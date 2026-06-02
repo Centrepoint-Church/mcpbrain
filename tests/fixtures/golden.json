@@ -1,0 +1,104 @@
+{
+  "documents": [
+    {
+      "doc_id": "doc-budget-review",
+      "text": "The annual budget review meeting is scheduled for the first week of August. Department heads must submit their expenditure reports and forecast requests to the finance team by the last Friday of July. All line items over five thousand dollars require a written justification. The review panel will prioritise capital expenditure requests before operational cost increases."
+    },
+    {
+      "doc_id": "doc-volunteer-roster",
+      "text": "The volunteer roster for weekend services is published every Thursday by the team coordinator. Volunteers are assigned to roles including greeting, ushering, kids ministry, café service, and audio-visual operation. If a volunteer cannot attend their rostered shift, they must notify the coordinator at least 48 hours in advance so a replacement can be arranged. Roster conflicts are tracked in the shared spreadsheet."
+    },
+    {
+      "doc_id": "doc-fire-drill",
+      "text": "The building fire drill is conducted twice per year, in March and September. All staff and regular volunteers must participate. The fire warden checks that all exits are clear, confirms headcount at the muster point, and submits a completion report to the facilities manager within 24 hours of the drill. Evacuation maps are posted at each exit and updated whenever the floor layout changes."
+    },
+    {
+      "doc_id": "doc-av-equipment-checklist",
+      "text": "Before each service, the audio-visual technician runs through the pre-service equipment checklist. This includes: powering on the mixing desk, testing all microphones, confirming the projection system is displaying the correct slides, checking the livestream encoder is connected, and verifying the hearing-loop system is active. Any fault is logged in the AV equipment register and reported to the technical director."
+    },
+    {
+      "doc_id": "doc-carpark-briefing",
+      "text": "The carpark team briefing covers positioning, traffic flow management, and communication protocols. Team members are stationed at the entrance, the overflow area, and the pedestrian crossing. The team leader holds a radio on channel 3. During peak arrival times, the entrance attendant signals the overflow attendant when the main lot reaches capacity. Safety vests must be worn at all times on the carpark."
+    },
+    {
+      "doc_id": "doc-maintenance-request",
+      "text": "Building maintenance requests are submitted through the facilities helpdesk system. Each request must include the location, a description of the fault, the urgency level (routine, urgent, or emergency), and the submitter's contact details. Routine requests are processed within five working days. Emergency faults such as water leaks, electrical hazards, or broken security doors are escalated to the facilities manager immediately."
+    },
+    {
+      "doc_id": "doc-catering-order",
+      "text": "Catering orders for staff meetings and events must be placed at least three business days in advance using the catering request form. The form captures headcount, dietary requirements including vegetarian, vegan, gluten-free, and allergen needs, the delivery location, and the contact person on the day. Orders under thirty people are handled by the internal kitchen. Larger orders require an approved external caterer from the preferred supplier list."
+    },
+    {
+      "doc_id": "doc-newsletter-draft",
+      "text": "The weekly newsletter is drafted on Tuesdays and reviewed by the communications coordinator before distribution on Wednesday mornings. Content submissions from ministries and departments are due by Monday noon. The newsletter template includes sections for upcoming events, community announcements, prayer requests, and giving highlights. Images must be provided in landscape format at a minimum resolution of one thousand pixels wide."
+    },
+    {
+      "doc_id": "doc-onboarding-checklist",
+      "text": "The new staff onboarding checklist covers the first 30 days of employment. It includes completion of the employment agreement, identity verification, bank account details for payroll, IT account setup, building access card issue, induction to workplace health and safety policies, a meet-and-greet schedule with key team members, and a 30-day check-in with the line manager. The HR coordinator tracks progress against each item."
+    },
+    {
+      "doc_id": "doc-key-management",
+      "text": "Physical building keys and access cards are managed by the facilities coordinator. All key holders must sign the key register when issued or returning a key. Keys are not to be duplicated without written authorisation from the facilities manager. Lost keys must be reported within 24 hours. When a staff member leaves the organisation, their access card is deactivated on the final day and any physical keys are returned and recorded."
+    },
+    {
+      "doc_id": "doc-incident-report",
+      "text": "Any workplace incident, injury, or near-miss must be reported using the incident report form within 24 hours of the event. The form captures the date, time, location, people involved, a description of what happened, any immediate first aid administered, and whether medical treatment was sought. Serious incidents are reported to the WHS officer who notifies the relevant authority within the statutory timeframe. All incident reports are reviewed monthly by the safety committee."
+    },
+    {
+      "doc_id": "doc-room-booking",
+      "text": "Meeting rooms and hall spaces are booked through the internal room booking calendar. Bookings must include the event name, organiser, expected attendance, setup requirements such as chairs, tables, or audio-visual equipment, and the start and end time including setup and pack-down. Recurring bookings must be re-confirmed each term. The administration team manages booking conflicts and notifies affected parties with at least 48 hours notice."
+    }
+  ],
+  "cases": [
+    {
+      "query": "annual spending review and department expenditure forecasts",
+      "expected_doc_ids": ["doc-budget-review"],
+      "_style": "semantic"
+    },
+    {
+      "query": "volunteer roster",
+      "expected_doc_ids": ["doc-volunteer-roster"],
+      "_style": "keyword"
+    },
+    {
+      "query": "emergency evacuation procedure and muster point headcount",
+      "expected_doc_ids": ["doc-fire-drill"],
+      "_style": "semantic"
+    },
+    {
+      "query": "mixing desk microphone projection livestream encoder",
+      "expected_doc_ids": ["doc-av-equipment-checklist"],
+      "_style": "keyword"
+    },
+    {
+      "query": "directing traffic in the car park and communicating between team members",
+      "expected_doc_ids": ["doc-carpark-briefing"],
+      "_style": "semantic"
+    },
+    {
+      "query": "facilities helpdesk fault urgency routine emergency",
+      "expected_doc_ids": ["doc-maintenance-request"],
+      "_style": "keyword"
+    },
+    {
+      "query": "dietary requirements and food ordering for staff events",
+      "expected_doc_ids": ["doc-catering-order"],
+      "_style": "semantic"
+    },
+    {
+      "query": "newsletter template submissions communications coordinator",
+      "expected_doc_ids": ["doc-newsletter-draft"],
+      "_style": "keyword"
+    },
+    {
+      "query": "starting a new job payroll setup and meeting the team in the first month",
+      "expected_doc_ids": ["doc-onboarding-checklist"],
+      "_style": "semantic"
+    },
+    {
+      "query": "access card key register deactivated final day",
+      "expected_doc_ids": ["doc-key-management"],
+      "_style": "keyword"
+    }
+  ]
+}
