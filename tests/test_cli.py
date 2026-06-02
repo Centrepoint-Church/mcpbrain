@@ -8,10 +8,11 @@ def test_dispatch_routes_each_subcommand(monkeypatch):
     monkeypatch.setattr(cli, "_setup_main",  lambda a: called.setdefault("setup", a))
     monkeypatch.setattr(cli, "_update_main", lambda a: called.setdefault("update", a))
     monkeypatch.setattr(cli, "_register_main", lambda a: called.setdefault("register", a))
+    monkeypatch.setattr(cli, "_tray_main",   lambda a: called.setdefault("tray", a))
     cli.main(["daemon", "--once"]);     assert "daemon" in called
     assert called["daemon"] == ["--once"]
     cli.main(["mcp-server"]);           assert called["mcp"] is True
     cli.main(["auth", "--client-secrets", "x"]); assert "auth" in called
     assert called["auth"] == ["--client-secrets", "x"]
-    cli.main(["setup"]);  cli.main(["update"]);  cli.main(["register"])
-    assert {"setup","update","register"} <= set(called)
+    cli.main(["setup"]);  cli.main(["update"]);  cli.main(["register"]);  cli.main(["tray"])
+    assert {"setup","update","register","tray"} <= set(called)

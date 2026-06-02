@@ -17,7 +17,8 @@ run() { if [ "$DRY" = "--dry-run" ]; then echo "[dry-run] $*"; else "$@"; fi; }
 
 command -v uv >/dev/null 2>&1 || run sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 
-run uv tool install --from . mcpbrain --force
+# Install with the [tray] extra so the optional menu-bar tray has its GUI deps.
+run uv tool install --from . "mcpbrain[tray]" --force
 
 BIN="$(command -v mcpbrain || echo "$HOME/.local/bin/mcpbrain")"
 

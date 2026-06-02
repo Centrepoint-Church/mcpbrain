@@ -1,4 +1,7 @@
-from mcpbrain.agents import launchd_plist, systemd_unit, schtasks_args
+from mcpbrain.agents import (
+    launchd_plist, systemd_unit, schtasks_args,
+    launchd_tray_plist, systemd_tray_unit, schtasks_tray_args,
+)
 
 
 def test_launchd_plist_runs_daemon():
@@ -23,3 +26,29 @@ def test_schtasks_args_quotes_path_with_spaces():
     # The /tr value must wrap the spaced path in double-quotes.
     expected_tr = r'"C:\Program Files\mcpbrain.exe" daemon'
     assert expected_tr in a
+
+
+def test_launchd_tray_plist_runs_tray_and_does_not_respawn():
+    s = launchd_tray_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
+    assert "church.centrepoint.mcpbrain.tray" in s
+    assert "<string>tray</string>" in s and "<key>RunAtLoad</key>" in s
+    # Quitting the icon must not respawn it.
+    assert "<key>KeepAlive</key>\n    <false/>" in s
+
+
+def test_daemon_launchd_plist_keeps_alive():
+    # The daemon agent (unchanged) must still KeepAlive=true after the refactor.
+    s = launchd_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
+    assert "<key>KeepAlive</key>\n    <true/>" in s
+    assert "church.centrepoint.mcpbrain.tray" not in s   # daemon label is distinct
+
+
+def test_systemd_tray_unit_runs_tray():
+    s = systemd_tray_unit(mcpbrain_bin="/home/j/.local/bin/mcpbrain", home="/home/j/.mcpbrain")
+    assert "ExecStart=/home/j/.local/bin/mcpbrain tray" in s
+    assert "Restart=no" in s and "WantedBy=default.target" in s
+
+
+def test_schtasks_tray_args_at_logon():
+    a = schtasks_tray_args(mcpbrain_bin=r"C:\Users\j\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
+    assert "mcpbrain-tray" in a and "onlogon" in a and any("mcpbrain.exe tray" in x for x in a)
