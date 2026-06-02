@@ -4,6 +4,8 @@ Offline and fast: no git, no network. Each case builds a tmp dir with a
 pyproject.toml and checks _repo_dir() resolves to it.
 """
 
+from pathlib import Path
+
 import mcpbrain.update as upd
 
 
@@ -56,4 +58,6 @@ def test_repo_dir_ignores_stale_config_path(tmp_path, monkeypatch):
     cfg.write_config(str(tmp_path), {"repo_dir": str(gone)})
 
     # The package source tree has a pyproject.toml above it, so the walk wins.
-    assert upd._repo_dir().endswith("mcp-ops-brain")
+    # Assert on the contract (the resolved dir holds a pyproject.toml), not the
+    # dir name, so this passes in both the monorepo and the exported repo.
+    assert (Path(upd._repo_dir()) / "pyproject.toml").exists()
