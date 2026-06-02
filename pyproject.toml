@@ -49,7 +49,10 @@ include = ["mcpbrain*"]
 # wizard served by control_api._serve_wizard.
 [tool.setuptools.package-data]
 "mcpbrain.wizard" = ["*"]
-"mcpbrain" = ["*.json.example"]
+# Ship the wizard assets, the example client, and the SHARED desktop OAuth
+# client so a clean `uv tool install` carries it (auth.py finds it via its
+# bundled-path lookup, so no env var is needed on any machine).
+"mcpbrain" = ["*.json.example", "google_oauth_client.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

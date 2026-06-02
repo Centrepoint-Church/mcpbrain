@@ -68,9 +68,11 @@ jobs:
           names = zipfile.ZipFile(wheels[0]).namelist()
           html = any(n.endswith("mcpbrain/wizard/index.html") for n in names)
           example = any("google_oauth_client.json.example" in n for n in names)
+          client = any(n.endswith("mcpbrain/google_oauth_client.json") for n in names)
           print("HTML:", html)
           print("EXAMPLE:", example)
-          if not (html and example):
+          print("CLIENT:", client)
+          if not (html and example and client):
               print("package data missing from wheel", file=sys.stderr)
               sys.exit(1)
           PY
