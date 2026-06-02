@@ -1,3 +1,10 @@
+import pytest
+
+# The Voyage embedder is an opt-in path; voyageai is an optional dependency
+# (install with `pip install .[voyage]`). Skip this module when it is absent
+# rather than failing collection on a default install.
+pytest.importorskip("voyageai")
+
 from mcpbrain.embed_voyage import VoyageEmbedder
 
 
