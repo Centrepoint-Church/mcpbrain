@@ -40,6 +40,8 @@ This pulls the latest commits (fast-forward only, so it aborts cleanly if you ha
 
 The login agent starts the mcpbrain daemon in the background. The daemon runs a loop: it syncs new mail and docs into the local store, embeds them for search, and (if you've set a Gemini key) extracts the entity/relationship graph that powers `brain_context` and `brain_graph`. Run only one daemon at a time; it holds a single-writer lock on the store. Claude Desktop opens the store read-only, so it's safe alongside the daemon.
 
+A second, optional login agent runs a menu-bar tray (`mcpbrain tray`). It shows whether the daemon is running or paused and how many items are indexed, and gives you Pause/Resume, Open setup, and Quit. The tray is a status-and-control client that talks to the daemon over the loopback control API; it does not own the daemon, so quitting the icon closes the menu bar item only and leaves syncing running. It comes back at your next login, or run `mcpbrain tray` to relaunch it.
+
 ## What leaves your machine
 
 Two things, and only these:
