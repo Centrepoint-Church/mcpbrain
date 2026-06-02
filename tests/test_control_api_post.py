@@ -102,6 +102,30 @@ def test_post_malformed_json_returns_400(tmp_path):
         srv.stop()
 
 
+def test_post_register_failure_returns_json_error(tmp_path):
+    """A handler that raises surfaces as a JSON {'error': ...} 500 so the wizard
+    can show the cause, not an opaque failure."""
+    import urllib.error
+
+    class FailingDaemon(FakeDaemon):
+        def register(self):
+            raise RuntimeError("could not find mcpbrain on PATH")
+
+    d = FailingDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        try:
+            _post(base + "/api/register", srv.token, {})
+            assert False, "expected HTTP 500"
+        except urllib.error.HTTPError as e:
+            assert e.code == 500
+            assert "could not find mcpbrain" in json.loads(e.read())["error"]
+    finally:
+        srv.stop()
+
+
 def test_post_oversize_body_returns_413(tmp_path):
     """A POST whose Content-Length exceeds the 1 MiB cap returns 413."""
     import urllib.error
