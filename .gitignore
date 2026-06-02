@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 .venv/
+# Build artefacts created by `uv tool install` / `pip install` / `uv build`.
+# Regenerated on every install, never committed.
+build/
+dist/
+*.egg-info/
 .DS_Store
 ._*
 *.sqlite3
