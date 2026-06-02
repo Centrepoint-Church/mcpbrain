@@ -1,0 +1,42 @@
+<!doctype html><html><head><meta charset="utf-8"><title>mcpbrain setup</title>
+<style>body{font:15px system-ui;margin:40px auto;max-width:620px;color:#1a1a1a}
+section{border:1px solid #ddd;border-radius:10px;padding:18px 20px;margin:14px 0}
+button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #888;cursor:pointer}
+.ok{color:#157f3b}.muted{color:#666}</style></head>
+<body>
+<h1>mcpbrain setup</h1>
+<section id="step-google"><h2>1. Connect Google</h2>
+<p class="muted">Grant Gmail + Drive (+ Calendar) read-only. A browser tab opens for consent.</p>
+<button onclick="startAuth()">Connect Google</button> <span id="g-state"></span>
+<p class="muted">Authorised means a credential is stored; if syncs fail, re-run this step.</p></section>
+<section id="step-enrich"><h2>2. Enrichment (optional)</h2>
+<p class="muted">A Gemini key builds the knowledge graph. Skip to leave it off.</p>
+<input id="gk" placeholder="Gemini API key (optional)" size="36">
+<button onclick="saveKey()">Save</button> <button onclick="skipKey()">Skip</button>
+<span id="e-state"></span></section>
+<section id="step-register"><h2>3. Register with Claude Desktop</h2>
+<button onclick="reg()">Register</button> <span id="r-state"></span>
+<p class="muted">Then quit and reopen Claude Desktop.</p></section>
+<section id="step-status"><h2>4. Status</h2><pre id="status">…</pre></section>
+<script>
+const T="__MCPBRAIN_TOKEN__";
+const H={headers:{Authorization:"Bearer "+T}};
+const P=(p,b)=>fetch(p,{method:"POST",headers:H.headers,body:JSON.stringify(b||{})});
+async function startAuth(){document.getElementById("g-state").textContent="opening browser…";
+  await P("/api/auth/start");poll();}
+async function poll(){try{const r=await fetch("/api/auth/status",H);const j=await r.json();
+  const el=document.getElementById("g-state");
+  if(j.connected){el.textContent="authorised: "+j.granted_scopes.join(", ");el.className="ok";}
+  else{el.textContent="waiting…";el.className="";setTimeout(poll,2000);}}
+  catch(e){setTimeout(poll,2000);}}
+async function saveKey(){await P("/api/config",{gemini_key:document.getElementById("gk").value});
+  const el=document.getElementById("e-state");el.textContent="saved";el.className="ok";}
+function skipKey(){document.getElementById("e-state").textContent="skipped";}
+async function reg(){const r=await P("/api/register");const j=await r.json();
+  const el=document.getElementById("r-state");el.textContent="wrote "+j.config_path;el.className="ok";}
+async function refresh(){try{const r=await fetch("/api/status",H);
+  document.getElementById("status").textContent=JSON.stringify(await r.json(),null,2);
+  setTimeout(refresh,3000);}
+  catch(e){setTimeout(refresh,3000);}}
+refresh();
+</script></body></html>

@@ -1,0 +1,90 @@
+_BGE_Q = "Represent this sentence for searching relevant passages: "
+_ORG_SENTINELS = frozenset(("unknown", "external", ""))
+
+
+# ---------------------------------------------------------------------------
+# Contextual prefix — prepended to PASSAGES only, never to queries.
+# Ported from the main server's src/embedder.py (lines 99-164).
+# Adds provenance text so the passage embedding carries source context.
+# The query path (embed_query / _BGE_Q instruction) is NOT touched here.
+# ---------------------------------------------------------------------------
+
+def contextual_prefix(metadata: dict) -> str:
+    """Return a provenance prefix for a passage chunk, e.g. '[Context: Email from ..., re: ...] '.
+
+    Returns "" when metadata is empty, the source_type is unknown, or no
+    meaningful parts can be assembled. The prefix is PASSAGE-ONLY — it must
+    never be applied to the query side.
+    """
+    source = metadata.get("source_type", "")
+    parts: list[str] = []
+
+    if source == "gmail":
+        sender = metadata.get("sender", "")
+        date_raw = str(metadata.get("date") or "")[:10]
+        subject = metadata.get("subject", "")
+        org = metadata.get("org", "")
+        if sender:
+            parts.append(f"Email from {sender}")
+        if date_raw:
+            parts.append(f"on {date_raw}")
+        if subject:
+            parts.append(f"re: {subject}")
+        if org and org not in _ORG_SENTINELS:
+            parts.append(f"({org})")
+
+    elif source == "gdrive":
+        fname = metadata.get("file_name", "")
+        folder = metadata.get("folder_path", "")
+        modified = str(metadata.get("modified") or "")[:10]
+        org = metadata.get("org", "")
+        if fname:
+            parts.append(f"Document: {fname}")
+        if folder:
+            parts.append(f"in {folder}")
+        if modified:
+            parts.append(f"last updated {modified}")
+        if org and org not in _ORG_SENTINELS:
+            parts.append(f"({org})")
+
+    elif source == "calendar":
+        summary = metadata.get("summary", "")
+        start = str(metadata.get("start") or "")[:10]
+        location = metadata.get("location", "")
+        if summary:
+            parts.append(f"Event: {summary}")
+        if start:
+            parts.append(f"on {start}")
+        if location:
+            parts.append(f"at {location}")
+
+    # gmail_enriched, notion, session_notes, local_file branches are not
+    # emitted by this product's sync layer and are intentionally omitted.
+    # Add them here if new source_types are introduced.
+
+    if not parts:
+        return ""
+    return "[Context: " + ", ".join(parts) + "] "
+
+
+class _LocalEmbedder:
+    def __init__(self, model_name: str, dim: int, query_prefix: str):
+        from fastembed import TextEmbedding          # lazy: keep import-time light
+        self._model = TextEmbedding(model_name=model_name)
+        self.dim = dim
+        self._qp = query_prefix
+
+    def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        return [list(map(float, v)) for v in self._model.embed(list(texts))]
+
+    def embed_query(self, text: str) -> list[float]:
+        return list(map(float, next(self._model.query_embed([self._qp + text]))))
+
+
+def get_embedder(kind: str = "bge-small"):
+    if kind == "bge-small":
+        return _LocalEmbedder("BAAI/bge-small-en-v1.5", 384, _BGE_Q)
+    if kind == "voyage":
+        from mcpbrain.embed_voyage import VoyageEmbedder  # opt-in Voyage embedder
+        return VoyageEmbedder()
+    raise ValueError(f"unknown embedder {kind!r}")

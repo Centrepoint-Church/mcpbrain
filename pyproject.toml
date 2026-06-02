@@ -1,0 +1,54 @@
+[project]
+name = "mcpbrain"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "sqlite-vec>=0.1.6",
+  "fastembed>=0.3",
+  "mcp>=1.2",
+  "numpy>=1.26",
+  # Binary content extractors for Drive sync
+  "pymupdf>=1.23",         # PDF text extraction (fitz)
+  "python-docx>=1.1",      # DOCX extraction
+  "openpyxl>=3.1",         # XLSX extraction
+  "cryptography>=42",      # Fernet escrow encryption for backup snapshots (Task 5.2)
+  "google-api-python-client>=2",  # Drive API client for Shared Drive backup upload (Task 5.3)
+  "google-auth>=2",               # google.auth.transport.requests / oauth2.credentials (auth.py)
+  "google-auth-oauthlib>=1",      # google_auth_oauthlib OAuth flow (auth.py)
+  "google-auth-httplib2>=0.1",    # httplib2 transport for google-auth
+  # Note: tesseract is an optional external binary for scanned-PDF OCR.
+  # It is NOT a pip dependency — install via OS package manager if needed.
+]
+
+[project.scripts]
+mcpbrain = "mcpbrain.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# Tray UI (Task 3.2): pystray/pillow are lazy-imported inside run_tray() so
+# tests and headless installs don't need them. Install with `pip install .[tray]`.
+tray = ["pystray>=0.19", "pillow>=10"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Ship only the mcpbrain package. The folder also holds install/ (the macOS and
+# Windows installer scripts) and tests/, which flat-layout autodiscovery would
+# otherwise flag as extra top-level packages and refuse to build. Pin the
+# package list so a clean build from source is deterministic.
+[tool.setuptools.packages.find]
+include = ["mcpbrain*"]
+
+# Non-.py files that must ship inside the wheel. packages.find ships only .py
+# modules, so without this block a clean (non-editable) install is missing the
+# onboarding wizard HTML and the example OAuth client, breaking the browser
+# wizard served by control_api._serve_wizard.
+[tool.setuptools.package-data]
+"mcpbrain.wizard" = ["*"]
+"mcpbrain" = ["*.json.example"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = ["slow: long-running integration tests (real subprocess + model load)"]
