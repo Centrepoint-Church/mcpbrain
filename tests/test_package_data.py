@@ -25,3 +25,11 @@ def test_wizard_html_present():
 def test_oauth_client_example_present():
     example = _pkg_dir() / "google_oauth_client.json.example"
     assert example.is_file(), f"example OAuth client missing at {example}"
+
+
+def test_shared_oauth_client_present():
+    # The shared desktop client is committed and bundled so every install can
+    # run consent with no per-user file. If this is missing the wizard's
+    # "Connect Google" step has no client to use.
+    client = _pkg_dir() / "google_oauth_client.json"
+    assert client.is_file(), f"shared OAuth client missing at {client}"

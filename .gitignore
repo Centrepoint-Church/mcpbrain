@@ -9,4 +9,7 @@ __pycache__/
 *.sqlite3-shm
 google_token.json
 client_secret.json
-mcpbrain/google_oauth_client.json
+# mcpbrain/google_oauth_client.json is the SHARED desktop OAuth client. It is
+# committed and bundled (private repo; a desktop client secret is non-confidential
+# under Google's PKCE flow) so every install carries it. The per-user token
+# (google_token.json) and the user-supplied client_secret.json stay ignored.
