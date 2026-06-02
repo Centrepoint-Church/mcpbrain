@@ -363,9 +363,25 @@ class Daemon:
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
+        import sys
+        from pathlib import Path
         # Lazy import to avoid an import cycle (wizard imports daemon-adjacent code).
         from mcpbrain.wizard.register import register_mcpbrain
-        return str(register_mcpbrain(mcpbrain_home=str(app_dir())))
+        # Resolve the mcpbrain executable WITHOUT relying on PATH. Under launchd
+        # (and systemd) the daemon's PATH usually omits ~/.local/bin, so a bare
+        # shutil.which("mcpbrain") returns None and registration fails. The
+        # console script sits next to this interpreter in the tool venv, and
+        # argv[0] is the launching binary; prefer those, fall back to which().
+        names = ("mcpbrain", "mcpbrain.exe")
+        candidates = [
+            Path(sys.executable).with_name("mcpbrain"),
+            Path(sys.executable).with_name("mcpbrain.exe"),
+            Path(sys.argv[0]),
+        ]
+        mcpbrain_bin = next(
+            (str(c) for c in candidates if c.name in names and c.exists()), None
+        )
+        return str(register_mcpbrain(mcpbrain_home=str(app_dir()), mcpbrain_bin=mcpbrain_bin))
 
     def start_auth(self) -> None:
         """Run the interactive Google OAuth consent flow (blocking).

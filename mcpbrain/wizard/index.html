@@ -100,6 +100,7 @@
       <button class="primary" onclick="reg()">Register</button>
       <span id="r-state" class="badge idle hidden"></span>
     </div>
+    <p id="r-msg" class="note"></p>
     <p class="note">After registering, quit Claude Desktop completely and reopen it.</p>
   </section>
 
@@ -161,12 +162,20 @@ async function saveKey(){
 function skipKey(){ badge("e-state", "Skipped", "idle"); $("e-state").classList.remove("hidden"); }
 
 async function reg(){
+  $("r-state").classList.remove("hidden");
   try{
-    const j = await (await P("/api/register")).json();
-    badge("r-state", "Registered", "ok"); $("r-state").classList.remove("hidden");
-    $("r-state").title = j.config_path || "";          // path via attribute, set as text-safe value
+    const res = await P("/api/register");
+    const j = await res.json().catch(() => ({}));
+    if(res.ok && j.config_path){
+      badge("r-state", "Registered", "ok");
+      $("r-msg").textContent = "Wrote " + j.config_path;   // server path via textContent
+    }else{
+      badge("r-state", "Failed", "wait");
+      $("r-msg").textContent = j.error ? ("Error: " + j.error) : "Registration failed.";
+    }
   }catch(e){
-    badge("r-state", "Failed", "wait"); $("r-state").classList.remove("hidden");
+    badge("r-state", "Failed", "wait");
+    $("r-msg").textContent = "Could not reach the daemon.";
   }
 }
 
