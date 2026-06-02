@@ -38,7 +38,8 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     }
 }
 
-Run uv tool install --from . mcpbrain --force
+# Install with the [tray] extra so the optional menu-bar tray has its GUI deps.
+Run uv tool install --from . "mcpbrain[tray]" --force
 
 $Bin = (Get-Command mcpbrain -ErrorAction SilentlyContinue).Source
 if (-not $Bin) { $Bin = Join-Path $HOME ".local\bin\mcpbrain.exe" }

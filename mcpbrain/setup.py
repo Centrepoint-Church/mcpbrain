@@ -27,6 +27,40 @@ _POLL_INTERVAL = 0.5
 _DRY_RUN_PORT = 53999
 
 
+def _platform() -> str:
+    p = sys.platform
+    if p.startswith("linux"):
+        return "linux"
+    if p == "darwin":
+        return "darwin"
+    if p in ("win32", "cygwin"):
+        return "win32"
+    return p
+
+
+def _mcpbrain_bin() -> str:
+    return shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
+
+
+def _install_tray_best_effort(home: str) -> None:
+    """Install the optional menu-bar tray login agent. Never fatal.
+
+    The tray is a convenience, and it needs the [tray] GUI deps and a desktop
+    session, so a failure here must not block onboarding. Logs a hint and
+    carries on.
+    """
+    from mcpbrain import agents
+    try:
+        agents.install_tray_agent(_platform(), mcpbrain_bin=_mcpbrain_bin(), home=home)
+        print("Menu-bar tray installed; it appears at your next login (or run 'mcpbrain tray').")
+    except Exception as exc:  # noqa: BLE001 - the tray is optional
+        print(
+            f"Skipped the menu-bar tray ({exc}). It is optional; the daemon runs without it. "
+            f"Install the GUI deps with the [tray] extra and run 'mcpbrain tray' to enable it.",
+            file=sys.stderr,
+        )
+
+
 def _read_port(home: str):
     """Return the int control port from <home>/control_port, or None if absent."""
     p = Path(home) / "control_port"
@@ -65,15 +99,8 @@ def _ensure_daemon_running(home: str, *, dry_run: bool = False) -> int:
     # No port file yet. Install and start the login agent so the daemon comes up.
     from mcpbrain import agents
 
-    platform = sys.platform
-    if platform.startswith("linux"):
-        platform = "linux"
-    elif platform == "darwin":
-        platform = "darwin"
-    elif platform in ("win32", "cygwin"):
-        platform = "win32"
-
-    mcpbrain_bin = shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
+    platform = _platform()
+    mcpbrain_bin = _mcpbrain_bin()
     try:
         agents.install_agent(platform, mcpbrain_bin=mcpbrain_bin, home=home)
     except Exception as exc:  # noqa: BLE001 - degrade gracefully, the agent step is best-effort
@@ -125,6 +152,8 @@ def main(argv=None) -> int:
     if args.dry_run:
         print(f"would open {url}")
         return 0
+
+    _install_tray_best_effort(home)
 
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")

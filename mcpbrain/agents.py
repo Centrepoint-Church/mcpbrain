@@ -20,19 +20,23 @@ log = logging.getLogger(__name__)
 
 # Bundle identifier used as the launchd label and scheduled-task name.
 _LABEL = "church.centrepoint.mcpbrain"
+_TRAY_LABEL = f"{_LABEL}.tray"
 
 # Canonical agent file locations by platform.
 _LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LABEL}.plist"
+_TRAY_LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_TRAY_LABEL}.plist"
 _SYSTEMD_PATH = Path.home() / ".config" / "systemd" / "user" / "mcpbrain.service"
+_TRAY_SYSTEMD_PATH = Path.home() / ".config" / "systemd" / "user" / "mcpbrain-tray.service"
 _TASK_NAME = "mcpbrain"
+_TRAY_TASK_NAME = "mcpbrain-tray"
 
 
 # ---------------------------------------------------------------------------
 # Pure generators
 # ---------------------------------------------------------------------------
 
-def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
-    """Return a macOS launchd plist that runs ``mcpbrain daemon`` at login."""
+def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive: bool) -> str:
+    keep = "true" if keep_alive else "false"
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -40,11 +44,11 @@ def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{_LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{mcpbrain_bin}</string>
-        <string>daemon</string>
+        <string>{subcommand}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -54,47 +58,79 @@ def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <{keep}/>
 </dict>
 </plist>
 """
 
 
-def systemd_unit(*, mcpbrain_bin: str, home: str) -> str:
-    """Return a systemd user unit that runs ``mcpbrain daemon`` at login."""
+def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
+    """Return a macOS launchd plist that runs ``mcpbrain daemon`` at login."""
+    return _launchd_plist(label=_LABEL, subcommand="daemon", mcpbrain_bin=mcpbrain_bin,
+                          home=home, keep_alive=True)
+
+
+def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
+    """Return a macOS launchd plist that runs ``mcpbrain tray`` at login.
+
+    KeepAlive is false: quitting the menu-bar icon must not respawn it; it
+    returns at the next login. The daemon agent (separate) keeps KeepAlive true.
+    """
+    return _launchd_plist(label=_TRAY_LABEL, subcommand="tray", mcpbrain_bin=mcpbrain_bin,
+                          home=home, keep_alive=False)
+
+
+def _systemd_unit(*, description: str, subcommand: str, mcpbrain_bin: str, home: str,
+                  restart_on_failure: bool) -> str:
+    restart = "Restart=on-failure\nRestartSec=5\n" if restart_on_failure else "Restart=no\n"
     return f"""\
 [Unit]
-Description=mcpbrain background daemon
+Description={description}
 After=network.target
 
 [Service]
-ExecStart={mcpbrain_bin} daemon
+ExecStart={mcpbrain_bin} {subcommand}
 Environment=MCPBRAIN_HOME={home}
-Restart=on-failure
-RestartSec=5
-
+{restart}
 [Install]
 WantedBy=default.target
 """
 
 
-def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
-    """Return the schtasks.exe argument list that registers ``mcpbrain daemon`` at logon.
+def systemd_unit(*, mcpbrain_bin: str, home: str) -> str:
+    """Return a systemd user unit that runs ``mcpbrain daemon`` at login."""
+    return _systemd_unit(description="mcpbrain background daemon", subcommand="daemon",
+                         mcpbrain_bin=mcpbrain_bin, home=home, restart_on_failure=True)
 
-    The /tr value uses conditional quoting: if ``mcpbrain_bin`` contains
-    whitespace the path is wrapped in double-quotes so Task Scheduler handles
-    it correctly; paths without whitespace are left bare.
-    """
+
+def systemd_tray_unit(*, mcpbrain_bin: str, home: str) -> str:
+    """Return a systemd user unit that runs ``mcpbrain tray`` at login."""
+    return _systemd_unit(description="mcpbrain menu-bar tray", subcommand="tray",
+                         mcpbrain_bin=mcpbrain_bin, home=home, restart_on_failure=False)
+
+
+def _schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str) -> list[str]:
+    # Conditional quoting: wrap a whitespace-containing path so Task Scheduler
+    # parses it correctly; leave bare paths unquoted.
     quoted_bin = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
-    task_run = f"{quoted_bin} daemon"
     return [
         "schtasks",
         "/create",
-        "/tn", _TASK_NAME,
+        "/tn", task_name,
         "/sc", "onlogon",
-        "/tr", task_run,
+        "/tr", f"{quoted_bin} {subcommand}",
         "/f",
     ]
+
+
+def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
+    """Return the schtasks.exe argument list that registers ``mcpbrain daemon`` at logon."""
+    return _schtasks_args(task_name=_TASK_NAME, subcommand="daemon", mcpbrain_bin=mcpbrain_bin)
+
+
+def schtasks_tray_args(*, mcpbrain_bin: str, home: str) -> list[str]:
+    """Return the schtasks.exe argument list that registers ``mcpbrain tray`` at logon."""
+    return _schtasks_args(task_name=_TRAY_TASK_NAME, subcommand="tray", mcpbrain_bin=mcpbrain_bin)
 
 
 # ---------------------------------------------------------------------------
@@ -233,3 +269,72 @@ def _restart_schtasks() -> None:  # pragma: no cover
     subprocess.run(["schtasks", "/end", "/tn", _TASK_NAME], check=False)
     subprocess.run(["schtasks", "/run", "/tn", _TASK_NAME], check=True)
     log.info("Windows scheduled task '%s' restarted", _TASK_NAME)
+
+
+# ---------------------------------------------------------------------------
+# Tray login agent (separate from the daemon agent; optional GUI convenience)
+# ---------------------------------------------------------------------------
+
+def install_tray_agent(platform: str, *, mcpbrain_bin: str, home: str) -> None:
+    """Write the menu-bar tray login agent and register it with the OS loader."""
+    if platform == "darwin":
+        _install_launchd_tray(mcpbrain_bin=mcpbrain_bin, home=home)
+    elif platform == "linux":
+        _install_systemd_tray(mcpbrain_bin=mcpbrain_bin, home=home)
+    elif platform == "win32":
+        _install_schtasks_tray(mcpbrain_bin=mcpbrain_bin, home=home)
+    else:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+
+
+def uninstall_tray_agent(platform: str) -> None:
+    """Remove the tray login agent and deregister it from the OS loader."""
+    if platform == "darwin":
+        _uninstall_launchd_tray()
+    elif platform == "linux":
+        _uninstall_systemd_tray()
+    elif platform == "win32":
+        _uninstall_schtasks_tray()
+    else:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+
+
+def _install_launchd_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    plist = launchd_tray_plist(mcpbrain_bin=mcpbrain_bin, home=home)
+    _TRAY_LAUNCHD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _TRAY_LAUNCHD_PATH.write_text(plist)
+    subprocess.run(["launchctl", "load", "-w", str(_TRAY_LAUNCHD_PATH)], check=True)
+    log.info("launchd tray agent loaded")
+
+
+def _uninstall_launchd_tray() -> None:  # pragma: no cover
+    if _TRAY_LAUNCHD_PATH.exists():
+        subprocess.run(["launchctl", "unload", "-w", str(_TRAY_LAUNCHD_PATH)], check=False)
+        _TRAY_LAUNCHD_PATH.unlink(missing_ok=True)
+        log.info("launchd tray agent removed")
+
+
+def _install_systemd_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    unit = systemd_tray_unit(mcpbrain_bin=mcpbrain_bin, home=home)
+    _TRAY_SYSTEMD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _TRAY_SYSTEMD_PATH.write_text(unit)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "mcpbrain-tray.service"], check=True)
+    log.info("systemd tray user service enabled and started")
+
+
+def _uninstall_systemd_tray() -> None:  # pragma: no cover
+    subprocess.run(["systemctl", "--user", "disable", "--now", "mcpbrain-tray.service"], check=False)
+    _TRAY_SYSTEMD_PATH.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    log.info("systemd tray user service removed")
+
+
+def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    subprocess.run(schtasks_tray_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
+    log.info("Windows scheduled task '%s' created", _TRAY_TASK_NAME)
+
+
+def _uninstall_schtasks_tray() -> None:  # pragma: no cover
+    subprocess.run(["schtasks", "/delete", "/tn", _TRAY_TASK_NAME, "/f"], check=False)
+    log.info("Windows scheduled task '%s' deleted", _TRAY_TASK_NAME)
