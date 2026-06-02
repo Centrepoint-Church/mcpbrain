@@ -1,42 +1,188 @@
-<!doctype html><html><head><meta charset="utf-8"><title>mcpbrain setup</title>
-<style>body{font:15px system-ui;margin:40px auto;max-width:620px;color:#1a1a1a}
-section{border:1px solid #ddd;border-radius:10px;padding:18px 20px;margin:14px 0}
-button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #888;cursor:pointer}
-.ok{color:#157f3b}.muted{color:#666}</style></head>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcpbrain setup</title>
+<style>
+  :root{
+    --accent:#0066ff; --accent-d:#0052cc;
+    --ink:#15181d; --muted:#6b7280; --line:#e6e8ec;
+    --bg:#f4f6f9; --card:#ffffff;
+    --ok:#157f3b; --ok-bg:#e7f6ed;
+    --wait:#9a6700; --wait-bg:#fbf3d8;
+    --idle:#5b6470; --idle-bg:#eef1f5;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:660px;margin:0 auto;padding:48px 20px 64px}
+  header{margin:0 0 28px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .dot{width:30px;height:30px;border-radius:9px;
+    background:linear-gradient(135deg,var(--accent),#3d8bff);flex:0 0 auto}
+  h1{font-size:24px;font-weight:680;letter-spacing:-.02em;margin:0}
+  .tagline{color:var(--muted);margin:6px 0 0;font-size:14.5px}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:22px 24px;margin:16px 0;
+    box-shadow:0 1px 2px rgba(20,24,29,.04),0 6px 20px rgba(20,24,29,.03);
+  }
+  .card h2{display:flex;align-items:center;gap:12px;font-size:16.5px;font-weight:640;margin:0 0 6px}
+  .num{flex:0 0 auto;width:26px;height:26px;border-radius:50%;
+    background:var(--accent);color:#fff;font-size:13px;font-weight:700;
+    display:flex;align-items:center;justify-content:center}
+  .desc{color:var(--muted);margin:0 0 14px;font-size:14.5px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  button{font:inherit;font-weight:600;border-radius:10px;padding:9px 16px;cursor:pointer;
+    border:1px solid transparent;transition:background .12s,border-color .12s,opacity .12s}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .primary{background:var(--accent);color:#fff}
+  .primary:hover{background:var(--accent-d)}
+  .ghost{background:#fff;border-color:var(--line);color:var(--ink)}
+  .ghost:hover{background:var(--idle-bg)}
+  input{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;
+    min-width:240px;flex:1 1 240px;background:#fff}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,102,255,.15)}
+  .badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;
+    padding:3px 11px;font-size:13px;font-weight:600;background:var(--idle-bg);color:var(--idle)}
+  .badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.9}
+  .badge.ok{background:var(--ok-bg);color:var(--ok)}
+  .badge.wait{background:var(--wait-bg);color:var(--wait)}
+  .badge.hidden{display:none}
+  .note{color:var(--muted);font-size:13px;margin:12px 0 0}
+  .scopes{color:var(--muted);font-size:13px;margin:8px 0 0}
+  .status-list{margin:4px 0 0;display:grid;gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .status-list div{display:flex;justify-content:space-between;align-items:center;
+    gap:12px;background:#fff;padding:11px 14px}
+  .status-list dt{color:var(--muted);font-size:14px}
+  .status-list dd{margin:0;font-weight:600;font-variant-numeric:tabular-nums}
+  footer{color:var(--muted);font-size:13px;text-align:center;margin-top:28px}
+</style>
+</head>
 <body>
-<h1>mcpbrain setup</h1>
-<section id="step-google"><h2>1. Connect Google</h2>
-<p class="muted">Grant Gmail + Drive (+ Calendar) read-only. A browser tab opens for consent.</p>
-<button onclick="startAuth()">Connect Google</button> <span id="g-state"></span>
-<p class="muted">Authorised means a credential is stored; if syncs fail, re-run this step.</p></section>
-<section id="step-enrich"><h2>2. Enrichment (optional)</h2>
-<p class="muted">A Gemini key builds the knowledge graph. Skip to leave it off.</p>
-<input id="gk" placeholder="Gemini API key (optional)" size="36">
-<button onclick="saveKey()">Save</button> <button onclick="skipKey()">Skip</button>
-<span id="e-state"></span></section>
-<section id="step-register"><h2>3. Register with Claude Desktop</h2>
-<button onclick="reg()">Register</button> <span id="r-state"></span>
-<p class="muted">Then quit and reopen Claude Desktop.</p></section>
-<section id="step-status"><h2>4. Status</h2><pre id="status">…</pre></section>
+<main class="wrap">
+  <header>
+    <div class="brand"><span class="dot"></span><h1>mcpbrain setup</h1></div>
+    <p class="tagline">Connect your Google account and link mcpbrain to Claude Desktop. Everything stays on this machine.</p>
+  </header>
+
+  <section id="step-google" class="card">
+    <h2><span class="num">1</span>Connect Google</h2>
+    <p class="desc">Grant read-only access to Gmail and Drive (and Calendar if available). A browser tab opens for consent.</p>
+    <div class="row">
+      <button class="primary" onclick="startAuth()">Connect Google</button>
+      <span id="g-state" class="badge idle">Not connected</span>
+    </div>
+    <p id="g-scopes" class="scopes"></p>
+    <p class="note">Connected means a credential is stored on this machine. If syncs fail later, run this step again.</p>
+  </section>
+
+  <section id="step-enrich" class="card">
+    <h2><span class="num">2</span>Enrichment <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
+    <p class="desc">A Gemini API key builds the knowledge graph behind richer answers. Skip to leave it off; search still works.</p>
+    <div class="row">
+      <input id="gk" type="password" placeholder="Gemini API key (optional)" autocomplete="off" spellcheck="false">
+      <button class="primary" onclick="saveKey()">Save</button>
+      <button class="ghost" onclick="skipKey()">Skip</button>
+      <span id="e-state" class="badge idle hidden"></span>
+    </div>
+  </section>
+
+  <section id="step-register" class="card">
+    <h2><span class="num">3</span>Register with Claude Desktop</h2>
+    <p class="desc">Adds mcpbrain to Claude Desktop as a tool. Existing tools are kept.</p>
+    <div class="row">
+      <button class="primary" onclick="reg()">Register</button>
+      <span id="r-state" class="badge idle hidden"></span>
+    </div>
+    <p class="note">After registering, quit Claude Desktop completely and reopen it.</p>
+  </section>
+
+  <section id="step-status" class="card">
+    <h2><span class="num">4</span>Status</h2>
+    <p class="desc">Live state of the background daemon.</p>
+    <dl class="status-list">
+      <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
+      <div><dt>Google</dt><dd><span id="st-google" class="badge idle">…</span></dd></div>
+      <div><dt>Enrichment</dt><dd><span id="st-enrich" class="badge idle">…</span></dd></div>
+      <div><dt>Daemon</dt><dd><span id="st-daemon" class="badge idle">…</span></dd></div>
+    </dl>
+  </section>
+
+  <footer>mcpbrain runs locally. The only things that leave this machine are an encrypted backup, if you enable it, and the queries you send Claude.</footer>
+</main>
+
 <script>
-const T="__MCPBRAIN_TOKEN__";
-const H={headers:{Authorization:"Bearer "+T}};
-const P=(p,b)=>fetch(p,{method:"POST",headers:H.headers,body:JSON.stringify(b||{})});
-async function startAuth(){document.getElementById("g-state").textContent="opening browser…";
-  await P("/api/auth/start");poll();}
-async function poll(){try{const r=await fetch("/api/auth/status",H);const j=await r.json();
-  const el=document.getElementById("g-state");
-  if(j.connected){el.textContent="authorised: "+j.granted_scopes.join(", ");el.className="ok";}
-  else{el.textContent="waiting…";el.className="";setTimeout(poll,2000);}}
-  catch(e){setTimeout(poll,2000);}}
-async function saveKey(){await P("/api/config",{gemini_key:document.getElementById("gk").value});
-  const el=document.getElementById("e-state");el.textContent="saved";el.className="ok";}
-function skipKey(){document.getElementById("e-state").textContent="skipped";}
-async function reg(){const r=await P("/api/register");const j=await r.json();
-  const el=document.getElementById("r-state");el.textContent="wrote "+j.config_path;el.className="ok";}
-async function refresh(){try{const r=await fetch("/api/status",H);
-  document.getElementById("status").textContent=JSON.stringify(await r.json(),null,2);
-  setTimeout(refresh,3000);}
-  catch(e){setTimeout(refresh,3000);}}
+const T = "__MCPBRAIN_TOKEN__";
+const H = {headers:{Authorization:"Bearer " + T}};
+const P = (p, b) => fetch(p, {method:"POST", headers:H.headers, body:JSON.stringify(b || {})});
+const $ = id => document.getElementById(id);
+
+function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
+  const el = $(id);
+  el.textContent = text;                   // server-derived text always via textContent
+  el.className = "badge " + (kind || "idle");
+}
+
+async function startAuth(){
+  badge("g-state", "Opening browser…", "wait");
+  try{ await P("/api/auth/start"); }catch(e){}
+  poll();
+}
+async function poll(){
+  try{
+    const j = await (await fetch("/api/auth/status", H)).json();
+    if(j.connected){
+      badge("g-state", "Connected", "ok");
+      const names = (j.granted_scopes || [])
+        .map(s => String(s).split("/").pop().replace(".readonly", ""))
+        .filter(Boolean);
+      $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
+    }else{
+      badge("g-state", "Waiting for consent…", "wait");
+      setTimeout(poll, 2000);
+    }
+  }catch(e){ setTimeout(poll, 2000); }
+}
+
+async function saveKey(){
+  try{
+    await P("/api/config", {gemini_key: $("gk").value});
+    badge("e-state", "Saved", "ok"); $("e-state").classList.remove("hidden");
+  }catch(e){
+    badge("e-state", "Could not save", "wait"); $("e-state").classList.remove("hidden");
+  }
+}
+function skipKey(){ badge("e-state", "Skipped", "idle"); $("e-state").classList.remove("hidden"); }
+
+async function reg(){
+  try{
+    const j = await (await P("/api/register")).json();
+    badge("r-state", "Registered", "ok"); $("r-state").classList.remove("hidden");
+    $("r-state").title = j.config_path || "";          // path via attribute, set as text-safe value
+  }catch(e){
+    badge("r-state", "Failed", "wait"); $("r-state").classList.remove("hidden");
+  }
+}
+
+function renderStatus(j){
+  $("st-count").textContent = (j.chunk_count != null) ? j.chunk_count : "—";
+  badge("st-google", j.google_connected ? "Connected" : "Not connected", j.google_connected ? "ok" : "idle");
+  badge("st-enrich", j.enrich_enabled ? "On" : "Off", j.enrich_enabled ? "ok" : "idle");
+  badge("st-daemon", j.paused ? "Paused" : "Running", j.paused ? "wait" : "ok");
+}
+async function refresh(){
+  try{
+    renderStatus(await (await fetch("/api/status", H)).json());
+  }catch(e){}
+  setTimeout(refresh, 3000);
+}
 refresh();
-</script></body></html>
+</script>
+</body>
+</html>
