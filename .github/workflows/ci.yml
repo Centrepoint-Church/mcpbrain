@@ -4,13 +4,9 @@ on:
   push:
   pull_request:
 
-# The workflow lives inside the monorepo at products/mcp-ops-brain. Both jobs
-# operate from that subdirectory, so set it as the default working directory
-# for every run step.
-defaults:
-  run:
-    working-directory: products/mcp-ops-brain
-
+# This workflow runs in the exported standalone mcpbrain repo (GitHub only reads
+# .github/workflows at a repo root). There the package sits at the repo root, so
+# every run step operates from the checkout root with no working-directory set.
 jobs:
   # Job 1 — clean-container smoke. Installs mcpbrain the way a user would
   # (uv tool install), then proves the two no-credential entry points work:
@@ -29,7 +25,7 @@ jobs:
             ~/.cache/uv
             ~/.cache/fastembed
             ~/.cache/huggingface
-          key: mcpbrain-deps-${{ runner.os }}-${{ hashFiles('products/mcp-ops-brain/pyproject.toml') }}
+          key: mcpbrain-deps-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             mcpbrain-deps-${{ runner.os }}-
 
@@ -141,7 +137,7 @@ jobs:
             ~/.cache/uv
             ~/.cache/fastembed
             ~/.cache/huggingface
-          key: mcpbrain-deps-${{ runner.os }}-${{ hashFiles('products/mcp-ops-brain/pyproject.toml') }}
+          key: mcpbrain-deps-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             mcpbrain-deps-${{ runner.os }}-
 
