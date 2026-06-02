@@ -1,6 +1,8 @@
-import json, os, secrets, tempfile, threading
+import json, logging, os, secrets, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 def _write_private(path, text):
     """Write text to path at mode 0600 with no world-readable window.
@@ -112,16 +114,23 @@ class ControlServer:
         except (json.JSONDecodeError, ValueError):
             return h_json(h, 400, {"error": "invalid JSON body"})
         d = self.daemon
-        if h.path == "/api/pause":   d.pause();  return h_json(h, 200, {"paused": True})
-        if h.path == "/api/resume":  d.resume(); return h_json(h, 200, {"paused": False})
-        # /api/config carries the Gemini key. The control API is loopback-only
-        # over plain HTTP by design, so the key travels in cleartext on
-        # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed
-        # cert UX is worse than the threat it removes. The bearer token plus the
-        # 127.0.0.1 bind are the protections.
-        if h.path == "/api/config":  d.apply_config(body); return h_json(h, 200, {"ok": True})
-        if h.path == "/api/auth/start":
-            threading.Thread(target=d.start_auth, daemon=True).start()
-            return h_json(h, 202, {"started": True})
-        if h.path == "/api/register": return h_json(h, 200, {"config_path": d.register()})
-        h.send_response(404); h.end_headers()
+        # A handler that raises would otherwise surface as an opaque 500 (or a
+        # dropped connection) and the wizard could only say "Failed". Return the
+        # error text as JSON so the cause is visible in the browser and the log.
+        try:
+            if h.path == "/api/pause":   d.pause();  return h_json(h, 200, {"paused": True})
+            if h.path == "/api/resume":  d.resume(); return h_json(h, 200, {"paused": False})
+            # /api/config carries the Gemini key. The control API is loopback-only
+            # over plain HTTP by design, so the key travels in cleartext on
+            # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed
+            # cert UX is worse than the threat it removes. The bearer token plus the
+            # 127.0.0.1 bind are the protections.
+            if h.path == "/api/config":  d.apply_config(body); return h_json(h, 200, {"ok": True})
+            if h.path == "/api/auth/start":
+                threading.Thread(target=d.start_auth, daemon=True).start()
+                return h_json(h, 202, {"started": True})
+            if h.path == "/api/register": return h_json(h, 200, {"config_path": d.register()})
+        except Exception as exc:
+            log.exception("control API POST %s failed", h.path)
+            return h_json(h, 500, {"error": str(exc)})
+        return h_json(h, 404, {"error": "not found"})
