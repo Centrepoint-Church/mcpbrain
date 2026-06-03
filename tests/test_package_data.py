@@ -33,3 +33,11 @@ def test_shared_oauth_client_present():
     # "Connect Google" step has no client to use.
     client = _pkg_dir() / "google_oauth_client.json"
     assert client.is_file(), f"shared OAuth client missing at {client}"
+
+
+def test_enrich_prompt_doc_present():
+    # The extractor prompt is read at runtime by extractor_driver.run_extractor
+    # via Path(__file__).with_name. packages.find skips .md, so without the
+    # package-data declaration a clean install has no prompt to feed Claude.
+    prompt = _pkg_dir() / "enrich_prompt.md"
+    assert prompt.is_file(), f"extractor prompt missing at {prompt}"

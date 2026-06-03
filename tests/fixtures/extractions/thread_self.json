@@ -1,0 +1,19 @@
+{
+  "thread_id": "t-self-003",
+  "org": "Centrepoint",
+  "content_type": "fyi",
+  "summary": "Josh sends himself a note about the carpark team briefing for the upcoming conference.",
+  "contextual_summary": "",
+  "entities": [],
+  "topics": ["conference", "carpark"],
+  "actions": [],
+  "reply_needed": false,
+  "reply_reason": "",
+  "resolved_action_ids": [],
+  "updated_actions": [],
+  "relations": [],
+  "messages": [
+    {"message_id": "m-1", "sender": "Josh Kemp <josh.k@centrepoint.church>",
+     "date": "2026-05-20", "labels": "SENT", "subject": "Carpark briefing note to self"}
+  ]
+}

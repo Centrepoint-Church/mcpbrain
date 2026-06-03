@@ -1,0 +1,36 @@
+{
+  "batch_id": "batch-20260602-101500",
+  "prepared_at": "2026-06-02T10:15:00Z",
+  "context": {
+    "known_people": [
+      {"name": "Joel Chelliah", "org": "Centrepoint", "role": "Senior Pastor"}
+    ],
+    "projects": [
+      {"id": "byford-grant", "name": "Byford Building Grant", "org": "Centrepoint",
+       "status_line": "Awaiting council approval on the stage-two plans."}
+    ],
+    "areas": [
+      {"id": "centrepoint-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."}
+    ],
+    "org_domain_map": [
+      "centrepoint.church → Centrepoint"
+    ]
+  },
+  "threads": [
+    {"thread_id": "t-merge-a", "prior_thread_context": "",
+     "open_actions": [],
+     "messages": [
+       {"message_id": "m-ma1", "sender": "Joel Chelliah <joel@centrepoint.church>",
+        "date": "2026-06-02", "labels": "INBOX", "subject": "Worship night logistics",
+        "text": "Can we lock in the AV crew for the worship night next Friday?"}
+     ]}
+  ],
+  "merge_review": [
+    {"pair_id": "joel-chelliah|joel-c",
+     "a": {"id": "joel-chelliah", "name": "Joel Chelliah", "type": "person"},
+     "b": {"id": "joel-c", "name": "Joel C", "type": "person"}},
+    {"pair_id": "centrepoint-church|centrepoint",
+     "a": {"id": "centrepoint-church", "name": "Centrepoint Church", "type": "org"},
+     "b": {"id": "centrepoint", "name": "Centrepoint", "type": "org"}}
+  ]
+}

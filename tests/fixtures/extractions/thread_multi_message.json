@@ -1,0 +1,36 @@
+{
+  "thread_id": "t-multi-002",
+  "org": "ACC",
+  "content_type": "update",
+  "summary": "Taryn raises a CAMS field-audit task, Josh scopes it, and Taryn confirms it is now closed.",
+  "contextual_summary": "Three-message thread on the CAMS review; the audit action raised in the first message is resolved by the third.",
+  "entities": [
+    {"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint", "role": "Executive Pastor"},
+    {"name": "Josh Kemp", "type": "person", "org": "Centrepoint", "role": ""},
+    {"name": "CAMS Review", "type": "project", "org": "ACC", "role": ""}
+  ],
+  "topics": ["cams", "salesforce", "audit"],
+  "actions": [
+    {"description": "Run the credentialing field audit across the WA region for the CAMS review.",
+     "owner_name": "Josh Kemp", "owner_fallback": "sender", "due_date": "2026-05-15",
+     "project_id": "cams-review", "area_id": "acc-projects"}
+  ],
+  "reply_needed": false,
+  "reply_reason": "",
+  "resolved_action_ids": [101],
+  "updated_actions": [
+    {"id": 101, "new_text": "Run the credentialing field audit across the WA region (completed)."}
+  ],
+  "relations": [
+    {"source_name": "Taryn Hamilton", "type": "works_at", "target_name": "Centrepoint Church"},
+    {"source_name": "Josh Kemp", "type": "contributes_to", "target_name": "CAMS Review"}
+  ],
+  "messages": [
+    {"message_id": "m-1", "sender": "Taryn Hamilton <taryn@centrepoint.church>",
+     "date": "2026-05-01", "labels": "INBOX", "subject": "CAMS field audit"},
+    {"message_id": "m-2", "sender": "Josh Kemp <josh.k@centrepoint.church>",
+     "date": "2026-05-02", "labels": "SENT", "subject": "Re: CAMS field audit"},
+    {"message_id": "m-3", "sender": "Taryn Hamilton <taryn@centrepoint.church>",
+     "date": "2026-05-10", "labels": "INBOX", "subject": "Re: CAMS field audit"}
+  ]
+}
