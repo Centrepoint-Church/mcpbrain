@@ -220,7 +220,7 @@ def test_cycle_with_enrich_client_enriches_and_marks(tmp_path):
     fake = _gmail_fake_one_message()
     enrich = FakeEnrichClient(_ENRICH_JSON)
     daemon = Daemon(store, emb, services={"gmail_service": fake},
-                    enrich_client=enrich,
+                    enrich_client=enrich, enrich_mode="gemini",
                     lock=SingleWriterLock(tmp_path / "d.lock"))
 
     res = daemon.run_one()
@@ -239,6 +239,7 @@ def test_cycle_without_enrich_client_defers(tmp_path):
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
     daemon = Daemon(store, emb, services={"gmail_service": fake},
+                    enrich_mode="gemini",
                     lock=SingleWriterLock(tmp_path / "d.lock"))
 
     res = daemon.run_one()
@@ -264,7 +265,8 @@ def test_enrich_batch_caps_per_cycle_and_drains_progressively(tmp_path):
     assert len(store.unenriched_chunks()) == 5
 
     daemon = Daemon(store, emb, services={}, enrich_client=enrich,
-                    enrich_batch=2, lock=SingleWriterLock(tmp_path / "d.lock"))
+                    enrich_mode="gemini", enrich_batch=2,
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
 
     daemon.run_one()
     assert len(store.unenriched_chunks()) == 3  # dropped by 2, not to 0
@@ -280,7 +282,8 @@ def test_run_cycle_function_accepts_enrich_client(tmp_path):
     fake = _gmail_fake_one_message()
     enrich = FakeEnrichClient(_ENRICH_JSON)
 
-    res = run_cycle(store, emb, gmail_service=fake, enrich_client=enrich)
+    res = run_cycle(store, emb, gmail_service=fake, enrich_client=enrich,
+                    enrich_mode="gemini")
 
     assert res["enrich"]["mode"] == "live"
     assert store.unenriched_chunks() == []

@@ -44,6 +44,25 @@ def read_config(home) -> dict:
         return {}
 
 
+ENRICH_MODES = {"spool", "gemini", "off"}
+
+
+def enrich_mode(home) -> str:
+    """Resolve the daemon's enrichment source: spool | gemini | off.
+
+    Reads config['enrich_mode'], defaulting to "off" so a fresh install enriches
+    nothing until the mode is set. An unknown value clamps to "off" and is warned
+    about, so a typo never silently enables a path. This is the single source of
+    truth for the daemon's enrichment branch.
+    """
+    mode = read_config(home).get("enrich_mode", "off")
+    if mode not in ENRICH_MODES:
+        log.warning("enrich_mode %r is not one of %s; defaulting to off",
+                    mode, sorted(ENRICH_MODES))
+        return "off"
+    return mode
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 
