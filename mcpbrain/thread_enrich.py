@@ -118,7 +118,7 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         messages.append({
             "message_id": mid,
             "sender": meta.get("sender", ""),
-            "date": meta.get("date", ""),
+            "date": meta.get("date") or meta.get("start", ""),
             "labels": meta.get("labels", ""),
             "subject": meta.get("subject", ""),
             "text": text,
