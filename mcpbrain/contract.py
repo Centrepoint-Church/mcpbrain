@@ -57,10 +57,13 @@ def validate_extraction(d: object) -> list[str]:
             if not isinstance(msg, dict):
                 problems.append(f"messages[{i}] must be an object")
                 continue
-            for field in ("message_id", "sender", "date"):
+            for field in ("message_id", "date"):
                 value = msg.get(field)
                 if not isinstance(value, str) or not value.strip():
                     problems.append(f"messages[{i}].{field} must be a non-empty string")
+            # sender is optional — calendar events have no sender; allow empty string
+            if not isinstance(msg.get("sender", ""), str):
+                problems.append(f"messages[{i}].sender must be a string")
 
     # entities / actions / relations / topics: must be lists (may be empty).
     for field in ("entities", "actions", "relations", "topics"):
