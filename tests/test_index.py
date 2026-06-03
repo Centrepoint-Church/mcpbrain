@@ -30,6 +30,24 @@ def test_index_pending_embeds_and_marks_done(tmp_path):
     assert s.unembedded_chunks() == []
 
 
+def test_embed_doc_embeds_single_chunk(tmp_path):
+    s = Store(tmp_path / "e.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("one", "first chunk", "h1", {"source_type": "gmail"})
+    s.upsert_chunk("two", "second chunk", "h2", {"source_type": "gmail"})
+
+    assert s.embed_doc("one", FakeEmbedder()) is True
+    pending = [c["doc_id"] for c in s.unembedded_chunks()]
+    assert "one" not in pending  # embedded
+    assert "two" in pending      # untouched
+
+
+def test_embed_doc_missing_returns_false(tmp_path):
+    s = Store(tmp_path / "f.sqlite3", dim=4)
+    s.init()
+    assert s.embed_doc("nope", FakeEmbedder()) is False
+
+
 def test_index_pending_prepends_contextual_prefix(tmp_path):
     """Passage text fed to embed_passages must start with [Context: and contain the original chunk text."""
     s = Store(tmp_path / "c.sqlite3", dim=4)

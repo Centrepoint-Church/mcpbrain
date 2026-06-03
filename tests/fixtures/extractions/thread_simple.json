@@ -1,0 +1,28 @@
+{
+  "thread_id": "t-simple-001",
+  "org": "Centrepoint",
+  "content_type": "request",
+  "summary": "Joel asks Josh to confirm Hall B availability for the Wednesday-night session.",
+  "contextual_summary": "Follow-up on the college term-one room booking thread; Hall B is the preferred space.",
+  "entities": [
+    {"name": "Joel Chelliah", "type": "person", "org": "Centrepoint", "role": "Senior Pastor"},
+    {"name": "Centrepoint Church", "type": "org", "org": "Centrepoint", "role": ""}
+  ],
+  "topics": ["facilities", "college"],
+  "actions": [
+    {"description": "Confirm whether Hall B is free for the Wednesday-night college session.",
+     "owner_name": "Josh Kemp", "owner_fallback": "sender", "due_date": "2026-04-30",
+     "project_id": "", "area_id": "centrepoint-facilities"}
+  ],
+  "reply_needed": true,
+  "reply_reason": "Direct question: 'can you confirm Hall B?'",
+  "resolved_action_ids": [],
+  "updated_actions": [],
+  "relations": [
+    {"source_name": "Joel Chelliah", "type": "works_at", "target_name": "Centrepoint Church"}
+  ],
+  "messages": [
+    {"message_id": "m-1", "sender": "Joel Chelliah <joel@centrepoint.church>",
+     "date": "2026-04-18", "labels": "INBOX", "subject": "Hall B for Wednesday college"}
+  ]
+}

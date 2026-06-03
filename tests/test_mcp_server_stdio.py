@@ -107,7 +107,7 @@ def test_stdio_spawn_initialize_and_brain_search(tmp_path):
     tool_names, payload = asyncio.run(_run_session(home))
 
     # initialize + tools list
-    assert {"brain_search", "brain_read", "brain_context", "brain_graph"} <= tool_names
+    assert {"brain_search", "brain_read", "brain_context", "brain_graph", "brain_actions"} <= tool_names
 
     # brain_search over the live store finds the seeded chunk
     assert isinstance(payload, list)

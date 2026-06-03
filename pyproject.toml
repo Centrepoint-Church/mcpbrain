@@ -7,6 +7,8 @@ dependencies = [
   "fastembed>=0.3",
   "mcp>=1.2",
   "numpy>=1.26",
+  "nameparser>=1.1",       # HumanName title-stripping in graph_write.strip_title
+  "dateparser>=1.4",       # date inference in graph_write._infer_deadline
   # Binary content extractors for Drive sync
   "pymupdf>=1.23",         # PDF text extraction (fitz)
   "python-docx>=1.1",      # DOCX extraction
@@ -57,7 +59,7 @@ include = ["mcpbrain*"]
 # Ship the wizard assets, the example client, and the SHARED desktop OAuth
 # client so a clean `uv tool install` carries it (auth.py finds it via its
 # bundled-path lookup, so no env var is needed on any machine).
-"mcpbrain" = ["*.json.example", "google_oauth_client.json"]
+"mcpbrain" = ["*.json.example", "google_oauth_client.json", "enrich_prompt.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

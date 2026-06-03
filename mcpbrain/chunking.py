@@ -27,6 +27,38 @@ def _canonical_name(name) -> str:
     return s
 
 
+# Near-duplicate action fingerprint normalisation (memory_db.py:1748-1777).
+# Single source of truth shared by graph_write (insert path) and store (text
+# rewrite path) — both must produce byte-for-byte equal fingerprints for the
+# near-duplicate guard to work. Lives here beside slugify because chunking is
+# dependency-free (stdlib only), so neither caller risks a circular import.
+_DEDUP_TITLE_CHARS = re.compile(r"[^\w\s]+")
+_DEDUP_STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "of", "for", "with", "on", "in",
+    "at", "by", "is", "are", "was", "be", "have", "has", "that", "this",
+    "it", "i", "you", "we", "do", "not",
+}
+
+
+def _normalise_title_for_dedup(text: str) -> str:
+    """Lowercase, drop punctuation, drop short stopwords (memory_db.py:1756)."""
+    if not text:
+        return ""
+    s = _DEDUP_TITLE_CHARS.sub(" ", text.lower())
+    return " ".join(t for t in s.split() if t and t not in _DEDUP_STOPWORDS)
+
+
+def action_fingerprint(text: str) -> str:
+    """SHA1 of normalised action text (memory_db.py:1766).
+
+    The near-duplicate guard depends on graph_write (insert) and store (text
+    rewrite) computing identical fingerprints; both import this function so the
+    normalisation and SHA stay in lockstep.
+    """
+    norm = _normalise_title_for_dedup(text)
+    return hashlib.sha1(norm.encode()).hexdigest() if norm else ""
+
+
 def slugify(name: str) -> str:
     """Lower-case, collapse runs of non-alphanumerics into single hyphens.
 

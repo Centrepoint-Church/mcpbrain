@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from mcpbrain import auth, backup, config, control_api, enrich
+from mcpbrain import auth, backup, config, control_api, drain, enrich, graph_write, prepare
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.config import app_dir
 from mcpbrain.enrich import run_enrichment
@@ -51,6 +51,22 @@ log = logging.getLogger(__name__)
 
 EMBED_BACKEND = "fastembed:bge-small:v1"
 DEFAULT_BACKUP_INTERVAL_S = 3600
+
+# Spool prepare bounds. thread_cap is a belt-and-braces ceiling on top of the
+# cap group_unenriched_threads already applies; char_budget splits an over-long
+# thread before the extractor sees it. Conservative starting points; tune later.
+SPOOL_THREAD_CAP = 20
+SPOOL_CHAR_BUDGET = 24000
+
+
+def _graph_apply():
+    """Resolve Phase 1's graph_write.apply through an indirection seam.
+
+    graph_write has landed (imported at module top), so this returns the real
+    apply directly. The seam is kept as the monkeypatch surface that
+    tests/test_run_cycle_modes.py patches to a stub.
+    """
+    return graph_write.apply
 
 
 @dataclass
@@ -165,21 +181,37 @@ class SingleWriterLock:
 
 def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               drive_service=None, enrich_client=None,
-              enrich_limit: int | None = None) -> dict:
+              enrich_limit: int | None = None,
+              enrich_mode: str = "off", resolution_due: bool = False,
+              synthesis_requests: list | None = None) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
-    then enrich the un-enriched chunks. Enrichment is tiered: with an
-    enrich_client it extracts into the graph and marks chunks enriched; without
-    one (None) it defers (no graph writes, no marking, mode flag set).
+    then enrich according to enrich_mode:
 
-    enrich_limit caps how many un-enriched chunks are processed this cycle so a
-    large post-migration backlog drains progressively over multiple cycles
-    rather than enriching the entire corpus in one tight, lock-holding loop.
-    None enriches every un-enriched chunk.
+      - "gemini": the existing per-chunk path. run_enrichment over the un-enriched
+        chunks. Tiered on enrich_client: with a client it extracts into the graph
+        and marks chunks enriched; without one (None) it defers (no graph writes,
+        no marking, mode flag set).
+      - "spool": prepare.prepare writes pending.json from the un-enriched threads,
+        then drain.drain applies whatever the out-of-band extractor session has
+        produced since last cycle. run_cycle does NOT call the extractor itself.
+        resolution_due gates the merge-review block in prepare, so it is appended
+        exactly when the deterministic resolve tier would also fire.
+      - "off": skip enrichment entirely.
+
+    enrich_mode defaults to "off" (matching config.enrich_mode's default), so a
+    direct caller that forgets to pass a mode does NOT silently run the legacy
+    gemini path. The live daemon resolves the real mode from config in run_one
+    and passes it in explicitly.
+
+    enrich_limit caps how many un-enriched chunks the gemini path processes this
+    cycle so a large post-migration backlog drains progressively rather than
+    enriching the entire corpus in one tight, lock-holding loop. None enriches
+    every un-enriched chunk.
 
     Returns the sync result dict ({"gmail","calendar","drive","embedded"}) plus
-    an "enrich" key holding run_enrichment's summary.
+    an "enrich" key holding the chosen path's summary.
     """
     result = run_sync_cycle(
         store, embedder,
@@ -187,11 +219,21 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         calendar_service=calendar_service,
         drive_service=drive_service,
     )
-    docs = [
-        (c["doc_id"], c["text"], c["metadata"])
-        for c in store.unenriched_chunks(limit=enrich_limit)
-    ]
-    result["enrich"] = run_enrichment(store, docs, client=enrich_client)
+    if enrich_mode == "spool":
+        prep = prepare.prepare(store, thread_cap=SPOOL_THREAD_CAP,
+                               char_budget=SPOOL_CHAR_BUDGET,
+                               resolution_due=resolution_due,
+                               synthesis_requests=synthesis_requests)
+        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
+        result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
+    elif enrich_mode == "off":
+        result["enrich"] = {"mode": "off"}
+    else:  # "gemini": the existing path, unchanged.
+        docs = [
+            (c["doc_id"], c["text"], c["metadata"])
+            for c in store.unenriched_chunks(limit=enrich_limit)
+        ]
+        result["enrich"] = run_enrichment(store, docs, client=enrich_client)
     return result
 
 
@@ -213,10 +255,22 @@ class Daemon:
                  interval_s: float = 300.0,
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
                  backup_interval_s: float | None = None,
-                 resolve_interval_s: float | None = None, clock=time.monotonic):
+                 resolve_interval_s: float | None = None,
+                 communities_interval_s: float | None = None,
+                 lint_interval_s: float | None = None,
+                 synthesise_interval_s: float | None = None,
+                 proactive_interval_s: float | None = None,
+                 waiting_on_interval_s: float | None = None,
+                 clock=time.monotonic,
+                 enrich_mode: str = "off"):
         self._store = store
         self._embedder = embedder
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
+        # Enrichment source: spool | gemini | off. Defaults to "gemini" so a
+        # daemon constructed without it keeps today's per-chunk behaviour.
+        # apply_config re-reads it from config under _config_lock, the same way
+        # _enrich_client is re-wired, and run_one snapshots it per cycle.
+        self._enrich_mode = enrich_mode
         # Cap chunks enriched per cycle so a post-migration backlog drains
         # progressively instead of enriching the whole corpus in one cycle.
         self._enrich_batch = enrich_batch
@@ -256,6 +310,28 @@ class Daemon:
         self._clock = clock
         self._last_backup = None
         self._last_resolve = None
+        # Periodic community detection is OFF unless communities_interval_s is set.
+        # Tiered like resolve: OFF by default; time-based cadence via self._clock.
+        self._communities_interval_s: float | None = communities_interval_s
+        self._last_communities = None
+        # Periodic graph lint is OFF unless lint_interval_s is set.
+        # Same three-shape contract as maybe_communities.
+        self._lint_interval_s: float | None = lint_interval_s
+        self._last_lint = None
+        # Periodic thread synthesis is OFF unless synthesise_interval_s is set.
+        # Cadence-gated: builds synthesis requests and stashes them so run_one
+        # can pass them to prepare.prepare() in the next spool cycle.
+        self._synthesise_interval_s: float | None = synthesise_interval_s
+        self._last_synthesise = None
+        self._pending_synthesis: list = []
+        # Periodic proactive detection is OFF unless proactive_interval_s is set.
+        # Same three-shape contract as maybe_communities / maybe_lint / maybe_synthesise.
+        self._proactive_interval_s: float | None = proactive_interval_s
+        self._last_proactive = None
+        # Periodic waiting-on reconciliation is OFF unless waiting_on_interval_s is set.
+        # Same three-shape contract as maybe_communities / maybe_lint / maybe_proactive.
+        self._waiting_on_interval_s: float | None = waiting_on_interval_s
+        self._last_waiting_on = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -355,11 +431,21 @@ class Daemon:
         # _enrich_client or a _backup paired with a stale interval. Keep the
         # lock hold time to the assignments only.
         enrich_client = _enrich_client_from_config(home)
+        enrich_mode = config.enrich_mode(home)
         backup_cfg, backup_interval = _backup_from_config(home)
+        cadences = _cadences_from_config(home)  # IO off-lock; assign under lock below
         with self._config_lock:
             self._enrich_client = enrich_client
+            self._enrich_mode = enrich_mode
             self._backup = backup_cfg
             self._backup_interval_s = backup_interval
+            # Cadence re-wire: intervals only; _last_* anchors persist across
+            # re-wire so a cadence change doesn't reset the clock.
+            self._communities_interval_s = cadences["communities_interval_s"]
+            self._lint_interval_s = cadences["lint_interval_s"]
+            self._synthesise_interval_s = cadences["synthesise_interval_s"]
+            self._proactive_interval_s = cadences["proactive_interval_s"]
+            self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -428,13 +514,29 @@ class Daemon:
         if self._pause.is_set():
             return None
         services = self.ensure_services()
-        # Snapshot the enrich client under the config lock so apply_config (HTTP
-        # handler thread) can't swap it mid-cycle; use the local for this cycle.
+        # Snapshot the enrich client + mode under the config lock so apply_config
+        # (HTTP handler thread) can't swap them mid-cycle; use the locals for this
+        # cycle.
         with self._config_lock:
             enrich_client = self._enrich_client
-        return run_cycle(self._store, self._embedder,
-                         enrich_client=enrich_client,
-                         enrich_limit=self._enrich_batch, **services)
+            enrich_mode = self._enrich_mode
+        # The spool prepare step folds in the merge-review block on the same
+        # cadence the deterministic resolve tier fires. Compute it here (without
+        # consuming the cadence) and pass it through; maybe_resolve still runs
+        # after this cycle and advances the clock.
+        resolution_due = self._resolve_due()
+        # Snapshot pending_synthesis and pass to prepare via run_cycle; reset
+        # after so the same requests are not re-sent on the next cycle.
+        synthesis_requests = self._pending_synthesis
+        result = run_cycle(self._store, self._embedder,
+                           enrich_client=enrich_client,
+                           enrich_limit=self._enrich_batch,
+                           enrich_mode=enrich_mode,
+                           resolution_due=resolution_due,
+                           synthesis_requests=synthesis_requests,
+                           **services)
+        self._pending_synthesis = []
+        return result
 
     # -- periodic backup ----------------------------------------------------
 
@@ -487,6 +589,22 @@ class Daemon:
 
     # -- periodic entity resolution -----------------------------------------
 
+    def _resolve_due(self) -> bool:
+        """Whether an entity resolve is due this cycle, without consuming it.
+
+        OFF (False) unless resolve_interval_s was supplied. Otherwise due on the
+        first call (self._last_resolve is None) or once resolve_interval_s has
+        elapsed since the last resolve. Read-only: it does not advance the
+        cadence clock. maybe_resolve uses this as its gate, and run_one reuses it
+        to set the spool merge-review cadence (resolution_due), so the LLM merge
+        block is appended exactly when the deterministic resolve tier fires.
+        """
+        if self._resolve_interval_s is None:
+            return False
+        if self._last_resolve is None:
+            return True
+        return (self._clock() - self._last_resolve) >= self._resolve_interval_s
+
     def maybe_resolve(self) -> dict | None:
         """Run entity resolution, if it is due.
 
@@ -511,15 +629,13 @@ class Daemon:
         small resolve_interval_s therefore drives frequent LLM calls — pick an
         interval well above the sync interval (resolution is cheap to defer).
         """
-        if self._resolve_interval_s is None:
+        if not self._resolve_due():
             return None
 
         # Record the START time as the cadence anchor (unlike maybe_backup's
         # end-time): a slow LLM-adjudicated resolve then doesn't eat into the
         # next interval. _last_resolve is committed only on a clean run below.
         now = self._clock()
-        if self._last_resolve is not None and (now - self._last_resolve) < self._resolve_interval_s:
-            return None
 
         try:
             # Lazy import: keeps the daemon import light and resolution an
@@ -533,6 +649,280 @@ class Daemon:
         # Advance the cadence clock only after a clean resolve.
         self._last_resolve = now
         return summary
+
+    # -- periodic community detection ---------------------------------------
+
+    def maybe_communities(self) -> dict | None:
+        """Run community detection, if it is due.
+
+        OFF unless communities_interval_s was supplied: returns None when
+        self._communities_interval_s is None (never runs on an unconfigured
+        daemon). Otherwise gates on a time-based cadence using the injected
+        clock — due on the first call (self._last_communities is None) or once
+        communities_interval_s has elapsed since the last run. Not due ->
+        returns None and does nothing.
+
+        Records START time as the cadence anchor (same pattern as maybe_resolve)
+        so a long detection run doesn't eat into the next interval.
+        _last_communities advances only on a clean run.
+
+        A communities failure is logged and swallowed so the daemon loop keeps
+        running — it returns {"communities": False, "error": ...} rather than
+        propagating.
+        """
+        if self._communities_interval_s is None:
+            return None
+
+        if self._last_communities is not None:
+            elapsed = self._clock() - self._last_communities
+            if elapsed < self._communities_interval_s:
+                return None
+
+        # Record START time as cadence anchor before the (potentially slow) pass.
+        now = self._clock()
+
+        try:
+            from mcpbrain.communities import run
+            summary = run(self._store)
+        except Exception as exc:  # noqa: BLE001 — communities must never crash the loop
+            log.warning(
+                "community detection failed (will retry next due): %s", exc,
+                exc_info=True,
+            )
+            return {"communities": False, "error": str(exc)}
+
+        # Advance the cadence clock only after a clean run.
+        self._last_communities = now
+        return summary
+
+    # -- periodic graph lint ------------------------------------------------
+
+    def maybe_lint(self) -> dict | None:
+        """Run the graph lint pass, if it is due.
+
+        OFF unless lint_interval_s was supplied: returns None when
+        self._lint_interval_s is None (never runs on an unconfigured daemon).
+        Otherwise gates on a time-based cadence using the injected clock —
+        due on the first call (self._last_lint is None) or once
+        lint_interval_s has elapsed since the last run. Not due -> returns
+        None and does nothing.
+
+        Records START time as the cadence anchor (same pattern as
+        maybe_communities) so a long lint run doesn't eat into the next
+        interval. _last_lint advances only on a clean run.
+
+        A lint failure is logged and swallowed so the daemon loop keeps
+        running — it returns {"lint": False, "error": ...} rather than
+        propagating.
+        """
+        if self._lint_interval_s is None:
+            return None
+
+        if self._last_lint is not None:
+            elapsed = self._clock() - self._last_lint
+            if elapsed < self._lint_interval_s:
+                return None
+
+        # Record START time as cadence anchor before the (potentially slow) pass.
+        now = self._clock()
+
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        try:
+            # Lazy import: keeps the daemon import light and lint an optional
+            # path; also lets tests patch mcpbrain.lint_graph.run.
+            from mcpbrain.lint_graph import run
+            summary = run(self._store, now=now_iso)
+        except Exception as exc:  # noqa: BLE001 — lint must never crash the loop
+            log.warning(
+                "lint pass failed (will retry next due): %s", exc, exc_info=True
+            )
+            return {"lint": False, "error": str(exc)}
+
+        # Advance the cadence clock only after a clean run.
+        self._last_lint = now
+        return summary
+
+    # -- periodic thread synthesis ------------------------------------------
+
+    def maybe_synthesise(self) -> dict | None:
+        """Build synthesis requests, if synthesis is due.
+
+        OFF unless synthesise_interval_s was supplied: returns None when
+        self._synthesise_interval_s is None (never synthesises an unconfigured
+        daemon). Otherwise gates on a time-based cadence using the injected
+        clock — due on the first call (self._last_synthesise is None) or once
+        synthesise_interval_s has elapsed since the last run. Not due ->
+        returns None and does nothing.
+
+        When due: calls build_synthesis_requests(store) and stashes the result
+        on self._pending_synthesis so run_one() can forward it to
+        prepare.prepare() in the next spool cycle. Returns a summary dict with
+        synthesis_requested=N.
+
+        Records START time as the cadence anchor (same pattern as maybe_resolve)
+        so a slow build doesn't eat into the next interval. _last_synthesise
+        advances only on a clean run.
+
+        A synthesis failure is logged and swallowed so the daemon loop keeps
+        running — it returns {"synthesis_requested": 0, "error": ...} rather
+        than propagating. _last_synthesise is NOT advanced on failure, so the
+        next call retries.
+        """
+        if self._synthesise_interval_s is None:
+            return None
+
+        if self._last_synthesise is not None:
+            elapsed = self._clock() - self._last_synthesise
+            if elapsed < self._synthesise_interval_s:
+                return None
+
+        # Record START time as cadence anchor before the build pass.
+        now = self._clock()
+
+        try:
+            # Lazy import: keeps the daemon import light and synthesis an
+            # optional path; also lets tests patch build_synthesis_requests.
+            from mcpbrain.synthesise_threads import build_synthesis_requests
+            requests = build_synthesis_requests(self._store)
+            self._pending_synthesis = requests
+        except Exception as exc:  # noqa: BLE001 — synthesis must never crash the loop
+            log.warning(
+                "synthesis build failed (will retry next due): %s", exc,
+                exc_info=True,
+            )
+            return {"synthesis_requested": 0, "error": str(exc)}
+
+        # Advance the cadence clock only after a clean build.
+        self._last_synthesise = now
+        return {"synthesis_requested": len(requests)}
+
+    # -- periodic proactive detection pass ---------------------------------
+
+    def maybe_proactive(self) -> dict | None:
+        """Run the proactive detection pass, if it is due.
+
+        OFF unless proactive_interval_s was supplied: returns None when
+        self._proactive_interval_s is None (never runs on an unconfigured
+        daemon). Otherwise gates on a time-based cadence using the injected
+        clock — due on the first call (self._last_proactive is None) or once
+        proactive_interval_s has elapsed since the last run. Not due ->
+        returns None and does nothing.
+
+        Records START time as the cadence anchor (same pattern as
+        maybe_resolve) so a long detection run doesn't eat into the next
+        interval. _last_proactive advances only on a clean run.
+
+        A proactive failure is logged and swallowed so the daemon loop keeps
+        running — it returns {"proactive": False, "error": ...} rather than
+        propagating.
+        """
+        if self._proactive_interval_s is None:
+            return None
+
+        if self._last_proactive is not None:
+            elapsed = self._clock() - self._last_proactive
+            if elapsed < self._proactive_interval_s:
+                return None
+
+        # Record START time as cadence anchor before the (potentially slow) pass.
+        now = self._clock()
+
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        try:
+            # Lazy import: keeps the daemon import light and the proactive path
+            # an optional dependency; also lets tests patch mcpbrain.proactive.run.
+            from mcpbrain.proactive import run
+            summary = run(self._store, now=now_iso)
+        except Exception as exc:  # noqa: BLE001 — proactive must never crash the loop
+            log.warning(
+                "proactive detection failed (will retry next due): %s", exc,
+                exc_info=True,
+            )
+            return {"proactive": False, "error": str(exc)}
+
+        # Advance the cadence clock only after a clean run.
+        self._last_proactive = now
+        return summary
+
+    # -- periodic waiting-on reconciliation ---------------------------------
+
+    def maybe_waiting_on(self) -> dict | None:
+        """Run the waiting-on reconciliation pass, if it is due.
+
+        OFF unless waiting_on_interval_s was supplied: returns None when
+        self._waiting_on_interval_s is None (never runs on an unconfigured
+        daemon). Otherwise gates on a time-based cadence using the injected
+        clock — due on the first call (self._last_waiting_on is None) or once
+        waiting_on_interval_s has elapsed since the last run. Not due ->
+        returns None and does nothing.
+
+        Records START time as the cadence anchor (same pattern as maybe_proactive)
+        so a long pass doesn't eat into the next interval. _last_waiting_on
+        advances only on a clean run.
+
+        A waiting_on failure is logged and swallowed so the daemon loop keeps
+        running — it returns {"waiting_on": False, "error": ...} rather than
+        propagating.
+        """
+        if self._waiting_on_interval_s is None:
+            return None
+
+        if self._last_waiting_on is not None:
+            elapsed = self._clock() - self._last_waiting_on
+            if elapsed < self._waiting_on_interval_s:
+                return None
+
+        # Record START time as cadence anchor before the pass.
+        now = self._clock()
+
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        try:
+            # Lazy import: keeps the daemon import light and lets tests patch
+            # mcpbrain.waiting_on.run.
+            from mcpbrain.waiting_on import run
+            summary = run(self._store, now=now_iso)
+        except Exception as exc:  # noqa: BLE001 — waiting_on must never crash the loop
+            log.warning(
+                "waiting-on reconciliation failed (will retry next due): %s", exc,
+                exc_info=True,
+            )
+            return {"waiting_on": False, "error": str(exc)}
+
+        # Advance the cadence clock only after a clean run.
+        self._last_waiting_on = now
+        return summary
+
+    # -- periodic pass orchestration ----------------------------------------
+
+    def _run_periodic_passes(self) -> None:
+        """Call the five periodic maintenance passes in spec order (§54, §165).
+
+        communities first so lint's duplicate-detection reads fresh
+        entity_communities. Each pass self-gates on its cadence and swallows
+        its own errors, but this method also wraps each call individually so
+        an unexpected raise (e.g. a mocked exception in tests) from one pass
+        never blocks the remaining passes.
+        """
+        for pass_fn in (
+            self.maybe_communities,
+            self.maybe_lint,
+            self.maybe_synthesise,
+            self.maybe_proactive,
+            self.maybe_waiting_on,
+        ):
+            try:
+                pass_fn()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "periodic pass %s failed unexpectedly: %s",
+                    getattr(pass_fn, "__name__", repr(pass_fn)), exc, exc_info=True,
+                )
 
     # -- the loop -----------------------------------------------------------
 
@@ -609,6 +999,9 @@ class Daemon:
                 # Resolution self-gates on configured + due; reuses the
                 # single-writer lock this loop thread already holds.
                 self.maybe_resolve()
+                # Five periodic maintenance passes in spec order (§54, §165).
+                # communities first (lint reads fresh entity_communities).
+                self._run_periodic_passes()
                 if self._stop.is_set():
                     break
                 # Block until woken (sync_now/stop) or the interval elapses.
@@ -691,6 +1084,39 @@ def _backup_from_config(home):
     return (bc, interval_s)
 
 
+_CADENCE_KEYS = (
+    "communities_interval_s",
+    "lint_interval_s",
+    "synthesise_interval_s",
+    "proactive_interval_s",
+    "waiting_on_interval_s",
+)
+
+
+def _cadences_from_config(home) -> dict:
+    """Read the cadences block from config.json. Returns a dict of the five
+    interval keys; absent keys map to None (OFF). Invalid values log a warning
+    and map to None, mirroring the backup interval validation in daemon.py.
+    """
+    cfg = config.read_config(home)
+    cadences_block = cfg.get("cadences") or {}
+    result = {}
+    for key in _CADENCE_KEYS:
+        raw = cadences_block.get(key)
+        if raw is None:
+            result[key] = None
+            continue
+        try:
+            val = float(raw)
+            if val <= 0:
+                raise ValueError("must be positive")
+            result[key] = val
+        except (TypeError, ValueError) as exc:
+            log.warning("cadences.%s invalid (%r); disabling: %s", key, raw, exc)
+            result[key] = None
+    return result
+
+
 def main(argv=None) -> None:
     """CLI entry point: `python -m mcpbrain.daemon [--once] [--interval N]`.
 
@@ -713,9 +1139,17 @@ def main(argv=None) -> None:
     store = Store(config.store_path(), dim=emb.dim)
     store.init()
     enrich_client = _enrich_client_from_config(str(config.app_dir()))
+    enrich_mode = config.enrich_mode(str(config.app_dir()))
     backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
+    cadences = _cadences_from_config(str(config.app_dir()))
     daemon = Daemon(store, emb, interval_s=args.interval, enrich_client=enrich_client,
-                    backup=backup_cfg, backup_interval_s=backup_interval)  # services=None -> auto-build from token
+                    enrich_mode=enrich_mode,
+                    backup=backup_cfg, backup_interval_s=backup_interval,
+                    communities_interval_s=cadences["communities_interval_s"],
+                    lint_interval_s=cadences["lint_interval_s"],
+                    synthesise_interval_s=cadences["synthesise_interval_s"],
+                    proactive_interval_s=cadences["proactive_interval_s"],
+                    waiting_on_interval_s=cadences["waiting_on_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle

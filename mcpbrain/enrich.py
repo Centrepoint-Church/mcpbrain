@@ -21,6 +21,10 @@ _EMPTY = {"entities": [], "relations": [], "actions": [], "decisions": []}
 # stuff arbitrary text (e.g. "WORSHIP"/"PRAISE") into the org field.
 _VALID_ORGS = {"Centrepoint", "ACC", "Courageous Church", "Curtin", "external", "unknown"}
 
+# Allowed thread content types. Single owner: the contract validator imports this
+# rather than re-declaring it, so the enrichment enum can't drift from the gate.
+_VALID_CONTENT_TYPES = {"request", "update", "decision", "fyi", "notification"}
+
 # Allowed declared entity types. A model-declared type outside this set is
 # clamped to "topic". The relation-endpoint STUB type ("unknown") is NOT a
 # declared type and is never clamped.

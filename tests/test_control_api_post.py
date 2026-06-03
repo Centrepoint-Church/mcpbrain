@@ -254,6 +254,29 @@ def test_register_returns_path(tmp_path, monkeypatch):
     assert d.register() == str(target)
 
 
+def test_apply_config_rewires_enrich_mode(tmp_path, monkeypatch):
+    """apply_config re-reads enrich_mode from the config and writes _enrich_mode.
+
+    Mirrors the setup of test_apply_config_writes_and_rewires: same _make_daemon
+    helper, same MCPBRAIN_HOME env-var, same monkeypatches for the two module-
+    level config builders that apply_config calls. The new assertion is that
+    _enrich_mode (not _enrich_client) reflects the value config.enrich_mode
+    returns after the write.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(daemon_mod, "_enrich_client_from_config", lambda home: None)
+    monkeypatch.setattr(daemon_mod, "_backup_from_config", lambda home: (None, None))
+    # Patch config.enrich_mode so it returns "spool" regardless of what is on disk.
+    monkeypatch.setattr(daemon_mod.config, "enrich_mode", lambda home: "spool")
+
+    d = _make_daemon(tmp_path)
+    assert d._enrich_mode == "off"   # constructor default
+
+    d.apply_config({"enrich_mode": "spool"})
+
+    assert d._enrich_mode == "spool"
+
+
 def test_status_degrades_without_token(tmp_path, monkeypatch):
     """status() with no token file: google_connected False, no scopes, no raise.
 
