@@ -55,7 +55,7 @@ DEFAULT_BACKUP_INTERVAL_S = 3600
 # Spool prepare bounds. thread_cap is a belt-and-braces ceiling on top of the
 # cap group_unenriched_threads already applies; char_budget splits an over-long
 # thread before the extractor sees it. Conservative starting points; tune later.
-SPOOL_THREAD_CAP = 20
+SPOOL_THREAD_CAP = 100
 SPOOL_CHAR_BUDGET = 24000
 
 
