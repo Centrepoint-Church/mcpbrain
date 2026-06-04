@@ -55,3 +55,17 @@ def test_caps_and_unknown_fields_skipped(tmp_path):
          "corrections": [{"field": "shoe_size", "new_value": "11"}]}]},
         max_corrections=10)
     assert n["corrections_applied"] == 0
+
+
+def test_max_corrections_cap(tmp_path):
+    s = _store(tmp_path)
+    # Create 3 people, each with one correction.
+    eids = [_person_with_profile(s, f"Person {i}", role="Volunteer") for i in range(3)]
+    inbox = {"profile_audit": [
+        {"entity_id": eid,
+         "corrections": [{"field": "org", "new_value": "Updated Org"}]}
+        for eid in eids
+    ]}
+    # Cap at 2 — only 2 should apply.
+    n = profile_audit.drain_audit(s, inbox, max_corrections=2)
+    assert n["corrections_applied"] == 2
