@@ -63,6 +63,26 @@ def enrich_mode(home) -> str:
     return mode
 
 
+def clickup_api_key(home) -> str:
+    """Return the ClickUp personal API token from config, or '' if unset."""
+    return read_config(home).get("clickup_api_key", "") or ""
+
+
+def clickup_list_id(home) -> str:
+    """Return the ClickUp list ID from config, or '' if unset."""
+    return read_config(home).get("clickup_list_id", "") or ""
+
+
+def owner_name(home) -> str:
+    """The install owner's name, used to filter dashboard actions to "mine".
+
+    Defaults to "Josh" because graph_write._infer_owner currently hardcodes
+    that name for self-owned actions. When multi-user identity lands, both
+    must move to this config key together.
+    """
+    return read_config(home).get("owner_name", "") or "Josh"
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 

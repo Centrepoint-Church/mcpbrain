@@ -1160,7 +1160,7 @@ def main(argv=None) -> None:
         # wizard alongside the sync loop. ControlServer.start() writes the
         # control_port/control_token files `mcpbrain setup` reads. A one-shot
         # --once cycle needs no control server, so it stays unwired above.
-        ctrl = control_api.ControlServer(daemon, home=str(config.app_dir()))
+        ctrl = control_api.ControlServer(daemon, home=str(config.app_dir()), store=store)
         ctrl.start()
         log.info("control API + wizard on http://127.0.0.1:%d/", ctrl.port)
         try:

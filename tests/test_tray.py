@@ -37,6 +37,9 @@ class FakeClient:
     def wizard_url(self):
         return "http://127.0.0.1:50000/" if self.up else ""
 
+    def dashboard_url(self):
+        return "http://127.0.0.1:50000/dashboard" if self.up else ""
+
 
 def _ctrl(**kw):
     c = TrayController(FakeClient(**kw))
@@ -108,3 +111,43 @@ def test_import_does_not_import_pystray():
     import mcpbrain.tray
     importlib.reload(mcpbrain.tray)
     assert "pystray" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# dashboard_url and Open Dashboard menu item
+# ---------------------------------------------------------------------------
+
+def test_dashboard_url_returns_dashboard_path(tmp_path):
+    """ControlClient pointed at a fake home with port+token files returns a URL
+    ending in /dashboard."""
+    from mcpbrain.control_client import ControlClient
+    (tmp_path / "control_port").write_text("51234\n")
+    (tmp_path / "control_token").write_text("tok\n")
+    client = ControlClient(home=tmp_path)
+    url = client.dashboard_url()
+    assert url.endswith("/dashboard"), f"Expected URL ending in /dashboard, got: {url!r}"
+
+
+def test_dashboard_url_returns_empty_when_unavailable(tmp_path):
+    """ControlClient with no port file returns '' from dashboard_url()."""
+    from mcpbrain.control_client import ControlClient
+    client = ControlClient(home=tmp_path)
+    assert client.dashboard_url() == ""
+
+
+def test_menu_has_open_dashboard():
+    """The second item in menu_items() has label 'Open Dashboard'."""
+    items = _ctrl().menu_items()
+    assert items[1][0] == "Open Dashboard"
+    assert items[1][2] is True  # always enabled
+
+
+def test_on_open_dashboard_calls_webbrowser(monkeypatch):
+    """on_open_dashboard() calls webbrowser.open with a URL containing /dashboard."""
+    import mcpbrain.tray as tray
+    opened = {}
+    monkeypatch.setattr(tray.webbrowser, "open", lambda u: opened.setdefault("url", u))
+    _ctrl().on_open_dashboard()
+    assert "/dashboard" in opened.get("url", ""), (
+        f"Expected URL containing /dashboard, got: {opened!r}"
+    )

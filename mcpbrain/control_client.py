@@ -77,3 +77,11 @@ class ControlClient:
         except DaemonUnavailable:
             return ""
         return base + "/"
+
+    def dashboard_url(self) -> str:
+        """The local dashboard URL, or '' if the daemon is not running."""
+        try:
+            base, _ = self._endpoint()
+        except DaemonUnavailable:
+            return ""
+        return base + "/dashboard"
