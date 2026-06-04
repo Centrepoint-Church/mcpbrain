@@ -30,6 +30,7 @@ def build_community_requests(store, *, cap: int = 10) -> list[dict]:
             SELECT community_id, member_count
             FROM community_summaries
             WHERE (title IS NULL OR trim(title) = '')
+              AND member_count >= 2
             ORDER BY member_count DESC
             LIMIT ?
             """,
