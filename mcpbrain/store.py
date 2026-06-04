@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -37,8 +38,24 @@ class Store:
         self.dim = dim
         self.read_only = read_only  # MCP server opens read-only; daemon is the sole writer
 
-    def _connect(self) -> sqlite3.Connection:
-        return _open_db(self.path, self.read_only)
+    @contextmanager
+    def _connect(self):
+        """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
+
+        sqlite3.Connection is its own context manager but only commits/rollbacks
+        — it does NOT close the file handle. Callers that did `with store._connect()
+        as db:` leaked one OS fd per call. The control API polls /api/status every
+        few seconds, so a long-running daemon exhausted its fd budget and started
+        failing with `sqlite3.OperationalError: unable to open database file`.
+        This wrapper keeps the existing commit/rollback semantics (via the inner
+        `with db:`) and adds an unconditional close in the finally block.
+        """
+        db = _open_db(self.path, self.read_only)
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def init(self) -> None:
         with self._connect() as db:
@@ -495,10 +512,45 @@ class Store:
         with self._connect() as db:
             db.execute("UPDATE chunks SET embedded=0")
 
+    def delete_calendar_chunks_after(self, iso_cutoff: str) -> int:
+        """Delete calendar chunks whose start time is after iso_cutoff.
+
+        Called when the calendar sync's forward horizon shrinks: events that
+        were previously synced past the new horizon stay in the store unless
+        we evict them, and they'd keep occupying embedding/enrichment slots.
+
+        ISO-8601 dates sort lexicographically, so a string comparison on the
+        stored metadata.start field is correct. Removes the row from chunks
+        plus its mirrors in vec_chunks and fts_chunks (keyed on rowid). Graph
+        rows that reference entities/actions from those chunks are NOT
+        touched — the graph is canonical knowledge, the chunk is just one of
+        the evidence sources. Returns the number of chunk rows deleted.
+        """
+        with self._connect() as db:
+            cur = db.execute(
+                "SELECT rowid FROM chunks "
+                "WHERE json_extract(metadata,'$.source_type')='calendar' "
+                "  AND json_extract(metadata,'$.start') > ?",
+                (iso_cutoff,),
+            )
+            rowids = [r["rowid"] for r in cur.fetchall()]
+            if not rowids:
+                return 0
+            placeholders = ",".join("?" * len(rowids))
+            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})", rowids)
+            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({placeholders})", rowids)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", rowids)
+            return len(rowids)
+
     def chunk_count(self) -> int:
         """Total number of rows in the chunks table."""
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
+    def enriched_count(self) -> int:
+        """Number of chunks that have been enriched into the graph."""
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM chunks WHERE enriched=1").fetchone()[0]
 
     def unembedded_chunks(self) -> list[dict]:
         with self._connect() as db:
