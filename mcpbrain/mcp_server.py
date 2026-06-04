@@ -136,6 +136,63 @@ def make_brain_proactive(store):
     return brain_proactive
 
 
+def _capture_envelope(kind: str, source: str = "mcp", **fields) -> dict:
+    from datetime import datetime, timezone
+    return {"kind": kind, "source": source,
+            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **fields}
+
+
+def make_brain_ingest():
+    async def brain_ingest(title: str, content: str, tags: str = "",
+                           observation_type: str = "note", org: str = "") -> dict:
+        """Save a note/decision/memory. QUEUED: searchable after the next
+        sync cycle (~5 min), not immediately. Returns {queued, path|error}."""
+        from mcpbrain.capture import write_capture
+        from mcpbrain import config
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "ingest", title=title, content=content, tags=tags,
+                observation_type=observation_type or "note", org=org))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_ingest
+
+
+def make_brain_action_create():
+    async def brain_action_create(text: str, owner: str = "", deadline: str = "",
+                                  org: str = "", project_id: str = "",
+                                  area_id: str = "") -> dict:
+        """Create an action item. QUEUED: appears after the next sync cycle
+        (~5 min). Empty owner defaults to the configured install owner."""
+        from mcpbrain.capture import write_capture
+        from mcpbrain import config
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "action_create", text=text, owner=owner, deadline=deadline,
+                org=org, project_id=project_id, area_id=area_id))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_action_create
+
+
+def make_brain_action_update():
+    async def brain_action_update(action_id: int, status: str) -> dict:
+        """Mark an action done or reopen it ('done'|'open'). QUEUED: applies
+        on the next sync cycle (~5 min)."""
+        from mcpbrain.capture import write_capture
+        from mcpbrain import config
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "action_update", action_id=action_id, status=status))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_action_update
+
+
 def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     import mcp.server.stdio
     from mcp.server import Server
@@ -150,6 +207,9 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     actions = make_brain_actions(store)
     graph = make_brain_graph(store)
     proactive = make_brain_proactive(store)
+    ingest = make_brain_ingest()
+    action_create = make_brain_action_create()
+    action_update = make_brain_action_update()
     server = Server("mcpbrain")
 
     @server.list_tools()
@@ -238,6 +298,64 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                     },
                 },
             ),
+            types.Tool(
+                name="brain_ingest",
+                description=(
+                    "Save a note, decision, or memory to your knowledge base. "
+                    "QUEUED: the item is searchable after the next sync cycle (~5 min), "
+                    "not immediately."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "tags": {"type": "string", "default": ""},
+                        "observation_type": {
+                            "type": "string",
+                            "default": "note",
+                            "enum": ["note", "decision", "memory", "reference"],
+                        },
+                        "org": {"type": "string", "default": ""},
+                    },
+                    "required": ["title", "content"],
+                },
+            ),
+            types.Tool(
+                name="brain_action_create",
+                description=(
+                    "Create a new action item. "
+                    "QUEUED: appears in brain_actions after the next sync cycle (~5 min). "
+                    "Empty owner defaults to the configured install owner."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "owner": {"type": "string", "default": ""},
+                        "deadline": {"type": "string", "default": ""},
+                        "org": {"type": "string", "default": ""},
+                        "project_id": {"type": "string", "default": ""},
+                        "area_id": {"type": "string", "default": ""},
+                    },
+                    "required": ["text"],
+                },
+            ),
+            types.Tool(
+                name="brain_action_update",
+                description=(
+                    "Mark an action done or reopen it. "
+                    "QUEUED: applies on the next sync cycle (~5 min)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action_id": {"type": "integer"},
+                        "status": {"type": "string", "enum": ["done", "open"]},
+                    },
+                    "required": ["action_id", "status"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -266,6 +384,31 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_proactive":
             out = await proactive(arguments.get("finding_type", ""), arguments.get("severity", ""))
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_ingest":
+            out = await ingest(
+                title=arguments.get("title", ""),
+                content=arguments.get("content", ""),
+                tags=arguments.get("tags", ""),
+                observation_type=arguments.get("observation_type", "note"),
+                org=arguments.get("org", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_action_create":
+            out = await action_create(
+                text=arguments.get("text", ""),
+                owner=arguments.get("owner", ""),
+                deadline=arguments.get("deadline", ""),
+                org=arguments.get("org", ""),
+                project_id=arguments.get("project_id", ""),
+                area_id=arguments.get("area_id", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_action_update":
+            out = await action_update(
+                action_id=arguments.get("action_id"),
+                status=arguments.get("status", ""),
+            )
             return [types.TextContent(type="text", text=json.dumps(out))]
         results = await search(arguments["query"], arguments.get("limit", 10))
         return [types.TextContent(type="text", text=json.dumps(results))]
