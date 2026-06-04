@@ -471,12 +471,17 @@ class Store:
             db.execute("""CREATE TABLE IF NOT EXISTS change_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 change_type TEXT NOT NULL,
+                source      TEXT DEFAULT '',
                 ref_id      TEXT DEFAULT '',
                 summary     TEXT DEFAULT '',
                 detail      TEXT DEFAULT '',
                 revert_ref  TEXT DEFAULT '',
                 created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
             # ORDER BY id DESC uses the PK — no secondary index needed.
+            cl_cols = {row["name"] for row in db.execute(
+                "PRAGMA table_info(change_log)").fetchall()}
+            if "source" not in cl_cols:
+                db.execute("ALTER TABLE change_log ADD COLUMN source TEXT DEFAULT ''")
 
             # --- Phase 3, Task 0.4: actions.waiting_on* columns ---------------
             # Back-fill waiting-on tracking onto the unified actions table.
@@ -1443,13 +1448,13 @@ class Store:
     # --- Phase 1 capture: change_log + finding helpers -----------------------
 
     def record_change(self, change_type: str, *, ref_id: str = "", summary: str = "",
-                      detail: str = "", revert_ref: str = "") -> int:
+                      detail: str = "", revert_ref: str = "", source: str = "") -> int:
         """Append one row to the change digest's audit trail."""
         with self._connect() as db:
             cur = db.execute(
-                "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref) "
-                "VALUES(?,?,?,?,?)",
-                (change_type, ref_id, summary, detail, revert_ref))
+                "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref, source) "
+                "VALUES(?,?,?,?,?,?)",
+                (change_type, ref_id, summary, detail, revert_ref, source))
             return cur.lastrowid
 
     def recent_changes(self, limit: int = 20) -> list[dict]:
