@@ -65,11 +65,17 @@ def normalise_calendar(event: dict) -> list[Chunk]:
 # Internal: paginated events.list
 # ---------------------------------------------------------------------------
 
-def _list_events(service, calendar_id: str, sync_token: str | None, time_min: str | None):
+def _list_events(service, calendar_id: str, sync_token: str | None,
+                 time_min: str | None, time_max: str | None):
     """Page through events().list. Returns (items, next_sync_token).
 
     Uses the syncToken path for delta syncs; falls back to timeMin +
     singleEvents for the initial full fetch (sync_token is None).
+
+    time_max bounds the forward horizon: recurring events expanded via
+    singleEvents=True can stretch arbitrarily far into the future, and we
+    don't want to embed/enrich events years ahead. timeMax is rejected by
+    Google when syncToken is set, so it applies only to the full-fetch path.
     """
     items: list[dict] = []
     page_token: str | None = None
@@ -83,6 +89,8 @@ def _list_events(service, calendar_id: str, sync_token: str | None, time_min: st
             params["singleEvents"] = True
             if time_min:
                 params["timeMin"] = time_min
+            if time_max:
+                params["timeMax"] = time_max
         if page_token:
             params["pageToken"] = page_token
 
@@ -96,6 +104,45 @@ def _list_events(service, calendar_id: str, sync_token: str | None, time_min: st
     return items, next_sync
 
 
+def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
+                             calendar_id: str = "primary",
+                             max_events: int | None = None) -> int:
+    """List events in [time_min, time_max] and upsert them. No syncToken side effects.
+
+    Used by the progressive-backfill loop to walk old history without resetting
+    the delta cursor. Cancelled events are skipped via `normalise_calendar`.
+    Returns the count of events that produced at least one chunk.
+    """
+    items: list[dict] = []
+    page_token: str | None = None
+    while True:
+        params: dict = {
+            "calendarId": calendar_id,
+            "showDeleted": False,
+            "singleEvents": True,
+            "timeMin": time_min,
+            "timeMax": time_max,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = service.events().list(**params).execute()
+        items.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    count = 0
+    for ev in items:
+        if max_events is not None and count >= max_events:
+            break
+        chunks = normalise_calendar(ev)
+        for ch in chunks:
+            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+        if chunks:
+            count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Public sync entry point
 # ---------------------------------------------------------------------------
@@ -106,6 +153,7 @@ def sync_calendar(
     source: str = "calendar",
     calendar_id: str = "primary",
     time_min: str | None = None,
+    time_max: str | None = None,
 ) -> int:
     """Delta sync via syncToken; full fetch on first run or HTTP 410 (expired token).
 
@@ -113,25 +161,38 @@ def sync_calendar(
     durably written, so a mid-run failure leaves the cursor at the last
     good position and the next run retries from there.
 
+    time_min defaults to 30 days ago; time_max defaults to one year ahead.
+    Bounding the forward window prevents singleEvents=True from expanding
+    recurring events arbitrarily far into the future (and then needlessly
+    embedding/enriching them).
+
     Returns the count of events that produced at least one chunk (i.e.
     non-cancelled events that were upserted).
     """
     cursor = store.get_cursor(source)
+    now = datetime.now(timezone.utc)
     if time_min is None:
-        time_min = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        time_min = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if time_max is None:
+        time_max = (now + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Evict any calendar chunks that fell outside the new forward horizon —
+    # for example, recurring events that an earlier (unbounded) sync expanded
+    # years ahead. Cheap idempotent no-op once the store has caught up.
+    store.delete_calendar_chunks_after(time_max)
 
     if cursor:
         try:
-            items, next_sync = _list_events(service, calendar_id, cursor, time_min)
+            items, next_sync = _list_events(service, calendar_id, cursor, time_min, time_max)
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 410:
                 # Sync token expired — fall back to full fetch.
-                items, next_sync = _list_events(service, calendar_id, None, time_min)
+                items, next_sync = _list_events(service, calendar_id, None, time_min, time_max)
             else:
                 raise
     else:
-        items, next_sync = _list_events(service, calendar_id, None, time_min)
+        items, next_sync = _list_events(service, calendar_id, None, time_min, time_max)
 
     count = 0
     for ev in items:
