@@ -102,6 +102,9 @@
     <div class="row" style="margin-top:8px">
       <input id="owner_email" type="text" placeholder="Your email address" autocomplete="off" spellcheck="false">
     </div>
+    <div class="row" style="margin-top:8px">
+      <input id="owner_role" type="text" placeholder="Your role (e.g. Operations Manager)" autocomplete="off" spellcheck="false">
+    </div>
     <p class="desc" style="margin-top:14px">The organisations you work across (work, study, church, personal&hellip;). Email domains are optional and help classify senders; separate several with commas.</p>
     <div id="org-rows">
       <div class="row org-row" style="margin-top:8px">
@@ -196,6 +199,8 @@ async function saveKey(){
   }
   const oe = $("owner_email").value.trim();
   if(oe) body.owner_email = oe;
+  const orole = $("owner_role").value.trim();
+  if(orole) body.owner_role = orole;
   const orgRows = collectOrgs();
   if(orgRows.length) body.orgs = orgRows;
   try{
