@@ -99,6 +99,7 @@ def build_prompt(text: str, metadata: dict) -> str:
     _home = str(_config.app_dir())
     owner_full = _config.owner_full_name(_home)
     owner_short = _config.owner_name(_home)
+    owner_role = _config.owner_role(_home)
     _tax = _orgs.taxonomy_from_config(_home)
     org_list = ", ".join(_tax.names)
     org_enum = "|".join(list(_tax.names) + ["external", "unknown"])
@@ -112,8 +113,8 @@ def build_prompt(text: str, metadata: dict) -> str:
     provenance = ("\n".join(prov_lines) + "\n") if prov_lines else ""
 
     return (
-        f"You extract an operations knowledge graph for {owner_full}, an "
-        "operations manager who works across these organisations: "
+        f"You extract an operations knowledge graph for {owner_full} "
+        f"({owner_role}), who works across these organisations: "
         f"{org_list}.\n\n"
         "Respond with STRICT JSON only. No markdown fences. No commentary. "
         "Use exactly this schema:\n"
