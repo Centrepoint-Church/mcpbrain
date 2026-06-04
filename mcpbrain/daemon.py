@@ -34,6 +34,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 
+import json
 import logging
 import os
 import threading
@@ -396,26 +397,103 @@ class Daemon:
         gracefully — a missing or unreadable token resolves to
         google_connected=False / granted_scopes=[] and never raises.
         """
+        import json as _json
         from google.oauth2.credentials import Credentials
 
         token_file = auth.token_path()
         granted: list[str] = []
         google_connected = False
+        google_account: str = ""
         try:
             if token_file.exists():
                 creds = Credentials.from_authorized_user_file(str(token_file), auth.SCOPES)
                 scopes = auth._granted_scopes(creds, token_file)
                 granted = sorted(scopes) if scopes else []
                 google_connected = bool(creds and (creds.valid or creds.refresh_token))
+                # Resolve the connected account email. The token JSON has an
+                # "account" field but the consent flow leaves it empty; fall
+                # back to a one-shot Gmail getProfile call cached to a sidecar
+                # so /api/status polls don't hit Google. start_auth removes the
+                # sidecar on re-consent so a different account refreshes it.
+                google_account = self._resolve_google_account(token_file) if google_connected else ""
         except Exception as exc:  # noqa: BLE001 — no/invalid token degrades, never crashes
             log.debug("status: Google credentials unavailable: %s", exc)
+        # Spool depth for the cowork extractor wizard step. The on-disk layout
+        # is owned by prepare.py (writes enrich_queue/pending.json) and
+        # extractor_driver.py (writes enrich_inbox/<batch>.json), so we just
+        # count files. Errors degrade to zero rather than failing the status
+        # poll.
+        pending = 0
+        inbox = 0
+        try:
+            home = config.app_dir()
+            if (home / "enrich_queue" / "pending.json").exists():
+                pending = 1
+            inbox_dir = home / "enrich_inbox"
+            if inbox_dir.exists():
+                inbox = sum(1 for p in inbox_dir.iterdir() if p.suffix == ".json")
+        except OSError as exc:
+            log.debug("status: spool counts unavailable: %s", exc)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
+            "enriched_count": self._store.enriched_count(),
             "google_connected": google_connected,
             "granted_scopes": granted,
+            "google_account": google_account,
             "enrich_enabled": self._enrich_client is not None,
+            "spool": {"pending": pending, "inbox": inbox},
         }
+
+    def _resolve_google_account(self, token_file) -> str:
+        """Return the connected Google account email, resolving lazily.
+
+        Reads ``MCPBRAIN_HOME/google_account`` first (cache). If missing, tries
+        the consent-time-populated "account" field of the token JSON. If still
+        missing AND a Gmail service is available, calls
+        ``users().getProfile(userId='me')`` once and writes the email to the
+        sidecar so subsequent polls stay offline. All errors degrade to "".
+        """
+        sidecar = app_dir() / "google_account"
+        # Cache hit: trust the sidecar.
+        try:
+            cached = sidecar.read_text().strip()
+            if cached:
+                return cached
+        except OSError:
+            pass
+        # Consent-time field (typically empty here, but cheap to check).
+        try:
+            from_token = (json.loads(token_file.read_text()).get("account") or "").strip()
+        except (OSError, ValueError):
+            from_token = ""
+        if from_token:
+            self._cache_google_account(sidecar, from_token)
+            return from_token
+        # Last resort: Gmail getProfile, but only if we already have a service.
+        try:
+            gmail = self.ensure_services().get("gmail_service")
+        except Exception:  # noqa: BLE001
+            gmail = None
+        if gmail is None:
+            return ""
+        try:
+            profile = gmail.users().getProfile(userId="me").execute()
+            email = (profile.get("emailAddress") or "").strip()
+        except Exception as exc:  # noqa: BLE001 — must not break status polls
+            log.debug("status: getProfile failed: %s", exc)
+            return ""
+        if email:
+            self._cache_google_account(sidecar, email)
+        return email
+
+    @staticmethod
+    def _cache_google_account(sidecar, email: str) -> None:
+        try:
+            sidecar.write_text(email)
+            os.chmod(sidecar, 0o600)
+        except OSError as exc:
+            log.debug("status: failed to write google_account sidecar: %s", exc)
 
     def apply_config(self, body: dict) -> None:
         """Persist config updates, then re-wire enrich + backup from disk.
@@ -484,6 +562,14 @@ class Daemon:
             return
         try:
             auth.run_consent_flow()
+            # Drop the cached account so a different Google identity is
+            # re-resolved next /api/status poll instead of showing the old one.
+            try:
+                (app_dir() / "google_account").unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.debug("could not clear google_account sidecar: %s", exc)
         finally:
             self._auth_lock.release()
 
@@ -1135,6 +1221,16 @@ def main(argv=None) -> None:
     ap.add_argument("--interval", type=float, default=300.0, help="sync interval seconds")
     args = ap.parse_args(argv)
 
+    # Configure root logging so warnings/errors reach stdout/stderr. Under
+    # launchd these are routed to the plist's StandardOutPath/StandardErrorPath;
+    # in a terminal they appear inline. Without this, every `log.info/warning`
+    # in the daemon is silently dropped, which is why a healthy daemon looks
+    # "hung" in the foreground and a crashing launchd job leaves no trace.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     emb = get_embedder(config.EMBEDDER)
     store = Store(config.store_path(), dim=emb.dim)
     store.init()
@@ -1160,6 +1256,22 @@ def main(argv=None) -> None:
         # wizard alongside the sync loop. ControlServer.start() writes the
         # control_port/control_token files `mcpbrain setup` reads. A one-shot
         # --once cycle needs no control server, so it stays unwired above.
+        #
+        # Order matters: probe the single-writer lock BEFORE ControlServer.start()
+        # so a second instance (e.g. a launchd retry racing the running daemon)
+        # exits cleanly without clobbering the live daemon's on-disk
+        # control_port/control_token. Otherwise the tray, which reads those
+        # files, would be pointed at a dead port. The probe acquires-then-releases
+        # so daemon.run()'s own `with self._lock:` can re-acquire normally; the
+        # TOCTOU window is microseconds vs. launchd's 10-second minimum-runtime
+        # retry cadence.
+        try:
+            probe = SingleWriterLock()
+            probe.acquire()
+            probe.release()
+        except AlreadyRunningError:
+            log.error("another mcpbrain daemon is already running; exiting")
+            raise SystemExit(1)
         ctrl = control_api.ControlServer(daemon, home=str(config.app_dir()), store=store)
         ctrl.start()
         log.info("control API + wizard on http://127.0.0.1:%d/", ctrl.port)

@@ -37,6 +37,11 @@ _TRAY_TASK_NAME = "mcpbrain-tray"
 
 def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive: bool) -> str:
     keep = "true" if keep_alive else "false"
+    # Log paths under MCPBRAIN_HOME so crashes are debuggable. Without these,
+    # launchd discards stdout/stderr and a daemon that exits non-zero leaves
+    # no trace beyond `last exit code` in `launchctl print`.
+    log_path = f"{home}/{label}.log"
+    err_path = f"{home}/{label}.err"
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -59,6 +64,10 @@ def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str,
     <true/>
     <key>KeepAlive</key>
     <{keep}/>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{err_path}</string>
 </dict>
 </plist>
 """
