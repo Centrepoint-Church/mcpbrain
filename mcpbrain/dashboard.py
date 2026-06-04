@@ -267,13 +267,29 @@ def snooze(store, action_id: int, until_iso: str) -> bool:
     return False
 
 
+def changes_digest(store) -> dict:
+    """Recent system writes + open findings for the dashboard Review card.
+
+    Uses the Store methods directly: the dashboard runs in the daemon process
+    (same writer), so this is safe; the read-only URI pattern in actions_today
+    predates the store being passed in whole.
+    """
+    try:
+        return {"changes": store.recent_changes(limit=20),
+                "findings": store.open_findings()[:20]}
+    except Exception as exc:  # noqa: BLE001 — degrade, never break the dashboard
+        log.warning("changes_digest failed: %s", exc)
+        return {"changes": [], "findings": []}
+
+
 def assemble(store, home) -> dict:
-    """Fan-out to all three data sources in parallel and return combined payload."""
+    """Fan-out to all four data sources in parallel and return combined payload."""
     owner = config.owner_name(home)
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         fut_actions = pool.submit(actions_today, store, owner)
         fut_calendar = pool.submit(calendar_today, home)
         fut_clickup = pool.submit(clickup_today, home)
+        fut_digest = pool.submit(changes_digest, store)
 
         try:
             actions_result = fut_actions.result()
@@ -293,9 +309,17 @@ def assemble(store, home) -> dict:
             log.warning("assemble: clickup_today failed: %s", exc)
             clickup_result = []
 
+        try:
+            digest_result = fut_digest.result()
+        except Exception as exc:
+            log.warning("assemble: changes_digest failed: %s", exc)
+            digest_result = {"changes": [], "findings": []}
+
     return {
         "actions": actions_result,
         "calendar": calendar_result,
         "clickup": clickup_result,
+        "changes": digest_result["changes"],
+        "findings": digest_result["findings"],
         "as_of": _now_iso(),
     }
