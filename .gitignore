@@ -13,8 +13,24 @@ dist/
 *.sqlite3-wal
 *.sqlite3-shm
 google_token.json
+google_account
 client_secret.json
 # mcpbrain/google_oauth_client.json is the SHARED desktop OAuth client. It is
 # committed and bundled (private repo; a desktop client secret is non-confidential
 # under Google's PKCE flow) so every install carries it. The per-user token
-# (google_token.json) and the user-supplied client_secret.json stay ignored.
+# (google_token.json), the lazily-cached connected-account email
+# (google_account), and the user-supplied client_secret.json stay ignored.
+
+# Per-user local state from the Claude Code "remember" skill — session
+# transcripts, log lines, scratch files. Not part of the shipped repo.
+.remember/
+
+# Daemon runtime artefacts that may land beside the data dir if MCPBRAIN_HOME
+# is ever pointed at the repo (it shouldn't be, but ignore defensively).
+control_port
+control_token
+daemon.lock
+*.mcpbrain.log
+*.mcpbrain.err
+enrich_queue/
+enrich_inbox/

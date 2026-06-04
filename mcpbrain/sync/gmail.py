@@ -69,10 +69,19 @@ def sync_gmail(service, store, source: str = "gmail") -> int:
         raise
 
     # Fetch, normalise, and upsert each message.
-    # Any exception propagates before set_cursor is reached — cursor stays unchanged.
+    # A 404 on an individual id means the message was deleted between
+    # history.list and our get — skip it rather than crashing the whole sync.
+    # Other HttpErrors still propagate so the cursor stays at the last good
+    # position and the next run retries them.
     messages_processed = 0
     for mid in new_message_ids:
-        raw = service.users().messages().get(userId="me", id=mid, format="full").execute()
+        try:
+            raw = service.users().messages().get(userId="me", id=mid, format="full").execute()
+        except HttpError as e:
+            resp = getattr(e, "resp", None)
+            if resp is not None and resp.status == 404:
+                continue
+            raise
         for chunk in normalise_gmail(raw):
             store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash, chunk.metadata)
         messages_processed += 1
@@ -83,13 +92,20 @@ def sync_gmail(service, store, source: str = "gmail") -> int:
     return messages_processed
 
 
-def backfill_gmail(service, store, after: str, max_messages: int | None = None) -> int:
+def backfill_gmail(service, store, after: str, before: str | None = None,
+                   max_messages: int | None = None) -> int:
     """One-shot bounded backfill via messages.list with an `after:YYYY/MM/DD` query.
 
     Fetches each matched message (format=full), normalises, upserts its chunks.
     Does NOT touch the History cursor. Returns the number of messages indexed.
+
+    `before` (YYYY/MM/DD) optionally caps the upper bound so callers can walk a
+    historical window without re-fetching newer mail. Omit it for the original
+    "everything since X" semantics.
     """
     q = f"after:{after}"
+    if before:
+        q += f" before:{before}"
     page_token, processed = None, 0
     while True:
         params = {"userId": "me", "q": q, "maxResults": 100}
@@ -99,7 +115,15 @@ def backfill_gmail(service, store, after: str, max_messages: int | None = None) 
         for m in resp.get("messages", []):
             if max_messages is not None and processed >= max_messages:
                 return processed
-            raw = service.users().messages().get(userId="me", id=m["id"], format="full").execute()
+            try:
+                raw = service.users().messages().get(
+                    userId="me", id=m["id"], format="full"
+                ).execute()
+            except HttpError as e:
+                resp_err = getattr(e, "resp", None)
+                if resp_err is not None and resp_err.status == 404:
+                    continue
+                raise
             for ch in normalise_gmail(raw):
                 store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
             processed += 1
