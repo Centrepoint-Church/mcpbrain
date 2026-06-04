@@ -31,3 +31,12 @@ def test_prompt_doc_exists_and_names_contract():
     # The two file roles the session reads from and writes to.
     assert "pending.json" in text, "prompt must name the pending.json input"
     assert "enrich_inbox" in text, "prompt must name the enrich_inbox output"
+
+
+def test_four_block_keys_documented():
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    for fname in ["mcpbrain/enrich_prompt.md", "docs/cowork-task.md"]:
+        text = (root / fname).read_text()
+        for key in ["profile_synthesis", "community_synthesis", "memory_distil", "profile_audit"]:
+            assert key in text, f"{key} not found in {fname}"

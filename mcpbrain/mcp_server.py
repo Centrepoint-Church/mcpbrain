@@ -87,7 +87,8 @@ def make_brain_context(store):
             actions = annotate_action_freshness(store, store.unified_actions(owner=ent["name"]))
             projects = store.projects_owned_by(ent["id"])
             areas = store.areas_owned_by(ent["id"])
-            return {"entity": ent, "relations": relations, "actions": actions,
+            return {"entity": {**ent, "profile": ent.get("profile", "")},
+                    "relations": relations, "actions": actions,
                     "projects": projects, "areas": areas}
         except Exception:
             _log.exception("brain_context failed for entity=%r mode=%r", entity, mode)
