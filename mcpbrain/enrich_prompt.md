@@ -38,44 +38,46 @@ Each extraction uses this schema verbatim. Match the field names exactly.
 ```json
 {
   "thread_id": "t-abc123",
-  "org": "Centrepoint|ACC|Courageous Church|Curtin|external|unknown",
+  "org": "<one of the valid_orgs tags>",
   "content_type": "request|update|decision|fyi|notification",
   "summary": "One plain sentence.",
   "contextual_summary": "Optional longer situational summary, or omit it.",
-  "entities": [{"name": "Joel Chelliah", "type": "person|org|project",
-                "org": "Centrepoint|...", "role": "Senior Pastor"}],
+  "entities": [{"name": "Person Name", "type": "person|org|project",
+                "org": "<org tag>", "role": "Job title"}],
   "topics": ["facilities", "worship"],
-  "actions": [{"description": "...", "owner_name": "Joel Chelliah",
-               "owner_fallback": "sender", "due_date": "2026-04-30",
-               "project_id": "byford-grant", "area_id": "centrepoint-it",
-               "waiting_on": "Taryn Hamilton"}],
+  "actions": [{"description": "...", "owner_name": "Person Name",
+               "owner_fallback": "sender", "due_date": "YYYY-MM-DD",
+               "project_id": "a-project-id", "area_id": "an-area-id",
+               "waiting_on": "Other Person"}],
   "reply_needed": true,
   "reply_reason": "Direct question: 'can you confirm Hall B?'",
   "resolved_action_ids": [42],
   "updated_actions": [{"id": 42, "new_text": "..."}],
-  "relations": [{"source_name": "Joel Chelliah", "type": "works_at",
-                 "target_name": "Centrepoint Church"}],
+  "relations": [{"source_name": "Person Name", "type": "works_at",
+                 "target_name": "Org Name"}],
   "messages": [{"message_id": "m-1",
-                "sender": "Joel Chelliah <joel@centrepoint.church>",
-                "date": "2026-04-18", "labels": "INBOX", "subject": "Hall B"}]
+                "sender": "Person Name <addr@example.com>",
+                "date": "YYYY-MM-DD", "labels": "INBOX", "subject": "..."}]
 }
 ```
 
 Field notes:
 
 - `thread_id`: copy the thread's `thread_id` exactly.
-- `org`: one of `Centrepoint`, `ACC`, `Courageous Church`, `Curtin`,
-  `external`, `unknown`. Use `org_domain_map` to map sender domains to an org.
-  Use `unknown` only when nothing supports a choice.
+- `org`: one of the tags in the context block's `valid_orgs` list (the
+  configured org names plus `external` and `unknown`). Use `org_domain_map` to
+  map sender domains to an org. Use `unknown` only when nothing supports a
+  choice.
 - `content_type`: one of `request`, `update`, `decision`, `fyi`,
   `notification`.
 - `summary`: one plain sentence. `contextual_summary` is optional; leave it as
   an empty string when there is nothing situational to add.
 - `entities`, `topics`, `actions`, `relations`: lists. Empty lists are fine.
 - `waiting_on` (on an action): optional. Set it to the name of the person the
-  action is awaiting a reply or input from ("Josh is waiting on Taryn to confirm"
-  -> `"waiting_on": "Taryn Hamilton"`). Use the person's bare name, matching an
-  entity you listed. Omit it for actions that are not blocked on someone's reply.
+  action is awaiting a reply or input from (the action is blocked until "Taryn"
+  confirms -> `"waiting_on": "Taryn Hamilton"`). Use the person's bare name,
+  matching an entity you listed. Omit it for actions that are not blocked on
+  someone's reply.
 - `messages`: provenance only. For each message in the thread emit
   `message_id`, `sender`, `date`, `labels`, `subject`. Do NOT include the
   message `text` body in the output. You read the body; you do not echo it.
@@ -87,6 +89,9 @@ The `context` block is given so you don't re-derive what is already known.
 - `known_people`: each entry's `org` and `role` are confirmed. Trust them. Do
   not re-derive a person's org or role, and do not contradict these entries.
   Trust them even when the sender's email domain is absent from `org_domain_map`.
+- `valid_orgs`: the org tags this install classifies against — the configured
+  org names plus `external` and `unknown`. The thread-level `org` and any org
+  tag you assign must come from this list.
 - `org_domain_map`: maps email domains to orgs. Use it to set `org` and to
   decide whether a sender is internal or `external`.
 - `projects` and `areas`: the valid `project_id` and `area_id` sets. When you
@@ -111,16 +116,14 @@ Entities and relations are the part most worth getting right.
   "Franz from The Church Co <franz@thechurchco.com>" yields the name `Franz`,
   not "Franz from The Church Co".
 - **Type.** `person` is a named individual. `org` is any company, church,
-  store, venue, team, school, or agency (The Church Co, Microsoft Store, Optus
-  Stadium, Centrepoint Church are all `org`). `project` is a named initiative
+  store, venue, team, school, or agency. `project` is a named initiative
   or body of work, not a thing or a place. When torn between `org` and
   `person`, a name that could sign a contract or own a building is an `org`.
 - **Per-entity org.** An entity's `org` is where THAT entity belongs, not the
   thread's org. It is fixed by THAT entity's own email domain (via
   `org_domain_map`) or a stated affiliation, NOT by what the email is about. A
   sender whose domain is not in `org_domain_map` is `external`, even when the
-  body is entirely about your own org. `franz@thechurchco.com` is `external`
-  regardless of the email being all about centrepoint.church. Do not infer a
+  body is entirely about one of your own orgs. Do not infer a
   person's org from the thread's subject matter or from the recipient's org, and
   do not default an outside person to your own org just because they emailed you.
   Use `unknown` when nothing supports a choice. When an entity appears in
@@ -128,8 +131,9 @@ Entities and relations are the part most worth getting right.
   only to entities not already confirmed there.
 - **Relations.** A relation joins two real, named entities that you have also
   listed in `entities`. Both `source_name` and `target_name` must be entity
-  names, never an org tag (`Centrepoint`, `external`, `unknown` are tags, not
-  entities). `works_at` links a person to the org they belong to; do not assert
+  names, never an org tag (the `valid_orgs` values, `external`, and `unknown`
+  are tags, not entities). `works_at` links a person to the org they belong
+  to; do not assert
   it for venues, tools, or places. Emit only relations the text supports, and
   skip the rest rather than guessing.
 

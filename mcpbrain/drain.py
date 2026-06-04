@@ -36,8 +36,8 @@ import logging
 import os
 from pathlib import Path
 
-from mcpbrain import config
-from mcpbrain.contract import validate_batch_file
+from mcpbrain import config, orgs
+from mcpbrain.contract import normalise_org, validate_batch_file
 from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
@@ -212,6 +212,7 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
         file_ok = True
 
         extractions = _regroup_parts(data["extractions"])
+        taxonomy = orgs.taxonomy_from_config(home)
         # Fail loudly on a misconfigured call rather than letting the per-
         # extraction handler swallow the TypeError, set file_ok=False, keep the
         # file, and loop forever. Raised before the loop so it is never caught.
@@ -220,6 +221,22 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
 
         for extraction in extractions:
             thread_id = extraction["thread_id"]
+            # Org drift gate: canonicalise; coerce an unconfigured org to
+            # "unknown" and record it, so repeated sightings of a real org
+            # surface as a "add it to config orgs?" finding instead of either
+            # quarantining the thread or vanishing silently.
+            raw_org = normalise_org(extraction, taxonomy)
+            if raw_org is not None:
+                log.info("drain: unconfigured org %r on thread %s coerced to "
+                         "'unknown'", raw_org, thread_id)
+                store.record_finding(
+                    "org_unrecognised", ref_id=raw_org.strip().lower(),
+                    org="unknown",
+                    summary=f"Extractor returned unconfigured org '{raw_org}'",
+                    detail=f"Last seen on thread {thread_id}; coerced to "
+                           f"'unknown'. If this is a real organisation, add it "
+                           f"to the orgs list in config.json.",
+                    severity="info")
             # Recover the chunks this extraction covers by message id, NOT by a
             # thread-wide query. Marking only the messages that were actually
             # extracted means a late-arriving message (synced after prepare) or a

@@ -6,13 +6,25 @@ it. This module is the single seam that pins the shape, so the two cannot drift.
 The validator is strict on structure (required keys, correct types, enum
 membership) and lenient on optionality: fields that the contract describes as
 "or empty" are allowed to be absent or empty. Validation only: the input dict
-is never mutated. Pure stdlib, no third-party imports.
+is never mutated.
 
-`_VALID_ORGS` and `_VALID_CONTENT_TYPES` are imported from `enrich` rather than
-re-declared so each enum has a single owner and the gate can't diverge from it.
+Org handling is split in two:
+  - validate_extraction checks org is a non-empty STRING (structural). The org
+    value set is config-driven (orgs.OrgTaxonomy), and an extractor returning
+    an unconfigured org is recoverable drift, not a structural violation — a
+    whole thread's entities and actions should not be quarantined over a label.
+  - normalise_org (called by drain after validation) canonicalises the value
+    through the taxonomy's aliases and coerces anything still unrecognised to
+    "unknown", returning the raw value so drain can record a proactive finding
+    ("org X keeps appearing — add it to config?"). That is the taxonomy-growth
+    loop: drift is absorbed, observed, and feeds config evolution.
+
+`_VALID_CONTENT_TYPES` is imported from `enrich` rather than re-declared so the
+enum has a single owner and the gate can't diverge from it.
 """
 
-from mcpbrain.enrich import _VALID_CONTENT_TYPES, _VALID_ORGS
+from mcpbrain import orgs
+from mcpbrain.enrich import _VALID_CONTENT_TYPES
 
 
 def validate_extraction(d: object) -> list[str]:
@@ -30,10 +42,12 @@ def validate_extraction(d: object) -> list[str]:
     if not isinstance(thread_id, str) or not thread_id.strip():
         problems.append("thread_id must be a non-empty string")
 
-    # org: required, in enum.
+    # org: required, non-empty string. Enum membership is NOT checked here —
+    # see the module head: normalise_org coerces unconfigured values after
+    # validation instead of quarantining the extraction.
     org = d.get("org")
-    if org not in _VALID_ORGS:
-        problems.append(f"org must be one of {sorted(_VALID_ORGS)}, got {org!r}")
+    if not isinstance(org, str) or not org.strip():
+        problems.append(f"org must be a non-empty string, got {org!r}")
 
     # content_type: required, in enum.
     content_type = d.get("content_type")
@@ -106,6 +120,25 @@ def validate_extraction(d: object) -> list[str]:
 
     # Optional fields (contextual_summary, updated_actions, reply_*) are intentionally not deep-validated -- lenient on optionality.
     return problems
+
+
+def normalise_org(extraction: dict, taxonomy: "orgs.OrgTaxonomy | None" = None) -> str | None:
+    """Canonicalise the thread org in place; coerce unrecognised values to "unknown".
+
+    Runs AFTER validate_extraction (org is known to be a non-empty string).
+    Returns the raw unrecognised value when a coercion happened (so the caller
+    can record a proactive finding), or None when the org was already valid.
+    """
+    if taxonomy is None:
+        taxonomy = orgs.taxonomy_from_config()
+    raw = extraction.get("org", "")
+    resolved = taxonomy.canonical(raw)
+    if resolved in taxonomy.valid_orgs:
+        if resolved != raw:
+            extraction["org"] = resolved
+        return None
+    extraction["org"] = "unknown"
+    return raw
 
 
 def validate_batch_file(d: object) -> list[str]:
