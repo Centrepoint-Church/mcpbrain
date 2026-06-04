@@ -437,6 +437,10 @@ class Daemon:
                 inbox = sum(1 for p in inbox_dir.iterdir() if p.suffix == ".json")
         except OSError as exc:
             log.debug("status: spool counts unavailable: %s", exc)
+        try:
+            open_findings = self._store.open_findings_count()
+        except Exception:  # noqa: BLE001 — degrade gracefully, never crash status poll
+            open_findings = 0
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -446,6 +450,7 @@ class Daemon:
             "google_account": google_account,
             "enrich_enabled": self._enrich_client is not None,
             "spool": {"pending": pending, "inbox": inbox},
+            "open_findings": open_findings,
         }
 
     def _resolve_google_account(self, token_file) -> str:
