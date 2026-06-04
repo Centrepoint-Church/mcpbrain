@@ -32,9 +32,10 @@ class FakeControlServer:
 
     instances = []
 
-    def __init__(self, daemon, home):
+    def __init__(self, daemon, home, store=None):
         self.daemon = daemon
         self.home = home
+        self.store = store
         self.events = []
         self.port = 54321
         FakeControlServer.instances.append(self)
@@ -75,6 +76,10 @@ def test_main_loop_starts_and_stops_control_server(tmp_path, monkeypatch):
     ctrl = FakeControlServer.instances[0]
     assert ctrl.daemon is captured["daemon"]
     assert isinstance(ctrl.daemon, daemon_module.Daemon)
+
+    # The daemon's store must be wired through, or every dashboard API call
+    # returns 503 ("dashboard not available") in production.
+    assert isinstance(ctrl.store, FakeStore)
 
     # start() -> run() -> stop(), in that exact order.
     assert ctrl.events == ["start", "run", "stop"]
