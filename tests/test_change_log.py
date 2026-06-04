@@ -49,3 +49,25 @@ def test_find_open_action_by_fingerprint(tmp_path):
     assert s.find_open_action_by_fingerprint("fp-none") is None
     s.set_action_status(aid, "done")
     assert s.find_open_action_by_fingerprint("fp-1") is None
+
+
+def test_prune_change_log_keeps_most_recent(tmp_path):
+    s = _store(tmp_path)
+    for i in range(10):
+        s.record_change("t", ref_id=str(i), summary=f"row {i}")
+    pruned = s.prune_change_log(keep=3)
+    assert pruned == 7
+    remaining = s.recent_changes(20)
+    assert len(remaining) == 3
+    # the most recent 3 rows are kept
+    assert remaining[0]["summary"] == "row 9"
+    assert remaining[-1]["summary"] == "row 7"
+
+
+def test_prune_change_log_noop_when_under_limit(tmp_path):
+    s = _store(tmp_path)
+    for i in range(3):
+        s.record_change("t", summary=f"row {i}")
+    pruned = s.prune_change_log(keep=10)
+    assert pruned == 0
+    assert len(s.recent_changes(20)) == 3
