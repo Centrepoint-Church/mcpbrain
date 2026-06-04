@@ -237,8 +237,16 @@ def validate_capture(d: object) -> list[str]:
         if not isinstance(v, str) or not v.strip():
             problems.append("text must be a non-empty string")
     elif kind == "action_update":
-        if not isinstance(d.get("action_id"), int) or isinstance(d.get("action_id"), bool):
+        aid = d.get("action_id")
+        if not isinstance(aid, int) or isinstance(aid, bool):
             problems.append("action_id must be an integer")
+        elif aid <= 0:
+            problems.append("action_id must be a positive integer")
         if d.get("status") not in _ACTION_STATUSES:
             problems.append(f"status must be one of {sorted(_ACTION_STATUSES)}")
+    # Cross-kind contamination: action_id on a non-action_update envelope is
+    # almost certainly a client bug (misrouted envelope). Quarantine rather than
+    # silently create a note when the intent was to update an action.
+    if kind != "action_update" and "action_id" in d:
+        problems.append("action_id is only valid on action_update envelopes")
     return problems

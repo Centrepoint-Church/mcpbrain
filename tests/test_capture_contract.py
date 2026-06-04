@@ -45,3 +45,15 @@ def test_action_update_requires_int_id_and_status_enum():
 def test_unknown_kind_rejected():
     assert any("kind" in p for p in validate_capture({"kind": "telepathy"}))
     assert any("kind" in p for p in validate_capture("not a dict"))
+
+
+def test_action_id_must_be_positive():
+    assert validate_capture({"kind": "action_update", "action_id": 0, "status": "done"})
+    assert validate_capture({"kind": "action_update", "action_id": -1, "status": "done"})
+
+
+def test_cross_kind_contamination_rejected():
+    # action_id on an ingest envelope is a misrouted client bug
+    problems = validate_capture({"kind": "ingest", "title": "T", "content": "C",
+                                  "action_id": 5})
+    assert any("action_id" in p for p in problems)
