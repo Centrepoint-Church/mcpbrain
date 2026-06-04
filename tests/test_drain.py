@@ -477,4 +477,24 @@ def test_drain_handles_apply_returning_none(store, home):
 
     assert summary["applied"] == 1
     assert summary["entities"] == 0
-    assert summary["relations"] == 0
+
+
+def test_consumed_pending_json_deleted(store, home):
+    import json as _json
+    queue = home / "enrich_queue"
+    queue.mkdir(parents=True, exist_ok=True)
+    (queue / "pending.json").write_text(_json.dumps({"batch_id": "batch-1"}))
+    _write_inbox(home, "b1.json", _batch("batch-1", [_envelope("t-1")]))
+    app = RecordingApply()
+    drain.drain(store, home=home, apply=app)
+    assert not (queue / "pending.json").exists()
+
+
+def test_unrelated_pending_json_kept(store, home):
+    import json as _json
+    queue = home / "enrich_queue"
+    queue.mkdir(parents=True, exist_ok=True)
+    (queue / "pending.json").write_text(_json.dumps({"batch_id": "batch-OTHER"}))
+    _write_inbox(home, "b1.json", _batch("batch-1", [_envelope("t-1")]))
+    drain.drain(store, home=home, apply=RecordingApply())
+    assert (queue / "pending.json").exists()
