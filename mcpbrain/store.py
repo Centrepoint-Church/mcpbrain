@@ -476,8 +476,7 @@ class Store:
                 detail      TEXT DEFAULT '',
                 revert_ref  TEXT DEFAULT '',
                 created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_change_log_created "
-                       "ON change_log(created_at DESC)")
+            # ORDER BY id DESC uses the PK — no secondary index needed.
 
             # --- Phase 3, Task 0.4: actions.waiting_on* columns ---------------
             # Back-fill waiting-on tracking onto the unified actions table.
