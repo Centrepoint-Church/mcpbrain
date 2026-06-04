@@ -293,3 +293,76 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 log.error("drain: could not delete completed file %s: %s", path.name, exc)
 
     return summary
+
+
+def drain_captures(store, *, home=None) -> int:
+    """Apply every capture_inbox envelope. Returns the number applied.
+
+    validate -> dedupe -> apply -> change_log -> delete. Invalid or unparseable
+    envelopes quarantine to capture_inbox/bad/. The daemon calls this each
+    cycle; it is the ONLY consumer of the spool the MCP write tools feed.
+    """
+    from mcpbrain.chunking import action_fingerprint, content_hash
+    from mcpbrain.contract import validate_capture
+
+    home_dir = _home(home)
+    inbox = home_dir / "capture_inbox"
+    if not inbox.exists():
+        return 0
+    applied = 0
+    for path in sorted(inbox.glob("*.json")):
+        try:
+            env = json.loads(path.read_text())
+        except (ValueError, OSError) as exc:
+            log.warning("capture: unparseable %s, quarantining: %s", path.name, exc)
+            _quarantine(path)
+            continue
+        problems = validate_capture(env)
+        if problems:
+            log.warning("capture: invalid %s, quarantining: %s",
+                        path.name, "; ".join(problems[:3]))
+            _quarantine(path)
+            continue
+        kind = env["kind"]
+        if kind == "ingest":
+            text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
+            chash = content_hash(text)
+            doc_id = f"note-{chash[:16]}"
+            store.upsert_chunk(doc_id, text, chash,
+                               {"source": "note", "title": env["title"],
+                                "observation_type": env.get("observation_type", "note"),
+                                "tags": env.get("tags", ""),
+                                "org": env.get("org", ""),
+                                "captured_at": env.get("captured_at", "")})
+            store.record_change("capture_ingest", ref_id=doc_id,
+                                summary=f"Saved note '{env['title'][:60]}'")
+            applied += 1
+        elif kind == "action_create":
+            fp = action_fingerprint(env["text"])
+            if store.find_open_action_by_fingerprint(fp) is not None:
+                log.info("capture: duplicate action skipped: %r", env["text"][:60])
+            else:
+                owner = env.get("owner") or config.owner_name(str(home_dir))
+                aid = store.add_unified_action(
+                    text=env["text"], owner=owner, deadline=env.get("deadline", ""),
+                    org=env.get("org", ""), project_id=env.get("project_id", ""),
+                    area_id=env.get("area_id", ""), source="capture",
+                    text_fingerprint=fp)
+                store.record_change("capture_action", ref_id=str(aid),
+                                    summary=f"Created action '{env['text'][:60]}'")
+                applied += 1
+        elif kind == "action_update":
+            changed = store.set_action_status(
+                env["action_id"], env["status"],
+                resolved_by=f"capture:{env.get('source', 'mcp')}",
+                only_if_open=(env["status"] == "done"))
+            if changed:
+                store.record_change(
+                    "capture_action_update", ref_id=str(env["action_id"]),
+                    summary=f"Action {env['action_id']} -> {env['status']}")
+                applied += 1
+            else:
+                log.info("capture: action_update %s no-op (not open / not found)",
+                         env["action_id"])
+        path.unlink(missing_ok=True)
+    return applied
