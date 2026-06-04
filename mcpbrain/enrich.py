@@ -89,7 +89,15 @@ def build_prompt(text: str, metadata: dict) -> str:
     entities/relations/actions/decisions, with light provenance for gmail. The
     rules constrain the model to real named entities and reject junk (dollar
     amounts, newsletter subject lines, form-field labels, etc.).
+
+    The owner's name comes from config (owner_full_name / owner_name) so a
+    non-Josh install extracts against the right identity.
     """
+    from mcpbrain import config as _config
+    _home = str(_config.app_dir())
+    owner_full = _config.owner_full_name(_home)
+    owner_short = _config.owner_name(_home)
+
     prov_lines = []
     if metadata.get("source_type") == "gmail":
         for field in ("subject", "sender", "date"):
@@ -99,7 +107,7 @@ def build_prompt(text: str, metadata: dict) -> str:
     provenance = ("\n".join(prov_lines) + "\n") if prov_lines else ""
 
     return (
-        "You extract a ministry/operations knowledge graph for Josh Kemp, an "
+        f"You extract a ministry/operations knowledge graph for {owner_full}, an "
         "operations manager at a church organisation in Western Australia, across "
         "his orgs: Centrepoint Church, ACC, Courageous Church, Curtin.\n\n"
         "Respond with STRICT JSON only. No markdown fences. No commentary. "
@@ -122,7 +130,7 @@ def build_prompt(text: str, metadata: dict) -> str:
         "  - false for human-authored ministry/operations content, including FYIs.\n\n"
         "entities:\n"
         "  - Only REAL named people, organisations, projects, or genuine topics.\n"
-        "  - EXCLUDE Josh Kemp.\n"
+        f"  - EXCLUDE {owner_full}.\n"
         "  - name: full canonical form (\"Joel Chelliah\" not \"Pastor Joel\"); no honorifics.\n"
         "  - type must be one of: person|org|project|topic.\n"
         "  - org must be one of: Centrepoint|ACC|Courageous Church|Curtin|external|unknown. "
@@ -133,9 +141,9 @@ def build_prompt(text: str, metadata: dict) -> str:
         "relations:\n"
         "  - Only between entities listed in entities[].\n"
         "  - relation must be one of: works_at|reports_to|manages|coordinates_with|mentioned_with.\n"
-        "  - Never include Josh Kemp.\n\n"
+        f"  - Never include {owner_full}.\n\n"
         "actions:\n"
-        "  - Real tasks Josh must act on, stated specifically.\n"
+        f"  - Real tasks {owner_short} must act on, stated specifically.\n"
         "  - NOT form-field labels, slide headings, or single interrogatives "
         "(\"What?\", \"Why?\", \"Who?\").\n"
         "  - owner = canonical person name or empty. At most 5 per document.\n\n"

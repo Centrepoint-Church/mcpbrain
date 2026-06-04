@@ -16,11 +16,13 @@ canonical so org tags match the extraction contract and email_context rows.
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from nameparser import HumanName
 
+from mcpbrain import config
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     _normalise_title_for_dedup,
     action_fingerprint as _compute_fingerprint,
@@ -28,6 +30,35 @@ from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich cou
 )
 
 log = logging.getLogger("mcpbrain.graph_write")
+
+
+# ---------------------------------------------------------------------------
+# Install-owner identity (config-driven; replaces the hardcoded Josh identity)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class OwnerIdentity:
+    """Who this install belongs to, for action attribution and self-exclusion.
+
+    name:      short name written to actions.owner ("Josh")
+    entity_id: the owner's entity slug ("josh-kemp") — never upserted as an
+               entity; used to recognise and skip the owner in the graph
+    aliases:   lowercased name variants treated as the owner
+    """
+    name: str = "Josh"
+    entity_id: str = "josh-kemp"
+    aliases: frozenset = field(
+        default_factory=lambda: frozenset({"josh", "joshua", "josh kemp"}))
+
+
+def owner_identity_from_config() -> OwnerIdentity:
+    """Build the owner identity from config.json under MCPBRAIN_HOME."""
+    home = str(config.app_dir())
+    return OwnerIdentity(
+        name=config.owner_name(home),
+        entity_id=entity_slug(config.owner_full_name(home)),
+        aliases=config.owner_aliases(home),
+    )
 
 # ---------------------------------------------------------------------------
 # Org / entity utilities (ported from memory_db.py:1428-1519)
@@ -455,8 +486,22 @@ def _extract_name(header: str) -> str:
     return header.strip()
 
 
-def _is_josh(name: str) -> bool:
-    return "josh" in (name or "").lower()
+def _is_owner(name: str, owner: OwnerIdentity) -> bool:
+    """True if the name refers to the install owner.
+
+    Single-word aliases match as whole words ("josh" matches "Josh Kemp" and
+    "josh.k" but not "Joshveer"); multi-word aliases match as substrings.
+    Word-level matching matters for short configured names: a plain substring
+    test would let an alias like "tom" swallow "Tomlinson".
+    """
+    low = (name or "").lower()
+    if not low:
+        return False
+    tokens = set(re.split(r"[^a-z0-9]+", low))
+    for a in owner.aliases:
+        if a == low or (" " not in a and a in tokens) or (" " in a and a in low):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +513,8 @@ def _is_josh(name: str) -> bool:
 _SELF_PREFIX_RE = re.compile(
     r"^(TODO|Task|Action|Reminder|Follow\s+up|FU)\s*:\s*", re.IGNORECASE)
 
-# Imperative verbs that signal Josh owns the action when no explicit owner is
-# named (enrich_gmail.py:340-348).
+# Imperative verbs that signal the install owner owns the action when no
+# explicit owner is named (enrich_gmail.py:340-348).
 _IMPERATIVE_VERBS = frozenset({
     "email", "send", "review", "update", "check", "prepare", "create", "build",
     "investigate", "follow", "confirm", "complete", "schedule", "coordinate", "write",
@@ -526,18 +571,19 @@ def _jaccard_action(a: str, b: str) -> float:
     return len(sa & sb) / len(sa | sb) if (sa and sb) else 0.0
 
 
-def _infer_owner(is_sender_josh: bool, action_text: str) -> tuple[str, str, float]:
+def _infer_owner(is_sender_owner: bool, action_text: str,
+                 owner: OwnerIdentity) -> tuple[str, str, float]:
     """Infer the action owner when the LLM returned empty/unclear.
 
     Ported from enrich_gmail.py:351-366. Returns (owner_name, owner_eid,
     confidence); ('', '', 0.0) when no owner can be assigned.
     """
-    if is_sender_josh:
-        return ("Josh", "josh-kemp", 0.8)
+    if is_sender_owner:
+        return (owner.name, owner.entity_id, 0.8)
     text = (action_text or "").strip()
     first_word = text.split()[0].lower().rstrip(".,:") if text else ""
     if first_word in _IMPERATIVE_VERBS:
-        return ("Josh", "josh-kemp", 0.6)
+        return (owner.name, owner.entity_id, 0.6)
     return ("", "", 0.0)
 
 
@@ -744,13 +790,14 @@ def _find_near_duplicate_action(conn, text, owner, *, window_days=7,
 # apply() — structural write pass (ported from enrich_gmail.py:1043-1600)
 # ---------------------------------------------------------------------------
 
-def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
-          clock=None, embedder=None) -> dict:
+def apply(store, extraction, *, doc_ids, identity=None,
+          clock=None, embedder=None, owner=None) -> dict:
     """Write one thread's extraction to the graph (structural pass).
 
     Adapts the Nexus write_to_graph_v2 sequence to mcpbrain: derives the thread
     lead from messages[] (earliest by date), writes the email_context row,
-    upserts entities (excluding Josh), links them to the lead message, writes
+    upserts entities (excluding the install owner), links them to the lead
+    message, writes
     role observations, links topics, and writes resolved relations. The action
     LIFECYCLE (owner/deadline inference, age/notification gates, resolve/update)
     is Task 3 — actions are not written here.
@@ -771,9 +818,21 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
     None (the daemon's spool path, which does NOT forward an embedder), the doc
     is left unembedded for the daemon's next index_pending pass.
 
+    identity: the synced Gmail address, for self-email detection. None
+    resolves config.owner_email (which defaults to the historical address).
+
+    owner: optional OwnerIdentity naming the install owner for action
+    attribution and self-exclusion. Defaults to owner_identity_from_config()
+    (config.json under MCPBRAIN_HOME), which itself defaults to the historical
+    Josh identity on an unconfigured install.
+
     Returns a small summary dict (counts) for the caller / Task 3. When a thread
     lead exists, a `semantic_doc` key carries the enriched doc_id.
     """
+    if identity is None:
+        identity = config.owner_email(str(config.app_dir()))
+    if owner is None:
+        owner = owner_identity_from_config()
     now = (clock() if clock else datetime.now(timezone.utc))
     today = now.strftime("%Y-%m-%d")
 
@@ -825,9 +884,9 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
     ]
     labels_str = ", ".join(custom_labels)
 
-    # Sender entity (skip Josh — self-mail anchors nothing in the graph).
+    # Sender entity (skip the owner — self-mail anchors nothing in the graph).
     sender_id = ""
-    if sender_name and sender_email and not _is_josh(sender_name) \
+    if sender_name and sender_email and not _is_owner(sender_name, owner) \
             and identity.lower() not in sender_email.lower():
         sender_id = upsert_entity(
             store, name=sender_name, entity_type="person",
@@ -868,7 +927,7 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
         if etype == "person":
             ename = strip_affiliation(ename)
 
-        if not ename or _is_josh(ename):
+        if not ename or _is_owner(ename, owner):
             continue
         if etype == "person" and is_junk_entity(ename, "person"):
             continue
@@ -918,7 +977,7 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
             continue
         if rel_type not in VALID_RELATION_TYPES:
             continue
-        if _is_josh(source_name) or _is_josh(target_name):
+        if _is_owner(source_name, owner) or _is_owner(target_name, owner):
             continue
 
         # Reject endpoints that are org-classification TAGS, not real entities
@@ -986,7 +1045,7 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
         lead=lead, lead_msg_id=lead_msg_id, lead_date_iso=lead_date_iso,
         content_type=content_type, org=org, sender_id=sender_id,
         sender_name=sender_name, is_self=is_self, in_inbox=in_inbox,
-        name_to_id=name_to_id, now=now, thread_id=thread_id)
+        name_to_id=name_to_id, now=now, thread_id=thread_id, owner=owner)
 
     # ── 5. Semantic layer (Task 5) ──────────────────────────────────────────
     # One synthesised vector doc per thread, keyed enriched-{thread_id}. Written
@@ -999,7 +1058,7 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
 
     semantic_doc_id = f"enriched-{thread_id}" if thread_id else ""
     if semantic_doc_id:
-        semantic_text, semantic_meta = build_semantic_doc(extraction, lead)
+        semantic_text, semantic_meta = build_semantic_doc(extraction, lead, owner=owner)
         store.upsert_chunk(
             doc_id=semantic_doc_id, text=semantic_text,
             content_hash=content_hash(semantic_text), metadata=semantic_meta)
@@ -1042,13 +1101,13 @@ def apply(store, extraction, *, doc_ids, identity="josh.k@centrepoint.church",
 
 def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                    content_type, org, sender_id, sender_name, is_self, in_inbox,
-                   name_to_id, now, thread_id) -> dict:
+                   name_to_id, now, thread_id, owner) -> dict:
     """Action lifecycle: gates, self-synthesis, dedup, owner/deadline inference,
     routing into the unified actions table, then resolve/update.
 
     Ported from enrich_gmail.py:1285-1539. The Nexus two-table routing
     (knowledge_actions vs decisions) collapses to a single store.add_unified_action
-    call: the is_non_josh / unclear / Josh branches differ only in the
+    call: the not-the-owner / unclear / owner branches differ only in the
     owner/confidence/context_tag written. Each action's project_id/area_id is run
     through _validate_action_targets first (the Task 2 helper).
 
@@ -1091,7 +1150,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             if first_sentence:
                 subject_clean = f"{subject_clean}. {first_sentence}"
         actions_list = [{
-            "description": subject_clean, "owner_name": "Josh",
+            "description": subject_clean, "owner_name": owner.name,
             "owner_fallback": "", "due_date": "", "_synthetic": True,
         }]
 
@@ -1108,7 +1167,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         seen_norms.append(n)
     actions_list = deduped_actions
 
-    is_sender_josh = bool(sender_name and _is_josh(sender_name))
+    is_sender_owner = bool(sender_name and _is_owner(sender_name, owner))
 
     # Load the active project/area sets once for the whole thread, not per action.
     valid_projects = _active_project_ids(store)
@@ -1131,9 +1190,9 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         resolved_owner_eid = ""
 
         if owner_name:
-            if owner_name.lower() in ("josh", "joshua", "josh kemp"):
-                resolved_owner_eid = "josh-kemp"
-                resolved_owner_name = "Josh"
+            if owner_name.lower() in owner.aliases:
+                resolved_owner_eid = owner.entity_id
+                resolved_owner_name = owner.name
             elif owner_name.lower() == "unclear":
                 resolved_owner_name = None
                 owner_name = None
@@ -1143,16 +1202,16 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                     resolved_owner_eid = hit["id"]
                 elif owner_name in name_to_id:
                     resolved_owner_eid = name_to_id[owner_name]
-        elif owner_fallback == "sender" and sender_id and sender_id != "josh-kemp":
+        elif owner_fallback == "sender" and sender_id and sender_id != owner.entity_id:
             resolved_owner_eid = sender_id
             resolved_owner_name = sender_name
 
         context_tag_for_action = ""
 
         if is_self:
-            # Self-email: owner is definitionally Josh, bypass inference.
-            resolved_owner_name = "Josh"
-            resolved_owner_eid = "josh-kemp"
+            # Self-email: owner is definitionally the install owner, bypass inference.
+            resolved_owner_name = owner.name
+            resolved_owner_eid = owner.entity_id
             context_tag_for_action = "self-email"
             synthetic = action.get("_synthetic", False)
             has_prefix = bool(_SELF_PREFIX_RE.match(lead.get("subject", "")))
@@ -1160,7 +1219,8 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         else:
             action_confidence = _CONFIRMED_EMAIL_ACTION_CONFIDENCE
             if not resolved_owner_name:
-                inf_name, inf_eid, inf_conf = _infer_owner(is_sender_josh, description)
+                inf_name, inf_eid, inf_conf = _infer_owner(
+                    is_sender_owner, description, owner)
                 if inf_name:
                     resolved_owner_name = inf_name
                     resolved_owner_eid = inf_eid
@@ -1174,15 +1234,15 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                 due_date = inferred_d
                 deadline_confidence = 0.6
 
-        is_non_josh = bool(
+        is_not_owner = bool(
             resolved_owner_name
-            and resolved_owner_name.lower() not in {"josh", "joshua", "josh kemp"})
+            and resolved_owner_name.lower() not in owner.aliases)
 
         cluster_id = f"msg-{lead_msg_id[:16]}" if lead_msg_id else ""
 
         # Single-table routing. The three Nexus branches differ only in the
         # owner / confidence / context_tag written into the same actions table.
-        if is_non_josh:
+        if is_not_owner:
             owner_out = resolved_owner_name or ""
             owner_eid_out = resolved_owner_eid
             confidence_out = action_confidence
@@ -1208,7 +1268,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         waiting_on_name = (action.get("waiting_on") or "").strip()
         waiting_on_eid = ""
         waiting_on_set_at = ""
-        if waiting_on_name and not _is_josh(waiting_on_name):
+        if waiting_on_name and not _is_owner(waiting_on_name, owner):
             hit = store.find_entity(waiting_on_name)
             if hit:
                 waiting_on_eid = hit["id"]
@@ -1225,7 +1285,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             context_tag=context_tag_for_action, cluster_id=cluster_id,
             source_doc_id=lead_msg_id, thread_id=thread_id,
             text_fingerprint=_compute_fingerprint(description),
-            waiting_on=waiting_on_name if waiting_on_name and not _is_josh(waiting_on_name) else "",
+            waiting_on=waiting_on_name if waiting_on_name and not _is_owner(waiting_on_name, owner) else "",
             waiting_on_entity_id=waiting_on_eid,
             waiting_on_set_at=waiting_on_set_at,
             created_at=now_iso)
