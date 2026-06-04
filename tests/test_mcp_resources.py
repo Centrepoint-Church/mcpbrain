@@ -5,7 +5,7 @@ from mcpbrain.mcp_server import list_context_resources, read_context_resource
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_lists_markdown_files(tmp_path, monkeypatch):
