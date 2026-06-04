@@ -298,4 +298,5 @@ def test_status_degrades_without_token(tmp_path, monkeypatch):
     assert set(st) == {
         "paused", "chunk_count", "enriched_count", "google_connected",
         "granted_scopes", "google_account", "enrich_enabled", "spool",
+        "open_findings",
     }
