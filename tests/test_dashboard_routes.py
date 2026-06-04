@@ -154,8 +154,9 @@ def test_get_dashboard_today_with_store(tmp_path):
 
 def test_post_mark_done(tmp_path):
     """POST /api/dashboard/actions/1/done returns 200 {"done": false} (empty store)."""
-    path = _make_store_path(tmp_path)
-    store = FakeStore(path)
+    from mcpbrain.store import Store
+    store = Store(tmp_path / "real.sqlite3", dim=4)
+    store.init()
 
     d = FakeDaemon()
     srv = ControlServer(d, home=str(tmp_path), store=store)

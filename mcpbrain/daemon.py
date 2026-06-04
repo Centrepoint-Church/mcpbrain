@@ -220,9 +220,12 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         calendar_service=calendar_service,
         drive_service=drive_service,
     )
-    drain_caps = drain.drain_captures(store)
-    if drain_caps:
-        log.info("captures applied: %d", drain_caps)
+    try:
+        drain_caps = drain.drain_captures(store)
+        if drain_caps:
+            log.info("captures applied: %d", drain_caps)
+    except Exception as exc:
+        log.warning("capture drain failed (cycle continues): %s", exc)
     try:
         pruned = store.prune_change_log()
         if pruned:
