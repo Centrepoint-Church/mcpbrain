@@ -336,47 +336,62 @@ def drain_captures(store, *, home=None) -> int:
             _quarantine(path)
             continue
         kind = env["kind"]
+        file_ok = True
         if kind == "ingest":
             text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
             chash = content_hash(text)
-            doc_id = f"note-{chash[:16]}"
+            doc_id = f"note-{chash[:32]}"
             is_new = store.get_chunk(doc_id) is None
-            store.upsert_chunk(doc_id, text, chash,
-                               {"source": "note", "title": env["title"],
-                                "observation_type": env.get("observation_type", "note"),
-                                "tags": env.get("tags", ""),
-                                "org": env.get("org", ""),
-                                "captured_at": env.get("captured_at", "")})
-            if is_new:
-                store.record_change("capture_ingest", ref_id=doc_id,
-                                    summary=f"Saved note '{env['title'][:60]}'")
-                applied += 1
+            try:
+                store.upsert_chunk(doc_id, text, chash,
+                                   {"source": "note", "title": env["title"],
+                                    "observation_type": env.get("observation_type", "note"),
+                                    # tags stored for future FTS indexing (not yet live)
+                                    "tags": env.get("tags", ""),
+                                    "org": env.get("org", ""),
+                                    "captured_at": env.get("captured_at", "")})
+                if is_new:
+                    store.record_change("capture_ingest", ref_id=doc_id,
+                                        summary=f"Saved note '{env['title'][:60]}'")
+                    applied += 1
+            except Exception as exc:
+                log.error("capture: ingest failed for %s: %s", path.name, exc)
+                file_ok = False
         elif kind == "action_create":
             fp = action_fingerprint(env["text"])
             if store.find_open_action_by_fingerprint(fp) is not None:
                 log.info("capture: duplicate action skipped: %r", env["text"][:60])
             else:
-                owner = env.get("owner") or config.owner_name(str(home_dir))
-                aid = store.add_unified_action(
-                    text=env["text"], owner=owner, deadline=env.get("deadline", ""),
-                    org=env.get("org", ""), project_id=env.get("project_id", ""),
-                    area_id=env.get("area_id", ""), source="capture",
-                    text_fingerprint=fp)
-                store.record_change("capture_action", ref_id=str(aid),
-                                    summary=f"Created action '{env['text'][:60]}'")
-                applied += 1
+                try:
+                    owner = env.get("owner") or config.owner_name(str(home_dir))
+                    aid = store.add_unified_action(
+                        text=env["text"], owner=owner, deadline=env.get("deadline", ""),
+                        org=env.get("org", ""), project_id=env.get("project_id", ""),
+                        area_id=env.get("area_id", ""), source="capture",
+                        text_fingerprint=fp)
+                    store.record_change("capture_action", ref_id=str(aid),
+                                        summary=f"Created action '{env['text'][:60]}'")
+                    applied += 1
+                except Exception as exc:
+                    log.error("capture: action_create failed for %s: %s", path.name, exc)
+                    file_ok = False
         elif kind == "action_update":
-            changed = store.set_action_status(
-                env["action_id"], env["status"],
-                resolved_by=f"capture:{env.get('source', 'mcp')}",
-                only_if_open=(env["status"] == "done"))
-            if changed:
-                store.record_change(
-                    "capture_action_update", ref_id=str(env["action_id"]),
-                    summary=f"Action {env['action_id']} -> {env['status']}")
-                applied += 1
-            else:
-                log.info("capture: action_update %s no-op (not open / not found)",
-                         env["action_id"])
-        path.unlink(missing_ok=True)
+            try:
+                changed = store.set_action_status(
+                    env["action_id"], env["status"],
+                    resolved_by=f"capture:{env.get('source', 'mcp')}",
+                    only_if_open=(env["status"] == "done"))
+                if changed:
+                    store.record_change(
+                        "capture_action_update", ref_id=str(env["action_id"]),
+                        summary=f"Action {env['action_id']} -> {env['status']}")
+                    applied += 1
+                else:
+                    log.info("capture: action_update %s no-op (not open / not found)",
+                             env["action_id"])
+            except Exception as exc:
+                log.error("capture: action_update failed for %s: %s", path.name, exc)
+                file_ok = False
+        if file_ok:
+            path.unlink(missing_ok=True)
     return applied
