@@ -44,9 +44,9 @@
   .spinner.active{display:inline-block}
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* Three-col grid */
-  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
-  @media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}
+  /* Four-col grid */
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;align-items:start}
+  @media(max-width:1100px){.grid{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:600px){.grid{grid-template-columns:1fr}}
 
   /* Cards */
@@ -159,6 +159,15 @@
         <span id="cu-count" class="count-badge">0</span>
       </div>
       <div id="cu-body"><p class="empty">Loading…</p></div>
+    </div>
+
+    <!-- Review -->
+    <div class="card" id="card-review">
+      <div class="card-head">
+        <h2>Review</h2>
+        <span id="rv-count" class="count-badge">0</span>
+      </div>
+      <div id="rv-body"><p class="empty">Loading…</p></div>
     </div>
   </div>
 </main>
@@ -373,6 +382,55 @@ async function markDone(id, row, cb){
   }
 }
 
+// ---- render review ----
+
+function renderReview(findings, changes){
+  const body = $("rv-body");
+  $("rv-count").textContent = findings.length;
+  const frag = document.createDocumentFragment();
+  if(findings.length){
+    const head = document.createElement("div");
+    head.className = "bucket-head"; head.textContent = "Needs attention";
+    frag.appendChild(head);
+    for(const f of findings){
+      const row = document.createElement("div");
+      row.className = "action-row";
+      const text = document.createElement("span");
+      text.className = "action-body";
+      text.textContent = f.summary || f.finding_type;
+      const btn = document.createElement("button");
+      btn.className = "ghost"; btn.textContent = "Dismiss";
+      btn.addEventListener("click", async () => {
+        try{
+          const res = await fetch("/api/dashboard/findings/" + f.id + "/dismiss",
+                                  {method: "POST", headers: H.headers});
+          if(res.ok) row.remove();
+        }catch(e){ showToast("Could not dismiss."); }
+      });
+      row.appendChild(text); row.appendChild(btn);
+      frag.appendChild(row);
+    }
+  }
+  if(changes.length){
+    const head = document.createElement("div");
+    head.className = "bucket-head"; head.textContent = "Recent changes";
+    frag.appendChild(head);
+    for(const c of changes.slice(0, 10)){
+      const row = document.createElement("div");
+      row.className = "action-row";
+      const text = document.createElement("span");
+      text.className = "action-body";
+      text.textContent = c.summary;
+      row.appendChild(text);
+      frag.appendChild(row);
+    }
+  }
+  if(!findings.length && !changes.length){
+    body.innerHTML = '<p class="empty ok">Nothing to review.</p>'; return;
+  }
+  body.innerHTML = ""; body.appendChild(frag);
+}
+
 // ---- render clickup ----
 
 function renderClickUp(tasks){
@@ -451,6 +509,7 @@ async function refresh(){
     renderCalendar(data.calendar || []);
     renderActions(data.actions || {});
     renderClickUp(data.clickup || []);
+    renderReview(data.findings || [], data.changes || []);
   } catch(e){
     showToast("Could not load data. Retrying in 60s.");
   } finally{

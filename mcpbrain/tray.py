@@ -59,6 +59,10 @@ class TrayController:
     def should_exit(self) -> bool:
         return self._quit
 
+    def review_count(self) -> int:
+        """Return the number of open findings from the last status snapshot."""
+        return int(self._last.get("open_findings") or 0) if self._last else 0
+
     def status_text(self) -> str:
         """Short, user-facing status line."""
         if not self._available or self._last is None:
@@ -66,9 +70,9 @@ class TrayController:
         if self._last.get("paused"):
             return "Paused"
         count = self._last.get("chunk_count")
-        if isinstance(count, int) and count > 0:
-            return f"{count:,} items indexed"
-        return "Running"
+        base = f"{count:,} items indexed" if isinstance(count, int) and count > 0 else "Running"
+        n = self.review_count()
+        return base + f" · {n} to review" if n > 0 else base
 
     # -- menu actions ---------------------------------------------------------
 
@@ -167,10 +171,18 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
 
     def _setup(icon: "pystray.Icon") -> None:
         icon.visible = True
+        last_n = 0
         while not controller.should_exit():
             controller.refresh()
             icon.title = f"mcpbrain — {controller.status_text()}"
             icon.update_menu()
+            n = controller.review_count()
+            if n > last_n:
+                try:
+                    icon.notify(f"{n} items to review", "mcpbrain")
+                except Exception:
+                    pass
+            last_n = n
             time.sleep(_POLL_SECONDS)
         icon.stop()
 

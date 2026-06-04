@@ -13,10 +13,11 @@ from mcpbrain.tray import TrayController
 class FakeClient:
     """Stand-in for ControlClient. `up=False` simulates a stopped daemon."""
 
-    def __init__(self, up=True, paused=False, count=7):
+    def __init__(self, up=True, paused=False, count=7, open_findings=0):
         self.up = up
         self.paused = paused
         self.count = count
+        self.open_findings = open_findings
         self.calls = []
 
     def status(self):
@@ -24,7 +25,8 @@ class FakeClient:
         if not self.up:
             raise DaemonUnavailable("no daemon")
         return {"paused": self.paused, "chunk_count": self.count,
-                "google_connected": True, "granted_scopes": [], "enrich_enabled": False}
+                "google_connected": True, "granted_scopes": [], "enrich_enabled": False,
+                "open_findings": self.open_findings}
 
     def pause(self):
         self.calls.append("pause")
@@ -151,3 +153,21 @@ def test_on_open_dashboard_calls_webbrowser(monkeypatch):
     assert "/dashboard" in opened.get("url", ""), (
         f"Expected URL containing /dashboard, got: {opened!r}"
     )
+
+
+def test_status_text_shows_review_count():
+    c = TrayController(FakeClient(count=5, open_findings=3))
+    c.refresh()
+    assert "3 to review" in c.status_text()
+
+
+def test_review_count_zero_not_shown():
+    c = TrayController(FakeClient(count=5, open_findings=0))
+    c.refresh()
+    assert "review" not in c.status_text()
+
+
+def test_review_count_accessor():
+    c = TrayController(FakeClient(open_findings=2))
+    c.refresh()
+    assert c.review_count() == 2
