@@ -20,7 +20,8 @@ from mcpbrain.graph_write import (
 )
 
 
-def build_semantic_doc(extraction: dict, thread: dict, owner=None) -> tuple[str, dict]:
+def build_semantic_doc(extraction: dict, thread: dict, owner=None,
+                       taxonomy=None) -> tuple[str, dict]:
     """Assemble the synthesised vector doc for one enriched thread.
 
     `extraction` is the thread's extraction JSON (org, summary, content_type,
@@ -33,10 +34,11 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None) -> tuple[str,
     install owner), an Actions block, then Topics and Labels lines.
 
     owner: optional OwnerIdentity; None resolves from config.
+    taxonomy: optional OrgTaxonomy; None resolves from config.
     """
     if owner is None:
         owner = owner_identity_from_config()
-    org = canonical_org(extraction.get("org", "unknown") or "unknown")
+    org = canonical_org(extraction.get("org", "unknown") or "unknown", taxonomy)
     actions_list = extraction.get("actions", []) or []
     topics_list = extraction.get("topics", []) or []
     entities_list = extraction.get("entities", []) or []

@@ -58,12 +58,22 @@ def test_validate_rejects_non_list_messages():
     assert any("messages" in p for p in problems)
 
 
-def test_validate_rejects_bad_org():
+def test_validate_rejects_non_string_org():
+    from mcpbrain.contract import validate_extraction
+    d = _load("thread_simple")
+    d["org"] = None
+    problems = validate_extraction(d)
+    assert any("org" in p for p in problems)
+
+
+def test_validate_accepts_unconfigured_org_string():
+    # Enum membership is no longer structural: an unconfigured org is
+    # recoverable drift, coerced by normalise_org in drain (with a proactive
+    # finding) rather than quarantining the whole extraction.
     from mcpbrain.contract import validate_extraction
     d = _load("thread_simple")
     d["org"] = "WORSHIP"
-    problems = validate_extraction(d)
-    assert any("org" in p for p in problems)
+    assert validate_extraction(d) == []
 
 
 def test_validate_rejects_action_without_description():
@@ -130,7 +140,7 @@ def test_validate_batch_file_reports_failing_index():
     from mcpbrain.contract import validate_batch_file
     good = _load("thread_simple")
     bad = _load("thread_multi_message")
-    bad["org"] = "WORSHIP"
+    bad["thread_id"] = ""
     problems = validate_batch_file(_batch([good, bad]))
     assert problems, "expected the bad extraction to be reported"
     assert any("1" in p for p in problems), f"expected index 1 to be named, got {problems}"

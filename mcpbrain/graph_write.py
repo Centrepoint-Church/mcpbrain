@@ -22,7 +22,7 @@ from email.utils import parsedate_to_datetime
 
 from nameparser import HumanName
 
-from mcpbrain import config
+from mcpbrain import config, orgs
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     _normalise_title_for_dedup,
     action_fingerprint as _compute_fingerprint,
@@ -62,49 +62,24 @@ def owner_identity_from_config() -> OwnerIdentity:
 
 # ---------------------------------------------------------------------------
 # Org / entity utilities (ported from memory_db.py:1428-1519)
+#
+# The taxonomy itself now lives in orgs.py (config-driven, DEFAULT_TAXONOMY =
+# the historical four orgs). The module-level names below are kept as
+# default-taxonomy views for back-compat importers; runtime paths resolve the
+# configured taxonomy via orgs.taxonomy_from_config() — apply() resolves once
+# per call and threads it down.
 # ---------------------------------------------------------------------------
 
-# Display-case canonical orgs (matches enrich._VALID_ORGS). The Nexus map used
-# lowercase tags; values are rewritten to display form here.
-_DOMAIN_ORG = {
-    "centrepoint.church": "Centrepoint",
-    "centrepoint.com.au": "Centrepoint",
-    # ACC family — national, denominational, state office
-    "acc.org.au": "ACC",
-    "acci.org.au": "ACC",
-    "accwa.org.au": "ACC",
-    "acc.net.au": "ACC",
-    "acc.church": "ACC",
-    "courageouschurch.org.au": "Courageous Church",
-    "courageouschurch.com.au": "Courageous Church",
-    "courageouschurchperth.com": "Courageous Church",
-    "curtin.edu.au": "Curtin",
-}
+_DOMAIN_ORG = dict(orgs.DEFAULT_TAXONOMY.domain_map)
 
 KNOWN_ORGS: frozenset = frozenset(_DOMAIN_ORG.values())
 
-# Human-readable "domain -> Org" lines for the enrich prompt's org_domain_map.
-# The LLM reads these to map sender domains to an org (see enrich_prompt.md).
-# Derived deterministically from _DOMAIN_ORG so the two never drift; one line
-# per domain, sorted for stable prompt output.
-_DOMAIN_ORG_LINES = [
-    f"{domain} -> {org}" for domain, org in sorted(_DOMAIN_ORG.items())
-]
+# Human-readable "domain -> Org" lines for the enrich prompt's org_domain_map
+# (default-taxonomy view; prepare reads the configured taxonomy directly).
+_DOMAIN_ORG_LINES = list(orgs.DEFAULT_TAXONOMY.domain_lines)
 
-# Free-text org strings → display-case canonical org.
-ORG_ALIASES = {
-    "centrepoint church": "Centrepoint",
-    "centrepoint church incorporated": "Centrepoint",
-    "centrepoint.church": "Centrepoint",
-    "centrepoint baptist church": "Centrepoint",
-    "centrepoint": "Centrepoint",
-    "courageous church": "Courageous Church",
-    "courageous church perth": "Courageous Church",
-    "courageous": "Courageous Church",
-    "australian christian churches": "ACC",
-    "acc": "ACC",
-    "curtin": "Curtin",
-}
+# Free-text org strings → display-case canonical org (default-taxonomy view).
+ORG_ALIASES = dict(orgs.DEFAULT_TAXONOMY.aliases)
 
 _JUNK_PATTERNS = [
     re.compile(r"^(Re|Fwd|FW|RE|FWD)\s*:", re.IGNORECASE),
@@ -123,35 +98,25 @@ _NUMERIC_JUNK = [
 ]
 
 
-def canonical_org(raw: str) -> str:
-    """Resolve a free-text org string to its display-case canonical form."""
-    if not raw:
-        return raw
-    lowered = raw.strip().lower()
-    if lowered in ORG_ALIASES:
-        return ORG_ALIASES[lowered]
-    for known in KNOWN_ORGS:
-        if lowered == known.lower():
-            return known
-    return raw
+def canonical_org(raw: str, taxonomy: "orgs.OrgTaxonomy | None" = None) -> str:
+    """Resolve a free-text org string to its display-case canonical form.
+
+    taxonomy=None resolves the configured taxonomy from config (which falls
+    back to the historical default on an unconfigured install).
+    """
+    if taxonomy is None:
+        taxonomy = orgs.taxonomy_from_config()
+    return taxonomy.canonical(raw)
 
 
-def org_from_email(email_addr: str) -> str:
+def org_from_email(email_addr: str, taxonomy: "orgs.OrgTaxonomy | None" = None) -> str:
     """Map an email address to its display-case org via the domain table.
 
     "" for empty input, "external" for an unrecognised domain.
     """
-    if not email_addr:
-        return ""
-    addr = email_addr.lower().strip()
-    match = re.search(r"@([\w.\-]+)", addr)
-    if not match:
-        return ""
-    domain = match.group(1)
-    for known_domain, org in _DOMAIN_ORG.items():
-        if domain == known_domain or domain.endswith("." + known_domain):
-            return org
-    return "external"
+    if taxonomy is None:
+        taxonomy = orgs.taxonomy_from_config()
+    return taxonomy.from_email(email_addr)
 
 
 def entity_slug(name: str) -> str:
@@ -174,14 +139,12 @@ def strip_title(name: str) -> tuple[str, str]:
     return original, original
 
 
-# Org-classification TAGS — the org enum values (matches enrich._VALID_ORGS).
+# Org-classification TAGS — the org enum values (default-taxonomy view).
 # A relation endpoint that is an EXACT (case-insensitive) match to one of these
 # is a classification tag, not a real entity, so the relation is rejected. Real
 # org names that merely contain a tag word ("Centrepoint Church") are not tags.
-# Kept local to avoid a graph_write -> enrich import cycle; the two sets must
-# stay in step — see the casing-seam note at the module head.
-_ORG_TAGS = frozenset(
-    {tag.lower() for tag in KNOWN_ORGS} | {"external", "unknown"})
+# apply() uses the configured taxonomy's org_tags; this stays for importers.
+_ORG_TAGS = orgs.DEFAULT_TAXONOMY.org_tags
 
 
 # ` from <X>` / ` at <X>` affiliation suffix on a PERSON name. The head group
@@ -833,10 +796,11 @@ def apply(store, extraction, *, doc_ids, identity=None,
         identity = config.owner_email(str(config.app_dir()))
     if owner is None:
         owner = owner_identity_from_config()
+    taxonomy = orgs.taxonomy_from_config()
     now = (clock() if clock else datetime.now(timezone.utc))
     today = now.strftime("%Y-%m-%d")
 
-    org = canonical_org(extraction.get("org", "unknown") or "unknown")
+    org = canonical_org(extraction.get("org", "unknown") or "unknown", taxonomy)
     content_type = extraction.get("content_type", "") or ""
     summary = extraction.get("summary", "") or ""
     contextual_summary = extraction.get("contextual_summary", "") or ""
@@ -866,12 +830,12 @@ def apply(store, extraction, *, doc_ids, identity=None,
     #                                   do NOT inherit the thread org);
     #   no email signal ("") + known thread org -> thread org;
     #   else                        -> external.
-    sender_domain_org = org_from_email(sender_email) if sender_email else ""
+    sender_domain_org = org_from_email(sender_email, taxonomy) if sender_email else ""
     if sender_domain_org and sender_domain_org != "external":
         sender_org = sender_domain_org
     elif sender_domain_org == "external":
         sender_org = "external"
-    elif org in KNOWN_ORGS:
+    elif org in taxonomy.names:
         sender_org = org
     else:
         sender_org = "external"
@@ -890,7 +854,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             and identity.lower() not in sender_email.lower():
         sender_id = upsert_entity(
             store, name=sender_name, entity_type="person",
-            org=sender_org, email_addr=sender_email) or ""
+            org=sender_org, email_addr=sender_email, taxonomy=taxonomy) or ""
 
     # email_context row for the lead message.
     store.upsert_email_context(
@@ -932,7 +896,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if etype == "person" and is_junk_entity(ename, "person"):
             continue
 
-        entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg)
+        entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg,
+                                  taxonomy=taxonomy)
         if not entity_id:
             continue
 
@@ -984,7 +949,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
         # ("Centrepoint", "external", ...). Real org names that merely contain a
         # tag word ("Centrepoint Church") are an inexact match and pass through.
         # Tag check runs on the raw name before any stripping.
-        if source_name.lower() in _ORG_TAGS or target_name.lower() in _ORG_TAGS:
+        if source_name.lower() in taxonomy.org_tags or target_name.lower() in taxonomy.org_tags:
             continue
 
         def _resolve_endpoint(name, *, for_works_at_target=False):
@@ -1015,7 +980,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             if for_works_at_target:
                 create_name = name  # prefer original for brand-new org entities
                 eid = upsert_entity(store, name=create_name,
-                                    entity_type="org", org=org)
+                                    entity_type="org", org=org, taxonomy=taxonomy)
                 if eid:
                     return eid, create_name
 
@@ -1058,7 +1023,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
     semantic_doc_id = f"enriched-{thread_id}" if thread_id else ""
     if semantic_doc_id:
-        semantic_text, semantic_meta = build_semantic_doc(extraction, lead, owner=owner)
+        semantic_text, semantic_meta = build_semantic_doc(
+            extraction, lead, owner=owner, taxonomy=taxonomy)
         store.upsert_chunk(
             doc_id=semantic_doc_id, text=semantic_text,
             content_hash=content_hash(semantic_text), metadata=semantic_meta)
@@ -1459,7 +1425,7 @@ def _ensure_works_at(conn, entity_id: str, org: str) -> None:
 
 
 def upsert_entity(store, *, name, entity_type, org="", email_addr="",
-                  aliases="", notes=""):
+                  aliases="", notes="", taxonomy=None):
     """Insert or merge an entity. Returns the surviving entity id, or None.
 
     Ported from memory_db.py:1581-1717, repointed at store._connect(). Dedup
@@ -1468,7 +1434,9 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
     hit (matching Nexus). Title honorifics on person names are stripped and
     recorded as an alias.
     """
-    org = canonical_org(org)
+    if taxonomy is None:
+        taxonomy = orgs.taxonomy_from_config()
+    org = canonical_org(org, taxonomy)
     name = (name or "").strip()
     if not name:
         return None
@@ -1480,7 +1448,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
     # relations loop minting a 'centrepoint-church' node beside the tag-derived
     # 'centrepoint' node that _ensure_works_at creates.
     if entity_type == "org":
-        name = canonical_org(name)
+        name = canonical_org(name, taxonomy)
 
     if is_junk_entity(name, entity_type):
         return None

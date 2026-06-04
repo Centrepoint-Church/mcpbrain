@@ -166,8 +166,10 @@ def test_drain_quarantines_malformed(store, home):
 
 
 def test_drain_quarantines_contract_violation(store, home):
-    # Valid JSON, but an extraction violates the contract (bad org).
-    bad_env = _envelope("t-bad", org="NotAnOrg")
+    # Valid JSON, but an extraction violates the contract structurally
+    # (org must be a string; an unconfigured org STRING is coerced, not
+    # quarantined — see test_org_taxonomy.TestDrainOrgDrift).
+    bad_env = _envelope("t-bad", org=None)
     _write_inbox(home, "violation.json", _batch("batch-bad", [bad_env]))
 
     app = RecordingApply()

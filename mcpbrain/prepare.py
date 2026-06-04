@@ -171,8 +171,18 @@ def _read_areas(store):
 
 
 def _org_domain_lines():
-    # Indirection kept as the unit-test seam; backed by the real mcpbrain.graph_write.
-    return list(graph_write._DOMAIN_ORG_LINES)
+    # Indirection kept as the unit-test seam; backed by the configured taxonomy.
+    from mcpbrain import orgs
+    return list(orgs.taxonomy_from_config().domain_lines)
+
+
+def _valid_org_tags():
+    # The org enum the extractor must choose from: configured org names plus
+    # the reserved external/unknown tags. Fed into pending.json context so the
+    # prompt prose (enrich_prompt.md) never hardcodes an install's orgs.
+    from mcpbrain import orgs
+    tax = orgs.taxonomy_from_config()
+    return list(tax.names) + list(orgs.RESERVED_TAGS)
 
 
 # --- noise marking ---------------------------------------------------------
@@ -311,6 +321,7 @@ def _build_context(store, thread_ids) -> dict:
         "projects": _read_projects(store),
         "areas": _read_areas(store),
         "org_domain_map": _org_domain_lines(),
+        "valid_orgs": _valid_org_tags(),
     }
 
 
