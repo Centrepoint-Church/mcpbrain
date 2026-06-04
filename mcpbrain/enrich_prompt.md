@@ -191,3 +191,59 @@ one answer per item into `synthesis`:
 
 Use each item's `thread_id` verbatim. When `synthesis` is empty or absent in the
 input, omit it from the output or use `[]`.
+
+## Profile-synthesis rules
+
+`pending.json` may carry a `profile_synthesis` list: people who need a standing
+profile. Each item gives `entity_id`, `name`, `org`, `role`, and `relations`.
+For each, write a 2-4 sentence `profile`: who they are, their role and org,
+how they relate to the owner's work. Factual, grounded in the given fields and
+thread context only — no speculation. Emit one answer per item:
+
+```json
+{"entity_id": "taryn-hamilton", "profile": "Executive Pastor at..."}
+```
+
+When the block is absent, omit `profile_synthesis` from the output.
+
+## Community-synthesis rules
+
+`pending.json` may carry a `community_synthesis` list: clusters of related
+people lacking a name. Each item gives `community_id` and `members`. Emit a
+short `title` (2-4 words naming what connects them) and a one-sentence
+`summary` per item:
+
+```json
+{"community_id": 3, "title": "Facilities team", "summary": "People who..."}
+```
+
+## Memory-distil rules
+
+`pending.json` may carry a `memory_distil` list: the owner's saved memory
+notes. Each item gives `doc_id`, `title`, `content`, `captured_at`. For each,
+emit a verdict:
+
+```json
+{"doc_id": "note-abc", "verdict": "keep|expire|promote",
+ "reason": "...", "target_hint": "preferences.md"}
+```
+
+- `expire`: stale, superseded, or a duplicate of another listed note (name it
+  in `reason`). When two notes duplicate each other, expire the OLDER one.
+- `promote`: a durable preference or rule stated repeatedly — worth moving to
+  a context file. `target_hint` names the file; `reason` says why.
+- `keep`: everything else. When unsure, keep.
+
+## Profile-audit rules
+
+`pending.json` may carry a `profile_audit` list: people whose recorded
+profile, role, and org should be checked against what the threads in this
+batch actually show. Emit corrections ONLY where the batch contains clear
+evidence (their own signature, their own statement). Never infer a role from
+the owner's writing about them. Empty `corrections` means the record is fine:
+
+```json
+{"entity_id": "taryn-hamilton",
+ "corrections": [{"field": "role|org", "new_value": "...",
+                  "evidence": "their signature in m-12"}]}
+```
