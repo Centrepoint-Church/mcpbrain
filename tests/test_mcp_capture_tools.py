@@ -8,7 +8,7 @@ from mcpbrain.mcp_server import (
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_brain_ingest_spools_envelope(tmp_path, monkeypatch):
