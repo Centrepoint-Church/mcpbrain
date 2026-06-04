@@ -149,7 +149,6 @@ def make_brain_ingest():
         """Save a note/decision/memory. QUEUED: searchable after the next
         sync cycle (~5 min), not immediately. Returns {queued, path|error}."""
         from mcpbrain.capture import write_capture
-        from mcpbrain import config
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
                 "ingest", title=title, content=content, tags=tags,
@@ -167,7 +166,6 @@ def make_brain_action_create():
         """Create an action item. QUEUED: appears after the next sync cycle
         (~5 min). Empty owner defaults to the configured install owner."""
         from mcpbrain.capture import write_capture
-        from mcpbrain import config
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
                 "action_create", text=text, owner=owner, deadline=deadline,
@@ -183,7 +181,6 @@ def make_brain_action_update():
         """Mark an action done or reopen it ('done'|'open'). QUEUED: applies
         on the next sync cycle (~5 min)."""
         from mcpbrain.capture import write_capture
-        from mcpbrain import config
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
                 "action_update", action_id=action_id, status=status))
@@ -406,7 +403,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_action_update":
             out = await action_update(
-                action_id=arguments.get("action_id"),
+                action_id=arguments.get("action_id", 0),
                 status=arguments.get("status", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
