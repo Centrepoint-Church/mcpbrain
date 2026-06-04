@@ -349,9 +349,22 @@ def _write_pending(data: dict) -> None:
 
 # --- entry point -----------------------------------------------------------
 
+def attach_extra_blocks(pending: dict, extra_blocks: dict | None) -> dict:
+    """Merge optional block requests into pending.json. Empty/None blocks are
+    omitted so the contract stays minimal."""
+    if not extra_blocks:
+        return pending
+    out = dict(pending)
+    for key, requests in extra_blocks.items():
+        if requests:
+            out[key] = requests
+    return out
+
+
 def prepare(store, *, thread_cap: int, char_budget: int,
             resolution_due: bool, now=None,
-            synthesis_requests: list | None = None) -> dict:
+            synthesis_requests: list | None = None,
+            extra_blocks: dict | None = None) -> dict:
     """Build pending.json from un-enriched threads and return a summary.
 
     group_unenriched_threads already caps the thread COUNT; thread_cap is a
@@ -388,6 +401,7 @@ def prepare(store, *, thread_cap: int, char_budget: int,
     if synthesis_requests:
         from mcpbrain.synthesise_threads import attach_synthesis_block
         data = attach_synthesis_block(data, synthesis_requests)
+    data = attach_extra_blocks(data, extra_blocks)
     _write_pending(data)
 
     return {"batch_id": batch_id, "threads": len(threads), "merge_pairs": len(merge_review)}
