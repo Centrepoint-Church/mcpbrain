@@ -212,6 +212,9 @@ def validate_capture(d: object) -> list[str]:
 
     Structural only, same philosophy as validate_extraction: an empty list
     means valid. The daemon drain quarantines envelopes that fail.
+    captured_at and source are intentionally not validated — the MCP write
+    tools always stamp them via _capture_envelope; the drain treats them as
+    optional metadata.
     """
     if not isinstance(d, dict):
         return ["capture envelope must be a JSON object with a valid kind"]
@@ -234,7 +237,7 @@ def validate_capture(d: object) -> list[str]:
         if not isinstance(v, str) or not v.strip():
             problems.append("text must be a non-empty string")
     elif kind == "action_update":
-        if not isinstance(d.get("action_id"), int):
+        if not isinstance(d.get("action_id"), int) or isinstance(d.get("action_id"), bool):
             problems.append("action_id must be an integer")
         if d.get("status") not in _ACTION_STATUSES:
             problems.append(f"status must be one of {sorted(_ACTION_STATUSES)}")
