@@ -469,7 +469,7 @@ class TestAssembleShape:
 
         result = dashboard.assemble(store, str(tmp_path))
 
-        assert set(result.keys()) == {"actions", "calendar", "clickup", "as_of"}
+        assert set(result.keys()) == {"actions", "calendar", "clickup", "changes", "findings", "as_of"}
         assert result["actions"] == mock_actions
         assert result["calendar"] == mock_cal
         assert result["clickup"] == mock_cu

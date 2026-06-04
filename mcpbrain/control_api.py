@@ -175,6 +175,13 @@ class ControlServer:
                 ok = dash.snooze(self.store, action_id, until)
                 return h_json(h, 200, {"snoozed": ok})
 
+            m = re.match(r"^/api/dashboard/findings/(\d+)/dismiss$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                ok = self.store.resolve_finding(int(m.group(1)))
+                return h_json(h, 200, {"dismissed": ok})
+
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
             return h_json(h, 500, {"error": str(exc)})
