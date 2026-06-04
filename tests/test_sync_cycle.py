@@ -240,7 +240,15 @@ def test_sync_cycle_skips_absent_sources(tmp_path, emb):
 
     res = run_sync_cycle(store, emb)
 
-    assert res == {"gmail": 0, "calendar": 0, "drive": 0, "embedded": 0}
+    # Live deltas all skipped; the backfill step adds a `backfill` sub-dict
+    # whose source counts are zero because no services were provided.
+    assert res["gmail"] == 0
+    assert res["calendar"] == 0
+    assert res["drive"] == 0
+    assert res["embedded"] == 0
+    assert res["backfill"]["gmail"] == 0
+    assert res["backfill"]["drive"] == 0
+    assert res["backfill"]["calendar"] == 0
 
 
 def test_sync_cycle_embeds_after_sync(tmp_path, emb):

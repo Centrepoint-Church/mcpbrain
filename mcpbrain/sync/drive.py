@@ -196,13 +196,21 @@ def sync_drive(service, store, source: str = "drive") -> int:
     return processed
 
 
-def backfill_drive(service, store, modified_after: str, max_files: int | None = None) -> int:
+def backfill_drive(service, store, modified_after: str,
+                   modified_before: str | None = None,
+                   max_files: int | None = None) -> int:
     """One-shot bounded backfill via files.list with a modifiedTime filter.
 
     Text-native files only (reuses _fetch_text, which returns None for binaries).
     Does NOT touch the changes cursor. Returns the number of files indexed.
+
+    `modified_before` optionally caps the upper bound (RFC 3339 timestamp) so
+    callers can walk a historical window without re-fetching newer files.
+    Omit it for the original "everything since X" semantics.
     """
     q = f"modifiedTime > '{modified_after}'"
+    if modified_before:
+        q += f" and modifiedTime < '{modified_before}'"
     fields = "nextPageToken, files(id,name,mimeType,modifiedTime,owners)"
     page_token, processed = None, 0
     while True:
