@@ -62,6 +62,15 @@
   .status-list dt{color:var(--muted);font-size:14px}
   .status-list dd{margin:0;font-weight:600;font-variant-numeric:tabular-nums}
   footer{color:var(--muted);font-size:13px;text-align:center;margin-top:28px}
+  .field{margin:10px 0 0}
+  .field-head{display:flex;align-items:center;justify-content:space-between;
+    margin:0 0 4px;font-size:13px;font-weight:600;color:var(--ink)}
+  .copy{font-size:12px;font-weight:600;padding:4px 10px;border-radius:8px;
+    background:#fff;border:1px solid var(--line);color:var(--ink);cursor:pointer}
+  .copy:hover{background:var(--idle-bg)}
+  .spec{margin:0;padding:11px 13px;border:1px solid var(--line);border-radius:10px;
+    background:#f9fafb;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+    white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;color:var(--ink)}
 </style>
 </head>
 <body>
@@ -83,13 +92,143 @@
   </section>
 
   <section id="step-enrich" class="card">
-    <h2><span class="num">2</span>Enrichment <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
-    <p class="desc">A Gemini API key builds the knowledge graph behind richer answers. Skip to leave it off; search still works.</p>
+    <h2><span class="num">2</span>Schedule the extractor in Claude Cowork</h2>
+    <p class="desc">Enrichment runs out-of-band: the daemon writes <code>pending.json</code>, a scheduled Cowork task reads it and drops batches into <code>enrich_inbox/</code>, and the daemon applies them on the next sync cycle. Skip and search still works.</p>
+    <ol class="desc" style="padding-left:20px;margin:6px 0 10px">
+      <li>Open the Claude desktop app and go to <strong>Cowork</strong>.</li>
+      <li>Click <strong>Scheduled</strong>, then <strong>Create new task</strong>.</li>
+      <li>Copy each field below into the Cowork form (the spec uses <code>~/.mcpbrain/</code> so it works on every machine).</li>
+      <li>Set the frequency to <strong>hourly</strong> and save.</li>
+    </ol>
+
+    <div class="field">
+      <div class="field-head"><span>Name</span><button type="button" class="copy" onclick="copySpec('spec-name', this)">Copy</button></div>
+      <pre id="spec-name" class="spec">mcpbrain-enrichment</pre>
+    </div>
+
+    <div class="field">
+      <div class="field-head"><span>Description</span><button type="button" class="copy" onclick="copySpec('spec-desc', this)">Copy</button></div>
+      <pre id="spec-desc" class="spec">Reads a batch of email threads from ~/.mcpbrain/enrich_queue/pending.json, extracts structured knowledge (entities, actions, relations, org tags), and writes the result to ~/.mcpbrain/enrich_inbox/&lt;batch_id&gt;.json. No database access, no Gmail — two files in and out. Run when pending.json appears; the mcpbrain daemon handles everything else.</pre>
+    </div>
+
+    <div class="field">
+      <div class="field-head"><span>Task</span><button type="button" class="copy" onclick="copySpec('spec-task', this)">Copy</button></div>
+      <pre id="spec-task" class="spec">The base directory for all file operations is ~/.mcpbrain/ (your home dir's .mcpbrain folder). All paths below are relative to that base.
+
+You are extracting structured knowledge from a batch of email threads for an operations manager who works across several organisations. You read one input file and write one output file. You touch nothing else: no database, no Gmail, no marking, no sending. Two files, in and out.
+
+The two files
+
+Input: enrich_queue/pending.json. It carries a batch_id, a context block, a list of threads, and a merge_review list (often empty).
+Output: enrich_inbox/&lt;batch_id&gt;.json, where &lt;batch_id&gt; is the batch_id from the input, verbatim. Write valid JSON only.
+
+The task
+
+Produce exactly one extraction per thread in threads. Read each message's text body to do the extraction. Then assemble the output file:
+
+{"batch_id": "batch-...",
+ "extractions": [ &lt;one extraction envelope per thread&gt; ],
+ "merge_answers": [ &lt;one answer per merge_review pair, or []&gt; ],
+ "synthesis": [ &lt;one answer per synthesis request, only if pending.json carries them&gt; ]}
+
+merge_answers and synthesis are present only when pending.json carries a merge_review or synthesis block respectively; otherwise omit them or use [].
+
+If a thread carries part and of keys (a long thread split across parts), still emit one extraction for that part; the daemon regroups parts by thread_id before applying. Keep the same thread_id on every part.
+
+The extraction envelope
+
+Each extraction uses this schema verbatim. Match the field names exactly.
+
+{
+  "thread_id": "t-abc123",
+  "org": "&lt;one of your configured org tags&gt;|external|unknown",
+  "content_type": "request|update|decision|fyi|notification",
+  "summary": "One plain sentence.",
+  "contextual_summary": "Optional longer situational summary, or omit it.",
+  "entities": [{"name": "Person Name", "type": "person|org|project",
+                "org": "&lt;org tag&gt;", "role": "Job title"}],
+  "topics": ["facilities", "worship"],
+  "actions": [{"description": "...", "owner_name": "Person Name",
+               "owner_fallback": "sender", "due_date": "YYYY-MM-DD",
+               "project_id": "your-project-id", "area_id": "your-area-id",
+               "waiting_on": "Other Person"}],
+  "reply_needed": true,
+  "reply_reason": "Direct question: 'can you confirm Hall B?'",
+  "resolved_action_ids": [42],
+  "updated_actions": [{"id": 42, "new_text": "..."}],
+  "relations": [{"source_name": "Person Name", "type": "works_at",
+                 "target_name": "Org Name"}],
+  "messages": [{"message_id": "m-1",
+                "sender": "Person Name &lt;addr@example.com&gt;",
+                "date": "YYYY-MM-DD", "labels": "INBOX", "subject": "..."}]
+}
+
+Field notes:
+
+thread_id: copy the thread's thread_id exactly.
+org: one of the org tags configured in pending.json's context block, plus external and unknown. Use org_domain_map to map sender domains to an org. Use unknown only when nothing supports a choice.
+content_type: one of request, update, decision, fyi, notification.
+summary: one plain sentence. contextual_summary is optional; leave it as an empty string when there is nothing situational to add.
+entities, topics, actions, relations: lists. Empty lists are fine.
+waiting_on (on an action): optional. Set it to the name of the person the action is awaiting a reply or input from. Use the person's bare name, matching an entity you listed. Omit it for actions that are not blocked on someone's reply.
+messages: provenance only. For each message in the thread emit message_id, sender, date, labels, subject. Do NOT include the message text body in the output. You read the body; you do not echo it.
+
+Using the standing context
+
+The context block is given so you don't re-derive what is already known.
+
+known_people: each entry's org and role are confirmed. Trust them. Do not re-derive a person's org or role, and do not contradict these entries. Trust them even when the sender's email domain is absent from org_domain_map.
+org_domain_map: maps email domains to orgs. Use it to set org and to decide whether a sender is internal or external.
+projects and areas: the valid project_id and area_id sets. When you attach a project_id or area_id to an action, it must be an id drawn from these lists. If no listed id fits, leave the field out rather than inventing one.
+
+Entity and relation discipline
+
+Entities and relations are the part most worth getting right.
+
+Naming. An entity name is the bare proper name, nothing else. Strip role descriptors, employer phrases, and articles. Affiliation belongs in org and title in role, never in the name. Consistent bare names let the same person or org collapse to one entity instead of several near-duplicates. When the entity is a message sender, take the name from the sender's display-name, but a sender display-name is often decorated and must be reduced to the bare personal name: strip any trailing "from &lt;org&gt;", "at &lt;org&gt;", or role phrasing.
+
+Type. person is a named individual. org is any company, church, store, venue, team, school, or agency. project is a named initiative or body of work, not a thing or a place. When torn between org and person, a name that could sign a contract or own a building is an org.
+
+Per-entity org. An entity's org is where THAT entity belongs, not the thread's org. It is fixed by THAT entity's own email domain (via org_domain_map) or a stated affiliation, NOT by what the email is about. A sender whose domain is not in org_domain_map is external, even when the body is entirely about your own org. Do not infer a person's org from the thread's subject matter or from the recipient's org, and do not default an outside person to your own org just because they emailed you. Use unknown when nothing supports a choice. When an entity appears in known_people, use that entry's org directly: the own-domain rule applies only to entities not already confirmed there.
+
+Relations. A relation joins two real, named entities that you have also listed in entities. Both source_name and target_name must be entity names, never an org tag (external and unknown are tags, not entities). works_at links a person to the org they belong to; do not assert it for venues, tools, or places. Emit only relations the text supports, and skip the rest rather than guessing.
+
+Thread-mode rules
+
+Each thread carries open_actions: actions already on record for that thread, each with an id. When open_actions is present, prefer resolving or updating over creating.
+
+resolved_action_ids: list the ids this thread clearly closes or supersedes.
+updated_actions: list ids where the action is still needed but the text should be corrected (scope clarified, date confirmed, wording improved). Give the corrected text in new_text.
+New actions: only add an action if the thread introduces work genuinely NOT covered by the open actions above. Prefer resolving or updating over creating a near-duplicate.
+
+Merge-review rules
+
+pending.json may carry a merge_review list of candidate entity pairs. For each pair, decide whether the two entries are the SAME real-world entity and, if so, give the single best canonical name. Emit one answer per pair into merge_answers:
+
+{"pair_id": "a-id|b-id", "same": true, "canonical": "Person Name"}
+
+Use the pair's pair_id verbatim. When same is false, canonical is an empty string. Guidance:
+
+Initials and short forms can match a full name ("Joel" = "Joel Chelliah").
+Different surnames or different initials are different people ("Daniel P" is not "Daniel F").
+When unsure, answer false.
+
+When merge_review is empty or absent, merge_answers is [].
+
+Thread-synthesis rules
+
+pending.json may carry a synthesis list: threads active enough to deserve a deeper situational narrative than the one-line summary already on record. Each item gives thread_id, subject, org, email_count, the date span, and email_summaries (the thread's per-message summary lines in date order).
+
+For each item, write a contextual_summary: a short paragraph (2-4 sentences) that says what the thread is actually about, where it has got to, who is involved, and what is outstanding. This is the standing context a colleague would want before opening the thread cold, not a restatement of the one-line summary. Emit one answer per item into synthesis:
+
+{"thread_id": "t-abc123", "contextual_summary": "The Hall B booking for the..."}
+
+Use each item's thread_id verbatim. When synthesis is empty or absent in the input, omit it from the output or use [].</pre>
+    </div>
+
+    <p class="note">Cowork tasks only run while this machine is awake and the Claude desktop app is open.</p>
     <div class="row">
-      <input id="gk" type="password" placeholder="Gemini API key (optional)" autocomplete="off" spellcheck="false">
-      <button class="primary" onclick="saveKey()">Save</button>
-      <button class="ghost" onclick="skipKey()">Skip</button>
-      <span id="e-state" class="badge idle hidden"></span>
+      <span id="e-state" class="badge idle">Spool: <span id="e-pending">…</span> pending / <span id="e-inbox">…</span> inbox</span>
     </div>
   </section>
 
@@ -109,8 +248,8 @@
     <p class="desc">Live state of the background daemon.</p>
     <dl class="status-list">
       <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
+      <div><dt>Enriched items</dt><dd id="st-enriched">…</dd></div>
       <div><dt>Google</dt><dd><span id="st-google" class="badge idle">…</span></dd></div>
-      <div><dt>Enrichment</dt><dd><span id="st-enrich" class="badge idle">…</span></dd></div>
       <div><dt>Daemon</dt><dd><span id="st-daemon" class="badge idle">…</span></dd></div>
     </dl>
   </section>
@@ -124,6 +263,25 @@ const H = {headers:{Authorization:"Bearer " + T}};
 const P = (p, b) => fetch(p, {method:"POST", headers:H.headers, body:JSON.stringify(b || {})});
 const $ = id => document.getElementById(id);
 
+async function copySpec(elId, btn){
+  // The spec text is rendered to <pre> via HTML (with &lt; and &gt; escapes the
+  // browser already decoded), so reading textContent gives the user clean text
+  // ready to paste into the Cowork form. Falls back to a manual select if
+  // navigator.clipboard is unavailable.
+  const text = $(elId).textContent;
+  try{
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent;
+    btn.textContent = "Copied";
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }catch(e){
+    const range = document.createRange();
+    range.selectNodeContents($(elId));
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+  }
+}
+
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
   const el = $(id);
   el.textContent = text;                   // server-derived text always via textContent
@@ -133,33 +291,35 @@ function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
 async function startAuth(){
   badge("g-state", "Opening browser…", "wait");
   try{ await P("/api/auth/start"); }catch(e){}
-  poll();
+  // Keep polling until the daemon reports connected — re-arm only when waiting.
+  pollAuth(true);
 }
-async function poll(){
+let _authPollScheduled = false;
+async function pollAuth(armed){
+  _authPollScheduled = false;
   try{
-    const j = await (await fetch("/api/auth/status", H)).json();
-    if(j.connected){
-      badge("g-state", "Connected", "ok");
+    const j = await (await fetch("/api/status", H)).json();
+    if(j.google_connected){
+      const who = j.google_account ? (" as " + j.google_account) : "";
+      badge("g-state", "Connected" + who, "ok");
       const names = (j.granted_scopes || [])
         .map(s => String(s).split("/").pop().replace(".readonly", ""))
         .filter(Boolean);
       $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
     }else{
-      badge("g-state", "Waiting for consent…", "wait");
-      setTimeout(poll, 2000);
+      badge("g-state", armed ? "Waiting for consent…" : "Not connected", armed ? "wait" : "idle");
+      if(armed && !_authPollScheduled){
+        _authPollScheduled = true;
+        setTimeout(() => pollAuth(true), 2000);
+      }
     }
-  }catch(e){ setTimeout(poll, 2000); }
-}
-
-async function saveKey(){
-  try{
-    await P("/api/config", {gemini_key: $("gk").value});
-    badge("e-state", "Saved", "ok"); $("e-state").classList.remove("hidden");
   }catch(e){
-    badge("e-state", "Could not save", "wait"); $("e-state").classList.remove("hidden");
+    if(armed && !_authPollScheduled){
+      _authPollScheduled = true;
+      setTimeout(() => pollAuth(true), 2000);
+    }
   }
 }
-function skipKey(){ badge("e-state", "Skipped", "idle"); $("e-state").classList.remove("hidden"); }
 
 async function reg(){
   $("r-state").classList.remove("hidden");
@@ -181,9 +341,27 @@ async function reg(){
 
 function renderStatus(j){
   $("st-count").textContent = (j.chunk_count != null) ? j.chunk_count : "—";
-  badge("st-google", j.google_connected ? "Connected" : "Not connected", j.google_connected ? "ok" : "idle");
-  badge("st-enrich", j.enrich_enabled ? "On" : "Off", j.enrich_enabled ? "ok" : "idle");
+  $("st-enriched").textContent = (j.enriched_count != null) ? j.enriched_count : "—";
+  const who = j.google_connected && j.google_account
+    ? "Connected as " + j.google_account
+    : (j.google_connected ? "Connected" : "Not connected");
+  badge("st-google", who, j.google_connected ? "ok" : "idle");
   badge("st-daemon", j.paused ? "Paused" : "Running", j.paused ? "wait" : "ok");
+  // Mirror google_connected into Step 1's badge so the wizard reflects reality
+  // on page load, not just after the user clicks "Connect Google".
+  if(j.google_connected){
+    const who1 = j.google_account ? (" as " + j.google_account) : "";
+    badge("g-state", "Connected" + who1, "ok");
+    const names = (j.granted_scopes || [])
+      .map(s => String(s).split("/").pop().replace(".readonly", ""))
+      .filter(Boolean);
+    $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
+  }
+  // Spool queue depth for the cowork extractor step.
+  if(j.spool){
+    $("e-pending").textContent = (j.spool.pending != null) ? j.spool.pending : "—";
+    $("e-inbox").textContent = (j.spool.inbox != null) ? j.spool.inbox : "—";
+  }
 }
 async function refresh(){
   try{
