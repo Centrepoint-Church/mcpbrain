@@ -467,6 +467,18 @@ class Store:
                 "ON proactive_findings(finding_type) WHERE resolved_at IS NULL"
             )
 
+            # --- Phase 1 capture: change_log -----------------------------------
+            db.execute("""CREATE TABLE IF NOT EXISTS change_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_type TEXT NOT NULL,
+                ref_id      TEXT DEFAULT '',
+                summary     TEXT DEFAULT '',
+                detail      TEXT DEFAULT '',
+                revert_ref  TEXT DEFAULT '',
+                created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_change_log_created "
+                       "ON change_log(created_at DESC)")
+
             # --- Phase 3, Task 0.4: actions.waiting_on* columns ---------------
             # Back-fill waiting-on tracking onto the unified actions table.
             # Mirrors Nexus waiting_on columns (knowledge_db waiting_on_cleared_by_message_id)
@@ -1428,6 +1440,49 @@ class Store:
                     [now, finding_type] + list(live_ref_ids),
                 )
             return cur.rowcount
+
+    # --- Phase 1 capture: change_log + finding helpers -----------------------
+
+    def record_change(self, change_type: str, *, ref_id: str = "", summary: str = "",
+                      detail: str = "", revert_ref: str = "") -> int:
+        """Append one row to the change digest's audit trail."""
+        with self._connect() as db:
+            cur = db.execute(
+                "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref) "
+                "VALUES(?,?,?,?,?)",
+                (change_type, ref_id, summary, detail, revert_ref))
+            return cur.lastrowid
+
+    def recent_changes(self, limit: int = 20) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def open_findings_count(self) -> int:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM proactive_findings WHERE resolved_at IS NULL"
+            ).fetchone()
+            return row[0] if row else 0
+
+    def resolve_finding(self, finding_id: int) -> bool:
+        """Dismiss one finding (sets resolved_at). True if a row changed."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE proactive_findings SET resolved_at=? "
+                "WHERE id=? AND resolved_at IS NULL", (now, finding_id))
+            return cur.rowcount > 0
+
+    def find_open_action_by_fingerprint(self, fp: str) -> int | None:
+        if not fp:
+            return None
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM actions WHERE text_fingerprint=? AND status='open' "
+                "LIMIT 1", (fp,)).fetchone()
+            return row["id"] if row else None
 
     # --- Phase 3, Task 0.5D: waiting-on reader/writer methods ---------------
 
