@@ -31,6 +31,16 @@ def test_requests_pick_untitled_communities(tmp_path):
     assert "Ann A" in reqs[0]["members"]
 
 
+def test_single_member_community_excluded(tmp_path):
+    s = _store(tmp_path)
+    _seed_community(s, 1, ["Solo Person"], title="")   # 1 member, untitled — excluded
+    _seed_community(s, 2, ["Ann A", "Bob B"], title="")  # 2 members, untitled — included
+    reqs = community_synth.build_community_requests(s, cap=10)
+    ids = [r["community_id"] for r in reqs]
+    assert 1 not in ids
+    assert 2 in ids
+
+
 def test_drain_writes_title_summary_change_log(tmp_path):
     s = _store(tmp_path)
     _seed_community(s, 1, ["Ann A"], title="")
