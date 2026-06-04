@@ -84,3 +84,37 @@ def test_invalid_envelope_quarantined(tmp_path):
     drain.drain_captures(s, home=tmp_path)
     bad = list((tmp_path / "capture_inbox" / "bad").glob("*.json"))
     assert len(bad) == 2
+
+
+def test_store_write_failure_preserves_file(tmp_path, monkeypatch):
+    """A SQLite error during apply must NOT delete the spool file."""
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-fail.json", _ingest_env(title="Will fail"))
+
+    original_upsert = s.upsert_chunk
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(s, "upsert_chunk", boom)
+
+    n = drain.drain_captures(s, home=tmp_path)
+    assert n == 0
+    # file must still be there for retry
+    assert list((tmp_path / "capture_inbox").glob("cap-fail.json"))
+
+
+def test_action_update_reopen(tmp_path):
+    """Reopening a done action succeeds and is logged."""
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Old task")
+    # close it first
+    s.set_action_status(aid, "done", resolved_by="test", only_if_open=True)
+    assert s.unified_actions(status="open") == []
+    # reopen via capture
+    _spool(tmp_path, "cap-reopen.json",
+           {"kind": "action_update", "captured_at": "x", "source": "desktop",
+            "action_id": aid, "status": "open"})
+    drain.drain_captures(s, home=tmp_path)
+    acts = s.unified_actions(status="open")
+    assert len(acts) == 1
+    changes = s.recent_changes(5)
+    assert any(c["change_type"] == "capture_action_update" for c in changes)
