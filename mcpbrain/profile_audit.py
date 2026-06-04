@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from mcpbrain.graph_write import write_role_observation, _JUNK_ROLE_VALUES
+
 log = logging.getLogger(__name__)
 
 # Minimum email_count for an entity to be eligible for audit.
@@ -104,6 +106,9 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
     today = datetime.now(timezone.utc).date().isoformat()
 
     for item in items:
+        if applied >= max_corrections:
+            log.info("profile_audit: per-run cap reached")
+            break
         if not isinstance(item, dict):
             continue
         eid = item.get("entity_id", "")
@@ -121,8 +126,6 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
         for correction in corrections:
             if not isinstance(correction, dict):
                 continue
-            if applied >= max_corrections:
-                break
             field = correction.get("field", "")
             new_value = correction.get("new_value", "")
             if field not in _ALLOWED_FIELDS:
@@ -134,10 +137,14 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
                 continue
 
             if field == "role":
+                if new_value.strip().lower() in _JUNK_ROLE_VALUES:
+                    log.debug(
+                        "profile_audit: role %r is junk value, skipping", new_value
+                    )
+                    continue
                 old_value = _fetch_role(store, eid)
                 # write_role_observation uses source="profile_audit" (rank 4)
                 # to supersede any existing lower-ranked role.
-                from mcpbrain.graph_write import write_role_observation
                 write_role_observation(
                     store, eid, new_value, "profile_audit", today, "high"
                 )
