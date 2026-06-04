@@ -48,6 +48,13 @@ from mcpbrain.config import app_dir
 from mcpbrain.enrich import run_enrichment
 from mcpbrain.sync import run_sync_cycle
 
+# Import block modules at startup so their BLOCK_DRAINERS entries are registered
+# before the first drain pass. All four imports are intentional side effects.
+import mcpbrain.profile_synth   # noqa: F401 — registers BLOCK_DRAINERS["profile_synthesis"]
+import mcpbrain.community_synth  # noqa: F401 — registers BLOCK_DRAINERS["community_synthesis"]
+import mcpbrain.memory_distil    # noqa: F401 — registers BLOCK_DRAINERS["memory_distil"]
+import mcpbrain.profile_audit    # noqa: F401 — registers BLOCK_DRAINERS["profile_audit"]
+
 log = logging.getLogger(__name__)
 
 EMBED_BACKEND = "fastembed:bge-small:v1"
@@ -278,6 +285,8 @@ class Daemon:
                  synthesise_interval_s: float | None = None,
                  proactive_interval_s: float | None = None,
                  waiting_on_interval_s: float | None = None,
+                 blocks_interval_s: float | None = None,
+                 audit_interval_s: float | None = None,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -349,6 +358,17 @@ class Daemon:
         # Same three-shape contract as maybe_communities / maybe_lint / maybe_proactive.
         self._waiting_on_interval_s: float | None = waiting_on_interval_s
         self._last_waiting_on = None
+        # Periodic block requests (profile_synthesis + community_synthesis + memory_distil)
+        # are OFF unless blocks_interval_s is set. Cadence-gated: builds extra_blocks
+        # requests and stashes them so run_one() can pass them to prepare.prepare().
+        self._blocks_interval_s: float | None = blocks_interval_s
+        self._last_blocks = None
+        self._pending_blocks: dict = {}
+        # Periodic profile audit is OFF unless audit_interval_s is set.
+        # Same cadence pattern: builds audit requests and stashes for run_one().
+        self._audit_interval_s: float | None = audit_interval_s
+        self._last_audit = None
+        self._pending_audit: dict = {}
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -545,6 +565,8 @@ class Daemon:
             self._synthesise_interval_s = cadences["synthesise_interval_s"]
             self._proactive_interval_s = cadences["proactive_interval_s"]
             self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
+            self._blocks_interval_s = cadences["blocks_interval_s"]
+            self._audit_interval_s = cadences["audit_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -635,14 +657,24 @@ class Daemon:
         # Snapshot pending_synthesis and pass to prepare via run_cycle; reset
         # after so the same requests are not re-sent on the next cycle.
         synthesis_requests = self._pending_synthesis
+        # Merge extra block requests (blocks + audit cadences) into a single
+        # extra_blocks dict for prepare.prepare(). Reset after each cycle.
+        extra_blocks: dict | None = None
+        if self._pending_blocks or self._pending_audit:
+            extra_blocks = {}
+            extra_blocks.update(self._pending_blocks)
+            extra_blocks.update(self._pending_audit)
         result = run_cycle(self._store, self._embedder,
                            enrich_client=enrich_client,
                            enrich_limit=self._enrich_batch,
                            enrich_mode=enrich_mode,
                            resolution_due=resolution_due,
                            synthesis_requests=synthesis_requests,
+                           extra_blocks=extra_blocks,
                            **services)
         self._pending_synthesis = []
+        self._pending_blocks = {}
+        self._pending_audit = {}
         return result
 
     # -- periodic backup ----------------------------------------------------
@@ -1005,6 +1037,107 @@ class Daemon:
         self._last_waiting_on = now
         return summary
 
+    # -- periodic block requests (profile_synthesis + community_synthesis + memory_distil) ---
+
+    def maybe_blocks(self) -> dict | None:
+        """Build block requests for profile/community/memory, if due.
+
+        OFF unless blocks_interval_s was supplied: returns None when
+        self._blocks_interval_s is None (never builds on an unconfigured daemon).
+        Otherwise gates on a time-based cadence using the injected clock —
+        due on the first call (self._last_blocks is None) or once
+        blocks_interval_s has elapsed since the last run.
+
+        When due: calls build_profile_requests, build_community_requests, and
+        build_distil_requests; stashes the results in self._pending_blocks so
+        run_one() can forward them to prepare.prepare() as extra_blocks in the
+        next spool cycle. Returns a summary dict.
+
+        Records START time as cadence anchor. _last_blocks advances only on a
+        clean run. Failures are logged and swallowed.
+        """
+        if self._blocks_interval_s is None:
+            return None
+
+        if self._last_blocks is not None:
+            elapsed = self._clock() - self._last_blocks
+            if elapsed < self._blocks_interval_s:
+                return None
+
+        now = self._clock()
+
+        try:
+            from mcpbrain.profile_synth import build_profile_requests
+            from mcpbrain.community_synth import build_community_requests
+            from mcpbrain.memory_distil import build_distil_requests
+
+            profile_reqs = build_profile_requests(self._store)
+            community_reqs = build_community_requests(self._store)
+            distil_reqs = build_distil_requests(self._store)
+            self._pending_blocks = {
+                "profile_synthesis": profile_reqs,
+                "community_synthesis": community_reqs,
+                "memory_distil": distil_reqs,
+            }
+        except Exception as exc:  # noqa: BLE001 — must never crash the loop
+            log.warning(
+                "blocks build failed (will retry next due): %s", exc, exc_info=True
+            )
+            return {
+                "profile_synthesis_requested": 0,
+                "community_synthesis_requested": 0,
+                "memory_distil_requested": 0,
+                "error": str(exc),
+            }
+
+        self._last_blocks = now
+        return {
+            "profile_synthesis_requested": len(profile_reqs),
+            "community_synthesis_requested": len(community_reqs),
+            "memory_distil_requested": len(distil_reqs),
+        }
+
+    # -- periodic profile audit ---------------------------------------------
+
+    def maybe_audit(self) -> dict | None:
+        """Build profile audit requests, if due.
+
+        OFF unless audit_interval_s was supplied: returns None when
+        self._audit_interval_s is None (never builds on an unconfigured daemon).
+        Otherwise gates on a time-based cadence using the injected clock —
+        due on the first call (self._last_audit is None) or once
+        audit_interval_s has elapsed since the last run.
+
+        When due: calls build_audit_requests; stashes the results in
+        self._pending_audit so run_one() can forward them to prepare.prepare()
+        as extra_blocks in the next spool cycle. Returns a summary dict.
+
+        Records START time as cadence anchor. _last_audit advances only on a
+        clean run. Failures are logged and swallowed.
+        """
+        if self._audit_interval_s is None:
+            return None
+
+        if self._last_audit is not None:
+            elapsed = self._clock() - self._last_audit
+            if elapsed < self._audit_interval_s:
+                return None
+
+        now = self._clock()
+
+        try:
+            from mcpbrain.profile_audit import build_audit_requests
+            audit_reqs = build_audit_requests(self._store)
+            self._pending_audit = {"profile_audit": audit_reqs}
+        except Exception as exc:  # noqa: BLE001 — must never crash the loop
+            log.warning(
+                "audit build failed (will retry next due): %s", exc, exc_info=True
+            )
+            return {"audit_requested": 0, "error": str(exc)}
+
+        self._last_audit = now
+        return {"audit_requested": len(audit_reqs)}
+
     # -- periodic pass orchestration ----------------------------------------
 
     def _run_periodic_passes(self) -> None:
@@ -1022,6 +1155,8 @@ class Daemon:
             self.maybe_synthesise,
             self.maybe_proactive,
             self.maybe_waiting_on,
+            self.maybe_blocks,
+            self.maybe_audit,
         ):
             try:
                 pass_fn()
@@ -1197,6 +1332,8 @@ _CADENCE_KEYS = (
     "synthesise_interval_s",
     "proactive_interval_s",
     "waiting_on_interval_s",
+    "blocks_interval_s",
+    "audit_interval_s",
 )
 
 
@@ -1266,7 +1403,9 @@ def main(argv=None) -> None:
                     lint_interval_s=cadences["lint_interval_s"],
                     synthesise_interval_s=cadences["synthesise_interval_s"],
                     proactive_interval_s=cadences["proactive_interval_s"],
-                    waiting_on_interval_s=cadences["waiting_on_interval_s"])  # services=None -> auto-build from token
+                    waiting_on_interval_s=cadences["waiting_on_interval_s"],
+                    blocks_interval_s=cadences["blocks_interval_s"],
+                    audit_interval_s=cadences["audit_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
