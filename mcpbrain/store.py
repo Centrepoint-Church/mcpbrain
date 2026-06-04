@@ -1458,6 +1458,17 @@ class Store:
                 "SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
 
+    def prune_change_log(self, keep: int = 500) -> int:
+        """Delete old change_log rows, keeping the most recent `keep`. Returns count deleted."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM change_log ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (keep - 1,)).fetchone()
+            if row is None:
+                return 0
+            cur = db.execute("DELETE FROM change_log WHERE id < ?", (row["id"],))
+            return cur.rowcount
+
     def open_findings_count(self) -> int:
         with self._connect() as db:
             row = db.execute(

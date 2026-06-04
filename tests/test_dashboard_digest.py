@@ -1,6 +1,7 @@
 """Change digest: assemble() carries recent changes + open findings; the
 control API can dismiss a finding."""
 import json
+import urllib.error
 import urllib.request
 from unittest import mock
 
@@ -46,5 +47,25 @@ def test_post_dismiss_finding(tmp_path):
         out = json.loads(urllib.request.urlopen(req).read())
         assert out["dismissed"] is True
         assert s.open_findings_count() == 0
+        # Second dismiss must return 404
+        req2 = urllib.request.Request(
+            f"http://127.0.0.1:{srv.port}/api/dashboard/findings/{fid}/dismiss",
+            data=b"{}", method="POST")
+        req2.add_header("Authorization", f"Bearer {srv.token}")
+        try:
+            urllib.request.urlopen(req2)
+            assert False, "expected 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
     finally:
         srv.stop()
+
+
+def test_changes_digest_degrades_on_store_error(tmp_path):
+    """changes_digest must return empty lists rather than crashing on a store error."""
+    from unittest import mock
+    from mcpbrain.dashboard import changes_digest
+    s = _store(tmp_path)
+    with mock.patch.object(s, "recent_changes", side_effect=RuntimeError("db gone")):
+        result = changes_digest(s)
+    assert result == {"changes": [], "findings": []}
