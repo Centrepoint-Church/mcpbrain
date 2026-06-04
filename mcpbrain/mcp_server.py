@@ -1,10 +1,39 @@
 import logging
+from pathlib import Path
 
 from mcpbrain import config
 
 from mcpbrain.retrieval import annotate_action_freshness, hybrid_search
 
 _log = logging.getLogger("mcpbrain.mcp_server")
+
+
+async def list_context_resources():
+    """Return types.Resource entries for every *.md in ~/.mcpbrain/context/."""
+    from mcp import types
+    ctx = config.app_dir() / "context"
+    if not ctx.is_dir():
+        return []
+    resources = []
+    for md in sorted(ctx.glob("*.md")):
+        resources.append(types.Resource(
+            uri=f"file://{md.resolve()}",
+            name=md.name,
+            mimeType="text/markdown",
+        ))
+    return resources
+
+
+async def read_context_resource(uri) -> str:
+    """Return the text content of a context/*.md resource identified by uri.
+
+    Raises ValueError if the resolved path is outside the context directory.
+    """
+    ctx = (config.app_dir() / "context").resolve()
+    path = Path(str(uri).replace("file://", "")).resolve()
+    if path.parent != ctx:
+        raise ValueError(f"resource outside context dir: {uri}")
+    return path.read_text(encoding="utf-8")
 
 
 def make_brain_search(store, embedder):
@@ -208,6 +237,16 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     action_create = make_brain_action_create()
     action_update = make_brain_action_update()
     server = Server("mcpbrain")
+
+    @server.list_resources()
+    async def _list_resources():
+        return await list_context_resources()
+
+    @server.read_resource()
+    async def _read_resource(uri):
+        from mcp.server.lowlevel.helper_types import ReadResourceContents
+        text = await read_context_resource(uri)
+        return [ReadResourceContents(content=text, mime_type="text/markdown")]
 
     @server.list_tools()
     async def _tools():
