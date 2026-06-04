@@ -292,6 +292,17 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             except OSError as exc:
                 log.error("drain: could not delete completed file %s: %s", path.name, exc)
 
+            # The batch this file answers is consumed: remove a matching
+            # pending.json so the extractor can't re-run a stale batch.
+            pending = home_dir / "enrich_queue" / "pending.json"
+            try:
+                if pending.exists() and \
+                        json.loads(pending.read_text()).get("batch_id") == data.get("batch_id"):
+                    pending.unlink()
+                    log.info("drain: consumed pending.json for %s", data.get("batch_id"))
+            except (ValueError, OSError) as exc:
+                log.warning("drain: pending.json check failed: %s", exc)
+
     return summary
 
 
