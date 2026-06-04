@@ -678,6 +678,53 @@ class Store:
             r = db.execute("SELECT doc_id,text,metadata FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
             return {"doc_id": r["doc_id"], "text": r["text"], "metadata": json.loads(r["metadata"])} if r else None
 
+    def patch_chunk_metadata(self, doc_id: str, **patch) -> bool:
+        """Merge kwargs into a chunk's metadata JSON without touching content_hash or embedded.
+
+        Returns True if the chunk exists and was updated, False if not found.
+        Leaves content_hash and embedded untouched so an expiry flag (or any other
+        metadata patch) does not re-queue embedding.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT metadata FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+            if row is None:
+                return False
+            meta = json.loads(row["metadata"])
+            meta.update(patch)
+            db.execute(
+                "UPDATE chunks SET metadata=? WHERE doc_id=?",
+                (json.dumps(meta), doc_id))
+            return True
+
+    def note_chunks(self, *, observation_type: str | None = None,
+                    include_expired: bool = False, limit: int = 500) -> list[dict]:
+        """Return capture-note chunks (doc_id starting with 'note-'), with parsed metadata.
+
+        Excludes expired chunks (meta["expired"] is truthy) unless include_expired=True.
+        Filters by observation_type if provided. Returns up to `limit` results.
+        """
+        sql = "SELECT doc_id, text, metadata FROM chunks WHERE doc_id LIKE 'note-%' LIMIT ?"
+        with self._connect() as db:
+            rows = db.execute(sql, (limit,)).fetchall()
+
+        results = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"])
+            except Exception:
+                continue
+            if not include_expired and meta.get("expired"):
+                continue
+            if observation_type is not None and meta.get("observation_type") != observation_type:
+                continue
+            results.append({
+                "doc_id": r["doc_id"],
+                "text": r["text"],
+                "metadata": meta,
+            })
+        return results
+
     def get_cursor(self, source: str) -> str | None:
         with self._connect() as db:
             r = db.execute("SELECT cursor FROM sync_cursors WHERE source=?", (source,)).fetchone()
