@@ -224,6 +224,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         drain_caps = drain.drain_captures(store)
         if drain_caps:
             log.info("captures applied: %d", drain_caps)
+            from mcpbrain.memory_index import regenerate
+            regenerate(store, str(config.app_dir()))
     except Exception as exc:
         log.warning("capture drain failed (cycle continues): %s", exc)
     try:
