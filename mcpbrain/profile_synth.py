@@ -151,14 +151,13 @@ def drain_profiles(store, inbox_obj: dict) -> dict:
 
 # Register this drainer so drain.py picks it up automatically when this
 # module is imported (matches the BLOCK_DRAINERS pattern from Task 5).
+# drain.py calls drainer(store, full_inbox_dict) — pass it straight through;
+# drain_profiles already extracts the "profile_synthesis" key internally.
 def _register():
     try:
         from mcpbrain.drain import BLOCK_DRAINERS  # noqa: PLC0415
 
-        def _drainer(store, inbox_obj):
-            return drain_profiles(store, {"profile_synthesis": inbox_obj})
-
-        BLOCK_DRAINERS["profile_synthesis"] = _drainer
+        BLOCK_DRAINERS["profile_synthesis"] = drain_profiles
     except ImportError:
         log.debug("drain module not available; profile_synthesis drainer not registered")
 

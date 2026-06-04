@@ -54,3 +54,14 @@ def test_profiled_entity_not_rerequested(tmp_path):
     profile_synth.drain_profiles(s, {"profile_synthesis": [
         {"entity_id": eid, "profile": "A profile."}]})
     assert profile_synth.build_profile_requests(s, cap=6) == []
+
+
+def test_drainer_registered_and_callable(tmp_path):
+    from mcpbrain import profile_synth as _ps  # noqa: ensures registration
+    from mcpbrain.drain import BLOCK_DRAINERS
+    s = _store(tmp_path)
+    eid = _person(s, "Taryn Hamilton")
+    drainer = BLOCK_DRAINERS["profile_synthesis"]
+    n = drainer(s, {"profile_synthesis": [
+        {"entity_id": eid, "profile": "Executive Pastor."}]})
+    assert n["profiles_written"] == 1
