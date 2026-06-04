@@ -48,6 +48,7 @@ def test_ingest_retry_is_idempotent(tmp_path):
         n = db.execute("SELECT COUNT(*) FROM chunks "
                        "WHERE doc_id LIKE 'note-%'").fetchone()[0]
     assert n == 1
+    assert len(s.recent_changes(10)) == 1
 
 
 def test_action_create_and_dedupe(tmp_path, monkeypatch):
