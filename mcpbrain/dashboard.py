@@ -243,20 +243,17 @@ def clickup_today(home) -> list[dict]:
 
 
 def mark_done(store, action_id: int) -> bool:
-    """Mark a unified action as done. Returns True if a row was updated."""
-    path = store._path if hasattr(store, "_path") else store.path
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Mark a unified action as done. Returns True if a row was updated.
+
+    Routes through Store.set_action_status so the write goes through the same
+    connection discipline as every other store write (post-Phase-1 review fix:
+    the original bare sqlite3.connect predated the store being passed whole
+    to ControlServer).
+    """
     try:
-        # WAL mode: 5s timeout for the case daemon is mid-commit
-        with sqlite3.connect(str(path), timeout=5.0) as db:
-            cur = db.execute(
-                "UPDATE actions SET status='done', resolved_by='dashboard', "
-                "resolved_at=?, updated_at=? "
-                "WHERE id=? AND status='open'",
-                (now, now, action_id),
-            )
-            return cur.rowcount > 0
-    except sqlite3.OperationalError as exc:
+        return store.set_action_status(
+            action_id, "done", resolved_by="dashboard", only_if_open=True) > 0
+    except sqlite3.Error as exc:
         log.warning("mark_done: error updating action %s: %s", action_id, exc)
         return False
 

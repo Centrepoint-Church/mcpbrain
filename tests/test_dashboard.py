@@ -404,47 +404,33 @@ class TestClickupToday:
 # ---------------------------------------------------------------------------
 
 class TestMarkDone:
+    """mark_done routes through Store.set_action_status (post-Phase-1 review
+    fix), so these tests use a real Store rather than the FakeStore path stub."""
+
+    def _real_store(self, tmp_path):
+        from mcpbrain.store import Store
+        s = Store(tmp_path / "real.sqlite3", dim=4)
+        s.init()
+        return s
+
     def test_marks_open_action_done(self, tmp_path):
-        db_path = tmp_path / "brain.sqlite3"
-        _make_db(db_path)
-        store = FakeStore(db_path)
+        store = self._real_store(tmp_path)
+        action_id = store.add_unified_action(text="Overdue task A")
 
-        # Get an open action id
-        with sqlite3.connect(str(db_path)) as db:
-            row = db.execute(
-                "SELECT id FROM actions WHERE text='Overdue task A'"
-            ).fetchone()
-        action_id = row[0]
+        assert dashboard.mark_done(store, action_id) is True
 
-        result = dashboard.mark_done(store, action_id)
-        assert result is True
-
-        with sqlite3.connect(str(db_path)) as db:
-            row = db.execute(
-                "SELECT status FROM actions WHERE id=?", (action_id,)
-            ).fetchone()
-        assert row[0] == "done"
+        acts = store.unified_actions(status="done")
+        assert [a["id"] for a in acts] == [action_id]
+        assert acts[0]["resolved_by"] == "dashboard"
 
     def test_returns_false_for_nonexistent_id(self, tmp_path):
-        db_path = tmp_path / "brain.sqlite3"
-        _make_db(db_path)
-        store = FakeStore(db_path)
-        result = dashboard.mark_done(store, 99999)
-        assert result is False
+        store = self._real_store(tmp_path)
+        assert dashboard.mark_done(store, 99999) is False
 
     def test_returns_false_for_already_done(self, tmp_path):
-        db_path = tmp_path / "brain.sqlite3"
-        _make_db(db_path)
-        store = FakeStore(db_path)
-
-        with sqlite3.connect(str(db_path)) as db:
-            row = db.execute(
-                "SELECT id FROM actions WHERE text='Done task F'"
-            ).fetchone()
-        action_id = row[0]
-
-        result = dashboard.mark_done(store, action_id)
-        assert result is False
+        store = self._real_store(tmp_path)
+        action_id = store.add_unified_action(text="Done task F", status="done")
+        assert dashboard.mark_done(store, action_id) is False
 
 
 # ---------------------------------------------------------------------------

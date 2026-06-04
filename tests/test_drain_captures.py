@@ -43,7 +43,7 @@ def test_ingest_retry_is_idempotent(tmp_path):
     _spool(tmp_path, "cap-1.json", _ingest_env())
     drain.drain_captures(s, home=tmp_path)
     _spool(tmp_path, "cap-2.json", _ingest_env())  # same content
-    drain.drain_captures(s, home=tmp_path)
+    assert drain.drain_captures(s, home=tmp_path) == 0  # idempotent: nothing applied
     with s._connect() as db:
         n = db.execute("SELECT COUNT(*) FROM chunks "
                        "WHERE doc_id LIKE 'note-%'").fetchone()[0]
