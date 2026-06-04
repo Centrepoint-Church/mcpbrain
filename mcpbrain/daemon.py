@@ -184,7 +184,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               drive_service=None, enrich_client=None,
               enrich_limit: int | None = None,
               enrich_mode: str = "off", resolution_due: bool = False,
-              synthesis_requests: list | None = None) -> dict:
+              synthesis_requests: list | None = None,
+              extra_blocks: dict | None = None) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -238,7 +239,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         prep = prepare.prepare(store, thread_cap=SPOOL_THREAD_CAP,
                                char_budget=SPOOL_CHAR_BUDGET,
                                resolution_due=resolution_due,
-                               synthesis_requests=synthesis_requests)
+                               synthesis_requests=synthesis_requests,
+                               extra_blocks=extra_blocks)
         drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
     elif enrich_mode == "off":

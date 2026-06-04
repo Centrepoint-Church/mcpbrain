@@ -42,6 +42,11 @@ from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
 
+# Per-key drainers for optional inbox blocks. Each drainer(store, inbox_obj) called
+# when the key is present; failures are isolated (log + continue). Registered by
+# block modules at import time.
+BLOCK_DRAINERS: dict = {}
+
 
 def _home(home) -> Path:
     """Resolve the spool root: explicit override first, else config.app_dir()."""
@@ -280,6 +285,17 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
         except Exception as exc:
             log.error("drain: synthesis drain failed in %s: %s", path.name, exc)
             file_ok = False
+
+        for _key, _drainer in BLOCK_DRAINERS.items():
+            if _key not in data:
+                continue
+            try:
+                res = _drainer(store, data)
+                if res:
+                    summary[f"{_key}_drained"] = sum(
+                        v for v in res.values() if isinstance(v, int))
+            except Exception as exc:
+                log.error("drain: %s drain failed in %s: %s", _key, path.name, exc)
 
         # Delete only when every extraction applied and merge-answers ran. A
         # partial failure leaves the file for retry next cycle. Idempotency on a
