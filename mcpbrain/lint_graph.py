@@ -31,7 +31,7 @@ from nameparser import HumanName
 from nameparser.config import CONSTANTS as _NP_CONSTANTS
 from rapidfuzz import fuzz
 
-from mcpbrain import config
+from mcpbrain import config, orgs
 
 for _t in ("ps", "pastor", "rev", "reverend", "bishop", "elder", "deacon"):
     _NP_CONSTANTS.titles.add(_t)
@@ -260,14 +260,7 @@ def check_community_singletons(conn) -> list[dict]:
 
 def check_ambiguous_org(conn) -> list[dict]:
     """Entities tagged 'external' whose email domain maps to a known org."""
-    known_domains = {
-        "centrepoint.church": "Centrepoint",
-        "centrepoint.com.au": "Centrepoint",
-        "acc.net.au": "ACC",
-        "acc.church": "ACC",
-        "courageouschurch.org.au": "Courageous Church",
-        "courageouschurch.com.au": "Courageous Church",
-    }
+    known_domains = dict(orgs.taxonomy_from_config().domain_map)
     results = []
     rows = conn.execute("""
         SELECT id, name, type, org, email_addr, email_count
@@ -287,7 +280,7 @@ def check_ambiguous_org(conn) -> list[dict]:
 
 def check_duplicate_orgs(conn) -> list[dict]:
     """Detect org field values that are likely variants of a canonical org."""
-    CANONICAL = {"Centrepoint", "ACC", "Courageous Church", "Curtin", "external", "unknown"}
+    CANONICAL = set(orgs.taxonomy_from_config().valid_orgs)
 
     rows = conn.execute("""
         SELECT org, COUNT(*) as cnt

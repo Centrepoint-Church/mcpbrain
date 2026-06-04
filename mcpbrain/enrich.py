@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 
 _EMPTY = {"entities": [], "relations": [], "actions": [], "decisions": []}
 
-# Allowed org affiliations. Anything else is clamped to "" so the model can't
-# stuff arbitrary text (e.g. "WORSHIP"/"PRAISE") into the org field.
-_VALID_ORGS = {"Centrepoint", "ACC", "Courageous Church", "Curtin", "external", "unknown"}
+# Allowed org affiliations (default-taxonomy view, kept for importers).
+# Runtime paths use orgs.taxonomy_from_config().valid_orgs so configured
+# installs clamp against their own org list.
+from mcpbrain import orgs as _orgs  # noqa: E402 — placed with the enum it owns
+_VALID_ORGS = set(_orgs.DEFAULT_TAXONOMY.valid_orgs)
 
 # Allowed thread content types. Single owner: the contract validator imports this
 # rather than re-declaring it, so the enrichment enum can't drift from the gate.
@@ -97,6 +99,9 @@ def build_prompt(text: str, metadata: dict) -> str:
     _home = str(_config.app_dir())
     owner_full = _config.owner_full_name(_home)
     owner_short = _config.owner_name(_home)
+    _tax = _orgs.taxonomy_from_config(_home)
+    org_list = ", ".join(_tax.names)
+    org_enum = "|".join(list(_tax.names) + ["external", "unknown"])
 
     prov_lines = []
     if metadata.get("source_type") == "gmail":
@@ -107,15 +112,15 @@ def build_prompt(text: str, metadata: dict) -> str:
     provenance = ("\n".join(prov_lines) + "\n") if prov_lines else ""
 
     return (
-        f"You extract a ministry/operations knowledge graph for {owner_full}, an "
-        "operations manager at a church organisation in Western Australia, across "
-        "his orgs: Centrepoint Church, ACC, Courageous Church, Curtin.\n\n"
+        f"You extract an operations knowledge graph for {owner_full}, an "
+        "operations manager who works across these organisations: "
+        f"{org_list}.\n\n"
         "Respond with STRICT JSON only. No markdown fences. No commentary. "
         "Use exactly this schema:\n"
         "{\n"
         '  "skip": false,\n'
         '  "entities": [{"name": "...", "type": "person|org|project|topic", '
-        '"org": "Centrepoint|ACC|Courageous Church|Curtin|external|unknown"}],\n'
+        f'"org": "{org_enum}"}}],\n'
         '  "relations": [{"from": "<entity name>", "relation": '
         '"works_at|reports_to|manages|coordinates_with|mentioned_with", '
         '"to": "<entity name>"}],\n'
@@ -133,7 +138,7 @@ def build_prompt(text: str, metadata: dict) -> str:
         f"  - EXCLUDE {owner_full}.\n"
         "  - name: full canonical form (\"Joel Chelliah\" not \"Pastor Joel\"); no honorifics.\n"
         "  - type must be one of: person|org|project|topic.\n"
-        "  - org must be one of: Centrepoint|ACC|Courageous Church|Curtin|external|unknown. "
+        f"  - org must be one of: {org_enum}. "
         "It is a person/org's affiliation, NOT arbitrary text (never a word like \"WORSHIP\").\n"
         "  - DO NOT extract as entities: dollar amounts (\"$0\", \"$300\"), "
         "article/newsletter/email subject lines, product or software names, generic words, "
@@ -254,7 +259,7 @@ def enrich_document(store, client, doc_id: str, text: str, metadata: dict,
             continue
         # Clamp org to the allowed enum so arbitrary text (e.g. "WORSHIP") can't land.
         org = ent.get("org", "")
-        if org not in _VALID_ORGS:
+        if org not in _orgs.taxonomy_from_config().valid_orgs:
             org = ""
         if store.upsert_entity(slug, name, etype, org, seen=seen):
             n_entities += 1  # count only newly created entity rows

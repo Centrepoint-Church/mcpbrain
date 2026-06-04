@@ -102,6 +102,16 @@
     <div class="row" style="margin-top:8px">
       <input id="owner_email" type="text" placeholder="Your email address" autocomplete="off" spellcheck="false">
     </div>
+    <p class="desc" style="margin-top:14px">The organisations you work across (work, study, church, personal&hellip;). Email domains are optional and help classify senders; separate several with commas.</p>
+    <div id="org-rows">
+      <div class="row org-row" style="margin-top:8px">
+        <input class="org-name" type="text" placeholder="Organisation name" autocomplete="off" spellcheck="false" style="flex:1 1 160px;min-width:160px">
+        <input class="org-domains" type="text" placeholder="Email domains (e.g. acme.com)" autocomplete="off" spellcheck="false" style="flex:2 1 220px;min-width:220px">
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" type="button" onclick="addOrgRow()">+ Add organisation</button>
+    </div>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick="saveKey()">Save</button>
       <button class="ghost" onclick="skipKey()">Skip</button>
@@ -186,6 +196,8 @@ async function saveKey(){
   }
   const oe = $("owner_email").value.trim();
   if(oe) body.owner_email = oe;
+  const orgRows = collectOrgs();
+  if(orgRows.length) body.orgs = orgRows;
   try{
     await P("/api/config", body);
     badge("e-state", "Saved", "ok"); $("e-state").classList.remove("hidden");
@@ -194,6 +206,28 @@ async function saveKey(){
   }
 }
 function skipKey(){ badge("e-state", "Skipped", "idle"); $("e-state").classList.remove("hidden"); }
+
+function addOrgRow(){
+  const rows = $("org-rows");
+  const row = rows.querySelector(".org-row").cloneNode(true);
+  row.querySelectorAll("input").forEach(i => i.value = "");
+  rows.appendChild(row);
+}
+
+function collectOrgs(){
+  // Rows with a name become {name, domains:[...]}; blank rows are skipped.
+  // Only posted when at least one row is filled, so an untouched section
+  // never overwrites a saved orgs list (same merge rule as the other fields).
+  const out = [];
+  document.querySelectorAll("#org-rows .org-row").forEach(row => {
+    const name = row.querySelector(".org-name").value.trim();
+    if(!name) return;
+    const domains = row.querySelector(".org-domains").value
+      .split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
+    out.push({name: name, domains: domains});
+  });
+  return out;
+}
 
 async function reg(){
   $("r-state").classList.remove("hidden");
