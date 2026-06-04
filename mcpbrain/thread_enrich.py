@@ -118,7 +118,13 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         messages.append({
             "message_id": mid,
             "sender": meta.get("sender", ""),
-            "date": meta.get("date") or meta.get("start", ""),
+            # Three sources, three metadata names: gmail puts the message date
+            # in `date`; calendar puts the event start in `start`; drive puts
+            # the file's modifiedTime in `modified`. The extractor contract
+            # requires a non-empty date string, so fall through all three.
+            "date": (
+                meta.get("date") or meta.get("start") or meta.get("modified") or ""
+            ),
             "labels": meta.get("labels", ""),
             "subject": meta.get("subject", ""),
             "text": text,
