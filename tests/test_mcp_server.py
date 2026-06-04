@@ -370,6 +370,27 @@ def test_brain_context_profile_still_works_after_signature_change(tmp_path):
     assert out["entity"]["id"] == "taryn-hamilton"
 
 
+def test_brain_context_profile_included(tmp_path):
+    """A profiled entity's brain_context payload includes a 'profile' key with
+    the profile text written by the profile_synthesis block."""
+    s = Store(tmp_path / "prof.sqlite3", dim=4)
+    s.init()
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    # Simulate what the profile_synthesis drain writes.
+    with s._connect() as db:
+        db.execute(
+            "UPDATE entities SET profile=? WHERE id=?",
+            ("Executive Pastor at Centrepoint Church, responsible for staff and ministry teams.",
+             "taryn-hamilton"),
+        )
+
+    tool = make_brain_context(s)
+    out = asyncio.run(tool("taryn-hamilton"))
+
+    assert "profile" in out["entity"], "'profile' key must be present in entity dict"
+    assert "Executive Pastor" in out["entity"]["profile"]
+
+
 # --- brain_proactive MCP tool (Phase 3 Task 4.4) -------------------------
 
 from mcpbrain.mcp_server import make_brain_proactive
