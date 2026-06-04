@@ -206,6 +206,7 @@ def _today() -> str:
 
 _SOURCE_RANK = {
     "manual": 5,
+    "profile_audit": 4,   # audited corrections rank alongside email_signature
     "email_signature": 4,
     "from_header": 3,
     "domain_match": 3,

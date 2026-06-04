@@ -708,8 +708,197 @@ def test_apply_config_rewires_cadences(tmp_path):
              "synthesise_interval_s": None,
              "proactive_interval_s": None,
              "waiting_on_interval_s": None,
+             "blocks_interval_s": None,
+             "audit_interval_s": None,
          }):
         daemon.apply_config(new_config)
 
     assert daemon._communities_interval_s == 500.0
     assert daemon._lint_interval_s is None
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — maybe_blocks and maybe_audit cadence tests
+# ---------------------------------------------------------------------------
+
+def _blocks_daemon(tmp_path, *, blocks_interval_s=None, clock=None, **kw):
+    store = _make_store(tmp_path, name="blk.sqlite3")
+    return store, Daemon(
+        store, _FakeEmbedder(),
+        services={},
+        lock=SingleWriterLock(tmp_path / "dblk.lock"),
+        blocks_interval_s=blocks_interval_s,
+        clock=clock or _Clock(),
+        **kw,
+    )
+
+
+def _audit_daemon(tmp_path, *, audit_interval_s=None, clock=None, **kw):
+    store = _make_store(tmp_path, name="aud.sqlite3")
+    return store, Daemon(
+        store, _FakeEmbedder(),
+        services={},
+        lock=SingleWriterLock(tmp_path / "daud.lock"),
+        audit_interval_s=audit_interval_s,
+        clock=clock or _Clock(),
+        **kw,
+    )
+
+
+def test_maybe_blocks_off_when_unconfigured(tmp_path):
+    """blocks_interval_s not supplied -> maybe_blocks() returns None and
+    build_profile_requests is never called."""
+    store, daemon = _blocks_daemon(tmp_path)  # no blocks_interval_s
+
+    with patch("mcpbrain.profile_synth.build_profile_requests") as mock_build:
+        result = daemon.maybe_blocks()
+
+    assert result is None
+    mock_build.assert_not_called()
+
+
+def test_maybe_blocks_runs_when_due(tmp_path):
+    """blocks_interval_s set -> first call is due and returns summary with
+    all three block counts. Stashes results in _pending_blocks."""
+    store, daemon = _blocks_daemon(tmp_path, blocks_interval_s=3600.0)
+
+    fake_profiles = [{"entity_id": "e-1", "name": "Alice"}]
+    fake_communities = [{"community_id": "c-1"}]
+    fake_distil = [{"memory_id": "m-1"}]
+
+    with patch("mcpbrain.profile_synth.build_profile_requests",
+               return_value=fake_profiles), \
+         patch("mcpbrain.community_synth.build_community_requests",
+               return_value=fake_communities), \
+         patch("mcpbrain.memory_distil.build_distil_requests",
+               return_value=fake_distil):
+        result = daemon.maybe_blocks()
+
+    assert result is not None
+    assert result["profile_synthesis_requested"] == 1
+    assert result["community_synthesis_requested"] == 1
+    assert result["memory_distil_requested"] == 1
+    assert daemon._pending_blocks == {
+        "profile_synthesis": fake_profiles,
+        "community_synthesis": fake_communities,
+        "memory_distil": fake_distil,
+    }
+
+
+def test_maybe_blocks_not_due_before_interval(tmp_path):
+    """After a successful run, a call before the interval elapses returns None."""
+    clock = _Clock()
+    store, daemon = _blocks_daemon(tmp_path, blocks_interval_s=100.0, clock=clock)
+
+    with patch("mcpbrain.profile_synth.build_profile_requests", return_value=[]), \
+         patch("mcpbrain.community_synth.build_community_requests", return_value=[]), \
+         patch("mcpbrain.memory_distil.build_distil_requests", return_value=[]):
+        first = daemon.maybe_blocks()
+    assert first is not None
+
+    clock.advance(50.0)
+    with patch("mcpbrain.profile_synth.build_profile_requests") as mock_build:
+        second = daemon.maybe_blocks()
+    assert second is None
+    mock_build.assert_not_called()
+
+
+def test_maybe_blocks_swallows_errors(tmp_path):
+    """build_profile_requests raising -> error dict returned, _last_blocks NOT advanced."""
+    clock = _Clock()
+    store, daemon = _blocks_daemon(tmp_path, blocks_interval_s=100.0, clock=clock)
+
+    with patch("mcpbrain.profile_synth.build_profile_requests",
+               side_effect=RuntimeError("blocks-boom")):
+        result = daemon.maybe_blocks()
+
+    assert result is not None
+    assert "error" in result
+    assert "blocks-boom" in result["error"]
+    assert daemon._last_blocks is None
+
+
+def test_maybe_audit_off_when_unconfigured(tmp_path):
+    """audit_interval_s not supplied -> maybe_audit() returns None and
+    build_audit_requests is never called."""
+    store, daemon = _audit_daemon(tmp_path)  # no audit_interval_s
+
+    with patch("mcpbrain.profile_audit.build_audit_requests") as mock_build:
+        result = daemon.maybe_audit()
+
+    assert result is None
+    mock_build.assert_not_called()
+
+
+def test_maybe_audit_runs_when_due(tmp_path):
+    """audit_interval_s set -> first call is due and returns audit_requested count.
+    Stashes requests in _pending_audit."""
+    store, daemon = _audit_daemon(tmp_path, audit_interval_s=3600.0)
+
+    fake_reqs = [{"entity_id": "e-1", "name": "Taryn", "role": "Executive Pastor",
+                  "profile": "...", "org": "Centrepoint"}]
+
+    with patch("mcpbrain.profile_audit.build_audit_requests",
+               return_value=fake_reqs) as mock_build:
+        result = daemon.maybe_audit()
+
+    assert result is not None
+    assert result["audit_requested"] == 1
+    assert daemon._pending_audit == {"profile_audit": fake_reqs}
+    mock_build.assert_called_once_with(store)
+
+
+def test_maybe_audit_not_due_before_interval(tmp_path):
+    """After a successful run, a call before the interval elapses returns None."""
+    clock = _Clock()
+    store, daemon = _audit_daemon(tmp_path, audit_interval_s=100.0, clock=clock)
+
+    with patch("mcpbrain.profile_audit.build_audit_requests", return_value=[]):
+        first = daemon.maybe_audit()
+    assert first is not None
+
+    clock.advance(50.0)
+    with patch("mcpbrain.profile_audit.build_audit_requests") as mock_build:
+        second = daemon.maybe_audit()
+    assert second is None
+    mock_build.assert_not_called()
+
+
+def test_maybe_audit_swallows_errors(tmp_path):
+    """build_audit_requests raising -> error dict returned, _last_audit NOT advanced."""
+    clock = _Clock()
+    store, daemon = _audit_daemon(tmp_path, audit_interval_s=100.0, clock=clock)
+
+    with patch("mcpbrain.profile_audit.build_audit_requests",
+               side_effect=RuntimeError("audit-boom")):
+        result = daemon.maybe_audit()
+
+    assert result is not None
+    assert "error" in result
+    assert "audit-boom" in result["error"]
+    assert daemon._last_audit is None
+
+
+def test_pending_blocks_and_audit_merged_in_run_one(tmp_path):
+    """run_one() passes merged _pending_blocks + _pending_audit as extra_blocks
+    and resets both after the cycle."""
+    store, daemon = _blocks_daemon(tmp_path)
+
+    daemon._pending_blocks = {"profile_synthesis": [{"entity_id": "e-1"}]}
+    daemon._pending_audit = {"profile_audit": [{"entity_id": "e-2"}]}
+
+    captured = {}
+
+    def fake_run_cycle(store, embedder, *, extra_blocks=None, **kw):
+        captured["extra_blocks"] = extra_blocks
+        return {"enrich": {}}
+
+    with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
+        daemon.run_one()
+
+    assert captured["extra_blocks"] == {
+        "profile_synthesis": [{"entity_id": "e-1"}],
+        "profile_audit": [{"entity_id": "e-2"}],
+    }
+    assert daemon._pending_blocks == {}
+    assert daemon._pending_audit == {}
