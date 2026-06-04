@@ -71,3 +71,17 @@ def test_prune_change_log_noop_when_under_limit(tmp_path):
     pruned = s.prune_change_log(keep=10)
     assert pruned == 0
     assert len(s.recent_changes(20)) == 3
+
+
+def test_record_change_carries_source(tmp_path):
+    s = _store(tmp_path)
+    s.record_change("profile_correction", ref_id="e-1", summary="role updated",
+                    source="profile_audit")
+    row = s.recent_changes(1)[0]
+    assert row["source"] == "profile_audit"
+
+
+def test_source_defaults_empty_for_existing_callers(tmp_path):
+    s = _store(tmp_path)
+    s.record_change("capture_ingest", ref_id="n-1", summary="x")
+    assert s.recent_changes(1)[0]["source"] == ""
