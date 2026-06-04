@@ -12,10 +12,15 @@ chunk on its own doc_id (`enriched-{thread_id}`) and only carries the five
 fields the contextual-prefix / filter paths actually read.
 """
 
-from mcpbrain.graph_write import SYSTEM_LABELS, canonical_org
+from mcpbrain.graph_write import (
+    SYSTEM_LABELS,
+    _is_owner,
+    canonical_org,
+    owner_identity_from_config,
+)
 
 
-def build_semantic_doc(extraction: dict, thread: dict) -> tuple[str, dict]:
+def build_semantic_doc(extraction: dict, thread: dict, owner=None) -> tuple[str, dict]:
     """Assemble the synthesised vector doc for one enriched thread.
 
     `extraction` is the thread's extraction JSON (org, summary, content_type,
@@ -24,9 +29,13 @@ def build_semantic_doc(extraction: dict, thread: dict) -> tuple[str, dict]:
     derived. Returns (text, metadata).
 
     The text mirrors the Nexus shape: an org-prefixed Email line, From/Date,
-    Type, a blank line then the summary, a People line (non-Josh persons), an
-    Actions block, then Topics and Labels lines.
+    Type, a blank line then the summary, a People line (persons other than the
+    install owner), an Actions block, then Topics and Labels lines.
+
+    owner: optional OwnerIdentity; None resolves from config.
     """
+    if owner is None:
+        owner = owner_identity_from_config()
     org = canonical_org(extraction.get("org", "unknown") or "unknown")
     actions_list = extraction.get("actions", []) or []
     topics_list = extraction.get("topics", []) or []
@@ -56,7 +65,7 @@ def build_semantic_doc(extraction: dict, thread: dict) -> tuple[str, dict]:
         e.get("name", "") for e in entities_list
         if e.get("type") == "person"
         and e.get("name")
-        and "josh" not in e.get("name", "").lower()
+        and not _is_owner(e.get("name", ""), owner)
     ]
     if people_names:
         lines += ["", f"People: {', '.join(people_names)}"]

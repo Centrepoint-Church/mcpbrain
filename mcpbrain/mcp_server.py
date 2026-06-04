@@ -1,5 +1,7 @@
 import logging
 
+from mcpbrain import config
+
 from mcpbrain.retrieval import annotate_action_freshness, hybrid_search
 
 _log = logging.getLogger("mcpbrain.mcp_server")
@@ -65,11 +67,13 @@ def make_brain_context(store):
 
 
 def make_brain_actions(store):
-    async def brain_actions(owner: str = "Josh", status: str = "open") -> list[dict]:
+    async def brain_actions(owner: str = "", status: str = "open") -> list[dict]:
         """Action items from the unified actions table, filtered by owner and
-        status, with read-time freshness annotation. Returns [] on error."""
+        status, with read-time freshness annotation. Empty owner defaults to
+        the configured install owner. Returns [] on error."""
         try:
-            owner = owner or "Josh"  # explicit None must not widen to all owners
+            if not owner:  # explicit None/empty must not widen to all owners
+                owner = config.owner_name(str(config.app_dir()))
             status = status or "open"
             actions = store.unified_actions(owner=owner, status=status)
             return annotate_action_freshness(store, actions)
@@ -200,7 +204,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "owner": {"type": "string", "default": "Josh"},
+                        "owner": {"type": "string", "default": "",
+                                  "description": "Empty defaults to the configured install owner."},
                         "status": {"type": "string", "default": "open"},
                     },
                 },
@@ -249,7 +254,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_actions":
-            owner = arguments.get("owner") or "Josh"  # null-coalesce: explicit None defaults to Josh
+            # null-coalesce: explicit None/empty defaults to the configured owner
+            owner = arguments.get("owner") or ""
             status = arguments.get("status") or "open"
             out = await actions(owner, status)
             return [types.TextContent(type="text", text=json.dumps(out))]
