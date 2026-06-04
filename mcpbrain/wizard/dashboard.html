@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Today — mcpbrain</title>
+<style>
+  :root{
+    --accent:#0066ff; --accent-d:#0052cc;
+    --ink:#15181d; --muted:#6b7280; --line:#e6e8ec;
+    --bg:#f4f6f9; --card:#ffffff;
+    --ok:#157f3b; --ok-bg:#e7f6ed;
+    --warn:#9a6700; --warn-bg:#fbf3d8;
+    --err:#b91c1c; --err-bg:#fef2f2;
+    --idle:#5b6470; --idle-bg:#eef1f5;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:36px 20px 64px}
+
+  /* Header */
+  header{display:flex;align-items:center;justify-content:space-between;margin:0 0 28px;flex-wrap:wrap;gap:12px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .dot{width:30px;height:30px;border-radius:9px;
+    background:linear-gradient(135deg,var(--accent),#3d8bff);flex:0 0 auto}
+  h1{font-size:24px;font-weight:680;letter-spacing:-.02em;margin:0}
+  h1 small{font-size:14px;font-weight:400;color:var(--muted);margin-left:10px;letter-spacing:0}
+  .header-actions{display:flex;align-items:center;gap:10px}
+  button{font:inherit;font-weight:600;border-radius:10px;padding:8px 15px;cursor:pointer;
+    border:1px solid transparent;transition:background .12s,border-color .12s,opacity .12s}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button:disabled{opacity:.5;cursor:default}
+  .ghost{background:#fff;border-color:var(--line);color:var(--ink)}
+  .ghost:hover:not(:disabled){background:var(--idle-bg)}
+
+  /* Spinner */
+  .spinner{width:16px;height:16px;border:2px solid var(--line);
+    border-top-color:var(--accent);border-radius:50%;
+    animation:spin .6s linear infinite;display:none}
+  .spinner.active{display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* Three-col grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
+  @media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}
+  @media(max-width:600px){.grid{grid-template-columns:1fr}}
+
+  /* Cards */
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:20px 22px;
+    box-shadow:0 1px 2px rgba(20,24,29,.04),0 6px 20px rgba(20,24,29,.03);
+  }
+  .card-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 14px}
+  .card-head h2{font-size:15.5px;font-weight:640;margin:0}
+  .count-badge{background:var(--idle-bg);color:var(--idle);border-radius:999px;
+    padding:1px 9px;font-size:12.5px;font-weight:600}
+
+  /* Empty state */
+  .empty{color:var(--muted);font-size:14px;padding:6px 0}
+  .empty.ok{color:var(--ok)}
+
+  /* Calendar */
+  .cal-event{display:flex;align-items:baseline;gap:10px;padding:8px 0;
+    border-bottom:1px solid var(--line)}
+  .cal-event:last-child{border-bottom:none}
+  .cal-time{font:13px/1.3 "SF Mono","Fira Mono","Consolas",monospace;
+    color:var(--muted);white-space:nowrap;flex:0 0 auto;min-width:96px}
+  .cal-title{font-size:14px;flex:1 1 auto;line-height:1.4}
+  .pack-badge{background:var(--accent);color:#fff;border-radius:5px;
+    padding:1px 7px;font-size:11.5px;font-weight:600;cursor:pointer;
+    border:none;text-decoration:none;display:inline-block;margin-left:6px;
+    vertical-align:middle}
+
+  /* Actions */
+  .bucket-head{font-size:12.5px;font-weight:700;text-transform:uppercase;
+    letter-spacing:.06em;color:var(--muted);margin:12px 0 6px;padding-top:8px;
+    border-top:1px solid var(--line)}
+  .bucket-head:first-of-type{margin-top:0;border-top:none;padding-top:0}
+  .action-row{display:flex;align-items:flex-start;gap:10px;padding:6px 0;
+    border-bottom:1px solid var(--line)}
+  .action-row:last-child{border-bottom:none}
+  .action-row.done-ui{opacity:.4}
+  .action-row.done-ui .action-text{text-decoration:line-through}
+  .action-check{margin-top:3px;flex:0 0 auto;width:16px;height:16px;cursor:pointer;
+    accent-color:var(--accent)}
+  .action-body{flex:1 1 auto;font-size:14px;line-height:1.45}
+  .action-text{display:block}
+  .action-meta{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:3px}
+  .action-deadline{font-size:12.5px;color:var(--muted)}
+  .chip{border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;display:inline-block}
+  .chip-org{background:var(--idle-bg);color:var(--idle)}
+  .chip-waiting{background:var(--warn-bg);color:var(--warn)}
+  .chip-overdue-deadline{color:var(--err)}
+
+  /* ClickUp */
+  .cu-row{display:flex;align-items:center;gap:8px;padding:8px 0;
+    border-bottom:1px solid var(--line)}
+  .cu-row:last-child{border-bottom:none}
+  .cu-name{flex:1 1 auto;font-size:14px}
+  .cu-right{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .cu-date{font-size:12.5px;color:var(--muted);white-space:nowrap}
+  .status-chip{border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600}
+  .status-chip.inprogress{background:#dbeafe;color:#1d4ed8}
+  .status-chip.complete{background:var(--ok-bg);color:var(--ok)}
+  .status-chip.other{background:var(--idle-bg);color:var(--idle)}
+  .ext-link{color:var(--accent);text-decoration:none;font-size:14px;line-height:1}
+  .ext-link:hover{color:var(--accent-d)}
+
+  /* Toast */
+  #toast{
+    position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+    background:#1a1f27;color:#fff;border-radius:10px;padding:10px 18px;
+    font-size:14px;pointer-events:none;
+    opacity:0;transition:opacity .2s;z-index:999;white-space:nowrap;
+  }
+  #toast.show{opacity:1}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Today <small id="as-of"></small></h1>
+    </div>
+    <div class="header-actions">
+      <span id="spinner" class="spinner"></span>
+      <button class="ghost" id="refresh-btn" onclick="refresh()">Refresh</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Calendar -->
+    <div class="card" id="card-cal">
+      <div class="card-head">
+        <h2>Calendar</h2>
+        <span id="cal-count" class="count-badge">0</span>
+      </div>
+      <div id="cal-body"><p class="empty">Loading…</p></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="card" id="card-actions">
+      <div class="card-head">
+        <h2>Actions</h2>
+      </div>
+      <div id="actions-body"><p class="empty">Loading…</p></div>
+    </div>
+
+    <!-- ClickUp -->
+    <div class="card" id="card-clickup">
+      <div class="card-head">
+        <h2>ClickUp</h2>
+        <span id="cu-count" class="count-badge">0</span>
+      </div>
+      <div id="cu-body"><p class="empty">Loading…</p></div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const TOKEN = "__MCPBRAIN_TOKEN__";
+const H = {headers: {Authorization: "Bearer " + TOKEN}};
+
+function $(id){ return document.getElementById(id); }
+
+// ---- utilities ----
+
+function fmtTime(t){
+  // t is "HH:MM" or "HH:MM:SS"
+  if(!t) return "";
+  const parts = t.split(":");
+  return parts[0] + ":" + parts[1];
+}
+
+function asofLabel(iso){
+  // Parse ISO and display HH:MM in Perth time (AWST/AWDT)
+  try{
+    const d = new Date(iso);
+    return d.toLocaleTimeString("en-AU", {
+      timeZone:"Australia/Perth",
+      hour:"2-digit", minute:"2-digit", hour12:false
+    });
+  }catch(e){ return ""; }
+}
+
+function fmtDeadline(d){
+  if(!d) return "";
+  // d = "YYYY-MM-DD"
+  return d;
+}
+
+function isOverdue(deadline){
+  if(!deadline) return false;
+  // Perth date, not UTC: between midnight and 8am Perth the UTC date is still
+  // yesterday, which would lag the red highlight a day behind the server's
+  // Perth-time bucketing. en-CA locale gives YYYY-MM-DD.
+  const today = new Date().toLocaleDateString("en-CA", {timeZone:"Australia/Perth"});
+  return deadline < today;
+}
+
+function statusChipClass(status){
+  if(!status) return "other";
+  const s = status.toLowerCase().replace(/\s+/g,"");
+  if(s === "inprogress") return "inprogress";
+  if(s === "complete" || s === "done" || s === "closed") return "complete";
+  return "other";
+}
+
+function showToast(msg, ms){
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), ms || 3000);
+}
+
+// ---- render calendar ----
+
+function renderCalendar(events){
+  const body = $("cal-body");
+  $("cal-count").textContent = events.length;
+  if(!events.length){
+    body.innerHTML = '<p class="empty">Nothing scheduled today.</p>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for(const ev of events){
+    const row = document.createElement("div");
+    row.className = "cal-event";
+
+    const timeEl = document.createElement("span");
+    timeEl.className = "cal-time";
+    if(ev.all_day){
+      timeEl.textContent = "All day";
+    } else {
+      const s = fmtTime(ev.start);
+      const e = fmtTime(ev.end);
+      timeEl.textContent = e ? s + "–" + e : s;
+    }
+
+    const titleEl = document.createElement("span");
+    titleEl.className = "cal-title";
+    titleEl.textContent = ev.title || "(No title)";
+
+    if(ev.has_pack){
+      const pb = document.createElement("a");
+      pb.className = "pack-badge";
+      pb.textContent = "pack";
+      pb.href = "/";
+      pb.title = "Open pack in wizard";
+      pb.addEventListener("click", function(e){
+        e.preventDefault();
+        window.location.href = "/";
+      });
+      titleEl.appendChild(pb);
+    }
+
+    row.appendChild(timeEl);
+    row.appendChild(titleEl);
+    frag.appendChild(row);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+}
+
+// ---- render actions ----
+
+function renderActions(actions){
+  const body = $("actions-body");
+  const overdue = actions.overdue || [];
+  const dueToday = actions.due_today || [];
+  const upcoming = actions.upcoming || [];
+
+  const total = overdue.length + dueToday.length + upcoming.length;
+  if(total === 0){
+    body.innerHTML = '<p class="empty ok">All clear.</p>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+
+  function renderBucket(label, items){
+    if(!items.length) return;
+    const head = document.createElement("div");
+    head.className = "bucket-head";
+    head.textContent = label;
+    frag.appendChild(head);
+
+    for(const item of items){
+      frag.appendChild(buildActionRow(item));
+    }
+  }
+
+  renderBucket("Overdue", overdue);
+  renderBucket("Due today", dueToday);
+  renderBucket("Upcoming", upcoming);
+
+  body.innerHTML = "";
+  body.appendChild(frag);
+}
+
+function buildActionRow(item){
+  const row = document.createElement("div");
+  row.className = "action-row";
+  row.dataset.id = item.id;
+
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "action-check";
+  cb.setAttribute("aria-label", "Mark done");
+  cb.addEventListener("change", function(){
+    if(cb.checked) markDone(item.id, row, cb);
+  });
+
+  const body = document.createElement("div");
+  body.className = "action-body";
+
+  const text = document.createElement("span");
+  text.className = "action-text";
+  text.textContent = item.text;
+
+  const meta = document.createElement("div");
+  meta.className = "action-meta";
+
+  if(item.deadline){
+    const dl = document.createElement("span");
+    dl.className = "action-deadline" + (isOverdue(item.deadline) ? " chip-overdue-deadline" : "");
+    dl.textContent = fmtDeadline(item.deadline);
+    meta.appendChild(dl);
+  }
+
+  if(item.org){
+    const org = document.createElement("span");
+    org.className = "chip chip-org";
+    org.textContent = item.org;
+    meta.appendChild(org);
+  }
+
+  if(item.waiting_on){
+    const w = document.createElement("span");
+    w.className = "chip chip-waiting";
+    w.textContent = "Waiting: " + item.waiting_on;
+    meta.appendChild(w);
+  }
+
+  body.appendChild(text);
+  body.appendChild(meta);
+
+  row.appendChild(cb);
+  row.appendChild(body);
+  return row;
+}
+
+async function markDone(id, row, cb){
+  row.classList.add("done-ui");
+  try{
+    const res = await fetch("/api/dashboard/actions/" + id + "/done", {
+      method: "POST",
+      headers: H.headers
+    });
+    if(!res.ok) throw new Error("HTTP " + res.status);
+  } catch(e){
+    row.classList.remove("done-ui");
+    cb.checked = false;
+    showToast("Could not mark done. Try again.");
+  }
+}
+
+// ---- render clickup ----
+
+function renderClickUp(tasks){
+  const body = $("cu-body");
+  $("cu-count").textContent = tasks.length;
+  if(!tasks.length){
+    body.innerHTML = '<p class="empty">No tasks due today.</p>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for(const t of tasks){
+    const row = document.createElement("div");
+    row.className = "cu-row";
+
+    const name = document.createElement("span");
+    name.className = "cu-name";
+    name.textContent = t.name;
+
+    const right = document.createElement("div");
+    right.className = "cu-right";
+
+    const chip = document.createElement("span");
+    chip.className = "status-chip " + statusChipClass(t.status);
+    chip.textContent = t.status || "unknown";
+
+    right.appendChild(chip);
+
+    if(t.due_date){
+      const dd = document.createElement("span");
+      dd.className = "cu-date";
+      dd.textContent = t.due_date;
+      right.appendChild(dd);
+    }
+
+    if(t.url){
+      const a = document.createElement("a");
+      a.className = "ext-link";
+      a.href = t.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.setAttribute("aria-label", "Open in ClickUp");
+      // external link icon (SVG inline)
+      a.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+      right.appendChild(a);
+    }
+
+    row.appendChild(name);
+    row.appendChild(right);
+    frag.appendChild(row);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+}
+
+// ---- main refresh ----
+
+let fetching = false;
+
+async function refresh(){
+  if(fetching) return;
+  fetching = true;
+  const btn = $("refresh-btn");
+  const sp = $("spinner");
+  btn.disabled = true;
+  sp.classList.add("active");
+
+  try{
+    const res = await fetch("/api/dashboard/today", H);
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+
+    if(data.as_of){
+      $("as-of").textContent = "as of " + asofLabel(data.as_of);
+    }
+
+    renderCalendar(data.calendar || []);
+    renderActions(data.actions || {});
+    renderClickUp(data.clickup || []);
+  } catch(e){
+    showToast("Could not load data. Retrying in 60s.");
+  } finally{
+    fetching = false;
+    btn.disabled = false;
+    sp.classList.remove("active");
+  }
+}
+
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

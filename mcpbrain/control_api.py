@@ -1,4 +1,4 @@
-import json, logging, os, secrets, tempfile, threading
+import json, logging, os, re, secrets, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,8 +31,9 @@ def h_json(h, code, obj):
     h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
 
 class ControlServer:
-    def __init__(self, daemon, home):
+    def __init__(self, daemon, home, store=None):
         self.daemon = daemon; self.home = Path(home)
+        self.store = store  # may be None if dashboard not enabled
         self.token = secrets.token_urlsafe(32); self._httpd = None; self.port = None
 
     def start(self):
@@ -64,12 +65,25 @@ class ControlServer:
                 # Served before the auth gate on purpose: a browser with no token yet
                 # must load the wizard page, which then injects the token into the HTML.
                 if self.path == "/": return server._serve_wizard(self)   # Task 2.3
+                if self.path == "/dashboard": return server._serve_dashboard(self)
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
                 if self.path == "/api/auth/status":
                     st = server.daemon.status()
                     return h_json(self, 200, {"connected": st["google_connected"],
                                               "granted_scopes": st["granted_scopes"]})
+                if self.path == "/api/dashboard/today":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    # Same JSON-error contract as _handle_post: a raise here would
+                    # otherwise drop the connection and the page could only say
+                    # "Could not load data" with no cause.
+                    try:
+                        from mcpbrain import dashboard as dash
+                        return h_json(self, 200, dash.assemble(server.store, str(server.home)))
+                    except Exception as exc:
+                        log.exception("dashboard today failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 self.send_response(404); self.end_headers()
             def do_POST(self):
                 if not self._auth_ok(): return
@@ -88,6 +102,17 @@ class ControlServer:
         p = Path(__file__).parent / "wizard" / "index.html"
         if not p.exists():
             b = b"wizard/index.html not found (packaging error)"
+            h.send_response(500); h.send_header("Content-Type","text/plain")
+            h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
+            return
+        html = p.read_text().replace("__MCPBRAIN_TOKEN__", self.token).encode()
+        h.send_response(200); h.send_header("Content-Type","text/html")
+        h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
+
+    def _serve_dashboard(self, h):
+        p = Path(__file__).parent / "wizard" / "dashboard.html"
+        if not p.exists():
+            b = b"wizard/dashboard.html not found (packaging error)"
             h.send_response(500); h.send_header("Content-Type","text/plain")
             h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
             return
@@ -130,6 +155,26 @@ class ControlServer:
                 threading.Thread(target=d.start_auth, daemon=True).start()
                 return h_json(h, 202, {"started": True})
             if h.path == "/api/register": return h_json(h, 200, {"config_path": d.register()})
+
+            m = re.match(r"^/api/dashboard/actions/(\d+)/done$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import dashboard as dash
+                action_id = int(m.group(1))
+                ok = dash.mark_done(self.store, action_id)
+                return h_json(h, 200, {"done": ok})
+
+            m = re.match(r"^/api/dashboard/actions/(\d+)/snooze$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import dashboard as dash
+                action_id = int(m.group(1))
+                until = body.get("until", "")
+                ok = dash.snooze(self.store, action_id, until)
+                return h_json(h, 200, {"snoozed": ok})
+
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
             return h_json(h, 500, {"error": str(exc)})

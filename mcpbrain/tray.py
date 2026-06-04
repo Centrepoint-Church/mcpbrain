@@ -92,6 +92,12 @@ class TrayController:
         if url:
             webbrowser.open(url)
 
+    def on_open_dashboard(self) -> None:
+        """Open the local today-dashboard in the browser."""
+        url = self._client.dashboard_url()
+        if url:
+            webbrowser.open(url)
+
     def on_quit(self) -> None:
         """Close the tray icon. Does NOT stop the daemon (login agent owns it)."""
         self._quit = True
@@ -114,6 +120,7 @@ class TrayController:
             toggle = ("Pause", self.on_pause, self._available)
         return [
             (self.status_text(), None, False),
+            ("Open Dashboard", self.on_open_dashboard, True),
             toggle,
             ("Open setup…", self.on_open_setup, True),
             ("Quit", self.on_quit, True),

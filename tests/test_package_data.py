@@ -41,3 +41,8 @@ def test_enrich_prompt_doc_present():
     # package-data declaration a clean install has no prompt to feed Claude.
     prompt = _pkg_dir() / "enrich_prompt.md"
     assert prompt.is_file(), f"extractor prompt missing at {prompt}"
+
+
+def test_dashboard_html_present():
+    html = _pkg_dir() / "wizard" / "dashboard.html"
+    assert html.is_file(), f"dashboard HTML missing at {html}"

@@ -17,13 +17,14 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import config
 
 log = logging.getLogger(__name__)
 
 _BASE = "https://api.clickup.com/api/v2"
+_PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches dashboard._PERTH)
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -44,10 +45,22 @@ def _ms_to_iso(ms_str: str | None) -> str:
         return ""
 
 
-def _iso_to_ms(iso: str) -> int:
-    """Convert a YYYY-MM-DD string to unix milliseconds (start of day UTC)."""
-    dt = datetime.strptime(iso, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
+def _iso_to_ms(iso: str) -> int | None:
+    """Convert a YYYY-MM-DD string to unix milliseconds at the END of that day, Perth time.
+
+    due_date_lte means "due on or before this date" and ClickUp compares raw ms
+    timestamps, so the cutoff must be the last instant of the day. A start-of-day
+    cutoff would exclude tasks due later the same day.
+
+    Returns None and logs a warning if the string is not a valid date.
+    """
+    try:
+        day_start = datetime.strptime(iso, "%Y-%m-%d").replace(tzinfo=_PERTH)
+        day_end = day_start + timedelta(days=1)
+        return int(day_end.timestamp() * 1000) - 1
+    except ValueError:
+        log.warning("_iso_to_ms: invalid date string %r — skipping due_date_lte param", iso)
+        return None
 
 
 def search_tasks(home, *, due_date_lte: str | None = None) -> list[dict]:
@@ -62,15 +75,16 @@ def search_tasks(home, *, due_date_lte: str | None = None) -> list[dict]:
         List of dicts with keys: id, name, status, due_date, url.
         Returns [] if config is missing, creds are absent, or any HTTP error occurs.
     """
-    cfg = config.read_config(home)
-    token = cfg.get("clickup_api_key", "").strip()
-    list_id = cfg.get("clickup_list_id", "").strip()
+    token = config.clickup_api_key(home).strip()
+    list_id = config.clickup_list_id(home).strip()
     if not token or not list_id:
         return []
 
     params: dict[str, str] = {"include_closed": "false"}
     if due_date_lte:
-        params["due_date_lte"] = str(_iso_to_ms(due_date_lte))
+        ms = _iso_to_ms(due_date_lte)
+        if ms is not None:
+            params["due_date_lte"] = str(ms)
 
     url = f"{_BASE}/list/{list_id}/task?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers=_headers(token))
@@ -83,6 +97,9 @@ def search_tasks(home, *, due_date_lte: str | None = None) -> list[dict]:
         return []
     except (urllib.error.URLError, OSError) as exc:
         log.warning("ClickUp search_tasks network error: %s", exc)
+        return []
+    except json.JSONDecodeError as exc:
+        log.warning("ClickUp search_tasks non-JSON response: %s", exc)
         return []
 
     tasks = []
@@ -115,8 +132,7 @@ def update_task_status(home, task_id: str, status: str) -> bool:
     Returns:
         True on success, False on any error.
     """
-    cfg = config.read_config(home)
-    token = cfg.get("clickup_api_key", "").strip()
+    token = config.clickup_api_key(home).strip()
     if not token:
         return False
 

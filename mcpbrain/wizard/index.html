@@ -87,6 +87,19 @@
     <p class="desc">A Gemini API key builds the knowledge graph behind richer answers. Skip to leave it off; search still works.</p>
     <div class="row">
       <input id="gk" type="password" placeholder="Gemini API key (optional)" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="desc" style="margin-top:14px">ClickUp integration syncs actions to a list. Both fields are optional.</p>
+    <div class="row">
+      <input id="clickup_api_key" type="password" placeholder="ClickUp API token (pk_…)" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="clickup_list_id" type="text" placeholder="ClickUp list ID (e.g. 901610549962)" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="desc" style="margin-top:14px">Your first name, as it appears in your emails. The dashboard uses it to show only your actions.</p>
+    <div class="row">
+      <input id="owner_name" type="text" placeholder="Your name (e.g. Josh)" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row" style="margin-top:12px">
       <button class="primary" onclick="saveKey()">Save</button>
       <button class="ghost" onclick="skipKey()">Skip</button>
       <span id="e-state" class="badge idle hidden"></span>
@@ -152,8 +165,19 @@ async function poll(){
 }
 
 async function saveKey(){
+  // Only post fields the user filled in. write_config merges posted keys over
+  // saved ones, so sending "" for an untouched field would wipe a saved key.
+  const body = {};
+  const gk = $("gk").value.trim();
+  const ck = $("clickup_api_key").value.trim();
+  const cl = $("clickup_list_id").value.trim();
+  const on = $("owner_name").value.trim();
+  if(gk) body.gemini_key = gk;
+  if(ck) body.clickup_api_key = ck;
+  if(cl) body.clickup_list_id = cl;
+  if(on) body.owner_name = on;
   try{
-    await P("/api/config", {gemini_key: $("gk").value});
+    await P("/api/config", body);
     badge("e-state", "Saved", "ok"); $("e-state").classList.remove("hidden");
   }catch(e){
     badge("e-state", "Could not save", "wait"); $("e-state").classList.remove("hidden");
