@@ -109,6 +109,10 @@ class Store:
                 db.execute("ALTER TABLE entities ADD COLUMN email_addr TEXT DEFAULT ''")
             if "notes" not in ent_cols:
                 db.execute("ALTER TABLE entities ADD COLUMN notes TEXT DEFAULT ''")
+            if "profile" not in ent_cols:
+                db.execute("ALTER TABLE entities ADD COLUMN profile TEXT DEFAULT ''")
+            if "profile_updated_at" not in ent_cols:
+                db.execute("ALTER TABLE entities ADD COLUMN profile_updated_at TEXT DEFAULT ''")
 
             db.execute("""CREATE TABLE IF NOT EXISTS entity_relations(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
