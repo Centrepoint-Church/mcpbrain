@@ -22,7 +22,13 @@ Spec-7 bitemporal shape (current role = valid_to IS NULL), ranked by
 graph_write._source_rank.
 """
 
-from mcpbrain.graph_write import _JUNK_ROLE_VALUES, _SOURCE_RANK
+from mcpbrain.graph_write import (
+    _JUNK_ROLE_VALUES,
+    _SOURCE_RANK,
+    OwnerIdentity,
+    _is_owner as _gw_is_owner,
+    owner_identity_from_config,
+)
 
 
 # A SQL CASE that mirrors graph_write._source_rank ordering, so the role chosen
@@ -39,11 +45,10 @@ _ROLE_SOURCE_CASE = (
 _CORE_EMAIL_COUNT_MIN = 5
 
 
-def _is_josh(entity_id: str, name: str) -> bool:
-    """Josh is never a known_people entry. Matches the slug id or any name
-    containing 'josh' (case-insensitive), mirroring graph_write's Josh exclusion.
-    """
-    return entity_id == "josh-kemp" or "josh" in (name or "").lower()
+def _is_install_owner(entity_id: str, name: str, owner: OwnerIdentity) -> bool:
+    """The install owner is never a known_people entry. Matches the owner's
+    entity slug or name, mirroring graph_write's owner exclusion."""
+    return entity_id == owner.entity_id or _gw_is_owner(name, owner)
 
 
 def _clean_role(value):
@@ -100,10 +105,11 @@ def read_areas(store) -> list[dict]:
     return out
 
 
-def build_known_people(store, *, batch_thread_ids, core_cap=40) -> list[dict]:
+def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> list[dict]:
     """People whose org and role are confirmed, for the context block.
 
-    Two sources, unioned and deduped by entity id, with Josh excluded:
+    Two sources, unioned and deduped by entity id, with the install owner
+    excluded (owner=None resolves from config):
 
       1. Global core (port of enrich_gmail.py:588-610): person entities with
          email_count >= 5, a confirmed org (org NOT IN ('','unknown')), and a
@@ -119,11 +125,16 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40) -> list[dict]:
     current role or None; `org` may be '' for batch-overlay people. The LLM
     treats present org/role as confirmed (enrich_prompt.md).
     """
+    if owner is None:
+        owner = owner_identity_from_config()
+    # SQL pre-filter on the short name; _add re-checks with the full alias set.
+    owner_like = f"%{owner.name.lower()}%"
+
     seen: set[str] = set()
     out: list[dict] = []
 
     def _add(entity_id, name, org, role):
-        if entity_id in seen or _is_josh(entity_id, name):
+        if entity_id in seen or _is_install_owner(entity_id, name, owner):
             return
         seen.add(entity_id)
         out.append({
@@ -149,11 +160,11 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40) -> list[dict]:
             WHERE e.type = 'person'
               AND e.email_count >= ?
               AND e.org NOT IN ('', 'unknown')
-              AND lower(e.name) NOT LIKE '%josh%'
+              AND lower(e.name) NOT LIKE ?
             ORDER BY e.email_count DESC
             LIMIT ?
             """,
-            (_CORE_EMAIL_COUNT_MIN, core_cap),
+            (_CORE_EMAIL_COUNT_MIN, owner_like, core_cap),
         ).fetchall()
         for r in core_rows:
             _add(r["id"], r["name"], r["org"], r["best_role"])
@@ -176,10 +187,10 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40) -> list[dict]:
                 JOIN entities e ON e.id = ee.entity_id
                 WHERE ec.thread_id IN ({placeholders})
                   AND e.type = 'person'
-                  AND e.id != 'josh-kemp'
-                  AND lower(e.name) NOT LIKE '%josh%'
+                  AND e.id != ?
+                  AND lower(e.name) NOT LIKE ?
                 """,
-                list(batch_thread_ids),
+                list(batch_thread_ids) + [owner.entity_id, owner_like],
             ).fetchall()
             for r in batch_rows:
                 _add(r["id"], r["name"], r["org"], r["best_role"])

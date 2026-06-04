@@ -95,9 +95,12 @@
     <div class="row" style="margin-top:8px">
       <input id="clickup_list_id" type="text" placeholder="ClickUp list ID (e.g. 901610549962)" autocomplete="off" spellcheck="false">
     </div>
-    <p class="desc" style="margin-top:14px">Your first name, as it appears in your emails. The dashboard uses it to show only your actions.</p>
+    <p class="desc" style="margin-top:14px">Your full name and email, as they appear in your mail. Action extraction and the dashboard use them to recognise which actions are yours and which emails are self-notes.</p>
     <div class="row">
-      <input id="owner_name" type="text" placeholder="Your name (e.g. Josh)" autocomplete="off" spellcheck="false">
+      <input id="owner_name" type="text" placeholder="Your full name (e.g. Josh Kemp)" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="owner_email" type="text" placeholder="Your email address" autocomplete="off" spellcheck="false">
     </div>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick="saveKey()">Save</button>
@@ -175,7 +178,14 @@ async function saveKey(){
   if(gk) body.gemini_key = gk;
   if(ck) body.clickup_api_key = ck;
   if(cl) body.clickup_list_id = cl;
-  if(on) body.owner_name = on;
+  if(on){
+    // Full name drives the owner entity id; first name is what the pipeline
+    // writes to actions.owner and the dashboard filters on.
+    body.owner_full_name = on;
+    body.owner_name = on.split(/\s+/)[0];
+  }
+  const oe = $("owner_email").value.trim();
+  if(oe) body.owner_email = oe;
   try{
     await P("/api/config", body);
     badge("e-state", "Saved", "ok"); $("e-state").classList.remove("hidden");
