@@ -220,15 +220,15 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         calendar_service=calendar_service,
         drive_service=drive_service,
     )
+    drain_caps = drain.drain_captures(store)
+    if drain_caps:
+        log.info("captures applied: %d", drain_caps)
     if enrich_mode == "spool":
         prep = prepare.prepare(store, thread_cap=SPOOL_THREAD_CAP,
                                char_budget=SPOOL_CHAR_BUDGET,
                                resolution_due=resolution_due,
                                synthesis_requests=synthesis_requests)
         drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
-        drain_caps = drain.drain_captures(store)
-        if drain_caps:
-            log.info("captures applied: %d", drain_caps)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
     elif enrich_mode == "off":
         result["enrich"] = {"mode": "off"}
