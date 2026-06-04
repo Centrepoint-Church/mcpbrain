@@ -89,6 +89,13 @@ def owner_full_name(home) -> str:
     return read_config(home).get("owner_full_name", "") or "Josh Kemp"
 
 
+def owner_role(home) -> str:
+    """The install owner's working role, used to frame the extraction prompts
+    ("operations manager", "research lead", ...). Defaults to the historical
+    phrasing."""
+    return read_config(home).get("owner_role", "") or "operations manager"
+
+
 def owner_email(home) -> str:
     """The Gmail address the daemon syncs, used by graph_write to detect
     self-emails. Defaults to the historical hardcoded address so an

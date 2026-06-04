@@ -276,3 +276,28 @@ class TestEnrichPromptOwner:
         assert "EXCLUDE Sarah Chen" in p
         assert "tasks Sarah must act on" in p
         assert "Josh Kemp" not in p
+
+
+# ---------------------------------------------------------------------------
+# owner_role
+# ---------------------------------------------------------------------------
+
+class TestOwnerRole:
+    def test_defaults_to_operations_manager(self, tmp_path):
+        from mcpbrain.config import owner_role
+        home = _write_config(tmp_path, {})
+        assert owner_role(home) == "operations manager"
+
+    def test_configured(self, tmp_path):
+        from mcpbrain.config import owner_role
+        home = _write_config(tmp_path, {"owner_role": "Research Lead"})
+        assert owner_role(home) == "Research Lead"
+
+    def test_role_named_in_enrich_prompt(self, tmp_path, monkeypatch):
+        from mcpbrain.enrich import build_prompt
+        monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+        _write_config(tmp_path, {
+            "owner_full_name": "Sarah Chen", "owner_role": "Research Lead"})
+        p = build_prompt("doc", {})
+        assert "Sarah Chen (Research Lead)" in p
+        assert "operations manager" not in p

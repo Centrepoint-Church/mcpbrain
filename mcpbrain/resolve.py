@@ -113,8 +113,10 @@ def _adjudicate(client, a, b, model=None) -> dict:
     Returns {"same": bool, "canonical": str}. The generate_content CALL may
     raise (API error) — the caller handles that. Unparseable output -> {"same": False}."""
     model = model or _DEFAULT_MODEL
+    from mcpbrain import config as _config
+    _role = _config.owner_role(str(_config.app_dir()))
     prompt = (
-        "You are deduplicating a knowledge graph for an operations manager. "
+        f"You are deduplicating a knowledge graph for its owner ({_role}). "
         "Are these two entries the SAME real-world entity?\n"
         f"A: name={json.dumps(a['name'])} type={a['type']}\n"
         f"B: name={json.dumps(b['name'])} type={b['type']}\n"
