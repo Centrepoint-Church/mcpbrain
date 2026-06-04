@@ -200,3 +200,42 @@ def validate_batch_file(d: object) -> list[str]:
                     problems.append(f"synthesis[{i}]: thread_id must be a non-empty string")
 
     return problems
+
+
+_CAPTURE_KINDS = {"ingest", "action_create", "action_update"}
+_OBSERVATION_TYPES = {"memory", "decision", "note", "reference"}
+_ACTION_STATUSES = {"open", "done"}
+
+
+def validate_capture(d: object) -> list[str]:
+    """Validate one capture envelope (the MCP write tools' spool format).
+
+    Structural only, same philosophy as validate_extraction: an empty list
+    means valid. The daemon drain quarantines envelopes that fail.
+    """
+    if not isinstance(d, dict):
+        return ["capture envelope must be a JSON object with a valid kind"]
+    problems: list[str] = []
+    kind = d.get("kind")
+    if kind not in _CAPTURE_KINDS:
+        problems.append(f"kind must be one of {sorted(_CAPTURE_KINDS)}, got {kind!r}")
+        return problems
+    if kind == "ingest":
+        for field in ("title", "content"):
+            v = d.get(field)
+            if not isinstance(v, str) or not v.strip():
+                problems.append(f"{field} must be a non-empty string")
+        ot = d.get("observation_type", "note") or "note"
+        if ot not in _OBSERVATION_TYPES:
+            problems.append(
+                f"observation_type must be one of {sorted(_OBSERVATION_TYPES)}, got {ot!r}")
+    elif kind == "action_create":
+        v = d.get("text")
+        if not isinstance(v, str) or not v.strip():
+            problems.append("text must be a non-empty string")
+    elif kind == "action_update":
+        if not isinstance(d.get("action_id"), int):
+            problems.append("action_id must be an integer")
+        if d.get("status") not in _ACTION_STATUSES:
+            problems.append(f"status must be one of {sorted(_ACTION_STATUSES)}")
+    return problems
