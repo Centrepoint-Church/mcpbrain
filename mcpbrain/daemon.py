@@ -653,16 +653,16 @@ class Daemon:
         # consuming the cadence) and pass it through; maybe_resolve still runs
         # after this cycle and advances the clock.
         resolution_due = self._resolve_due()
-        # Snapshot pending_synthesis and pass to prepare via run_cycle; reset
-        # after so the same requests are not re-sent on the next cycle.
+        # Stashed synthesis/block requests are RE-ATTACHED every cycle, not
+        # consumed by one: prepare rewrites pending.json each cycle, so a
+        # one-shot attach survives only until the next rewrite (~one interval)
+        # unless the out-of-band extractor happens to read the file in that
+        # window (live 2026-06-05 loss). Each stash is cleared below, once the
+        # drain summary shows its answers actually came back; until then every
+        # rewritten pending.json carries the same requests.
         synthesis_requests = self._pending_synthesis
-        # Merge extra block requests (blocks + audit cadences) into a single
-        # extra_blocks dict for prepare.prepare(). Reset after each cycle.
-        extra_blocks: dict | None = None
-        if self._pending_blocks or self._pending_audit:
-            extra_blocks = {}
-            extra_blocks.update(self._pending_blocks)
-            extra_blocks.update(self._pending_audit)
+        merged = {**self._pending_blocks, **self._pending_audit}
+        extra_blocks = {k: v for k, v in merged.items() if v} or None
         result = run_cycle(self._store, self._embedder,
                            enrich_client=enrich_client,
                            enrich_limit=self._enrich_batch,
@@ -671,9 +671,15 @@ class Daemon:
                            synthesis_requests=synthesis_requests,
                            extra_blocks=extra_blocks,
                            **services)
-        self._pending_synthesis = []
-        self._pending_blocks = {}
-        self._pending_audit = {}
+        drained = ((result or {}).get("enrich") or {}).get("drain") or {}
+        if drained.get("synthesis_written"):
+            self._pending_synthesis = []
+        for key in list(self._pending_blocks):
+            if f"{key}_drained" in drained:
+                del self._pending_blocks[key]
+        for key in list(self._pending_audit):
+            if f"{key}_drained" in drained:
+                del self._pending_audit[key]
         return result
 
     # -- periodic backup ----------------------------------------------------

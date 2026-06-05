@@ -374,20 +374,26 @@ def test_maybe_synthesise_advances_clock_only_on_success(tmp_path):
     assert daemon._last_synthesise == 5.0
 
 
-def test_maybe_synthesise_pending_synthesis_reset_after_run_one(tmp_path):
-    """After run_one(), _pending_synthesis is reset to [] regardless of what prepare does."""
+def test_pending_synthesis_kept_until_drained(tmp_path):
+    """_pending_synthesis survives run_one() until the drain reports synthesis
+    answers. prepare REWRITES pending.json every cycle, so a one-shot attach
+    was overwritten a minute later unless the extractor read the file inside a
+    single interval (live 2026-06-05 loss)."""
     store, daemon = _synth_daemon(tmp_path, synthesise_interval_s=3600.0)
-
-    # Pre-load pending synthesis.
     daemon._pending_synthesis = [{"thread_id": "t-pre"}]
 
-    # Stub out run_cycle so run_one doesn't need real services.
-    with patch("mcpbrain.daemon.run_cycle", return_value={"enrich": {}}):
+    # No synthesis answers drained yet -> stash kept, re-sent next cycle.
+    with patch("mcpbrain.daemon.run_cycle",
+               return_value={"enrich": {"mode": "spool", "drain": {}}}):
         daemon.run_one()
+    assert daemon._pending_synthesis == [{"thread_id": "t-pre"}]
 
-    assert daemon._pending_synthesis == [], (
-        "_pending_synthesis must be reset to [] after run_one"
-    )
+    # Drain reports the answers came back -> stash cleared.
+    with patch("mcpbrain.daemon.run_cycle",
+               return_value={"enrich": {"mode": "spool",
+                                        "drain": {"synthesis_written": 1}}}):
+        daemon.run_one()
+    assert daemon._pending_synthesis == []
 
 
 # ---------------------------------------------------------------------------
@@ -874,25 +880,63 @@ def test_maybe_audit_swallows_errors(tmp_path):
 
 
 def test_pending_blocks_and_audit_merged_in_run_one(tmp_path):
-    """run_one() passes merged _pending_blocks + _pending_audit as extra_blocks
-    and resets both after the cycle."""
+    """run_one() passes merged _pending_blocks + _pending_audit as extra_blocks,
+    re-attaching every cycle until the drain reports each key's answers."""
     store, daemon = _blocks_daemon(tmp_path)
 
-    daemon._pending_blocks = {"profile_synthesis": [{"entity_id": "e-1"}]}
+    daemon._pending_blocks = {"profile_synthesis": [{"entity_id": "e-1"}],
+                              "community_synthesis": []}   # empty: filtered out
     daemon._pending_audit = {"profile_audit": [{"entity_id": "e-2"}]}
 
-    captured = {}
+    seen = []
 
     def fake_run_cycle(store, embedder, *, extra_blocks=None, **kw):
-        captured["extra_blocks"] = extra_blocks
-        return {"enrich": {}}
+        seen.append(extra_blocks)
+        return {"enrich": {"mode": "spool", "drain": {}}}
+
+    # Two cycles with no block answers drained: re-attached BOTH times
+    # (prepare rewrites pending.json each cycle; a one-shot attach is lost).
+    with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
+        daemon.run_one()
+        daemon.run_one()
+    assert seen == [{
+        "profile_synthesis": [{"entity_id": "e-1"}],
+        "profile_audit": [{"entity_id": "e-2"}],
+    }] * 2
+    assert daemon._pending_blocks.get("profile_synthesis")
+    assert daemon._pending_audit.get("profile_audit")
+
+
+def test_pending_blocks_cleared_per_key_when_drained(tmp_path):
+    """A key's stash is cleared once the drain summary carries <key>_drained;
+    unanswered keys stay stashed and keep re-attaching."""
+    store, daemon = _blocks_daemon(tmp_path)
+    daemon._pending_blocks = {"profile_synthesis": [{"entity_id": "e-1"}],
+                              "memory_distil": [{"doc_id": "note-1"}]}
+    daemon._pending_audit = {"profile_audit": [{"entity_id": "e-2"}]}
+
+    with patch("mcpbrain.daemon.run_cycle",
+               return_value={"enrich": {"mode": "spool",
+                                        "drain": {"profile_synthesis_drained": 1,
+                                                  "profile_audit_drained": 1}}}):
+        daemon.run_one()
+    assert "profile_synthesis" not in daemon._pending_blocks
+    assert daemon._pending_audit == {}
+    assert daemon._pending_blocks.get("memory_distil")  # unanswered: kept
+
+    seen = []
+
+    def fake_run_cycle(store, embedder, *, extra_blocks=None, **kw):
+        seen.append(extra_blocks)
+        return {"enrich": {"mode": "spool",
+                           "drain": {"memory_distil_drained": 2}}}
 
     with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
         daemon.run_one()
-
-    assert captured["extra_blocks"] == {
-        "profile_synthesis": [{"entity_id": "e-1"}],
-        "profile_audit": [{"entity_id": "e-2"}],
-    }
+    assert seen == [{"memory_distil": [{"doc_id": "note-1"}]}]
     assert daemon._pending_blocks == {}
-    assert daemon._pending_audit == {}
+
+    # Nothing left: extra_blocks goes back to None.
+    with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
+        daemon.run_one()
+    assert seen[-1] is None
