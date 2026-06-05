@@ -71,18 +71,25 @@ def _check_one(store, path: Path) -> None:
         fh.seek(cursor)
         new_region = fh.read()
 
-    # Cap at the last TAIL_BYTES of the new region.
+    # Hash the FULL new region before capping so two distinct multi-KB errors
+    # that share the same last 4KB still produce different fingerprints.
+    fp = hashlib.sha256(new_region).hexdigest()[:12]
+
+    # Cap the stored detail at the last TAIL_BYTES — enough to diagnose without
+    # letting a runaway log fill the findings table.
     if len(new_region) > TAIL_BYTES:
         new_region = new_region[-TAIL_BYTES:]
     content = new_region.decode("utf-8", errors="replace").strip()
 
     if not content:
         # Whitespace-only growth: advance cursor, no finding.
+        # (fp is already computed above; we just don't record the finding.)
         store.set_cursor(cursor_key, str(size))
         return
-
-    fp = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
     label = _agent_label(filename)
+    # record_finding upserts on UNIQUE(finding_type, ref_id) and clears
+    # resolved_at, so a dismissed finding coming back means the agent is still
+    # failing — that's intentional: recurrence reopens the finding by design.
     store.record_finding(
         FINDING_TYPE,
         ref_id=f"{filename}:{fp}",
