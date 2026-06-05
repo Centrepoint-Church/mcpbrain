@@ -252,6 +252,21 @@ def test_reobserving_superseded_pair_revives_not_unique_error(tmp_path):
     assert s.get_entity("a")["degree"] == deg_before
 
 
+def test_revive_updates_source_doc_id_to_new_evidence(tmp_path):
+    """A revived relation must carry the doc id of the evidence that revived it,
+    not the original source_doc_id from when it was first observed."""
+    s = _store(tmp_path)
+    _mk_ent(s, "a"); _mk_ent(s, "orgx", "org"); _mk_ent(s, "orgy", "org")
+    gw.upsert_relation(s, "a", "works_at", "orgx", valid_from="2026-04-01",
+                       evidence="msg-old")
+    gw.upsert_relation(s, "a", "works_at", "orgy", valid_from="2026-05-01",
+                       evidence="msg-mid")
+    gw.upsert_relation(s, "a", "works_at", "orgx", valid_from="2026-06-01",
+                       evidence="msg-new")
+    revived = [r for r in _rels(s) if r["entity_b"] == "orgx"][0]
+    assert revived["source_doc_id"] == "msg-new"
+
+
 def test_accumulating_relation_coexists(tmp_path):
     s = _store(tmp_path)
     _mk_ent(s, "a"); _mk_ent(s, "b"); _mk_ent(s, "c")

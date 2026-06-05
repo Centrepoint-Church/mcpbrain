@@ -34,6 +34,18 @@ def test_keyword_finds_exact_term(tmp_path):
     assert "d-roster" in ids
 
 
+def test_hybrid_search_skips_expired_notes(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("note-budget", "the annual budget review", "h1",
+                   {"source": "note", "expired": True})
+    s.upsert_chunk("d-other", "the volunteer roster", "h2", {})
+    from mcpbrain.index import index_pending
+    index_pending(s, FakeEmbedder())
+    ids = [r["doc_id"] for r in hybrid_search(s, FakeEmbedder(), "budget", limit=5)]
+    assert "note-budget" not in ids   # expired note must not surface
+
+
 # --- action freshness (Task 4.4) -----------------------------------------
 
 # RFC2822 dates: msg-a is earlier, msg-b is later.

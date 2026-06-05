@@ -39,6 +39,25 @@ def test_read_rejects_paths_outside_context(tmp_path, monkeypatch):
         _run(read_context_resource(f"file://{tmp_path}/config.json"))
 
 
+def test_read_rejects_nested_subdir_path(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    sub = tmp_path / "context" / "sub"
+    sub.mkdir(parents=True)
+    (sub / "x.md").write_text("nested")
+    with pytest.raises(ValueError):
+        _run(read_context_resource(f"file://{sub}/x.md"))
+
+
+def test_read_rejects_parent_escape_path(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "context").mkdir()
+    (tmp_path / "escape.md").write_text("escaped")
+    with pytest.raises(ValueError):
+        _run(read_context_resource(f"file://{tmp_path}/context/../escape.md"))
+
+
 def test_missing_context_dir_lists_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     assert _run(list_context_resources()) == []
