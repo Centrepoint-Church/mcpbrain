@@ -86,8 +86,8 @@ def test_run_cycle_gemini_unchanged(monkeypatch):
     store = FakeStore(unenriched=[
         {"doc_id": "d1", "text": "body", "metadata": {}},
     ])
-    res = run_cycle(store, FakeEmbedder(), enrich_mode="gemini",
-                    enrich_client="client")
+    run_cycle(store, FakeEmbedder(), enrich_mode="gemini",
+              enrich_client="client")
 
     names = [c[0] for c in calls]
     assert names == ["enrich"]

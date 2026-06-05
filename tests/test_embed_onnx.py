@@ -1,4 +1,5 @@
-import json, math
+import json
+import math
 from pathlib import Path
 from mcpbrain.embed import get_embedder
 

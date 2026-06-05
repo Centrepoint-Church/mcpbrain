@@ -14,7 +14,6 @@ def _store(tmp_path):
 
 def test_prepare_merges_extra_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    s = _store(tmp_path)
     # No unenriched threads -> prepare returns zero summary and writes nothing,
     # so test the merge helper directly.
     data = {"batch_id": "b1", "threads": [], "context": {}, "merge_review": []}

@@ -3,7 +3,6 @@ import json
 import sqlite3
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from mcpbrain.control_api import ControlServer
 

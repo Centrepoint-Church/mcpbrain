@@ -56,8 +56,8 @@ def test_action_is_stale_when_thread_has_resolution_reply(tmp_path):
     s.upsert_chunk("gmail-t1-b", "Done, sent it through.", "h2",
                    {"thread_id": "t1", "message_id": "msg-b",
                     "date": _DATE_LATE, "source_type": "gmail"})
-    action_id = s.add_action("Send the campus budget", owner="Josh",
-                             source_doc_id="gmail-t1-a", thread_id="t1")
+    s.add_action("Send the campus budget", owner="Josh",
+                 source_doc_id="gmail-t1-a", thread_id="t1")
     action = s.list_actions()[0]
 
     assert action_is_stale(s, action) is True

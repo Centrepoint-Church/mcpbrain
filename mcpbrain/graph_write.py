@@ -26,7 +26,6 @@ from mcpbrain import config, orgs
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     _normalise_title_for_dedup,
     action_fingerprint as _compute_fingerprint,
-    slugify,
 )
 
 log = logging.getLogger("mcpbrain.graph_write")

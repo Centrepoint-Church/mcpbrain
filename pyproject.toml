@@ -86,3 +86,13 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 extend-exclude = ["build"]
+
+[tool.ruff.lint]
+ignore = [
+    "E701", "E702",  # one-line `x; y` / `finally: x` compaction is house style
+    "E731",          # lambda assignment used deliberately for tiny shims
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files import mid-file to mark task sections; keep that structure.
+"tests/*" = ["E402"]

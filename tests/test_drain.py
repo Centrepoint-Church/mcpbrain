@@ -14,7 +14,6 @@ end-to-end round trip against the real apply lives in test_integration_spool.py.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 

@@ -2,7 +2,6 @@
 
 import base64
 
-import pytest
 
 from mcpbrain.chunking import content_hash
 from mcpbrain.sync.normalise import Chunk, normalise_gmail

@@ -1,4 +1,5 @@
-import urllib.request, urllib.error
+import urllib.request
+import urllib.error
 import pytest
 from mcpbrain import control_api
 from mcpbrain.control_api import ControlServer

@@ -5,9 +5,8 @@ Sub-tasks covered:
   1.2  _save + run entry point
 """
 
-import pytest
 from mcpbrain.store import Store
-from mcpbrain.communities import build_graph, detect_communities, _save, run
+from mcpbrain.communities import build_graph, detect_communities, run
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +213,7 @@ def test_run_replaces_completely(tmp_path):
         db.execute(
             "DELETE FROM entity_relations WHERE entity_a='x3' AND entity_b='y1'"  # admin-delete-ok
         )
-    second = run(s)
+    run(s)
 
     # y1 has no edges now, so it must NOT appear in entity_communities.
     leftover = s.communities_for(["y1"])

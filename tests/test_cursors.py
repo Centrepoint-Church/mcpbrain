@@ -1,6 +1,5 @@
 """Tests for per-source sync cursors — advance-after-durable-write semantics."""
 import pytest
-from pathlib import Path
 
 from mcpbrain.store import Store
 from mcpbrain.sync.cursors import advance_after, get_cursor, set_cursor

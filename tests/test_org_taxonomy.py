@@ -13,7 +13,6 @@ Pins three things:
 import json
 from datetime import datetime, timezone
 
-import pytest
 
 from mcpbrain import contract, drain, orgs
 import mcpbrain.graph_write as gw

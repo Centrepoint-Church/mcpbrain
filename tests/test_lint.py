@@ -7,7 +7,6 @@ Sub-tasks covered:
   2.2  build_report counts + run() findings sink
 """
 
-import pytest
 from mcpbrain.store import Store
 from mcpbrain.lint_graph import (
     check_missing_org,

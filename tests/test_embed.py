@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from mcpbrain.embed import get_embedder, contextual_prefix
 
 

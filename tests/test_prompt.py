@@ -6,7 +6,6 @@ functions. These functions feed pending.json's `context` block; the consuming
 contract is mcpbrain/enrich_prompt.md.
 """
 
-from pathlib import Path
 
 from mcpbrain import prompt
 from mcpbrain.store import Store

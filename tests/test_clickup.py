@@ -1,12 +1,10 @@
 """Tests for mcpbrain.clickup — stdlib urllib mocked throughout."""
 from __future__ import annotations
 
-import io
 import json
 import unittest.mock as mock
 from pathlib import Path
 
-import pytest
 
 from mcpbrain import clickup
 
