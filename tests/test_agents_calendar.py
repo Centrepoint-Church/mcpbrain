@@ -53,6 +53,14 @@ def test_prune_commits_hot_md():
     assert "cd /Users/josh/joshbrain" in plist
 
 
+def test_prune_commit_scoped_to_hot_md():
+    # Both the diff check and the commit carry a pathspec: files another
+    # session left staged must neither trigger nor join the launchd commit.
+    plist = _prune()
+    assert "git diff --cached --quiet -- state/hot.md" in plist
+    assert "git commit -m 'prune: hot.md (launchd)' -- state/hot.md" in plist
+
+
 def test_prune_xml_escapes_shell_operators():
     # && must be XML-escaped as &amp;&amp; for the plist to be well-formed.
     plist = _prune()
