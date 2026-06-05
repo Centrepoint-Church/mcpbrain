@@ -226,6 +226,32 @@ def test_singleton_relation_supersedes(tmp_path):
     assert new["invalidated_at"] is None
 
 
+def test_reobserving_superseded_pair_revives_not_unique_error(tmp_path):
+    """Re-observing a pair whose row was superseded must revive that row, not
+    INSERT into the legacy UNIQUE(entity_a,relation,entity_b) (live drain bug:
+    'UNIQUE constraint failed' aborted the whole thread apply, 2026-06-05)."""
+    s = _store(tmp_path)
+    _mk_ent(s, "a"); _mk_ent(s, "orgx", "org"); _mk_ent(s, "orgy", "org")
+    gw.upsert_relation(s, "a", "works_at", "orgx", valid_from="2026-04-01")
+    gw.upsert_relation(s, "a", "works_at", "orgy", valid_from="2026-05-01")
+    deg_before = s.get_entity("a")["degree"]
+    # Third observation goes BACK to orgx: must not raise sqlite3.IntegrityError.
+    rid = gw.upsert_relation(s, "a", "works_at", "orgx", valid_from="2026-06-01")
+    rows = _rels(s)
+    assert len(rows) == 2                     # revived, no third row
+    revived = [r for r in rows if r["entity_b"] == "orgx"][0]
+    assert rid == revived["id"]
+    assert revived["invalidated_at"] is None  # live again
+    assert revived["valid_to"] is None
+    assert revived["valid_from"] == "2026-06-01"
+    # works_at is a singleton: orgy must now be superseded by the revival.
+    orgy = [r for r in rows if r["entity_b"] == "orgy"][0]
+    assert orgy["invalidated_at"] is not None
+    assert orgy["invalidated_by_relation_id"] == revived["id"]
+    # Revival is a re-observation, not a new edge: degree unchanged.
+    assert s.get_entity("a")["degree"] == deg_before
+
+
 def test_accumulating_relation_coexists(tmp_path):
     s = _store(tmp_path)
     _mk_ent(s, "a"); _mk_ent(s, "b"); _mk_ent(s, "c")
