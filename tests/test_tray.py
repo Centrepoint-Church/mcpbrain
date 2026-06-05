@@ -69,15 +69,15 @@ def test_status_text_daemon_down():
 
 def test_menu_toggle_and_enabled_flags():
     # Running: shows Pause, enabled.
-    labels = [(l, e) for (l, _, e) in _ctrl().menu_items()]
+    labels = [(lab, e) for (lab, _, e) in _ctrl().menu_items()]
     assert ("Pause", True) in labels
     # Paused: shows Resume.
-    assert any(l == "Resume" and e for (l, _, e) in _ctrl(paused=True).menu_items())
+    assert any(lab == "Resume" and e for (lab, _, e) in _ctrl(paused=True).menu_items())
     # Down: toggle present but disabled; status line + Quit still there.
     down = _ctrl(up=False).menu_items()
     assert down[0][2] is False                      # status line disabled
-    assert any(l == "Quit" and e for (l, _, e) in down)
-    assert any(l == "Pause" and e is False for (l, _, e) in down)
+    assert any(lab == "Quit" and e for (lab, _, e) in down)
+    assert any(lab == "Pause" and e is False for (lab, _, e) in down)
 
 
 def test_pause_resume_call_client_and_refresh():

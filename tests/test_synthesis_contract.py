@@ -6,7 +6,6 @@ Covers:
   3.3  drain_synthesis (drain-side) + round-trip acceptance test
 """
 
-import pytest
 
 from mcpbrain.store import Store
 from mcpbrain.synthesise_threads import (

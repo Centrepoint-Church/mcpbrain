@@ -57,7 +57,7 @@ def test_profiled_entity_not_rerequested(tmp_path):
 
 
 def test_drainer_registered_and_callable(tmp_path):
-    from mcpbrain import profile_synth as _ps  # noqa: ensures registration
+    from mcpbrain import profile_synth as _ps  # noqa: F401 — import registers the drainer
     from mcpbrain.drain import BLOCK_DRAINERS
     s = _store(tmp_path)
     eid = _person(s, "Taryn Hamilton")

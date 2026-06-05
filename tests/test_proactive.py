@@ -4,7 +4,6 @@ Sub-tasks 4.1 (detectors), 4.2 (run + findings sink).
 """
 
 import datetime as dt
-import pytest
 from mcpbrain.store import Store
 
 
@@ -161,7 +160,6 @@ def test_proactive_run_records_findings(tmp_path):
     from mcpbrain.proactive import run
     store = _make_store(tmp_path)
     now = "2026-06-03T10:00:00+00:00"
-    today_str = "2026-06-03"
 
     # Project gap
     _insert_project(store, "p-gap", name="Gapped Project")

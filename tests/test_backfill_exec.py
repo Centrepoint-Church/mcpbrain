@@ -460,7 +460,6 @@ def test_initial_backfill_date_math(tmp_path):
     """With now=2026-05-31 and days=10, the after/modified_after strings
     passed to the fake services must be 2026/05/21 (Gmail) and
     2026-05-21T00:00:00Z (Drive)."""
-    from mcpbrain.embed import get_embedder
 
     class _FakeEmbedder:
         dim = 4

@@ -11,7 +11,6 @@ lazy real imports never fire.
 import datetime as _datetime
 import json
 
-import pytest
 
 from mcpbrain import prepare
 

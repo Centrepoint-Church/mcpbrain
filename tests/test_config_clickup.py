@@ -2,7 +2,6 @@
 import json
 from pathlib import Path
 
-import pytest
 
 from mcpbrain.config import clickup_api_key, clickup_list_id
 

@@ -1,4 +1,6 @@
-import json, urllib.request, urllib.error
+import json
+import urllib.request
+import urllib.error
 from mcpbrain.control_api import ControlServer
 
 class FakeDaemon:

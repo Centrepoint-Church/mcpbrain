@@ -24,7 +24,7 @@ KEPT checks (all tables exist from Phase 1 / Phase 3 Task 0):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from nameparser import HumanName

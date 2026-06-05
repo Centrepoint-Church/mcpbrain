@@ -7,11 +7,10 @@ Sub-task 5.2: store.inbound_chunks_since + run entry point.
 import json
 import pytest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from mcpbrain import graph_write as gw
 from mcpbrain.store import Store
-from mcpbrain.waiting_on import _normalise, _matches, _is_outbound, reconcile, run
+from mcpbrain.waiting_on import _normalise, _matches, reconcile, run
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +152,7 @@ def test_reconcile_ignores_outbound(store):
 
 def test_reconcile_only_clears_once_per_action(store):
     """Two matching chunks -> action cleared once (break after first match)."""
-    action_id = _add_action(store, waiting_on="Taryn Hamilton")
+    _add_action(store, waiting_on="Taryn Hamilton")
     chunks = [
         _make_chunk(doc_id="chunk-a", sender_name="Taryn Hamilton"),
         _make_chunk(doc_id="chunk-b", sender_name="taryn hamilton"),
@@ -230,7 +229,7 @@ def test_waiting_on_run_clears_and_advances_cursor(store):
     # Insert a chunk (inbound) with a date
     _insert_chunk(store, "chunk-taryn", date="2026-06-01", sender="Taryn Hamilton")
     # Add an open waiting action
-    action_id = _add_action(store, waiting_on="Taryn Hamilton")
+    _add_action(store, waiting_on="Taryn Hamilton")
     now = datetime.now(timezone.utc).isoformat()
 
     result = run(store, now=now)
@@ -245,7 +244,7 @@ def test_waiting_on_run_advances_cursor_so_second_run_sees_no_new(store):
     """Second run with no new chunks after cursor advanced -> cleared=0."""
     _insert_chunk(store, "chunk-taryn", date="2026-06-01", sender="Taryn Hamilton")
     # Insert a new waiting action for the second run check
-    action_id = _add_action(store, waiting_on="Taryn Hamilton")
+    _add_action(store, waiting_on="Taryn Hamilton")
     now = datetime.now(timezone.utc).isoformat()
 
     # First run: clears

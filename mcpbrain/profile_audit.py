@@ -102,7 +102,6 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
         return {"corrections_applied": 0}
 
     applied = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
     today = datetime.now(timezone.utc).date().isoformat()
 
     for item in items:

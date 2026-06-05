@@ -7,7 +7,6 @@ path and exercises the ported write-path functions against it.
 import json
 from pathlib import Path
 
-import pytest
 
 from mcpbrain import graph_write as gw
 from mcpbrain.store import Store
@@ -201,7 +200,7 @@ def test_relation_reobservation_bumps(tmp_path):
     _mk_ent(s, "a"); _mk_ent(s, "b", "org")
     gw.upsert_relation(s, "a", "mentioned_with", "b", valid_from="2026-04-01")
     deg_after_first = s.get_entity("a")["degree"]
-    rid2 = gw.upsert_relation(s, "a", "mentioned_with", "b", valid_from="2026-04-10")
+    gw.upsert_relation(s, "a", "mentioned_with", "b", valid_from="2026-04-10")
     rows = _rels(s)
     assert len(rows) == 1  # re-observation, no new row
     assert rows[0]["confidence"] > 1.0 - 1e-9 or rows[0]["confidence"] >= 1.0
@@ -271,7 +270,7 @@ def test_apply_writes_entities_and_email_context(tmp_path):
     # INBOX is a Gmail system label, stripped from stored custom labels.
     assert ec["labels"] == ""
     # Sender linked.
-    sender_links = [l for l in links if l["entity_id"] == joel["id"]]
+    sender_links = [lk for lk in links if lk["entity_id"] == joel["id"]]
     assert sender_links and sender_links[0]["role"] == "sender"
 
 
@@ -931,9 +930,9 @@ def test_no_email_sender_inherits_thread_org(tmp_path):
     s = _store(tmp_path)
     # Display name only, no resolvable email address.
     gw.apply(s, _sender_ext("Centrepoint", "Bob Builder"), doc_ids=["d1"])
-    bob = s.find_entity("Bob Builder")
-    # No email → no sender entity is upserted (needs name + email), so assert
-    # the org logic directly via the email_context org instead.
+    # No email → no sender entity is upserted (needs name + email); assert
+    # that, then check the org logic via the email_context org instead.
+    assert s.find_entity("Bob Builder") is None
     with s._connect() as db:
         ec = dict(db.execute(
             "SELECT * FROM email_context WHERE message_id='ms-1'").fetchone())
