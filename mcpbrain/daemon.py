@@ -1232,7 +1232,16 @@ class Daemon:
             self.ensure_services()
             while not self._stop.is_set():
                 self._wake.clear()          # clear before the cycle; a sync_now during the cycle re-sets it
-                self.run_one()
+                try:
+                    self.run_one()
+                except Exception as exc:  # noqa: BLE001 — a transient cycle error must not kill the daemon
+                    # Crashing here would hand the failure to launchd, whose
+                    # restart resets every cadence anchor and drops stashed
+                    # block/synthesis requests (live 2026-06-05 Gmail-timeout
+                    # crash loop). Log and retry on the next interval; the
+                    # skipped _pending_* resets in run_one preserve the stash.
+                    log.error("cycle failed; retrying next interval: %s",
+                              exc, exc_info=True)
                 # Backup self-gates on configured + due; harmless when paused
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
