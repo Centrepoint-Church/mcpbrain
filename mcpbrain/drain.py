@@ -357,16 +357,15 @@ def drain_captures(store, *, home=None) -> int:
             text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
             chash = content_hash(text)
             doc_id = f"note-{chash[:32]}"
-            is_new = store.get_chunk(doc_id) is None
             try:
-                store.upsert_chunk(doc_id, text, chash,
+                changed = store.upsert_chunk(doc_id, text, chash,
                                    {"source": "note", "title": env["title"],
                                     "observation_type": env.get("observation_type", "note"),
                                     # tags stored for future FTS indexing (not yet live)
                                     "tags": env.get("tags", ""),
                                     "org": env.get("org", ""),
                                     "captured_at": env.get("captured_at", "")})
-                if is_new:
+                if changed:
                     store.record_change("capture_ingest", ref_id=doc_id,
                                         summary=f"Saved note '{env['title'][:60]}'")
                     applied += 1

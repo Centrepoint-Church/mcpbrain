@@ -31,7 +31,11 @@ async def read_context_resource(uri) -> str:
     """
     ctx = (config.app_dir() / "context").resolve()
     path = Path(str(uri).replace("file://", "")).resolve()
-    if path.parent != ctx:
+    # Containment, defence in depth: the file must sit directly in context/
+    # (parent == ctx) AND ctx must be an ancestor of the resolved path. The
+    # second check rejects nested subdirs and any ../ escape that resolves out
+    # of the context tree.
+    if path.parent != ctx or ctx not in path.parents:
         raise ValueError(f"resource outside context dir: {uri}")
     return path.read_text(encoding="utf-8")
 

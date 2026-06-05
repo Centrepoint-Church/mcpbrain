@@ -32,6 +32,12 @@ def write_capture(home, envelope: dict) -> Path:
     name = f"cap-{stamp}-{secrets.token_hex(3)}.json"
     fd, tmp = tempfile.mkstemp(dir=str(inbox), prefix=".cap.", suffix=".tmp")
     try:
+        # Deliberate: no fsync before os.replace. This is a capture queue, not a
+        # durability log. A power-cut may drop the most recent capture, which is
+        # an acceptable loss here; fsync per write would add latency to every
+        # MCP capture call for no real benefit. A partially-written tmp file
+        # never reaches the inbox (os.replace is atomic), and any malformed
+        # envelope that does land is caught by the drain's quarantine path.
         with os.fdopen(fd, "w") as f:
             json.dump(envelope, f, ensure_ascii=False)
         target = inbox / name

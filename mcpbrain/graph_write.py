@@ -398,9 +398,10 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
                 "UPDATE entity_relations "
                 "SET valid_from = ?, valid_to = NULL, invalidated_at = NULL, "
                 "    superseded_reason = NULL, invalidated_by_relation_id = NULL, "
-                "    confidence = ?, evidence = ?, strength = ?, last_seen = ? "
+                "    confidence = ?, evidence = ?, strength = ?, last_seen = ?, "
+                "    source_doc_id = ? "
                 "WHERE id = ?",
-                (valid_from, confidence, evidence, strength, now, new_id),
+                (valid_from, confidence, evidence, strength, now, evidence, new_id),
             )
         else:
             new_id = conn.execute(

@@ -50,3 +50,14 @@ def test_note_chunks_filters_type_and_expiry(tmp_path):
     assert all_ids == {"note-mem", "note-ref"}   # expired excluded by default
     with_expired = {c["doc_id"] for c in s.note_chunks(include_expired=True)}
     assert "note-old" in with_expired
+
+
+def test_note_chunks_limit_counts_live_not_expired(tmp_path):
+    """LIMIT must apply after the expired filter, newest first — a store full of
+    expired notes must not truncate live ones."""
+    s = _store(tmp_path)
+    # Insert alternating live/expired in rowid order: live-0, exp-1, live-2, ...
+    for i in range(6):
+        _add_note(s, f"note-{i}", otype="memory", expired=(i % 2 == 1))
+    got = s.note_chunks(limit=3)
+    assert [c["doc_id"] for c in got] == ["note-4", "note-2", "note-0"]

@@ -511,12 +511,19 @@ class Store:
                 "WHERE status='open' AND waiting_on IS NOT NULL"
             )
 
-    def upsert_chunk(self, doc_id, text, content_hash, metadata) -> None:
+    def upsert_chunk(self, doc_id, text, content_hash, metadata) -> bool:
+        """Insert or update a chunk. Returns True when a row was inserted or its
+        content changed, False when the call was a no-op (same content_hash).
+
+        Callers use the return value as a single signal for "did this write
+        anything", which closes the crash-retry gap where a read-then-write pair
+        could double-count or silently drop a re-processed envelope.
+        """
         with self._connect() as db:
             cur = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?", (doc_id,))
             row = cur.fetchone()
             if row and row["content_hash"] == content_hash:
-                return  # idempotent: unchanged
+                return False  # idempotent: unchanged
             if row:
                 db.execute(
                     "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=0,enriched=0 WHERE doc_id=?",
@@ -527,6 +534,7 @@ class Store:
                     "INSERT INTO chunks(doc_id,text,content_hash,metadata) VALUES(?,?,?,?)",
                     (doc_id, text, content_hash, json.dumps(metadata)),
                 )
+            return True
 
     def mark_all_unembedded(self) -> None:
         with self._connect() as db:
@@ -706,27 +714,32 @@ class Store:
         """Return capture-note chunks (doc_id starting with 'note-'), with parsed metadata.
 
         Excludes expired chunks (meta["expired"] is truthy) unless include_expired=True.
-        Filters by observation_type if provided. Returns up to `limit` results.
+        Filters by observation_type if provided. Returns the newest `limit` live
+        results (ORDER BY rowid DESC). The limit is applied AFTER the Python-side
+        expired/observation_type filter, so a store full of expired notes never
+        truncates live ones — we iterate the cursor and stop once `limit` live
+        rows are collected rather than pre-truncating in SQL.
         """
-        sql = "SELECT doc_id, text, metadata FROM chunks WHERE doc_id LIKE 'note-%' LIMIT ?"
-        with self._connect() as db:
-            rows = db.execute(sql, (limit,)).fetchall()
-
+        sql = ("SELECT doc_id, text, metadata FROM chunks "
+               "WHERE doc_id LIKE 'note-%' ORDER BY rowid DESC")
         results = []
-        for r in rows:
-            try:
-                meta = json.loads(r["metadata"])
-            except Exception:
-                continue
-            if not include_expired and meta.get("expired"):
-                continue
-            if observation_type is not None and meta.get("observation_type") != observation_type:
-                continue
-            results.append({
-                "doc_id": r["doc_id"],
-                "text": r["text"],
-                "metadata": meta,
-            })
+        with self._connect() as db:
+            for r in db.execute(sql):
+                try:
+                    meta = json.loads(r["metadata"])
+                except Exception:
+                    continue
+                if not include_expired and meta.get("expired"):
+                    continue
+                if observation_type is not None and meta.get("observation_type") != observation_type:
+                    continue
+                results.append({
+                    "doc_id": r["doc_id"],
+                    "text": r["text"],
+                    "metadata": meta,
+                })
+                if len(results) == limit:
+                    break
         return results
 
     def get_cursor(self, source: str) -> str | None:
