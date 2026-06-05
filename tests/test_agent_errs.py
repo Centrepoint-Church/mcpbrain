@@ -141,3 +141,35 @@ def test_no_err_files_is_noop(tmp_path):
     home.mkdir()
     check_agent_errs(s, home)
     assert s.open_findings(FINDING_TYPE) == []
+
+
+def test_full_region_hash_not_tail_hash(tmp_path):
+    """Two errors whose full regions differ but share identical last 4KB must
+    produce two distinct findings, not one deduped finding.
+
+    Before the fix the hash was computed AFTER the 4KB cap, so errors A+shared
+    and B+shared would both hash to sha256(shared) and collapse to one finding.
+    """
+    s = _store(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    shared_tail = "X" * 4096  # exactly 4KB — identical tail
+    region_a = "ERROR_A\n" + shared_tail
+    region_b = "ERROR_B\n" + shared_tail  # same tail, different prefix
+
+    p = home / "church.centrepoint.joshbrain.prune.err"
+
+    # First write: region_a only.
+    p.write_text(region_a)
+    check_agent_errs(s, home)
+    assert len(s.open_findings(FINDING_TYPE)) == 1
+
+    # Append region_b so the new region read from the cursor is region_b.
+    with p.open("a") as fh:
+        fh.write(region_b)
+    check_agent_errs(s, home)
+
+    findings = s.open_findings(FINDING_TYPE)
+    assert len(findings) == 2, (
+        "expected two distinct findings but got one — hash is still computed after cap"
+    )
