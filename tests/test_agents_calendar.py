@@ -23,7 +23,7 @@ def test_prune_uses_calendar_interval():
     plist = _prune()
     assert "StartCalendarInterval" in plist
     assert "<key>Hour</key>" in plist
-    assert "<integer>6</integer>" in plist
+    assert "<key>Hour</key>\n        <integer>6</integer>" in plist
 
 
 def test_prune_no_keep_alive_no_run_at_load():
@@ -54,8 +54,8 @@ def test_health_weekly_monday():
     plist = _health()
     assert "StartCalendarInterval" in plist
     assert "<key>Weekday</key>" in plist
-    assert "<integer>1</integer>" in plist  # Monday
-    assert "<integer>7</integer>" in plist  # 07:00
+    assert "<key>Weekday</key>\n        <integer>1</integer>" in plist
+    assert "<key>Hour</key>\n        <integer>7</integer>" in plist
 
 
 def test_health_no_keep_alive():
