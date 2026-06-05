@@ -100,3 +100,51 @@ def test_context_health_is_executable(tmp_path):
     import os, stat
     mode = (dest / "bin" / "context_health.py").stat().st_mode
     assert mode & stat.S_IXUSR
+
+
+def test_seed_generates_memory_index_and_gitkeep(tmp_path):
+    src, dest = _make_src(tmp_path), tmp_path / "dest"
+    result = _run(src, dest)
+    assert result.returncode == 0, result.stderr
+    assert (dest / "MEMORY.md").exists()
+    assert (dest / "memory" / ".gitkeep").exists()
+    assert "Memory Index" in (dest / "MEMORY.md").read_text()
+
+
+def _load_context_health(dest: Path):
+    """Import the seeded context_health.py as a module bound to dest as JOSHBRAIN."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "seeded_context_health", str(dest / "bin" / "context_health.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_context_health_hot_md_regex_fires_on_stale_bullet(tmp_path):
+    # Functional proof the generated regex matches real bullet-style hot.md
+    # entries (the prior `\*\*(date):` pattern never matched a real entry).
+    src, dest = _make_src(tmp_path), tmp_path / "dest"
+    assert _run(src, dest).returncode == 0
+    # Stale, bullet-style entry well past the 14-day window.
+    (dest / "state" / "hot.md").write_text(
+        "# Hot\n\n- **2020-01-01: Old.** stale entry that should be pruned\n"
+    )
+    mod = _load_context_health(dest)
+    # The module computes JOSHBRAIN from __file__ — the seeded dest IS the tree.
+    warnings = mod._check_hot_md()
+    assert warnings, "expected a stale-entry warning, got none"
+    assert "2020-01-01" in warnings[0]
+
+
+def test_context_health_hot_md_regex_quiet_on_fresh_bullet(tmp_path):
+    src, dest = _make_src(tmp_path), tmp_path / "dest"
+    assert _run(src, dest).returncode == 0
+    from datetime import date
+    today = date.today().isoformat()
+    (dest / "state" / "hot.md").write_text(
+        f"# Hot\n\n- **{today}: Fresh.** recent entry, should not warn\n"
+    )
+    mod = _load_context_health(dest)
+    assert mod._check_hot_md() == []

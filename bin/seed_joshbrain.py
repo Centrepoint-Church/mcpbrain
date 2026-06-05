@@ -121,7 +121,7 @@ _CLAUDE_MD = """\
 | Decision that supersedes earlier behaviour | `state/decisions.md` | Dated row + `Supersedes` column |
 | Rule that should always apply going forward | `CLAUDE.md` (or `reference/*` if conditional) | Bullet under the right heading |
 | Active in-progress work, < 7 days old | `state/hot.md` "Just decided" | 2-4 line entry, date-prefixed |
-| One-shot session detail (what shipped, what bug) | Commit message + `logs/activity.log` | Don't write to hot.md |
+| One-shot session detail (what shipped, what bug) | Commit message | Don't write to hot.md |
 | Cross-session learning from a mistake | `memory/feedback_*.md` | Standalone file + link from MEMORY.md |
 | Centrepoint context / project status change | `reference/ministry-context.md` or `reference/projects.md` | Inline update |
 | Tool / system / integration change | `reference/systems.md` | Inline update |
@@ -256,7 +256,7 @@ cp ~/Documents/GitHub/mcpbrain/config.json.example ~/.mcpbrain/config.json
 
 ## 4. Install launchd agents
 
-Run this Python snippet (from ~/Documents/GitHub/mcpbrain):
+Run with the venv python (`.venv/bin/python3`) from ~/Documents/GitHub/mcpbrain:
 
 ```python
 from mcpbrain.agents import (
@@ -298,21 +298,15 @@ launchctl list | grep centrepoint
 
 ## 5. Register mcpbrain MCP — Claude Code
 
-Edit `~/.claude/settings.json` (create if absent):
+Register the server with `claude mcp add` (not by hand-editing JSON):
 
-```json
-{
-  "mcpServers": {
-    "ops-brain-search": {
-      "command": "/Users/joshkemp/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain",
-      "args": ["mcp"],
-      "env": {
-        "MCPBRAIN_HOME": "/Users/joshkemp/.mcpbrain"
-      }
-    }
-  }
-}
+```bash
+claude mcp add --transport stdio --scope user ops-brain-search \
+  -e MCPBRAIN_HOME=/Users/joshkemp/.mcpbrain \
+  -- /Users/joshkemp/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain mcp
 ```
+
+This writes to `~/.claude.json` (user scope) — NOT `~/.claude/settings.json`, which Claude Code does not read MCP servers from. The `-e KEY=value` flag sets the environment variable (long form: `--env MCPBRAIN_HOME=...`). Verify with `claude mcp list`.
 
 ## 6. Register mcpbrain MCP — Claude Desktop
 
@@ -411,6 +405,8 @@ See `context/preferences.md` for format defaults, collaboration style, and hard 
 
 The file `context/memory.md` in the connected ~/.mcpbrain folder contains Josh's current memory index. Read it when cross-session context helps ("what do we know about X", "what was decided about Y").
 
+`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/joshbrain/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
+
 ## Routing
 
 When something worth recording happens this session:
@@ -455,6 +451,8 @@ Each week: review new memory captures, check context files for drift, and apply 
 2. `state/hot.md` — entries from the last 7 days
 3. `MEMORY.md` in joshbrain — the Claude Code auto-memory index
 4. Recent entries in `~/.mcpbrain/change_log` (if accessible) — system-applied changes since last gardener run
+
+`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/joshbrain/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
 
 ## What you can update
 
@@ -504,6 +502,12 @@ Read every file you changed. Confirm:
 - Role attributions only from confirmed sources
 """
 
+_MEMORY_MD = """\
+# Memory Index
+
+Populated by the Memory Gardener (weekly, Monday). One line per memory file in memory/.
+"""
+
 _CONTEXT_HEALTH_PY = """\
 #!/usr/bin/env python3
 \"\"\"Weekly context health check for joshbrain.
@@ -545,7 +549,7 @@ def _check_hot_md():
     cutoff = date.today() - timedelta(days=_WARN_HOT_DAYS)
     warnings = []
     for line in path.read_text().splitlines():
-        m = re.match(r"\\*\\*(\\d{4}-\\d{2}-\\d{2}):", line)
+        m = re.match(r"^\\s*[-*]\\s+(?:\\*\\*\\s*)?(\\d{4}-\\d{2}-\\d{2})", line)
         if m:
             entry_date = date.fromisoformat(m.group(1))
             if entry_date < cutoff:
@@ -639,6 +643,8 @@ def main() -> None:
         "cowork/context-project.md": _COWORK_CONTEXT_PROJECT_MD,
         "cowork/memory-gardener.md": _COWORK_MEMORY_GARDENER_MD,
         "bin/context_health.py": _CONTEXT_HEALTH_PY,
+        "MEMORY.md": _MEMORY_MD,
+        "memory/.gitkeep": "",
     }
     for rel, content in generated_files.items():
         dest_file = dest / rel
