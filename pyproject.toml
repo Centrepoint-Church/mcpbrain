@@ -18,6 +18,13 @@ dependencies = [
   "google-auth>=2",               # google.auth.transport.requests / oauth2.credentials (auth.py)
   "google-auth-oauthlib>=1",      # google_auth_oauthlib OAuth flow (auth.py)
   "google-auth-httplib2>=0.1",    # httplib2 transport for google-auth
+  # Graph cadences (communities.py / lint_graph.py import these at module top;
+  # the daemon lazy-imports the modules, but an installed tool venv needs them
+  # the moment communities_interval_s / lint_interval_s are enabled).
+  "networkx>=3",           # entity graph assembly (communities.build_graph)
+  "igraph>=0.11",          # Leiden clustering backend (communities.py)
+  "leidenalg>=0.10",       # Leiden algorithm (communities.py)
+  "rapidfuzz>=3",          # fuzzy name matching (lint_graph near-duplicate check)
   # Note: tesseract is an optional external binary for scanned-PDF OCR.
   # It is NOT a pip dependency — install via OS package manager if needed.
 ]
