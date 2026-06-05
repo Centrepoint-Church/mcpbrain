@@ -193,6 +193,24 @@ def test_run_cycle_runs_one_cycle_against_fixtures(tmp_path):
     assert store.get_chunk("gmail-m1-body-0") is not None
 
 
+def test_run_cycle_surfaces_agent_err_as_finding(tmp_path, monkeypatch):
+    """A cycle with a joshbrain .err file in the home records an open finding."""
+    from mcpbrain.agent_errs import FINDING_TYPE
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    fake = _gmail_fake_one_message()
+    (tmp_path / "church.centrepoint.joshbrain.prune.err").write_text(
+        "Traceback (most recent call last): boom\n")
+
+    run_cycle(store, emb, gmail_service=fake)
+
+    findings = store.open_findings(FINDING_TYPE)
+    assert len(findings) == 1
+    assert "joshbrain" in findings[0]["summary"]
+
+
 def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
