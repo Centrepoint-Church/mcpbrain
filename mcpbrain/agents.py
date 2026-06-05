@@ -13,7 +13,6 @@ OS path and invoke the system loader. Their subprocess/loader bodies are marked
 import logging
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)

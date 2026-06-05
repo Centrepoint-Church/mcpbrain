@@ -149,7 +149,8 @@ def test_config_path_darwin_full_equality(monkeypatch, tmp_path):
 
 
 def test_registers_mcpbrain_console_command(tmp_path, monkeypatch):
-    import mcpbrain.wizard.register as reg, json
+    import mcpbrain.wizard.register as reg
+    import json
     cfgp = tmp_path / "claude_desktop_config.json"
     cfgp.write_text('{"mcpServers": {"other": {"command": "x"}}}')
     monkeypatch.setattr(reg, "claude_desktop_config_path", lambda platform=None: str(cfgp))

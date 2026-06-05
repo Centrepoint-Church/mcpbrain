@@ -25,7 +25,8 @@ def test_wal_enabled_and_readonly_rejects_writes(tmp_path):
     with s._connect() as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     ro = Store(p, dim=4, read_only=True)
-    import pytest, sqlite3
+    import pytest
+    import sqlite3
     with pytest.raises(sqlite3.OperationalError):
         ro.upsert_chunk("d2", "y", "h2", {})  # read-only connection cannot write
 

@@ -12,7 +12,7 @@ import json
 from datetime import datetime, timezone
 
 import mcpbrain.graph_write as gw
-from mcpbrain.config import owner_aliases, owner_email, owner_full_name, owner_name
+from mcpbrain.config import owner_aliases, owner_email, owner_full_name
 from mcpbrain.semantic import build_semantic_doc
 from mcpbrain.store import Store
 

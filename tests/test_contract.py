@@ -8,7 +8,6 @@ tests pin the envelope shape so the two cannot drift.
 import json
 from pathlib import Path
 
-import pytest
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "extractions"
 EXTRACTION_FIXTURES = ["thread_simple", "thread_multi_message", "thread_self"]

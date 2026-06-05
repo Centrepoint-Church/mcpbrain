@@ -828,19 +828,16 @@ def test_run_enrichment_empty_docs_live_mode(tmp_path):
 # --- resolve_client (Task 4.3) -------------------------------------------
 
 def test_resolve_client_none_returns_none():
-    from mcpbrain.enrich import resolve_client
     assert resolve_client(None) is None
 
 
 def test_resolve_client_empty_string_returns_none():
-    from mcpbrain.enrich import resolve_client
     assert resolve_client("") is None
 
 
 def test_resolve_client_none_does_not_import_sdk():
     """Calling resolve_client(None) must not pull in google.genai."""
     sys.modules.pop("google.genai", None)
-    from mcpbrain.enrich import resolve_client
     resolve_client(None)
     assert "google.genai" not in sys.modules
 

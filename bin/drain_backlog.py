@@ -329,7 +329,7 @@ def process_batch(*, home: Path, pending: dict, prompt_prefix: str,
     batch_id = pending.get("batch_id")
     threads = pending.get("threads") or []
     if not batch_id or not threads:
-        raise BatchError(f"pending.json missing batch_id or threads")
+        raise BatchError("pending.json missing batch_id or threads")
 
     full_prompt = (
         _PREAMBLE + prompt_prefix + _PENDING_DELIM +

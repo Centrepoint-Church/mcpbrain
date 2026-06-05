@@ -91,7 +91,6 @@ def test_store_write_failure_preserves_file(tmp_path, monkeypatch):
     s = _store(tmp_path)
     _spool(tmp_path, "cap-fail.json", _ingest_env(title="Will fail"))
 
-    original_upsert = s.upsert_chunk
     def boom(*a, **kw):
         raise RuntimeError("disk full")
     monkeypatch.setattr(s, "upsert_chunk", boom)

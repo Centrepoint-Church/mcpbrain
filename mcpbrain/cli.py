@@ -1,4 +1,5 @@
-import argparse, sys
+import argparse
+import sys
 from mcpbrain.daemon import main as _daemon_main
 from mcpbrain.auth import main as _auth_main
 

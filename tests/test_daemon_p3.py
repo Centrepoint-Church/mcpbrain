@@ -4,7 +4,6 @@ Tests for maybe_communities() and maybe_lint(), modelled on the maybe_resolve
 tests in test_daemon.py. Each test is self-contained with a minimal store fixture.
 """
 
-import pytest
 from unittest.mock import patch
 
 from mcpbrain.daemon import Daemon, SingleWriterLock
@@ -291,7 +290,6 @@ def test_maybe_synthesise_sets_due_flag_when_due(tmp_path):
     """synthesise_interval_s set -> first call returns summary with synthesis_requested=N
     and stashes requests in daemon._pending_synthesis."""
     store, daemon = _synth_daemon(tmp_path, synthesise_interval_s=3600.0)
-    clock = _Clock()
 
     fake_requests = [
         {"thread_id": "t-1", "subject": "S1"},
@@ -378,7 +376,6 @@ def test_maybe_synthesise_advances_clock_only_on_success(tmp_path):
 
 def test_maybe_synthesise_pending_synthesis_reset_after_run_one(tmp_path):
     """After run_one(), _pending_synthesis is reset to [] regardless of what prepare does."""
-    from unittest.mock import MagicMock
     store, daemon = _synth_daemon(tmp_path, synthesise_interval_s=3600.0)
 
     # Pre-load pending synthesis.
@@ -587,8 +584,6 @@ def test_run_calls_passes_in_order(tmp_path):
     """_run_periodic_passes() calls the five maybe_* methods in spec order:
     communities -> lint -> synthesise -> proactive -> waiting_on."""
     from unittest.mock import MagicMock
-    from mcpbrain.embed import get_embedder
-    from mcpbrain import config
 
     store = _make_store(tmp_path, name="t6a.db")
     emb = _FakeEmbedder()
@@ -686,7 +681,6 @@ def test_cadences_from_config_absent_keys_map_to_none(tmp_path):
 
 
 def test_apply_config_rewires_cadences(tmp_path):
-    from mcpbrain import config
     from mcpbrain.daemon import Daemon
 
     store = _make_store(tmp_path, name="t7.db")

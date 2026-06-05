@@ -433,7 +433,6 @@ class Daemon:
         gracefully — a missing or unreadable token resolves to
         google_connected=False / granted_scopes=[] and never raises.
         """
-        import json as _json
         from google.oauth2.credentials import Credentials
 
         token_file = auth.token_path()

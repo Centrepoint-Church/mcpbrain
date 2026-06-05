@@ -1,7 +1,6 @@
 """Tests for mcpbrain.sync.calendar — fake service, no network."""
 
 import httplib2
-import pytest
 from googleapiclient.errors import HttpError
 
 from mcpbrain.store import Store
