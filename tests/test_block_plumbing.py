@@ -50,7 +50,17 @@ def test_drain_dispatches_registered_block(tmp_path):
         del drain.BLOCK_DRAINERS["my_block"]
 
 
-def test_block_drainer_failure_does_not_break_file(tmp_path):
+def _minimal_env():
+    return {"thread_id": "t1", "org": "unknown", "content_type": "update",
+            "summary": "s", "entities": [], "topics": [], "actions": [],
+            "relations": [],
+            "messages": [{"message_id": "m1", "sender": "A <a@b.c>",
+                          "date": "2026-06-01", "labels": "", "subject": "x"}],
+            "resolved_action_ids": [], "updated_actions": [],
+            "reply_needed": False, "reply_reason": ""}
+
+
+def test_block_drainer_failure_retains_file(tmp_path):
     s = _store(tmp_path)
     (tmp_path / "enrich_inbox").mkdir(parents=True)
 
@@ -59,18 +69,34 @@ def test_block_drainer_failure_does_not_break_file(tmp_path):
 
     drain.BLOCK_DRAINERS["bad_block"] = bad_drainer
     try:
-        env = {"thread_id": "t1", "org": "unknown", "content_type": "update",
-               "summary": "s", "entities": [], "topics": [], "actions": [],
-               "relations": [],
-               "messages": [{"message_id": "m1", "sender": "A <a@b.c>",
-                             "date": "2026-06-01", "labels": "", "subject": "x"}],
-               "resolved_action_ids": [], "updated_actions": [],
-               "reply_needed": False, "reply_reason": ""}
         (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(
-            {"batch_id": "b1", "extractions": [env], "merge_answers": [],
+            {"batch_id": "b1", "extractions": [_minimal_env()], "merge_answers": [],
              "bad_block": [{"id": 1}]}))
         summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids: {})
         assert summary["applied"] == 1       # extraction still applied
-        assert not (tmp_path / "enrich_inbox" / "b1.json").exists()  # file consumed
+        # A raising drainer must NOT delete the file: the answers are retained
+        # on disk for retry, matching the synthesis-drain failure path.
+        assert (tmp_path / "enrich_inbox" / "b1.json").exists()
+        assert "bad_block_drained" not in summary
     finally:
         del drain.BLOCK_DRAINERS["bad_block"]
+
+
+def test_block_drainer_falsy_result_reports_zero(tmp_path):
+    s = _store(tmp_path)
+    (tmp_path / "enrich_inbox").mkdir(parents=True)
+
+    def empty_drainer(store, inbox_obj):
+        return {}      # consumed the answers, but nothing changed
+
+    drain.BLOCK_DRAINERS["empty_block"] = empty_drainer
+    try:
+        (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(
+            {"batch_id": "b1", "extractions": [_minimal_env()], "merge_answers": [],
+             "empty_block": [{"id": 1}]}))
+        summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids: {})
+        # Success with a falsy result still reports the key so the daemon can
+        # clear its stash for that block.
+        assert summary["empty_block_drained"] == 0
+    finally:
+        del drain.BLOCK_DRAINERS["empty_block"]

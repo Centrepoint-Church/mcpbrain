@@ -291,11 +291,18 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 continue
             try:
                 res = _drainer(store, data)
-                if res:
-                    summary[f"{_key}_drained"] = sum(
-                        v for v in res.values() if isinstance(v, int))
+                # Always report the key on success, even for a falsy result, so
+                # the daemon clears its stash for this block (it keys off the
+                # presence of f"{_key}_drained", not its value).
+                summary[f"{_key}_drained"] = sum(
+                    v for v in res.values() if isinstance(v, int)) if res else 0
             except Exception as exc:
                 log.error("drain: %s drain failed in %s: %s", _key, path.name, exc)
+                # Retain the file for retry — matches the synthesis-drain failure
+                # path above. Without this the inbox file is deleted with the
+                # block's answers unapplied while the daemon's stash re-attaches
+                # the same requests every cycle (silent infinite retry loop).
+                file_ok = False
 
         # Delete only when every extraction applied and merge-answers ran. A
         # partial failure leaves the file for retry next cycle. Idempotency on a
