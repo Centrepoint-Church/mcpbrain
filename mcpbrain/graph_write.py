@@ -362,9 +362,11 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
     mcpbrain entity_relations table has no such column.
 
     The legacy UNIQUE(entity_a,relation,entity_b) does NOT block re-observation:
-    a same-target observation bumps the existing row rather than inserting.
-    degree is incremented on both endpoints only for a NEW row; supersession
-    never decrements.
+    a same-target observation bumps the existing row rather than inserting, and
+    a same-target observation of a SUPERSEDED row revives that row (the UNIQUE
+    spans invalidated rows, so inserting a fresh one is impossible — the
+    2026-06-05 drain failures were exactly this). degree is incremented on both
+    endpoints only for a NEW row; supersession and revival never touch it.
     """
     if not valid_from:
         raise ValueError("valid_from is required for bi-temporal writes")
@@ -379,13 +381,35 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
             _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
             return rid
 
-        new_id = conn.execute(
-            "INSERT INTO entity_relations "
-            "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now),
-        ).lastrowid
-        _increment_degree(conn, entity_a, entity_b)
+        # A superseded row for this exact pair blocks INSERT via the legacy
+        # UNIQUE. Revive it: the fact is being observed again, so it becomes
+        # current from the new valid_from. The old validity interval is not
+        # preserved as a separate row (the UNIQUE forbids that); change_log
+        # and the superseding row keep the history.
+        invalidated = conn.execute(
+            "SELECT id FROM entity_relations "
+            "WHERE entity_a = ? AND relation = ? AND entity_b = ? "
+            "AND invalidated_at IS NOT NULL",
+            (entity_a, relation, entity_b),
+        ).fetchone()
+        if invalidated is not None:
+            new_id = invalidated["id"]
+            conn.execute(
+                "UPDATE entity_relations "
+                "SET valid_from = ?, valid_to = NULL, invalidated_at = NULL, "
+                "    superseded_reason = NULL, invalidated_by_relation_id = NULL, "
+                "    confidence = ?, evidence = ?, strength = ?, last_seen = ? "
+                "WHERE id = ?",
+                (valid_from, confidence, evidence, strength, now, new_id),
+            )
+        else:
+            new_id = conn.execute(
+                "INSERT INTO entity_relations "
+                "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now),
+            ).lastrowid
+            _increment_degree(conn, entity_a, entity_b)
 
         if is_singleton_relation(relation):
             for c in conflicts:
