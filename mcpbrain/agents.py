@@ -346,3 +346,84 @@ def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: 
 def _uninstall_schtasks_tray() -> None:  # pragma: no cover
     subprocess.run(["schtasks", "/delete", "/tn", _TRAY_TASK_NAME, "/f"], check=False)
     log.info("Windows scheduled task '%s' deleted", _TRAY_TASK_NAME)
+
+
+# ---------------------------------------------------------------------------
+# joshbrain calendar agents (prune_hot_md daily, context_health weekly)
+# ---------------------------------------------------------------------------
+
+_PRUNE_LABEL = "church.centrepoint.joshbrain.prune"
+_HEALTH_LABEL = "church.centrepoint.joshbrain.context-health"
+
+
+def _calendar_plist(
+    *,
+    label: str,
+    program_args: list[str],
+    mcpbrain_home: str,
+    hour: int,
+    minute: int,
+    weekday: int | None = None,
+) -> str:
+    """Return a macOS launchd plist that runs on a StartCalendarInterval schedule."""
+    args_xml = "\n".join(f"        <string>{a}</string>" for a in program_args)
+    day_key = (
+        f"        <key>Weekday</key>\n        <integer>{weekday}</integer>\n"
+        if weekday is not None
+        else ""
+    )
+    interval_block = (
+        f"{day_key}"
+        f"        <key>Hour</key>\n        <integer>{hour}</integer>\n"
+        f"        <key>Minute</key>\n        <integer>{minute}</integer>"
+    )
+    log_path = f"{mcpbrain_home}/{label}.log"
+    err_path = f"{mcpbrain_home}/{label}.err"
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+{interval_block}
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{err_path}</string>
+</dict>
+</plist>
+"""
+
+
+def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home: str) -> str:
+    """Return a launchd plist that runs prune_hot_md.py daily at 06:00."""
+    return _calendar_plist(
+        label=_PRUNE_LABEL,
+        program_args=[python_bin, f"{joshbrain_dir}/bin/prune_hot_md.py"],
+        mcpbrain_home=mcpbrain_home,
+        hour=6,
+        minute=0,
+    )
+
+
+def joshbrain_context_health_plist(
+    *, python_bin: str, joshbrain_dir: str, mcpbrain_home: str
+) -> str:
+    """Return a launchd plist that runs context_health.py weekly on Monday at 07:00."""
+    return _calendar_plist(
+        label=_HEALTH_LABEL,
+        program_args=[python_bin, f"{joshbrain_dir}/bin/context_health.py"],
+        mcpbrain_home=mcpbrain_home,
+        hour=7,
+        minute=0,
+        weekday=1,
+    )
