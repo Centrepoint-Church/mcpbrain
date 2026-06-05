@@ -940,3 +940,19 @@ def test_pending_blocks_cleared_per_key_when_drained(tmp_path):
     with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
         daemon.run_one()
     assert seen[-1] is None
+
+
+def test_pending_blocks_cleared_when_drained_is_zero(tmp_path):
+    """A <key>_drained value of 0 (answers consumed, nothing changed) still
+    clears the stash — clearing keys on presence, not truthiness."""
+    store, daemon = _blocks_daemon(tmp_path)
+    daemon._pending_blocks = {"memory_distil": [{"doc_id": "note-1"}]}
+    daemon._pending_audit = {"profile_audit": [{"entity_id": "e-2"}]}
+
+    with patch("mcpbrain.daemon.run_cycle",
+               return_value={"enrich": {"mode": "spool",
+                                        "drain": {"memory_distil_drained": 0,
+                                                  "profile_audit_drained": 0}}}):
+        daemon.run_one()
+    assert daemon._pending_blocks == {}
+    assert daemon._pending_audit == {}

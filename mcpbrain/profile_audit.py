@@ -123,6 +123,9 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
             continue
 
         for correction in corrections:
+            if applied >= max_corrections:
+                log.info("profile_audit: per-run cap reached")
+                break
             if not isinstance(correction, dict):
                 continue
             field = correction.get("field", "")
