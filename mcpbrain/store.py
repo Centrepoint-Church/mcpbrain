@@ -1038,18 +1038,25 @@ class Store:
         change_log revert_ref so the snooze can be undone.
         """
         date.fromisoformat(until_iso)  # raises ValueError on a non-date string
+        # The UPDATE's status='open' predicate, not a prior SELECT, decides
+        # whether the row is snoozable — so a concurrent close on another
+        # ThreadingHTTPServer thread can't be clobbered and a closed/missing
+        # row never gains a snooze or a change_log entry. The prior-value read
+        # for revert_ref shares the same connection (single SQLite write-lock
+        # window), and record_change runs only when rowcount confirms a hit.
         with self._connect() as db:
             row = db.execute(
-                "SELECT snoozed_until FROM actions WHERE id = ? AND status = 'open'",
+                "SELECT snoozed_until FROM actions WHERE id = ?",
                 (action_id,)).fetchone()
-            if row is None:
-                return False
-            prev = row["snoozed_until"] or ""
-            db.execute(
-                "UPDATE actions SET snoozed_until = ?, updated_at = ? WHERE id = ?",
+            prev = (row["snoozed_until"] if row else "") or ""
+            cur = db.execute(
+                "UPDATE actions SET snoozed_until = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'open'",
                 (until_iso,
                  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  action_id))
+            if cur.rowcount == 0:
+                return False
         self.record_change(
             "action_snoozed", ref_id=str(action_id),
             summary=f"Snoozed action {action_id} until {until_iso}",
