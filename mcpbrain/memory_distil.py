@@ -14,6 +14,7 @@ Block contract:
 
 from __future__ import annotations
 
+import json
 import logging
 
 log = logging.getLogger(__name__)
@@ -94,9 +95,18 @@ def drain_distil(store, inbox_obj: dict) -> dict:
         elif verdict == "promote":
             reason = item.get("reason", "")
             target_hint = item.get("target_hint", "")
+            # get_chunk returns metadata already parsed to a dict; guard for a
+            # raw JSON string defensively.
+            meta = chunk.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
             store.record_finding(
                 "memory_promotion",
                 ref_id=doc_id,
+                org=meta.get("org", ""),
                 summary=f"Memory note flagged for promotion: {doc_id}",
                 detail=f"reason={reason} target_hint={target_hint}",
             )

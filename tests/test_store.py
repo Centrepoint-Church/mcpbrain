@@ -19,6 +19,13 @@ def test_upsert_is_idempotent_on_content_hash(tmp_path):
     assert len(s.unembedded_chunks()) == 1
 
 
+def test_upsert_chunk_returns_changed_bool(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    assert s.upsert_chunk("d1", "x", "h1", {}) is True       # new insert
+    assert s.upsert_chunk("d1", "x", "h1", {}) is False      # unchanged no-op
+    assert s.upsert_chunk("d1", "y", "h2", {}) is True       # content changed
+
+
 def test_wal_enabled_and_readonly_rejects_writes(tmp_path):
     p = tmp_path / "b.sqlite3"
     s = Store(p, dim=4); s.init()

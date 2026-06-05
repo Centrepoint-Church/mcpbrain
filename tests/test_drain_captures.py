@@ -51,6 +51,22 @@ def test_ingest_retry_is_idempotent(tmp_path):
     assert len(s.recent_changes(10)) == 1
 
 
+def test_ingest_crash_retry_keeps_single_change_row(tmp_path):
+    """Crash-retry: the chunk was applied on the first run but the file was not
+    unlinked before the crash. Re-draining the same envelope must not write a
+    second change_log row (the upsert no-ops on unchanged content)."""
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-1.json", _ingest_env())
+    drain.drain_captures(s, home=tmp_path)
+    # Simulate the crash window: chunk is present, envelope re-appears.
+    _spool(tmp_path, "cap-1.json", _ingest_env())  # same content, re-processed
+    applied = drain.drain_captures(s, home=tmp_path)
+    assert applied == 0
+    capture_changes = [c for c in s.recent_changes(10)
+                       if c["change_type"] == "capture_ingest"]
+    assert len(capture_changes) == 1
+
+
 def test_action_create_and_dedupe(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)

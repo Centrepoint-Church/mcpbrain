@@ -1,5 +1,6 @@
 # mcpbrain/retrieval.py
 import email.utils
+import json
 import re
 from datetime import timezone
 
@@ -136,5 +137,24 @@ def hybrid_search(store, embedder, query: str, limit: int = 10) -> list[dict]:
     sem = [d for d, _ in store.vec_knn(qv, limit * 2)]
     kw = [d for d, _ in store.fts_search(query, limit * 2)]
     fused = _rrf([sem, kw])
-    top = sorted(fused, key=lambda d: -fused[d])[:limit]
-    return [c for d in top if (c := store.get_chunk(d))]
+    # Over-fetch then drop expired notes so the expiry flag is honoured on the
+    # read path. store.get_chunk returns metadata already parsed to a dict, but
+    # guard for a raw JSON string in case a caller passes an unparsed chunk.
+    ordered = sorted(fused, key=lambda d: -fused[d])
+    results = []
+    for d in ordered:
+        c = store.get_chunk(d)
+        if not c:
+            continue
+        meta = c.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if meta.get("expired"):
+            continue
+        results.append(c)
+        if len(results) == limit:
+            break
+    return results
