@@ -242,6 +242,11 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
             log.debug("change_log: pruned %d old rows", pruned)
     except Exception as exc:
         log.warning("change_log prune failed: %s", exc)
+    try:
+        from mcpbrain import agent_errs
+        agent_errs.check_agent_errs(store, config.app_dir())
+    except Exception as exc:
+        log.warning("agent_errs scan failed (cycle continues): %s", exc)
     if enrich_mode == "spool":
         prep = prepare.prepare(store, thread_cap=SPOOL_THREAD_CAP,
                                char_budget=SPOOL_CHAR_BUDGET,
