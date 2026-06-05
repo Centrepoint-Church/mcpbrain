@@ -277,6 +277,84 @@ def test_apply_config_rewires_enrich_mode(tmp_path, monkeypatch):
     assert d._enrich_mode == "spool"
 
 
+# ---------------------------------------------------------------------------
+# POST /api/dashboard/actions/<id>/snooze
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+_PERTH = timezone(timedelta(hours=8))
+
+
+def _perth_date(offset_days: int = 0) -> str:
+    return (datetime.now(_PERTH).date() + timedelta(days=offset_days)).isoformat()
+
+
+def _snooze_srv(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path), store=s)
+    srv.start()
+    return s, srv
+
+
+def test_snooze_success_returns_200(tmp_path):
+    s, srv = _snooze_srv(tmp_path)
+    try:
+        aid = s.add_unified_action(text="Snooze via API", status="open")
+        r = _post(f"http://127.0.0.1:{srv.port}/api/dashboard/actions/{aid}/snooze",
+                  srv.token, {"until": _perth_date(2)})
+        assert json.loads(r.read()) == {"snoozed": True}
+    finally:
+        srv.stop()
+
+
+def test_snooze_unknown_id_returns_404(tmp_path):
+    import urllib.error
+    s, srv = _snooze_srv(tmp_path)
+    try:
+        url = f"http://127.0.0.1:{srv.port}/api/dashboard/actions/99999/snooze"
+        try:
+            _post(url, srv.token, {"until": _perth_date(1)})
+            assert False, "expected 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        srv.stop()
+
+
+def test_snooze_closed_action_returns_404(tmp_path):
+    import urllib.error
+    s, srv = _snooze_srv(tmp_path)
+    try:
+        aid = s.add_unified_action(text="Closed", status="done")
+        url = f"http://127.0.0.1:{srv.port}/api/dashboard/actions/{aid}/snooze"
+        try:
+            _post(url, srv.token, {"until": _perth_date(1)})
+            assert False, "expected 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        srv.stop()
+
+
+def test_snooze_bad_date_returns_400_and_no_mutation(tmp_path):
+    import urllib.error
+    s, srv = _snooze_srv(tmp_path)
+    try:
+        aid = s.add_unified_action(text="Untouched", status="open")
+        url = f"http://127.0.0.1:{srv.port}/api/dashboard/actions/{aid}/snooze"
+        try:
+            _post(url, srv.token, {"until": "garbage"})
+            assert False, "expected 400"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+        row = s.list_unified_actions()[0]
+        assert (row["snoozed_until"] or "") == ""
+    finally:
+        srv.stop()
+
+
 def test_status_degrades_without_token(tmp_path, monkeypatch):
     """status() with no token file: google_connected False, no scopes, no raise.
 

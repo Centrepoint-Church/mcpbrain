@@ -178,8 +178,17 @@ class ControlServer:
                 from mcpbrain import dashboard as dash
                 action_id = int(m.group(1))
                 until = body.get("until", "")
-                ok = dash.snooze(self.store, action_id, until)
-                return h_json(h, 200, {"snoozed": ok})
+                # Bad date is a client error, not a server fault: validate before
+                # the success/404 split so garbage returns 400, not 500.
+                try:
+                    ok = dash.snooze(self.store, action_id, until)
+                except ValueError:
+                    return h_json(h, 400, {"error": "invalid date"})
+                if not ok:
+                    # Mirrors the dismiss route: nothing to snooze (unknown id or
+                    # already closed) is a 404, not a success-shaped 200.
+                    return h_json(h, 404, {"error": "action not found or not open"})
+                return h_json(h, 200, {"snoozed": True})
 
             m = re.match(r"^/api/dashboard/findings/(\d+)/dismiss$", h.path)
             if m:
