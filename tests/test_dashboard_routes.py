@@ -35,6 +35,10 @@ class FakeStore:
     def __init__(self, path):
         self._path = path
 
+    def snooze_action(self, action_id, until_iso):
+        # No matching open row in this empty store: nothing to snooze.
+        return False
+
 
 class FakeDaemon:
     def status(self):
@@ -170,8 +174,12 @@ def test_post_mark_done(tmp_path):
         srv.stop()
 
 
-def test_post_snooze(tmp_path):
-    """POST /api/dashboard/actions/1/snooze returns 200 {"snoozed": false} (stub)."""
+def test_post_snooze_unknown_action_404(tmp_path):
+    """POST snooze when snooze_action returns False (no open row) maps to 404.
+
+    Covers the FakeStore/route wiring layer: when the store reports nothing was
+    snoozed, the route mirrors the dismiss path and returns 404.
+    """
     path = _make_store_path(tmp_path)
     store = FakeStore(path)
 
@@ -179,14 +187,14 @@ def test_post_snooze(tmp_path):
     srv = ControlServer(d, home=str(tmp_path), store=store)
     srv.start()
     try:
-        r = _post(
+        _post(
             f"http://127.0.0.1:{srv.port}/api/dashboard/actions/1/snooze",
             srv.token,
             {"until": "2026-06-10"},
         )
-        assert r.status == 200
-        payload = json.loads(r.read())
-        assert payload == {"snoozed": False}
+        assert False, "expected HTTP 404"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
     finally:
         srv.stop()
 
