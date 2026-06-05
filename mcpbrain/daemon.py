@@ -663,6 +663,9 @@ class Daemon:
         synthesis_requests = self._pending_synthesis
         merged = {**self._pending_blocks, **self._pending_audit}
         extra_blocks = {k: v for k, v in merged.items() if v} or None
+        if extra_blocks:
+            log.info("extra blocks attached: %s",
+                     {k: len(v) for k, v in extra_blocks.items()})
         result = run_cycle(self._store, self._embedder,
                            enrich_client=enrich_client,
                            enrich_limit=self._enrich_batch,
@@ -676,9 +679,13 @@ class Daemon:
             self._pending_synthesis = []
         for key in list(self._pending_blocks):
             if f"{key}_drained" in drained:
+                log.info("block %s answers drained (%s); stash cleared",
+                         key, drained[f"{key}_drained"])
                 del self._pending_blocks[key]
         for key in list(self._pending_audit):
             if f"{key}_drained" in drained:
+                log.info("block %s answers drained (%s); stash cleared",
+                         key, drained[f"{key}_drained"])
                 del self._pending_audit[key]
         return result
 
@@ -1096,6 +1103,8 @@ class Daemon:
             }
 
         self._last_blocks = now
+        log.info("blocks stashed: profiles=%d communities=%d distil=%d",
+                 len(profile_reqs), len(community_reqs), len(distil_reqs))
         return {
             "profile_synthesis_requested": len(profile_reqs),
             "community_synthesis_requested": len(community_reqs),
