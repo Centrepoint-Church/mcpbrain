@@ -10,10 +10,13 @@ OS path and invoke the system loader. Their subprocess/loader bodies are marked
 ``# pragma: no cover`` because they require a real OS environment.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import subprocess
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 log = logging.getLogger(__name__)
 
@@ -366,7 +369,10 @@ def _calendar_plist(
     weekday: int | None = None,
 ) -> str:
     """Return a macOS launchd plist that runs on a StartCalendarInterval schedule."""
-    args_xml = "\n".join(f"        <string>{a}</string>" for a in program_args)
+    # Escape XML-special chars (&, <, >) in each arg so shell operators like
+    # `&&` survive as well-formed `&amp;&amp;` in the plist. Plain paths are
+    # unaffected; this can only ever help args that carry markup-significant chars.
+    args_xml = "\n".join(f"        <string>{_xml_escape(a)}</string>" for a in program_args)
     day_key = (
         f"        <key>Weekday</key>\n        <integer>{weekday}</integer>\n"
         if weekday is not None
@@ -405,10 +411,23 @@ def _calendar_plist(
 
 
 def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home: str) -> str:
-    """Return a launchd plist that runs prune_hot_md.py daily at 06:00."""
+    """Return a launchd plist that runs prune_hot_md.py daily at 06:00.
+
+    The prune mutates state/hot.md. launchd has no notion of committing, so the
+    job is wrapped in `/bin/sh -c`: run the prune, then stage and conditionally
+    commit hot.md. Without the commit the Mac's working tree drifts permanently
+    dirty. The whole shell pipeline is a single ProgramArguments string; the `&&`
+    operators are XML-escaped by _calendar_plist when the plist is rendered.
+    """
+    command = (
+        f"{python_bin} {joshbrain_dir}/bin/prune_hot_md.py "
+        f"&& cd {joshbrain_dir} "
+        f"&& git add state/hot.md "
+        f"&& (git diff --cached --quiet || git commit -m 'prune: hot.md (launchd)')"
+    )
     return _calendar_plist(
         label=_PRUNE_LABEL,
-        program_args=[python_bin, f"{joshbrain_dir}/bin/prune_hot_md.py"],
+        program_args=["/bin/sh", "-c", command],
         mcpbrain_home=mcpbrain_home,
         hour=6,
         minute=0,
