@@ -477,6 +477,48 @@ def test_run_exits_when_stop_preset(tmp_path):
     assert not t.is_alive(), "run() should return promptly when stop is preset"
 
 
+class _FlakyGmailService:
+    """Raises a network-ish error on the first sync, then serves one message."""
+
+    def __init__(self):
+        self.calls = 0
+        self._ok = _gmail_fake_one_message()
+
+    def users(self):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("The read operation timed out")
+        return self._ok.users()
+
+
+def test_run_survives_transient_sync_error(tmp_path):
+    """A sync exception (e.g. a Gmail read timeout) must NOT kill the loop.
+
+    Live 2026-06-05 failure: an uncaught sync_gmail timeout crashed the
+    process; launchd restarted it, resetting cadence anchors and dropping
+    stashed block requests. The loop must log the cycle failure and try
+    again on the next interval.
+    """
+    store = _make_store(tmp_path)
+    flaky = _FlakyGmailService()
+    daemon = Daemon(store, FakeEmbedder(), services={"gmail_service": flaky},
+                    interval_s=0.01, lock=SingleWriterLock(tmp_path / "d.lock"))
+
+    t = threading.Thread(target=daemon.run, daemon=True)
+    t.start()
+    poll = threading.Event()  # never set; used only as a bounded sleep
+    for _ in range(500):      # up to ~5s
+        if store.get_chunk("gmail-m1-body-0") is not None or not t.is_alive():
+            break
+        poll.wait(0.01)
+    daemon.stop()
+    t.join(timeout=5.0)
+
+    assert flaky.calls >= 2, "loop died on the first (failing) sync cycle"
+    assert store.get_chunk("gmail-m1-body-0") is not None, \
+        "a later cycle should sync successfully after the transient error"
+
+
 # ---------------------------------------------------------------------------
 # sync_now() during an in-flight cycle triggers an immediate extra cycle
 # ---------------------------------------------------------------------------
