@@ -418,12 +418,18 @@ def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home:
     commit hot.md. Without the commit the Mac's working tree drifts permanently
     dirty. The whole shell pipeline is a single ProgramArguments string; the `&&`
     operators are XML-escaped by _calendar_plist when the plist is rendered.
+
+    Both the staged-diff check and the commit are scoped to state/hot.md with a
+    pathspec: files another session left staged must neither trigger the commit
+    nor be swept into it, and a no-change day exits 0 (an unscoped commit would
+    exit 1 on "no changes" and surface as a false agent_stderr finding).
     """
     command = (
         f"{python_bin} {joshbrain_dir}/bin/prune_hot_md.py "
         f"&& cd {joshbrain_dir} "
         f"&& git add state/hot.md "
-        f"&& (git diff --cached --quiet || git commit -m 'prune: hot.md (launchd)')"
+        f"&& (git diff --cached --quiet -- state/hot.md "
+        f"|| git commit -m 'prune: hot.md (launchd)' -- state/hot.md)"
     )
     return _calendar_plist(
         label=_PRUNE_LABEL,
