@@ -5,7 +5,7 @@ Provides:
   - calendar_today(home)   — today's Google Calendar events
   - clickup_today(home)    — today's ClickUp tasks due
   - mark_done(store, id)   — close an action
-  - snooze(store, id, iso) — stub; not yet implemented
+  - snooze(store, id, iso) — hide an open action until a date passes
   - assemble(store, home)  — parallel fan-out returning all three + as_of
 """
 from __future__ import annotations
@@ -99,12 +99,26 @@ def actions_today(store, owner: str | None = None) -> dict:
                     " AND (owner IS NULL OR owner='' OR lower(owner)=lower(?))"
                 )
                 params.append(owner)
+
+            # Hide snoozed actions until their date passes. A snoozed_until that
+            # is empty/NULL or already <= today is shown; a future date is
+            # filtered out and the action reappears once today catches up. String
+            # comparison is correct for the YYYY-MM-DD ISO format. Guarded on the
+            # column existing so the read still works on pre-snooze schemas.
+            snooze_clause = ""
+            if "snoozed_until" in cols:
+                snooze_clause = (
+                    " AND (snoozed_until IS NULL OR snoozed_until='' "
+                    "OR snoozed_until <= ?)"
+                )
+                params.append(today)
+
             rows = db.execute(
                 f"SELECT id, text, COALESCE(deadline,'') AS deadline, "
                 f"COALESCE(org,'') AS org, COALESCE(project_id,'') AS project_id, "
                 f"{at_expr}, "
                 f"{wo_expr}, COALESCE(source,'') AS source "
-                f"FROM actions WHERE status='open'{owner_clause}",
+                f"FROM actions WHERE status='open'{owner_clause}{snooze_clause}",
                 params,
             ).fetchall()
         finally:
@@ -259,9 +273,13 @@ def mark_done(store, action_id: int) -> bool:
 
 
 def snooze(store, action_id: int, until_iso: str) -> bool:
-    """Stub — snoozed_until column not yet confirmed. Returns False."""
-    log.info("snooze not yet implemented (action_id=%s, until=%s)", action_id, until_iso)
-    return False
+    """Snooze an open action until until_iso. Returns True if a row was updated.
+
+    Routes through Store.snooze_action (same connection discipline as mark_done).
+    A missing or closed action returns False; an invalid date string raises
+    ValueError, which the control API maps to a 400.
+    """
+    return store.snooze_action(action_id, until_iso)
 
 
 def changes_digest(store) -> dict:
