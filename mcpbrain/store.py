@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlite_vec
@@ -203,6 +203,7 @@ class Store:
                 resolved_by      TEXT DEFAULT '',
                 resolved_at      TEXT DEFAULT '',
                 text_fingerprint TEXT DEFAULT '',
+                snoozed_until    TEXT DEFAULT '',
                 created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at       TEXT DEFAULT CURRENT_TIMESTAMP)""")
             # Back-fill Phase 1 columns on pre-existing actions tables that were
@@ -225,6 +226,7 @@ class Store:
                 ("resolved_by",      "TEXT DEFAULT ''"),
                 ("resolved_at",      "TEXT DEFAULT ''"),
                 ("text_fingerprint", "TEXT DEFAULT ''"),
+                ("snoozed_until",    "TEXT DEFAULT ''"),
                 ("updated_at",       "TEXT DEFAULT CURRENT_TIMESTAMP"),
             ):
                 if _col not in _act_p1_cols:
@@ -1021,6 +1023,38 @@ class Store:
                 f"UPDATE actions SET status = ?, resolved_by = ?, resolved_at = ?, "
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
             return cur.rowcount
+
+    def snooze_action(self, action_id: int, until_iso: str) -> bool:
+        """Snooze an OPEN action until until_iso (a YYYY-MM-DD date).
+
+        The dashboard listing hides a snoozed action until today reaches
+        until_iso, then it reappears automatically. Only open actions can be
+        snoozed: a missing or closed row is a no-op.
+
+        until_iso must parse as an ISO date — date.fromisoformat raises
+        ValueError on garbage, which the control API maps to a 400 (distinct
+        from the 404 a missing/closed row returns False for). Returns True only
+        when a row was updated, and records the prior snoozed_until in the
+        change_log revert_ref so the snooze can be undone.
+        """
+        date.fromisoformat(until_iso)  # raises ValueError on a non-date string
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT snoozed_until FROM actions WHERE id = ? AND status = 'open'",
+                (action_id,)).fetchone()
+            if row is None:
+                return False
+            prev = row["snoozed_until"] or ""
+            db.execute(
+                "UPDATE actions SET snoozed_until = ?, updated_at = ? WHERE id = ?",
+                (until_iso,
+                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 action_id))
+        self.record_change(
+            "action_snoozed", ref_id=str(action_id),
+            summary=f"Snoozed action {action_id} until {until_iso}",
+            revert_ref=f"snoozed_until:{prev}", source="dashboard")
+        return True
 
     def set_action_text(self, action_id: int, new_text: str, *,
                         thread_id: str | None = None,
