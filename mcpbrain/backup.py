@@ -179,7 +179,16 @@ def _guard_user_id(user_id: str) -> None:
 
 def _default_media(path):
     """Lazy default media factory — imports googleapiclient only when an upload
-    actually runs, so `import mcpbrain.backup` does not require the SDK."""
+    actually runs, so `import mcpbrain.backup` does not require the SDK.
+
+    Non-resumable single PUT: the encrypted snapshot (~750MB) uploads in one
+    request. This is deliberate — googleapiclient's resumable path rides on
+    httplib2, which mishandles the 308 "Resume Incomplete" responses and raises
+    RedirectMissingLocation (a long-standing httplib2 bug). A single PUT avoids
+    308s entirely; the real fix for the original failure was the socket timeout
+    (auth.build_service now uses a generous one), not chunking. A mid-upload
+    network blip simply fails this run and the daily cadence retries.
+    """
     from googleapiclient.http import MediaFileUpload
 
     return MediaFileUpload(str(path), resumable=False)
@@ -248,8 +257,10 @@ def upload_snapshot(
             .execute()["id"]
         )
 
-    # 3. Upload the artifact into the per-user folder. Pass a str path to the
-    # factory (matches the real MediaFileUpload(str(path)) default).
+    # 3. Upload the artifact into the per-user folder (single PUT — see
+    # _default_media for why non-resumable). num_retries gives the library's
+    # exponential backoff on transient 5xx. Pass a str path to the factory
+    # (matches MediaFileUpload(str(path))).
     media = media_factory(str(file_path))
     created = (
         service.files()
@@ -259,7 +270,7 @@ def upload_snapshot(
             supportsAllDrives=True,
             fields="id",
         )
-        .execute()
+        .execute(num_retries=5)
     )
     return created["id"]
 

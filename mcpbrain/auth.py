@@ -16,12 +16,21 @@ import os
 import sys
 from pathlib import Path
 
+import httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from mcpbrain import config
+
+# httplib2's default socket timeout is very short — long enough for small reads
+# but not for large resumable uploads (the encrypted backup snapshot is ~750MB)
+# or occasionally-slow Gmail/Drive reads, which surfaced as intermittent
+# "read operation timed out" errors in the daemon sync log. A generous timeout
+# only ever prevents a premature cut-off; fast calls are unaffected.
+DEFAULT_HTTP_TIMEOUT_S = 600
 
 logger = logging.getLogger(__name__)
 
@@ -190,18 +199,25 @@ def run_consent_flow(
     return creds
 
 
-def build_service(api: str, version: str, creds: Credentials):
-    """Build a Google API service client.
+def build_service(api: str, version: str, creds: Credentials,
+                  *, timeout_s: float = DEFAULT_HTTP_TIMEOUT_S):
+    """Build a Google API service client with an explicit socket timeout.
 
     Args:
         api: API name, e.g. "gmail".
         version: API version, e.g. "v1".
         creds: Valid Credentials object.
+        timeout_s: socket timeout for every request made through this service.
 
     Returns:
         A googleapiclient Resource object.
+
+    Uses an AuthorizedHttp over httplib2.Http(timeout=...) instead of the
+    default credentials= path so the timeout actually applies (the library's
+    default is too short for large resumable uploads / slow reads).
     """
-    return build(api, version, credentials=creds)
+    authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout_s))
+    return build(api, version, http=authed_http)
 
 
 def _granted_scopes(creds, token_file: Path | None = None) -> set[str] | None:
