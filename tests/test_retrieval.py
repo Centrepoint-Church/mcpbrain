@@ -34,6 +34,23 @@ def test_keyword_finds_exact_term(tmp_path):
     assert "d-roster" in ids
 
 
+def test_keyword_query_with_fts_special_chars_does_not_crash(tmp_path):
+    """A query containing FTS5 operator chars (hyphens, colons, quotes) must not
+    raise 'no such column' — it should be treated as literal search terms."""
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("d-hyphen", "VERIFY-CAP-001 probe token", "h1", {})
+    s.upsert_chunk("d-roster", "the volunteer roster", "h2", {})
+    from mcpbrain.index import index_pending
+    index_pending(s, FakeEmbedder())
+    # None of these should raise (previously crashed on the leading/embedded '-').
+    for q in ["VERIFY-CAP-001", "a:b", 'has " quote', "trailing-", "-leading", "*", "("]:
+        hybrid_search(s, FakeEmbedder(), q, limit=5)
+    # And the exact hyphenated term must still retrieve its doc.
+    ids = [r["doc_id"] for r in hybrid_search(s, FakeEmbedder(), "VERIFY-CAP-001", limit=5)]
+    assert "d-hyphen" in ids
+
+
 def test_hybrid_search_skips_expired_notes(tmp_path):
     s = Store(tmp_path / "b.sqlite3", dim=4)
     s.init()
