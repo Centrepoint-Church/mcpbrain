@@ -52,3 +52,30 @@ def test_systemd_tray_unit_runs_tray():
 def test_schtasks_tray_args_at_logon():
     a = schtasks_tray_args(mcpbrain_bin=r"C:\Users\j\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
     assert "mcpbrain-tray" in a and "onlogon" in a and any("mcpbrain.exe tray" in x for x in a)
+
+
+def test_restart_agent_restarts_daemon_and_tray_darwin(monkeypatch, tmp_path):
+    """restart_agent kicks BOTH the daemon and the tray (one system)."""
+    import mcpbrain.agents as agents
+    calls = []
+    monkeypatch.setattr(agents.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or None)
+    # tray plist must appear to exist so the best-effort tray restart fires
+    monkeypatch.setattr(agents, "_TRAY_LAUNCHD_PATH", tmp_path / "tray.plist")
+    (tmp_path / "tray.plist").write_text("x")
+    agents.restart_agent("darwin")
+    kicked = [c for c in calls if "kickstart" in c]
+    assert any(agents._LABEL in " ".join(c) for c in kicked), "daemon not restarted"
+    assert any(agents._TRAY_LABEL in " ".join(c) for c in kicked), "tray not restarted"
+
+
+def test_restart_agent_tray_absent_is_not_fatal(monkeypatch, tmp_path):
+    """No tray registered -> daemon still restarts, no error."""
+    import mcpbrain.agents as agents
+    calls = []
+    monkeypatch.setattr(agents.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or None)
+    monkeypatch.setattr(agents, "_TRAY_LAUNCHD_PATH", tmp_path / "absent.plist")
+    agents.restart_agent("darwin")  # must not raise
+    assert any("kickstart" in c and agents._LABEL in " ".join(c) for c in calls)
+    assert not any(agents._TRAY_LABEL in " ".join(c) for c in calls)

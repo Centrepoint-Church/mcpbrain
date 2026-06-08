@@ -43,11 +43,12 @@ def _mcpbrain_bin() -> str:
 
 
 def _install_tray_best_effort(home: str) -> None:
-    """Install the optional menu-bar tray login agent. Never fatal.
+    """Register the menu-bar tray login agent. Never fatal.
 
-    The tray is a convenience, and it needs the [tray] GUI deps and a desktop
-    session, so a failure here must not block onboarding. Logs a hint and
-    carries on.
+    The tray's GUI deps ship with the package (main dependencies), so the only
+    thing that can fail here is registering the OS login agent on a machine
+    without a desktop session (e.g. a headless server). That must not block
+    onboarding, so a failure logs a hint and carries on.
     """
     from mcpbrain import agents
     try:
@@ -56,7 +57,7 @@ def _install_tray_best_effort(home: str) -> None:
     except Exception as exc:  # noqa: BLE001 - the tray is optional
         print(
             f"Skipped the menu-bar tray ({exc}). It is optional; the daemon runs without it. "
-            f"Install the GUI deps with the [tray] extra and run 'mcpbrain tray' to enable it.",
+            f"On a desktop machine, run 'mcpbrain tray' to enable it.",
             file=sys.stderr,
         )
 

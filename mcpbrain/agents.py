@@ -178,13 +178,24 @@ def uninstall_agent(platform: str) -> None:
 
 
 def restart_agent(platform: str) -> None:
-    """Restart the running agent via the OS loader."""
+    """Restart the running agents via the OS loader.
+
+    The daemon and its menu-bar tray are one system: a restart (e.g. after
+    `mcpbrain update` reinstalls the package) brings BOTH up on the new code.
+    The daemon restart is required (raises on failure); the tray restart is
+    best-effort — a machine without the tray installed (headless, or the tray
+    never registered) simply has nothing to kick, and that must not fail an
+    update.
+    """
     if platform == "darwin":
         _restart_launchd()
+        _restart_launchd_tray()
     elif platform == "linux":
         _restart_systemd()
+        _restart_systemd_tray()
     elif platform == "win32":
         _restart_schtasks()
+        _restart_schtasks_tray()
     else:
         raise ValueError(f"Unsupported platform: {platform!r}")
 
@@ -349,6 +360,29 @@ def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: 
 def _uninstall_schtasks_tray() -> None:  # pragma: no cover
     subprocess.run(["schtasks", "/delete", "/tn", _TRAY_TASK_NAME, "/f"], check=False)
     log.info("Windows scheduled task '%s' deleted", _TRAY_TASK_NAME)
+
+
+# -- best-effort tray restarts (called by restart_agent; never fatal) --------
+
+def _restart_launchd_tray() -> None:  # pragma: no cover
+    if not _TRAY_LAUNCHD_PATH.exists():
+        return  # tray not registered on this machine — nothing to restart
+    uid = getattr(os, "getuid", lambda: 0)()
+    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{_TRAY_LABEL}"], check=False)
+    log.info("launchd tray agent restarted")
+
+
+def _restart_systemd_tray() -> None:  # pragma: no cover
+    if not _TRAY_SYSTEMD_PATH.exists():
+        return
+    subprocess.run(["systemctl", "--user", "restart", "mcpbrain-tray.service"], check=False)
+    log.info("systemd tray user service restarted")
+
+
+def _restart_schtasks_tray() -> None:  # pragma: no cover
+    subprocess.run(["schtasks", "/end", "/tn", _TRAY_TASK_NAME], check=False)
+    subprocess.run(["schtasks", "/run", "/tn", _TRAY_TASK_NAME], check=False)
+    log.info("Windows scheduled task '%s' restarted", _TRAY_TASK_NAME)
 
 
 # ---------------------------------------------------------------------------
