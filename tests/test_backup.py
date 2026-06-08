@@ -1017,3 +1017,65 @@ def test_download_snapshot_writes_bytes_via_injected_factory(tmp_path):
     assert call["supportsAllDrives"] is True
     # The injected factory received the get_media request object.
     assert isinstance(captured["request"], _DLMediaRequest)
+
+
+# --- snapshot retention (prune) ---------------------------------------------
+
+class _FakeDelete:
+    def __init__(self, deleted, file_id):
+        self.deleted = deleted
+        self.file_id = file_id
+
+    def execute(self, num_retries=0):
+        self.deleted.append(self.file_id)
+        return {}
+
+
+class FakeFilesPrune:
+    """Fake Drive files() for prune_snapshots: a folder lookup, a file list
+    (newest-first sortable createdTime), and delete() recording ids."""
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+
+    def __init__(self, snapshot_files):
+        self._snaps = snapshot_files
+        self.deleted = []
+
+    def list(self, **kw):
+        q = kw.get("q", "")
+        if self.FOLDER_MIME in q:
+            return _FakeList([], {"files": [{"id": "folder-1"}]})
+        return _FakeList([], {"files": list(self._snaps)})
+
+    def delete(self, *, fileId, supportsAllDrives=False):
+        return _FakeDelete(self.deleted, fileId)
+
+
+def _snap(i, day):
+    return {"id": f"snap-{i}", "name": "snapshot.enc",
+            "createdTime": f"2026-06-{day:02d}T00:00:00Z", "modifiedTime": ""}
+
+
+def test_prune_keeps_newest_n_deletes_rest():
+    from mcpbrain.backup import prune_snapshots
+    # 5 snapshots, days 1..5; keep newest 3 → delete days 1 and 2 (snap-1, snap-2)
+    files = [_snap(i, i) for i in range(1, 6)]
+    svc = FakeService(FakeFilesPrune(files))
+    deleted = prune_snapshots(svc, "drive-X", "josh", keep=3)
+    assert deleted == 2
+    assert set(svc._files.deleted) == {"snap-1", "snap-2"}
+
+
+def test_prune_noop_when_within_keep():
+    from mcpbrain.backup import prune_snapshots
+    files = [_snap(i, i) for i in range(1, 4)]  # 3 files
+    svc = FakeService(FakeFilesPrune(files))
+    assert prune_snapshots(svc, "drive-X", "josh", keep=7) == 0
+    assert svc._files.deleted == []
+
+
+def test_prune_keep_zero_is_noop():
+    from mcpbrain.backup import prune_snapshots
+    files = [_snap(i, i) for i in range(1, 4)]
+    svc = FakeService(FakeFilesPrune(files))
+    assert prune_snapshots(svc, "drive-X", "josh", keep=0) == 0
+    assert svc._files.deleted == []
