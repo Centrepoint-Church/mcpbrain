@@ -451,10 +451,11 @@ class TestAssembleShape:
         monkeypatch.setattr(dashboard, "actions_today", lambda s: mock_actions)
         monkeypatch.setattr(dashboard, "calendar_today", lambda h: mock_cal)
         monkeypatch.setattr(dashboard, "clickup_today", lambda h: mock_cu)
+        monkeypatch.setattr(dashboard, "inbox_today", lambda s: [])
 
         result = dashboard.assemble(store, str(tmp_path))
 
-        assert set(result.keys()) == {"actions", "calendar", "clickup", "changes", "findings", "as_of"}
+        assert set(result.keys()) == {"actions", "calendar", "clickup", "inbox", "changes", "findings", "as_of"}
         assert result["actions"] == mock_actions
         assert result["calendar"] == mock_cal
         assert result["clickup"] == mock_cu
