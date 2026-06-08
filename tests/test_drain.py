@@ -164,18 +164,70 @@ def test_drain_quarantines_malformed(store, home):
     assert summary["quarantined"] == 1
 
 
-def test_drain_quarantines_contract_violation(store, home):
-    # Valid JSON, but an extraction violates the contract structurally
-    # (org must be a string; an unconfigured org STRING is coerced, not
-    # quarantined — see test_org_taxonomy.TestDrainOrgDrift).
+def test_drain_skips_invalid_extraction_not_whole_batch(store, home):
+    # A per-extraction contract violation (org missing) is skipped individually,
+    # NOT quarantined with the whole file — one bad extraction must not discard
+    # a batch. The file is still consumed; the skipped thread's chunks stay
+    # enriched=0 and re-queue next prepare.
     bad_env = _envelope("t-bad", org=None)
     _write_inbox(home, "violation.json", _batch("batch-bad", [bad_env]))
 
     app = RecordingApply()
     summary = drain.drain(store, home=home, apply=app)
 
-    assert (home / "enrich_inbox" / "bad" / "violation.json").exists()
-    assert app.calls == [], "a contract-violating file must not be applied"
+    assert not (home / "enrich_inbox" / "bad" / "violation.json").exists()
+    assert not (home / "enrich_inbox" / "violation.json").exists()  # consumed
+    assert app.calls == [], "the invalid extraction must not be applied"
+    assert summary["quarantined"] == 0
+    assert summary["skipped"] == 1
+
+
+def test_drain_applies_good_skips_bad_in_mixed_batch(store, home):
+    # One valid + one invalid extraction: the valid applies, the invalid is
+    # skipped, and the batch is not quarantined.
+    good = _envelope("t-good")
+    bad = _envelope("t-bad", content_type="not-a-real-type")
+    _write_inbox(home, "mixed.json", _batch("batch-mixed", [good, bad]))
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert [c["thread_id"] for c in app.calls] == ["t-good"]
+    assert summary["skipped"] == 1
+    assert summary["quarantined"] == 0
+
+
+def test_drain_sanitizes_empty_relations_keeps_extraction(store, home):
+    # An otherwise-valid extraction with one good relation and one stub relation
+    # (empty fields) — the LLM noise that used to fail the whole batch. The stub
+    # is dropped; the extraction applies with its good relation intact.
+    env = _envelope("t-rel", relations=[
+        {"source_name": "Joel", "type": "works_with", "target_name": "Josh"},
+        {"source_name": "", "type": "", "target_name": ""},
+    ])
+    _write_inbox(home, "rel.json", _batch("batch-rel", [env]))
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert summary["quarantined"] == 0 and summary["skipped"] == 0
+    assert summary["dropped_items"] == 1
+    assert len(app.calls) == 1
+    assert len(app.calls[0]["extraction"]["relations"]) == 1  # only valid one
+
+
+def test_drain_quarantines_wrapper_violation(store, home):
+    # A malformed merge_answer (irreversible-merge risk) is a WRAPPER violation
+    # and still quarantines the whole file.
+    env = _envelope("t-ok")
+    batch = _batch("batch-wrap", [env],
+                   merge_answers=[{"pair_id": "p1", "same": "false"}])  # not bool
+    _write_inbox(home, "wrap.json", batch)
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert (home / "enrich_inbox" / "bad" / "wrap.json").exists()
     assert summary["quarantined"] == 1
 
 
@@ -397,7 +449,8 @@ def test_drain_idempotent_rerun(store, home):
     app2 = RecordingApply()
     s2 = drain.drain(store, home=home, apply=app2)
     assert s2 == {"files": 0, "applied": 0, "marked": 0, "merges": 0,
-                  "quarantined": 0, "entities": 0, "relations": 0}
+                  "quarantined": 0, "entities": 0, "relations": 0,
+                  "skipped": 0, "dropped_items": 0}
     assert app2.calls == []
 
 
@@ -440,7 +493,8 @@ def test_drain_summary_counts(store, home):
     summary = drain.drain(store, home=home, apply=RecordingApply())
 
     assert summary == {"files": 1, "applied": 2, "marked": 2, "merges": 1,
-                       "quarantined": 0, "entities": 2, "relations": 2}
+                       "quarantined": 0, "entities": 2, "relations": 2,
+                       "skipped": 0, "dropped_items": 0}
 
 
 # --- 4.5: surfacing apply's entity/relation counts -------------------------

@@ -37,7 +37,9 @@ import os
 from pathlib import Path
 
 from mcpbrain import config, orgs
-from mcpbrain.contract import normalise_org, validate_batch_file
+from mcpbrain.contract import (
+    normalise_org, sanitize_batch, validate_batch_wrapper, validate_extraction,
+)
 from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
@@ -194,7 +196,8 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
     """
     home_dir = _home(home)
     summary = {"files": 0, "applied": 0, "marked": 0, "merges": 0,
-               "quarantined": 0, "entities": 0, "relations": 0}
+               "quarantined": 0, "entities": 0, "relations": 0,
+               "skipped": 0, "dropped_items": 0}
 
     for path in _iter_inbox(home_dir):
         try:
@@ -205,13 +208,24 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             summary["quarantined"] += 1
             continue
 
-        problems = validate_batch_file(data)
+        # Tolerant validation: only wrapper / merge_answers problems (structural,
+        # or irreversible-merge risk) quarantine the whole file. A single bad
+        # extraction is sanitised (droppable noise removed) and, if still
+        # invalid, skipped individually — one malformed relation from the LLM
+        # must not discard an entire batch of good extractions.
+        problems = validate_batch_wrapper(data)
         if problems:
-            log.warning("drain: contract violation in %s, quarantining: %s",
+            log.warning("drain: wrapper contract violation in %s, quarantining: %s",
                         path.name, "; ".join(problems[:5]))
             _quarantine(path)
             summary["quarantined"] += 1
             continue
+
+        data, dropped_noise = sanitize_batch(data)
+        if dropped_noise:
+            log.warning("drain: dropped %d malformed relation/action item(s) in %s",
+                        dropped_noise, path.name)
+            summary["dropped_items"] = summary.get("dropped_items", 0) + dropped_noise
 
         summary["files"] += 1
         file_ok = True
@@ -225,6 +239,19 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             raise TypeError("drain() requires an apply callable; inject graph_write.apply")
 
         for extraction in extractions:
+            # Per-extraction contract check (post-sanitise). A structurally
+            # invalid extraction (missing thread_id, bad messages, unknown
+            # content_type…) is dropped and logged, NOT quarantined with the
+            # batch — its chunks stay enriched=0 and re-queue next prepare. This
+            # does not flip file_ok: the file is still consumed (we did our best
+            # with the salvageable extractions).
+            ext_problems = validate_extraction(extraction)
+            if ext_problems:
+                log.warning("drain: skipping invalid extraction (thread %s) in %s: %s",
+                            extraction.get("thread_id", "?"), path.name,
+                            "; ".join(ext_problems[:3]))
+                summary["skipped"] = summary.get("skipped", 0) + 1
+                continue
             thread_id = extraction["thread_id"]
             # Org drift gate: canonicalise; coerce an unconfigured org to
             # "unknown" and record it, so repeated sightings of a real org

@@ -141,13 +141,14 @@ def normalise_org(extraction: dict, taxonomy: "orgs.OrgTaxonomy | None" = None) 
     return raw
 
 
-def validate_batch_file(d: object) -> list[str]:
-    """Validate the inbox batch-file wrapper.
+def validate_batch_wrapper(d: object) -> list[str]:
+    """Validate only the batch-file *wrapper* — everything validate_batch_file
+    checks except the per-extraction contents.
 
-    Shape: {"batch_id": str, "extractions": [<envelope>, ...], "merge_answers": [...]}.
-    Validates the wrapper, then each extraction by index so a failure names which
-    one. Returns a list of human-readable problems; empty means valid. Input is
-    not mutated.
+    Used by the tolerant drain path: a wrapper or merge_answers problem is
+    structural (or risks an irreversible mis-merge) and quarantines the whole
+    file, but a single malformed extraction is dropped individually rather than
+    failing the batch. Returns a list of human-readable problems; empty = valid.
     """
     problems: list[str] = []
 
@@ -158,13 +159,8 @@ def validate_batch_file(d: object) -> list[str]:
     if not isinstance(batch_id, str) or not batch_id.strip():
         problems.append("batch_id must be a non-empty string")
 
-    extractions = d.get("extractions")
-    if not isinstance(extractions, list):
+    if not isinstance(d.get("extractions"), list):
         problems.append("extractions must be a list")
-    else:
-        for i, extraction in enumerate(extractions):
-            for problem in validate_extraction(extraction):
-                problems.append(f"extractions[{i}]: {problem}")
 
     # merge_answers: optional list. Each entry is validated here, not downstream:
     # a merge collapses two entities irreversibly, so a malformed answer must
@@ -200,6 +196,74 @@ def validate_batch_file(d: object) -> list[str]:
                     problems.append(f"synthesis[{i}]: thread_id must be a non-empty string")
 
     return problems
+
+
+def validate_batch_file(d: object) -> list[str]:
+    """Validate the inbox batch-file wrapper AND every extraction by index.
+
+    Returns a list of human-readable problems; empty means valid. Input is not
+    mutated. The strict whole-file view; the drain consumer uses the tolerant
+    wrapper + per-extraction path instead (sanitize_batch + validate_extraction).
+    """
+    problems = validate_batch_wrapper(d)
+    if isinstance(d, dict) and isinstance(d.get("extractions"), list):
+        for i, extraction in enumerate(d["extractions"]):
+            for problem in validate_extraction(extraction):
+                problems.append(f"extractions[{i}]: {problem}")
+    return problems
+
+
+def sanitize_extraction(d: object) -> tuple[object, int]:
+    """Drop droppable LLM noise from one extraction; return (cleaned, dropped).
+
+    Removes relations missing a non-empty source_name/type/target_name and
+    actions missing a non-empty description — the common case where the model
+    emits a stub with empty fields. These are list items the contract treats as
+    individually invalid; dropping them lets the rest of an otherwise-good
+    extraction apply instead of failing the whole batch. Non-dict input and
+    structural fields (thread_id, messages, org…) are left untouched. Returns a
+    shallow copy; the input is not mutated.
+    """
+    if not isinstance(d, dict):
+        return d, 0
+    out = dict(d)
+    dropped = 0
+
+    rels = out.get("relations")
+    if isinstance(rels, list):
+        kept = [r for r in rels if isinstance(r, dict) and all(
+            isinstance(r.get(f), str) and r.get(f).strip()
+            for f in ("source_name", "type", "target_name"))]
+        dropped += len(rels) - len(kept)
+        out["relations"] = kept
+
+    acts = out.get("actions")
+    if isinstance(acts, list):
+        kept = [a for a in acts if isinstance(a, dict)
+                and isinstance(a.get("description"), str) and a["description"].strip()]
+        dropped += len(acts) - len(kept)
+        out["actions"] = kept
+
+    return out, dropped
+
+
+def sanitize_batch(d: object) -> tuple[object, int]:
+    """Apply sanitize_extraction to every extraction; return (cleaned, dropped).
+
+    Non-dict input or a missing/!list extractions field is returned unchanged
+    (the wrapper validator will catch those structural problems).
+    """
+    if not isinstance(d, dict) or not isinstance(d.get("extractions"), list):
+        return d, 0
+    out = dict(d)
+    total = 0
+    cleaned = []
+    for extraction in d["extractions"]:
+        ce, n = sanitize_extraction(extraction)
+        cleaned.append(ce)
+        total += n
+    out["extractions"] = cleaned
+    return out, total
 
 
 _CAPTURE_KINDS = {"ingest", "action_create", "action_update"}
