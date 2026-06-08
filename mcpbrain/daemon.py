@@ -292,6 +292,7 @@ class Daemon:
                  waiting_on_interval_s: float | None = None,
                  blocks_interval_s: float | None = None,
                  audit_interval_s: float | None = None,
+                 clickup_interval_s: float | None = None,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -374,6 +375,11 @@ class Daemon:
         self._audit_interval_s: float | None = audit_interval_s
         self._last_audit = None
         self._pending_audit: dict = {}
+        # Periodic ClickUp two-way sync is OFF unless clickup_interval_s is set.
+        # Same three-shape contract as the other passes; runs in this loop
+        # thread so it shares the single-writer lock.
+        self._clickup_interval_s: float | None = clickup_interval_s
+        self._last_clickup = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -571,6 +577,7 @@ class Daemon:
             self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
             self._blocks_interval_s = cadences["blocks_interval_s"]
             self._audit_interval_s = cadences["audit_interval_s"]
+            self._clickup_interval_s = cadences["clickup_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -849,6 +856,33 @@ class Daemon:
 
         # Advance the cadence clock only after a clean run.
         self._last_communities = now
+        return summary
+
+    # -- periodic ClickUp two-way sync --------------------------------------
+
+    def maybe_clickup_sync(self) -> dict | None:
+        """Run the ClickUp ⇄ actions sync, if due.
+
+        OFF unless clickup_interval_s is set (returns None). Otherwise gates on a
+        time-based cadence like maybe_communities. Runs in the loop thread so it
+        shares the single-writer lock. A failure is logged and swallowed so the
+        daemon loop keeps running.
+        """
+        if self._clickup_interval_s is None:
+            return None
+        if self._last_clickup is not None:
+            if (self._clock() - self._last_clickup) < self._clickup_interval_s:
+                return None
+        now = self._clock()
+        try:
+            from mcpbrain import clickup_sync
+            from mcpbrain import config as _config
+            summary = clickup_sync.sync(self._store, str(_config.app_dir()))
+        except Exception as exc:  # noqa: BLE001 — sync must never crash the loop
+            log.warning("clickup sync failed (will retry next due): %s", exc,
+                        exc_info=True)
+            return {"clickup": False, "error": str(exc)}
+        self._last_clickup = now
         return summary
 
     # -- periodic graph lint ------------------------------------------------
@@ -1176,6 +1210,7 @@ class Daemon:
             self.maybe_waiting_on,
             self.maybe_blocks,
             self.maybe_audit,
+            self.maybe_clickup_sync,
         ):
             try:
                 pass_fn()
@@ -1362,6 +1397,7 @@ _CADENCE_KEYS = (
     "waiting_on_interval_s",
     "blocks_interval_s",
     "audit_interval_s",
+    "clickup_interval_s",
 )
 
 
