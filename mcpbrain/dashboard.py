@@ -297,14 +297,70 @@ def changes_digest(store) -> dict:
         return {"changes": [], "findings": []}
 
 
+def inbox_today(store, limit: int = 20) -> list[dict]:
+    """Return emails needing attention: reply_needed=1 OR request/decision type, last 7 days."""
+    cutoff = (datetime.now(_PERTH) - timedelta(days=7)).date().isoformat()
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(path)
+        try:
+            cols = {r["name"] for r in db.execute("PRAGMA table_info(email_context)").fetchall()}
+            if not cols:
+                return []
+            rows = db.execute(
+                "SELECT message_id, subject, sender, sender_email, date_iso, "
+                "org, content_type, summary, "
+                "COALESCE(reply_needed,0) AS reply_needed, "
+                "COALESCE(reply_reason,'') AS reply_reason "
+                "FROM email_context "
+                "WHERE (reply_needed=1 OR content_type IN ('request','decision')) "
+                "  AND date_iso >= ? "
+                "ORDER BY date_iso DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        log.warning("inbox_today: cannot read email_context: %s", exc)
+        return []
+    return [dict(r) for r in rows]
+
+
+def annotate_meeting_packs(store, calendar_events: list[dict]) -> list[dict]:
+    """Set has_pack=True on calendar events that have a meeting pack in the store."""
+    if not calendar_events:
+        return []
+    path = store._path if hasattr(store, "_path") else store.path
+    packed = set()
+    try:
+        db = _open_ro(path)
+        try:
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "meeting_packs" in tables:
+                rows = db.execute("SELECT event_id FROM meeting_packs").fetchall()
+                packed = {r["event_id"] for r in rows}
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        log.warning("annotate_meeting_packs: db error: %s", exc)
+    result = []
+    for ev in calendar_events:
+        ev_copy = dict(ev)
+        ev_copy["has_pack"] = ev.get("id", "") in packed
+        result.append(ev_copy)
+    return result
+
+
 def assemble(store, home) -> dict:
-    """Fan-out to all four data sources in parallel and return combined payload."""
+    """Fan-out to all data sources in parallel and return combined payload."""
     owner = config.owner_name(home)
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         fut_actions = pool.submit(actions_today, store, owner)
         fut_calendar = pool.submit(calendar_today, home)
         fut_clickup = pool.submit(clickup_today, home)
         fut_digest = pool.submit(changes_digest, store)
+        fut_inbox = pool.submit(inbox_today, store)
 
         try:
             actions_result = fut_actions.result()
@@ -330,10 +386,23 @@ def assemble(store, home) -> dict:
             log.warning("assemble: changes_digest failed: %s", exc)
             digest_result = {"changes": [], "findings": []}
 
+        try:
+            inbox_result = fut_inbox.result()
+        except Exception as exc:
+            log.warning("assemble: inbox_today failed: %s", exc)
+            inbox_result = []
+
+    # Annotate calendar events with meeting pack status (read-only, fast)
+    try:
+        calendar_result = annotate_meeting_packs(store, calendar_result)
+    except Exception as exc:
+        log.warning("assemble: annotate_meeting_packs failed: %s", exc)
+
     return {
         "actions": actions_result,
         "calendar": calendar_result,
         "clickup": clickup_result,
+        "inbox": inbox_result,
         "changes": digest_result["changes"],
         "findings": digest_result["findings"],
         "as_of": _now_iso(),
