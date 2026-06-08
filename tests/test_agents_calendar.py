@@ -107,3 +107,32 @@ def test_health_is_direct_python_invocation():
     assert "/bin/sh" not in plist
     assert "git commit" not in plist
     assert "&amp;&amp;" not in plist
+
+
+class TestMeetingPacksPlist:
+    def test_plist_has_calendar_intervals(self, tmp_path):
+        from mcpbrain import agents
+        plist = agents.meeting_packs_plist(str(tmp_path))
+        assert "StartCalendarInterval" in plist
+        # Should fire twice daily
+        assert plist.count("<key>Minute</key>") >= 2
+
+    def test_plist_includes_mcpbrain_home(self, tmp_path):
+        from mcpbrain import agents
+        plist = agents.meeting_packs_plist(str(tmp_path))
+        assert str(tmp_path) in plist
+
+    def test_plist_calls_meeting_packs_script(self, tmp_path):
+        from mcpbrain import agents
+        plist = agents.meeting_packs_plist(str(tmp_path))
+        assert "meeting-packs" in plist.lower() or "meeting_packs" in plist.lower()
+
+    def test_plist_fires_at_0745_and_1200(self, tmp_path):
+        import plistlib
+        from mcpbrain import agents
+        plist = agents.meeting_packs_plist(str(tmp_path))
+        parsed = plistlib.loads(plist.encode())
+        intervals = parsed["StartCalendarInterval"]
+        assert isinstance(intervals, list) and len(intervals) == 2
+        times = {(i["Hour"], i["Minute"]) for i in intervals}
+        assert times == {(7, 45), (12, 0)}

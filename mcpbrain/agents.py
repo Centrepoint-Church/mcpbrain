@@ -357,6 +357,7 @@ def _uninstall_schtasks_tray() -> None:  # pragma: no cover
 
 _PRUNE_LABEL = "church.centrepoint.joshbrain.prune"
 _HEALTH_LABEL = "church.centrepoint.joshbrain.context-health"
+_MEETING_PACKS_LABEL = "church.centrepoint.joshbrain.meeting-packs"
 
 
 def _calendar_plist(
@@ -405,6 +406,62 @@ def _calendar_plist(
     <string>{log_path}</string>
     <key>StandardErrorPath</key>
     <string>{err_path}</string>
+</dict>
+</plist>
+"""
+
+
+def meeting_packs_plist(home: str) -> str:
+    """Return a launchd plist that runs the meeting packs cowork session twice daily.
+
+    Fires at 07:45 and 12:00 Perth time. The cowork session reads today's calendar
+    events, checks which need packs, and POSTs to /api/meeting-packs/upsert.
+
+    A standalone f-string is used rather than _calendar_plist() because the helper
+    emits a single StartCalendarInterval dict; this job needs an array of two so it
+    fires both morning and midday.
+    """
+    joshbrain = Path(home).parent / "joshbrain"
+    script = _xml_escape(str(joshbrain / "bin" / "build_meeting_packs.sh"))
+    home_x = _xml_escape(home)
+    label = _MEETING_PACKS_LABEL
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{script}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MCPBRAIN_HOME</key>
+        <string>{home_x}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>7</integer>
+            <key>Minute</key>
+            <integer>45</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>12</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>{home_x}/{label}.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home_x}/{label}.err</string>
 </dict>
 </plist>
 """
