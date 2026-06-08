@@ -28,6 +28,9 @@ _LEAN_FLAGS = [
     "--tools", "",
     "--strict-mcp-config",
     "--mcp-config", '{"mcpServers":{}}',
+    # This is an internal tool call, not a user session: never fire user hooks
+    # (e.g. the SessionEnd capture would otherwise ingest a junk note per draft).
+    "--settings", '{"disableAllHooks":true}',
     "--dangerously-skip-permissions",
 ]
 _TIMEOUT = 90
