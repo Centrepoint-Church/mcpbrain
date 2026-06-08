@@ -1,8 +1,9 @@
 """mcpbrain update — git pull + reinstall + restart.
 
-Pulls the latest commits from the ops-brain repo using --ff-only (aborting on
-divergence), reinstalls the mcpbrain package via uv, then restarts the login
-agent so the new version takes effect immediately.
+Pulls the latest commits from the mcpbrain repo using --ff-only (aborting on
+divergence), reinstalls the mcpbrain package via uv (the tray's GUI deps are
+main dependencies, so a plain reinstall picks them up), then restarts BOTH the
+daemon and its menu-bar tray so the new version takes effect immediately.
 """
 
 import os
@@ -75,7 +76,7 @@ def _run(cmd: list) -> tuple[str, int]:
 
 
 def _restart_agent() -> None:
-    """Restart the mcpbrain login agent for the current platform."""
+    """Restart the mcpbrain daemon and tray login agents for this platform."""
     from mcpbrain import agents
     agents.restart_agent(sys.platform)
 
