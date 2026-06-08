@@ -44,8 +44,8 @@
   .spinner.active{display:inline-block}
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* Four-col grid */
-  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;align-items:start}
+  /* Three-col grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
   @media(max-width:1100px){.grid{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:600px){.grid{grid-template-columns:1fr}}
 
@@ -111,6 +111,17 @@
   .ext-link{color:var(--accent);text-decoration:none;font-size:14px;line-height:1}
   .ext-link:hover{color:var(--accent-d)}
 
+  /* Inbox */
+  .inbox-row{display:flex;align-items:flex-start;gap:10px;padding:7px 0;
+    border-bottom:1px solid var(--line)}
+  .inbox-row:last-child{border-bottom:none}
+  .inbox-body{flex:1 1 auto}
+  .inbox-subject{font-size:14px;font-weight:530;display:block;line-height:1.35}
+  .inbox-meta{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:3px}
+  .inbox-sender{font-size:12.5px;color:var(--muted)}
+  .inbox-reply{background:var(--warn-bg);color:var(--warn);border-radius:5px;
+    padding:1px 7px;font-size:11.5px;font-weight:600}
+
   /* Toast */
   #toast{
     position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
@@ -168,6 +179,15 @@
         <span id="rv-count" class="count-badge">0</span>
       </div>
       <div id="rv-body"><p class="empty">Loading…</p></div>
+    </div>
+
+    <!-- Inbox -->
+    <div class="card" id="card-inbox">
+      <div class="card-head">
+        <h2>Inbox</h2>
+        <span id="inbox-count" class="count-badge">0</span>
+      </div>
+      <div id="inbox-body"><p class="empty">Loading…</p></div>
     </div>
   </div>
 </main>
@@ -230,6 +250,31 @@ function showToast(msg, ms){
   setTimeout(() => t.classList.remove("show"), ms || 3000);
 }
 
+function showPackModal(title, text){
+  const existing = document.getElementById("pack-modal");
+  if(existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "pack-modal";
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px";
+  const box = document.createElement("div");
+  box.style.cssText = "background:var(--card);color:var(--ink);border-radius:16px;padding:28px;max-width:680px;width:100%;max-height:80vh;overflow-y:auto;position:relative";
+  const h = document.createElement("h2");
+  h.style.cssText = "margin:0 0 16px;font-size:18px";
+  h.textContent = title;
+  const pre = document.createElement("pre");
+  pre.style.cssText = "white-space:pre-wrap;font-size:13px;line-height:1.5;margin:0;font-family:inherit";
+  pre.textContent = text;
+  const close = document.createElement("button");
+  close.className = "ghost";
+  close.textContent = "Close";
+  close.style.cssText = "margin-top:16px";
+  close.onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if(e.target===overlay) overlay.remove(); };
+  box.appendChild(h); box.appendChild(pre); box.appendChild(close);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
 // ---- render calendar ----
 
 function renderCalendar(events){
@@ -264,9 +309,14 @@ function renderCalendar(events){
       pb.textContent = "pack";
       pb.href = "/";
       pb.title = "Open pack in wizard";
-      pb.addEventListener("click", function(e){
+      pb.addEventListener("click", async function(e){
         e.preventDefault();
-        window.location.href = "/";
+        try{
+          const r = await fetch("/api/meeting-packs/" + encodeURIComponent(ev.id), H);
+          if(!r.ok) throw new Error("HTTP " + r.status);
+          const data = await r.json();
+          showPackModal(data.event_title, data.pack_text);
+        }catch(ex){ showToast("Could not load pack."); }
       });
       titleEl.appendChild(pb);
     }
@@ -485,6 +535,57 @@ function renderClickUp(tasks){
   body.appendChild(frag);
 }
 
+// ---- render inbox ----
+
+function renderInbox(items){
+  const body = $("inbox-body");
+  $("inbox-count").textContent = items.length;
+  if(!items.length){
+    body.innerHTML = '<p class="empty">No emails need attention.</p>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for(const item of items){
+    const row = document.createElement("div");
+    row.className = "inbox-row";
+
+    const b = document.createElement("div");
+    b.className = "inbox-body";
+
+    const subj = document.createElement("span");
+    subj.className = "inbox-subject";
+    subj.textContent = item.subject || "(no subject)";
+
+    const meta = document.createElement("div");
+    meta.className = "inbox-meta";
+
+    const sender = document.createElement("span");
+    sender.className = "inbox-sender";
+    sender.textContent = item.sender || item.sender_email || "";
+    meta.appendChild(sender);
+
+    if(item.reply_needed){
+      const chip = document.createElement("span");
+      chip.className = "inbox-reply";
+      chip.textContent = "reply needed";
+      meta.appendChild(chip);
+    }
+    if(item.org){
+      const org = document.createElement("span");
+      org.className = "chip chip-org";
+      org.textContent = item.org;
+      meta.appendChild(org);
+    }
+
+    b.appendChild(subj);
+    b.appendChild(meta);
+    row.appendChild(b);
+    frag.appendChild(row);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+}
+
 // ---- main refresh ----
 
 let fetching = false;
@@ -510,6 +611,7 @@ async function refresh(){
     renderActions(data.actions || {});
     renderClickUp(data.clickup || []);
     renderReview(data.findings || [], data.changes || []);
+    renderInbox(data.inbox || []);
   } catch(e){
     showToast("Could not load data. Retrying in 60s.");
   } finally{
