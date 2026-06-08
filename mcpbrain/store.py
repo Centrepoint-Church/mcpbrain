@@ -13,6 +13,24 @@ import sqlite_vec
 from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 
 
+def _fts_match_query(query: str) -> str:
+    """Turn an arbitrary user string into a safe FTS5 MATCH expression.
+
+    FTS5 treats characters like '-', ':', '"', '*', '(', ')' as query operators,
+    so a raw query such as 'VERIFY-CAP-001' is parsed as a column filter and
+    raises 'no such column: CAP'. We split on whitespace and wrap each token in
+    double quotes (escaping embedded quotes by doubling), turning every token
+    into a literal phrase joined with spaces (implicit AND). This preserves the
+    previous keyword-AND behaviour while never raising on punctuation. Tokens
+    that tokenise to nothing (e.g. a lone '-') simply match nothing.
+
+    Returns '' when the query has no usable tokens; callers should treat an
+    empty result as "no keyword matches" rather than passing it to MATCH.
+    """
+    quoted = ['"' + tok.replace('"', '""') + '"' for tok in query.split() if tok]
+    return " ".join(quoted)
+
+
 def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     """Open a connection to the derived store with sqlite-vec loaded.
 
@@ -508,6 +526,9 @@ class Store:
                 ("waiting_on_cleared_at",         "TEXT"),
                 ("waiting_on_cleared_by_doc_id",  "TEXT"),
                 ("reply_received",                "INTEGER DEFAULT 0"),
+                # ClickUp two-way sync (2026-06-08): link anchor + priority.
+                ("clickup_task_id",               "TEXT DEFAULT ''"),
+                ("priority",                      "TEXT DEFAULT ''"),
             ):
                 if col_name not in act_cols:
                     db.execute(f"ALTER TABLE actions ADD COLUMN {col_name} {col_def}")
@@ -768,12 +789,15 @@ class Store:
             return [(r["doc_id"], r["distance"]) for r in cur.fetchall()]
 
     def fts_search(self, query: str, k: int) -> list[tuple[str, float]]:
+        match = _fts_match_query(query)
+        if not match:
+            return []
         with self._connect() as db:
             cur = db.execute(
                 "SELECT c.doc_id, bm25(fts_chunks) AS rank FROM fts_chunks "
                 "JOIN chunks c ON c.rowid=fts_chunks.rowid "
                 "WHERE fts_chunks MATCH ? ORDER BY rank LIMIT ?",
-                (query, k))
+                (match, k))
             return [(r["doc_id"], r["rank"]) for r in cur.fetchall()]
 
     def get_chunk(self, doc_id: str) -> dict | None:
@@ -1176,6 +1200,55 @@ class Store:
                 f"UPDATE actions SET text = ?, text_fingerprint = ?, updated_at = ? "
                 f"WHERE {' AND '.join(where)}", params)
             return cur.rowcount
+
+    # --- ClickUp sync (2026-06-08) ----------------------------------------
+
+    def set_action_clickup_id(self, action_id: int, clickup_task_id: str) -> int:
+        """Cache the linked ClickUp task id on an action. Returns rows changed."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE actions SET clickup_task_id = ?, updated_at = ? WHERE id = ?",
+                (clickup_task_id,
+                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 action_id))
+            return cur.rowcount
+
+    def update_action_fields(self, action_id: int, **fields) -> int:
+        """Update a whitelisted set of action columns in one statement.
+
+        Used by the ClickUp inbound pass to mirror ClickUp edits (org, deadline,
+        priority). Status/text have dedicated methods (they touch resolved_at /
+        fingerprint); this handles the plain columns. Unknown keys are ignored.
+        Always bumps updated_at. Returns rows changed.
+        """
+        allowed = {"org", "deadline", "priority", "clickup_task_id",
+                   "owner", "owner_entity_id"}
+        sets, params = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                sets.append(f"{k} = ?")
+                params.append(v)
+        if not sets:
+            return 0
+        sets.append("updated_at = ?")
+        params.append(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        params.append(action_id)
+        with self._connect() as db:
+            cur = db.execute(
+                f"UPDATE actions SET {', '.join(sets)} WHERE id = ?", params)
+            return cur.rowcount
+
+    def action_by_clickup_id(self, clickup_task_id: str) -> dict | None:
+        with self._connect() as db:
+            r = db.execute("SELECT * FROM actions WHERE clickup_task_id = ?",
+                           (clickup_task_id,)).fetchone()
+            return dict(r) if r else None
+
+    def get_unified_action(self, action_id: int) -> dict | None:
+        with self._connect() as db:
+            r = db.execute("SELECT * FROM actions WHERE id = ?",
+                           (action_id,)).fetchone()
+            return dict(r) if r else None
 
     def list_unified_actions(self) -> list[dict]:
         with self._connect() as db:
