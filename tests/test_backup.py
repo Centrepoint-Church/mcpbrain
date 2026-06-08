@@ -341,7 +341,7 @@ class _FakeCreate:
         self.calls = calls
         self.canned_id = canned_id
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return {"id": self.canned_id}
 
 
