@@ -5,6 +5,7 @@ import re
 import secrets
 import tempfile
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -90,6 +91,15 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("dashboard today failed")
                         return h_json(self, 500, {"error": str(exc)})
+                m = re.match(r"^/api/meeting-packs/([^?]+)$", self.path)
+                if m:
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    event_id = m.group(1)
+                    pack = server.store.get_meeting_pack(event_id)
+                    if pack is None:
+                        return h_json(self, 404, {"error": "pack not found"})
+                    return h_json(self, 200, pack)
                 self.send_response(404); self.end_headers()
             def do_POST(self):
                 if not self._auth_ok(): return
@@ -144,6 +154,8 @@ class ControlServer:
             body = json.loads(h.rfile.read(length) or b"{}")
         except (json.JSONDecodeError, ValueError):
             return h_json(h, 400, {"error": "invalid JSON body"})
+        if not isinstance(body, dict):
+            return h_json(h, 400, {"error": "body must be a JSON object"})
         d = self.daemon
         # A handler that raises would otherwise surface as an opaque 500 (or a
         # dropped connection) and the wizard could only say "Failed". Return the
@@ -200,6 +212,40 @@ class ControlServer:
                     return h_json(h, 404, {"error": "finding not found or already dismissed"})
                 self.store.record_change("finding_dismissed", ref_id=str(finding_id))
                 return h_json(h, 200, {"dismissed": True})
+
+            if h.path == "/api/meeting-packs/upsert":
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                event_id = body.get("event_id", "").strip()
+                if not event_id:
+                    return h_json(h, 400, {"error": "event_id required"})
+                self.store.upsert_meeting_pack(
+                    event_id=event_id,
+                    event_title=body.get("event_title", ""),
+                    event_date=body.get("event_date", ""),
+                    pack_text=body.get("pack_text", ""),
+                    attendees=body.get("attendees") or [],
+                    cowork_session=body.get("cowork_session", ""),
+                )
+                return h_json(h, 200, {"ok": True})
+
+            if h.path == "/api/session/ingest":
+                title = body.get("title", "").strip()
+                content = body.get("content", "").strip()
+                if not title or not content:
+                    return h_json(h, 400, {"error": "title and content required"})
+                from mcpbrain.capture import write_capture
+                envelope = {
+                    "kind": "ingest",
+                    "source": "stop_hook",
+                    "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "title": title,
+                    "content": content,
+                    "tags": str(body.get("tags") or "session"),
+                    "observation_type": "note",
+                }
+                p = write_capture(str(self.home), envelope)
+                return h_json(h, 200, {"queued": True, "path": str(p)})
 
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
