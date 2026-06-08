@@ -37,6 +37,10 @@ def _now_iso() -> str:
 def _open_ro(path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
+    # Match store._open_db: a bounded busy_timeout so a dashboard read during a
+    # daemon/draft WAL checkpoint waits briefly instead of failing immediately and
+    # blanking the card.
+    db.execute("PRAGMA busy_timeout=5000")
     try:
         import sqlite_vec  # noqa: PLC0415
         db.enable_load_extension(True)
