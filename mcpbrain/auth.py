@@ -29,6 +29,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
+    # drive.file: write access limited to files/folders this app creates — the
+    # least privilege needed for the encrypted-snapshot backup upload
+    # (backup.upload_snapshot creates a per-user folder on a Shared Drive and
+    # uploads into it). Read access stays via drive.readonly above.
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
 # Per-service (api, version) keyed by the scope that grants it.
