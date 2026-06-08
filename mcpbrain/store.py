@@ -26,6 +26,10 @@ def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     else:
         db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
+    # Explicit busy_timeout so concurrent writers (daemon + MCP draft handle) serialise
+    # via WAL with a bounded wait instead of failing immediately on a locked DB. WAL is
+    # set once at init() and is a file-level setting, so every connection inherits it.
+    db.execute("PRAGMA busy_timeout=5000")
     db.enable_load_extension(True)
     sqlite_vec.load(db)  # vec0 tables need the extension even on a read-only conn
     db.enable_load_extension(False)
@@ -36,7 +40,8 @@ class Store:
     def __init__(self, path: Path, dim: int, read_only: bool = False):
         self.path = Path(path)
         self.dim = dim
-        self.read_only = read_only  # MCP server opens read-only; daemon is the sole writer
+        self.read_only = read_only  # daemon is sole writer for index/graph/ingest tables;
+        # the MCP server also opens a writable handle for draft_records (serialised via WAL)
 
     @contextmanager
     def _connect(self):

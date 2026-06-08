@@ -224,6 +224,44 @@ def make_brain_action_update():
     return brain_action_update
 
 
+def make_brain_draft_reply(store, home: str):
+    async def brain_draft_reply(email_id: str, intent: str = "") -> dict:
+        """Draft an email reply using the 4-stage pipeline (pretrial → generate → critique → voice).
+
+        email_id: message_id from email_context.
+        intent: optional override — 'reply' | 'acknowledge' | 'decline' | 'decide' | 'inform'.
+        Returns {draft_record_id, final_draft, critique, voice_issues, audience_tier} or {error}.
+        """
+        try:
+            from mcpbrain import draft as _draft
+            return _draft.draft_email(store, home, email_id, intent=intent)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        except Exception:
+            _log.exception("brain_draft_reply failed for email_id=%r", email_id)
+            return {"error": "draft pipeline failed — check daemon log"}
+    return brain_draft_reply
+
+
+def make_brain_draft_refine(store, home: str):
+    async def brain_draft_refine(draft_record_id: int, refinement: str) -> dict:
+        """Refine an existing draft.
+
+        draft_record_id: id from a prior brain_draft_reply call.
+        refinement: 'warmer' | 'shorter' | 'firmer' | 'direct_about:<topic>'
+        Returns {draft_record_id, final_draft, critique, voice_issues, audience_tier} or {error}.
+        """
+        try:
+            from mcpbrain import draft as _draft
+            return _draft.refine_draft(store, home, draft_record_id, refinement)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        except Exception:
+            _log.exception("brain_draft_refine failed for record_id=%r", draft_record_id)
+            return {"error": "refine pipeline failed — check daemon log"}
+    return brain_draft_refine
+
+
 def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     import mcp.server.stdio
     from mcp.server import Server
@@ -232,7 +270,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     from mcpbrain.store import Store
     from mcpbrain.embed import get_embedder
     emb = get_embedder(config.EMBEDDER)
-    store = Store(config.store_path(), dim=emb.dim, read_only=True)  # daemon is sole writer
+    _store_path, _store_dim = config.store_path(), emb.dim
+    store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
     search = make_brain_search(store, emb)
     context = make_brain_context(store)
     actions = make_brain_actions(store)
@@ -241,6 +280,13 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     ingest = make_brain_ingest()
     action_create = make_brain_action_create()
     action_update = make_brain_action_update()
+    # Draft tools write to draft_records, so they need a writable store handle.
+    # the read-only store cannot INSERT; this writable handle is scoped to draft_records
+    # writes by the MCP server (serialised via WAL + busy_timeout).
+    draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
+    home = str(config.app_dir())
+    draft_reply = make_brain_draft_reply(draft_store, home)
+    draft_refine = make_brain_draft_refine(draft_store, home)
     server = Server("mcpbrain")
 
     @server.list_resources()
@@ -397,6 +443,42 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                     "required": ["action_id", "status"],
                 },
             ),
+            types.Tool(
+                name="brain_draft_reply",
+                description=(
+                    "Draft an email reply using a 4-stage pipeline. "
+                    "Stages: pretrial+plan (intent, audience tier), generate, critique+revise, voice check. "
+                    "Returns draft_record_id for use with brain_draft_refine."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "email_id": {"type": "string",
+                                     "description": "message_id from email_context"},
+                        "intent": {"type": "string",
+                                   "description": "override intent: reply|acknowledge|decline|decide|inform",
+                                   "default": ""},
+                    },
+                    "required": ["email_id"],
+                },
+            ),
+            types.Tool(
+                name="brain_draft_refine",
+                description=(
+                    "Refine a draft from brain_draft_reply. "
+                    "Runs critique+revise+voice stages with a refinement instruction. "
+                    "Returns a new draft_record_id."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "draft_record_id": {"type": "integer"},
+                        "refinement": {"type": "string",
+                                       "description": "warmer | shorter | firmer | direct_about:<topic>"},
+                    },
+                    "required": ["draft_record_id", "refinement"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -449,6 +531,18 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await action_update(
                 action_id=arguments.get("action_id", 0),
                 status=arguments.get("status", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_draft_reply":
+            out = await draft_reply(
+                email_id=arguments.get("email_id", ""),
+                intent=arguments.get("intent", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_draft_refine":
+            out = await draft_refine(
+                draft_record_id=arguments.get("draft_record_id", 0),
+                refinement=arguments.get("refinement", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         results = await search(arguments["query"], arguments.get("limit", 10))
