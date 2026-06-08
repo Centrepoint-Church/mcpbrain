@@ -522,3 +522,131 @@ def test_brain_proactive_error_returns_empty_list(tmp_path, caplog):
             out = asyncio.run(tool())
         s.open_findings = original
     assert out == []
+
+
+class TestBrainDraftReply:
+    """brain_draft_reply and brain_draft_refine MCP tools."""
+
+    def _store_with_email(self, tmp_path):
+        from mcpbrain.store import Store
+        import sqlite3
+        s = Store(tmp_path / "brain.sqlite3", dim=4)
+        s.init()
+        # Seed email_context directly
+        with sqlite3.connect(str(s.path)) as db:
+            db.execute(
+                "INSERT INTO email_context(message_id, subject, sender, sender_email, "
+                "thread_id, org, content_type, summary, reply_needed) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("msg1", "Budget Q2", "Alice", "alice@x.com",
+                 "thr1", "Centrepoint", "request", "Alice asks about budget timeline.", 1))
+        return s
+
+    def test_draft_reply_returns_draft_record_id(self, tmp_path, monkeypatch):
+        from mcpbrain import mcp_server
+        import asyncio
+
+        store = self._store_with_email(tmp_path)
+        home = str(tmp_path)
+
+        def fake_draft_email(s, h, email_id, intent=""):
+            return {"draft_record_id": 1, "final_draft": "Hi Alice, the budget is on track.",
+                    "critique": "Good.", "voice_issues": [], "audience_tier": "staff_internal"}
+
+        # factory does a deferred `from mcpbrain import draft as _draft`, so patch the module attribute
+        monkeypatch.setattr("mcpbrain.draft.draft_email", fake_draft_email)
+
+        tool = mcp_server.make_brain_draft_reply(store, home)
+        result = asyncio.run(tool(email_id="msg1"))
+        assert result["draft_record_id"] == 1
+        assert "final_draft" in result
+
+    def test_draft_reply_returns_error_for_unknown_email(self, tmp_path, monkeypatch):
+        from mcpbrain import mcp_server
+        import asyncio
+
+        store = self._store_with_email(tmp_path)
+        tool = mcp_server.make_brain_draft_reply(store, str(tmp_path))
+        result = asyncio.run(tool(email_id="nope"))
+        assert "error" in result
+
+    def test_draft_refine_returns_new_draft_record_id(self, tmp_path, monkeypatch):
+        from mcpbrain import mcp_server
+        import asyncio
+
+        store = self._store_with_email(tmp_path)
+        home = str(tmp_path)
+
+        draft_id = store.save_draft(
+            email_id="msg1", thread_id="thr1", intent="reply",
+            audience_tier="staff_internal",
+            draft_text="Hi Alice, budget is on track.",
+            critique="Good.", voice_issues=[], samples_used=0, model="sonnet")
+
+        def fake_refine(s, h, record_id, refinement):
+            return {"draft_record_id": draft_id + 1,
+                    "final_draft": "Hi Alice — the budget is on track. Happy to chat.",
+                    "critique": "Warmer now.", "voice_issues": [], "audience_tier": "staff_internal"}
+
+        monkeypatch.setattr("mcpbrain.draft.refine_draft", fake_refine)
+        tool = mcp_server.make_brain_draft_refine(store, home)
+        result = asyncio.run(
+            tool(draft_record_id=draft_id, refinement="warmer"))
+        assert result["draft_record_id"] == draft_id + 1
+
+
+class TestBrainDraftReplyIntegration:
+    """End-to-end proof that the writable draft_store persists a draft and the
+    read-only store sees it on the same WAL DB — exercises the real 4-stage
+    pipeline with only the LLM subprocess mocked (no draft_email mock)."""
+
+    def test_writable_handle_persists_draft_visible_to_readonly(self, tmp_path, monkeypatch):
+        import sqlite3
+        from mcpbrain import mcp_server
+        from mcpbrain import draft as d
+
+        # Seed an email_context row via a writable init, then open BOTH handles
+        # on the SAME path (mirrors main(): read-only store + writable draft_store).
+        path = tmp_path / "brain.sqlite3"
+        seed = Store(path, dim=4, read_only=False)
+        seed.init()
+        with sqlite3.connect(str(path)) as db:
+            db.execute(
+                "INSERT INTO email_context(message_id, subject, sender, sender_email, "
+                "thread_id, org, content_type, summary, reply_needed) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("msg1", "Budget Q2", "Alice", "alice@x.com",
+                 "thr1", "Centrepoint", "request", "Alice asks about budget timeline.", 1))
+
+        read_store = Store(path, dim=4, read_only=True)
+        write_store = Store(path, dim=4, read_only=False)
+
+        # Mock the LLM subprocess only; disambiguate the four pipeline calls by
+        # model (Haiku = pretrial) and prompt substrings (confirmed against draft.py).
+        def fake_llm(prompt, model=None, timeout=None):
+            import json as _j
+            if model == d._HAIKU:
+                return _j.dumps({"intent": "reply", "audience_tier": "staff_internal",
+                                 "key_points": ["confirm timeline"], "tone_notes": "warm"})
+            if "Review this email draft" in prompt:
+                return _j.dumps({"critique": "good", "revised_draft": "REVISED BODY"})
+            if "Scan this email draft" in prompt:
+                return _j.dumps({"issues": [], "clean_draft": "FINAL BODY"})
+            return "INITIAL DRAFT BODY"  # generate_draft
+        monkeypatch.setattr("mcpbrain.draft._call_llm", fake_llm)
+
+        # No joshbrain dir under tmp_path, so voice rules load empty (no real file IO).
+        assert d._load_voice_rules(str(tmp_path)) == ""
+
+        # Build the tool with the WRITABLE handle and run the real pipeline.
+        tool = mcp_server.make_brain_draft_reply(write_store, str(tmp_path))
+        result = asyncio.run(tool(email_id="msg1"))
+
+        assert result["draft_record_id"] > 0
+        assert result["final_draft"] == "FINAL BODY"
+
+        # The write went through read_only=False and is visible to the read_only=True
+        # handle on the same WAL DB.
+        row = read_store.get_draft(result["draft_record_id"])
+        assert row is not None
+        assert row["draft_text"] == result["final_draft"]
