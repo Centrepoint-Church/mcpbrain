@@ -330,6 +330,50 @@ class TestCalendarTodayWithEvents:
         assert evt["end"] == ""
         assert evt["has_pack"] is False
 
+    def test_attendees_extracted_excluding_self_and_resources(self, tmp_path):
+        today = datetime.now(_PERTH).date()
+        start_dt = datetime(today.year, today.month, today.day, 9, 0, 0,
+                            tzinfo=_PERTH)
+        end_dt = datetime(today.year, today.month, today.day, 10, 0, 0,
+                          tzinfo=_PERTH)
+        items = [{
+            "id": "evt3",
+            "summary": "1:1",
+            "start": {"dateTime": start_dt.isoformat()},
+            "end": {"dateTime": end_dt.isoformat()},
+            "attendees": [
+                {"email": "alice@x.com", "displayName": "Alice"},
+                {"email": "bob@x.com"},  # no displayName -> falls back to email
+                {"email": "room@resource.calendar.google.com", "resource": True},
+                {"email": "josh@x.com", "self": True, "displayName": "Josh"},
+            ],
+        }]
+        svc = self._make_service(items)
+        with mock.patch("mcpbrain.auth.build_google_services",
+                        return_value={"calendar_service": svc}):
+            result = dashboard.calendar_today(str(tmp_path))
+        # Resources (rooms) and the owner (self) are excluded; displayName wins,
+        # email is the fallback.
+        assert result[0]["attendees"] == ["Alice", "bob@x.com"]
+
+    def test_no_attendees_defaults_to_empty_list(self, tmp_path):
+        today = datetime.now(_PERTH).date()
+        start_dt = datetime(today.year, today.month, today.day, 9, 0, 0,
+                            tzinfo=_PERTH)
+        end_dt = datetime(today.year, today.month, today.day, 10, 0, 0,
+                          tzinfo=_PERTH)
+        items = [{
+            "id": "evt4",
+            "summary": "Solo block",
+            "start": {"dateTime": start_dt.isoformat()},
+            "end": {"dateTime": end_dt.isoformat()},
+        }]
+        svc = self._make_service(items)
+        with mock.patch("mcpbrain.auth.build_google_services",
+                        return_value={"calendar_service": svc}):
+            result = dashboard.calendar_today(str(tmp_path))
+        assert result[0]["attendees"] == []
+
     def test_mixed_timed_and_all_day(self, tmp_path):
         today = datetime.now(_PERTH).date()
         start_dt = datetime(today.year, today.month, today.day, 14, 30, 0,

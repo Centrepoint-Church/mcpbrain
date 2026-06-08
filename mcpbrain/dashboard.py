@@ -234,6 +234,16 @@ def calendar_today(home) -> list[dict]:
                 except (ValueError, TypeError):
                     end_str = ""
 
+            # Attendee names for meeting-pack prep. Exclude the owner (self) and
+            # room/equipment resources — neither is someone to prepare for.
+            # displayName is preferred; email is the fallback when it's absent.
+            attendees = [
+                (att.get("displayName") or att.get("email", "")).strip()
+                for att in item.get("attendees", [])
+                if not att.get("resource") and not att.get("self")
+            ]
+            attendees = [a for a in attendees if a]
+
             events.append({
                 "id": item.get("id", ""),
                 "title": item.get("summary", "(no title)"),
@@ -241,6 +251,7 @@ def calendar_today(home) -> list[dict]:
                 "end": end_str,
                 "all_day": all_day,
                 "location": item.get("location", ""),
+                "attendees": attendees,
                 "has_pack": False,
             })
 

@@ -52,6 +52,28 @@ class TestCallLlm:
         with pytest.raises(RuntimeError, match="claude exited 1"):
             d._call_llm("Hello")
 
+    def test_internal_run_is_isolated(self, monkeypatch):
+        # An internal `claude -p` is a tool call, not a user session: it must not
+        # fire user hooks (e.g. the SessionEnd capture, which would ingest a junk
+        # note per draft) nor spawn the configured MCP servers.
+        captured = {}
+        result = mock.MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+
+        def fake_run(cmd, *a, **kw):
+            captured["cmd"] = cmd
+            return result
+
+        monkeypatch.setattr(d.subprocess, "run", fake_run)
+        monkeypatch.setattr(d, "_find_claude", lambda: "/usr/bin/claude")
+        d._call_llm("Hello")
+        cmd = captured["cmd"]
+        assert "--strict-mcp-config" in cmd
+        assert "--settings" in cmd
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        assert settings.get("disableAllHooks") is True
+
 
 class TestLoadVoiceRules:
     def test_returns_content_when_file_exists(self, tmp_path):
