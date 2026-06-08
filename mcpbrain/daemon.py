@@ -95,6 +95,7 @@ class BackupConfig:
     shared_drive_id: str
     user_id: str
     out_path: Path | None = None
+    retain: int = 7   # keep the newest N uploaded snapshots; older are pruned
 
     def __post_init__(self):
         self.out_path = (
@@ -742,6 +743,11 @@ class Daemon:
             file_id = upload_snapshot(
                 cfg.drive_service, path, cfg.shared_drive_id, cfg.user_id
             )
+            # Bound history: keep the newest `retain` snapshots, prune older.
+            # Best-effort — a prune failure must not fail the (successful) backup.
+            from mcpbrain.backup import prune_snapshots
+            prune_snapshots(cfg.drive_service, cfg.shared_drive_id, cfg.user_id,
+                            keep=cfg.retain)
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
             log.warning("periodic backup failed: %s", exc, exc_info=True)
             return {"backed_up": False, "error": str(exc)}
@@ -1384,8 +1390,17 @@ def _backup_from_config(home):
         log.warning("backup.interval_s invalid (%r); using default %ss: %s",
                     raw_interval, DEFAULT_BACKUP_INTERVAL_S, exc)
         interval_s = float(DEFAULT_BACKUP_INTERVAL_S)
+    try:
+        retain = int(cfg.get("retain", 7))
+        if retain <= 0:
+            raise ValueError("must be positive")
+    except (TypeError, ValueError) as exc:
+        log.warning("backup.retain invalid (%r); using default 7: %s",
+                    cfg.get("retain"), exc)
+        retain = 7
     bc = BackupConfig(key=key, drive_service=drive,
-                      shared_drive_id=shared_drive_id, user_id=user_id)
+                      shared_drive_id=shared_drive_id, user_id=user_id,
+                      retain=retain)
     return (bc, interval_s)
 
 

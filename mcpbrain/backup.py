@@ -361,6 +361,60 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
     return files[0]["id"]
 
 
+def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -> int:
+    """Delete all but the newest `keep` snapshots in <shared_drive>/<user_id>/.
+
+    Bounds the daily full-snapshot uploads so they don't grow without limit
+    (~750MB/day otherwise). Sorts by the same (createdTime, modifiedTime) key
+    find_latest_snapshot uses, so the snapshot a restore would pick is always
+    among those kept. Best-effort: a delete failure is logged and skipped, never
+    raised. keep <= 0 means "keep everything" (no-op). Returns the count deleted.
+    """
+    _guard_user_id(user_id)
+    if keep <= 0:
+        return 0
+
+    folder_q = (
+        f"name = '{user_id}' and mimeType = '{FOLDER_MIME}' "
+        f"and trashed = false and '{shared_drive_id}' in parents"
+    )
+    folders = (
+        service.files()
+        .list(q=folder_q, corpora="drive", driveId=shared_drive_id,
+              includeItemsFromAllDrives=True, supportsAllDrives=True,
+              fields="files(id)")
+        .execute()
+        .get("files", [])
+    )
+    if not folders:
+        return 0
+    folder_id = folders[0]["id"]
+
+    files = (
+        service.files()
+        .list(q=f"'{folder_id}' in parents and trashed = false", corpora="drive",
+              driveId=shared_drive_id, includeItemsFromAllDrives=True,
+              supportsAllDrives=True, fields="files(id, name, createdTime, modifiedTime)")
+        .execute()
+        .get("files", [])
+    )
+    files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
+               reverse=True)
+
+    deleted = 0
+    for f in files[keep:]:
+        try:
+            service.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001 — pruning must never break a backup
+            log.warning("prune_snapshots: could not delete %s (%s): %s",
+                        f.get("name"), f["id"], exc)
+    if deleted:
+        log.info("prune_snapshots: deleted %d old snapshot(s), kept newest %d",
+                 deleted, keep)
+    return deleted
+
+
 def _default_downloader(fh, request):
     """Lazy default downloader factory — imports googleapiclient only when a
     download actually runs, so `import mcpbrain.backup` does not require the
