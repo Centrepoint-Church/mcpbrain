@@ -513,6 +513,90 @@ class Store:
                 "WHERE status='open' AND waiting_on IS NOT NULL"
             )
 
+            # --- meeting_packs (Mac capability uplift) -----------------------
+            db.execute("""CREATE TABLE IF NOT EXISTS meeting_packs(
+                event_id       TEXT PRIMARY KEY,
+                event_title    TEXT DEFAULT '',
+                event_date     TEXT DEFAULT '',
+                pack_text      TEXT DEFAULT '',
+                attendees      TEXT DEFAULT '[]',
+                built_at       TEXT DEFAULT '',
+                cowork_session TEXT DEFAULT '')""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_mp_date ON meeting_packs(event_date)")
+
+            # --- draft_records (Mac capability uplift) ------------------------
+            db.execute("""CREATE TABLE IF NOT EXISTS draft_records(
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_id        TEXT DEFAULT '',
+                thread_id       TEXT DEFAULT '',
+                intent          TEXT DEFAULT '',
+                audience_tier   TEXT DEFAULT '',
+                draft_text      TEXT DEFAULT '',
+                critique        TEXT DEFAULT '',
+                voice_issues    TEXT DEFAULT '[]',
+                samples_used    INTEGER DEFAULT 0,
+                model           TEXT DEFAULT '',
+                parent_draft_id INTEGER,
+                refinement      TEXT DEFAULT '',
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_dr_email  ON draft_records(email_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_dr_thread ON draft_records(thread_id)")
+
+    def upsert_meeting_pack(self, event_id: str, event_title: str,
+                            event_date: str, pack_text: str,
+                            attendees: list | None = None,
+                            cowork_session: str = "") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO meeting_packs(event_id, event_title, event_date, pack_text,
+                       attendees, built_at, cowork_session)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(event_id) DO UPDATE SET
+                       event_title=excluded.event_title,
+                       event_date=excluded.event_date,
+                       pack_text=excluded.pack_text,
+                       attendees=excluded.attendees,
+                       built_at=excluded.built_at,
+                       cowork_session=excluded.cowork_session""",
+                (event_id, event_title, event_date, pack_text,
+                 json.dumps(attendees or []), now, cowork_session))
+
+    def get_meeting_pack(self, event_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM meeting_packs WHERE event_id=?", (event_id,)).fetchone()
+            return dict(row) if row else None
+
+    def pack_event_ids_for_date(self, date_iso: str) -> set:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT event_id FROM meeting_packs WHERE event_date=?",
+                (date_iso,)).fetchall()
+            return {r["event_id"] for r in rows}
+
+    def save_draft(self, email_id: str, thread_id: str, intent: str,
+                   audience_tier: str, draft_text: str, critique: str,
+                   voice_issues: list, samples_used: int, model: str,
+                   parent_draft_id: int | None = None,
+                   refinement: str = "") -> int:
+        with self._connect() as db:
+            cur = db.execute(
+                """INSERT INTO draft_records(email_id, thread_id, intent, audience_tier,
+                       draft_text, critique, voice_issues, samples_used, model,
+                       parent_draft_id, refinement)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (email_id, thread_id, intent, audience_tier, draft_text, critique,
+                 json.dumps(voice_issues), samples_used, model,
+                 parent_draft_id, refinement))
+            return cur.lastrowid
+
+    def get_draft(self, draft_id: int) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM draft_records WHERE id=?", (draft_id,)).fetchone()
+            return dict(row) if row else None
+
     def upsert_chunk(self, doc_id, text, content_hash, metadata) -> bool:
         """Insert or update a chunk. Returns True when a row was inserted or its
         content changed, False when the call was a no-op (same content_hash).
