@@ -528,3 +528,39 @@ def test_stale_reextract_roundtrip(tmp_path):
     # upsert replaces in place
     s.set_stale_reextract("thread-A", "sig456", "2026-06-09T01:00:00Z")
     assert s.get_stale_reextract("thread-A")["signature"] == "sig456"
+
+
+def _add_thread_chunk(s, doc_id, thread_id, text, chash, enriched):
+    # Insert a chunk with a thread_id in metadata, then set enriched directly.
+    s.upsert_chunk(doc_id, text, chash, {"thread_id": thread_id})
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET enriched=? WHERE doc_id=?", (enriched, doc_id))
+
+
+def test_thread_helpers(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    _add_thread_chunk(s, "d1", "T1", "hello", "h1", enriched=1)
+    _add_thread_chunk(s, "d2", "T1", "world", "h2", enriched=1)
+    _add_thread_chunk(s, "d3", "T2", "other", "h3", enriched=0)
+
+    # T1 fully enriched -> no unenriched; T2 has an unenriched chunk
+    assert s.thread_has_unenriched("T1") is False
+    assert s.thread_has_unenriched("T2") is True
+
+    # signature is stable and order-independent of insertion
+    sig_before = s.thread_signature("T1")
+    assert isinstance(sig_before, str) and len(sig_before) == 64
+
+    # mark_thread_unenriched flips only T1's chunks, returns the count
+    assert s.mark_thread_unenriched("T1") == 2
+    assert s.thread_has_unenriched("T1") is True
+    assert s.thread_has_unenriched("T2") is True  # untouched
+
+    # resetting enriched does NOT change content -> signature unchanged
+    assert s.thread_signature("T1") == sig_before
+
+    # changing content DOES change the signature
+    _add_thread_chunk(s, "d1", "T1", "hello edited", "h1b", enriched=1)
+    assert s.thread_signature("T1") != sig_before
