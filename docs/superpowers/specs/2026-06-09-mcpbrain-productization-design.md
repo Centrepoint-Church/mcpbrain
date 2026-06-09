@@ -248,11 +248,12 @@ written to disk as a quarantined downloaded app, so macOS does not block it
 
 Replace the git-pull-on-clone `update.py` with an index-based update:
 
-- The **daemon** owns the auto-update tick (it is always running; the tray is
-  optional and may be absent on a headless box). It periodically checks the Pages
-  index for a newer version, installs it in the background via `uv tool install
-  --index … mcpbrain --upgrade` (or `uv tool upgrade mcpbrain` against the
-  recorded index), then restarts the daemon and tray.
+- The **daemon** owns the auto-update tick — it is the always-on background
+  process, so it (not the tray) is the right home for a background check. It
+  periodically checks the Pages index for a newer version, installs it in the
+  background via `uv tool install --index … mcpbrain --upgrade` (or `uv tool
+  upgrade mcpbrain` against the recorded index), then restarts the daemon and
+  tray.
 - **Silent** by default (user chose this): no prompt, no terminal. The status
   home shows "Up to date · vX" / "Updating…". A bad release is contained by the
   maintainer's publish control.
@@ -337,6 +338,16 @@ Ordered by the implicit questions a returning non-technical user asks:
 
 ### 3.4 Menu bar (glance-first)
 
+The menu-bar tray is a **first-class, non-optional component** of the app, not a
+best-effort add-on. On every desktop install (macOS/Windows — the target
+audience) it is installed as a managed login agent alongside the daemon, and a
+failure to install it is a **surfaced error**, not a silent skip (today
+`setup.py:_install_tray_best_effort` swallows it and the README calls it
+"optional" — both change). For a non-technical user the tray *is* the app's face:
+it is how they see status, get the attention/self-healing signals, and trust that
+syncing is happening. The only case it is absent is a genuinely headless server
+with no GUI, which is not the user-facing audience.
+
 Following Dropbox/Backblaze conventions (status + one timestamp + the 1–2 most
 common actions; icon encodes state; settings live in the window, not the menu):
 
@@ -391,7 +402,11 @@ chatty — they fire for "you must act" states, not routine activity.
   the four cadences; replace shell wrappers with `python -m mcpbrain …`.
 - `update.py` — index-based reinstall replacing git pull; lock-safe restart.
 - `setup.py` / `install/*` — thin one-line bootstrap; drop `--repo-dir`
-  persistence.
+  persistence; **tray installed as a required desktop component** (replace
+  `_install_tray_best_effort`'s silent swallow with a surfaced error on desktop;
+  only a headless/no-GUI box may skip it).
+- `agents.py` — tray login agent registered as a managed component on every
+  desktop install (same lifecycle as the daemon agent), not best-effort.
 - `control_api.py` — extend `/api/status` with probes; add MCP heartbeat
   endpoint; reconnect/update/notification-related routes.
 - `mcp_server.py` — write heartbeat on startup (and periodically).
