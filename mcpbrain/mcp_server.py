@@ -224,6 +224,52 @@ def make_brain_action_update():
     return brain_action_update
 
 
+def make_brain_decision():
+    async def brain_decision(text: str, rationale: str = "", owner: str = "Josh",
+                             supersedes: str = "", org: str = "") -> dict:
+        """Record a decision. QUEUED: the daemon appends a row to state/decisions.md
+        in joshbrain and commits (one daemon cycle, ~seconds-minutes), not instantly."""
+        from mcpbrain.capture import write_capture
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "decision", text=text, rationale=rationale, owner=owner,
+                supersedes=supersedes, org=org))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_decision
+
+
+def make_brain_note():
+    async def brain_note(text: str) -> dict:
+        """Record a continuity note. QUEUED: the daemon prepends a dated entry to
+        state/hot.md in joshbrain and commits (one daemon cycle), not instantly."""
+        from mcpbrain.capture import write_capture
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "continuity", text=text))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_note
+
+
+def make_brain_memory_write():
+    async def brain_memory_write(slug: str, description: str, body: str,
+                                 memory_type: str = "project") -> dict:
+        """Write a durable auto-memory file. QUEUED: the daemon writes memory/<slug>.md
+        + a MEMORY.md pointer in joshbrain and commits (one daemon cycle), not instantly."""
+        from mcpbrain.capture import write_capture
+        try:
+            p = write_capture(str(config.app_dir()), _capture_envelope(
+                "memory", slug=slug, description=description, body=body,
+                memory_type=memory_type))
+            return {"queued": True, "path": str(p)}
+        except (ValueError, OSError) as exc:
+            return {"queued": False, "error": str(exc)}
+    return brain_memory_write
+
+
 def make_brain_draft_reply(store, home: str):
     async def brain_draft_reply(email_id: str, intent: str = "") -> dict:
         """Draft an email reply using the 4-stage pipeline (pretrial → generate → critique → voice).
@@ -280,6 +326,9 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     ingest = make_brain_ingest()
     action_create = make_brain_action_create()
     action_update = make_brain_action_update()
+    decision = make_brain_decision()
+    note = make_brain_note()
+    memory_write = make_brain_memory_write()
     # Draft tools write to draft_records, so they need a writable store handle.
     # the read-only store cannot INSERT; this writable handle is scoped to draft_records
     # writes by the MCP server (serialised via WAL + busy_timeout).
@@ -444,6 +493,58 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 },
             ),
             types.Tool(
+                name="brain_decision",
+                description=(
+                    "Record a decision. "
+                    "QUEUED: the daemon appends a row to state/decisions.md in joshbrain "
+                    "and commits (one daemon cycle, ~seconds-minutes), not instantly."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "rationale": {"type": "string", "default": ""},
+                        "owner": {"type": "string", "default": "Josh"},
+                        "supersedes": {"type": "string", "default": ""},
+                        "org": {"type": "string", "default": ""},
+                    },
+                    "required": ["text"],
+                },
+            ),
+            types.Tool(
+                name="brain_note",
+                description=(
+                    "Record a continuity note. "
+                    "QUEUED: the daemon prepends a dated entry to state/hot.md in joshbrain "
+                    "and commits (one daemon cycle), not instantly."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                    },
+                    "required": ["text"],
+                },
+            ),
+            types.Tool(
+                name="brain_memory_write",
+                description=(
+                    "Write a durable auto-memory file. "
+                    "QUEUED: the daemon writes memory/<slug>.md + a MEMORY.md pointer "
+                    "in joshbrain and commits (one daemon cycle), not instantly."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "description": {"type": "string"},
+                        "body": {"type": "string"},
+                        "memory_type": {"type": "string", "default": "project"},
+                    },
+                    "required": ["slug", "description", "body"],
+                },
+            ),
+            types.Tool(
                 name="brain_draft_reply",
                 description=(
                     "Draft an email reply using a 4-stage pipeline. "
@@ -531,6 +632,28 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await action_update(
                 action_id=arguments.get("action_id", 0),
                 status=arguments.get("status", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_decision":
+            out = await decision(
+                text=arguments.get("text", ""),
+                rationale=arguments.get("rationale", ""),
+                owner=arguments.get("owner", "Josh"),
+                supersedes=arguments.get("supersedes", ""),
+                org=arguments.get("org", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_note":
+            out = await note(
+                text=arguments.get("text", ""),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_memory_write":
+            out = await memory_write(
+                slug=arguments.get("slug", ""),
+                description=arguments.get("description", ""),
+                body=arguments.get("body", ""),
+                memory_type=arguments.get("memory_type", "project"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_draft_reply":
