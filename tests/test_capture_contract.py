@@ -57,3 +57,25 @@ def test_cross_kind_contamination_rejected():
     problems = validate_capture({"kind": "ingest", "title": "T", "content": "C",
                                   "action_id": 5})
     assert any("action_id" in p for p in problems)
+
+
+def test_decision_envelope_valid():
+    assert validate_capture({"kind": "decision", "text": "Retire X", "rationale": "Y", "owner": "Josh"}) == []
+
+
+def test_decision_requires_text():
+    assert validate_capture({"kind": "decision", "rationale": "Y"})  # non-empty problems list
+
+
+def test_continuity_envelope_valid():
+    assert validate_capture({"kind": "continuity", "text": "Shipped the parity audit today"}) == []
+
+
+def test_memory_envelope_valid():
+    assert validate_capture({"kind": "memory", "slug": "cowork-traps",
+                             "description": "Cowork gotchas", "body": "..."}) == []
+
+
+def test_memory_requires_slug_and_body():
+    probs = validate_capture({"kind": "memory", "description": "d"})
+    assert any("slug" in p for p in probs) and any("body" in p for p in probs)

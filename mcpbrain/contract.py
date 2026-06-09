@@ -266,7 +266,7 @@ def sanitize_batch(d: object) -> tuple[object, int]:
     return out, total
 
 
-_CAPTURE_KINDS = {"ingest", "action_create", "action_update"}
+_CAPTURE_KINDS = {"ingest", "action_create", "action_update", "decision", "continuity", "memory"}
 _OBSERVATION_TYPES = {"memory", "decision", "note", "reference"}
 _ACTION_STATUSES = {"open", "done"}
 
@@ -308,6 +308,19 @@ def validate_capture(d: object) -> list[str]:
             problems.append("action_id must be a positive integer")
         if d.get("status") not in _ACTION_STATUSES:
             problems.append(f"status must be one of {sorted(_ACTION_STATUSES)}")
+    elif kind == "decision":
+        v = d.get("text")
+        if not isinstance(v, str) or not v.strip():
+            problems.append("text must be a non-empty string")
+    elif kind == "continuity":
+        v = d.get("text")
+        if not isinstance(v, str) or not v.strip():
+            problems.append("text must be a non-empty string")
+    elif kind == "memory":
+        for field in ("slug", "body"):
+            v = d.get(field)
+            if not isinstance(v, str) or not v.strip():
+                problems.append(f"{field} must be a non-empty string")
     # Cross-kind contamination: action_id on a non-action_update envelope is
     # almost certainly a client bug (misrouted envelope). Quarantine rather than
     # silently create a note when the intent was to update an action.
