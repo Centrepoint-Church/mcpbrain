@@ -37,8 +37,15 @@ _TRAY_TASK_NAME = "mcpbrain-tray"
 # Pure generators
 # ---------------------------------------------------------------------------
 
-def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive: bool) -> str:
-    keep = "true" if keep_alive else "false"
+def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive) -> str:
+    # keep_alive: True -> always relaunch; False -> never; "crashonly" -> relaunch
+    # only on an abnormal (non-zero) exit. "crashonly" is for the tray: a clean
+    # Quit (exit 0) must stay quit, but a crash should bring the icon back.
+    if keep_alive == "crashonly":
+        keep_xml = ("<dict>\n        <key>SuccessfulExit</key>\n"
+                    "        <false/>\n    </dict>")
+    else:
+        keep_xml = "<true/>" if keep_alive else "<false/>"
     # Log paths under MCPBRAIN_HOME so crashes are debuggable. Without these,
     # launchd discards stdout/stderr and a daemon that exits non-zero leaves
     # no trace beyond `last exit code` in `launchctl print`.
@@ -65,7 +72,7 @@ def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str,
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <{keep}/>
+    {keep_xml}
     <key>StandardOutPath</key>
     <string>{log_path}</string>
     <key>StandardErrorPath</key>
@@ -84,11 +91,13 @@ def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
 def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
     """Return a macOS launchd plist that runs ``mcpbrain tray`` at login.
 
-    KeepAlive is false: quitting the menu-bar icon must not respawn it; it
-    returns at the next login. The daemon agent (separate) keeps KeepAlive true.
+    KeepAlive is "crashonly" (KeepAlive={SuccessfulExit: false}): a clean Quit
+    (exit 0) from the menu-bar icon stays quit until the next login, but a crash
+    (non-zero exit) relaunches the icon so it doesn't silently disappear. The
+    daemon agent (separate) keeps KeepAlive true.
     """
     return _launchd_plist(label=_TRAY_LABEL, subcommand="tray", mcpbrain_bin=mcpbrain_bin,
-                          home=home, keep_alive=False)
+                          home=home, keep_alive="crashonly")
 
 
 def _systemd_unit(*, description: str, subcommand: str, mcpbrain_bin: str, home: str,
@@ -432,6 +441,8 @@ def _calendar_plist(
     <array>
 {args_xml}
     </array>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StartCalendarInterval</key>
     <dict>
 {interval_block}
@@ -477,6 +488,8 @@ def meeting_packs_plist(home: str) -> str:
         <key>MCPBRAIN_HOME</key>
         <string>{home_x}</string>
     </dict>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StartCalendarInterval</key>
     <array>
         <dict>
