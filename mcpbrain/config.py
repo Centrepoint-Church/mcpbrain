@@ -132,6 +132,28 @@ def owner_aliases(home) -> frozenset[str]:
     return frozenset(a for a in aliases if a)
 
 
+def is_configured(home) -> bool:
+    """True when the install has the identity + org needed to enrich safely.
+
+    Requires owner_name and owner_email to be set (non-blank), and at least one
+    org entry with a non-blank name in the `orgs` list. Until both hold, the
+    daemon must not run enrichment — enrichment writes owner identity and org
+    taxonomy into the graph, so running it unconfigured would attribute the graph
+    to empty/wrong values. Checks the raw `orgs` key rather than
+    orgs.taxonomy_from_config to avoid an import cycle (orgs imports config).
+    """
+    cfg = read_config(home)
+    has_identity = bool(
+        (cfg.get("owner_name") or "").strip()
+        and (cfg.get("owner_email") or "").strip()
+    )
+    orgs_cfg = cfg.get("orgs")
+    has_org = isinstance(orgs_cfg, list) and any(
+        isinstance(e, dict) and str(e.get("name") or "").strip() for e in orgs_cfg
+    )
+    return has_identity and has_org
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 
