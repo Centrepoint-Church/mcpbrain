@@ -530,6 +530,9 @@ class Store:
                 # ClickUp two-way sync (2026-06-08): link anchor + priority.
                 ("clickup_task_id",               "TEXT DEFAULT ''"),
                 ("priority",                      "TEXT DEFAULT ''"),
+                # Last-synced ClickUp closed-state for reopen detection
+                # (2026-06-09). Nullable: NULL = never observed.
+                ("clickup_closed",                "INTEGER"),
             ):
                 if col_name not in act_cols:
                     db.execute(f"ALTER TABLE actions ADD COLUMN {col_name} {col_def}")
@@ -1222,6 +1225,15 @@ class Store:
                 (clickup_task_id,
                  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  action_id))
+            return cur.rowcount
+
+    def set_action_clickup_closed(self, action_id: int, closed: bool) -> int:
+        """Record the last-observed ClickUp closed-state (bookkeeping for reopen
+        detection). Stores 1/0; does not touch updated_at."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE actions SET clickup_closed=? WHERE id=?",
+                (1 if closed else 0, action_id))
             return cur.rowcount
 
     def update_action_fields(self, action_id: int, **fields) -> int:
