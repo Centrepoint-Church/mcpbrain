@@ -1,6 +1,4 @@
 """app_dir() picks the OS path via sys.platform and never calls os.uname()."""
-from pathlib import Path
-
 from mcpbrain import config
 
 

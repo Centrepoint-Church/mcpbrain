@@ -62,7 +62,14 @@ def _is_outbound(chunk: dict, identity: str = "") -> bool:
     return False
 
 
-def reconcile(store, chunks: list, *, now: str | None = None, window_days: int = 30) -> int:
+def reconcile(
+    store,
+    chunks: list,
+    *,
+    now: str | None = None,
+    window_days: int = 30,
+    identity: str | None = None,
+) -> int:
     """Clear waiting_on on open actions when the awaited person's chunk arrives.
 
     Note: drops the Nexus engine_db.log_signal causal-log call (Nexus-only).
@@ -75,7 +82,7 @@ def reconcile(store, chunks: list, *, now: str | None = None, window_days: int =
 
     for action in waiting_actions:
         for chunk in chunks:
-            if _is_outbound(chunk):
+            if _is_outbound(chunk, identity or ""):
                 continue
             if _matches(chunk, action.get("waiting_on"), action.get("waiting_on_entity_id")):
                 store.clear_waiting(action["id"], chunk["doc_id"], now)
@@ -85,7 +92,7 @@ def reconcile(store, chunks: list, *, now: str | None = None, window_days: int =
     return cleared
 
 
-def run(store, *, now: str | None = None) -> dict:
+def run(store, *, now: str | None = None, identity: str | None = None) -> dict:
     """Periodic reconcile sweep over new inbound chunks."""
     if now is None:
         now = datetime.now(timezone.utc).isoformat()
@@ -93,7 +100,7 @@ def run(store, *, now: str | None = None) -> dict:
     cursor = store.get_meta("waiting_on_cursor")
     chunks = store.inbound_chunks_since(cursor)
 
-    cleared = reconcile(store, chunks, now=now)
+    cleared = reconcile(store, chunks, now=now, identity=identity)
 
     # Advance cursor to the newest chunk's date
     if chunks:

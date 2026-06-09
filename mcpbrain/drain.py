@@ -386,6 +386,7 @@ def drain_captures(store, *, home=None) -> int:
     if not inbox.exists():
         return 0
     applied = 0
+    _records_repo_path: str | None = None
     for path in sorted(inbox.glob("*.json")):
         try:
             env = json.loads(path.read_text())
@@ -421,11 +422,11 @@ def drain_captures(store, *, home=None) -> int:
                 log.error("capture: ingest failed for %s: %s", path.name, exc)
                 file_ok = False
         elif kind == "action_create":
-            fp = action_fingerprint(env["text"])
-            if store.find_open_action_by_fingerprint(fp) is not None:
-                log.info("capture: duplicate action skipped: %r", env["text"][:60])
-            else:
-                try:
+            try:
+                fp = action_fingerprint(env["text"])
+                if store.find_open_action_by_fingerprint(fp) is not None:
+                    log.info("capture: duplicate action skipped: %r", env["text"][:60])
+                else:
                     owner = env.get("owner") or config.owner_name(str(home_dir))
                     aid = store.add_unified_action(
                         text=env["text"], owner=owner, deadline=env.get("deadline", ""),
@@ -435,9 +436,9 @@ def drain_captures(store, *, home=None) -> int:
                     store.record_change("capture_action", ref_id=str(aid),
                                         summary=f"Created action '{env['text'][:60]}'")
                     applied += 1
-                except Exception as exc:
-                    log.error("capture: action_create failed for %s: %s", path.name, exc)
-                    file_ok = False
+            except Exception as exc:
+                log.error("capture: action_create failed for %s: %s", path.name, exc)
+                file_ok = False
         elif kind == "action_update":
             try:
                 changed = store.set_action_status(
@@ -458,11 +459,12 @@ def drain_captures(store, *, home=None) -> int:
         elif kind in ("decision", "continuity", "memory"):
             try:
                 from mcpbrain import joshbrain_write as jw
-                repo = _records_repo(str(home_dir))
+                if _records_repo_path is None:
+                    _records_repo_path = _records_repo(str(home_dir))
+                repo = _records_repo_path
                 if kind == "decision":
                     committed = jw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
-                                       owner=env.get("owner", ""), supersedes=env.get("supersedes", ""),
-                                       org=env.get("org", ""))
+                                       owner=env.get("owner", ""), supersedes=env.get("supersedes", ""))
                 elif kind == "continuity":
                     committed = jw.append_continuity(repo, text=env["text"])
                 else:  # memory
@@ -470,6 +472,8 @@ def drain_captures(store, *, home=None) -> int:
                                     body=env["body"], memory_type=env.get("memory_type", "project"))
                 if committed:
                     applied += 1
+                else:
+                    log.info("capture: %s no-op (already applied) for %s", kind, path.name)
             except Exception as exc:
                 log.error("capture: %s write failed for %s: %s", kind, path.name, exc)
                 file_ok = False

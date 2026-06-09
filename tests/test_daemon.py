@@ -311,8 +311,14 @@ def test_enrich_batch_caps_per_cycle_and_drains_progressively(tmp_path, monkeypa
     assert len(store.unenriched_chunks()) == 1  # next batch drained
 
 
-def test_run_cycle_function_accepts_enrich_client(tmp_path):
+def test_run_cycle_function_accepts_enrich_client(tmp_path, monkeypatch):
     """The module-level run_cycle also takes enrich_client and enriches."""
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "owner_name": "Sam", "owner_email": "sam@x.org",
+        "orgs": [{"name": "Org", "domains": ["x.org"]}],
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
@@ -1180,3 +1186,13 @@ def test_daemon_cli_once_runs_one_offline_cycle(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "cycle:" in out, "the --once CLI should print the cycle result"
+
+
+def test_status_includes_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    d = Daemon(store, emb, enrich_mode="off")
+    s = d.status()
+    assert "is_configured" in s
+    assert isinstance(s["is_configured"], bool)

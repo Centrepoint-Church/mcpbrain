@@ -37,19 +37,30 @@ _MEMORY_MD = "# Memory Index\n"
 
 _VOICE_MD = "# Voice & style\n\n(Describe the owner's writing voice here.)\n"
 
+_BIN_README = (
+    "# bin/\n\nPlace cadence scripts here (prune_hot_md.py, context_health.py, "
+    "run_memory_gardener.sh, build_meeting_packs.sh).\n"
+)
+
 # Relative path -> initial content. memory/ is created as a directory separately.
 _SCAFFOLD = {
     "state/decisions.md": _DECISIONS_MD,
     "state/hot.md": _HOT_MD,
     "MEMORY.md": _MEMORY_MD,
     "context/voice.md": _VOICE_MD,
+    "bin/README.md": _BIN_README,
 }
 
 
 def _git(repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
-    return subprocess.run(["git", "-C", repo, *args], check=check,
-                          capture_output=True, env=env)
+    try:
+        return subprocess.run(["git", "-C", repo, *args], check=check,
+                              capture_output=True, env=env)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "git is required but was not found in PATH — install git and ensure it is on the PATH used by launchd"
+        )
 
 
 def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
@@ -67,21 +78,25 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
     if fresh:
         _git(repo_dir, "init")
     if _git(repo_dir, "config", "--local", "user.name", check=False).returncode != 0:
-        _git(repo_dir, "config", "user.name", git_name)
+        _git(repo_dir, "config", "--local", "user.name", git_name)
     if _git(repo_dir, "config", "--local", "user.email", check=False).returncode != 0:
-        _git(repo_dir, "config", "user.email", git_email)
+        _git(repo_dir, "config", "--local", "user.email", git_email)
     (repo / "memory").mkdir(exist_ok=True)
-    wrote = False
+    newly_written: list[str] = []
     for rel, content in _SCAFFOLD.items():
         p = repo / rel
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
-            wrote = True
-    if fresh or wrote:
+            newly_written.append(rel)
+    if fresh:
         _git(repo_dir, "add", "-A")
-        staged = _git(repo_dir, "diff", "--cached", "--quiet",
-                      check=False).returncode != 0
+        staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
         if staged:
             _git(repo_dir, "commit", "-m", "scaffold: initialize records repo")
+    elif newly_written:
+        _git(repo_dir, "add", *newly_written)
+        staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+        if staged:
+            _git(repo_dir, "commit", "-m", "scaffold: add missing scaffold files")
     return repo_dir
