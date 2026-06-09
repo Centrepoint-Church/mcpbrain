@@ -33,7 +33,13 @@ def test_write_memory_creates_file_and_pointer(tmp_path):
     repo = _fake_joshbrain(tmp_path)
     jw.write_memory(str(repo), slug="cowork-traps", description="Cowork gotchas", body="text", memory_type="reference")
     assert (repo / "memory" / "cowork-traps.md").exists()
-    assert "cowork-traps" in (repo / "MEMORY.md").read_text()
+    idx = (repo / "MEMORY.md").read_text()
+    assert "cowork-traps" in idx
+    assert "(memory/cowork-traps.md)" in idx
+    out = subprocess.run(["git", "-C", str(repo), "show", "--stat", "--name-only", "HEAD"],
+                         capture_output=True, text=True).stdout
+    assert "memory/cowork-traps.md" in out
+    assert "MEMORY.md" in out
 
 def test_drain_routes_decision_to_joshbrain(tmp_path):
     repo = _fake_joshbrain(tmp_path)
@@ -63,3 +69,38 @@ def test_drain_routes_memory_to_joshbrain(tmp_path):
     drain.drain_captures(store=None, home=str(home))
     assert (repo / "memory" / "test-slug.md").exists()
     assert "test-slug" in (repo / "MEMORY.md").read_text()
+
+def test_append_decision_idempotent_on_retry(tmp_path):
+    repo = _fake_joshbrain(tmp_path)
+    jw.append_decision(str(repo), text="Idempotent decision XYZ", rationale="R", owner="Josh")
+    jw.append_decision(str(repo), text="Idempotent decision XYZ", rationale="R", owner="Josh")
+    body = (repo / "state" / "decisions.md").read_text()
+    assert body.count("Idempotent decision XYZ") == 1
+
+def test_append_continuity_idempotent_on_retry(tmp_path):
+    repo = _fake_joshbrain(tmp_path)
+    jw.append_continuity(str(repo), text="Idempotent continuity ABC", today="2026-06-09")
+    jw.append_continuity(str(repo), text="Idempotent continuity ABC", today="2026-06-09")
+    body = (repo / "state" / "hot.md").read_text()
+    assert body.count("Idempotent continuity ABC") == 1
+
+def test_write_memory_creates_file_and_pointer_with_correct_path(tmp_path):
+    repo = _fake_joshbrain(tmp_path)
+    jw.write_memory(str(repo), slug="cowork-traps", description="Cowork gotchas",
+                    body="text", memory_type="reference")
+    assert (repo / "memory" / "cowork-traps.md").exists()
+    idx = (repo / "MEMORY.md").read_text()
+    assert "(memory/cowork-traps.md)" in idx
+    out = subprocess.run(["git", "-C", str(repo), "show", "--stat", "--name-only", "HEAD"],
+                         capture_output=True, text=True).stdout
+    assert "memory/cowork-traps.md" in out
+    assert "MEMORY.md" in out
+
+def test_write_memory_idempotent_on_retry(tmp_path):
+    repo = _fake_joshbrain(tmp_path)
+    jw.write_memory(str(repo), slug="cowork-traps", description="Cowork gotchas",
+                    body="text", memory_type="reference")
+    jw.write_memory(str(repo), slug="cowork-traps", description="Cowork gotchas",
+                    body="text", memory_type="reference")
+    idx = (repo / "MEMORY.md").read_text()
+    assert idx.count("(memory/cowork-traps.md)") == 1
