@@ -31,7 +31,6 @@ _PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches d
 # The link anchor is the NATIVE ClickUp task id (cached on the action as
 # clickup_task_id) — no custom field is used for linking. Org is the one custom
 # field we read/write (a genuine categorisation, not sync plumbing).
-ORG_FIELD_ID = "9c73ab46-980b-4962-b09c-74bc532c3cb4"
 # brain org (lowercased) <-> ClickUp Org dropdown option id
 _ORG_OPTION_IDS = {
     "centrepoint": "8fd028a6-588f-4536-8bb5-9fcd93ddb17c",
@@ -45,7 +44,6 @@ _ORG_NAMES_BY_ID = {v: k for k, v in _ORG_OPTION_IDS.items()}
 _PRIORITY_INT = {"urgent": 1, "high": 2, "normal": 3, "low": 4}
 _PRIORITY_NAME = {v: k for k, v in _PRIORITY_INT.items()}
 _CLOSED_STATUS = "complete"   # the list's done-type status label
-_OWNER_ASSIGNEE = 72748441    # Joshua Kemp's ClickUp user id
 
 
 def deadline_to_due_ms(deadline: str | None) -> int | None:
@@ -250,14 +248,14 @@ def _api(token: str, method: str, path: str, body: dict | None = None,
     return None
 
 
-def _normalise_task(t: dict) -> dict:
+def _normalise_task(t: dict, org_field_id: str = "") -> dict:
     """Flatten a raw ClickUp task into the fields the sync cares about.
 
     The link anchor is the native task id; no Brain ID custom field is read.
     """
     org = ""
     for cf in t.get("custom_fields") or []:
-        if cf.get("id") == ORG_FIELD_ID:
+        if org_field_id and cf.get("id") == org_field_id:
             org = option_id_to_org(cf.get("value"))
     assignees = [a.get("id") for a in (t.get("assignees") or [])]
     return {
@@ -282,6 +280,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
     list_id = config.clickup_list_id(home).strip()
     if not token or not list_id:
         return []
+    org_field = config.clickup_org_field_id(home).strip()
     out, page = [], 0
     while True:
         params = {"include_closed": "true" if include_closed else "false",
@@ -291,7 +290,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
         if not data:
             break
         tasks = data.get("tasks") or []
-        out.extend(_normalise_task(t) for t in tasks)
+        out.extend(_normalise_task(t, org_field) for t in tasks)
         if data.get("last_page") or len(tasks) == 0:
             break
         page += 1
@@ -310,13 +309,12 @@ def create_task(home, *, name: str, description: str = "",
     list_id = config.clickup_list_id(home).strip()
     if not token or not list_id:
         return None
-    body: dict = {
-        "name": name,
-        "assignees": [_OWNER_ASSIGNEE],
-    }
+    uid = config.clickup_user_id(home)
+    body: dict = {"name": name, "assignees": [uid] if uid else []}
+    org_field = config.clickup_org_field_id(home).strip()
     org_opt = org_to_option_id(org)
-    if org_opt:
-        body["custom_fields"] = [{"id": ORG_FIELD_ID, "value": org_opt}]
+    if org_opt and org_field:
+        body["custom_fields"] = [{"id": org_field, "value": org_opt}]
     if description:
         body["description"] = description
     due_ms = deadline_to_due_ms(deadline)
