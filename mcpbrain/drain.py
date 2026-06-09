@@ -447,7 +447,7 @@ def drain_captures(store, *, home=None) -> int:
                 repo = config.joshbrain_dir(str(home_dir))
                 if kind == "decision":
                     committed = jw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
-                                       owner=env.get("owner", "Josh"), supersedes=env.get("supersedes", ""),
+                                       owner=env.get("owner", ""), supersedes=env.get("supersedes", ""),
                                        org=env.get("org", ""))
                 elif kind == "continuity":
                     committed = jw.append_continuity(repo, text=env["text"])

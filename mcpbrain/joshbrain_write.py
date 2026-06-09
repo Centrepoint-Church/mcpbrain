@@ -43,7 +43,7 @@ def _commit_file(repo: str, relpath: str, message: str) -> bool:
     _git(repo, "commit", "-m", message)
     return True
 
-def append_decision(repo: str, *, text: str, rationale: str = "", owner: str = "Josh",
+def append_decision(repo: str, *, text: str, rationale: str = "", owner: str = "",
                     supersedes: str = "", org: str = "") -> bool:
     p = Path(repo) / "state" / "decisions.md"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
