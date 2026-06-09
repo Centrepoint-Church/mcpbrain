@@ -55,6 +55,20 @@ def _home(home) -> Path:
     return Path(home) if home is not None else config.app_dir()
 
 
+def _records_repo(home) -> str:
+    """Resolve the records repo path and guarantee it exists (git + scaffold).
+
+    The daemon is the single writer; ensuring here means a freshly-onboarded user
+    gets a working repo on the first cycle with no manual seeding.
+    """
+    from mcpbrain import records
+    repo = config.records_dir(str(home))
+    name = config.owner_full_name(str(home)) or "mcpbrain"
+    email = config.owner_email(str(home)) or "mcpbrain@localhost"
+    records.ensure_records_repo(repo, git_name=name, git_email=email)
+    return repo
+
+
 def _iter_inbox(home_dir: Path):
     """Yield enrich_inbox/*.json files, skipping the bad/ quarantine subdir."""
     inbox_dir = home_dir / "enrich_inbox"
@@ -444,7 +458,7 @@ def drain_captures(store, *, home=None) -> int:
         elif kind in ("decision", "continuity", "memory"):
             try:
                 from mcpbrain import joshbrain_write as jw
-                repo = config.joshbrain_dir(str(home_dir))
+                repo = _records_repo(str(home_dir))
                 if kind == "decision":
                     committed = jw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
                                        owner=env.get("owner", ""), supersedes=env.get("supersedes", ""),
