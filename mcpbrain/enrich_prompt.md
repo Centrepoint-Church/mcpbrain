@@ -86,6 +86,9 @@ Field notes:
 
 The `context` block is given so you don't re-derive what is already known.
 
+- `owner_name`: the full name of the person whose inbox this is. Do NOT
+  extract this person as an entity — they are the point of view, not a subject.
+  Do NOT include them in `entities` or as an endpoint in `relations`.
 - `known_people`: each entry's `org` and `role` are confirmed. Trust them. Do
   not re-derive a person's org or role, and do not contradict these entries.
   Trust them even when the sender's email domain is absent from `org_domain_map`.

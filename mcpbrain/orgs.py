@@ -26,9 +26,12 @@ enrich, contract, prepare, and lint_graph can all import it without cycles.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from mcpbrain import config
 
@@ -53,8 +56,8 @@ class OrgTaxonomy:
     aliases:    lowercased free-text variant -> canonical org name
     """
     names: tuple[str, ...]
-    domain_map: dict[str, str] = field(default_factory=dict)
-    aliases: dict[str, str] = field(default_factory=dict)
+    domain_map: Mapping[str, str] = field(default_factory=dict)
+    aliases: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def valid_orgs(self) -> frozenset[str]:
@@ -106,9 +109,14 @@ class OrgTaxonomy:
         return "external"
 
 
-DEFAULT_TAXONOMY = OrgTaxonomy(names=(), domain_map={}, aliases={})
+DEFAULT_TAXONOMY = OrgTaxonomy(
+    names=(),
+    domain_map=MappingProxyType({}),
+    aliases=MappingProxyType({}),
+)
 
 
+@functools.lru_cache(maxsize=8)
 def taxonomy_from_config(home=None) -> OrgTaxonomy:
     """Build the taxonomy from config.json's `orgs` key.
 
@@ -117,6 +125,10 @@ def taxonomy_from_config(home=None) -> OrgTaxonomy:
     warning rather than crashing the pipeline. Each org's own name variants
     (lowercased name) are always usable; the optional per-org `aliases` list
     adds more. Reserved tags cannot be configured as org names.
+
+    Cached per home path (maxsize=8). For daemon use (config loaded once at
+    startup) this is acceptable; a config change during the process lifetime
+    will not be reflected until the process restarts.
     """
     if home is None:
         home = str(config.app_dir())
@@ -125,6 +137,7 @@ def taxonomy_from_config(home=None) -> OrgTaxonomy:
         return DEFAULT_TAXONOMY
 
     names: list[str] = []
+    seen_names: set[str] = set()
     domain_map: dict[str, str] = {}
     aliases: dict[str, str] = {}
     for entry in raw:
@@ -135,8 +148,11 @@ def taxonomy_from_config(home=None) -> OrgTaxonomy:
         if not name or name.lower() in RESERVED_TAGS:
             log.warning("orgs config: skipping entry with reserved/empty name %r", entry)
             continue
-        if name in names:
+        name_lower = name.lower()
+        if name_lower in seen_names:
+            log.warning("orgs: duplicate org name %r in config — skipping second entry", name_lower)
             continue
+        seen_names.add(name_lower)
         names.append(name)
         for d in entry.get("domains") or []:
             d = str(d).strip().lower().lstrip("@")
@@ -149,4 +165,8 @@ def taxonomy_from_config(home=None) -> OrgTaxonomy:
 
     if not names:
         return DEFAULT_TAXONOMY
-    return OrgTaxonomy(names=tuple(names), domain_map=domain_map, aliases=aliases)
+    return OrgTaxonomy(
+        names=tuple(names),
+        domain_map=MappingProxyType(domain_map),
+        aliases=MappingProxyType(aliases),
+    )

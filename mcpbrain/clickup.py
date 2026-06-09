@@ -24,6 +24,10 @@ from . import config
 log = logging.getLogger(__name__)
 
 _BASE = "https://api.clickup.com/api/v2"
+# TODO(timezone): _PERTH is a hardcoded UTC+8 offset used for deadline <-> epoch-ms
+# conversions. config.user_timezone(home) now exposes a per-install IANA timezone name
+# that should replace this. Threading `home` into deadline_to_due_ms / due_ms_to_deadline
+# is a larger refactor left for a future task.
 _PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches dashboard._PERTH)
 
 # --- two-way sync field map ---------------------------------------------------
@@ -35,6 +39,7 @@ _PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches d
 # ClickUp priority int (1=urgent..4=low) <-> brain priority name
 _PRIORITY_INT = {"urgent": 1, "high": 2, "normal": 3, "low": 4}
 _PRIORITY_NAME = {v: k for k, v in _PRIORITY_INT.items()}
+# Default closed status — overridden per-install via config.clickup_closed_status(home).
 _CLOSED_STATUS = "complete"   # the list's done-type status label
 
 
@@ -227,11 +232,14 @@ def update_task_status(home, task_id: str, status: str) -> bool:
 # --- two-way sync transport -------------------------------------------------
 
 def _api(token: str, method: str, path: str, body: dict | None = None,
-         timeout: int = 15):
-    """Issue a ClickUp REST call. Returns parsed JSON on success, None on error.
+         timeout: int = 15) -> tuple[dict | None, int | None]:
+    """Issue a ClickUp REST call. Returns (parsed_json, status_code) on success,
+    (None, status_code) on HTTP error, or (None, None) on network/parse error.
 
-    Every failure is logged and swallowed (returns None) so a sync pass degrades
-    gracefully and never crashes the daemon loop.
+    Every failure is logged and swallowed so a sync pass degrades gracefully and
+    never crashes the daemon loop. Callers that need to distinguish HTTP error
+    codes (e.g. 422 custom-field rejection vs 401 auth failure) can inspect the
+    returned status code.
     """
     url = f"{_BASE}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -239,14 +247,16 @@ def _api(token: str, method: str, path: str, body: dict | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
-        return json.loads(raw) if raw else {}
+            status_code = resp.status
+        return (json.loads(raw) if raw else {}), status_code
     except urllib.error.HTTPError as exc:
         log.warning("ClickUp %s %s HTTP %s: %s", method, path, exc.code, exc.reason)
+        return None, exc.code
     except (urllib.error.URLError, OSError) as exc:
         log.warning("ClickUp %s %s network error: %s", method, path, exc)
     except json.JSONDecodeError as exc:
         log.warning("ClickUp %s %s non-JSON response: %s", method, path, exc)
-    return None
+    return None, None
 
 
 def _normalise_task(t: dict, org_field_id: str = "",
@@ -258,7 +268,13 @@ def _normalise_task(t: dict, org_field_id: str = "",
     org = ""
     for cf in t.get("custom_fields") or []:
         if org_field_id and cf.get("id") == org_field_id:
-            org = option_id_to_org(cf.get("value"), org_options)
+            option_id = cf.get("value")
+            org = option_id_to_org(option_id, org_options)
+            if option_id and not org:
+                log.warning(
+                    "clickup: unknown org option_id %r — update clickup_org_options in config",
+                    option_id,
+                )
     assignees = [a.get("id") for a in (t.get("assignees") or [])]
     return {
         "id": t.get("id", ""),
@@ -289,7 +305,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
         params = {"include_closed": "true" if include_closed else "false",
                   "subtasks": "false", "page": str(page)}
         path = f"/list/{list_id}/task?" + urllib.parse.urlencode(params)
-        data = _api(token, "GET", path)
+        data, _status = _api(token, "GET", path)
         if not data:
             break
         tasks = data.get("tasks") or []
@@ -327,20 +343,29 @@ def create_task(home, *, name: str, description: str = "",
     pri = priority_to_int(priority)
     if pri is not None:
         body["priority"] = pri
-    created = _api(token, "POST", f"/list/{list_id}/task", body)
-    if created is None and "custom_fields" in body:
-        # A rejected custom field (e.g. plan's custom-field-usage quota) must not
-        # block task creation — the native task id is the link anchor, Org is a
-        # nice-to-have. Retry without custom fields.
+    created, status = _api(token, "POST", f"/list/{list_id}/task", body)
+    if created is None and status == 422 and "custom_fields" in body:
+        # A 422 indicates a rejected custom field (e.g. plan's custom-field-usage
+        # quota). Retry without custom fields — the native task id is the link
+        # anchor, Org is a nice-to-have. Do NOT retry on auth (401) or other
+        # errors, since that would silently create unintended tasks.
         body.pop("custom_fields")
-        log.warning("ClickUp create_task retrying without custom fields for %r", name)
-        created = _api(token, "POST", f"/list/{list_id}/task", body)
+        log.warning("ClickUp create_task retrying without custom fields for %r (422)", name)
+        created, _status = _api(token, "POST", f"/list/{list_id}/task", body)
     return created
 
 
 def close_task(home, task_id: str) -> bool:
-    """Set a task to the list's closed-type status. Returns True on success."""
+    """Set a task to the list's closed-type status. Returns True on success.
+
+    The status label is read from config.clickup_closed_status(home) so each
+    install can use its own done-type label (e.g. "done", "finished"). Falls
+    back to the module-level _CLOSED_STATUS default ("complete") when home is
+    not provided or the config key is absent.
+    """
     token = config.clickup_api_key(home).strip()
     if not token:
         return False
-    return _api(token, "PUT", f"/task/{task_id}", {"status": _CLOSED_STATUS}) is not None
+    closed_status = config.clickup_closed_status(home) if home else _CLOSED_STATUS
+    data, _status = _api(token, "PUT", f"/task/{task_id}", {"status": closed_status})
+    return data is not None

@@ -352,7 +352,8 @@ def _increment_degree(conn, entity_a, entity_b):
 
 
 def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
-                    evidence="", confidence=1.0, strength=1) -> int:
+                    evidence="", confidence=1.0, strength=1,
+                    source_doc_id: str | None = None) -> int:
     """Insert a bi-temporal relation with automatic supersession.
 
     Ported from bitemporal_writer.upsert_relation_bitemporal, repointed at
@@ -366,7 +367,12 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
     spans invalidated rows, so inserting a fresh one is impossible — the
     2026-06-05 drain failures were exactly this). degree is incremented on both
     endpoints only for a NEW row; supersession and revival never touch it.
+
+    source_doc_id: the originating document id for provenance. Defaults to
+    evidence for backward compatibility when not explicitly supplied.
     """
+    if source_doc_id is None:
+        source_doc_id = evidence
     if not valid_from:
         raise ValueError("valid_from is required for bi-temporal writes")
     confidence = max(0.0, min(1.0, float(confidence)))
@@ -400,14 +406,14 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
                 "    confidence = ?, evidence = ?, strength = ?, last_seen = ?, "
                 "    source_doc_id = ? "
                 "WHERE id = ?",
-                (valid_from, confidence, evidence, strength, now, evidence, new_id),
+                (valid_from, confidence, evidence, strength, now, source_doc_id, new_id),
             )
         else:
             new_id = conn.execute(
                 "INSERT INTO entity_relations "
-                "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now),
+                "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen, source_doc_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now, source_doc_id),
             ).lastrowid
             _increment_degree(conn, entity_a, entity_b)
 

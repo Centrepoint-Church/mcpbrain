@@ -141,9 +141,8 @@ def import_baseline(store, home, *, client=_clickup, dry_run: bool = True) -> di
                     text=t["name"], owner=config.owner_name(home),
                     status="done" if t["closed"] else "open",
                     deadline=t["deadline"], org=t["org"], source="clickup",
-                    text_fingerprint=_fp(t["name"]))
-                store.update_action_fields(
-                    new_id, priority=t["priority"], clickup_task_id=t["id"])
+                    text_fingerprint=_fp(t["name"]),
+                    clickup_task_id=t["id"], priority=t["priority"])
                 store.set_action_clickup_closed(new_id, bool(t["closed"]))
                 if t["closed"]:
                     store.set_action_status(new_id, "done", "clickup")

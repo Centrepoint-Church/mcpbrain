@@ -53,7 +53,7 @@ def test_prune_commits_hot_md():
     assert "git add state/hot.md" in plist
     assert "git diff --cached --quiet" in plist
     assert "git commit" in plist
-    assert "cd /Users/x/records" in plist
+    assert "cd '/Users/x/records'" in plist
 
 
 def test_prune_commit_scoped_to_hot_md():
@@ -191,3 +191,21 @@ def test_prune_still_runs_at_load():
 
 def test_context_health_still_runs_at_load():
     assert "<key>RunAtLoad</key>" in _health()
+
+
+def test_prune_injects_mcpbrain_home():
+    plist = _prune(mcpbrain_home="/Users/x/.mcpbrain")
+    assert "MCPBRAIN_HOME" in plist
+    assert "/Users/x/.mcpbrain" in plist
+
+
+def test_health_injects_mcpbrain_home():
+    plist = _health(mcpbrain_home="/Users/x/.mcpbrain")
+    assert "MCPBRAIN_HOME" in plist
+    assert "/Users/x/.mcpbrain" in plist
+
+
+def test_gardener_injects_mcpbrain_home():
+    plist = _gardener(mcpbrain_home="/Users/x/.mcpbrain")
+    assert "MCPBRAIN_HOME" in plist
+    assert "/Users/x/.mcpbrain" in plist

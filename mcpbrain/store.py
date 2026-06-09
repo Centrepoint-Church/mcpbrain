@@ -1091,14 +1091,17 @@ class Store:
                            context_tag="", cluster_id="", source_doc_id="",
                            thread_id="", text_fingerprint="", waiting_on="",
                            waiting_on_entity_id="", waiting_on_set_at="",
-                           created_at="") -> int:
+                           created_at="", clickup_task_id="",
+                           priority="") -> int:
         """Insert a row into the unified actions table. Returns the new id.
 
         waiting_on* mark an action as awaiting a reply from a person (cleared by
         the waiting-on reconciler when that person's chunk arrives). created_at,
         when given, overrides the CURRENT_TIMESTAMP default so a caller with an
         injected clock (apply's `now`) keeps the near-duplicate window aligned
-        with the clock the gates use.
+        with the clock the gates use. clickup_task_id and priority, when given,
+        are set atomically on insert so callers like import_baseline avoid a
+        separate update_action_fields call.
         """
         cols = ["text", "owner", "owner_entity_id", "status", "deadline", "org",
                 "project_id", "area_id", "confidence", "source", "context_tag",
@@ -1112,6 +1115,12 @@ class Store:
         if created_at:
             cols.append("created_at")
             vals.append(created_at)
+        if clickup_task_id:
+            cols.append("clickup_task_id")
+            vals.append(clickup_task_id)
+        if priority:
+            cols.append("priority")
+            vals.append(priority)
         placeholders = ",".join("?" * len(cols))
         with self._connect() as db:
             cur = db.execute(

@@ -44,7 +44,7 @@ def _commit_file(repo: str, relpath: str, message: str) -> bool:
     return True
 
 def append_decision(repo: str, *, text: str, rationale: str = "", owner: str = "",
-                    supersedes: str = "", org: str = "") -> bool:
+                    supersedes: str = "") -> bool:
     p = Path(repo) / "state" / "decisions.md"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = f"| {today} | {text} | {rationale or '-'} | {owner} | Active | {supersedes or '-'} |\n"

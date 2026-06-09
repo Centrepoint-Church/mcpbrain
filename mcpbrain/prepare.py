@@ -316,7 +316,9 @@ def _merge_review_block(store) -> list:
 # --- context assembly ------------------------------------------------------
 
 def _build_context(store, thread_ids) -> dict:
+    home = str(config.app_dir())
     return {
+        "owner_name": config.owner_full_name(home) or config.owner_name(home),
         "known_people": _build_known_people(store, batch_thread_ids=thread_ids),
         "projects": _read_projects(store),
         "areas": _read_areas(store),

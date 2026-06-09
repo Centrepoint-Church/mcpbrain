@@ -100,6 +100,7 @@ def records_dir(home) -> str:
     A plain local git repo (no remote). Resolution: config 'records_dir' →
     '<home>/records' default. The repo is created/scaffolded by
     records.ensure_records_repo at first write.
+    The path is trusted (user-supplied via config.json) and is not validated against home.
     """
     cfg = read_config(home)
     return cfg.get("records_dir") or str(Path(home) / "records")
@@ -145,6 +146,17 @@ def owner_aliases(home) -> frozenset[str]:
     if isinstance(extra, list):
         aliases.update(str(a).strip().lower() for a in extra if str(a).strip())
     return frozenset(a for a in aliases if a)
+
+
+def user_timezone(home) -> str:
+    """IANA timezone name for the install owner. Defaults to 'Australia/Perth'."""
+    return read_config(home).get("user_timezone", "Australia/Perth") or "Australia/Perth"
+
+
+def clickup_closed_status(home) -> str:
+    """ClickUp status label that means 'done/closed' for this install's lists.
+    Defaults to 'complete' which is ClickUp's default done-type label."""
+    return read_config(home).get("clickup_closed_status", "complete") or "complete"
 
 
 def clickup_org_options(home) -> dict:

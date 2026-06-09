@@ -76,9 +76,9 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None,
         lines += ["", "Actions:"]
         for a in actions_list:
             line = f"- {a.get('description', '')}"
-            owner = a.get("owner_name") or ""
-            if owner:
-                line += f" (owner: {owner})"
+            action_owner_name = a.get("owner_name") or ""
+            if action_owner_name:
+                line += f" (owner: {action_owner_name})"
             due = a.get("due_date") or ""
             if due:
                 line += f" (due: {due})"
