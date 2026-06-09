@@ -401,6 +401,7 @@ def _restart_schtasks_tray() -> None:  # pragma: no cover
 _PRUNE_LABEL = "church.centrepoint.joshbrain.prune"
 _HEALTH_LABEL = "church.centrepoint.joshbrain.context-health"
 _MEETING_PACKS_LABEL = "church.centrepoint.joshbrain.meeting-packs"
+_GARDENER_LABEL = "church.centrepoint.joshbrain.gardener"
 
 
 def _calendar_plist(
@@ -553,6 +554,24 @@ def joshbrain_context_health_plist(
         program_args=[python_bin, f"{joshbrain_dir}/bin/context_health.py"],
         mcpbrain_home=mcpbrain_home,
         hour=7,
+        minute=0,
+        weekday=1,
+    )
+
+
+def joshbrain_gardener_plist(*, joshbrain_dir: str, mcpbrain_home: str) -> str:
+    """Return a launchd plist that runs the memory gardener weekly on Monday at 08:00.
+
+    The gardener runs `claude` headless against cowork/memory-gardener.md to do
+    memory hygiene (dedupe/expire/promote-misses/fix-drift) and commits its own
+    changes by name. launchd-driven (not a Cowork scheduled task) to dodge the
+    Cowork scheduled-task permission bug.
+    """
+    return _calendar_plist(
+        label=_GARDENER_LABEL,
+        program_args=["/bin/bash", f"{joshbrain_dir}/bin/run_memory_gardener.sh"],
+        mcpbrain_home=mcpbrain_home,
+        hour=8,
         minute=0,
         weekday=1,
     )
