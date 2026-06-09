@@ -9,6 +9,21 @@ def test_update_runs_pull_reinstall_restart(monkeypatch):
     assert ["git","-C","/repo","pull","--ff-only"] in calls
     assert any("uv" in c and "install" in c for c in calls) and ["restart"] in calls
 
+def test_reinstall_busts_build_cache(monkeypatch):
+    # The package version is static (0.1.0), so a plain `uv tool install --force`
+    # reuses uv's cached wheel and silently reinstalls OLD code. The install must
+    # force a fresh build of mcpbrain from the local source. `--reinstall-package
+    # mcpbrain` implies `--refresh-package mcpbrain`, which rebuilds it.
+    calls = []
+    monkeypatch.setattr(upd, "_run", lambda cmd, **k: calls.append(cmd) or ("", 0))
+    monkeypatch.setattr(upd, "_repo_dir", lambda: "/repo")
+    monkeypatch.setattr(upd, "_restart_agent", lambda: calls.append(["restart"]))
+    upd.main([])
+    install = next(c for c in calls if "uv" in c and "install" in c)
+    assert "--reinstall-package" in install
+    assert "mcpbrain" in install[install.index("--reinstall-package") + 1:]
+
+
 def test_non_fast_forward_aborts(monkeypatch):
     monkeypatch.setattr(upd, "_repo_dir", lambda: "/repo")
     monkeypatch.setattr(upd, "_run",

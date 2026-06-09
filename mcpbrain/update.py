@@ -107,7 +107,16 @@ def main(argv: list) -> int:
         return pull_rc
 
     # Step 2: reinstall.
-    uv_out, uv_rc = _run(["uv", "tool", "install", "--from", repo, "mcpbrain", "--force"])
+    # `--reinstall-package mcpbrain` is REQUIRED, not just `--force`: the package
+    # version is static (0.1.0), so a plain `--force` reuses uv's cached wheel
+    # and silently reinstalls the OLD code even after a successful pull — the
+    # daemon keeps running the previous version with no error. `--reinstall-package`
+    # implies `--refresh-package`, which rebuilds mcpbrain from the freshly-pulled
+    # local source (deps stay cached, so it's not as heavy as a full --no-cache).
+    uv_out, uv_rc = _run([
+        "uv", "tool", "install", "--from", repo, "mcpbrain",
+        "--force", "--reinstall-package", "mcpbrain",
+    ])
     if uv_rc != 0:
         print(
             "Update aborted: uv tool install failed.\n"
