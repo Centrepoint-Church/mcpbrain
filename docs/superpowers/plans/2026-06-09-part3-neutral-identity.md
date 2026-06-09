@@ -315,3 +315,17 @@ New installs are unaffected (they never had the old labels).
 **Placeholder scan:** every step is a concrete edit with the exact old→new string and the test to update; no vague instructions. The migration shell snippet is complete.
 
 **Type consistency:** label constants are renamed in one place each and consumed by attribute elsewhere (`agents._LABEL`, `agents._TRAY_LABEL`) so no signature drift. `GLOB`/`_agent_label` keep their types. `app_dir()` return type unchanged. The new-label strings used in tests (`com.mcpbrain`, `com.mcpbrain.tray`, `com.mcpbrain.records.{prune,context-health,meeting-packs,gardener}`) match the constants set in Tasks 1-2 exactly.
+
+---
+
+## Deviation: generator function renames pulled forward from Plan 3b
+
+**What changed:** The acceptance grep `grep -rni 'josh|centrepoint' mcpbrain/ --include='*.py'` surfaced `joshbrain_prune_plist`, `joshbrain_context_health_plist`, `joshbrain_gardener_plist`, `joshbrain_dir` param, and `joshbrain_dir()` config function as additional violations not covered by Tasks 1–5. Rather than failing acceptance, these were renamed in a single additional commit (`bb7b9b1`):
+
+- `agents.py`: `joshbrain_prune_plist` → `records_prune_plist`, `joshbrain_context_health_plist` → `records_context_health_plist`, `joshbrain_gardener_plist` → `records_gardener_plist`; `joshbrain_dir` parameter → `records_dir` in all three; `meeting_packs_plist` local var `joshbrain` → `records_path`; path `Path(home).parent / "joshbrain"` → `Path(home) / "records"`.
+- `config.py`: removed `joshbrain_dir()` deprecated alias and the `cfg.get("joshbrain_dir")` legacy config-key fallback from `records_dir()`. **Migration:** users with `joshbrain_dir` set in `config.json` must rename it to `records_dir`.
+- `agent_errs.py`: summary string `"joshbrain agent stderr"` → `"records agent stderr"`.
+- `records.py`: removed `joshbrain_write` module name from docstring.
+- Caller updates: `tests/test_agents_calendar.py`, `tests/test_agent_errs.py`, `tests/test_config_joshbrain.py`, `tests/test_config_records.py`, `tests/test_joshbrain_write.py`, `tests/test_daemon.py`, `tests/fixtures/spool/pending_with_merge.json`, `bin/seed_joshbrain.py`.
+
+**Spec update:** 1.6a scope now includes generator function renames. The "deferred to Plan 3b" note in the scope boundary above (generator repo-path/param renames) is superseded by this deviation.
