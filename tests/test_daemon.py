@@ -201,7 +201,7 @@ def test_run_cycle_surfaces_agent_err_as_finding(tmp_path, monkeypatch):
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
-    (tmp_path / "church.centrepoint.joshbrain.prune.err").write_text(
+    (tmp_path / "com.mcpbrain.records.prune.err").write_text(
         "Traceback (most recent call last): boom\n")
 
     run_cycle(store, emb, gmail_service=fake)

@@ -1,7 +1,7 @@
-"""Surface joshbrain launchd agent stderr as proactive findings.
+"""Surface records-cadence launchd agent stderr as proactive findings.
 
-The two joshbrain launchd agents (prune daily, context-health weekly) write
-stderr to ~/.mcpbrain/church.centrepoint.joshbrain.*.err. Nothing reads those
+The records cadence agents (prune daily, context-health weekly) write
+stderr to ~/.mcpbrain/com.mcpbrain.records.*.err. Nothing reads those
 files, so a crashing agent rots unseen. check_agent_errs tails each .err file
 per cycle, using a byte-offset cursor in sync_cursors, and turns new non-empty
 stderr into an open finding on the same surface Phase 1 built (record_finding).
@@ -19,19 +19,19 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 FINDING_TYPE = "agent_stderr"
-GLOB = "church.centrepoint.joshbrain.*.err"
+GLOB = "com.mcpbrain.records.*.err"
 # Cap each finding's detail at the last 4KB of the new region — a tail is enough
 # to diagnose; we don't want a runaway log filling the findings table.
 TAIL_BYTES = 4096
 
 
 def _agent_label(filename: str) -> str:
-    """church.centrepoint.joshbrain.prune.err -> church.centrepoint.joshbrain.prune"""
+    """com.mcpbrain.records.prune.err -> com.mcpbrain.records.prune"""
     return filename[:-4] if filename.endswith(".err") else filename
 
 
 def check_agent_errs(store, home) -> None:
-    """Scan joshbrain .err files; record new stderr as findings.
+    """Scan records cadence .err files; record new stderr as findings.
 
     Never raises: a bad/unreadable .err file is logged and skipped so the sync
     cycle keeps running (matches the capture-drain isolation in run_cycle).
