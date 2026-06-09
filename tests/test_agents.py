@@ -32,8 +32,13 @@ def test_launchd_tray_plist_runs_tray_and_does_not_respawn():
     s = launchd_tray_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
     assert "church.centrepoint.mcpbrain.tray" in s
     assert "<string>tray</string>" in s and "<key>RunAtLoad</key>" in s
-    # Quitting the icon must not respawn it.
-    assert "<key>KeepAlive</key>\n    <false/>" in s
+    # Crash-only KeepAlive: a clean Quit (exit 0) stays quit, but a crash
+    # relaunches the icon. KeepAlive is a {SuccessfulExit: false} dict — not a
+    # plain <false/> (never relaunches) nor <true/> (would respawn a Quit).
+    assert "<key>KeepAlive</key>\n    <dict>" in s
+    assert "<key>SuccessfulExit</key>\n        <false/>" in s
+    assert "<key>KeepAlive</key>\n    <false/>" not in s
+    assert "<key>KeepAlive</key>\n    <true/>" not in s
 
 
 def test_daemon_launchd_plist_keeps_alive():
