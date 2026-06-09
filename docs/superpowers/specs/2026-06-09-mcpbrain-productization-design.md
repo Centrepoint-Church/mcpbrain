@@ -197,33 +197,46 @@ repo with a remote, and it must not be named after Josh.
 
 ### 1.6 Windows cadence parity + platform hardening
 
-`install_agent/uninstall_agent/restart_agent` already branch
-darwin/linux/win32, but the four records cadences (prune, context-health,
-gardener, meeting-packs) are launchd-only and hardcode `/bin/bash`, `/bin/sh`,
-and `.sh` wrappers.
+This part splits into two plans, because the identity/hardening work is pure and
+fully testable now, while making the cadences actually *run* cross-platform is a
+subsystem that needs a discovery pass over the four records-repo cadence scripts.
 
-- Add **Task Scheduler** generators (Windows) and **systemd timer** generators
-  (Linux) for the four cadences, mirroring the launchd plists.
-- Replace shell-wrapped commands with cross-platform invocations: prefer
-  `python -m mcpbrain <subcommand>` (or the `mcpbrain` console script) over
-  `/bin/sh -c "... && git ..."`. The "run then commit" logic moves into the
-  Python entrypoint so it is identical on every OS.
-- Harden `config.py:18`: the `os.uname()` call is currently safe only because
-  `os.name == "nt"` is checked first; guard it explicitly (use `sys.platform` or
-  `platform.system()`) so a future refactor can't expose the Windows
-  `AttributeError`.
+**1.6a — neutral identity + platform hardening (Plan 3, done):**
+- Service/label naming becomes org-/person-neutral (the launchd/agent labels), and
+  `config.app_dir()`'s `os.uname()` is hardened to `sys.platform`. Details in the
+  "naming" paragraph below.
 
-Service/label naming becomes org-neutral **and** drops "joshbrain" (the label
-rename deferred here from 1.5): `church.centrepoint.joshbrain.*` →
-`com.mcpbrain.records.*` for the four cadence labels in `agents.py`
-(`_PRUNE_LABEL`, `_HEALTH_LABEL`, `_MEETING_PACKS_LABEL`, `_GARDENER_LABEL`), and
-the daemon/tray labels `church.centrepoint.mcpbrain*` → `com.mcpbrain.*`. The
-`agent_errs.py` `GLOB` (`church.centrepoint.joshbrain.*.err`) and its label-parse
-move in lockstep. The cadence plists that reference the repo path use
-`config.records_dir` (the `joshbrain_dir=`/`Path(home).parent/"joshbrain"`
-arguments at `agents.py:474,522,537-538,553,558,566,576` are repointed). Each user
-is on their own device, so there is no same-machine collision concern; the rename
-is about not baking one org (or one person) into the service identity.
+**1.6b — cross-platform cadence execution (Plan 3b, deferred, discovery-gated):**
+- The four cadences (prune, context-health, gardener, meeting-packs) are
+  **launchd-only**, call scripts that live in the records repo
+  (`{records}/bin/{prune_hot_md.py,context_health.py,run_memory_gardener.sh,build_meeting_packs.sh}`),
+  and are installed **only by `seed_joshbrain.py`** — never by the product. So for
+  any non-Mac (or non-Josh) user they do not run at all.
+- The fix: **Task Scheduler** generators (Windows, time-triggered) + **systemd
+  timer** generators (Linux) for the four cadences; **port the logic into
+  `python -m mcpbrain <subcommand>`s** so the "run then commit" is identical on
+  every OS and no longer depends on records-repo shell scripts or `/bin/bash`,
+  `/bin/sh`, `.sh`; and a **product install path** for cadences (today only the dev
+  seed installs them). The cadence generators' repo path moves to
+  `config.records_dir` and their `joshbrain_dir=` params are renamed as part of this
+  restructure.
+- **Prerequisite:** a discovery read of the four scripts (≈14 KB) to design the
+  subcommand surface faithfully. This is why it is its own plan.
+
+**Naming (1.6a / Plan 3):** service/label naming becomes org-neutral **and** drops
+"joshbrain": the daemon label `church.centrepoint.mcpbrain` → `com.mcpbrain`, tray
+→ `com.mcpbrain.tray`, and the four cadence labels
+(`_PRUNE_LABEL`/`_HEALTH_LABEL`/`_MEETING_PACKS_LABEL`/`_GARDENER_LABEL`)
+`church.centrepoint.joshbrain.*` → `com.mcpbrain.records.*`. The `agent_errs.py`
+`GLOB` (`church.centrepoint.joshbrain.*.err` → `com.mcpbrain.records.*.err`) and its
+label-parse move in lockstep (the new `records.` segment also stops the daemon's own
+`com.mcpbrain.err` being scanned as a cadence finding). Each user is on their own
+device, so there is no same-machine collision concern; the rename is about not
+baking one org (or one person) into the service identity. **Migration:** existing
+installs must unload the old `church.centrepoint.*` agents once (documented in the
+Plan 3 release note). Repointing the cadence generators' repo path to
+`config.records_dir` and renaming their `joshbrain_dir=` params happens in **1.6b**
+as part of the cross-platform restructure (not 1.6a).
 
 ---
 
@@ -619,9 +632,13 @@ data layer and the platform/label work are independent:
 - **Plan 2** — `2026-06-09-part2-records-repo.md` — spec **1.5** records data layer
   (`config.records_dir`, `mcpbrain/records.py` ensure+scaffold, drain ensures the
   repo, voice path, user-facing de-"joshbrain"). *Written.*
-- **Plan 3** — platform & cadences — spec **1.6** (`agents.py` label rename
-  `com.mcpbrain.records.*`, `agent_errs.py` glob, Task Scheduler + systemd timer
-  generators, `os.uname` hardening). *To write.*
+- **Plan 3** — `2026-06-09-part3-neutral-identity.md` — spec **1.6a** (neutral
+  service identity: `agents.py` daemon/tray/cadence label rename, `agent_errs.py`
+  glob, `os.uname` → `sys.platform` hardening). *Written.*
+- **Plan 3b** — cross-platform cadence execution — spec **1.6b** (port the four
+  cadences to `python -m mcpbrain` subcommands, systemd-timer + time-triggered
+  schtasks generators, product cadence-install path, repo-path/param renames).
+  Discovery-gated on the four records-repo scripts. *To write.*
 - **Plan 4** — status & connection-probe layer — spec **3.2** + `daemon.status()`
   `configured`/probe fields (also unblocks the 1.1 UI surfacing). *To write.*
 - **Plan 5** — distribution & release — spec **Part 2**. *To write.*
