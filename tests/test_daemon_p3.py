@@ -1004,3 +1004,20 @@ def test_maybe_stale_reextract_swallows_errors(tmp_path):
     assert result["stale_reextract"] is False
     # _last not advanced -> next call retries
     assert daemon._last_stale_reextract is None
+
+
+def test_maybe_stale_reextract_not_due_before_interval(tmp_path):
+    """After a successful run, a call within the interval returns None."""
+    clock = _Clock()
+    store, daemon = _stale_daemon(tmp_path, stale_reextract_interval_s=100.0,
+                                  clock=clock)
+    fake = {"triggered": 0, "deferred": 0, "threads": []}
+    with patch("mcpbrain.stale_reextract.sweep", return_value=fake):
+        first = daemon.maybe_stale_reextract()
+    assert first is not None
+
+    clock.advance(50.0)
+    with patch("mcpbrain.stale_reextract.sweep") as mock_sweep:
+        second = daemon.maybe_stale_reextract()
+    assert second is None
+    mock_sweep.assert_not_called()
