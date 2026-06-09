@@ -1,7 +1,7 @@
-"""check_agent_errs: surface joshbrain launchd agent stderr as findings.
+"""check_agent_errs: surface launchd agent stderr as findings.
 
-The two joshbrain launchd agents write stderr to
-~/.mcpbrain/church.centrepoint.joshbrain.*.err. Nothing reads those files, so
+The records cadence agents write stderr to
+~/.mcpbrain/com.mcpbrain.records.*.err. Nothing reads those files, so
 failures rot unseen. check_agent_errs tails the new stderr per cycle and turns
 it into an open finding (fingerprint-deduped) on the same surface Phase 1 built.
 """
@@ -25,7 +25,7 @@ def test_err_content_records_one_finding(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    _write(home, "church.centrepoint.joshbrain.prune.err", "Traceback: boom\n")
+    _write(home, "com.mcpbrain.records.prune.err", "Traceback: boom\n")
 
     check_agent_errs(s, home)
 
@@ -33,7 +33,7 @@ def test_err_content_records_one_finding(tmp_path):
     assert len(findings) == 1
     f = findings[0]
     assert "joshbrain" in f["summary"]
-    assert "church.centrepoint.joshbrain.prune" in f["summary"]
+    assert "com.mcpbrain.records.prune" in f["summary"]
     assert "boom" in f["detail"]
 
 
@@ -41,7 +41,7 @@ def test_second_call_no_growth_no_new_finding(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    _write(home, "church.centrepoint.joshbrain.prune.err", "boom\n")
+    _write(home, "com.mcpbrain.records.prune.err", "boom\n")
 
     check_agent_errs(s, home)
     check_agent_errs(s, home)
@@ -53,7 +53,7 @@ def test_append_new_content_records_second_finding(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    p = _write(home, "church.centrepoint.joshbrain.prune.err", "first error\n")
+    p = _write(home, "com.mcpbrain.records.prune.err", "first error\n")
 
     check_agent_errs(s, home)
     assert len(s.open_findings(FINDING_TYPE)) == 1
@@ -75,7 +75,7 @@ def test_identical_recurring_content_dedupes(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    p = _write(home, "church.centrepoint.joshbrain.health.err", "WARN same\n")
+    p = _write(home, "com.mcpbrain.records.health.err", "WARN same\n")
 
     check_agent_errs(s, home)
     # Truncate and write the identical warning again (e.g. weekly rerun).
@@ -90,7 +90,7 @@ def test_truncation_resets_and_rereads(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    p = _write(home, "church.centrepoint.joshbrain.prune.err", "a long first error line\n")
+    p = _write(home, "com.mcpbrain.records.prune.err", "a long first error line\n")
     check_agent_errs(s, home)
 
     # Rotated/truncated to a smaller file with fresh content.
@@ -105,13 +105,13 @@ def test_whitespace_only_growth_advances_cursor_no_finding(tmp_path):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    _write(home, "church.centrepoint.joshbrain.prune.err", "   \n\n  \t\n")
+    _write(home, "com.mcpbrain.records.prune.err", "   \n\n  \t\n")
 
     check_agent_errs(s, home)
 
     assert s.open_findings(FINDING_TYPE) == []
     # Cursor advanced to size, so a no-growth second call is also a no-op.
-    cur = s.get_cursor("agent_err:church.centrepoint.joshbrain.prune.err")
+    cur = s.get_cursor("agent_err:com.mcpbrain.records.prune.err")
     assert cur is not None and int(cur) > 0
 
 
@@ -119,7 +119,7 @@ def test_missing_or_unreadable_does_not_raise(tmp_path, monkeypatch):
     s = _store(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    p = _write(home, "church.centrepoint.joshbrain.prune.err", "boom\n")
+    p = _write(home, "com.mcpbrain.records.prune.err", "boom\n")
 
     # Make read blow up mid-scan; check_agent_errs must swallow it.
     import builtins
@@ -157,7 +157,7 @@ def test_full_region_hash_not_tail_hash(tmp_path):
     region_a = "ERROR_A\n" + shared_tail
     region_b = "ERROR_B\n" + shared_tail  # same tail, different prefix
 
-    p = home / "church.centrepoint.joshbrain.prune.err"
+    p = home / "com.mcpbrain.records.prune.err"
 
     # First write: region_a only.
     p.write_text(region_a)
