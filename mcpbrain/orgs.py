@@ -37,36 +37,11 @@ log = logging.getLogger(__name__)
 # Reserved classification tags: part of the org enum, never real orgs.
 RESERVED_TAGS = ("external", "unknown")
 
-# The historical hardcoded taxonomy (graph_write._DOMAIN_ORG / ORG_ALIASES as
-# they stood before the config migration). DEFAULT_TAXONOMY is built from these.
-_DEFAULT_DOMAIN_ORG = {
-    "centrepoint.church": "Centrepoint",
-    "centrepoint.com.au": "Centrepoint",
-    # ACC family — national, denominational, state office
-    "acc.org.au": "ACC",
-    "acci.org.au": "ACC",
-    "accwa.org.au": "ACC",
-    "acc.net.au": "ACC",
-    "acc.church": "ACC",
-    "courageouschurch.org.au": "Courageous Church",
-    "courageouschurch.com.au": "Courageous Church",
-    "courageouschurchperth.com": "Courageous Church",
-    "curtin.edu.au": "Curtin",
-}
-
-_DEFAULT_ALIASES = {
-    "centrepoint church": "Centrepoint",
-    "centrepoint church incorporated": "Centrepoint",
-    "centrepoint.church": "Centrepoint",
-    "centrepoint baptist church": "Centrepoint",
-    "centrepoint": "Centrepoint",
-    "courageous church": "Courageous Church",
-    "courageous church perth": "Courageous Church",
-    "courageous": "Courageous Church",
-    "australian christian churches": "ACC",
-    "acc": "ACC",
-    "curtin": "Curtin",
-}
+# No baked-in taxonomy: an unconfigured install classifies against nothing.
+# Orgs come from config.json's `orgs` key via taxonomy_from_config; the daemon's
+# enrichment gate (config.is_configured) prevents enrichment until >=1 org is set.
+_DEFAULT_DOMAIN_ORG: dict[str, str] = {}
+_DEFAULT_ALIASES: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -131,18 +106,14 @@ class OrgTaxonomy:
         return "external"
 
 
-DEFAULT_TAXONOMY = OrgTaxonomy(
-    names=("Centrepoint", "ACC", "Courageous Church", "Curtin"),
-    domain_map=dict(_DEFAULT_DOMAIN_ORG),
-    aliases=dict(_DEFAULT_ALIASES),
-)
+DEFAULT_TAXONOMY = OrgTaxonomy(names=(), domain_map={}, aliases={})
 
 
 def taxonomy_from_config(home=None) -> OrgTaxonomy:
     """Build the taxonomy from config.json's `orgs` key.
 
-    Absent or empty key -> DEFAULT_TAXONOMY (the historical four orgs), so an
-    unconfigured install is unchanged. Malformed entries are skipped with a
+    Absent or empty key -> DEFAULT_TAXONOMY (empty taxonomy), so an unconfigured
+    install classifies against nothing. Malformed entries are skipped with a
     warning rather than crashing the pipeline. Each org's own name variants
     (lowercased name) are always usable; the optional per-org `aliases` list
     adds more. Reserved tags cannot be configured as org names.

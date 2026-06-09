@@ -8,8 +8,39 @@ import json
 from pathlib import Path
 
 
-from mcpbrain import graph_write as gw
+from mcpbrain import graph_write as gw, orgs
 from mcpbrain.store import Store
+
+_CENTREPOINT_ORGS = [
+    {"name": "Centrepoint", "domains": ["centrepoint.church", "centrepoint.com.au"],
+     "aliases": ["Centrepoint Church", "Centrepoint Church Incorporated",
+                 "Centrepoint Baptist Church"]},
+    {"name": "ACC", "domains": ["acc.org.au", "acci.org.au", "accwa.org.au",
+                                 "acc.net.au", "acc.church"]},
+    {"name": "Courageous Church", "domains": ["courageouschurch.org.au"]},
+    {"name": "Curtin", "domains": ["curtin.edu.au"]},
+]
+
+
+_CP_TAXONOMY = orgs.OrgTaxonomy(
+    names=("Centrepoint", "ACC", "Courageous Church", "Curtin"),
+    domain_map={
+        "centrepoint.church": "Centrepoint", "centrepoint.com.au": "Centrepoint",
+        "acc.org.au": "ACC", "acci.org.au": "ACC", "accwa.org.au": "ACC",
+        "acc.net.au": "ACC", "acc.church": "ACC",
+        "courageouschurch.org.au": "Courageous Church",
+        "curtin.edu.au": "Curtin",
+    },
+    aliases={
+        "centrepoint church": "Centrepoint",
+        "centrepoint church incorporated": "Centrepoint",
+        "centrepoint baptist church": "Centrepoint",
+    },
+)
+
+
+def _write_cp_config(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": _CENTREPOINT_ORGS}))
 
 FIXTURES = Path(__file__).parent / "fixtures" / "extractions"
 
@@ -27,28 +58,24 @@ def _load(name):
 # --- 2.1 org-domain map + slug/junk helpers -------------------------------
 
 def test_org_from_email_known_domains():
-    assert gw.org_from_email("joel@centrepoint.church") == "Centrepoint"
-    assert gw.org_from_email("x@gmail.com") == "external"
+    assert gw.org_from_email("joel@centrepoint.church", _CP_TAXONOMY) == "Centrepoint"
+    assert gw.org_from_email("x@gmail.com", _CP_TAXONOMY) == "external"
     assert gw.org_from_email("") == ""
 
 
 def test_org_casing_is_display_form():
-    assert gw.org_from_email("a@acc.org.au") == "ACC"
+    assert gw.org_from_email("a@acc.org.au", _CP_TAXONOMY) == "ACC"
 
 
 def test_domain_org_lines_present_and_shaped():
-    lines = gw._DOMAIN_ORG_LINES
+    lines = _CP_TAXONOMY.domain_lines
     assert isinstance(lines, list) and lines
     assert all(isinstance(line, str) for line in lines)
-    # One line per _DOMAIN_ORG entry.
-    assert len(lines) == len(gw._DOMAIN_ORG)
-    # Each line carries its domain and its display-case org.
-    joined = "\n".join(lines)
-    assert "centrepoint.church" in joined
+    assert len(lines) == len(_CP_TAXONOMY.domain_map)
     assert any(
         "centrepoint.church" in line and "Centrepoint" in line for line in lines
     )
-    for domain, org in gw._DOMAIN_ORG.items():
+    for domain, org in _CP_TAXONOMY.domain_map.items():
         assert any(domain in line and org in line for line in lines)
 
 
@@ -324,7 +351,9 @@ def test_apply_excludes_josh(tmp_path):
     assert not any("josh" in n for n in names)
 
 
-def test_apply_relations_resolved_via_name_map(tmp_path):
+def test_apply_relations_resolved_via_name_map(tmp_path, monkeypatch):
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
@@ -355,13 +384,15 @@ def test_apply_email_count_stable_on_reapply(tmp_path):
     assert joel["email_count"] == 1  # not 2 — re-apply must not inflate
 
 
-def test_apply_org_affiliation_single_node(tmp_path):
+def test_apply_org_affiliation_single_node(tmp_path, monkeypatch):
     """A known org resolves to one canonical node, not a tag/full-name pair.
 
     'Centrepoint' (the org tag) and 'Centrepoint Church' (the relation target)
     must converge on the single 'centrepoint' entity with one valid works_at
     edge — no phantom bare-slug node, no immediately-superseded edge.
     """
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
@@ -961,7 +992,9 @@ def test_external_sender_in_centrepoint_thread_is_external(tmp_path):
     assert franz["org"] == "external"
 
 
-def test_known_domain_sender_gets_its_org(tmp_path):
+def test_known_domain_sender_gets_its_org(tmp_path, monkeypatch):
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     gw.apply(s, _sender_ext("ACC", "Joel <joel@centrepoint.church>"),
              doc_ids=["d1"])
@@ -1001,7 +1034,9 @@ def _rel_ext(target_name):
     }
 
 
-def test_relation_to_org_tag_is_skipped(tmp_path):
+def test_relation_to_org_tag_is_skipped(tmp_path, monkeypatch):
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     gw.apply(s, _rel_ext("Centrepoint"), doc_ids=["d1"])
     # The bare tag "Centrepoint" must not have been created as an entity.
@@ -1019,7 +1054,9 @@ def test_relation_to_external_tag_is_skipped(tmp_path):
     assert not s.relations_for(franz["id"])
 
 
-def test_relation_to_real_org_is_kept(tmp_path):
+def test_relation_to_real_org_is_kept(tmp_path, monkeypatch):
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     gw.apply(s, _rel_ext("Centrepoint Church"), doc_ids=["d1"])
     franz = s.find_entity("Franz")
@@ -1035,7 +1072,9 @@ def test_relation_to_real_org_is_kept(tmp_path):
 
 # Combined Franz regression lock.
 
-def test_franz_regression_lock(tmp_path):
+def test_franz_regression_lock(tmp_path, monkeypatch):
+    _write_cp_config(tmp_path)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     ext = {
         "thread_id": "tf-1", "org": "Centrepoint", "content_type": "update",
