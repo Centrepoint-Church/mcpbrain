@@ -442,9 +442,9 @@ def drain_captures(store, *, home=None) -> int:
                 log.error("capture: action_update failed for %s: %s", path.name, exc)
                 file_ok = False
         elif kind in ("decision", "continuity", "memory"):
-            from mcpbrain import joshbrain_write as jw
-            repo = config.joshbrain_dir(str(home_dir))
             try:
+                from mcpbrain import joshbrain_write as jw
+                repo = config.joshbrain_dir(str(home_dir))
                 if kind == "decision":
                     jw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
                                        owner=env.get("owner", "Josh"), supersedes=env.get("supersedes", ""),
