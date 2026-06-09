@@ -513,3 +513,18 @@ def test_entities_for_resolution_returns_five_fields(tmp_path):
     by_id = {r["id"]: r for r in rows}
     assert by_id["joel"]["name"] == "Joel"
     assert by_id["joel"]["org"] == "Centrepoint"
+
+
+def test_stale_reextract_roundtrip(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    assert s.get_stale_reextract("thread-A") is None
+    s.set_stale_reextract("thread-A", "sig123", "2026-06-09T00:00:00Z")
+    row = s.get_stale_reextract("thread-A")
+    assert row["thread_id"] == "thread-A"
+    assert row["signature"] == "sig123"
+    assert row["triggered_at"] == "2026-06-09T00:00:00Z"
+    # upsert replaces in place
+    s.set_stale_reextract("thread-A", "sig456", "2026-06-09T01:00:00Z")
+    assert s.get_stale_reextract("thread-A")["signature"] == "sig456"
