@@ -1,8 +1,32 @@
 import json
 import sys
 
+import pytest
+
 from mcpbrain.enrich import slugify, extract, enrich_document, run_enrichment, resolve_client
 from mcpbrain.store import Store
+
+
+# --- default taxonomy fixture -----------------------------------------------
+# build_prompt requires at least one org in the taxonomy (Fix I2). Tests that
+# don't configure their own MCPBRAIN_HOME get a minimal default config via this
+# autouse fixture. The lru_cache on taxonomy_from_config is cleared after each
+# test so cache pollution across tests with different MCPBRAIN_HOME values is
+# avoided.
+
+@pytest.fixture(autouse=True)
+def _default_orgs(tmp_path, monkeypatch):
+    """Provide a minimal orgs config when the test does not set its own."""
+    import os
+    if "MCPBRAIN_HOME" not in os.environ:
+        (tmp_path / "config.json").write_text(json.dumps({
+            "owner_name": "Josh", "owner_full_name": "Josh Kemp",
+            "orgs": [{"name": "TestOrg", "domains": ["testorg.example"]}],
+        }))
+        monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import orgs
+    yield
+    orgs.taxonomy_from_config.cache_clear()
 
 
 # --- slugify --------------------------------------------------------------

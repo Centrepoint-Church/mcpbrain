@@ -271,8 +271,9 @@ def check_ambiguous_org(conn) -> list[dict]:
     """).fetchall()
     for row in rows:
         addr = (row["email_addr"] or "").lower()
+        email_domain = addr.split("@")[-1] if "@" in addr else addr
         for domain, mapped_org in known_domains.items():
-            if domain in addr:
+            if email_domain == domain or email_domain.endswith("." + domain):
                 results.append({**dict(row), "should_be": mapped_org})
                 break
     return results

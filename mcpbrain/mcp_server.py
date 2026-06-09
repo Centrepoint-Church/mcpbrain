@@ -14,7 +14,12 @@ def _default_owner() -> str:
 
 
 async def list_context_resources():
-    """Return types.Resource entries for every *.md in ~/.mcpbrain/context/."""
+    """Return types.Resource entries for every *.md in ~/.mcpbrain/context/.
+
+    # NOTE: This serves files from app_dir/context/. Draft voice rules are read from
+    # records_dir/context/voice.md (see draft._load_voice_rules). These two paths differ
+    # when records_dir != app_dir/records. Align in a future pass.
+    """
     from mcp import types
     ctx = config.app_dir() / "context"
     if not ctx.is_dir():
@@ -602,7 +607,9 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_actions":
             # null-coalesce: explicit None/empty defaults to the configured owner
-            owner = arguments.get("owner") or ""
+            owner = arguments.get("owner") or _default_owner()
+            if not owner:
+                return [types.TextContent(type="text", text='[{"error": "Install not configured: set owner_name in config.json"}]')]
             status = arguments.get("status") or "open"
             out = await actions(owner, status)
             return [types.TextContent(type="text", text=json.dumps(out))]
@@ -626,7 +633,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
         if name == "brain_action_create":
             out = await action_create(
                 text=arguments.get("text", ""),
-                owner=arguments.get("owner", ""),
+                owner=arguments.get("owner") or _default_owner(),
                 deadline=arguments.get("deadline", ""),
                 org=arguments.get("org", ""),
                 project_id=arguments.get("project_id", ""),

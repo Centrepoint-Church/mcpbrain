@@ -101,6 +101,8 @@ def build_prompt(text: str, metadata: dict) -> str:
     owner_short = _config.owner_name(_home)
     owner_role = _config.owner_role(_home)
     _tax = _orgs.taxonomy_from_config(_home)
+    if not _tax.names:
+        raise ValueError("build_prompt requires at least one org in the taxonomy")
     org_list = ", ".join(_tax.names)
     org_enum = "|".join(list(_tax.names) + ["external", "unknown"])
 

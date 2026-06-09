@@ -413,6 +413,7 @@ def _calendar_plist(
     minute: int,
     weekday: int | None = None,
     run_at_load: bool = True,
+    env_vars: dict[str, str] | None = None,
 ) -> str:
     """Return a macOS launchd plist that runs on a StartCalendarInterval schedule.
 
@@ -436,6 +437,14 @@ def _calendar_plist(
     log_path = f"{mcpbrain_home}/{label}.log"
     err_path = f"{mcpbrain_home}/{label}.err"
     run_at_load_block = "    <key>RunAtLoad</key>\n    <true/>\n" if run_at_load else ""
+    if env_vars is not None and len(env_vars) > 0:
+        entries = "\n".join(
+            f"        <key>{k}</key>\n        <string>{_xml_escape(v)}</string>"
+            for k, v in env_vars.items()
+        )
+        env_vars_block = f"    <key>EnvironmentVariables</key>\n    <dict>\n{entries}\n    </dict>\n"
+    else:
+        env_vars_block = ""
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -448,7 +457,7 @@ def _calendar_plist(
     <array>
 {args_xml}
     </array>
-{run_at_load_block}    <key>StartCalendarInterval</key>
+{run_at_load_block}{env_vars_block}    <key>StartCalendarInterval</key>
     <dict>
 {interval_block}
     </dict>
@@ -534,8 +543,8 @@ def records_prune_plist(*, python_bin: str, records_dir: str, mcpbrain_home: str
     exit 1 on "no changes" and surface as a false agent_stderr finding).
     """
     command = (
-        f"{python_bin} {records_dir}/bin/prune_hot_md.py "
-        f"&& cd {records_dir} "
+        f"'{python_bin}' '{records_dir}/bin/prune_hot_md.py' "
+        f"&& cd '{records_dir}' "
         f"&& git add state/hot.md "
         f"&& (git diff --cached --quiet -- state/hot.md "
         f"|| git commit -m 'prune: hot.md (launchd)' -- state/hot.md)"
@@ -546,6 +555,7 @@ def records_prune_plist(*, python_bin: str, records_dir: str, mcpbrain_home: str
         mcpbrain_home=mcpbrain_home,
         hour=6,
         minute=0,
+        env_vars={"MCPBRAIN_HOME": mcpbrain_home},
     )
 
 
@@ -560,6 +570,7 @@ def records_context_health_plist(
         hour=7,
         minute=0,
         weekday=1,
+        env_vars={"MCPBRAIN_HOME": mcpbrain_home},
     )
 
 
@@ -579,4 +590,5 @@ def records_gardener_plist(*, records_dir: str, mcpbrain_home: str) -> str:
         minute=0,
         weekday=1,
         run_at_load=False,  # weekly-only; do not fire on every login/reboot
+        env_vars={"MCPBRAIN_HOME": mcpbrain_home},
     )

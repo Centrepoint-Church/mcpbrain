@@ -262,12 +262,13 @@ Run with the venv python (`.venv/bin/python3`) from ~/Documents/GitHub/mcpbrain:
 from mcpbrain.agents import (
     launchd_plist, launchd_tray_plist,
     records_prune_plist, records_context_health_plist,
+    records_gardener_plist, meeting_packs_plist,
 )
 import subprocess
 from pathlib import Path
 
 python_bin = subprocess.check_output(["which", "python3"], text=True).strip()
-records_dir = str(Path.home() / "Documents/GitHub/joshbrain")
+records_dir = str(Path.home() / ".mcpbrain" / "records")
 mcpbrain_home = str(Path.home() / ".mcpbrain")
 mcpbrain_bin = str(Path.home() / "Documents/GitHub/mcpbrain/.venv/bin/mcpbrain")
 launchd = Path.home() / "Library" / "LaunchAgents"
@@ -280,6 +281,9 @@ plists = {
         python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
     "com.mcpbrain.records.context-health": records_context_health_plist(
         python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
+    "com.mcpbrain.records.gardener": records_gardener_plist(
+        records_dir=records_dir, mcpbrain_home=mcpbrain_home),
+    "com.mcpbrain.records.meeting-packs": meeting_packs_plist(home=mcpbrain_home),
 }
 
 for label, content in plists.items():
@@ -293,7 +297,7 @@ Then verify:
 
 ```bash
 launchctl list | grep com.mcpbrain
-# Expected: com.mcpbrain, com.mcpbrain.tray, com.mcpbrain.records.prune, com.mcpbrain.records.context-health
+# Expected: com.mcpbrain, com.mcpbrain.tray, com.mcpbrain.records.prune, com.mcpbrain.records.context-health, com.mcpbrain.records.gardener, com.mcpbrain.records.meeting-packs
 ```
 
 ## 5. Register mcpbrain MCP — Claude Code

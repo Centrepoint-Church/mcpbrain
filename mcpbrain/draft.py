@@ -24,7 +24,7 @@ from mcpbrain import config
 
 log = logging.getLogger(__name__)
 
-_HAIKU = "claude-haiku-4-5-20251001"
+_HAIKU = "claude-haiku-4-5"
 _SONNET = "claude-sonnet-4-6"
 _LEAN_FLAGS = [
     "--tools", "",
@@ -78,8 +78,10 @@ def _parse_json(raw: str) -> dict:
 
 
 def _load_voice_rules(home: str) -> str:
-    """Read the records repo's context/voice.md. Returns '' if not found."""
-    from mcpbrain import config
+    """Read the records repo's context/voice.md. Returns '' if not found.
+    # NOTE: voice.md lives in records_dir/context/, not app_dir/context/ (MCP resources
+    # serve from the latter). The two paths will be aligned in a future pass.
+    """
     p = Path(config.records_dir(home)) / "context" / "voice.md"
     try:
         return p.read_text()

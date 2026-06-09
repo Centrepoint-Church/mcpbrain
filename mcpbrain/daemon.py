@@ -312,8 +312,8 @@ class Daemon:
         self._store = store
         self._embedder = embedder
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
-        # Enrichment source: spool | gemini | off. Defaults to "gemini" so a
-        # daemon constructed without it keeps today's per-chunk behaviour.
+        # Enrichment source: spool | gemini | off. Defaults to "off" so a
+        # newly-constructed daemon enriches nothing until explicitly configured.
         # apply_config re-reads it from config under _config_lock, the same way
         # _enrich_client is re-wired, and run_one snapshots it per cycle.
         self._enrich_mode = enrich_mode
@@ -512,6 +512,7 @@ class Daemon:
             "enrich_enabled": self._enrich_client is not None,
             "spool": {"pending": pending, "inbox": inbox},
             "open_findings": open_findings,
+            "is_configured": config.is_configured(str(app_dir())),
         }
 
     def _resolve_google_account(self, token_file) -> str:
@@ -1130,7 +1131,9 @@ class Daemon:
             # Lazy import: keeps the daemon import light and lets tests patch
             # mcpbrain.waiting_on.run.
             from mcpbrain.waiting_on import run
-            summary = run(self._store, now=now_iso)
+            from mcpbrain import config as _cfg
+            _identity = _cfg.owner_email(str(app_dir()))
+            summary = run(self._store, now=now_iso, identity=_identity or None)
         except Exception as exc:  # noqa: BLE001 — waiting_on must never crash the loop
             log.warning(
                 "waiting-on reconciliation failed (will retry next due): %s", exc,
