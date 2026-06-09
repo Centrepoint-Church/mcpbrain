@@ -550,6 +550,16 @@ class Store:
                 cowork_session TEXT DEFAULT '')""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_mp_date ON meeting_packs(event_date)")
 
+            # --- stale_reextract (Gap A re-extraction trigger, 2026-06-09) ----
+            # Records that a thread was reset to enriched=0 for a fresh LLM
+            # at-bat, keyed by a content signature so the same unchanged thread
+            # is never re-triggered (would re-pay the re-extraction token cost).
+            db.execute("""CREATE TABLE IF NOT EXISTS stale_reextract(
+                thread_id    TEXT PRIMARY KEY,
+                signature    TEXT NOT NULL,
+                triggered_at TEXT NOT NULL
+            )""")
+
             # --- draft_records (Mac capability uplift) ------------------------
             db.execute("""CREATE TABLE IF NOT EXISTS draft_records(
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1243,6 +1253,25 @@ class Store:
             r = db.execute("SELECT * FROM actions WHERE clickup_task_id = ?",
                            (clickup_task_id,)).fetchone()
             return dict(r) if r else None
+
+    def get_stale_reextract(self, thread_id: str) -> dict | None:
+        """Return the stale-reextract marker row for a thread, or None."""
+        with self._connect() as db:
+            r = db.execute(
+                "SELECT thread_id, signature, triggered_at "
+                "FROM stale_reextract WHERE thread_id=?",
+                (thread_id,)).fetchone()
+            return dict(r) if r else None
+
+    def set_stale_reextract(self, thread_id: str, signature: str,
+                            triggered_at: str) -> None:
+        """Upsert the marker recording that `thread_id` was re-triggered at the
+        given content `signature` and time."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO stale_reextract"
+                "(thread_id, signature, triggered_at) VALUES(?,?,?)",
+                (thread_id, signature, triggered_at))
 
     def get_unified_action(self, action_id: int) -> dict | None:
         with self._connect() as db:
