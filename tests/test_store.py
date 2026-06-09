@@ -564,3 +564,16 @@ def test_thread_helpers(tmp_path):
     # changing content DOES change the signature
     _add_thread_chunk(s, "d1", "T1", "hello edited", "h1b", enriched=1)
     assert s.thread_signature("T1") != sig_before
+
+
+def test_clickup_closed_setter(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    # default is NULL (never observed)
+    assert s.get_unified_action(aid)["clickup_closed"] is None
+    s.set_action_clickup_closed(aid, True)
+    assert s.get_unified_action(aid)["clickup_closed"] == 1
+    s.set_action_clickup_closed(aid, False)
+    assert s.get_unified_action(aid)["clickup_closed"] == 0
