@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import sqlite3
@@ -1477,6 +1478,45 @@ class Store:
                 }
                 for r in cur.fetchall()
             ]
+
+    def thread_has_unenriched(self, thread_id: str) -> bool:
+        """True if any chunk in the thread is enriched=0 (so the normal
+        enrichment path already owns it; the stale sweep must not double-trigger)."""
+        with self._connect() as db:
+            r = db.execute(
+                "SELECT 1 FROM chunks "
+                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=0 "
+                "LIMIT 1",
+                (thread_id,)).fetchone()
+            return r is not None
+
+    def mark_thread_unenriched(self, thread_id: str) -> int:
+        """Set enriched=0 on every enriched chunk in the thread so the next
+        enrichment cycle re-extracts it. Returns the number of rows flipped.
+        Touches only this thread; leaves embedded untouched."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE chunks SET enriched=0 "
+                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=1",
+                (thread_id,))
+            return cur.rowcount
+
+    def thread_signature(self, thread_id: str) -> str:
+        """sha256 over the thread's (doc_id, content_hash) pairs in doc_id order.
+        Stable across enriched-flag changes; changes iff thread content changes.
+        Empty thread -> a fixed empty-set digest."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id, content_hash FROM chunks "
+                "WHERE json_extract(metadata,'$.thread_id')=? ORDER BY doc_id",
+                (thread_id,)).fetchall()
+        h = hashlib.sha256()
+        for r in rows:
+            h.update(r["doc_id"].encode())
+            h.update(b"\x1f")
+            h.update((r["content_hash"] or "").encode())
+            h.update(b"\x1e")
+        return h.hexdigest()
 
     def doc_ids_for_messages(self, message_ids) -> list[str]:
         """doc_ids of the chunks whose messages these are.
