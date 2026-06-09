@@ -192,6 +192,19 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
         title="mcpbrain",
         menu=pystray.Menu(_menu_items),
     )
+
+    # Menu-bar-only: mark the process an "accessory" app so it shows ONLY in the
+    # status bar — no Dock icon, no foreground app presence. Without this the
+    # framework Python.app build pops a Dock icon every time the tray
+    # (re)starts. Set on the shared NSApplication (main thread, before the run
+    # loop); pystray reuses the same shared app. Best-effort.
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass
+
     icon.run(_setup)
 
 
