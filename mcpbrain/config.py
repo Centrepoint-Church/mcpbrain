@@ -73,6 +73,13 @@ def clickup_list_id(home) -> str:
     return read_config(home).get("clickup_list_id", "") or ""
 
 
+def joshbrain_dir(home) -> str:
+    """Path to the joshbrain repo the daemon writes structured records into.
+    Defaults to ~/joshbrain when unset."""
+    import os
+    return read_config(home).get("joshbrain_dir") or os.path.expanduser("~/joshbrain")
+
+
 def owner_name(home) -> str:
     """The install owner's short name: the value written to actions.owner by
     the enrichment pipeline and matched by the dashboard's owner filter.
