@@ -1,4 +1,4 @@
-from mcpbrain.agents import joshbrain_prune_plist, joshbrain_context_health_plist
+from mcpbrain.agents import joshbrain_prune_plist, joshbrain_context_health_plist, joshbrain_gardener_plist
 
 
 def _prune(**kw):
@@ -139,3 +139,38 @@ class TestMeetingPacksPlist:
         assert isinstance(intervals, list) and len(intervals) == 2
         times = {(i["Hour"], i["Minute"]) for i in intervals}
         assert times == {(7, 45), (12, 0)}
+
+
+def _gardener(**kw):
+    defaults = dict(joshbrain_dir="/Users/x/joshbrain",
+                    mcpbrain_home="/Users/x/.mcpbrain")
+    return joshbrain_gardener_plist(**{**defaults, **kw})
+
+
+def test_gardener_label():
+    assert "church.centrepoint.joshbrain.gardener" in _gardener()
+
+
+def test_gardener_weekly_monday_0800():
+    plist = _gardener()
+    assert "StartCalendarInterval" in plist
+    assert "<key>Weekday</key>\n        <integer>1</integer>" in plist
+    assert "<key>Hour</key>\n        <integer>8</integer>" in plist
+    assert "<key>Minute</key>\n        <integer>0</integer>" in plist
+
+
+def test_gardener_no_keep_alive():
+    assert "KeepAlive" not in _gardener()
+
+
+def test_gardener_program_arguments():
+    plist = _gardener(joshbrain_dir="/Users/josh/joshbrain")
+    assert "/bin/bash" in plist
+    assert "run_memory_gardener.sh" in plist
+    assert "/Users/josh/joshbrain/bin/run_memory_gardener.sh" in plist
+
+
+def test_gardener_log_paths_under_mcpbrain_home():
+    plist = _gardener(mcpbrain_home="/Users/josh/.mcpbrain")
+    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.log" in plist
+    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.err" in plist
