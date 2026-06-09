@@ -21,7 +21,7 @@ from xml.sax.saxutils import escape as _xml_escape
 log = logging.getLogger(__name__)
 
 # Bundle identifier used as the launchd label and scheduled-task name.
-_LABEL = "church.centrepoint.mcpbrain"
+_LABEL = "com.mcpbrain"
 _TRAY_LABEL = f"{_LABEL}.tray"
 
 # Canonical agent file locations by platform.
