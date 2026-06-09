@@ -1,18 +1,18 @@
-from mcpbrain.agents import joshbrain_prune_plist, joshbrain_context_health_plist, joshbrain_gardener_plist
+from mcpbrain.agents import records_prune_plist, records_context_health_plist, records_gardener_plist
 
 
 def _prune(**kw):
     defaults = dict(python_bin="/usr/bin/python3",
-                    joshbrain_dir="/Users/x/joshbrain",
+                    records_dir="/Users/x/records",
                     mcpbrain_home="/Users/x/.mcpbrain")
-    return joshbrain_prune_plist(**{**defaults, **kw})
+    return records_prune_plist(**{**defaults, **kw})
 
 
 def _health(**kw):
     defaults = dict(python_bin="/usr/bin/python3",
-                    joshbrain_dir="/Users/x/joshbrain",
+                    records_dir="/Users/x/records",
                     mcpbrain_home="/Users/x/.mcpbrain")
-    return joshbrain_context_health_plist(**{**defaults, **kw})
+    return records_context_health_plist(**{**defaults, **kw})
 
 
 def test_prune_label():
@@ -37,23 +37,23 @@ def test_prune_runs_at_load_no_keep_alive():
 
 def test_prune_program_arguments():
     plist = _prune(python_bin="/opt/homebrew/bin/python3",
-                   joshbrain_dir="/Users/josh/joshbrain")
+                   records_dir="/Users/x/records")
     # The job is now a single /bin/sh -c wrapper string, not bare arg vector.
     assert "/bin/sh" in plist
     assert "<string>-c</string>" in plist
     # python_bin and the prune script path appear inside the command string.
     assert "/opt/homebrew/bin/python3" in plist
     assert "prune_hot_md.py" in plist
-    assert "/Users/josh/joshbrain/bin/prune_hot_md.py" in plist
+    assert "/Users/x/records/bin/prune_hot_md.py" in plist
 
 
 def test_prune_commits_hot_md():
-    plist = _prune(joshbrain_dir="/Users/josh/joshbrain")
+    plist = _prune(records_dir="/Users/x/records")
     # The wrapper stages and conditionally commits state/hot.md.
     assert "git add state/hot.md" in plist
     assert "git diff --cached --quiet" in plist
     assert "git commit" in plist
-    assert "cd /Users/josh/joshbrain" in plist
+    assert "cd /Users/x/records" in plist
 
 
 def test_prune_commit_scoped_to_hot_md():
@@ -98,9 +98,9 @@ def test_health_no_keep_alive():
 
 def test_health_program_arguments():
     plist = _health(python_bin="/usr/bin/python3",
-                    joshbrain_dir="/Users/josh/joshbrain")
+                    records_dir="/Users/x/records")
     assert "context_health.py" in plist
-    assert "/Users/josh/joshbrain/bin/context_health.py" in plist
+    assert "/Users/x/records/bin/context_health.py" in plist
 
 
 def test_health_is_direct_python_invocation():
@@ -142,9 +142,9 @@ class TestMeetingPacksPlist:
 
 
 def _gardener(**kw):
-    defaults = dict(joshbrain_dir="/Users/x/joshbrain",
+    defaults = dict(records_dir="/Users/x/records",
                     mcpbrain_home="/Users/x/.mcpbrain")
-    return joshbrain_gardener_plist(**{**defaults, **kw})
+    return records_gardener_plist(**{**defaults, **kw})
 
 
 def test_gardener_label():
@@ -164,10 +164,10 @@ def test_gardener_no_keep_alive():
 
 
 def test_gardener_program_arguments():
-    plist = _gardener(joshbrain_dir="/Users/josh/joshbrain")
+    plist = _gardener(records_dir="/Users/x/records")
     assert "/bin/bash" in plist
     assert "run_memory_gardener.sh" in plist
-    assert "/Users/josh/joshbrain/bin/run_memory_gardener.sh" in plist
+    assert "/Users/x/records/bin/run_memory_gardener.sh" in plist
 
 
 def test_gardener_log_paths_under_mcpbrain_home():

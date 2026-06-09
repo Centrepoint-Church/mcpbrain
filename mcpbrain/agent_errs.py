@@ -93,7 +93,7 @@ def _check_one(store, path: Path) -> None:
     store.record_finding(
         FINDING_TYPE,
         ref_id=f"{filename}:{fp}",
-        summary=f"joshbrain agent stderr: {label}",
+        summary=f"records agent stderr: {label}",
         detail=content,
         severity="warn",
     )

@@ -395,7 +395,7 @@ def _restart_schtasks_tray() -> None:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# joshbrain calendar agents (prune_hot_md daily, context_health weekly)
+# records-repo calendar agents (prune_hot_md daily, context_health weekly)
 # ---------------------------------------------------------------------------
 
 _PRUNE_LABEL = "com.mcpbrain.records.prune"
@@ -471,8 +471,8 @@ def meeting_packs_plist(home: str) -> str:
     emits a single StartCalendarInterval dict; this job needs an array of two so it
     fires both morning and midday.
     """
-    joshbrain = Path(home).parent / "joshbrain"
-    script = _xml_escape(str(joshbrain / "bin" / "build_meeting_packs.sh"))
+    records_path = Path(home) / "records"
+    script = _xml_escape(str(records_path / "bin" / "build_meeting_packs.sh"))
     home_x = _xml_escape(home)
     label = _MEETING_PACKS_LABEL
     return f"""\
@@ -519,13 +519,13 @@ def meeting_packs_plist(home: str) -> str:
 """
 
 
-def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home: str) -> str:
+def records_prune_plist(*, python_bin: str, records_dir: str, mcpbrain_home: str) -> str:
     """Return a launchd plist that runs prune_hot_md.py daily at 06:00.
 
     The prune mutates state/hot.md. launchd has no notion of committing, so the
     job is wrapped in `/bin/sh -c`: run the prune, then stage and conditionally
-    commit hot.md. Without the commit the Mac's working tree drifts permanently
-    dirty. The whole shell pipeline is a single ProgramArguments string; the `&&`
+    commit hot.md. Without the commit the working tree drifts permanently dirty.
+    The whole shell pipeline is a single ProgramArguments string; the `&&`
     operators are XML-escaped by _calendar_plist when the plist is rendered.
 
     Both the staged-diff check and the commit are scoped to state/hot.md with a
@@ -534,8 +534,8 @@ def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home:
     exit 1 on "no changes" and surface as a false agent_stderr finding).
     """
     command = (
-        f"{python_bin} {joshbrain_dir}/bin/prune_hot_md.py "
-        f"&& cd {joshbrain_dir} "
+        f"{python_bin} {records_dir}/bin/prune_hot_md.py "
+        f"&& cd {records_dir} "
         f"&& git add state/hot.md "
         f"&& (git diff --cached --quiet -- state/hot.md "
         f"|| git commit -m 'prune: hot.md (launchd)' -- state/hot.md)"
@@ -549,13 +549,13 @@ def joshbrain_prune_plist(*, python_bin: str, joshbrain_dir: str, mcpbrain_home:
     )
 
 
-def joshbrain_context_health_plist(
-    *, python_bin: str, joshbrain_dir: str, mcpbrain_home: str
+def records_context_health_plist(
+    *, python_bin: str, records_dir: str, mcpbrain_home: str
 ) -> str:
     """Return a launchd plist that runs context_health.py weekly on Monday at 07:00."""
     return _calendar_plist(
         label=_HEALTH_LABEL,
-        program_args=[python_bin, f"{joshbrain_dir}/bin/context_health.py"],
+        program_args=[python_bin, f"{records_dir}/bin/context_health.py"],
         mcpbrain_home=mcpbrain_home,
         hour=7,
         minute=0,
@@ -563,7 +563,7 @@ def joshbrain_context_health_plist(
     )
 
 
-def joshbrain_gardener_plist(*, joshbrain_dir: str, mcpbrain_home: str) -> str:
+def records_gardener_plist(*, records_dir: str, mcpbrain_home: str) -> str:
     """Return a launchd plist that runs the memory gardener weekly on Monday at 08:00.
 
     The gardener runs `claude` headless against cowork/memory-gardener.md to do
@@ -573,7 +573,7 @@ def joshbrain_gardener_plist(*, joshbrain_dir: str, mcpbrain_home: str) -> str:
     """
     return _calendar_plist(
         label=_GARDENER_LABEL,
-        program_args=["/bin/bash", f"{joshbrain_dir}/bin/run_memory_gardener.sh"],
+        program_args=["/bin/bash", f"{records_dir}/bin/run_memory_gardener.sh"],
         mcpbrain_home=mcpbrain_home,
         hour=8,
         minute=0,

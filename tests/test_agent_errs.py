@@ -32,7 +32,7 @@ def test_err_content_records_one_finding(tmp_path):
     findings = s.open_findings(FINDING_TYPE)
     assert len(findings) == 1
     f = findings[0]
-    assert "joshbrain" in f["summary"]
+    assert "records" in f["summary"]
     assert "com.mcpbrain.records.prune" in f["summary"]
     assert "boom" in f["detail"]
 

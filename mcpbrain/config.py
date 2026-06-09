@@ -98,18 +98,11 @@ def records_dir(home) -> str:
     """Filesystem path to the per-user records repo the daemon writes into.
 
     A plain local git repo (no remote). Resolution: config 'records_dir' →
-    legacy 'joshbrain_dir' key (back-compat for existing installs) →
     '<home>/records' default. The repo is created/scaffolded by
     records.ensure_records_repo at first write.
     """
     cfg = read_config(home)
-    return (cfg.get("records_dir") or cfg.get("joshbrain_dir")
-            or str(Path(home) / "records"))
-
-
-def joshbrain_dir(home) -> str:
-    """Deprecated alias for records_dir(); kept so older callers keep working."""
-    return records_dir(home)
+    return cfg.get("records_dir") or str(Path(home) / "records")
 
 
 def owner_name(home) -> str:

@@ -45,7 +45,7 @@ def test_drain_routes_decision_to_joshbrain(tmp_path):
     repo = _fake_joshbrain(tmp_path)
     home = tmp_path / "mcpbrain_home"; (home / "capture_inbox").mkdir(parents=True)
     from mcpbrain import config, capture, drain
-    config.write_config(str(home), {"joshbrain_dir": str(repo)})
+    config.write_config(str(home), {"records_dir": str(repo)})
     capture.write_capture(str(home), {"kind": "decision", "text": "Routed via drain", "owner": "Josh"})
     drain.drain_captures(store=None, home=str(home))   # store unused for these kinds
     assert "Routed via drain" in (repo / "state" / "decisions.md").read_text()
@@ -54,7 +54,7 @@ def test_drain_routes_continuity_to_joshbrain(tmp_path):
     repo = _fake_joshbrain(tmp_path)
     home = tmp_path / "mcpbrain_home"; (home / "capture_inbox").mkdir(parents=True)
     from mcpbrain import config, capture, drain
-    config.write_config(str(home), {"joshbrain_dir": str(repo)})
+    config.write_config(str(home), {"records_dir": str(repo)})
     capture.write_capture(str(home), {"kind": "continuity", "text": "Continuity entry via drain"})
     drain.drain_captures(store=None, home=str(home))
     assert "Continuity entry via drain" in (repo / "state" / "hot.md").read_text()
@@ -63,7 +63,7 @@ def test_drain_routes_memory_to_joshbrain(tmp_path):
     repo = _fake_joshbrain(tmp_path)
     home = tmp_path / "mcpbrain_home"; (home / "capture_inbox").mkdir(parents=True)
     from mcpbrain import config, capture, drain
-    config.write_config(str(home), {"joshbrain_dir": str(repo)})
+    config.write_config(str(home), {"records_dir": str(repo)})
     capture.write_capture(str(home), {"kind": "memory", "slug": "test-slug",
                                        "description": "Test memory", "body": "Memory body text"})
     drain.drain_captures(store=None, home=str(home))

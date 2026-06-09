@@ -1,7 +1,7 @@
 """Create and scaffold the per-user records repo (local git, no remote).
 
 The daemon writes structured records (decisions, continuity, memories) into this
-repo via joshbrain_write, committing by name. The repo is a plain local git repo
+repo via the write module, committing by name. The repo is a plain local git repo
 under the user's app dir. This module creates it and stamps the minimal scaffold
 the writers expect (the decisions/hot anchors, MEMORY.md, memory/, voice.md),
 idempotently — existing files are never clobbered and an existing repo's git
