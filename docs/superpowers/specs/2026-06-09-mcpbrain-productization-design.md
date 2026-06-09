@@ -22,9 +22,10 @@ Three constraints frame every decision below:
 3. **Non-technical audience.** After one bootstrap line, the entire experience is
    browser + menu bar. No logs, no terminal, no manual update command.
 
-The work splits into three parts that ship as one coordinated effort because
+The work splits into four parts that ship as one coordinated effort because
 they are interdependent (the distribution model changes how `update` works; the
-multi-user gate is a UI state; the UX renders off the same status layer):
+multi-user gate is a UI state; the UX renders off the same status layer; backfill
+progress and the enrichment gate surface in that same status layer):
 
 - **Part 1 — Multi-user readiness** (correctness): stop the app silently being
   "Josh".
@@ -32,6 +33,8 @@ multi-user gate is a UI state; the UX renders off the same status layer):
   wheels, one-line install, silent auto-update.
 - **Part 3 — UX & experience**: a state-aware home, verified live status for
   every connection, a glanceable menu bar, and self-healing.
+- **Part 4 — Backfill**: index all history newest-first (largely built), and a
+  one-shot enrichment backfill over the backlog using the local Claude Code CLI.
 
 ## Background: product-grade engine, developer-grade shell
 
@@ -373,6 +376,71 @@ chatty — they fire for "you must act" states, not routine activity.
 
 ---
 
+## Part 4 — Backfill (indexing + enrichment)
+
+So a new install becomes useful immediately and can be caught up to full history,
+without manual scripts. Most of the indexing side already exists; the enrichment
+side exists but is wired for Nexus and must be made on-device.
+
+### 4.1 Indexing backfill — newest-first, full history (already built; make it first-class)
+
+The machinery is in `mcpbrain/sync/__init__.py`. `run_sync_cycle()` runs live
+delta-sync **first**, then one `progressive_backfill_step()`: it walks **one
+90-day window per source, newest → oldest** (200 items/source/cycle), tracking a
+per-source "floor" cursor (`<source>_backfill_until`) and an empty-window counter
+(`<source>_backfill_empty`). There is **no fixed horizon** — a source stops only
+after ~1 year of consecutive empty windows, so a 20-year-old account backfills in
+full and then goes idle. It covers Gmail, Drive, and Calendar and never touches
+the live delta cursors. Recent data lands first, so search is useful immediately
+while history fills in behind it.
+
+Product changes (small): backfill is **on by default** for new installs; it runs
+**pre-config** (indexing/sync is identity-agnostic — it produces no mis-attributed
+graph records, so a partially-onboarded user still sees search populate during
+onboarding); and its progress is **surfaced** (4.3). The fail-loud gate (1.1)
+does **not** apply to indexing backfill.
+
+### 4.2 Enrichment backfill — one-shot, via local Claude Code
+
+The enrichment contract already exists: `prepare` writes `enrich_queue/pending.json`
+from unenriched chunks → an **extractor** (a Claude session) writes
+`enrich_inbox/<batch>.json` → `drain` validates and applies it. The script you
+remembered is `extractor_driver.run_extractor()` — but its default `run_claude`
+lazily imports `claude_pool`, which is **Nexus-only**
+(`PYTHONPATH=/home/josh/ops-brain/src`). It must be made to run on any user's
+device.
+
+- **Local Claude Code runner (new):** a `run_claude` implementation that shells
+  to the on-device `claude` CLI, reusing `draft.py`'s binary resolution
+  (`CLAUDE_BIN` → `PATH` → `~/.local/bin/claude`) — the same approach the gardener
+  already uses. This lets any install enrich its backlog with the user's installed
+  Claude Code: no Gemini key, no Nexus.
+- **One-shot, user-triggered action** ("Backfill history enrichment"): drains the
+  pending spool **newest-first**, batch by batch, via the local runner until the
+  spool is empty (or a user-set bound), each batch validated + applied through the
+  existing `drain`. It is **not** a new ongoing `enrich_mode` — **ongoing
+  enrichment stays on the existing spool/cowork path** (the user's cowork already
+  enriches ~100/hour). The one-shot action exists to catch up the *backlog* faster
+  than the ongoing rate, and to populate a fresh install.
+- **Gating:** enrichment writes owner identity + org taxonomy into the graph, so
+  the **fail-loud gate (1.1) applies** — the action is unavailable until identity
+  + ≥1 org are configured. (Contrast 4.1, which is ungated.)
+- **Ordering:** newest-first — `prepare`'s unenriched-chunk selection orders by
+  recency so the recent graph lands first, matching the indexing backfill.
+- **Cost honesty:** it spends the user's local Claude Code usage. The UI states
+  this plainly and shows progress (pending remaining / batches drained) with a
+  cancel control. The spool is naturally resumable, so a cancelled or interrupted
+  run resumes where it left off.
+
+### 4.3 UI surfacing (extends Part 3)
+
+- **Status home** shows indexing-backfill progress per source ("Indexing history —
+  reached <date>") and a per-source "history complete" state, read from the floor
+  cursors via `status()`.
+- An **"Enrich history with Claude Code"** card shows the pending count, a
+  Start/Cancel control, live progress, and the cost note. The card is gated behind
+  the 1.1 config state (shows "Finish setup first" until identity + org are set).
+
 ## Data model / config changes
 
 - `config.json` new/normalized keys: `owner_*` (neutral defaults),
@@ -408,7 +476,15 @@ chatty — they fire for "you must act" states, not routine activity.
 - `agents.py` — tray login agent registered as a managed component on every
   desktop install (same lifecycle as the daemon agent), not best-effort.
 - `control_api.py` — extend `/api/status` with probes; add MCP heartbeat
-  endpoint; reconnect/update/notification-related routes.
+  endpoint; reconnect/update/notification-related routes; enrichment-backfill
+  action (start/cancel/progress).
+- `mcpbrain/sync/__init__.py` — expose the backfill floor/empty cursors in
+  `status()` for the indexing-backfill progress UI (4.1); the walk itself is
+  unchanged.
+- `extractor_driver.py` — add a **local Claude Code `run_claude`** (reuse
+  `draft.py`'s `CLAUDE_BIN → PATH → ~/.local/bin/claude` resolver) and a
+  drain-until-empty one-shot entry for the enrichment backfill (4.2).
+- `prepare.py` — order unenriched-chunk selection newest-first (4.2).
 - `mcp_server.py` — write heartbeat on startup (and periodically).
 - `wizard/index.html` — collect identity/orgs/ClickUp; render the wizard as the
   empty state of the state-aware home; verified-status step components.
@@ -439,6 +515,12 @@ chatty — they fire for "you must act" states, not routine activity.
 - **UX states:** home renders wizard when incomplete and control center when
   configured; menu bar icon/title reflect each state; self-healing banner +
   critical notification fire on a simulated token-expired.
+- **Backfill (Part 4):** indexing backfill runs pre-config and newest-first, and
+  its floor cursors surface in `status()`; the local Claude Code runner shells to
+  a fake `claude` binary (no network); the one-shot enrichment backfill drains the
+  spool newest-first until empty with each batch validated + applied; the gate
+  blocks the enrichment backfill until identity + ≥1 org are configured; a
+  cancelled run resumes from the remaining spool.
 
 ## Risks / notes
 
@@ -454,6 +536,11 @@ chatty — they fire for "you must act" states, not routine activity.
 - **Claude Desktop connection** can only ever be *self-reported* by the MCP
   server; if a user never opens Claude Desktop, "connected" legitimately stays
   "not seen yet" — copy must make that distinction clear (registered vs verified).
+- **Enrichment backfill cost/duration:** a large backlog drained through the local
+  Claude Code CLI can be long and spends real Claude usage. Mitigated by making it
+  one-shot/opt-in (not background), newest-first (early value), cancellable, and
+  resumable (the spool persists). Ongoing enrichment stays on the existing
+  spool/cowork path, so the backfill is a catch-up, not the steady state.
 
 ## Rollout sequencing
 
@@ -466,5 +553,9 @@ chatty — they fire for "you must act" states, not routine activity.
    app it delivers is correct and self-reporting.
 4. **Part 3 polish** (state-aware home, menu bar states, self-healing
    notifications) — layered on the status layer.
+5. **Part 4 backfill:** indexing backfill (4.1) is independent and can land early
+   (it mostly exists — surface progress + confirm on-by-default). Enrichment
+   backfill (4.2) follows Part 1 (it depends on the gate) and the status layer (it
+   surfaces progress there).
 
 Each part is a separable implementation plan; this spec is the shared design.
