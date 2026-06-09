@@ -711,6 +711,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "blocks_interval_s": None,
              "audit_interval_s": None,
              "clickup_interval_s": None,
+             "stale_reextract_interval_s": None,
          }):
         daemon.apply_config(new_config)
 
@@ -957,3 +958,49 @@ def test_pending_blocks_cleared_when_drained_is_zero(tmp_path):
         daemon.run_one()
     assert daemon._pending_blocks == {}
     assert daemon._pending_audit == {}
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (stale-autoclose) — maybe_stale_reextract cadence tests
+# ---------------------------------------------------------------------------
+
+def _stale_daemon(tmp_path, *, stale_reextract_interval_s=None, clock=None, **kw):
+    store = _make_store(tmp_path)
+    return store, Daemon(
+        store, _FakeEmbedder(),
+        services={},
+        lock=SingleWriterLock(tmp_path / "d.lock"),
+        stale_reextract_interval_s=stale_reextract_interval_s,
+        clock=clock or _Clock(),
+        **kw,
+    )
+
+
+def test_maybe_stale_reextract_off_when_unconfigured(tmp_path):
+    store, daemon = _stale_daemon(tmp_path)  # no interval
+    with patch("mcpbrain.stale_reextract.sweep") as mock_sweep:
+        result = daemon.maybe_stale_reextract()
+    assert result is None
+    mock_sweep.assert_not_called()
+
+
+def test_maybe_stale_reextract_runs_when_due(tmp_path):
+    store, daemon = _stale_daemon(tmp_path, stale_reextract_interval_s=86400.0)
+    fake = {"triggered": 1, "deferred": 0, "threads": ["T1"]}
+    with patch("mcpbrain.stale_reextract.sweep", return_value=fake) as mock_sweep:
+        result = daemon.maybe_stale_reextract()
+    assert result == fake
+    mock_sweep.assert_called_once()
+    assert "now" in mock_sweep.call_args[1]   # now= passed as kwarg
+
+
+def test_maybe_stale_reextract_swallows_errors(tmp_path):
+    clock = _Clock()
+    store, daemon = _stale_daemon(tmp_path, stale_reextract_interval_s=100.0,
+                                  clock=clock)
+    with patch("mcpbrain.stale_reextract.sweep",
+               side_effect=RuntimeError("boom")):
+        result = daemon.maybe_stale_reextract()
+    assert result["stale_reextract"] is False
+    # _last not advanced -> next call retries
+    assert daemon._last_stale_reextract is None

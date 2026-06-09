@@ -294,6 +294,7 @@ class Daemon:
                  blocks_interval_s: float | None = None,
                  audit_interval_s: float | None = None,
                  clickup_interval_s: float | None = None,
+                 stale_reextract_interval_s: float | None = None,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -381,6 +382,10 @@ class Daemon:
         # thread so it shares the single-writer lock.
         self._clickup_interval_s: float | None = clickup_interval_s
         self._last_clickup = None
+        # Periodic stale -> re-extraction trigger (Gap A) is OFF unless
+        # stale_reextract_interval_s is set. Same three-shape cadence contract.
+        self._stale_reextract_interval_s: float | None = stale_reextract_interval_s
+        self._last_stale_reextract = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -579,6 +584,7 @@ class Daemon:
             self._blocks_interval_s = cadences["blocks_interval_s"]
             self._audit_interval_s = cadences["audit_interval_s"]
             self._clickup_interval_s = cadences["clickup_interval_s"]
+            self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -889,6 +895,34 @@ class Daemon:
                         exc_info=True)
             return {"clickup": False, "error": str(exc)}
         self._last_clickup = now
+        return summary
+
+    # -- periodic stale -> re-extraction trigger (Gap A) --------------------
+
+    def maybe_stale_reextract(self) -> dict | None:
+        """Reset stale, idle threads to enriched=0 so the normal cycle gives the
+        LLM closer another at-bat, if due.
+
+        OFF unless stale_reextract_interval_s is set (returns None). Does no LLM
+        work itself; the re-extraction happens in the normal enrichment cycle. A
+        failure is logged and swallowed so the loop keeps running.
+        """
+        if self._stale_reextract_interval_s is None:
+            return None
+        if self._last_stale_reextract is not None:
+            if (self._clock() - self._last_stale_reextract) < self._stale_reextract_interval_s:
+                return None
+        now = self._clock()
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        try:
+            from mcpbrain import stale_reextract
+            summary = stale_reextract.sweep(self._store, now=now_iso)
+        except Exception as exc:  # noqa: BLE001 — must never crash the loop
+            log.warning("stale-reextract sweep failed (will retry next due): %s",
+                        exc, exc_info=True)
+            return {"stale_reextract": False, "error": str(exc)}
+        self._last_stale_reextract = now
         return summary
 
     # -- periodic graph lint ------------------------------------------------
@@ -1217,6 +1251,7 @@ class Daemon:
             self.maybe_blocks,
             self.maybe_audit,
             self.maybe_clickup_sync,
+            self.maybe_stale_reextract,
         ):
             try:
                 pass_fn()
@@ -1413,6 +1448,7 @@ _CADENCE_KEYS = (
     "blocks_interval_s",
     "audit_interval_s",
     "clickup_interval_s",
+    "stale_reextract_interval_s",
 )
 
 
@@ -1484,7 +1520,8 @@ def main(argv=None) -> None:
                     proactive_interval_s=cadences["proactive_interval_s"],
                     waiting_on_interval_s=cadences["waiting_on_interval_s"],
                     blocks_interval_s=cadences["blocks_interval_s"],
-                    audit_interval_s=cadences["audit_interval_s"])  # services=None -> auto-build from token
+                    audit_interval_s=cadences["audit_interval_s"],
+                    stale_reextract_interval_s=cadences["stale_reextract_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
