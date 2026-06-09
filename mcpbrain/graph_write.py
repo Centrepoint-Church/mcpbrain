@@ -874,9 +874,11 @@ def apply(store, extraction, *, doc_ids, identity=None,
     labels_str = ", ".join(custom_labels)
 
     # Sender entity (skip the owner — self-mail anchors nothing in the graph).
+    # Guard against empty identity: "" is a substring of every email address,
+    # so the exclusion check must only fire when identity is actually set.
     sender_id = ""
     if sender_name and sender_email and not _is_owner(sender_name, owner) \
-            and identity.lower() not in sender_email.lower():
+            and (not identity or identity.lower() not in sender_email.lower()):
         sender_id = upsert_entity(
             store, name=sender_name, entity_type="person",
             org=sender_org, email_addr=sender_email, taxonomy=taxonomy) or ""
