@@ -398,10 +398,10 @@ def _restart_schtasks_tray() -> None:  # pragma: no cover
 # joshbrain calendar agents (prune_hot_md daily, context_health weekly)
 # ---------------------------------------------------------------------------
 
-_PRUNE_LABEL = "church.centrepoint.joshbrain.prune"
-_HEALTH_LABEL = "church.centrepoint.joshbrain.context-health"
-_MEETING_PACKS_LABEL = "church.centrepoint.joshbrain.meeting-packs"
-_GARDENER_LABEL = "church.centrepoint.joshbrain.gardener"
+_PRUNE_LABEL = "com.mcpbrain.records.prune"
+_HEALTH_LABEL = "com.mcpbrain.records.context-health"
+_MEETING_PACKS_LABEL = "com.mcpbrain.records.meeting-packs"
+_GARDENER_LABEL = "com.mcpbrain.records.gardener"
 
 
 def _calendar_plist(
