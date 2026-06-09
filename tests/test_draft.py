@@ -76,10 +76,10 @@ class TestCallLlm:
 
 class TestLoadVoiceRules:
     def test_returns_content_when_file_exists(self, tmp_path):
-        jb = tmp_path / "joshbrain" / "context"
-        jb.mkdir(parents=True)
-        (jb / "voice.md").write_text("Be direct. No em dashes.")
         home = str(tmp_path / ".mcpbrain")
+        voice_dir = tmp_path / ".mcpbrain" / "records" / "context"
+        voice_dir.mkdir(parents=True)
+        (voice_dir / "voice.md").write_text("Be direct. No em dashes.")
         rules = d._load_voice_rules(home)
         assert "Be direct" in rules
 

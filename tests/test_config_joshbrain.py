@@ -3,7 +3,7 @@ from mcpbrain import config
 
 
 def test_joshbrain_dir_default(tmp_path):
-    assert config.joshbrain_dir(str(tmp_path)).endswith("joshbrain")
+    assert config.joshbrain_dir(str(tmp_path)).endswith("records")
 
 
 def test_joshbrain_dir_configured(tmp_path):

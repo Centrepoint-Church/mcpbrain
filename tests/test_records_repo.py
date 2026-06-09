@@ -1,6 +1,4 @@
 """ensure_records_repo: git-inits and scaffolds a local records repo, idempotently."""
-from pathlib import Path
-
 from mcpbrain import records
 from mcpbrain.joshbrain_write import append_decision
 
