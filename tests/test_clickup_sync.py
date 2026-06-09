@@ -174,3 +174,85 @@ def test_sync_does_not_duplicate_existing_unlinked_task(tmp_path):
     client = FakeClient([_task("t9", "Existing task")])
     summary = clickup_sync.sync(s, "/h", client=client)
     assert summary["created"] == 0      # matched by fingerprint, not duplicated
+
+
+# --- stale auto-close / reopen by transition --------------------------------
+
+class FailingCloseClient(FakeClient):
+    """close_task always fails (ClickUp API error) -> returns False."""
+    def close_task(self, home, task_id):
+        return False
+
+
+def test_reopen_when_clickup_reopens_llm_closed_action(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    s.set_action_clickup_id(aid, "t1")
+    # action was closed by the LLM (resolved_by = an email msg id), not ClickUp
+    s.set_action_status(aid, "done", "gmail-19a2b3")
+    # we last synced the task as CLOSED
+    s.set_action_clickup_closed(aid, True)
+    # now the task is OPEN in ClickUp -> the user reopened it
+    client = FakeClient([_task("t1", "Do thing", closed=False)])
+    clickup_sync.sync(s, "/h", client=client)
+    a = s.get_unified_action(aid)
+    assert a["status"] == "open"                 # reopened despite non-clickup close
+    assert "t1" not in client.closed             # and not re-closed outbound
+
+
+def test_no_reopen_midpropagation_race(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    s.set_action_clickup_id(aid, "t1")
+    s.set_action_status(aid, "done", "local")    # just closed locally
+    # clickup_closed is NULL (task never observed closed) -> outbound-close pending
+    client = FakeClient([_task("t1", "Do thing", closed=False)])
+    clickup_sync.sync(s, "/h", client=client)
+    a = s.get_unified_action(aid)
+    assert a["status"] == "done"                 # NOT reopened (race protected)
+    assert "t1" in client.closed                 # outbound close fired instead
+
+
+def test_failed_close_leaves_clickup_closed_false(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    s.set_action_clickup_id(aid, "t1")
+    s.set_action_status(aid, "done", "local")
+    client = FailingCloseClient([_task("t1", "Do thing", closed=False)])
+    clickup_sync.sync(s, "/h", client=client)
+    # close failed -> we did NOT record it closed, so next cycle retries (not reopen)
+    assert s.get_unified_action(aid)["clickup_closed"] in (None, 0)
+
+
+def test_clickup_closed_set_on_outbound_create(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Fresh action", owner="Joshua")
+    client = FakeClient([])
+    clickup_sync.sync(s, "/h", client=client)
+    assert s.get_unified_action(aid)["clickup_closed"] == 0   # created open
+
+
+def test_clickup_closed_set_on_outbound_close(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    s.set_action_clickup_id(aid, "t1")
+    s.set_action_status(aid, "done", "local")
+    client = FakeClient([_task("t1", "Do thing", closed=False)])
+    clickup_sync.sync(s, "/h", client=client)
+    assert s.get_unified_action(aid)["clickup_closed"] == 1    # we closed it
+
+
+def test_roundtrip_close_then_clickup_reopen(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    s.set_action_clickup_id(aid, "t1")
+    s.set_action_status(aid, "done", "local")
+    client = FakeClient([_task("t1", "Do thing", closed=False)])
+    # cycle 1: outbound close -> task closed, clickup_closed=1
+    clickup_sync.sync(s, "/h", client=client)
+    assert s.get_unified_action(aid)["clickup_closed"] == 1
+    # user reopens the task in ClickUp
+    client.tasks[0]["closed"] = False
+    # cycle 2: inbound reopens the brain action
+    clickup_sync.sync(s, "/h", client=client)
+    assert s.get_unified_action(aid)["status"] == "open"
