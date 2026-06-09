@@ -78,11 +78,11 @@ def _parse_json(raw: str) -> dict:
 
 
 def _load_voice_rules(home: str) -> str:
-    """Read ~/joshbrain/context/voice.md. Returns empty string if not found."""
-    # assumes `home` (e.g. ~/.mcpbrain) is a subdirectory of the root holding joshbrain/
-    p = Path(home).parent / "joshbrain" / "context" / "voice.md"
+    """Read the records repo's context/voice.md. Returns '' if not found."""
+    from mcpbrain import config
+    p = Path(config.records_dir(home)) / "context" / "voice.md"
     try:
-        return p.read_text(encoding="utf-8") if p.exists() else ""
+        return p.read_text()
     except OSError:
         return ""
 
