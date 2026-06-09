@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -15,7 +16,7 @@ def app_dir() -> Path:
         d = Path(os.environ["APPDATA"]) / "mcpbrain"
     else:
         d = Path.home() / "Library" / "Application Support" / "mcpbrain" \
-            if os.uname().sysname == "Darwin" else Path.home() / ".mcpbrain"
+            if sys.platform == "darwin" else Path.home() / ".mcpbrain"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
