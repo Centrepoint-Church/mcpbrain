@@ -36,17 +36,17 @@ SARAH = gw.OwnerIdentity(
 # ---------------------------------------------------------------------------
 
 class TestConfigHelpers:
-    def test_full_name_defaults_to_josh_kemp(self, tmp_path):
+    def test_full_name_defaults_to_empty(self, tmp_path):
         home = _write_config(tmp_path, {})
-        assert owner_full_name(home) == "Josh Kemp"
+        assert owner_full_name(home) == ""
 
     def test_full_name_configured(self, tmp_path):
         home = _write_config(tmp_path, {"owner_full_name": "Sarah Chen"})
         assert owner_full_name(home) == "Sarah Chen"
 
-    def test_aliases_default_match_historical_set(self, tmp_path):
+    def test_aliases_empty_when_unconfigured(self, tmp_path):
         home = _write_config(tmp_path, {})
-        assert owner_aliases(home) == frozenset({"josh", "joshua", "josh kemp"})
+        assert owner_aliases(home) == frozenset()
 
     def test_aliases_configured(self, tmp_path):
         home = _write_config(tmp_path, {
@@ -60,13 +60,12 @@ class TestConfigHelpers:
         assert "sazza" in owner_aliases(home)
 
     def test_aliases_no_joshua_when_configured(self, tmp_path):
-        # The historical "joshua" variant must not leak into other identities.
         home = _write_config(tmp_path, {"owner_name": "Tom"})
         assert "joshua" not in owner_aliases(home)
 
-    def test_email_defaults_to_historical_address(self, tmp_path):
+    def test_email_defaults_to_empty(self, tmp_path):
         home = _write_config(tmp_path, {})
-        assert owner_email(home) == "josh.k@centrepoint.church"
+        assert owner_email(home) == ""
 
     def test_email_configured(self, tmp_path):
         home = _write_config(tmp_path, {"owner_email": "sarah@example.org"})
@@ -108,11 +107,11 @@ class TestIsOwner:
 # ---------------------------------------------------------------------------
 
 class TestOwnerIdentityFromConfig:
-    def test_unconfigured_is_historical_identity(self, tmp_path, monkeypatch):
+    def test_unconfigured_returns_empty_identity(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
         o = gw.owner_identity_from_config()
-        assert (o.name, o.entity_id) == ("Josh", "josh-kemp")
-        assert o.aliases == frozenset({"josh", "joshua", "josh kemp"})
+        assert (o.name, o.entity_id) == ("", "")
+        assert o.aliases == frozenset()
 
     def test_configured_identity(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -283,10 +282,10 @@ class TestEnrichPromptOwner:
 # ---------------------------------------------------------------------------
 
 class TestOwnerRole:
-    def test_defaults_to_operations_manager(self, tmp_path):
+    def test_defaults_to_empty(self, tmp_path):
         from mcpbrain.config import owner_role
         home = _write_config(tmp_path, {})
-        assert owner_role(home) == "operations manager"
+        assert owner_role(home) == ""
 
     def test_configured(self, tmp_path):
         from mcpbrain.config import owner_role
