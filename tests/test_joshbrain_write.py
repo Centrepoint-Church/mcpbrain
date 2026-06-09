@@ -1,4 +1,4 @@
-import subprocess, pathlib
+import subprocess
 from mcpbrain import joshbrain_write as jw
 
 def _git(repo, *args): subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)

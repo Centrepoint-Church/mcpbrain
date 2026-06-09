@@ -127,8 +127,8 @@ def main(argv=None) -> int:
         path = run_extractor(home=args.home, model=args.model, timeout=args.timeout)
     except ModuleNotFoundError as exc:
         if "claude_pool" in str(exc):
-            print("claude_pool not importable; on Nexus run with "
-                  "PYTHONPATH=/home/josh/ops-brain/src")
+            print("claude_pool not importable; ensure PYTHONPATH includes "
+                  "the ops-brain src directory")
             return 1
         raise
 

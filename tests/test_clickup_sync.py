@@ -23,10 +23,11 @@ def test_priority_roundtrip():
 
 
 def test_org_option_roundtrip():
-    oid = clickup.org_to_option_id("Centrepoint")  # case-insensitive
-    assert oid == "8fd028a6-588f-4536-8bb5-9fcd93ddb17c"
-    assert clickup.option_id_to_org(oid) == "centrepoint"
-    assert clickup.org_to_option_id("nonsense") is None
+    opts = {"acme": "uuid-abc-123"}
+    oid = clickup.org_to_option_id("Acme", opts)  # case-insensitive
+    assert oid == "uuid-abc-123"
+    assert clickup.option_id_to_org(oid, opts) == "acme"
+    assert clickup.org_to_option_id("nonsense", opts) is None
 
 
 def test_status_is_closed():
