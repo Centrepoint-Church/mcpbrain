@@ -20,6 +20,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from mcpbrain import config
+
 log = logging.getLogger(__name__)
 
 _HAIKU = "claude-haiku-4-5-20251001"
@@ -142,12 +144,13 @@ Return ONLY valid JSON, no markdown fences."""
 
 
 def generate_draft(email_subject: str, email_body: str, sender: str,
-                   plan: dict, voice_rules: str, samples: str) -> str:
+                   plan: dict, voice_rules: str, samples: str,
+                   owner_full_name: str = "") -> str:
     """Stage 2 (Sonnet): produce initial draft reply."""
     kp = "\n".join(f"- {p}" for p in plan.get("key_points", []))
     voice_excerpt = (voice_rules or "")[:2000]
     samples_section = f"\n\nPrior context from this thread:\n{samples}" if samples else ""
-    prompt = f"""Write an email reply from Josh Kemp.
+    prompt = f"""Write an email reply from {owner_full_name or "the account owner"}.
 
 Email to reply to:
 Subject: {email_subject}
@@ -251,6 +254,7 @@ def draft_email(store, home: str, email_id: str,
         email_body=ctx.get("summary", ""),
         sender=ctx.get("sender", ""),
         plan=plan, voice_rules=voice_rules, samples=samples,
+        owner_full_name=config.owner_full_name(home),
     )
 
     revised = critique_and_revise(
