@@ -6,7 +6,7 @@ from mcpbrain.agents import (
 
 def test_launchd_plist_runs_daemon():
     s = launchd_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
-    assert "church.centrepoint.mcpbrain" in s and "/usr/local/bin/mcpbrain" in s and "daemon" in s
+    assert "com.mcpbrain" in s and "/usr/local/bin/mcpbrain" in s and "daemon" in s
     assert "MCPBRAIN_HOME" in s and "<key>RunAtLoad</key>" in s
 
 
@@ -30,7 +30,7 @@ def test_schtasks_args_quotes_path_with_spaces():
 
 def test_launchd_tray_plist_runs_tray_and_does_not_respawn():
     s = launchd_tray_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
-    assert "church.centrepoint.mcpbrain.tray" in s
+    assert "com.mcpbrain.tray" in s
     assert "<string>tray</string>" in s and "<key>RunAtLoad</key>" in s
     # Crash-only KeepAlive: a clean Quit (exit 0) stays quit, but a crash
     # relaunches the icon. KeepAlive is a {SuccessfulExit: false} dict — not a
@@ -45,7 +45,7 @@ def test_daemon_launchd_plist_keeps_alive():
     # The daemon agent (unchanged) must still KeepAlive=true after the refactor.
     s = launchd_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
     assert "<key>KeepAlive</key>\n    <true/>" in s
-    assert "church.centrepoint.mcpbrain.tray" not in s   # daemon label is distinct
+    assert "com.mcpbrain.tray" not in s   # daemon label is distinct
 
 
 def test_systemd_tray_unit_runs_tray():
