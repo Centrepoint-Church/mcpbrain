@@ -199,7 +199,8 @@ def test_round_trip_idempotent_second_drain_noop(store, home, monkeypatch):
     second = drain.drain(store, home=home, apply=graph_write.apply)
     assert second == {"files": 0, "applied": 0, "marked": 0,
                       "merges": 0, "quarantined": 0,
-                      "entities": 0, "relations": 0}
+                      "entities": 0, "relations": 0,
+                      "skipped": 0, "dropped_items": 0}
     assert _entity_count(store) == ents_after_first
     assert _relation_count(store) == rels_after_first
 
