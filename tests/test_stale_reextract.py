@@ -1,5 +1,7 @@
 """Tests for the stale -> re-extraction trigger sweep (Gap A)."""
-from mcpbrain import stale_reextract
+from datetime import datetime, timezone
+
+from mcpbrain import graph_write, stale_reextract
 from mcpbrain.store import Store
 
 
@@ -76,3 +78,45 @@ def test_sweep_respects_cap_and_reports_deferred(tmp_path):
     out = stale_reextract.sweep(s, now="2026-06-09T00:00:00Z", cap=2)
     assert out["triggered"] == 2
     assert out["deferred"] == 1
+
+
+def _reextraction_for(thread_id, aid):
+    """The contract envelope the LLM produces when handed this thread's
+    open_actions and a resolving message — it resolves the open action."""
+    return {
+        "thread_id": thread_id, "org": "Centrepoint", "content_type": "request",
+        "summary": "s", "contextual_summary": "",
+        "entities": [], "topics": [], "actions": [],
+        "reply_needed": False, "reply_reason": "",
+        "resolved_action_ids": [aid], "updated_actions": [], "relations": [],
+        "messages": [{"message_id": "reext-lead", "sender": "A B <a@x.com>",
+                      "date": "2026-06-02", "labels": "INBOX",
+                      "subject": "report", "body": "All done, sent it through"}],
+    }
+
+
+def test_end_to_end_stale_thread_closes_after_reextraction(tmp_path):
+    """Integration (Gap A headline): a stale, idle thread's open action is
+    re-queued by the sweep and then CLOSED when the normal enrichment cycle
+    re-extracts it and returns resolved_action_ids. Uses the real sweep and the
+    real graph_write.apply close path (the LLM is stubbed by a canned
+    extraction, as the daemon's enrichment cycle would produce)."""
+    s = _store(tmp_path)
+    aid = _stale_thread(s, "E1", enriched=1)
+    assert s.get_unified_action(aid)["status"] == "open"
+
+    # 1. Sweep re-queues the idle stale thread for another LLM at-bat.
+    out = stale_reextract.sweep(s, now="2026-06-09T00:00:00Z")
+    assert out["triggered"] == 1
+    assert s.thread_has_unenriched("E1") is True
+
+    # 2. The enrichment cycle re-extracts the re-queued thread; the LLM, handed
+    #    the open action, resolves it. Apply that extraction via the real path.
+    ext = _reextraction_for("E1", aid)
+    graph_write.apply(s, ext, doc_ids=["E1-src", "E1-rep"],
+                      clock=lambda: datetime(2026, 6, 9, tzinfo=timezone.utc))
+
+    # 3. The action is now closed end-to-end.
+    row = s.get_unified_action(aid)
+    assert row["status"] == "done"
+    assert row["resolved_by"] == "reext-lead"
