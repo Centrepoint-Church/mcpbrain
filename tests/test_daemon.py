@@ -230,9 +230,15 @@ def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
 # enrich-in-loop (Task H1)
 # ---------------------------------------------------------------------------
 
-def test_cycle_with_enrich_client_enriches_and_marks(tmp_path):
+def test_cycle_with_enrich_client_enriches_and_marks(tmp_path, monkeypatch):
     """A cycle with an injected enrich client: graph rows land AND the synced
     chunks are marked enriched (unenriched_chunks empties)."""
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "owner_name": "Sam", "owner_email": "sam@x.org",
+        "orgs": [{"name": "Org", "domains": ["x.org"]}],
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
@@ -251,8 +257,14 @@ def test_cycle_with_enrich_client_enriches_and_marks(tmp_path):
     assert store.unenriched_chunks() == []  # synced chunks marked enriched
 
 
-def test_cycle_without_enrich_client_defers(tmp_path):
+def test_cycle_without_enrich_client_defers(tmp_path, monkeypatch):
     """enrich_client=None: sync+embed happen, NO graph rows, chunks stay enriched=0."""
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "owner_name": "Sam", "owner_email": "sam@x.org",
+        "orgs": [{"name": "Org", "domains": ["x.org"]}],
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
@@ -270,10 +282,16 @@ def test_cycle_without_enrich_client_defers(tmp_path):
     assert len(store.unenriched_chunks()) >= 1  # chunks remain enriched=0
 
 
-def test_enrich_batch_caps_per_cycle_and_drains_progressively(tmp_path):
+def test_enrich_batch_caps_per_cycle_and_drains_progressively(tmp_path, monkeypatch):
     """enrich_batch caps how many chunks enrich per cycle. With 5 unenriched
     chunks and enrich_batch=2, one cycle enriches exactly 2 (count drops by 2,
     not to 0); the next cycle drains the next batch."""
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "owner_name": "Sam", "owner_email": "sam@x.org",
+        "orgs": [{"name": "Org", "domains": ["x.org"]}],
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     enrich = FakeEnrichClient(_ENRICH_JSON)
