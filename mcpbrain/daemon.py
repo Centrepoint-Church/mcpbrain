@@ -188,6 +188,18 @@ class SingleWriterLock:
         self.release()
 
 
+def _gated_enrich_mode(mode: str, home: str) -> str:
+    """Force enrichment OFF until the install is configured (identity + ≥1 org).
+
+    Sync/index are identity-agnostic and still run every cycle; only enrichment —
+    which writes owner identity and org taxonomy into the graph — is gated. "off"
+    stays "off"; any other mode passes through only once config.is_configured.
+    """
+    if mode == "off":
+        return "off"
+    return mode if config.is_configured(home) else "off"
+
+
 def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               drive_service=None, enrich_client=None,
               enrich_limit: int | None = None,
@@ -667,6 +679,8 @@ class Daemon:
         with self._config_lock:
             enrich_client = self._enrich_client
             enrich_mode = self._enrich_mode
+        # Gate: no enrichment until the install is configured. Sync still runs.
+        enrich_mode = _gated_enrich_mode(enrich_mode, str(app_dir()))
         # The spool prepare step folds in the merge-review block on the same
         # cadence the deterministic resolve tier fires. Compute it here (without
         # consuming the cadence) and pass it through; maybe_resolve still runs
