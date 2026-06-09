@@ -9,8 +9,8 @@ No DDL lives here: every write goes through Store methods or `store._connect()`.
 The table DDL is owned by store.py.
 
 Casing seam: the Nexus `_DOMAIN_ORG` map and KNOWN_ORGS use lowercase canonical
-org tags ("centrepoint", "acc"). The mcpbrain contract and `enrich._VALID_ORGS`
-use DISPLAY forms ("Centrepoint", "ACC"). This module adopts display-case as
+org tags ("orgname", "acc"). The mcpbrain contract and `enrich._VALID_ORGS`
+use DISPLAY forms ("OrgName", "ACC"). This module adopts display-case as
 canonical so org tags match the extraction contract and email_context rows.
 """
 
@@ -32,22 +32,21 @@ log = logging.getLogger("mcpbrain.graph_write")
 
 
 # ---------------------------------------------------------------------------
-# Install-owner identity (config-driven; replaces the hardcoded Josh identity)
+# Install-owner identity (config-driven)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class OwnerIdentity:
     """Who this install belongs to, for action attribution and self-exclusion.
 
-    name:      short name written to actions.owner ("Josh")
-    entity_id: the owner's entity slug ("josh-kemp") — never upserted as an
-               entity; used to recognise and skip the owner in the graph
+    name:      short name written to actions.owner
+    entity_id: the owner's entity slug — never upserted as an entity; used to
+               recognise and skip the owner in the graph
     aliases:   lowercased name variants treated as the owner
     """
-    name: str = "Josh"
-    entity_id: str = "josh-kemp"
-    aliases: frozenset = field(
-        default_factory=lambda: frozenset({"josh", "joshua", "josh kemp"}))
+    name: str = ""
+    entity_id: str = ""
+    aliases: frozenset = field(default_factory=frozenset)
 
 
 def owner_identity_from_config() -> OwnerIdentity:
@@ -89,7 +88,7 @@ _JUNK_PATTERNS = [
 
 # Numeric patterns applied to person names ONLY: a 4-digit run (year/amount) or
 # a date fragment is almost always junk in a person name, but legitimate in an
-# org/project name ("Centrepoint 2026"). This split mirrors enrich._is_junk_entity
+# org/project name ("OrgName 2026"). This split mirrors enrich._is_junk_entity
 # rather than the Nexus is_junk_entity, which rejected 4-digit runs for orgs too.
 _NUMERIC_JUNK = [
     re.compile(r"\d{4}"),
@@ -141,7 +140,7 @@ def strip_title(name: str) -> tuple[str, str]:
 # Org-classification TAGS — the org enum values (default-taxonomy view).
 # A relation endpoint that is an EXACT (case-insensitive) match to one of these
 # is a classification tag, not a real entity, so the relation is rejected. Real
-# org names that merely contain a tag word ("Centrepoint Church") are not tags.
+# org names that merely contain a tag word ("Acme Corp") are not tags.
 # apply() uses the configured taxonomy's org_tags; this stays for importers.
 _ORG_TAGS = orgs.DEFAULT_TAXONOMY.org_tags
 
@@ -477,8 +476,8 @@ def _extract_name(header: str) -> str:
 def _is_owner(name: str, owner: OwnerIdentity) -> bool:
     """True if the name refers to the install owner.
 
-    Single-word aliases match as whole words ("josh" matches "Josh Kemp" and
-    "josh.k" but not "Joshveer"); multi-word aliases match as substrings.
+    Single-word aliases match as whole words ("sam" matches "Sam Chen" and
+    "sam.c" but not "Samantha"); multi-word aliases match as substrings.
     Word-level matching matters for short configured names: a plain substring
     test would let an alias like "tom" swallow "Tomlinson".
     """
@@ -682,7 +681,7 @@ def _is_self_message(msg: dict, identity: str) -> bool:
     """Phase 1 self-email test: explicit is_self flag, else sender == identity.
 
     Nexus is_self_email (enrich_gmail.py:369-393) checks sender AND every TO/CC
-    recipient against JOSH_ADDRESSES. Phase 1 fixtures carry an explicit
+    recipient against the owner's address list. Phase 1 fixtures carry an explicit
     `is_self` per message, or omit recipients; with no recipient headers we fall
     back to a sender-address match against `identity` (the no-recipient branch of
     is_self_email, which treats a subject-only self-task as self).
@@ -811,8 +810,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
     owner: optional OwnerIdentity naming the install owner for action
     attribution and self-exclusion. Defaults to owner_identity_from_config()
-    (config.json under MCPBRAIN_HOME), which itself defaults to the historical
-    Josh identity on an unconfigured install.
+    (config.json under MCPBRAIN_HOME). Returns an empty identity when the
+    install is not yet configured.
 
     Returns a small summary dict (counts) for the caller / Task 3. When a thread
     lead exists, a `semantic_doc` key carries the enriched doc_id.
@@ -973,8 +972,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
             continue
 
         # Reject endpoints that are org-classification TAGS, not real entities
-        # ("Centrepoint", "external", ...). Real org names that merely contain a
-        # tag word ("Centrepoint Church") are an inexact match and pass through.
+        # ("external", "contractor", ...). Real org names that merely contain a
+        # tag word ("Acme Corp") are an inexact match and pass through.
         # Tag check runs on the raw name before any stripping.
         if source_name.lower() in taxonomy.org_tags or target_name.lower() in taxonomy.org_tags:
             continue
@@ -1469,11 +1468,10 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
         return None
 
     # Canonicalise known org NAMES so every form of a known org converges on one
-    # node: "Centrepoint Church" / "centrepoint church incorporated" / the
-    # "Centrepoint" tag all resolve to the single 'centrepoint' entity. Unknown
-    # orgs ("Church at the Bay") pass through unchanged. This is what stops the
-    # relations loop minting a 'centrepoint-church' node beside the tag-derived
-    # 'centrepoint' node that _ensure_works_at creates.
+    # node: "Acme Corp" / "acme corp incorporated" / the "Acme" tag all resolve
+    # to the single 'acme' entity. Unknown orgs pass through unchanged. This is
+    # what stops the relations loop minting a duplicate node beside the
+    # tag-derived node that _ensure_works_at creates.
     if entity_type == "org":
         name = canonical_org(name, taxonomy)
 

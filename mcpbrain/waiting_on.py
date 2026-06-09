@@ -44,7 +44,7 @@ def _matches(chunk: dict, waiting_on: str | None, entity_id: str | None) -> bool
 
 
 def _is_outbound(chunk: dict, identity: str = "") -> bool:
-    """True if the chunk is outbound (sent by Josh/self)."""
+    """True if the chunk is outbound (sent by the install owner / self)."""
     meta = chunk.get("metadata", {})
     if isinstance(meta, str):
         meta = json.loads(meta)

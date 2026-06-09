@@ -142,6 +142,16 @@ def owner_aliases(home) -> frozenset[str]:
     return frozenset(a for a in aliases if a)
 
 
+def clickup_org_options(home) -> dict:
+    """Mapping of lowercased org name → ClickUp dropdown option id.
+
+    Configured as ``clickup_org_options`` in config.json, e.g.
+    ``{"acme": "uuid-1", "partner": "uuid-2"}``. Returns {} when unset.
+    """
+    v = read_config(home).get("clickup_org_options")
+    return dict(v) if isinstance(v, dict) else {}
+
+
 def is_configured(home) -> bool:
     """True when the install has the identity + org needed to enrich safely.
 

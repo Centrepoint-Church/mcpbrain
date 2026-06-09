@@ -48,7 +48,7 @@ NOISE_SENDERS = [
     "msonlineservicesteam", "microsoftonline.com",
     # --- mcpbrain additions (NOT part of the verbatim Nexus port) ----------
     # High-confidence vendor blast tokens only. Both observed live as pure
-    # marketing senders; neither appears in real Centrepoint/ministry mail.
+    # marketing senders; neither appears in real org/ministry mail.
     "updates@",       # Ubiquiti mailchimp newsletter (updates@ui.com)
     "microsoftstore",  # Microsoft Store retail blast (Microsoftstore@microsoftstore.microsoft.com)
     # Deliberately NOT added: support@, info@, hello@ — too broad, hit real mail.

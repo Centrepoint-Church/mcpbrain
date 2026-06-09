@@ -26,20 +26,12 @@ log = logging.getLogger(__name__)
 _BASE = "https://api.clickup.com/api/v2"
 _PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches dashboard._PERTH)
 
-# --- two-way sync field map (list "Josh Kemp To do" 901610549962) -----------
-# These ids are install-specific; discovered via the ClickUp API on 2026-06-08.
+# --- two-way sync field map ---------------------------------------------------
+# IDs are install-specific (discovered via the ClickUp API) and configured in
+# config.json as clickup_org_options: {"orgname": "<uuid>", ...}.
 # The link anchor is the NATIVE ClickUp task id (cached on the action as
 # clickup_task_id) — no custom field is used for linking. Org is the one custom
 # field we read/write (a genuine categorisation, not sync plumbing).
-# brain org (lowercased) <-> ClickUp Org dropdown option id
-_ORG_OPTION_IDS = {
-    "centrepoint": "8fd028a6-588f-4536-8bb5-9fcd93ddb17c",
-    "acc":         "72a0118b-d4ca-4c91-be3b-851df9b4188c",
-    "courageous":  "1a349d27-fd2d-4172-b7fc-31472fa64be8",
-    "curtin":      "1bf34d11-d93b-4320-b864-5377dc57565d",
-    "personal":    "263c064d-aeb8-4dca-aa1e-4c553a7e0629",
-}
-_ORG_NAMES_BY_ID = {v: k for k, v in _ORG_OPTION_IDS.items()}
 # ClickUp priority int (1=urgent..4=low) <-> brain priority name
 _PRIORITY_INT = {"urgent": 1, "high": 2, "normal": 3, "low": 4}
 _PRIORITY_NAME = {v: k for k, v in _PRIORITY_INT.items()}
@@ -83,12 +75,21 @@ def int_to_priority(value) -> str:
         return ""
 
 
-def org_to_option_id(org: str | None) -> str | None:
-    return _ORG_OPTION_IDS.get((org or "").strip().lower())
+def org_to_option_id(org: str | None, org_options: dict | None = None) -> str | None:
+    """Look up the ClickUp dropdown option id for an org name.
+
+    org_options maps lowercased org name → option uuid (from config).
+    Returns None when unmapped or when org_options is empty.
+    """
+    mapping = org_options or {}
+    return mapping.get((org or "").strip().lower()) or None
 
 
-def option_id_to_org(option_id) -> str:
-    return _ORG_NAMES_BY_ID.get(option_id, "")
+def option_id_to_org(option_id, org_options: dict | None = None) -> str:
+    """Reverse-map a ClickUp dropdown option id to a lowercased org name."""
+    mapping = org_options or {}
+    by_id = {v: k for k, v in mapping.items()}
+    return by_id.get(option_id, "")
 
 
 def status_is_closed(status_obj) -> bool:
@@ -248,7 +249,8 @@ def _api(token: str, method: str, path: str, body: dict | None = None,
     return None
 
 
-def _normalise_task(t: dict, org_field_id: str = "") -> dict:
+def _normalise_task(t: dict, org_field_id: str = "",
+                    org_options: dict | None = None) -> dict:
     """Flatten a raw ClickUp task into the fields the sync cares about.
 
     The link anchor is the native task id; no Brain ID custom field is read.
@@ -256,7 +258,7 @@ def _normalise_task(t: dict, org_field_id: str = "") -> dict:
     org = ""
     for cf in t.get("custom_fields") or []:
         if org_field_id and cf.get("id") == org_field_id:
-            org = option_id_to_org(cf.get("value"))
+            org = option_id_to_org(cf.get("value"), org_options)
     assignees = [a.get("id") for a in (t.get("assignees") or [])]
     return {
         "id": t.get("id", ""),
@@ -281,6 +283,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
     if not token or not list_id:
         return []
     org_field = config.clickup_org_field_id(home).strip()
+    org_options = config.clickup_org_options(home)
     out, page = [], 0
     while True:
         params = {"include_closed": "true" if include_closed else "false",
@@ -290,7 +293,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
         if not data:
             break
         tasks = data.get("tasks") or []
-        out.extend(_normalise_task(t, org_field) for t in tasks)
+        out.extend(_normalise_task(t, org_field, org_options) for t in tasks)
         if data.get("last_page") or len(tasks) == 0:
             break
         page += 1
@@ -312,7 +315,7 @@ def create_task(home, *, name: str, description: str = "",
     uid = config.clickup_user_id(home)
     body: dict = {"name": name, "assignees": [uid] if uid else []}
     org_field = config.clickup_org_field_id(home).strip()
-    org_opt = org_to_option_id(org)
+    org_opt = org_to_option_id(org, config.clickup_org_options(home))
     if org_opt and org_field:
         body["custom_fields"] = [{"id": org_field, "value": org_opt}]
     if description:

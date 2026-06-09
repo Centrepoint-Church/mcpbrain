@@ -202,7 +202,7 @@ def test_main_missing_claude_pool_prints_hint_and_nonzero(monkeypatch, capsys):
     assert rc != 0
     out = capsys.readouterr().out
     assert "claude_pool not importable" in out
-    assert "PYTHONPATH=/home/josh/ops-brain/src" in out
+    assert "PYTHONPATH" in out
 
 
 def test_main_defaults(monkeypatch):

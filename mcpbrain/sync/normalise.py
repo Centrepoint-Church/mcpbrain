@@ -29,7 +29,7 @@ _SIGNATURE_OPENERS = [
     '\nregards,', '\nkind regards,', '\nwarm regards,', '\nbest regards,',
     '\nbest,', '\nthanks,', '\nthank you,', '\ncheers,', '\nblessings,',
     '\nin christ,', '\nyours sincerely,', '\nsincerely,', '\nwarmly,',
-    '\nmany thanks,', '\njosh kemp', '\njoshua kemp',
+    '\nmany thanks,',
 ]
 
 _REPLY_CHAIN_PATTERNS = [
