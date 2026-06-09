@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from mcpbrain import clickup as _clickup
+from mcpbrain import clickup as _clickup, config
 from mcpbrain.chunking import action_fingerprint
 
 log = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ def import_baseline(store, home, *, client=_clickup, dry_run: bool = True) -> di
             plan["create"].append((t["id"], None, t["name"]))
             if not dry_run:
                 new_id = store.add_unified_action(
-                    text=t["name"], owner="Joshua",
+                    text=t["name"], owner=config.owner_name(home),
                     status="done" if t["closed"] else "open",
                     deadline=t["deadline"], org=t["org"], source="clickup",
                     text_fingerprint=_fp(t["name"]))
