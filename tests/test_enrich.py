@@ -90,6 +90,13 @@ def test_build_prompt_is_domain_anchored_and_constrained(tmp_path, monkeypatch):
     import json as _json
     (tmp_path / "config.json").write_text(_json.dumps({
         "owner_name": "Josh", "owner_full_name": "Josh Kemp",
+        "orgs": [
+            {"name": "Centrepoint", "domains": ["centrepoint.church"],
+             "aliases": ["Centrepoint Church"]},
+            {"name": "ACC", "domains": ["acc.org.au"]},
+            {"name": "Courageous Church", "domains": ["courageouschurch.org.au"]},
+            {"name": "Curtin", "domains": ["curtin.edu.au"]},
+        ],
     }))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain.enrich import build_prompt
@@ -293,7 +300,11 @@ def _store(tmp_path):
     return s
 
 
-def test_enrich_document_lands_expected_rows(tmp_path):
+def test_enrich_document_lands_expected_rows(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": [
+        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+    ]}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     client = FakeClient(json.dumps(GOOD_JSON))
     meta = {"source_type": "gmail", "date": "2026-05-30", "thread_id": "thr-1"}
@@ -365,7 +376,11 @@ def test_enrich_document_counts_rows_written_not_extracted(tmp_path):
     assert acts[0]["text"] == "Send the budget"
 
 
-def test_enrich_document_filters_junk_entities_and_clamps_org(tmp_path):
+def test_enrich_document_filters_junk_entities_and_clamps_org(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": [
+        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+    ]}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     payload = {
         "entities": [
