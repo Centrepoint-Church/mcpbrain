@@ -56,14 +56,17 @@ def _apply_inbound(store, action: dict, task: dict) -> dict:
 
     # status — ClickUp is authoritative for edits, but a brain-local close must
     # propagate OUT (handled by sync's outbound close), not be reverted here.
-    # resolved_by is the provenance tiebreaker: ClickUp only reopens an action
-    # it itself closed.
+    # The reopen signal is the closed->open TRANSITION: if we last synced the
+    # task as closed (clickup_closed truthy) and it is open now, the user
+    # reopened it, so reopen the action regardless of who closed it. If the task
+    # is open but we never saw it closed, that is a brain-close whose outbound
+    # close has not applied yet — leave it.
     a_done = (action.get("status") or "").lower() in ("done", "closed")
-    resolved_by = (action.get("resolved_by") or "").lower()
+    prev_closed = bool(action.get("clickup_closed"))
     if task["closed"] and not a_done:
         store.set_action_status(aid, "done", "clickup")
         diff["status"] = "done"
-    elif (not task["closed"]) and a_done and resolved_by == "clickup":
+    elif (not task["closed"]) and a_done and prev_closed:
         store.set_action_status(aid, "open", "")
         diff["status"] = "open"
 
@@ -83,6 +86,9 @@ def _apply_inbound(store, action: dict, task: dict) -> dict:
     if fields:
         store.update_action_fields(aid, **fields)
         diff.update(fields)
+    # Record the observed ClickUp closed-state for next cycle's reopen check.
+    if bool(task["closed"]) != prev_closed:
+        store.set_action_clickup_closed(aid, bool(task["closed"]))
     return diff
 
 
@@ -138,6 +144,7 @@ def import_baseline(store, home, *, client=_clickup, dry_run: bool = True) -> di
                     text_fingerprint=_fp(t["name"]))
                 store.update_action_fields(
                     new_id, priority=t["priority"], clickup_task_id=t["id"])
+                store.set_action_clickup_closed(new_id, bool(t["closed"]))
                 if t["closed"]:
                     store.set_action_status(new_id, "done", "clickup")
     return plan
@@ -187,6 +194,7 @@ def sync(store, home, *, client=_clickup) -> dict:
             priority=a.get("priority", ""), org=a.get("org", ""))
         if created and created.get("id"):
             store.set_action_clickup_id(a["id"], created["id"])
+            store.set_action_clickup_closed(a["id"], False)   # created open
             summary["created"] += 1
 
     # 3. Outbound close: action closed locally but its task still open.
@@ -197,5 +205,6 @@ def sync(store, home, *, client=_clickup) -> dict:
         t = tasks_by_id.get(tid)
         if t is not None and not t["closed"]:
             if client.close_task(home, tid):
+                store.set_action_clickup_closed(a["id"], True)
                 summary["closed"] += 1
     return summary
