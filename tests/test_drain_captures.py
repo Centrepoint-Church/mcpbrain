@@ -78,7 +78,7 @@ def test_action_create_and_dedupe(tmp_path, monkeypatch):
     drain.drain_captures(s, home=tmp_path)
     acts = s.unified_actions(status="open")
     assert len(acts) == 1
-    assert acts[0]["owner"] == "Josh"        # config default owner
+    assert acts[0]["owner"] == ""             # unconfigured install: empty owner
     assert acts[0]["source"] == "capture"
 
 

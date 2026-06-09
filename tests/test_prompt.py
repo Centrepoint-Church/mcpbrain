@@ -125,6 +125,7 @@ def test_known_people_includes_batch_senders(tmp_path):
 
 
 def test_known_people_excludes_josh(tmp_path):
+    from mcpbrain.graph_write import OwnerIdentity
     s = _store(tmp_path)
     with s._connect() as db:
         _add_person(db, "josh-kemp", "Josh Kemp", "Centrepoint", email_count=999)
@@ -132,7 +133,9 @@ def test_known_people_excludes_josh(tmp_path):
         # Also reach Josh via a batch thread to confirm the overlay excludes him too.
         _link_thread(db, "t-1", "m-1", "josh-kemp")
 
-    rows = prompt.build_known_people(s, batch_thread_ids=["t-1"], core_cap=40)
+    # Pass the owner explicitly so the test is self-contained.
+    rows = prompt.build_known_people(s, batch_thread_ids=["t-1"], core_cap=40,
+                                     owner=OwnerIdentity())
 
     assert all("josh" not in r["name"].lower() for r in rows)
     assert all(r.get("id") != "josh-kemp" for r in rows)

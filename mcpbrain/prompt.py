@@ -128,7 +128,9 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> l
     if owner is None:
         owner = owner_identity_from_config()
     # SQL pre-filter on the short name; _add re-checks with the full alias set.
-    owner_like = f"%{owner.name.lower()}%"
+    # When owner name is empty (unconfigured install), use a sentinel that
+    # matches nothing so all entities pass the NOT LIKE filter.
+    owner_like = f"%{owner.name.lower()}%" if owner.name else "\x00"
 
     seen: set[str] = set()
     out: list[dict] = []

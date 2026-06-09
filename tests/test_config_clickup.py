@@ -41,19 +41,17 @@ class TestClickupListId:
 
 
 class TestOwnerName:
-    def test_defaults_to_josh_when_absent(self, tmp_path):
-        # graph_write._infer_owner hardcodes "Josh" for self-owned actions;
-        # the default must match until multi-user identity lands.
+    def test_defaults_to_empty_when_absent(self, tmp_path):
         from mcpbrain.config import owner_name
         home = _write_config(tmp_path, {})
-        assert owner_name(home) == "Josh"
+        assert owner_name(home) == ""
 
     def test_returns_configured_value(self, tmp_path):
         from mcpbrain.config import owner_name
         home = _write_config(tmp_path, {"owner_name": "Taryn"})
         assert owner_name(home) == "Taryn"
 
-    def test_blank_string_falls_back_to_default(self, tmp_path):
+    def test_blank_string_falls_back_to_empty(self, tmp_path):
         from mcpbrain.config import owner_name
         home = _write_config(tmp_path, {"owner_name": ""})
-        assert owner_name(home) == "Josh"
+        assert owner_name(home) == ""

@@ -81,42 +81,34 @@ def joshbrain_dir(home) -> str:
 
 
 def owner_name(home) -> str:
-    """The install owner's short name: the value written to actions.owner by
-    the enrichment pipeline and matched by the dashboard's owner filter.
-
-    Defaults to "Josh" so an unconfigured install keeps the pipeline's
-    historical behaviour.
-    """
-    return read_config(home).get("owner_name", "") or "Josh"
+    """The install owner's short name (actions.owner, dashboard filter).
+    Empty until configured; the daemon's enrichment gate (is_configured) keeps
+    the pipeline from running before this is set."""
+    return read_config(home).get("owner_name", "") or ""
 
 
 def owner_full_name(home) -> str:
-    """The install owner's full name. graph_write slugs it into the owner's
-    entity id and the enrichment prompt names the owner with it."""
-    return read_config(home).get("owner_full_name", "") or "Josh Kemp"
+    """The install owner's full name. Empty until configured."""
+    return read_config(home).get("owner_full_name", "") or ""
 
 
 def owner_role(home) -> str:
-    """The install owner's working role, used to frame the extraction prompts
-    ("operations manager", "research lead", ...). Defaults to the historical
-    phrasing."""
-    return read_config(home).get("owner_role", "") or "operations manager"
+    """The install owner's working role, used to frame extraction prompts.
+    Empty until configured."""
+    return read_config(home).get("owner_role", "") or ""
 
 
 def owner_email(home) -> str:
-    """The Gmail address the daemon syncs, used by graph_write to detect
-    self-emails. Defaults to the historical hardcoded address so an
-    unconfigured install keeps its behaviour."""
-    return read_config(home).get("owner_email", "") or "josh.k@centrepoint.church"
+    """The Gmail address the daemon syncs, used to detect self-emails.
+    Empty until configured."""
+    return read_config(home).get("owner_email", "") or ""
 
 
 def owner_aliases(home) -> frozenset[str]:
     """Lowercased name variants recognised as the install owner.
 
-    Always contains owner_name, owner_full_name and the full name's first
-    token. The optional owner_aliases config key (list of strings) adds more,
-    e.g. a formal first name. An unconfigured install also gets "joshua",
-    preserving the pipeline's historical ("josh", "joshua", "josh kemp") set.
+    Derived from owner_name, owner_full_name, and the full name's first token,
+    plus any extra `owner_aliases` config entries. Empty when unconfigured.
     """
     cfg = read_config(home)
     short = owner_name(home).strip().lower()
@@ -127,8 +119,6 @@ def owner_aliases(home) -> frozenset[str]:
     extra = cfg.get("owner_aliases") or []
     if isinstance(extra, list):
         aliases.update(str(a).strip().lower() for a in extra if str(a).strip())
-    if not cfg.get("owner_name") and not cfg.get("owner_full_name"):
-        aliases.add("joshua")
     return frozenset(a for a in aliases if a)
 
 

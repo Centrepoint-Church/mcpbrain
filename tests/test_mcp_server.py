@@ -234,7 +234,11 @@ def test_brain_graph_include_invalidated(tmp_path):
 from mcpbrain.mcp_server import make_brain_actions
 
 
-def test_make_brain_actions(tmp_path):
+def test_make_brain_actions(tmp_path, monkeypatch):
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({"owner_name": "Josh"}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
     s = Store(tmp_path / "act.sqlite3", dim=4)
     s.init()
     s.add_unified_action(text="Draft policy", owner="Josh", status="open",
@@ -245,7 +249,7 @@ def test_make_brain_actions(tmp_path):
 
     tool = make_brain_actions(s)
 
-    # Defaults: owner=Josh, status=open.
+    # Defaults: owner=configured owner (Josh), status=open.
     out = asyncio.run(tool())
     assert [a["text"] for a in out] == ["Draft policy"]
     # Freshness annotation applied to every row.
@@ -260,10 +264,14 @@ def test_make_brain_actions(tmp_path):
     assert [a["text"] for a in taryn] == ["Book hall"]
 
 
-def test_brain_actions_explicit_null_owner_defaults_to_josh(tmp_path):
-    """An MCP client passing an explicit null owner must default to Josh, not
-    widen to every owner. unified_actions(owner=None) would return all owners,
-    leaking Taryn's actions into a Josh-scoped query."""
+def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monkeypatch):
+    """An MCP client passing an explicit null owner must default to the configured
+    owner, not widen to every owner. unified_actions(owner=None) would return all
+    owners, leaking Taryn's actions into a Josh-scoped query."""
+    import json
+    (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Josh"}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
     s = Store(tmp_path / "null.sqlite3", dim=4)
     s.init()
     s.add_unified_action(text="Draft policy", owner="Josh", status="open")

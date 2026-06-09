@@ -86,7 +86,12 @@ class SpyClient:
 
 # --- build_prompt ---------------------------------------------------------
 
-def test_build_prompt_is_domain_anchored_and_constrained():
+def test_build_prompt_is_domain_anchored_and_constrained(tmp_path, monkeypatch):
+    import json as _json
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "owner_name": "Josh", "owner_full_name": "Josh Kemp",
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain.enrich import build_prompt
     p = build_prompt("some body", {"source_type": "gmail", "subject": "Hi",
                                    "sender": "a@b.com", "date": "2026-05-30"})
