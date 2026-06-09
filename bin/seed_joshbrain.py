@@ -274,11 +274,11 @@ launchd = Path.home() / "Library" / "LaunchAgents"
 launchd.mkdir(parents=True, exist_ok=True)
 
 plists = {
-    "church.centrepoint.mcpbrain": launchd_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
-    "church.centrepoint.mcpbrain.tray": launchd_tray_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
-    "church.centrepoint.joshbrain.prune": joshbrain_prune_plist(
+    "com.mcpbrain": launchd_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
+    "com.mcpbrain.tray": launchd_tray_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
+    "com.mcpbrain.records.prune": joshbrain_prune_plist(
         python_bin=python_bin, joshbrain_dir=joshbrain_dir, mcpbrain_home=mcpbrain_home),
-    "church.centrepoint.joshbrain.context-health": joshbrain_context_health_plist(
+    "com.mcpbrain.records.context-health": joshbrain_context_health_plist(
         python_bin=python_bin, joshbrain_dir=joshbrain_dir, mcpbrain_home=mcpbrain_home),
 }
 
@@ -354,10 +354,10 @@ Create two projects in Cowork:
 
 ```bash
 # Launchd agents running
-launchctl list | grep centrepoint
+launchctl list | grep com.mcpbrain
 
 # mcpbrain daemon log
-tail -20 ~/.mcpbrain/church.centrepoint.mcpbrain.log
+tail -20 ~/.mcpbrain/com.mcpbrain.log
 
 # joshbrain git healthy
 git -C ~/Documents/GitHub/joshbrain log --oneline | head -5
