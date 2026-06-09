@@ -127,20 +127,38 @@ def test_post_register_failure_returns_json_error(tmp_path):
 
 
 def test_post_oversize_body_returns_413(tmp_path):
-    """A POST whose Content-Length exceeds the 1 MiB cap returns 413."""
-    import urllib.error
+    """A POST DECLARING a Content-Length over the 1 MiB cap is rejected with 413
+    before the body is read — so the daemon never sees it.
+
+    The cap keys off the Content-Length HEADER and returns 413 *before* reading
+    the body (control_api._handle_post): the threat it guards is "a client
+    claiming a huge length" without making the server buffer it. So this sends
+    the oversize Content-Length with NO body and reads the response.
+
+    It deliberately does NOT transmit a real 1 MiB body. Doing that raced the
+    server's early close against the client's in-flight write and intermittently
+    surfaced a BrokenPipeError/ConnectionResetError on the client instead of the
+    413 (the body write failed before the response could be read). Asserting on
+    the header-only path tests the actual contract and is race-free. The client
+    timeout also means a regression that moved the cap to AFTER the read (so the
+    server waits for a body that never arrives) fails loudly instead of passing.
+    """
+    import http.client
 
     d = FakeDaemon()
     srv = ControlServer(d, home=str(tmp_path))
     srv.start()
     try:
-        base = f"http://127.0.0.1:{srv.port}"
-        oversize = b"x" * (1_048_576 + 1)
-        try:
-            _post_raw(base + "/api/config", srv.token, oversize)
-            assert False, "expected HTTP 413 for an oversize body"
-        except urllib.error.HTTPError as e:
-            assert e.code == 413
+        conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=10)
+        conn.putrequest("POST", "/api/config")
+        conn.putheader("Authorization", f"Bearer {srv.token}")
+        conn.putheader("Content-Length", str(1_048_576 + 1))  # claim > 1 MiB
+        conn.putheader("Connection", "close")
+        conn.endheaders()          # send headers only; no body bytes follow
+        resp = conn.getresponse()
+        assert resp.status == 413
+        resp.read()
+        conn.close()
         # The daemon never saw the oversize body.
         assert d.cfg is None
     finally:
