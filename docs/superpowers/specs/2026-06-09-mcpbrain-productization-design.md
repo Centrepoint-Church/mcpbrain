@@ -234,9 +234,7 @@ label-parse move in lockstep (the new `records.` segment also stops the daemon's
 device, so there is no same-machine collision concern; the rename is about not
 baking one org (or one person) into the service identity. **Migration:** existing
 installs must unload the old `church.centrepoint.*` agents once (documented in the
-Plan 3 release note). Repointing the cadence generators' repo path to
-`config.records_dir` and renaming their `joshbrain_dir=` params happens in **1.6b**
-as part of the cross-platform restructure (not 1.6a).
+Plan 3 release note). **Deviation (committed bb7b9b1):** the generator function renames (`joshbrain_prune_plist` → `records_prune_plist`, etc.) and the removal of `config.joshbrain_dir()` + `cfg.get("joshbrain_dir")` legacy key were pulled forward into 1.6a to satisfy the acceptance grep. The 1.6b note below about "repo-path/param renames" is therefore superseded for those three generators.
 
 ---
 
@@ -637,8 +635,9 @@ data layer and the platform/label work are independent:
   glob, `os.uname` → `sys.platform` hardening). *Written.*
 - **Plan 3b** — cross-platform cadence execution — spec **1.6b** (port the four
   cadences to `python -m mcpbrain` subcommands, systemd-timer + time-triggered
-  schtasks generators, product cadence-install path, repo-path/param renames).
-  Discovery-gated on the four records-repo scripts. *To write.*
+  schtasks generators, product cadence-install path). Generator renames already
+  done in Plan 3 deviation (bb7b9b1). Discovery-gated on the four records-repo
+  scripts. *To write.*
 - **Plan 4** — status & connection-probe layer — spec **3.2** + `daemon.status()`
   `configured`/probe fields (also unblocks the 1.1 UI surfacing). *To write.*
 - **Plan 5** — distribution & release — spec **Part 2**. *To write.*
