@@ -8,6 +8,11 @@ from mcpbrain.retrieval import annotate_action_freshness, hybrid_search
 _log = logging.getLogger("mcpbrain.mcp_server")
 
 
+def _default_owner() -> str:
+    """The install owner for MCP-initiated writes, from config (empty if unset)."""
+    return config.owner_name(str(config.app_dir()))
+
+
 async def list_context_resources():
     """Return types.Resource entries for every *.md in ~/.mcpbrain/context/."""
     from mcp import types
@@ -225,7 +230,7 @@ def make_brain_action_update():
 
 
 def make_brain_decision():
-    async def brain_decision(text: str, rationale: str = "", owner: str = "Josh",
+    async def brain_decision(text: str, rationale: str = "", owner: str = "",
                              supersedes: str = "", org: str = "") -> dict:
         """Record a decision. QUEUED: the daemon appends a row to state/decisions.md
         in joshbrain and commits (one daemon cycle, ~seconds-minutes), not instantly."""
@@ -504,7 +509,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                     "properties": {
                         "text": {"type": "string"},
                         "rationale": {"type": "string", "default": ""},
-                        "owner": {"type": "string", "default": "Josh"},
+                        "owner": {"type": "string", "default": ""},
                         "supersedes": {"type": "string", "default": ""},
                         "org": {"type": "string", "default": ""},
                     },
@@ -638,7 +643,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await decision(
                 text=arguments.get("text", ""),
                 rationale=arguments.get("rationale", ""),
-                owner=arguments.get("owner", "Josh"),
+                owner=arguments.get("owner") or _default_owner(),
                 supersedes=arguments.get("supersedes", ""),
                 org=arguments.get("org", ""),
             )
