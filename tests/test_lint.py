@@ -7,6 +7,8 @@ Sub-tasks covered:
   2.2  build_report counts + run() findings sink
 """
 
+import json
+
 from mcpbrain.store import Store
 from mcpbrain.lint_graph import (
     check_missing_org,
@@ -127,8 +129,12 @@ def test_check_orphan_entities_truly_orphaned(tmp_path):
 # Sub-task 2.1 — check_ambiguous_org
 # ---------------------------------------------------------------------------
 
-def test_check_ambiguous_org_flags(tmp_path):
+def test_check_ambiguous_org_flags(tmp_path, monkeypatch):
     """Entity with org='external', email_addr contains centrepoint.church -> flagged."""
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": [
+        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+    ]}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     _add_entity(s, "amb1", "Jane Doe", org="external",
                 email_addr="jane@centrepoint.church", email_count=3)
@@ -232,8 +238,12 @@ def test_check_ownerless_actions_joins_email_context(tmp_path):
 # Sub-task 2.1 — check_duplicate_orgs
 # ---------------------------------------------------------------------------
 
-def test_check_duplicate_orgs_flags(tmp_path):
+def test_check_duplicate_orgs_flags(tmp_path, monkeypatch):
     """Entity with org='Centrepoint Church WA' -> flagged as variant (score >= 60)."""
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": [
+        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+    ]}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     _add_entity(s, "e1", "Alice", org="Centrepoint Church WA", email_count=1)
     _add_entity(s, "e2", "Bob", org="Centrepoint", email_count=1)  # canonical

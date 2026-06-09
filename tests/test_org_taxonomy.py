@@ -73,17 +73,16 @@ class TestOrgTaxonomy:
 
 
 class TestDefaultTaxonomy:
-    def test_historical_orgs(self):
-        assert orgs.DEFAULT_TAXONOMY.names == (
-            "Centrepoint", "ACC", "Courageous Church", "Curtin")
+    def test_empty_names(self):
+        assert orgs.DEFAULT_TAXONOMY.names == ()
 
-    def test_historical_domain_and_alias_samples(self):
+    def test_empty_domain_and_alias(self):
         t = orgs.DEFAULT_TAXONOMY
-        assert t.from_email("x@accwa.org.au") == "ACC"
-        assert t.canonical("centrepoint church incorporated") == "Centrepoint"
+        assert t.from_email("x@accwa.org.au") == "external"
+        assert t.canonical("centrepoint church incorporated") == "centrepoint church incorporated"
 
     def test_graph_write_module_views_match(self):
-        # The back-compat module constants must mirror the default taxonomy.
+        # Module constants mirror DEFAULT_TAXONOMY (both now empty).
         assert gw.KNOWN_ORGS == frozenset(orgs.DEFAULT_TAXONOMY.names)
         assert gw._ORG_TAGS == orgs.DEFAULT_TAXONOMY.org_tags
         assert gw._DOMAIN_ORG == orgs.DEFAULT_TAXONOMY.domain_map
