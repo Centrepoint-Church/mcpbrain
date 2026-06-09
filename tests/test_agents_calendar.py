@@ -16,7 +16,7 @@ def _health(**kw):
 
 
 def test_prune_label():
-    assert "church.centrepoint.joshbrain.prune" in _prune()
+    assert "com.mcpbrain.records.prune" in _prune()
 
 
 def test_prune_uses_calendar_interval():
@@ -76,12 +76,12 @@ def test_prune_xml_escapes_shell_operators():
 
 def test_prune_log_paths_under_mcpbrain_home():
     plist = _prune(mcpbrain_home="/Users/josh/.mcpbrain")
-    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.prune.log" in plist
-    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.prune.err" in plist
+    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.prune.log" in plist
+    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.prune.err" in plist
 
 
 def test_health_label():
-    assert "church.centrepoint.joshbrain.context-health" in _health()
+    assert "com.mcpbrain.records.context-health" in _health()
 
 
 def test_health_weekly_monday():
@@ -148,7 +148,7 @@ def _gardener(**kw):
 
 
 def test_gardener_label():
-    assert "church.centrepoint.joshbrain.gardener" in _gardener()
+    assert "com.mcpbrain.records.gardener" in _gardener()
 
 
 def test_gardener_weekly_monday_0800():
@@ -172,8 +172,8 @@ def test_gardener_program_arguments():
 
 def test_gardener_log_paths_under_mcpbrain_home():
     plist = _gardener(mcpbrain_home="/Users/josh/.mcpbrain")
-    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.log" in plist
-    assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.err" in plist
+    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.gardener.log" in plist
+    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.gardener.err" in plist
 
 
 # --- FIX F: gardener must NOT RunAtLoad (expensive weekly headless session) --
