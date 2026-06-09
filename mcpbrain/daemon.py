@@ -1522,6 +1522,7 @@ def main(argv=None) -> None:
                     waiting_on_interval_s=cadences["waiting_on_interval_s"],
                     blocks_interval_s=cadences["blocks_interval_s"],
                     audit_interval_s=cadences["audit_interval_s"],
+                    clickup_interval_s=cadences["clickup_interval_s"],
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
