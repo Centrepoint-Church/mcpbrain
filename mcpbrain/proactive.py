@@ -10,9 +10,9 @@ column on the unified actions table, so ANY open action linked to a project is
 treated as satisfying "has a next action". This is a deliberate simplification;
 if action_type is added later the WHERE clause can be tightened.
 
-Not ported: the Nexus `josh_owner_clause`-based detectors (`detect_actions_due_soon`
-etc.) are deliberately excluded here because `brain_actions` (Phase 1, Task 8.2)
-already covers owner/deadline queries via the MCP tool.
+Not ported: the owner-scoped detectors (`detect_actions_due_soon` etc.) are
+deliberately excluded here because `brain_actions` (Phase 1, Task 8.2) already
+covers owner/deadline queries via the MCP tool.
 """
 
 import datetime as dt

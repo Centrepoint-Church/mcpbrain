@@ -45,6 +45,13 @@ def _write_cp_config(tmp_path):
 FIXTURES = Path(__file__).parent / "fixtures" / "extractions"
 
 
+_JOSH_IDENTITY = gw.OwnerIdentity(
+    name="Josh",
+    entity_id="josh-kemp",
+    aliases=frozenset({"josh", "joshua", "josh kemp"}),
+)
+
+
 def _store(tmp_path):
     s = Store(tmp_path / "g.sqlite3", dim=4)
     s.init()
@@ -346,7 +353,7 @@ def test_apply_excludes_josh(tmp_path):
     s = _store(tmp_path)
     ext = _load("thread_multi_message.json")  # has a "Josh Kemp" entity
     gw.apply(s, ext, doc_ids=["t-multi-002"],
-             owner=gw.OwnerIdentity(), identity="josh.k@centrepoint.church")
+             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
     names = {e["name"].lower() for e in s.list_entities()}
     assert not any("josh" in n for n in names)
 
@@ -679,7 +686,7 @@ def test_self_email_synthesises_task_from_subject(tmp_path):
                   lead_sender="Josh Kemp <josh.k@centrepoint.church>",
                   is_self=True, subject="TODO: book the Narrogin van")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-             owner=gw.OwnerIdentity(), identity="josh.k@centrepoint.church")
+             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["text"] == "book the Narrogin van"  # prefix stripped
@@ -694,7 +701,7 @@ def test_self_email_synthetic_no_prefix_lower_confidence(tmp_path):
                   lead_sender="Josh Kemp <josh.k@centrepoint.church>",
                   is_self=True, subject="Carpark briefing note")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-             owner=gw.OwnerIdentity(), identity="josh.k@centrepoint.church")
+             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["text"] == "Carpark briefing note"
@@ -735,7 +742,7 @@ def test_owner_inferred_when_empty(tmp_path):
     # Imperative-verb description, empty owner, no sender fallback → inferred Josh.
     ext = _thread(actions=[_action("Review the draft policy before Friday",
                                    owner_name="", owner_fallback="")])
-    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=gw.OwnerIdentity())
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["owner"] == "Josh"
@@ -748,7 +755,7 @@ def test_owner_josh_normalised(tmp_path):
         s2 = Store(tmp_path / f"g{i}.sqlite3", dim=4)
         s2.init()
         ext = _thread(actions=[_action("Confirm the booking", owner_name=name)])
-        gw.apply(s2, ext, doc_ids=["d1"], clock=_clock, owner=gw.OwnerIdentity())
+        gw.apply(s2, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
         rows = s2.list_unified_actions()
         assert len(rows) == 1
         assert rows[0]["owner"] == "Josh"
@@ -764,7 +771,7 @@ def test_deadline_inferred_from_body(tmp_path):
     ext = _thread(actions=[_action("Submit the grant paperwork",
                                    owner_name="Josh", due_date="")],
                   body="Please get this in by 2026-06-20 at the latest.")
-    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=gw.OwnerIdentity())
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["deadline"] == "2026-06-20"

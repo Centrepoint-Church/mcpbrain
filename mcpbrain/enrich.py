@@ -42,7 +42,7 @@ _STRUCTURAL_JUNK = [
 ]
 
 # Numeric junk patterns applied to person ONLY: 4-digit runs (years/amounts) and
-# date-like fragments are valid in org/project names (e.g. "Centrepoint 2026",
+# date-like fragments are valid in org/project names (e.g. "OrgName 2026",
 # "Vision 2030") but almost always junk in a person name.
 _NUMERIC_JUNK = [
     re.compile(r"\d{4}"),
@@ -92,8 +92,8 @@ def build_prompt(text: str, metadata: dict) -> str:
     rules constrain the model to real named entities and reject junk (dollar
     amounts, newsletter subject lines, form-field labels, etc.).
 
-    The owner's name comes from config (owner_full_name / owner_name) so a
-    non-Josh install extracts against the right identity.
+    The owner's name comes from config (owner_full_name / owner_name) so the
+    prompt references the configured identity.
     """
     from mcpbrain import config as _config
     _home = str(_config.app_dir())
@@ -275,7 +275,7 @@ def enrich_document(store, client, doc_id: str, text: str, metadata: dict,
         if not (a and b and relation):
             continue
         # endpoints carry no type; screen with "org" (structural patterns only) to avoid
-        # over-rejecting year-bearing org/project names (e.g. "Centrepoint 2026").
+        # over-rejecting year-bearing org/project names (e.g. "OrgName 2026").
         if _is_junk_entity(from_name, "org") or _is_junk_entity(to_name, "org"):
             continue
         # stub any endpoint not declared above so there's no dangling edge

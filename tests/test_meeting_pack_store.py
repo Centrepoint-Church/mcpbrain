@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from mcpbrain.store import Store
 
 def _store(tmp_path):

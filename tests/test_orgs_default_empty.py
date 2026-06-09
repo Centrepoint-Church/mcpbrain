@@ -1,6 +1,5 @@
 """DEFAULT_TAXONOMY is empty; configured orgs come only from config."""
 import json
-from pathlib import Path
 
 from mcpbrain.orgs import DEFAULT_TAXONOMY, taxonomy_from_config
 

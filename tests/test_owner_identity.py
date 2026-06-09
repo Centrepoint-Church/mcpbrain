@@ -76,17 +76,21 @@ class TestConfigHelpers:
 # _is_owner matching semantics
 # ---------------------------------------------------------------------------
 
+_JOSH = gw.OwnerIdentity(
+    name="Josh", entity_id="josh-kemp",
+    aliases=frozenset({"josh", "joshua", "josh kemp"}))
+
+
 class TestIsOwner:
-    def test_default_matches_josh_variants(self):
-        o = gw.OwnerIdentity()
-        assert gw._is_owner("Josh Kemp", o)
-        assert gw._is_owner("Joshua", o)
-        assert gw._is_owner("josh.k", o)
+    def test_explicit_identity_matches_josh_variants(self):
+        assert gw._is_owner("Josh Kemp", _JOSH)
+        assert gw._is_owner("Joshua", _JOSH)
+        assert gw._is_owner("josh.k", _JOSH)
 
     def test_word_boundary_not_substring(self):
         # Historical substring matching would have excluded Joshveer; the
         # word-level match must not.
-        assert not gw._is_owner("Joshveer Singh", gw.OwnerIdentity())
+        assert not gw._is_owner("Joshveer Singh", _JOSH)
 
     def test_short_alias_does_not_swallow_longer_names(self):
         tom = gw.OwnerIdentity(name="Tom", entity_id="tom-li",
@@ -96,10 +100,12 @@ class TestIsOwner:
         assert not gw._is_owner("Tomlinson Smith", tom)
 
     def test_multi_word_alias_matches_substring(self):
-        assert gw._is_owner("Pastor Josh Kemp Jr", gw.OwnerIdentity())
+        assert gw._is_owner("Pastor Josh Kemp Jr", _JOSH)
 
-    def test_empty_name_is_not_owner(self):
-        assert not gw._is_owner("", gw.OwnerIdentity())
+    def test_empty_identity_never_matches(self):
+        empty = gw.OwnerIdentity()
+        assert not gw._is_owner("Josh Kemp", empty)
+        assert not gw._is_owner("anyone", empty)
 
 
 # ---------------------------------------------------------------------------

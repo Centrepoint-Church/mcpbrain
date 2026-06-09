@@ -68,7 +68,7 @@ def test_git_has_exactly_one_commit(tmp_path):
         ["git", "log", "--oneline"],
         capture_output=True, text=True, cwd=str(dest),
     )
-    lines = [l for l in result.stdout.strip().splitlines() if l]
+    lines = [ln for ln in result.stdout.strip().splitlines() if ln]
     assert len(lines) == 1
     assert "seed" in lines[0].lower()
 
@@ -97,7 +97,7 @@ def test_copies_examples_directory(tmp_path):
 def test_context_health_is_executable(tmp_path):
     src, dest = _make_src(tmp_path), tmp_path / "dest"
     _run(src, dest)
-    import os, stat
+    import stat
     mode = (dest / "bin" / "context_health.py").stat().st_mode
     assert mode & stat.S_IXUSR
 

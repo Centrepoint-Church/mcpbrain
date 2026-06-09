@@ -1,11 +1,7 @@
 # tests/test_meeting_pack_routes.py
 import json
-import threading
-from http.server import HTTPServer
-from pathlib import Path
 import urllib.request
 
-import pytest
 from mcpbrain.store import Store
 from mcpbrain.control_api import ControlServer
 
@@ -134,7 +130,8 @@ class TestSessionIngestRoute:
     def test_non_dict_body_returns_400(self, tmp_path):
         srv, store = _server(tmp_path)
         try:
-            import urllib.request, urllib.error
+            import urllib.request
+            import urllib.error
             data = json.dumps([1, 2, 3]).encode()
             req = urllib.request.Request(
                 f"http://127.0.0.1:{srv.port}/api/session/ingest",
