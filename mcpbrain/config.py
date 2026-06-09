@@ -73,6 +73,26 @@ def clickup_list_id(home) -> str:
     return read_config(home).get("clickup_list_id", "") or ""
 
 
+def clickup_user_id(home):
+    """ClickUp numeric user id used as the default task assignee, or None.
+
+    Returns an int when set to a number (or numeric string), else None so the
+    caller creates an unassigned task rather than assigning a wrong user.
+    """
+    v = read_config(home).get("clickup_user_id")
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def clickup_org_field_id(home) -> str:
+    """ClickUp custom-field id for the Org dropdown, or '' if unset."""
+    return read_config(home).get("clickup_org_field_id", "") or ""
+
+
 def joshbrain_dir(home) -> str:
     """Path to the joshbrain repo the daemon writes structured records into.
     Defaults to ~/joshbrain when unset."""
