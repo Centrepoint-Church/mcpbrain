@@ -29,8 +29,8 @@
     {"pair_id": "dana-okafor|dana-c",
      "a": {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"},
      "b": {"id": "dana-c", "name": "Dana C", "type": "person"}},
-    {"pair_id": "centrepoint-church|centrepoint",
-     "a": {"id": "centrepoint-church", "name": "Centrepoint Church", "type": "org"},
-     "b": {"id": "centrepoint", "name": "Centrepoint", "type": "org"}}
+    {"pair_id": "acme-church|acme",
+     "a": {"id": "acme-church", "name": "Acme Church", "type": "org"},
+     "b": {"id": "acme", "name": "Acme", "type": "org"}}
   ]
 }

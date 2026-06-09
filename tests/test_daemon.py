@@ -208,7 +208,7 @@ def test_run_cycle_surfaces_agent_err_as_finding(tmp_path, monkeypatch):
 
     findings = store.open_findings(FINDING_TYPE)
     assert len(findings) == 1
-    assert "joshbrain" in findings[0]["summary"]
+    assert "records" in findings[0]["summary"]
 
 
 def test_run_one_runs_one_cycle_against_fixtures(tmp_path):

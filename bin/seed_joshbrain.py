@@ -261,13 +261,13 @@ Run with the venv python (`.venv/bin/python3`) from ~/Documents/GitHub/mcpbrain:
 ```python
 from mcpbrain.agents import (
     launchd_plist, launchd_tray_plist,
-    joshbrain_prune_plist, joshbrain_context_health_plist,
+    records_prune_plist, records_context_health_plist,
 )
 import subprocess
 from pathlib import Path
 
 python_bin = subprocess.check_output(["which", "python3"], text=True).strip()
-joshbrain_dir = str(Path.home() / "Documents/GitHub/joshbrain")
+records_dir = str(Path.home() / "Documents/GitHub/joshbrain")
 mcpbrain_home = str(Path.home() / ".mcpbrain")
 mcpbrain_bin = str(Path.home() / "Documents/GitHub/mcpbrain/.venv/bin/mcpbrain")
 launchd = Path.home() / "Library" / "LaunchAgents"
@@ -276,10 +276,10 @@ launchd.mkdir(parents=True, exist_ok=True)
 plists = {
     "com.mcpbrain": launchd_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
     "com.mcpbrain.tray": launchd_tray_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
-    "com.mcpbrain.records.prune": joshbrain_prune_plist(
-        python_bin=python_bin, joshbrain_dir=joshbrain_dir, mcpbrain_home=mcpbrain_home),
-    "com.mcpbrain.records.context-health": joshbrain_context_health_plist(
-        python_bin=python_bin, joshbrain_dir=joshbrain_dir, mcpbrain_home=mcpbrain_home),
+    "com.mcpbrain.records.prune": records_prune_plist(
+        python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
+    "com.mcpbrain.records.context-health": records_context_health_plist(
+        python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
 }
 
 for label, content in plists.items():
@@ -292,8 +292,8 @@ for label, content in plists.items():
 Then verify:
 
 ```bash
-launchctl list | grep centrepoint
-# Expected: mcpbrain, mcpbrain.tray, joshbrain.prune, joshbrain.context-health
+launchctl list | grep com.mcpbrain
+# Expected: com.mcpbrain, com.mcpbrain.tray, com.mcpbrain.records.prune, com.mcpbrain.records.context-health
 ```
 
 ## 5. Register mcpbrain MCP — Claude Code
