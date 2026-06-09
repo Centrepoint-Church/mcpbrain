@@ -1,4 +1,4 @@
-"""Daemon-side writer for structured records into the joshbrain repo.
+"""Daemon-side writer for structured records into the records repo.
 
 Called only from drain (the daemon is the single writer). Each function
 appends/creates one file and commits it BY NAME (never `git add -A`), keeping

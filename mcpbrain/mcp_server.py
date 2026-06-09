@@ -233,7 +233,7 @@ def make_brain_decision():
     async def brain_decision(text: str, rationale: str = "", owner: str = "",
                              supersedes: str = "", org: str = "") -> dict:
         """Record a decision. QUEUED: the daemon appends a row to state/decisions.md
-        in joshbrain and commits (one daemon cycle, ~seconds-minutes), not instantly."""
+        in your records repo and commits (one daemon cycle, ~seconds-minutes), not instantly."""
         from mcpbrain.capture import write_capture
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
@@ -248,7 +248,7 @@ def make_brain_decision():
 def make_brain_note():
     async def brain_note(text: str) -> dict:
         """Record a continuity note. QUEUED: the daemon prepends a dated entry to
-        state/hot.md in joshbrain and commits (one daemon cycle), not instantly."""
+        state/hot.md in your records repo and commits (one daemon cycle), not instantly."""
         from mcpbrain.capture import write_capture
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
@@ -263,7 +263,7 @@ def make_brain_memory_write():
     async def brain_memory_write(slug: str, description: str, body: str,
                                  memory_type: str = "project") -> dict:
         """Write a durable auto-memory file. QUEUED: the daemon writes memory/<slug>.md
-        + a MEMORY.md pointer in joshbrain and commits (one daemon cycle), not instantly."""
+        + a MEMORY.md pointer in your records repo and commits (one daemon cycle), not instantly."""
         from mcpbrain.capture import write_capture
         try:
             p = write_capture(str(config.app_dir()), _capture_envelope(
@@ -501,7 +501,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 name="brain_decision",
                 description=(
                     "Record a decision. "
-                    "QUEUED: the daemon appends a row to state/decisions.md in joshbrain "
+                    "QUEUED: the daemon appends a row to state/decisions.md in your records repo "
                     "and commits (one daemon cycle, ~seconds-minutes), not instantly."
                 ),
                 inputSchema={
@@ -520,7 +520,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 name="brain_note",
                 description=(
                     "Record a continuity note. "
-                    "QUEUED: the daemon prepends a dated entry to state/hot.md in joshbrain "
+                    "QUEUED: the daemon prepends a dated entry to state/hot.md in your records repo "
                     "and commits (one daemon cycle), not instantly."
                 ),
                 inputSchema={
@@ -536,7 +536,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 description=(
                     "Write a durable auto-memory file. "
                     "QUEUED: the daemon writes memory/<slug>.md + a MEMORY.md pointer "
-                    "in joshbrain and commits (one daemon cycle), not instantly."
+                    "in your records repo and commits (one daemon cycle), not instantly."
                 ),
                 inputSchema={
                     "type": "object",
