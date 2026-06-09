@@ -26,10 +26,13 @@ def test_prune_uses_calendar_interval():
     assert "<key>Hour</key>\n        <integer>6</integer>" in plist
 
 
-def test_prune_no_keep_alive_no_run_at_load():
+def test_prune_runs_at_load_no_keep_alive():
     plist = _prune()
+    # No KeepAlive (one-shot job, not a resident service)...
     assert "KeepAlive" not in plist
-    assert "RunAtLoad" not in plist
+    # ...but RunAtLoad so a run missed while powered off is caught up at the
+    # next login/boot (idempotent: prune just re-trims hot.md).
+    assert "<key>RunAtLoad</key>" in plist
 
 
 def test_prune_program_arguments():
