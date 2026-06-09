@@ -174,3 +174,20 @@ def test_gardener_log_paths_under_mcpbrain_home():
     plist = _gardener(mcpbrain_home="/Users/josh/.mcpbrain")
     assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.log" in plist
     assert "/Users/josh/.mcpbrain/church.centrepoint.joshbrain.gardener.err" in plist
+
+
+# --- FIX F: gardener must NOT RunAtLoad (expensive weekly headless session) --
+
+def test_gardener_no_run_at_load():
+    # The weekly gardener fires an expensive headless `claude` session; it must
+    # NOT also run on every login/reboot.
+    assert "RunAtLoad" not in _gardener()
+
+
+def test_prune_still_runs_at_load():
+    # Default run_at_load=True preserved for the cheap idempotent prune.
+    assert "<key>RunAtLoad</key>" in _prune()
+
+
+def test_context_health_still_runs_at_load():
+    assert "<key>RunAtLoad</key>" in _health()

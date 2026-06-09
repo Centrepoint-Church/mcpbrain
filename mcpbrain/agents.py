@@ -412,8 +412,13 @@ def _calendar_plist(
     hour: int,
     minute: int,
     weekday: int | None = None,
+    run_at_load: bool = True,
 ) -> str:
-    """Return a macOS launchd plist that runs on a StartCalendarInterval schedule."""
+    """Return a macOS launchd plist that runs on a StartCalendarInterval schedule.
+
+    run_at_load=True (default) emits RunAtLoad so a run missed while powered off is
+    caught up at the next login/boot. Set run_at_load=False for expensive jobs that
+    must fire only on schedule (e.g. the weekly gardener's headless claude session)."""
     # Escape XML-special chars (&, <, >) in each arg so shell operators like
     # `&&` survive as well-formed `&amp;&amp;` in the plist. Plain paths are
     # unaffected; this can only ever help args that carry markup-significant chars.
@@ -430,6 +435,7 @@ def _calendar_plist(
     )
     log_path = f"{mcpbrain_home}/{label}.log"
     err_path = f"{mcpbrain_home}/{label}.err"
+    run_at_load_block = "    <key>RunAtLoad</key>\n    <true/>\n" if run_at_load else ""
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -442,9 +448,7 @@ def _calendar_plist(
     <array>
 {args_xml}
     </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StartCalendarInterval</key>
+{run_at_load_block}    <key>StartCalendarInterval</key>
     <dict>
 {interval_block}
     </dict>
@@ -574,4 +578,5 @@ def joshbrain_gardener_plist(*, joshbrain_dir: str, mcpbrain_home: str) -> str:
         hour=8,
         minute=0,
         weekday=1,
+        run_at_load=False,  # weekly-only; do not fire on every login/reboot
     )
