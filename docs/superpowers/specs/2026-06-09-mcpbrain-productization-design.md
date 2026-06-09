@@ -94,15 +94,21 @@ Add an explicit "install configured?" check. The daemon's enrichment/extraction
 path **must not run** until both are true:
 
 - identity is set: `owner_name` **and** `owner_email` present in config;
-- at least one org (name + domain) is present in config.
+- at least one org (with a non-blank name; domains optional) is present in config.
 
 When the gate is unsatisfied, the daemon does normal *sync* (mail/doc ingest is
-identity-agnostic) but **skips enrichment/graph extraction**, and surfaces a
-machine-readable `configured: false` plus a reason in `daemon.status()`. This is
-the single source of truth the UI renders as the "Finish setup" state (Part 3).
-The existing `enrich_mode` default of `"off"` is the lever; the gate is an
-additional precondition checked in the same place the daemon decides whether to
-enrich.
+identity-agnostic) but **skips enrichment/graph extraction**. This is the single
+source of truth the UI renders as the "Finish setup" state (Part 3).
+
+**Implementation (Plan 1):** the predicate is `config.is_configured(home)`, which
+reads the raw `orgs` config key directly (not `orgs.taxonomy_from_config`) to
+avoid an import cycle (orgs imports config). The gate itself is
+`daemon._gated_enrich_mode(mode, home)` called in `run_one`: it forces the
+per-cycle `enrich_mode` to `"off"` unless `is_configured`, so sync still runs.
+The existing `enrich_mode` default of `"off"` remains the base lever. **Surfacing
+`configured` in `daemon.status()`** (for the UI "Finish setup" state) is built
+with the status/probe layer in **Plan 3**, not Plan 1; Plan 1 covers the gate
+behaviour, fully unit-tested via `is_configured` and `_gated_enrich_mode`.
 
 Rationale for gating enrichment specifically (not all sync): enrichment is where
 owner identity and org taxonomy are *written into* the graph. Sync without
@@ -111,11 +117,12 @@ still gets their mail indexed for plain search without corrupting the graph.
 
 ### 1.2 Neutralize the Josh-shaped defaults
 
-- `config.owner_name/owner_full_name/owner_role/owner_email/owner_aliases`:
-  defaults become **neutral/empty**, not Josh's values. With the gate in 1.1 the
-  daemon never reaches enrichment with empty identity, so there is no behavioural
-  default to preserve. (Keep the helpers and config keys; only the fallback
-  literals change.)
+- `config.owner_name/owner_full_name/owner_role/owner_email`: defaults become the
+  **empty string**, not Josh's values. `owner_aliases` derives only from the
+  configured name/full-name (the hardcoded `"joshua"` special case is removed). With
+  the gate in 1.1 the daemon never reaches enrichment with empty identity, so there
+  is no behavioural default to preserve. (Keep the helpers and config keys; only the
+  fallback literals change.)
 - `orgs.DEFAULT_TAXONOMY`: becomes **empty**; `orgs.taxonomy_from_config(home)`
   is the only source of orgs. The gate ensures ≥1 org before enrichment.
 
@@ -141,7 +148,15 @@ defaults):
   `clickup.py:29` (helper already exists in config; ensure clickup.py uses it).
 - `clickup_org_field_id(home)` — replaces `clickup.py:34` `ORG_FIELD_ID`.
 
+`clickup_user_id` returns `int | None` (unassigned when unset, rather than a wrong
+default). `create_task` and `_normalise_task` read these per `home`.
+
 The wizard collects these (it already collects `clickup_api_key`).
+
+**Deferred follow-up:** `clickup.py:_ORG_OPTION_IDS` (the brain-org → ClickUp
+dropdown *option-id* map) is also install-specific. It only affects *writing* the
+Org custom field and degrades to "no org tag" when unmatched, so making it
+config-driven is out of scope for Plan 1 and tracked as a follow-up.
 
 ### 1.5 Records repo → per-user local git in app-dir, renamed
 
@@ -151,20 +166,34 @@ memories, continuity, voice, scaffolding). Its entire write path is git-based
 it must remain a git repo — but it does **not** need to be a separate *product*
 repo with a remote, and it must not be named after Josh.
 
-- **Location:** a per-user **local git repo inside app-dir** (e.g.
-  `<app_dir>/records`), created by a plain `git init` at onboarding. No remote,
-  no clone, no shared repo. Per-user by construction (app-dir is per-user); never
-  pushed; already inside `backup.py`'s snapshot scope.
-- **Name:** rename "joshbrain" → neutral `records` across `config.joshbrain_dir`
-  (→ `records_dir`, config-overridable, default `<app_dir>/records`),
-  `joshbrain_write.py`, `draft.py:81` (voice path), and the agent labels (see
-  1.6). The name is now a private local path, so "joshbrain" never appears to
-  other users.
-- **Scaffolding** (the `state/decisions.md`, `state/hot.md` templates with their
-  append-anchors, the cowork prompt files): ships **with the mcpbrain product**
-  and is stamped into the user's records repo at onboarding (and re-stamped on
-  update if missing). Clean split: product = shared/updated; records = local,
-  versioned, never shared.
+- **Location:** a per-user **local git repo inside app-dir**, default
+  `<home>/records` (`home` = app-dir). No remote, no clone, no shared repo.
+  Per-user by construction; never pushed; already inside `backup.py`'s snapshot
+  scope.
+- **Config (Plan 2):** new `config.records_dir(home)` resolves `records_dir` key →
+  **legacy `joshbrain_dir` key (back-compat for existing installs)** →
+  `<home>/records`. `config.joshbrain_dir` is kept as a thin alias so older callers
+  keep working.
+- **Creation (Plan 2):** a new module `mcpbrain/records.py` provides
+  `ensure_records_repo(repo_dir, *, git_name, git_email)` — it `git init`s the dir,
+  sets a local git identity only if none exists (from `owner_full_name`/`owner_email`,
+  else `mcpbrain`/`mcpbrain@localhost`), and stamps any missing scaffold files. The
+  **daemon's drain path calls it before every write** (`drain._records_repo`), so a
+  freshly-onboarded user gets a working repo on the first cycle with **no manual
+  seed and no wizard step**. Idempotent; never clobbers existing files or identity.
+- **Scaffold (Plan 2):** the minimal templates the writers require live as
+  constants in `mcpbrain/records.py`: `state/decisions.md` (with the
+  `"Append new decisions at the top. One line per decision."` anchor),
+  `state/hot.md` (`## Just decided` anchor), `MEMORY.md`, `context/voice.md`, and a
+  `memory/` dir. (The richer cowork-prompt scaffolding from `seed_joshbrain.py` is
+  not required for the write path and stays in the dev seed tool.)
+- **Naming:** the user-facing surfaces lose "joshbrain": the directory, the config
+  key, `draft.py`'s voice path, and the MCP tool-description text all become
+  `records`. The Python module file **`joshbrain_write.py` keeps its name** (it is an
+  internal import, not a user-facing surface; renaming it would churn imports for no
+  user benefit). The **service/agent labels** (`church.centrepoint.joshbrain.*`) and
+  the `agent_errs.py` glob are renamed in **1.6 / Plan 3**, since they are coupled to
+  the launchd/Task-Scheduler label work, not the records data layer.
 
 ### 1.6 Windows cadence parity + platform hardening
 
@@ -184,10 +213,17 @@ and `.sh` wrappers.
   `platform.system()`) so a future refactor can't expose the Windows
   `AttributeError`.
 
-Service/label naming becomes org-neutral: `church.centrepoint.*` →
-`com.mcpbrain.*` (and `*.records.*` for the cadences). Each user is on their own
-device, so there is no same-machine collision concern; the rename is about not
-baking one org into the service identity.
+Service/label naming becomes org-neutral **and** drops "joshbrain" (the label
+rename deferred here from 1.5): `church.centrepoint.joshbrain.*` →
+`com.mcpbrain.records.*` for the four cadence labels in `agents.py`
+(`_PRUNE_LABEL`, `_HEALTH_LABEL`, `_MEETING_PACKS_LABEL`, `_GARDENER_LABEL`), and
+the daemon/tray labels `church.centrepoint.mcpbrain*` → `com.mcpbrain.*`. The
+`agent_errs.py` `GLOB` (`church.centrepoint.joshbrain.*.err`) and its label-parse
+move in lockstep. The cadence plists that reference the repo path use
+`config.records_dir` (the `joshbrain_dir=`/`Path(home).parent/"joshbrain"`
+arguments at `agents.py:474,522,537-538,553,558,566,576` are repointed). Each user
+is on their own device, so there is no same-machine collision concern; the rename
+is about not baking one org (or one person) into the service identity.
 
 ---
 
@@ -462,12 +498,21 @@ device.
 - `daemon.py` — the 1.1 gate (skip enrichment until configured); `status()`
   returns `configured` + the connection-probe results; auto-update tick;
   self-healing state.
-- `clickup.py`, `clickup_sync.py`, `draft.py`, `mcp_server.py`,
-  `joshbrain_write.py` — remove Josh literals; route through config.
-- `joshbrain_write.py` / records module — rename to `records`; `records_dir`;
-  `git init` + scaffold-stamp at onboarding.
-- `agents.py` — org-neutral labels; Task Scheduler + systemd timer generators for
-  the four cadences; replace shell wrappers with `python -m mcpbrain …`.
+- `clickup.py`, `clickup_sync.py`, `mcp_server.py` — remove Josh literals; route
+  through config (Plan 1). `clickup.py` `_normalise_task`/`create_task` read the
+  per-user ClickUp helpers.
+- `draft.py` — `generate_draft` takes `owner_full_name` (Plan 1); `_load_voice_rules`
+  reads `config.records_dir(home)/context/voice.md` (Plan 2).
+- `config.py` — `records_dir()` + `joshbrain_dir()` back-compat alias (Plan 2).
+- `mcpbrain/records.py` (**new**, Plan 2) — `ensure_records_repo()` (git init +
+  scaffold templates), idempotent, no-clobber.
+- `drain.py` — `_records_repo(home)` resolves `records_dir` and ensures the repo
+  before the writer block (Plan 2). `joshbrain_write.py` keeps its filename; only
+  its `owner` default and docstring change.
+- `agents.py` — org-/person-neutral labels (`com.mcpbrain.records.*`); repo paths
+  via `config.records_dir`; Task Scheduler + systemd timer generators for the four
+  cadences; replace shell wrappers with `python -m mcpbrain …`. `agent_errs.py` glob
+  + label-parse follow the rename. (Plan 3.)
 - `update.py` — index-based reinstall replacing git pull; lock-safe restart.
 - `setup.py` / `install/*` — thin one-line bootstrap; drop `--repo-dir`
   persistence; **tray installed as a required desktop component** (replace
@@ -559,3 +604,26 @@ device.
    surfaces progress there).
 
 Each part is a separable implementation plan; this spec is the shared design.
+
+### Plan mapping (this spec → plan files)
+
+The work is decomposed into a plan series under `docs/superpowers/plans/`. Plan
+*numbers below reflect authoring order, not a mandated execution order* — the
+recommended dependency order is the "Rollout sequencing" list above (correctness →
+status layer → distribution → UX → backfill). Part 1 splits because the records
+data layer and the platform/label work are independent:
+
+- **Plan 1** — `2026-06-09-part1-identity-correctness.md` — spec **1.1–1.4** (gate
+  predicate + daemon gating, neutralized owner/orgs defaults, ClickUp per-user
+  helpers + routing, the four literal-"Josh" bypasses). *Written.*
+- **Plan 2** — `2026-06-09-part2-records-repo.md` — spec **1.5** records data layer
+  (`config.records_dir`, `mcpbrain/records.py` ensure+scaffold, drain ensures the
+  repo, voice path, user-facing de-"joshbrain"). *Written.*
+- **Plan 3** — platform & cadences — spec **1.6** (`agents.py` label rename
+  `com.mcpbrain.records.*`, `agent_errs.py` glob, Task Scheduler + systemd timer
+  generators, `os.uname` hardening). *To write.*
+- **Plan 4** — status & connection-probe layer — spec **3.2** + `daemon.status()`
+  `configured`/probe fields (also unblocks the 1.1 UI surfacing). *To write.*
+- **Plan 5** — distribution & release — spec **Part 2**. *To write.*
+- **Plan 6** — UX surfaces — spec **3.1/3.3/3.4/3.5**. *To write.*
+- **Plan 7** — backfill — spec **Part 4**. *To write.*
