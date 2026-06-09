@@ -1453,9 +1453,10 @@ _CADENCE_KEYS = (
 
 
 def _cadences_from_config(home) -> dict:
-    """Read the cadences block from config.json. Returns a dict of the five
-    interval keys; absent keys map to None (OFF). Invalid values log a warning
-    and map to None, mirroring the backup interval validation in daemon.py.
+    """Read the cadences block from config.json. Returns a dict of the
+    interval keys in _CADENCE_KEYS; absent keys map to None (OFF). Invalid
+    values log a warning and map to None, mirroring the backup interval
+    validation in daemon.py.
     """
     cfg = config.read_config(home)
     cadences_block = cfg.get("cadences") or {}
