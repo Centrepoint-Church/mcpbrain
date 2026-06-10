@@ -541,6 +541,22 @@ class Daemon:
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
+    def config_profile(self) -> dict:
+        """Saved profile for the settings form — never includes the ClickUp secret."""
+        cfg = config.read_config(str(app_dir()))
+        return {
+            "owner_full_name": cfg.get("owner_full_name", "") or "",
+            "owner_name": cfg.get("owner_name", "") or "",
+            "owner_email": cfg.get("owner_email", "") or "",
+            "owner_role": cfg.get("owner_role", "") or "",
+            "orgs": cfg.get("orgs") or [],
+            "clickup_list_id": cfg.get("clickup_list_id", "") or "",
+            "clickup_api_key_set": bool(cfg.get("clickup_api_key")),
+            "timezone": cfg.get("timezone", "") or "",
+            "home_dir": str(app_dir()),
+            "records_dir": config.records_dir(str(app_dir())),
+        }
+
     def _resolve_google_account(self, token_file) -> str:
         """Return the connected Google account email, resolving lazily.
 
@@ -626,6 +642,14 @@ class Daemon:
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
             self._verify_interval_s = cadences["verify_interval_s"]
+        # Best-effort: keep the enrichment skill + records-repo scaffold current
+        # whenever settings are saved. Failures never fail the POST.
+        try:
+            from mcpbrain import cowork_tasks, records
+            cowork_tasks.write_enrichment_skill(home)
+            records.scaffold_records(home)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("apply_config materialise degraded: %s", exc)
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""

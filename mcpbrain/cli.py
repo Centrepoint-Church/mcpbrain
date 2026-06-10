@@ -18,7 +18,7 @@ def main(argv=None):
     # own module parser (parse_known_args forwards --help into `rest`).
     for name in ("daemon","mcp-server","auth","setup","update","register","tray",
                  "enrich-backfill","records-prune","records-health",
-                 "records-gardener","meeting-packs"):
+                 "records-gardener","meeting-packs","session-start","session-end"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -34,4 +34,6 @@ def main(argv=None):
         "records-health": lambda: _records_cadence_main(["records-health", *rest]),
         "records-gardener": lambda: __import__("mcpbrain.cowork", fromlist=["gardener_main"]).gardener_main(rest),
         "meeting-packs": lambda: __import__("mcpbrain.cowork", fromlist=["meeting_packs_main"]).meeting_packs_main(rest),
+        "session-start": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_start_main"]).session_start_main(rest),
+        "session-end": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_end_main"]).session_end_main(rest),
     }[ns.cmd]()
