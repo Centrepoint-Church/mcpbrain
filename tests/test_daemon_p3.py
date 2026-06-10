@@ -713,6 +713,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "clickup_interval_s": None,
              "stale_reextract_interval_s": None,
              "auto_update_interval_s": None,
+             "verify_interval_s": None,
          }):
         daemon.apply_config(new_config)
 

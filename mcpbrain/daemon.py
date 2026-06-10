@@ -308,6 +308,7 @@ class Daemon:
                  clickup_interval_s: float | None = None,
                  stale_reextract_interval_s: float | None = None,
                  auto_update_interval_s: float | None = None,
+                 verify_interval_s: float | None = None,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -402,6 +403,11 @@ class Daemon:
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
+        # Periodic connection verification (network) is OFF unless verify_interval_s
+        # is set. Defaults to hourly when configured without an explicit interval.
+        # Writes connections.json which all_connections() overlays.
+        self._verify_interval_s: float | None = verify_interval_s
+        self._last_verify = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -610,6 +616,7 @@ class Daemon:
             self._clickup_interval_s = cadences["clickup_interval_s"]
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
+            self._verify_interval_s = cadences["verify_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -830,6 +837,29 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — auto-update must never crash the loop
             log.warning("auto-update failed (loop continues): %s", exc)
             return {"updated": False, "error": str(exc)}
+
+    # -- verify connections cadence -------------------------------------------
+
+    def maybe_verify_connections(self) -> dict | None:
+        """Periodically verify connections (network) and cache the result.
+        OFF unless configured; default hourly when configured without an explicit
+        interval. Time-gated via self._clock."""
+        home = str(app_dir())
+        if not config.is_configured(home):
+            return None
+        with self._config_lock:
+            interval = self._verify_interval_s
+        if interval is None:
+            interval = 3600.0
+        if self._last_verify is not None and (self._clock() - self._last_verify) < interval:
+            return None
+        self._last_verify = self._clock()
+        try:
+            from mcpbrain import probes
+            return probes.verify_connections(home, self._store)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("verify_connections failed (loop continues): %s", exc)
+            return None
 
     # -- periodic entity resolution -----------------------------------------
 
@@ -1324,6 +1354,7 @@ class Daemon:
             self.maybe_clickup_sync,
             self.maybe_stale_reextract,
             self.maybe_auto_update,
+            self.maybe_verify_connections,
         ):
             try:
                 pass_fn()
@@ -1522,6 +1553,7 @@ _CADENCE_KEYS = (
     "clickup_interval_s",
     "stale_reextract_interval_s",
     "auto_update_interval_s",
+    "verify_interval_s",
 )
 
 
@@ -1597,7 +1629,8 @@ def main(argv=None) -> None:
                     audit_interval_s=cadences["audit_interval_s"],
                     clickup_interval_s=cadences["clickup_interval_s"],
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
-                    auto_update_interval_s=cadences["auto_update_interval_s"])  # services=None -> auto-build from token
+                    auto_update_interval_s=cadences["auto_update_interval_s"],
+                    verify_interval_s=cadences["verify_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
