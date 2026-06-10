@@ -415,6 +415,11 @@ class Daemon:
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
+        # Single-flight guard for enrich-backfill: non-blocking acquire means a
+        # duplicate start_enrich_backfill call is a no-op. _backfill_active
+        # signals run_one to yield its write cycle while the backfill is live.
+        self._backfill_active = threading.Event()
+        self._backfill_lock = threading.Lock()
 
     # -- service resolution -------------------------------------------------
 
@@ -671,14 +676,22 @@ class Daemon:
             self._auth_lock.release()
 
     def start_enrich_backfill(self) -> None:
-        """Spawn a one-shot enrich-backfill run on a daemon thread (non-blocking)."""
+        """One-shot enrich-backfill on a daemon thread. Single-flight; pauses the
+        daemon's own write cycle for the duration so there is only one writer."""
         import threading
         from mcpbrain import enrich_backfill
+        if not self._backfill_lock.acquire(blocking=False):
+            log.info("enrich-backfill already running; ignoring duplicate start")
+            return
+        self._backfill_active.set()
         def _run():
             try:
                 enrich_backfill.run_backfill(store=self._store, embedder=self._embedder)
             except Exception as exc:  # noqa: BLE001
                 log.warning("enrich-backfill failed: %s", exc)
+            finally:
+                self._backfill_active.clear()
+                self._backfill_lock.release()
         threading.Thread(target=_run, daemon=True).start()
 
     def cancel_enrich_backfill(self) -> None:
@@ -710,7 +723,7 @@ class Daemon:
         guarantee). Otherwise runs run_cycle with the configured services and
         returns its result dict.
         """
-        if self._pause.is_set():
+        if self._pause.is_set() or self._backfill_active.is_set():
             return None
         services = self.ensure_services()
         # Snapshot the enrich client + mode under the config lock so apply_config
