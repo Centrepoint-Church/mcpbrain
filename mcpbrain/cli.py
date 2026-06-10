@@ -16,7 +16,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     # add_help only for mcp-server; every other subcommand delegates --help to its
     # own module parser (parse_known_args forwards --help into `rest`).
-    for name in ("daemon","mcp-server","auth","setup","update","register","tray"):
+    for name in ("daemon","mcp-server","auth","setup","update","register","tray",
+                 "enrich-backfill"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     return {
@@ -24,4 +25,5 @@ def main(argv=None):
         "auth": lambda: _auth_main(rest), "setup": lambda: _setup_main(rest),
         "update": lambda: _update_main(rest), "register": lambda: _register_main(rest),
         "tray": lambda: _tray_main(rest),
+        "enrich-backfill": lambda: __import__("mcpbrain.enrich_backfill", fromlist=["main"]).main(rest),
     }[ns.cmd]()

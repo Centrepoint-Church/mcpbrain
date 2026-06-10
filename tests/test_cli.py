@@ -1,5 +1,13 @@
 import mcpbrain.cli as cli
 
+
+def test_dispatch_enrich_backfill(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("mcpbrain.enrich_backfill.main", lambda argv: seen.setdefault("hit", True) or 0)
+    cli.main(["enrich-backfill"])
+    assert seen.get("hit") is True
+
+
 def test_dispatch_routes_each_subcommand(monkeypatch):
     called = {}
     monkeypatch.setattr(cli, "_daemon_main", lambda a: called.setdefault("daemon", a))
