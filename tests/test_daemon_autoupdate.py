@@ -14,9 +14,14 @@ def _daemon(tmp_path, **kw):
                   clock=clock, **kw)
 
 
-def test_auto_update_off_by_default(tmp_path):
+def test_auto_update_off_by_default(tmp_path, monkeypatch):
+    # Write an EMPTY config.json so is_configured() returns False.
+    # OFF when unconfigured; daily-default when configured.
+    import json
+    (tmp_path / "config.json").write_text(json.dumps({}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     d = _daemon(tmp_path)
-    assert d.maybe_auto_update() is None  # OFF unless interval set
+    assert d.maybe_auto_update() is None
 
 
 def test_auto_update_detects_when_due_and_behind(tmp_path, monkeypatch):
