@@ -586,11 +586,16 @@ def test_maybe_waiting_on_swallows_errors(tmp_path):
 # Task 6 — _run_periodic_passes wiring tests
 # ---------------------------------------------------------------------------
 
-def test_run_calls_passes_in_order(tmp_path):
+def test_run_calls_passes_in_order(tmp_path, monkeypatch):
     """_run_periodic_passes() calls the five maybe_* methods in spec order:
     communities -> lint -> synthesise -> proactive -> waiting_on."""
+    import json
     from unittest.mock import MagicMock
 
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"owner_name": "S", "owner_email": "s@x.com", "orgs": [{"name": "O"}]}
+    ))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path, name="t6a.db")
     emb = _FakeEmbedder()
     daemon = Daemon(
@@ -617,11 +622,16 @@ def test_run_calls_passes_in_order(tmp_path):
     assert call_order == ["communities", "lint", "synthesise", "proactive", "waiting_on"]
 
 
-def test_run_one_pass_failure_does_not_block_others(tmp_path):
+def test_run_one_pass_failure_does_not_block_others(tmp_path, monkeypatch):
     """If one maybe_* pass raises unexpectedly, _run_periodic_passes catches it
     and the remaining passes still run."""
+    import json
     from unittest.mock import MagicMock
 
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"owner_name": "S", "owner_email": "s@x.com", "orgs": [{"name": "O"}]}
+    ))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path, name="t6b.db")
     emb = _FakeEmbedder()
     daemon = Daemon(
