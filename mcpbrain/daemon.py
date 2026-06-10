@@ -307,6 +307,7 @@ class Daemon:
                  audit_interval_s: float | None = None,
                  clickup_interval_s: float | None = None,
                  stale_reextract_interval_s: float | None = None,
+                 auto_update_interval_s: float | None = None,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -398,6 +399,9 @@ class Daemon:
         # stale_reextract_interval_s is set. Same three-shape cadence contract.
         self._stale_reextract_interval_s: float | None = stale_reextract_interval_s
         self._last_stale_reextract = None
+        # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
+        self._auto_update_interval_s: float | None = auto_update_interval_s
+        self._last_auto_update = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -604,6 +608,7 @@ class Daemon:
             self._audit_interval_s = cadences["audit_interval_s"]
             self._clickup_interval_s = cadences["clickup_interval_s"]
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
+            self._auto_update_interval_s = cadences["auto_update_interval_s"]
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
@@ -798,6 +803,32 @@ class Daemon:
         # Advance the cadence clock only after a clean backup.
         self._last_backup = self._clock()
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
+
+    # -- silent auto-update ---------------------------------------------------
+
+    def maybe_auto_update(self) -> dict | None:
+        """Silently reinstall from the wheel index if a newer version is published.
+
+        OFF unless auto_update_interval_s is set. Time-gated via self._clock. On a
+        due tick: compare installed vs the index's newest; reinstall + restart only
+        when behind. Failures are swallowed (logged) so the loop keeps running."""
+        with self._config_lock:
+            interval = self._auto_update_interval_s
+        if interval is None:
+            return None
+        if self._last_auto_update is not None and (self._clock() - self._last_auto_update) < interval:
+            return None
+        self._last_auto_update = self._clock()
+        try:
+            from mcpbrain import update as upd
+            latest = upd._latest_version(upd._index_url())
+            if not upd._should_update(upd._installed_version(), latest):
+                return {"updated": False}
+            upd.update_from_index(upd._index_url())
+            return {"updated": True, "version": latest}
+        except Exception as exc:  # noqa: BLE001 — auto-update must never crash the loop
+            log.warning("auto-update failed (loop continues): %s", exc)
+            return {"updated": False, "error": str(exc)}
 
     # -- periodic entity resolution -----------------------------------------
 
@@ -1291,6 +1322,7 @@ class Daemon:
             self.maybe_audit,
             self.maybe_clickup_sync,
             self.maybe_stale_reextract,
+            self.maybe_auto_update,
         ):
             try:
                 pass_fn()
@@ -1488,6 +1520,7 @@ _CADENCE_KEYS = (
     "audit_interval_s",
     "clickup_interval_s",
     "stale_reextract_interval_s",
+    "auto_update_interval_s",
 )
 
 
