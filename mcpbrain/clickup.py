@@ -18,17 +18,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from . import config
 
 log = logging.getLogger(__name__)
 
 _BASE = "https://api.clickup.com/api/v2"
-# TODO(timezone): _PERTH is a hardcoded UTC+8 offset used for deadline <-> epoch-ms
-# conversions. config.user_timezone(home) now exposes a per-install IANA timezone name
-# that should replace this. Threading `home` into deadline_to_due_ms / due_ms_to_deadline
-# is a larger refactor left for a future task.
-_PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST (matches dashboard._PERTH)
 
 # --- two-way sync field map ---------------------------------------------------
 # IDs are install-specific (discovered via the ClickUp API) and configured in
@@ -43,25 +39,37 @@ _PRIORITY_NAME = {v: k for k, v in _PRIORITY_INT.items()}
 _CLOSED_STATUS = "complete"   # the list's done-type status label
 
 
-def deadline_to_due_ms(deadline: str | None) -> int | None:
-    """YYYY-MM-DD (Perth midnight) -> epoch ms, or None for empty/invalid."""
-    if not deadline:
+def _tz(tz: str):
+    """Resolve an IANA tz string to a tzinfo, or None when unset/invalid."""
+    if not tz:
         return None
     try:
-        d = datetime.strptime(deadline, "%Y-%m-%d").replace(tzinfo=_PERTH)
+        return ZoneInfo(tz)
+    except Exception:  # noqa: BLE001 — bad tz string => treat as unset
+        return None
+
+
+def deadline_to_due_ms(deadline: str | None, *, tz: str) -> int | None:
+    """YYYY-MM-DD (tz midnight) -> epoch ms, or None for empty/invalid/unset tz."""
+    z = _tz(tz)
+    if not deadline or z is None:
+        return None
+    try:
+        d = datetime.strptime(deadline, "%Y-%m-%d").replace(tzinfo=z)
     except ValueError:
         return None
     return int(d.timestamp() * 1000)
 
 
-def due_ms_to_deadline(ms) -> str:
-    """epoch ms -> YYYY-MM-DD (Perth), or '' for falsy input."""
-    if ms in (None, "", 0, "0"):
-        return ""
+def due_ms_to_deadline(due_ms, *, tz: str) -> str | None:
+    """epoch ms -> YYYY-MM-DD (tz), or None for falsy input or unset tz."""
+    z = _tz(tz)
+    if not due_ms or z is None:
+        return None
     try:
-        return datetime.fromtimestamp(int(ms) / 1000, tz=_PERTH).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(int(due_ms) / 1000, tz=z).strftime("%Y-%m-%d")
     except (ValueError, OSError, OverflowError):
-        return ""
+        return None
 
 
 def priority_to_int(name: str | None) -> int | None:
@@ -122,17 +130,20 @@ def _ms_to_iso(ms_str: str | None) -> str:
         return ""
 
 
-def _iso_to_ms(iso: str) -> int | None:
-    """Convert a YYYY-MM-DD string to unix milliseconds at the END of that day, Perth time.
+def _iso_to_ms(iso: str, *, tz: str) -> int | None:
+    """Convert a YYYY-MM-DD string to unix milliseconds at the END of that day (tz).
 
     due_date_lte means "due on or before this date" and ClickUp compares raw ms
     timestamps, so the cutoff must be the last instant of the day. A start-of-day
     cutoff would exclude tasks due later the same day.
 
-    Returns None and logs a warning if the string is not a valid date.
+    Returns None when tz is unset/invalid or the string is not a valid date.
     """
+    z = _tz(tz)
+    if z is None:
+        return None
     try:
-        day_start = datetime.strptime(iso, "%Y-%m-%d").replace(tzinfo=_PERTH)
+        day_start = datetime.strptime(iso, "%Y-%m-%d").replace(tzinfo=z)
         day_end = day_start + timedelta(days=1)
         return int(day_end.timestamp() * 1000) - 1
     except ValueError:
@@ -159,7 +170,7 @@ def search_tasks(home, *, due_date_lte: str | None = None) -> list[dict]:
 
     params: dict[str, str] = {"include_closed": "false"}
     if due_date_lte:
-        ms = _iso_to_ms(due_date_lte)
+        ms = _iso_to_ms(due_date_lte, tz=config.user_timezone(home))
         if ms is not None:
             params["due_date_lte"] = str(ms)
 
@@ -260,7 +271,7 @@ def _api(token: str, method: str, path: str, body: dict | None = None,
 
 
 def _normalise_task(t: dict, org_field_id: str = "",
-                    org_options: dict | None = None) -> dict:
+                    org_options: dict | None = None, tz: str = "") -> dict:
     """Flatten a raw ClickUp task into the fields the sync cares about.
 
     The link anchor is the native task id; no Brain ID custom field is read.
@@ -283,7 +294,7 @@ def _normalise_task(t: dict, org_field_id: str = "",
         "status": (t.get("status") or {}).get("status", "") if isinstance(t.get("status"), dict) else "",
         "org": org,
         "priority": int_to_priority(t.get("priority")),
-        "deadline": due_ms_to_deadline(t.get("due_date")),
+        "deadline": due_ms_to_deadline(t.get("due_date"), tz=tz),
         "assignees": assignees,
         "url": t.get("url", ""),
     }
@@ -300,6 +311,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
         return []
     org_field = config.clickup_org_field_id(home).strip()
     org_options = config.clickup_org_options(home)
+    tz = config.user_timezone(home)
     out, page = [], 0
     while True:
         params = {"include_closed": "true" if include_closed else "false",
@@ -309,7 +321,7 @@ def list_tasks_full(home, *, include_closed: bool = True) -> list[dict]:
         if not data:
             break
         tasks = data.get("tasks") or []
-        out.extend(_normalise_task(t, org_field, org_options) for t in tasks)
+        out.extend(_normalise_task(t, org_field, org_options, tz=tz) for t in tasks)
         if data.get("last_page") or len(tasks) == 0:
             break
         page += 1
@@ -336,7 +348,7 @@ def create_task(home, *, name: str, description: str = "",
         body["custom_fields"] = [{"id": org_field, "value": org_opt}]
     if description:
         body["description"] = description
-    due_ms = deadline_to_due_ms(deadline)
+    due_ms = deadline_to_due_ms(deadline, tz=config.user_timezone(home))
     if due_ms is not None:
         body["due_date"] = due_ms
         body["due_date_time"] = False

@@ -6,11 +6,12 @@ from mcpbrain.store import Store
 # --- pure mappers -----------------------------------------------------------
 
 def test_deadline_due_roundtrip():
-    ms = clickup.deadline_to_due_ms("2026-06-19")
+    tz = "Australia/Perth"
+    ms = clickup.deadline_to_due_ms("2026-06-19", tz=tz)
     assert isinstance(ms, int)
-    assert clickup.due_ms_to_deadline(ms) == "2026-06-19"
-    assert clickup.deadline_to_due_ms("") is None
-    assert clickup.due_ms_to_deadline(None) == ""
+    assert clickup.due_ms_to_deadline(ms, tz=tz) == "2026-06-19"
+    assert clickup.deadline_to_due_ms("", tz=tz) is None
+    assert clickup.due_ms_to_deadline(None, tz=tz) is None
 
 
 def test_priority_roundtrip():
