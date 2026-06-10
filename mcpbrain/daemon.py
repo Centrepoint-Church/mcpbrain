@@ -403,6 +403,10 @@ class Daemon:
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
+        # Pending update version: set by maybe_auto_update (detect-only); consumed
+        # by run() AFTER the write lock is released so uv install + restart never
+        # happen under the held lock.
+        self._pending_update: str | None = None
         # Periodic connection verification (network) is OFF unless verify_interval_s
         # is set. Defaults to hourly when configured without an explicit interval.
         # Writes connections.json which all_connections() overlays.
@@ -815,13 +819,14 @@ class Daemon:
     # -- silent auto-update ---------------------------------------------------
 
     def maybe_auto_update(self) -> dict | None:
-        """Silently reinstall from the wheel index if a newer version is published.
-
-        OFF unless auto_update_interval_s is set. Time-gated via self._clock. On a
-        due tick: compare installed vs the index's newest; reinstall + restart only
-        when behind. Failures are swallowed (logged) so the loop keeps running."""
+        """Detect a newer published version; signal run() to install it OUTSIDE the
+        write lock. Default daily when configured; OFF when unconfigured. Never runs
+        the install/restart here (that would happen under the held lock)."""
+        home = str(app_dir())
         with self._config_lock:
             interval = self._auto_update_interval_s
+        if interval is None:
+            interval = 86400.0 if config.is_configured(home) else None
         if interval is None:
             return None
         if self._last_auto_update is not None and (self._clock() - self._last_auto_update) < interval:
@@ -829,14 +834,17 @@ class Daemon:
         self._last_auto_update = self._clock()
         try:
             from mcpbrain import update as upd
-            latest = upd._latest_version(upd._index_url())
-            if not upd._should_update(upd._installed_version(), latest):
-                return {"updated": False}
-            upd.update_from_index(upd._index_url())
-            return {"updated": True, "version": latest}
-        except Exception as exc:  # noqa: BLE001 — auto-update must never crash the loop
-            log.warning("auto-update failed (loop continues): %s", exc)
-            return {"updated": False, "error": str(exc)}
+            idx = upd._index_url()
+            if "CHANGE-ME" in idx:
+                log.warning("auto-update skipped: update channel not configured (index URL is the placeholder)")
+                return None
+            latest = upd._latest_version(idx)
+            if upd._should_update(upd._installed_version(), latest):
+                self._pending_update = latest
+                return {"update_available": True, "version": latest}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto-update check failed (loop continues): %s", exc)
+        return None
 
     # -- verify connections cadence -------------------------------------------
 
@@ -1473,10 +1481,17 @@ class Daemon:
                 # Five periodic maintenance passes in spec order (§54, §165).
                 # communities first (lint reads fresh entity_communities).
                 self._run_periodic_passes()
-                if self._stop.is_set():
+                if self._pending_update or self._stop.is_set():
                     break
                 # Block until woken (sync_now/stop) or the interval elapses.
                 self._wake.wait(timeout=self._interval_s)
+
+        if self._pending_update:
+            try:
+                from mcpbrain import update as upd
+                upd.update_from_index(upd._index_url())  # uv install + restart, lock released
+            except Exception as exc:  # noqa: BLE001
+                log.error("auto-update install failed: %s", exc)
 
 
 def _enrich_client_from_config(home):
