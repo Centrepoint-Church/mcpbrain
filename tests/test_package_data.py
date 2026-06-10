@@ -46,3 +46,18 @@ def test_enrich_prompt_doc_present():
 def test_dashboard_html_present():
     html = _pkg_dir() / "wizard" / "dashboard.html"
     assert html.is_file(), f"dashboard HTML missing at {html}"
+
+
+def test_records_claude_template_present():
+    # The records-repo CLAUDE.md template is copied into a freshly-scaffolded
+    # records repo. packages.find skips .md, so without the package-data
+    # declaration a clean install has no template to seed the working space.
+    tmpl = _pkg_dir() / "records_templates" / "CLAUDE.md"
+    assert tmpl.is_file(), f"records CLAUDE.md template missing at {tmpl}"
+
+
+def test_cowork_enrichment_doc_present():
+    # The cowork enrichment prompt is read at runtime. packages.find skips .md,
+    # so without the package-data declaration a clean install lacks this doc.
+    doc = _pkg_dir() / "cowork" / "enrichment.md"
+    assert doc.is_file(), f"cowork enrichment doc missing at {doc}"

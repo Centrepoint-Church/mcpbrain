@@ -567,16 +567,16 @@ function copyText(id){
 async function prepareWorkspace(){
   $("ws-state").classList.remove("hidden");
   badge("ws-state", "Preparing…", "wait");
-  try{
-    await P("/api/records/scaffold");
-    badge("ws-state", "Ready", "ok");
-  }catch(e){ badge("ws-state", "Could not prepare", "wait"); }
+  const res = await P("/api/records/scaffold").catch(() => null);
+  if(res && res.ok){ badge("ws-state", "Ready", "ok"); }
+  else { badge("ws-state", "Could not prepare", "wait"); }
 }
 async function installHooks(){
   $("hooks-state").classList.remove("hidden");
   badge("hooks-state", "Turning on…", "wait");
-  try{ await P("/api/hooks/install"); badge("hooks-state", "On", "ok"); }
-  catch(e){ badge("hooks-state", "Could not turn on", "wait"); }
+  const res = await P("/api/hooks/install").catch(() => null);
+  if(res && res.ok){ badge("hooks-state", "On", "ok"); }
+  else { badge("hooks-state", "Could not turn on", "wait"); }
 }
 
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
@@ -763,6 +763,8 @@ async function prefillFromConfig(){
   if(c.clickup_api_key_set){
     $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
+  if(c.home_dir) $("home-path").textContent = c.home_dir;
+  if(c.records_dir) $("records-path").textContent = c.records_dir;
   await populateTimezones(c.timezone || "");
 }
 prefillFromConfig();
