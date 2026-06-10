@@ -258,3 +258,22 @@ def test_roundtrip_close_then_clickup_reopen(tmp_path):
     # cycle 2: inbound reopens the brain action
     clickup_sync.sync(s, "/h", client=client)
     assert s.get_unified_action(aid)["status"] == "open"
+
+
+def test_sync_none_deadline_does_not_count_as_change(tmp_path):
+    """None deadline from ClickUp (no due date set) vs empty-string in brain
+    must NOT produce an inbound diff — i.e. no spurious churn on every cycle."""
+    s = _store(tmp_path)
+    # action with no deadline stored (default is "")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
+    s.set_action_clickup_id(aid, "t1")
+    # task returns None for deadline (what due_ms_to_deadline returns when unset)
+    task = _task("t1", "Do thing")
+    task["deadline"] = None
+    client = FakeClient([task])
+    summary = clickup_sync.sync(s, "/h", client=client)
+    # no inbound changes should be counted
+    assert summary["inbound"] == 0
+    # the action's deadline must remain empty/falsy, not be overwritten with None
+    a = s.get_unified_action(aid)
+    assert not a["deadline"]
