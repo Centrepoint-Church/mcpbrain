@@ -2,15 +2,13 @@ from mcpbrain.agents import records_prune_plist, records_context_health_plist, r
 
 
 def _prune(**kw):
-    defaults = dict(python_bin="/usr/bin/python3",
-                    records_dir="/Users/x/records",
+    defaults = dict(mcpbrain_bin="/usr/local/bin/mcpbrain",
                     mcpbrain_home="/Users/x/.mcpbrain")
     return records_prune_plist(**{**defaults, **kw})
 
 
 def _health(**kw):
-    defaults = dict(python_bin="/usr/bin/python3",
-                    records_dir="/Users/x/records",
+    defaults = dict(mcpbrain_bin="/usr/local/bin/mcpbrain",
                     mcpbrain_home="/Users/x/.mcpbrain")
     return records_context_health_plist(**{**defaults, **kw})
 
@@ -36,42 +34,16 @@ def test_prune_runs_at_load_no_keep_alive():
 
 
 def test_prune_program_arguments():
-    plist = _prune(python_bin="/opt/homebrew/bin/python3",
-                   records_dir="/Users/x/records")
-    # The job is now a single /bin/sh -c wrapper string, not bare arg vector.
-    assert "/bin/sh" in plist
-    assert "<string>-c</string>" in plist
-    # python_bin and the prune script path appear inside the command string.
-    assert "/opt/homebrew/bin/python3" in plist
-    assert "prune_hot_md.py" in plist
-    assert "/Users/x/records/bin/prune_hot_md.py" in plist
+    plist = _prune(mcpbrain_bin="/opt/homebrew/bin/mcpbrain")
+    assert "/opt/homebrew/bin/mcpbrain" in plist
+    assert "records-prune" in plist
+    assert "/bin/sh" not in plist
+    assert "prune_hot_md.py" not in plist
 
 
-def test_prune_commits_hot_md():
-    plist = _prune(records_dir="/Users/x/records")
-    # The wrapper stages and conditionally commits state/hot.md.
-    assert "git add state/hot.md" in plist
-    assert "git diff --cached --quiet" in plist
-    assert "git commit" in plist
-    assert "cd '/Users/x/records'" in plist
-
-
-def test_prune_commit_scoped_to_hot_md():
-    # Both the diff check and the commit carry a pathspec: files another
-    # session left staged must neither trigger nor join the launchd commit.
-    plist = _prune()
-    assert "git diff --cached --quiet -- state/hot.md" in plist
-    assert "git commit -m 'prune: hot.md (launchd)' -- state/hot.md" in plist
-
-
-def test_prune_xml_escapes_shell_operators():
-    # && must be XML-escaped as &amp;&amp; for the plist to be well-formed.
-    plist = _prune()
-    assert "&amp;&amp;" in plist
-    assert "&& " not in plist  # no raw && in the generated XML
-    # The generated XML parses cleanly.
+def test_prune_plist_is_valid_xml():
     import xml.dom.minidom
-    xml.dom.minidom.parseString(plist)
+    xml.dom.minidom.parseString(_prune())
 
 
 def test_prune_log_paths_under_mcpbrain_home():
@@ -97,15 +69,13 @@ def test_health_no_keep_alive():
 
 
 def test_health_program_arguments():
-    plist = _health(python_bin="/usr/bin/python3",
-                    records_dir="/Users/x/records")
-    assert "context_health.py" in plist
-    assert "/Users/x/records/bin/context_health.py" in plist
+    plist = _health(mcpbrain_bin="/usr/bin/mcpbrain")
+    assert "/usr/bin/mcpbrain" in plist
+    assert "records-health" in plist
+    assert "context_health.py" not in plist
 
 
-def test_health_is_direct_python_invocation():
-    # The context-health job stays a direct python call — no shell wrapper,
-    # no git commit (it only reads).
+def test_health_is_direct_invocation():
     plist = _health()
     assert "/bin/sh" not in plist
     assert "git commit" not in plist

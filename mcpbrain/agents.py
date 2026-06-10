@@ -528,30 +528,11 @@ def meeting_packs_plist(home: str) -> str:
 """
 
 
-def records_prune_plist(*, python_bin: str, records_dir: str, mcpbrain_home: str) -> str:
-    """Return a launchd plist that runs prune_hot_md.py daily at 06:00.
-
-    The prune mutates state/hot.md. launchd has no notion of committing, so the
-    job is wrapped in `/bin/sh -c`: run the prune, then stage and conditionally
-    commit hot.md. Without the commit the working tree drifts permanently dirty.
-    The whole shell pipeline is a single ProgramArguments string; the `&&`
-    operators are XML-escaped by _calendar_plist when the plist is rendered.
-
-    Both the staged-diff check and the commit are scoped to state/hot.md with a
-    pathspec: files another session left staged must neither trigger the commit
-    nor be swept into it, and a no-change day exits 0 (an unscoped commit would
-    exit 1 on "no changes" and surface as a false agent_stderr finding).
-    """
-    command = (
-        f"'{python_bin}' '{records_dir}/bin/prune_hot_md.py' "
-        f"&& cd '{records_dir}' "
-        f"&& git add state/hot.md "
-        f"&& (git diff --cached --quiet -- state/hot.md "
-        f"|| git commit -m 'prune: hot.md (launchd)' -- state/hot.md)"
-    )
+def records_prune_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
+    """Return a launchd plist: `mcpbrain records-prune` daily at 06:00."""
     return _calendar_plist(
         label=_PRUNE_LABEL,
-        program_args=["/bin/sh", "-c", command],
+        program_args=[mcpbrain_bin, "records-prune"],
         mcpbrain_home=mcpbrain_home,
         hour=6,
         minute=0,
@@ -559,19 +540,59 @@ def records_prune_plist(*, python_bin: str, records_dir: str, mcpbrain_home: str
     )
 
 
-def records_context_health_plist(
-    *, python_bin: str, records_dir: str, mcpbrain_home: str
-) -> str:
-    """Return a launchd plist that runs context_health.py weekly on Monday at 07:00."""
+def records_context_health_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
+    """Return a launchd plist: `mcpbrain records-health` weekly Monday at 07:00."""
     return _calendar_plist(
         label=_HEALTH_LABEL,
-        program_args=[python_bin, f"{records_dir}/bin/context_health.py"],
+        program_args=[mcpbrain_bin, "records-health"],
         mcpbrain_home=mcpbrain_home,
         hour=7,
         minute=0,
         weekday=1,
         env_vars={"MCPBRAIN_HOME": mcpbrain_home},
     )
+
+
+def _timer_units(*, label_desc: str, subcommand: str, mcpbrain_bin: str, home: str,
+                 on_calendar: str) -> tuple[str, str]:
+    service = (f"[Unit]\nDescription={label_desc}\n\n[Service]\nType=oneshot\n"
+               f"ExecStart={mcpbrain_bin} {subcommand}\nEnvironment=MCPBRAIN_HOME={home}\n")
+    timer = (f"[Unit]\nDescription={label_desc} timer\n\n[Timer]\n"
+             f"OnCalendar={on_calendar}\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    return service, timer
+
+
+def prune_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
+    """Return (service, timer) systemd unit strings for `mcpbrain records-prune` daily 06:00."""
+    return _timer_units(label_desc="mcpbrain records prune", subcommand="records-prune",
+                        mcpbrain_bin=mcpbrain_bin, home=home, on_calendar="*-*-* 06:00:00")
+
+
+def health_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
+    """Return (service, timer) systemd unit strings for `mcpbrain records-health` Mon 07:00."""
+    return _timer_units(label_desc="mcpbrain records health", subcommand="records-health",
+                        mcpbrain_bin=mcpbrain_bin, home=home, on_calendar="Mon *-*-* 07:00:00")
+
+
+def _cadence_schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str,
+                           schedule: list[str]) -> list[str]:
+    quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
+    return ["schtasks", "/create", "/tn", task_name, *schedule,
+            "/tr", f"{quoted} {subcommand}", "/f"]
+
+
+def prune_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+    """Return schtasks args to schedule `mcpbrain records-prune` daily at 06:00."""
+    return _cadence_schtasks_args(task_name="mcpbrain-records-prune", subcommand="records-prune",
+                                  mcpbrain_bin=mcpbrain_bin,
+                                  schedule=["/sc", "daily", "/st", "06:00"])
+
+
+def health_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+    """Return schtasks args to schedule `mcpbrain records-health` weekly Monday at 07:00."""
+    return _cadence_schtasks_args(task_name="mcpbrain-records-health", subcommand="records-health",
+                                  mcpbrain_bin=mcpbrain_bin,
+                                  schedule=["/sc", "weekly", "/d", "MON", "/st", "07:00"])
 
 
 def records_gardener_plist(*, records_dir: str, mcpbrain_home: str) -> str:
@@ -592,3 +613,58 @@ def records_gardener_plist(*, records_dir: str, mcpbrain_home: str) -> str:
         run_at_load=False,  # weekly-only; do not fire on every login/reboot
         env_vars={"MCPBRAIN_HOME": mcpbrain_home},
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform cadence install dispatcher
+# ---------------------------------------------------------------------------
+
+def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
+    """Schedule records-prune (daily) and records-health (weekly) for the given OS."""
+    if platform == "darwin":
+        _install_cadences_launchd(mcpbrain_bin=mcpbrain_bin, home=home)
+    elif platform == "linux":
+        _install_cadences_systemd(mcpbrain_bin=mcpbrain_bin, home=home)
+    elif platform == "win32":
+        _install_cadences_schtasks(mcpbrain_bin=mcpbrain_bin, home=home)
+    else:
+        raise ValueError(f"Unsupported platform: {platform!r}")
+
+
+def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    import subprocess
+    from pathlib import Path
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    for label, plist_fn in [
+        (_PRUNE_LABEL, lambda: records_prune_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
+        (_HEALTH_LABEL, lambda: records_context_health_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
+    ]:
+        path = agents_dir / f"{label}.plist"
+        path.write_text(plist_fn())
+        subprocess.run(["launchctl", "unload", "-w", str(path)], capture_output=True)
+        subprocess.run(["launchctl", "load", "-w", str(path)], check=True)
+
+
+def _install_cadences_systemd(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    import subprocess
+    from pathlib import Path
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    for name, fn in [
+        ("mcpbrain-records-prune", lambda: prune_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
+        ("mcpbrain-records-health", lambda: health_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
+    ]:
+        service, timer = fn()
+        (unit_dir / f"{name}.service").write_text(service)
+        (unit_dir / f"{name}.timer").write_text(timer)
+        subprocess.run(["systemctl", "--user", "enable", "--now", f"{name}.timer"], check=True)
+
+
+def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    import subprocess
+    for args_fn in [
+        lambda: prune_schtasks_args(mcpbrain_bin=mcpbrain_bin),
+        lambda: health_schtasks_args(mcpbrain_bin=mcpbrain_bin),
+    ]:
+        subprocess.run(args_fn(), check=True)
