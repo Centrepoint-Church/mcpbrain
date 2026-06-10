@@ -1,6 +1,19 @@
 import mcpbrain.cli as cli
 
 
+def test_dispatch_records_cadences(monkeypatch):
+    import mcpbrain.cli as cli
+    seen = {}
+    def _fake(argv):
+        seen["argv"] = argv
+        return 0
+    monkeypatch.setattr("mcpbrain.records_cadences.main", _fake)
+    cli.main(["records-prune", "--days", "7"])
+    assert seen["argv"][0] == "records-prune" and "--days" in seen["argv"]
+    cli.main(["records-health"])
+    assert seen["argv"][0] == "records-health"
+
+
 def test_dispatch_enrich_backfill(monkeypatch):
     seen = {}
     monkeypatch.setattr("mcpbrain.enrich_backfill.main", lambda argv: seen.setdefault("hit", True) or 0)
