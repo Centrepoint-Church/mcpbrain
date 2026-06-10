@@ -51,6 +51,13 @@ def test_install_refuses_malformed(tmp_path, monkeypatch):
         hooks.install_session_hooks()
 
 
+def test_uninstall_is_noop_when_absent(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    p = hooks.uninstall_session_hooks()  # must not raise
+    assert not p.exists()
+
+
 def test_uninstall_removes_only_ours(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
