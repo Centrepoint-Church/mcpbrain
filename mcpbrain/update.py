@@ -94,6 +94,10 @@ def update_from_index(index_url: str) -> int:
 
 def main(argv: list) -> int:
     index_url = _index_url()
+    if "CHANGE-ME" in index_url:
+        print("Update channel not configured (index URL is the placeholder). "
+              "See docs/DISTRIBUTION.md.", file=sys.stderr)
+        return 1
     installed = _installed_version()
     latest = _latest_version(index_url)
     if not _should_update(installed, latest):

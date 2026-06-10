@@ -28,3 +28,22 @@ def test_update_from_index_runs_uv_then_restart(monkeypatch):
     assert any("mcpbrain=" in c for c in uv_cmd)        # --index mcpbrain=<url>
     assert "mcpbrain" in uv_cmd and "--upgrade" in uv_cmd
     assert calls["restart"] == 1
+
+
+def test_main_warns_and_exits_on_change_me_url(monkeypatch, capsys):
+    """main() must return 1 and print to stderr when index URL is still the placeholder."""
+    monkeypatch.setattr(update, "_index_url", lambda: "https://CHANGE-ME.github.io/mcpbrain-dist/simple/")
+
+    def _boom(*a, **kw):
+        raise AssertionError("_latest_version must not be called with unconfigured URL")
+
+    def _boom2(*a, **kw):
+        raise AssertionError("update_from_index must not be called with unconfigured URL")
+
+    monkeypatch.setattr(update, "_latest_version", _boom)
+    monkeypatch.setattr(update, "update_from_index", _boom2)
+
+    rc = update.main([])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "CHANGE-ME" in captured.err or "not configured" in captured.err.lower()
