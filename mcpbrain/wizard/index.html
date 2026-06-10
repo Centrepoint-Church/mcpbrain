@@ -121,7 +121,7 @@
     </div>
     <div class="row" style="margin-top:8px">
       <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;font-weight:600;color:var(--ink);flex:1">Timezone (required for ClickUp deadlines)
-        <input id="timezone" required placeholder="e.g. Australia/Perth" autocomplete="off" spellcheck="false">
+        <select id="timezone" required></select>
       </label>
     </div>
     <div class="row" style="margin-top:12px">
@@ -640,9 +640,49 @@ async function refresh(){
 }
 refresh();
 
-// Default the timezone field to the browser's detected zone for convenience.
-try { document.getElementById("timezone").value =
-      Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch(e){}
+// Populate the timezone dropdown, then prefill the whole form from saved config.
+async function populateTimezones(selected){
+  try{
+    const j = await (await fetch("/api/timezones", H)).json();
+    const sel = $("timezone");
+    sel.innerHTML = "";
+    let detected = "";
+    try{ detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; }catch(e){}
+    (j.zones||[]).forEach(z => {
+      const o = document.createElement("option");
+      o.value = z.value; o.textContent = z.label;
+      if(z.value === (selected || detected)) o.selected = true;
+      sel.appendChild(o);
+    });
+  }catch(e){}
+}
+
+async function prefillFromConfig(){
+  let c = {};
+  try{ c = await (await fetch("/api/config", H)).json(); }catch(e){ c = {}; }
+  if(c.owner_full_name) $("owner_name").value = c.owner_full_name;
+  if(c.owner_email) $("owner_email").value = c.owner_email;
+  if(c.owner_role) $("owner_role").value = c.owner_role;
+  // Rebuild one org row per saved org (domains joined by ", ").
+  const orgs = c.orgs || [];
+  if(orgs.length){
+    const rows = $("org-rows");
+    rows.querySelectorAll(".org-row:not(:first-child)").forEach(r => r.remove());
+    const tmpl = rows.querySelector(".org-row");
+    orgs.forEach((o, i) => {
+      const row = i === 0 ? tmpl : tmpl.cloneNode(true);
+      row.querySelector(".org-name").value = o.name || "";
+      row.querySelector(".org-domains").value = (o.domains || []).join(", ");
+      if(i > 0) rows.appendChild(row);
+    });
+  }
+  if(c.clickup_list_id) $("clickup_list_id").value = c.clickup_list_id;
+  if(c.clickup_api_key_set){
+    $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
+  }
+  await populateTimezones(c.timezone || "");
+}
+prefillFromConfig();
 </script>
 </body>
 </html>
