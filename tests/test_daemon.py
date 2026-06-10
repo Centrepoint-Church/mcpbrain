@@ -1007,9 +1007,14 @@ def test_resolve_failure_does_not_crash_and_loop_continues(tmp_path, monkeypatch
     assert len(store.list_entities()) == 1
 
 
-def test_run_loop_runs_a_resolve_within_the_loop(tmp_path):
+def test_run_loop_runs_a_resolve_within_the_loop(tmp_path, monkeypatch):
     """run() should call maybe_resolve() each iteration; with interval 0 the
     first loop pass resolves. Proves the loop wiring, not maybe_resolve alone."""
+    import json
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"owner_name": "S", "owner_email": "s@x.com", "orgs": [{"name": "O"}]}
+    ))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _make_store(tmp_path)
     _seed_duplicate_entities(store)
     daemon = Daemon(store, FakeEmbedder(), services={},
