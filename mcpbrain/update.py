@@ -1,145 +1,98 @@
-"""mcpbrain update — git pull + reinstall + restart.
+"""mcpbrain update — reinstall from the wheel index, then restart.
 
-Pulls the latest commits from the mcpbrain repo using --ff-only (aborting on
-divergence), reinstalls the mcpbrain package via uv (the tray's GUI deps are
-main dependencies, so a plain reinstall picks them up), then restarts BOTH the
-daemon and its menu-bar tray so the new version takes effect immediately.
+Resolves the index URL (env → config → default), asks it for the newest
+mcpbrain wheel, and if we're behind reinstalls via uv (the index is marked
+explicit, so deps still come from PyPI), then restarts the daemon + tray.
 """
-
 import os
+import re
 import subprocess
 import sys
-from pathlib import Path
+import urllib.request
+from importlib.metadata import version, PackageNotFoundError
+
+# Maintainer sets this to the published Pages index (the dist repo's /simple/).
+DEFAULT_INDEX_URL = "https://CHANGE-ME.github.io/mcpbrain-dist/simple/"
+
+_WHEEL_RE = re.compile(r"mcpbrain-(\d+\.\d+\.\d+)-")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _repo_dir() -> str:
-    """Return the directory containing pyproject.toml (the cloned mcpbrain repo).
-
-    Resolution order:
-      (a) MCPBRAIN_REPO env var, if set and it contains a pyproject.toml;
-      (b) the repo_dir persisted in config by the installer, if it still
-          contains a pyproject.toml;
-      (c) walk up from this file's location until pyproject.toml is found;
-      (d) raise RuntimeError with a user-facing message.
-
-    After `uv tool install` the package lives in an isolated tool venv with no
-    pyproject.toml, so (c) fails on a normal install — (a) and (b) are how
-    `mcpbrain update` finds the clone the installer ran from.
-    """
-    override = os.environ.get("MCPBRAIN_REPO")
-    if override and (Path(override) / "pyproject.toml").exists():
-        return override
-
-    # Persisted by the installer via `mcpbrain setup --repo-dir`.
+def _index_url() -> str:
+    env = os.environ.get("MCPBRAIN_INDEX_URL")
+    if env:
+        return env
     try:
         from mcpbrain.config import read_config, app_dir
-        persisted = read_config(str(app_dir())).get("repo_dir")
-    except Exception:  # noqa: BLE001 - config read must never break update
-        persisted = None
-    if persisted and (Path(persisted) / "pyproject.toml").exists():
-        return persisted
+        cfg = read_config(str(app_dir()))
+        if cfg.get("update_index_url"):
+            return cfg["update_index_url"]
+    except Exception:  # noqa: BLE001 — config read must never break update
+        pass
+    return DEFAULT_INDEX_URL
 
-    candidate = Path(__file__).resolve().parent
-    for _ in range(10):  # guard against runaway traversal
-        if (candidate / "pyproject.toml").exists():
-            return str(candidate)
-        parent = candidate.parent
-        if parent == candidate:
-            break
-        candidate = parent
 
-    raise RuntimeError(
-        "Could not locate the mcpbrain repo to update. Re-run the installer from "
-        "your cloned mcpbrain checkout, or set MCPBRAIN_REPO to the directory "
-        "containing the cloned repo (where pyproject.toml lives)."
-    )
+def _fetch(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def _parse(v: str) -> tuple:
+    return tuple(int(x) for x in v.split("."))
+
+
+def _installed_version() -> str:
+    try:
+        return version("mcpbrain")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+def _latest_version(index_url: str) -> str | None:
+    """Newest mcpbrain version on the PEP 503 index, or None if unreachable."""
+    try:
+        html = _fetch(index_url.rstrip("/") + "/mcpbrain/")
+    except Exception:  # noqa: BLE001 — offline / index down: no update
+        return None
+    versions = _WHEEL_RE.findall(html)
+    if not versions:
+        return None
+    return max(versions, key=_parse)
+
+
+def _should_update(installed: str, latest: str | None) -> bool:
+    return bool(latest) and _parse(latest) > _parse(installed)
 
 
 def _run(cmd: list) -> tuple[str, int]:
-    """Run cmd (list form, shell=False), return (combined_output, returncode).
-
-    No timeout is set intentionally: this is a user-invoked interactive command
-    and the user can Ctrl-C if needed. A generous timeout large enough to cover
-    slow connections would add little safety value.
-    """
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return result.stdout or "", result.returncode
 
 
 def _restart_agent() -> None:
-    """Restart the mcpbrain daemon and tray login agents for this platform."""
     from mcpbrain import agents
     agents.restart_agent(sys.platform)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def update_from_index(index_url: str) -> int:
+    """Reinstall mcpbrain from the index via uv, then restart. Returns 0 on success."""
+    out, rc = _run([
+        "uv", "tool", "install",
+        "--index", f"mcpbrain={index_url}",
+        "mcpbrain", "--upgrade", "--reinstall-package", "mcpbrain",
+    ])
+    if rc != 0:
+        print("Update failed (uv tool install):\n" + out.strip(), file=sys.stderr)
+        return rc
+    _restart_agent()
+    return 0
+
 
 def main(argv: list) -> int:
-    """Pull, reinstall, restart. Returns 0 on success, nonzero on failure."""
-    repo = _repo_dir()
-
-    # Capture current HEAD so we can show the log of what changed.
-    old_head_out, _ = _run(["git", "-C", repo, "rev-parse", "HEAD"])
-    old_head = old_head_out.strip()
-
-    # Step 1: pull.
-    pull_out, pull_rc = _run(["git", "-C", repo, "pull", "--ff-only"])
-    if pull_rc != 0:
-        print(
-            "Update aborted: git pull --ff-only failed.\n"
-            f"{pull_out.strip()}\n\n"
-            "This usually means there are local commits or the branch has diverged.\n"
-            "To resolve: stash or reset local changes, then run `mcpbrain update` again.\n"
-            "Or pull manually: git -C " + repo + " pull",
-            file=sys.stderr,
-        )
-        return pull_rc
-
-    # Step 2: reinstall.
-    # `--reinstall-package mcpbrain` is REQUIRED, not just `--force`: the package
-    # version is static (0.1.0), so a plain `--force` reuses uv's cached wheel
-    # and silently reinstalls the OLD code even after a successful pull — the
-    # daemon keeps running the previous version with no error. `--reinstall-package`
-    # implies `--refresh-package`, which rebuilds mcpbrain from the freshly-pulled
-    # local source (deps stay cached, so it's not as heavy as a full --no-cache).
-    uv_out, uv_rc = _run([
-        "uv", "tool", "install", "--from", repo, "mcpbrain",
-        "--force", "--reinstall-package", "mcpbrain",
-    ])
-    if uv_rc != 0:
-        print(
-            "Update aborted: uv tool install failed.\n"
-            f"{uv_out.strip()}\n\n"
-            "The daemon has NOT been restarted. Fix the error above and run "
-            "`mcpbrain update` again.",
-            file=sys.stderr,
-        )
-        return uv_rc
-
-    # Step 3: restart.
-    _restart_agent()
-
-    # Best-effort: show what changed.
-    if old_head:
-        log_out, log_rc = _run(
-            ["git", "-C", repo, "log", "--oneline", f"{old_head}..HEAD"]
-        )
-        if log_rc == 0 and log_out.strip():
-            print("Updated:\n" + log_out.strip())
-        elif log_rc == 0:
-            print("Already up to date.")
-        else:
-            print("Updated (could not determine the change range).")
-
-    return 0
+    index_url = _index_url()
+    installed = _installed_version()
+    latest = _latest_version(index_url)
+    if not _should_update(installed, latest):
+        print(f"Already up to date (v{installed}).")
+        return 0
+    print(f"Updating mcpbrain {installed} → {latest} …")
+    return update_from_index(index_url)

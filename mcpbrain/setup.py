@@ -132,20 +132,9 @@ def main(argv=None) -> int:
         action="store_true",
         help="print what would happen without starting the daemon or opening a browser",
     )
-    ap.add_argument(
-        "--repo-dir",
-        default=None,
-        help="path to the cloned mcpbrain repo; persisted so `mcpbrain update` can find it",
-    )
     args = ap.parse_args(argv)
 
     home = str(app_dir())
-
-    # Record where the clone lives so `mcpbrain update` can git pull it later.
-    # Skip on --dry-run: dry-run must have no side effects.
-    if args.repo_dir and not args.dry_run:
-        from mcpbrain.config import write_config
-        write_config(home, {"repo_dir": str(Path(args.repo_dir).resolve())})
 
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
