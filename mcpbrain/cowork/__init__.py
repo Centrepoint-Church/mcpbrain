@@ -31,8 +31,14 @@ def _mcp_config(home: str) -> str:
 
 
 def run_cowork(prompt_name: str, *, tools: str, extra_context: str,
-               log_name: str, cwd: str | None = None, timeout: int = 1800) -> int:
-    """Run a shipped cowork prompt via headless claude. Returns the claude rc."""
+               log_name: str, cwd: str | None = None, timeout: int = 1800,
+               _log_context: str | None = None) -> int:
+    """Run a shipped cowork prompt via headless claude. Returns the claude rc.
+
+    `_log_context` is written to the log instead of `extra_context` when the
+    caller needs to strip credentials (e.g. auth tokens) from the log file.
+    If omitted, `extra_context` is logged as-is.
+    """
     home = str(config.app_dir())
     prompt = (_PROMPT_DIR / prompt_name).read_text() + "\n\n" + extra_context
     cmd = [_find_claude(), "-p", "--tools", tools,
@@ -44,8 +50,9 @@ def run_cowork(prompt_name: str, *, tools: str, extra_context: str,
     result = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                             timeout=timeout, cwd=cwd)
     stamp = datetime.now(timezone.utc).isoformat()
+    logged_ctx = _log_context if _log_context is not None else extra_context
     with (logs / log_name).open("a") as f:
-        f.write(f"[{stamp}] rc={result.returncode}\n{result.stdout}\n{result.stderr}\n")
+        f.write(f"[{stamp}] rc={result.returncode}\nctx={logged_ctx}\n{result.stderr}\n")
     return result.returncode
 
 
@@ -68,8 +75,9 @@ def meeting_packs_main(argv=None) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     ctx = (f"Control API base URL: http://127.0.0.1:{port}\nAuth token: {token}\n"
            f"Today's date: {today}\nRun now: check calendar, find events needing packs, build them.")
+    safe_ctx = f"Control API base URL: http://127.0.0.1:{port}\nToday's date: {today}\n"
     return run_cowork("meeting-packs.md", tools="Bash", extra_context=ctx,
-                      log_name="meeting_packs.log")
+                      log_name="meeting_packs.log", _log_context=safe_ctx)
 
 
 def _read(p: Path) -> str:
