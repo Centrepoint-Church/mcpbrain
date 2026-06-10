@@ -504,6 +504,8 @@ class Daemon:
             open_findings = 0
         from mcpbrain import probes
         connections = probes.all_connections(str(app_dir()), self._store)
+        from mcpbrain.sync import backfill_progress
+        backfill = backfill_progress(self._store)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -516,6 +518,7 @@ class Daemon:
             "open_findings": open_findings,
             "is_configured": config.is_configured(str(app_dir())),
             "connections": connections,
+            "backfill": backfill,
         }
 
     def _resolve_google_account(self, token_file) -> str:

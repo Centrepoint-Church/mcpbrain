@@ -237,3 +237,21 @@ def initial_backfill(store, embedder, *, gmail_service=None, drive_service=None,
         res["calendar"] = sync_calendar(calendar_service, store, time_min=after_iso)
     res["embedded"] = index_pending(store, embedder)
     return res
+
+
+
+def backfill_progress(store) -> dict:
+    """Per-source indexing-backfill progress for the status UI.
+
+    `reached` is the floor cursor (how far back this source has indexed; None if
+    not started). `done` is True once the empty-window counter hit the stop
+    threshold (the source has walked past its earliest item)."""
+    out = {}
+    for src in ("gmail", "drive", "calendar"):
+        reached = store.get_cursor(f"{src}_backfill_until")
+        try:
+            empty = int(store.get_cursor(f"{src}_backfill_empty") or 0)
+        except ValueError:
+            empty = 0
+        out[src] = {"reached": reached, "done": empty >= _STOP_AFTER_EMPTY_WINDOWS}
+    return out
