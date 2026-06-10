@@ -14,7 +14,7 @@ from importlib.metadata import version, PackageNotFoundError
 from packaging.version import Version, InvalidVersion
 
 # Maintainer sets this to the published Pages index (the dist repo's /simple/).
-DEFAULT_INDEX_URL = "https://CHANGE-ME.github.io/mcpbrain-dist/simple/"
+DEFAULT_INDEX_URL = "https://itsjoshuakemp.github.io/mcpbrain-dist/simple/"
 
 _WHEEL_RE = re.compile(r"mcpbrain-([^-]+)-py3")
 
@@ -82,6 +82,12 @@ def update_from_index(index_url: str) -> int:
     """Reinstall mcpbrain from the index via uv, then restart. Returns 0 on success."""
     out, rc = _run([
         "uv", "tool", "install",
+        # Pin the interpreter: mcpbrain requires Python >=3.12 and uv otherwise
+        # resolves the tool env against the machine's default Python (often 3.9
+        # on macOS / 3.11 on Windows), which fails the requires-python solve.
+        # uv fetches a managed 3.12 if none is present. (Verified: install fails
+        # without this on a machine whose default Python is <3.12.)
+        "--python", "3.12",
         "--index", f"mcpbrain={index_url}",
         "mcpbrain", "--upgrade", "--reinstall-package", "mcpbrain",
     ])

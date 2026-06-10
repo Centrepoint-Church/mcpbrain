@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $env:MCPBRAIN_HOME = if ($env:MCPBRAIN_HOME) { $env:MCPBRAIN_HOME } else { Join-Path $HOME ".mcpbrain" }
-$IndexUrl = if ($env:MCPBRAIN_INDEX_URL) { $env:MCPBRAIN_INDEX_URL } else { "https://CHANGE-ME.github.io/mcpbrain-dist/simple/" }
+$IndexUrl = if ($env:MCPBRAIN_INDEX_URL) { $env:MCPBRAIN_INDEX_URL } else { "https://itsjoshuakemp.github.io/mcpbrain-dist/simple/" }
 
 function Run {
     param([Parameter(ValueFromRemainingArguments = $true)] [string[]]$Cmd)
@@ -33,7 +33,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     }
 }
 
-Run uv tool install --index "mcpbrain=$IndexUrl" mcpbrain --force
+Run uv tool install --python 3.12 --index "mcpbrain=$IndexUrl" mcpbrain --force
 
 $Bin = (Get-Command mcpbrain -ErrorAction SilentlyContinue).Source
 if (-not $Bin) { $Bin = Join-Path $HOME ".local\bin\mcpbrain.exe" }
