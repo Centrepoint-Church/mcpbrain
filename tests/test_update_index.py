@@ -27,6 +27,9 @@ def test_update_from_index_runs_uv_then_restart(monkeypatch):
     assert uv_cmd[0] == "uv" and "tool" in uv_cmd and "install" in uv_cmd
     assert any("mcpbrain=" in c for c in uv_cmd)        # --index mcpbrain=<url>
     assert "mcpbrain" in uv_cmd and "--upgrade" in uv_cmd
+    # Pin the interpreter so uv provisions Python 3.12 (mcpbrain requires >=3.12);
+    # without this the install fails on a machine whose default Python is <3.12.
+    assert "--python" in uv_cmd and "3.12" in uv_cmd
     assert calls["restart"] == 1
 
 
