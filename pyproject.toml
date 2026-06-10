@@ -13,6 +13,7 @@ dependencies = [
   "pymupdf>=1.23",         # PDF text extraction (fitz)
   "python-docx>=1.1",      # DOCX extraction
   "openpyxl>=3.1",         # XLSX extraction
+  "packaging>=23",         # PEP 440 version compare in update.py
   "cryptography>=42",      # Fernet escrow encryption for backup snapshots (Task 5.2)
   "google-api-python-client>=2",  # Drive API client for Shared Drive backup upload (Task 5.3)
   "google-auth>=2",               # google.auth.transport.requests / oauth2.credentials (auth.py)
