@@ -502,6 +502,8 @@ class Daemon:
             open_findings = self._store.open_findings_count()
         except Exception:  # noqa: BLE001 — degrade gracefully, never crash status poll
             open_findings = 0
+        from mcpbrain import probes
+        connections = probes.all_connections(str(app_dir()), self._store)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -513,6 +515,7 @@ class Daemon:
             "spool": {"pending": pending, "inbox": inbox},
             "open_findings": open_findings,
             "is_configured": config.is_configured(str(app_dir())),
+            "connections": connections,
         }
 
     def _resolve_google_account(self, token_file) -> str:

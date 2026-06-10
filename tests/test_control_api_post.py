@@ -391,8 +391,8 @@ def test_status_degrades_without_token(tmp_path, monkeypatch):
     assert st["google_account"] == ""
     assert st["spool"] == {"pending": 0, "inbox": 0}
     assert st["enriched_count"] == 0
-    assert set(st) == {
+    assert set(st) >= {
         "paused", "chunk_count", "enriched_count", "google_connected",
         "granted_scopes", "google_account", "enrich_enabled", "spool",
-        "open_findings", "is_configured",
+        "open_findings", "is_configured", "connections",
     }

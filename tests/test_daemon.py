@@ -1196,3 +1196,14 @@ def test_status_includes_is_configured(tmp_path, monkeypatch):
     s = d.status()
     assert "is_configured" in s
     assert isinstance(s["is_configured"], bool)
+
+
+def test_status_includes_connections_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    d = Daemon(store, emb, enrich_mode="off")
+    st = d.status()
+    assert "connections" in st
+    assert set(st["connections"]) == {"google", "claude", "clickup", "backup", "records"}
+    assert st["connections"]["claude"]["state"] == "not_started"  # no heartbeat yet
