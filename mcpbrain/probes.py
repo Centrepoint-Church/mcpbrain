@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mcpbrain import auth, config
+from mcpbrain import auth, config, cowork_tasks, hooks
 
 _CLAUDE_STALE_DAYS = 14
 
@@ -36,26 +36,39 @@ def probe_google(home) -> dict:
     return _state("ok", "Connected", last_verified=_mtime(token_file))
 
 
+def _claude_registered() -> bool:
+    """True when claude_desktop_config.json lists an mcpbrain server entry."""
+    try:
+        from mcpbrain.wizard.register import claude_desktop_config_path
+        p = claude_desktop_config_path()
+        data = json.loads(Path(p).read_text())
+        servers = data.get("mcpServers") or {}
+        return any("mcpbrain" in name for name in servers)
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def probe_claude(home) -> dict:
-    """Verified when the MCP server has written its heartbeat recently enough."""
+    """Three states: not registered -> registered/awaiting restart -> connected."""
     p = Path(home) / "mcp_heartbeat.json"
     if not p.exists():
-        return _state("not_started", "Not connected yet — quit & reopen Claude Desktop")
+        if not _claude_registered():
+            return _state("not_started", "Not registered yet — finish setup")
+        return _state("needs_action", "Registered — quit & reopen Claude Desktop")
     try:
         last = json.loads(p.read_text()).get("last_seen")
         if last is None:
             raise ValueError("missing last_seen")
         last_dt = datetime.fromisoformat(last)
-        # Ensure timezone-aware for comparison
         if last_dt.tzinfo is None:
             last_dt = last_dt.replace(tzinfo=timezone.utc)
-        age = datetime.now(timezone.utc) - last_dt
-        if age > timedelta(days=_CLAUDE_STALE_DAYS):
-            return _state("needs_action", "Not seen recently — open Claude Desktop",
-                          last_verified=last)
+        if datetime.now(timezone.utc) - last_dt > timedelta(days=_CLAUDE_STALE_DAYS):
+            return _state("needs_action", "Not seen recently — open Claude Desktop", last_verified=last)
     except (OSError, ValueError):
-        return _state("needs_action", "Not seen recently — open Claude Desktop")
-    return _state("ok", "Connected to Claude Desktop", last_verified=last)
+        if not _claude_registered():
+            return _state("not_started", "Not registered yet — finish setup")
+        return _state("needs_action", "Registered — quit & reopen Claude Desktop")
+    return _state("ok", "Connected", last_verified=last)
 
 
 def probe_clickup(home) -> dict:
@@ -149,8 +162,34 @@ def probe_backup(home) -> dict:
 def probe_records(home) -> dict:
     repo = Path(config.records_dir(home))
     if (repo / ".git").is_dir():
-        return _state("ok", str(repo))
+        detail = "Ready" if (repo / "CLAUDE.md").exists() else "Created (run Prepare working space)"
+        return _state("ok", detail)
     return _state("not_started", "Records repo not created yet")
+
+
+import time as _time
+
+
+def probe_enrichment(home) -> dict:
+    """not_started (no SKILL.md) / ok (running) / needs_action (installed, idle)."""
+    if not cowork_tasks.enrichment_skill_present():
+        return _state("not_started", "Enrichment skill not installed yet")
+    inbox = Path(home) / "enrich_inbox"
+    try:
+        recent = any(
+            (_time.time() - p.stat().st_mtime) < 2 * 86400
+            for p in inbox.glob("*.json")
+        )
+    except OSError:
+        recent = False
+    if recent:
+        return _state("ok", "Running")
+    return _state("needs_action", "Set up the schedule in Claude Desktop")
+
+
+def probe_memory_hooks(home) -> dict:
+    return (_state("ok", "On") if hooks.hooks_status().get("installed")
+            else _state("not_started", "Off — turn on cross-session memory"))
 
 
 def _mtime(p: Path):
@@ -182,6 +221,8 @@ def all_connections(home, store=None) -> dict:
         "clickup": probe_clickup(home),
         "backup": probe_backup(home),
         "records": probe_records(home),
+        "enrichment": probe_enrichment(home),
+        "memory-hooks": probe_memory_hooks(home),
     }
     out = {}
     for name, live in cheap.items():
