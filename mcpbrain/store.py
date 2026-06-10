@@ -731,7 +731,7 @@ class Store:
         not fully loaded then sliced). limit=None returns every unenriched
         chunk — the no-arg behaviour existing callers/tests rely on.
         """
-        sql = "SELECT rowid,doc_id,text,metadata FROM chunks WHERE enriched=0"
+        sql = "SELECT rowid,doc_id,text,metadata FROM chunks WHERE enriched=0 ORDER BY rowid DESC"
         params: tuple = ()
         if limit is not None:
             sql += " LIMIT ?"

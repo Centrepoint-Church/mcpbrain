@@ -78,9 +78,9 @@ def test_thread_cap_limits_threads(tmp_path):
               message_id=f"t{i}", chunk_index=0)
 
     batches = thread_enrich.group_unenriched_threads(store, thread_cap=2)
-    # The cap counts THREADS, not chunks. First two by first-seen order.
+    # The cap counts THREADS, not chunks. First two by newest-synced order (rowid DESC).
     assert len(batches) == 2
-    assert [b.thread_id for b in batches] == ["thread-0", "thread-1"]
+    assert [b.thread_id for b in batches] == ["thread-4", "thread-3"]
 
 
 def test_reassemble_thread_orders_messages_by_date(tmp_path):
