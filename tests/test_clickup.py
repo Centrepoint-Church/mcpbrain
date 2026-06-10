@@ -120,7 +120,9 @@ class TestSearchTasksDueDateConversion:
 
     def test_due_date_lte_param_passed(self, tmp_path):
         """Verify due_date_lte is converted to ms and appears in the request URL."""
-        self._cfg(tmp_path)
+        # Config must include a timezone for the conversion to produce a value.
+        _write_cfg(tmp_path, {"clickup_api_key": "pk_123_ABC", "clickup_list_id": "list99",
+                               "timezone": "Australia/Perth"})
         captured_urls = []
 
         def fake_urlopen(req, timeout=None):
@@ -262,11 +264,15 @@ class TestSearchTasksJSONDecodeError:
 class TestIsoToMsValueError:
     def test_valid_date_returns_ms(self):
         # End of 2025-06-01 Perth (+08): 2025-06-02 00:00 +08 = 1748793600000 ms, minus 1.
-        ms = clickup._iso_to_ms("2025-06-01")
+        ms = clickup._iso_to_ms("2025-06-01", tz="Australia/Perth")
         assert ms == 1748793599999
 
     def test_malformed_date_returns_none(self):
-        result = clickup._iso_to_ms("not-a-date")
+        result = clickup._iso_to_ms("not-a-date", tz="Australia/Perth")
+        assert result is None
+
+    def test_unset_tz_returns_none(self):
+        result = clickup._iso_to_ms("2025-06-01", tz="")
         assert result is None
 
     def test_malformed_date_skips_param(self, tmp_path):
