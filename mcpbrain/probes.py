@@ -8,6 +8,7 @@ one of: "not_started" (never configured), "ok" (configured + verified), or
 from __future__ import annotations
 
 import json
+import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,9 +51,10 @@ def _claude_registered() -> bool:
 
 def probe_claude(home) -> dict:
     """Three states: not registered -> registered/awaiting restart -> connected."""
+    registered = _claude_registered()
     p = Path(home) / "mcp_heartbeat.json"
     if not p.exists():
-        if not _claude_registered():
+        if not registered:
             return _state("not_started", "Not registered yet — finish setup")
         return _state("needs_action", "Registered — quit & reopen Claude Desktop")
     try:
@@ -65,7 +67,7 @@ def probe_claude(home) -> dict:
         if datetime.now(timezone.utc) - last_dt > timedelta(days=_CLAUDE_STALE_DAYS):
             return _state("needs_action", "Not seen recently — open Claude Desktop", last_verified=last)
     except (OSError, ValueError):
-        if not _claude_registered():
+        if not registered:
             return _state("not_started", "Not registered yet — finish setup")
         return _state("needs_action", "Registered — quit & reopen Claude Desktop")
     return _state("ok", "Connected", last_verified=last)
@@ -165,9 +167,6 @@ def probe_records(home) -> dict:
         detail = "Ready" if (repo / "CLAUDE.md").exists() else "Created (run Prepare working space)"
         return _state("ok", detail)
     return _state("not_started", "Records repo not created yet")
-
-
-import time as _time
 
 
 def probe_enrichment(home) -> dict:
