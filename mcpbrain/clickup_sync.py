@@ -79,7 +79,7 @@ def _apply_inbound(store, action: dict, task: dict) -> dict:
     fields = {}
     if task["org"] and task["org"] != (action.get("org") or ""):
         fields["org"] = task["org"]
-    if task["deadline"] != (action.get("deadline") or ""):
+    if (task["deadline"] or "") != (action.get("deadline") or ""):
         fields["deadline"] = task["deadline"]
     if task["priority"] and task["priority"] != (action.get("priority") or ""):
         fields["priority"] = task["priority"]
