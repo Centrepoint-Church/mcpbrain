@@ -31,7 +31,6 @@ def prune_hot_md(repo: str, *, days: int = _PRUNE_DAYS, now=None) -> int:
     """Drop hot.md dated-bullet lines older than `days`. Returns count removed.
 
     Idempotent. Does not commit — the subcommand layer commits.
-    Ported from joshbrain/bin/prune_hot_md.py.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=days)).date()
@@ -61,7 +60,7 @@ def prune_hot_md(repo: str, *, days: int = _PRUNE_DAYS, now=None) -> int:
 def context_health(repo: str, mcpbrain_home: str) -> list[str]:
     """Read-only health checks. Returns list of WARN strings (empty == healthy).
 
-    Ported from joshbrain/bin/context_health.py — three checks:
+    Three checks:
     1. MEMORY.md line count (warn >180)
     2. hot.md stale entries (>14 days)
     3. <mcpbrain_home>/context/memory.md age (>7 days)
