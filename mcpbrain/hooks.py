@@ -75,6 +75,7 @@ def install_session_hooks() -> Path:
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
+    changed = False
     for event, marker in _HOOKS:
         blocks = hooks.get(event)
         if not isinstance(blocks, list):
@@ -86,9 +87,11 @@ def install_session_hooks() -> Path:
         )
         if not present:
             blocks.append({"hooks": [{"type": "command", "command": f"{bin_path} {marker}"}]})
+            changed = True
         hooks[event] = blocks
-    data["hooks"] = hooks
-    _write(p, data)
+    if changed:
+        data["hooks"] = hooks
+        _write(p, data)
     return p
 
 
