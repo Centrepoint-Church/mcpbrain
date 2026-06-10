@@ -126,7 +126,7 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
         p = repo / rel
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content)
+            p.write_text(content, encoding="utf-8")
             newly_written.append(rel)
     if profile is not None:
         for rel, tmpl in _TEMPLATE_FILES.items():
