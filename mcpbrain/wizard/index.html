@@ -119,6 +119,11 @@
     <div class="row" style="margin-top:8px">
       <input id="clickup_list_id" type="text" placeholder="ClickUp list ID (e.g. 901610549962)" autocomplete="off" spellcheck="false">
     </div>
+    <div class="row" style="margin-top:8px">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;font-weight:600;color:var(--ink);flex:1">Timezone (required for ClickUp deadlines)
+        <input id="timezone" required placeholder="e.g. Australia/Perth" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick="saveProfile()">Save</button>
       <span id="p-state" class="badge idle hidden"></span>
@@ -489,6 +494,8 @@ async function saveProfile(){
   if(ck) body.clickup_api_key = ck;
   const cl = $("clickup_list_id").value.trim();
   if(cl) body.clickup_list_id = cl;
+  const tz = $("timezone").value.trim();
+  if(tz) body.timezone = tz;
   try{
     await P("/api/config", body);
     badge("p-state", "Saved", "ok"); $("p-state").classList.remove("hidden");
@@ -632,6 +639,10 @@ async function refresh(){
   setTimeout(refresh, 3000);
 }
 refresh();
+
+// Default the timezone field to the browser's detected zone for convenience.
+try { document.getElementById("timezone").value =
+      Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch(e){}
 </script>
 </body>
 </html>
