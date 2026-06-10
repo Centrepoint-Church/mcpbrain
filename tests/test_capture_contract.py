@@ -60,7 +60,7 @@ def test_cross_kind_contamination_rejected():
 
 
 def test_decision_envelope_valid():
-    assert validate_capture({"kind": "decision", "text": "Retire X", "rationale": "Y", "owner": "Josh"}) == []
+    assert validate_capture({"kind": "decision", "text": "Retire X", "rationale": "Y", "owner": "Sam"}) == []
 
 
 def test_decision_requires_text():

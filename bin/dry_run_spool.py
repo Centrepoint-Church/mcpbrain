@@ -15,7 +15,7 @@ Run conditions:
   - The daemon must be STOPPED. This script is the sole writer for its duration.
   - Point --home at a TEST home, never the live ~/.mcpbrain. Use a COPY of a
     real store so it has the chunk backlog plus graph context the loop needs.
-  - On Nexus, run with PYTHONPATH=/home/josh/ops-brain/src so the extractor's
+  - On Nexus, run with PYTHONPATH=/home/user/ops-brain/src so the extractor's
     lazy `from claude_pool import run_claude` resolves. When run_claude is left
     as the default (None), the real claude_pool fires; tests inject a fake.
 
@@ -23,7 +23,7 @@ The orchestration logic lives in run_dry_run(), which takes an injectable
 run_claude so the whole loop is testable offline.
 
 Usage (on Nexus):
-    PYTHONPATH=/home/josh/ops-brain/src \\
+    PYTHONPATH=/home/user/ops-brain/src \\
       python bin/dry_run_spool.py --home /path/to/store-copy --thread-cap 3
 """
 from __future__ import annotations

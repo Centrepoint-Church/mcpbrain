@@ -75,9 +75,9 @@ def test_prune_xml_escapes_shell_operators():
 
 
 def test_prune_log_paths_under_mcpbrain_home():
-    plist = _prune(mcpbrain_home="/Users/josh/.mcpbrain")
-    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.prune.log" in plist
-    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.prune.err" in plist
+    plist = _prune(mcpbrain_home="/Users/user/.mcpbrain")
+    assert "/Users/user/.mcpbrain/com.mcpbrain.records.prune.log" in plist
+    assert "/Users/user/.mcpbrain/com.mcpbrain.records.prune.err" in plist
 
 
 def test_health_label():
@@ -171,9 +171,9 @@ def test_gardener_program_arguments():
 
 
 def test_gardener_log_paths_under_mcpbrain_home():
-    plist = _gardener(mcpbrain_home="/Users/josh/.mcpbrain")
-    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.gardener.log" in plist
-    assert "/Users/josh/.mcpbrain/com.mcpbrain.records.gardener.err" in plist
+    plist = _gardener(mcpbrain_home="/Users/user/.mcpbrain")
+    assert "/Users/user/.mcpbrain/com.mcpbrain.records.gardener.log" in plist
+    assert "/Users/user/.mcpbrain/com.mcpbrain.records.gardener.err" in plist
 
 
 # --- FIX F: gardener must NOT RunAtLoad (expensive weekly headless session) --

@@ -27,9 +27,9 @@ def _make_inbox_db(path):
         db.executemany(
             "INSERT INTO email_context VALUES(?,?,?,?,?,?,?,?,?,?)",
             [
-                ("m1","Budget Q2","Alice","alice@x.com",_days_ago(1),"Centrepoint","update","Summary A",1,"needs reply"),
+                ("m1","Budget Q2","Alice","alice@x.com",_days_ago(1),"Acme","update","Summary A",1,"needs reply"),
                 ("m2","Request help","Bob","bob@x.com",_days_ago(2),"ACC","request","Summary B",0,""),
-                ("m3","Decision made","Carol","carol@x.com",_days_ago(3),"Centrepoint","decision","Summary C",0,""),
+                ("m3","Decision made","Carol","carol@x.com",_days_ago(3),"Acme","decision","Summary C",0,""),
                 ("m4","FYI update","Dave","dave@x.com",_days_ago(1),"","fyi","Summary D",0,""),
                 ("m5","Old request","Eve","eve@x.com",_days_ago(10),"","request","Summary E",0,""),
             ]

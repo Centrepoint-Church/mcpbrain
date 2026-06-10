@@ -11,7 +11,7 @@ def _store(tmp_path):
 
 
 def _person(s, name, email_count=5):
-    eid = gw.upsert_entity(s, name=name, entity_type="person", org="Centrepoint")
+    eid = gw.upsert_entity(s, name=name, entity_type="person", org="Acme")
     with s._connect() as db:
         db.execute("UPDATE entities SET email_count=? WHERE id=?", (email_count, eid))
     return eid
@@ -38,7 +38,7 @@ def test_drain_writes_profile_and_change_log(tmp_path):
     s = _store(tmp_path)
     eid = _person(s, "Taryn Hamilton")
     n = profile_synth.drain_profiles(s, {"profile_synthesis": [
-        {"entity_id": eid, "profile": "Executive Pastor at Centrepoint. Leads ops."},
+        {"entity_id": eid, "profile": "Executive Pastor at Acme. Leads ops."},
         {"entity_id": "nonexistent", "profile": "x"},        # skipped silently
         {"entity_id": eid, "profile": ""},                   # empty skipped
     ]})

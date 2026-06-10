@@ -11,7 +11,7 @@ def _store(tmp_path):
 
 
 def _person_with_profile(s, name, role="Volunteer"):
-    eid = gw.upsert_entity(s, name=name, entity_type="person", org="Centrepoint")
+    eid = gw.upsert_entity(s, name=name, entity_type="person", org="Acme")
     # Insert the role observation directly so test fixtures with contextual
     # role labels (e.g. "Volunteer") bypass write_role_observation's junk guard.
     with s._connect() as db:

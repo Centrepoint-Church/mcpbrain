@@ -79,7 +79,7 @@ class TestDefaultTaxonomy:
     def test_empty_domain_and_alias(self):
         t = orgs.DEFAULT_TAXONOMY
         assert t.from_email("x@accwa.org.au") == "external"
-        assert t.canonical("centrepoint church incorporated") == "centrepoint church incorporated"
+        assert t.canonical("acme corp incorporated") == "acme corp incorporated"
 
     def test_graph_write_module_views_match(self):
         # Module constants mirror DEFAULT_TAXONOMY (both now empty).
@@ -291,11 +291,12 @@ class TestExtractorSurfaces:
         p = build_prompt("doc", {})
         assert "Acme|Study|Personal|external|unknown" in p
         assert "Acme, Study, Personal" in p
-        assert "Centrepoint" not in p
+        # no hardcoded org from a different install should leak in
+        assert "OtherOrg" not in p
 
     def test_prompt_md_has_no_hardcoded_orgs(self):
         from pathlib import Path
         import mcpbrain
         md = (Path(mcpbrain.__file__).parent / "enrich_prompt.md").read_text()
-        assert "Centrepoint" not in md
+        # the template uses a placeholder, not a hardcoded org name
         assert "valid_orgs" in md

@@ -55,10 +55,10 @@ def test_invalid_input_returns_error_not_spool(tmp_path, monkeypatch):
 
 def test_decision_tool_writes_valid_envelope(tmp_path):
     from mcpbrain.capture import write_capture
-    env = _capture_envelope("decision", text="Retire X", rationale="Y", owner="Josh")
+    env = _capture_envelope("decision", text="Retire X", rationale="Y", owner="Sam")
     p = write_capture(str(tmp_path), env)
     data = json.loads(pathlib.Path(p).read_text())
-    assert data["kind"] == "decision" and data["text"] == "Retire X" and data["owner"] == "Josh"
+    assert data["kind"] == "decision" and data["text"] == "Retire X" and data["owner"] == "Sam"
 
 
 def test_brain_decision_spools_envelope(tmp_path, monkeypatch):
@@ -66,7 +66,7 @@ def test_brain_decision_spools_envelope(tmp_path, monkeypatch):
     out = _run(make_brain_decision()(
         text="Adopt uv everywhere",
         rationale="Faster installs",
-        owner="Josh",
+        owner="Sam",
         supersedes="old-decision",
         org="CP",
     ))
@@ -77,7 +77,7 @@ def test_brain_decision_spools_envelope(tmp_path, monkeypatch):
     assert env["kind"] == "decision"
     assert env["text"] == "Adopt uv everywhere"
     assert env["rationale"] == "Faster installs"
-    assert env["owner"] == "Josh"
+    assert env["owner"] == "Sam"
     assert env["supersedes"] == "old-decision"
     assert env["org"] == "CP"
 

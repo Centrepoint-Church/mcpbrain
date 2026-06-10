@@ -55,8 +55,8 @@ def test_simple_plaintext_message_one_chunk():
 
 
 def test_signature_is_stripped_into_metadata():
-    body = "Quick update on the roster.\n\nRegards,\nJosh Kemp\nOperations"
-    msg = plain_msg("sig001", "Roster", "josh@example.com", body)
+    body = "Quick update on the roster.\n\nRegards,\nSam Chen\nOperations"
+    msg = plain_msg("sig001", "Roster", "sam@example.com", body)
     chunks = normalise_gmail(msg)
 
     assert len(chunks) >= 1
@@ -259,7 +259,7 @@ def test_briefing_without_bulk_headers_not_filtered():
     msg = plain_msg(
         "brief001",
         "Morning briefing: Briefing for Fri 29 May",
-        "ops-brain@centrepoint.church",
+        "ops-brain@example.org",
         "Today's priorities: review budget, confirm venue, send board pack.",
     )
     chunks = normalise_gmail(msg)

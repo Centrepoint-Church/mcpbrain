@@ -20,7 +20,7 @@ def _default_orgs(tmp_path, monkeypatch):
     import os
     if "MCPBRAIN_HOME" not in os.environ:
         (tmp_path / "config.json").write_text(json.dumps({
-            "owner_name": "Josh", "owner_full_name": "Josh Kemp",
+            "owner_name": "Sam", "owner_full_name": "Sam Chen",
             "orgs": [{"name": "TestOrg", "domains": ["testorg.example"]}],
         }))
         monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -49,9 +49,9 @@ def test_slugify_empty_input():
 # --- fake client ----------------------------------------------------------
 
 GOOD_JSON = {
-    "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint"}],
+    "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Acme"}],
     "relations": [{"from": "Taryn Hamilton", "relation": "reports_to", "to": "Joel Chelliah"}],
-    "actions": [{"text": "Send the campus budget to the board", "owner": "Josh", "deadline": "2026-06-10"}],
+    "actions": [{"text": "Send the campus budget to the board", "owner": "Sam", "deadline": "2026-06-10"}],
     "decisions": [{"text": "Approved new AV spend for Byford", "decided_on": "2026-05-30"}],
 }
 
@@ -113,10 +113,10 @@ class SpyClient:
 def test_build_prompt_is_domain_anchored_and_constrained(tmp_path, monkeypatch):
     import json as _json
     (tmp_path / "config.json").write_text(_json.dumps({
-        "owner_name": "Josh", "owner_full_name": "Josh Kemp",
+        "owner_name": "Sam", "owner_full_name": "Sam Chen",
         "orgs": [
-            {"name": "Centrepoint", "domains": ["centrepoint.church"],
-             "aliases": ["Centrepoint Church"]},
+            {"name": "Acme", "domains": ["example.org"],
+             "aliases": ["Acme Corp"]},
             {"name": "ACC", "domains": ["acc.org.au"]},
             {"name": "Courageous Church", "domains": ["courageouschurch.org.au"]},
             {"name": "Curtin", "domains": ["curtin.edu.au"]},
@@ -127,15 +127,15 @@ def test_build_prompt_is_domain_anchored_and_constrained(tmp_path, monkeypatch):
     p = build_prompt("some body", {"source_type": "gmail", "subject": "Hi",
                                    "sender": "a@b.com", "date": "2026-05-30"})
     # domain framing
-    assert "Josh Kemp" in p
-    assert "Centrepoint" in p and "ACC" in p and "Courageous Church" in p and "Curtin" in p
+    assert "Sam Chen" in p
+    assert "Acme" in p and "ACC" in p and "Courageous Church" in p and "Curtin" in p
     # skip instruction
     assert "skip" in p
     assert "newsletter" in p.lower()
     # entity type allowlist
     assert "person|org|project|topic" in p
     # org enum
-    assert "Centrepoint|ACC|Courageous Church|Curtin|external|unknown" in p
+    assert "Acme|ACC|Courageous Church|Curtin|external|unknown" in p
     # explicit junk-exclusion rule
     assert "do not extract" in p.lower()
     assert "dollar" in p.lower()
@@ -204,7 +204,7 @@ def test_extract_fenced_json():
     fenced = "```json\n" + json.dumps(GOOD_JSON) + "\n```"
     client = FakeClient(fenced)
     out = extract(client, "body text", {})
-    assert out["entities"][0]["org"] == "Centrepoint"
+    assert out["entities"][0]["org"] == "Acme"
 
 
 def test_extract_garbage_returns_empty_lists():
@@ -326,7 +326,7 @@ def _store(tmp_path):
 
 def test_enrich_document_lands_expected_rows(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"orgs": [
-        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+        {"name": "Acme", "domains": ["example.org"]},
     ]}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
@@ -340,7 +340,7 @@ def test_enrich_document_lands_expected_rows(tmp_path, monkeypatch):
 
     taryn = s.get_entity("taryn-hamilton")
     assert taryn is not None
-    assert taryn["org"] == "Centrepoint"
+    assert taryn["org"] == "Acme"
     assert taryn["type"] == "person"
     assert taryn["last_seen"] == "2026-05-30"
 
@@ -358,7 +358,7 @@ def test_enrich_document_lands_expected_rows(tmp_path, monkeypatch):
 
     acts = s.list_actions()
     assert len(acts) == 1
-    assert acts[0]["owner"] == "Josh"
+    assert acts[0]["owner"] == "Sam"
     assert acts[0]["deadline"] == "2026-06-10"
     assert acts[0]["thread_id"] == "thr-1"
     assert acts[0]["source_doc_id"] == "gmail-1-body-0"
@@ -374,13 +374,13 @@ def test_enrich_document_counts_rows_written_not_extracted(tmp_path):
     # one valid entity + one with empty name (skipped); one valid action + one empty (skipped)
     payload = {
         "entities": [
-            {"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint"},
+            {"name": "Taryn Hamilton", "type": "person", "org": "Acme"},
             {"name": "", "type": "person", "org": ""},
         ],
         "relations": [],
         "actions": [
-            {"text": "Send the budget", "owner": "Josh", "deadline": ""},
-            {"text": "", "owner": "Josh", "deadline": ""},
+            {"text": "Send the budget", "owner": "Sam", "deadline": ""},
+            {"text": "", "owner": "Sam", "deadline": ""},
         ],
         "decisions": [],
     }
@@ -402,7 +402,7 @@ def test_enrich_document_counts_rows_written_not_extracted(tmp_path):
 
 def test_enrich_document_filters_junk_entities_and_clamps_org(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"orgs": [
-        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+        {"name": "Acme", "domains": ["example.org"]},
     ]}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
@@ -416,7 +416,7 @@ def test_enrich_document_filters_junk_entities_and_clamps_org(tmp_path, monkeypa
             {"name": "https://example.com/signup", "type": "org", "org": "external"},
             # single-char -> length junk
             {"name": "X", "type": "person", "org": "external"},
-            {"name": "Joel Chelliah", "type": "person", "org": "Centrepoint"},
+            {"name": "Joel Chelliah", "type": "person", "org": "Acme"},
             {"name": "Worship Night", "type": "topic", "org": "WORSHIP"},
         ],
         "relations": [
@@ -438,7 +438,7 @@ def test_enrich_document_filters_junk_entities_and_clamps_org(tmp_path, monkeypa
     assert "x" not in ids
     # real person kept
     joel = s.get_entity("joel-chelliah")
-    assert joel is not None and joel["org"] == "Centrepoint"
+    assert joel is not None and joel["org"] == "Acme"
     # topic kept (exempt from length/pattern junk), org clamped off the enum
     topic = s.get_entity("worship-night")
     assert topic is not None
@@ -486,9 +486,9 @@ def test_enrich_document_clamps_invalid_declared_types_to_topic(tmp_path):
     s = _store(tmp_path)
     payload = {
         "entities": [
-            {"name": "Easter Service", "type": "event", "org": "Centrepoint"},
-            {"name": "Some Thing", "type": "weirdtype", "org": "Centrepoint"},
-            {"name": "Joel Chelliah", "type": "person", "org": "Centrepoint"},
+            {"name": "Easter Service", "type": "event", "org": "Acme"},
+            {"name": "Some Thing", "type": "weirdtype", "org": "Acme"},
+            {"name": "Joel Chelliah", "type": "person", "org": "Acme"},
         ],
         "relations": [],
         "actions": [],
@@ -508,7 +508,7 @@ def test_enrich_document_canonicalises_declared_entity_name(tmp_path):
     s = _store(tmp_path)
     payload = {
         "entities": [
-            {"name": "Ps Joel Chelliah", "type": "person", "org": "Centrepoint"},
+            {"name": "Ps Joel Chelliah", "type": "person", "org": "Acme"},
         ],
         "relations": [],
         "actions": [],
@@ -529,7 +529,7 @@ def test_enrich_document_canonicalises_relation_endpoints(tmp_path):
     s = _store(tmp_path)
     payload = {
         "entities": [
-            {"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint"},
+            {"name": "Taryn Hamilton", "type": "person", "org": "Acme"},
         ],
         "relations": [
             {"from": "Taryn Hamilton", "relation": "reports_to", "to": "Pastor Joel Chelliah"},
@@ -570,7 +570,7 @@ def test_enrich_document_accent_folded_slug(tmp_path):
 def test_is_junk_entity_year_bearing_org_names_kept():
     from mcpbrain.enrich import _is_junk_entity
     # Year in an org/project name is legitimate — must NOT be junk-filtered.
-    assert _is_junk_entity("Centrepoint 2026", "org") is False
+    assert _is_junk_entity("Acme 2026", "org") is False
     assert _is_junk_entity("Vision 2030", "org") is False
     assert _is_junk_entity("ALL IN 2026", "org") is False
 
@@ -607,11 +607,11 @@ def test_relation_endpoint_year_bearing_org_not_dropped(tmp_path):
     s = _store(tmp_path)
     payload = {
         "entities": [
-            {"name": "Joel Chelliah", "type": "person", "org": "Centrepoint"},
-            {"name": "Centrepoint 2026", "type": "org", "org": "Centrepoint"},
+            {"name": "Joel Chelliah", "type": "person", "org": "Acme"},
+            {"name": "Acme 2026", "type": "org", "org": "Acme"},
         ],
         "relations": [
-            {"from": "Joel Chelliah", "relation": "works_at", "to": "Centrepoint 2026"},
+            {"from": "Joel Chelliah", "relation": "works_at", "to": "Acme 2026"},
         ],
         "actions": [],
         "decisions": [],
@@ -621,7 +621,7 @@ def test_relation_endpoint_year_bearing_org_not_dropped(tmp_path):
 
     rels = s.list_relations()
     assert len(rels) == 1
-    assert rels[0]["entity_b"] == "centrepoint-2026"
+    assert rels[0]["entity_b"] == "acme-2026"
 
 
 def test_relation_endpoint_url_junk_still_dropped(tmp_path):
@@ -629,7 +629,7 @@ def test_relation_endpoint_url_junk_still_dropped(tmp_path):
     s = _store(tmp_path)
     payload = {
         "entities": [
-            {"name": "Joel Chelliah", "type": "person", "org": "Centrepoint"},
+            {"name": "Joel Chelliah", "type": "person", "org": "Acme"},
         ],
         "relations": [
             {"from": "Joel Chelliah", "relation": "works_at", "to": "https://example.com"},
@@ -737,7 +737,7 @@ def test_run_enrichment_dedup_counts_shared_rows_once(tmp_path):
     each shared row ONCE, and the returned summary must equal the rows actually
     written to the graph. Regression guard for the dedup-aware counters."""
     shared = {
-        "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint"}],
+        "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Acme"}],
         "relations": [{"from": "Taryn Hamilton", "relation": "reports_to", "to": "Joel Chelliah"}],
         "actions": [],
         "decisions": [],

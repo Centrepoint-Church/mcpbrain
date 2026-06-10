@@ -39,7 +39,7 @@ def _seed_store(home: Path) -> str:
     doc_id = "d-budget-stdio"
     store.upsert_chunk(
         doc_id,
-        "the annual budget review for Centrepoint",
+        "the annual budget review for Acme",
         "h-budget-stdio",
         {"source_type": "gmail"},
     )

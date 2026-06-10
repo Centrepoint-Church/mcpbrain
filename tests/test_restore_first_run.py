@@ -20,7 +20,7 @@ class FakeBC:
     def __init__(self):
         self.drive_service = "DRIVE"
         self.shared_drive_id = "D"
-        self.user_id = "josh"
+        self.user_id = "sam"
         self.key = b"k" * 32
         self.out_path = None
 

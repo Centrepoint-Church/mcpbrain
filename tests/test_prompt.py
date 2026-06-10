@@ -25,12 +25,12 @@ def test_active_projects_block_uses_store(tmp_path):
         db.execute(
             "INSERT INTO projects(id,name,org_tag,status_line,archived_at) "
             "VALUES(?,?,?,?,?)",
-            ("byford-grant", "Byford Grant", "Centrepoint", "Awaiting council sign-off", None),
+            ("byford-grant", "Byford Grant", "Acme", "Awaiting council sign-off", None),
         )
         db.execute(
             "INSERT INTO projects(id,name,org_tag,status_line,archived_at) "
             "VALUES(?,?,?,?,?)",
-            ("old-fete", "Old Fete", "Centrepoint", "done", "2026-01-01"),
+            ("old-fete", "Old Fete", "Acme", "done", "2026-01-01"),
         )
 
     rows = prompt.read_projects(s)
@@ -38,7 +38,7 @@ def test_active_projects_block_uses_store(tmp_path):
     assert [r["id"] for r in rows] == ["byford-grant"]
     r = rows[0]
     assert r["name"] == "Byford Grant"
-    assert r["org"] == "Centrepoint"
+    assert r["org"] == "Acme"
     assert r["status_line"] == "Awaiting council sign-off"
 
 
@@ -47,19 +47,19 @@ def test_active_areas_block_uses_store(tmp_path):
     with s._connect() as db:
         db.execute(
             "INSERT INTO areas(id,org_id,name,description,active) VALUES(?,?,?,?,?)",
-            ("centrepoint-it", "Centrepoint", "IT", "Systems and devices", 1),
+            ("acme-it", "Acme", "IT", "Systems and devices", 1),
         )
         db.execute(
             "INSERT INTO areas(id,org_id,name,description,active) VALUES(?,?,?,?,?)",
-            ("retired-av", "Centrepoint", "AV", "Old AV area", 0),
+            ("retired-av", "Acme", "AV", "Old AV area", 0),
         )
 
     rows = prompt.read_areas(s)
 
-    assert [r["id"] for r in rows] == ["centrepoint-it"]
+    assert [r["id"] for r in rows] == ["acme-it"]
     r = rows[0]
     assert r["name"] == "IT"
-    assert r["org"] == "Centrepoint"
+    assert r["org"] == "Acme"
     assert r["description"] == "Systems and devices"
 
 
@@ -99,7 +99,7 @@ def test_known_people_global_core_capped(tmp_path):
         # Seed more than the cap of confirmed-org + current-role people.
         for i in range(45):
             eid = f"person-{i:02d}"
-            _add_person(db, eid, f"Person {i:02d}", "Centrepoint", email_count=100 - i)
+            _add_person(db, eid, f"Person {i:02d}", "Acme", email_count=100 - i)
             _add_role(db, eid, "Coordinator")
 
     rows = prompt.build_known_people(s, batch_thread_ids=[], core_cap=40)
@@ -124,29 +124,29 @@ def test_known_people_includes_batch_senders(tmp_path):
     assert any(r["name"] == "Batch Only" for r in rows)
 
 
-def test_known_people_excludes_josh(tmp_path):
+def test_known_people_excludes_owner(tmp_path):
     from mcpbrain.graph_write import OwnerIdentity
-    _josh = OwnerIdentity(name="Josh", entity_id="josh-kemp",
-                          aliases=frozenset({"josh", "joshua", "josh kemp"}))
+    _owner = OwnerIdentity(name="Sam", entity_id="sam-chen",
+                          aliases=frozenset({"sam", "alex", "sam chen"}))
     s = _store(tmp_path)
     with s._connect() as db:
-        _add_person(db, "josh-kemp", "Josh Kemp", "Centrepoint", email_count=999)
-        _add_role(db, "josh-kemp", "Operations Manager")
-        # Also reach Josh via a batch thread to confirm the overlay excludes him too.
-        _link_thread(db, "t-1", "m-1", "josh-kemp")
+        _add_person(db, "sam-chen", "Sam Chen", "Acme", email_count=999)
+        _add_role(db, "sam-chen", "Operations Manager")
+        # Also reach Sam via a batch thread to confirm the overlay excludes him too.
+        _link_thread(db, "t-1", "m-1", "sam-chen")
 
     # Pass the owner explicitly so the test is self-contained.
     rows = prompt.build_known_people(s, batch_thread_ids=["t-1"], core_cap=40,
-                                     owner=_josh)
+                                     owner=_owner)
 
-    assert all("josh" not in r["name"].lower() for r in rows)
-    assert all(r.get("id") != "josh-kemp" for r in rows)
+    assert all("sam" not in r["name"].lower() for r in rows)
+    assert all(r.get("id") != "sam-chen" for r in rows)
 
 
 def test_known_people_dedups_overlap(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        _add_person(db, "joel", "Joel Chelliah", "Centrepoint", email_count=50)
+        _add_person(db, "joel", "Joel Chelliah", "Acme", email_count=50)
         _add_role(db, "joel", "Senior Pastor")
         # Same person also appears in a batch thread.
         _link_thread(db, "t-1", "m-1", "joel")
@@ -161,7 +161,7 @@ def test_known_people_dedups_overlap(tmp_path):
 def test_known_people_picks_current_role_not_superseded(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        _add_person(db, "taryn", "Taryn Hamilton", "Centrepoint", email_count=50)
+        _add_person(db, "taryn", "Taryn Hamilton", "Acme", email_count=50)
         # Superseded role: invalidated_at set.
         _add_role(db, "taryn", "Worship Pastor",
                   invalidated_at="2025-01-01T00:00:00Z")
@@ -179,7 +179,7 @@ def test_known_people_empty_batch_returns_core_only(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         # Core person: confirmed org + current role + sufficient email_count.
-        _add_person(db, "joel", "Joel Chelliah", "Centrepoint", email_count=50)
+        _add_person(db, "joel", "Joel Chelliah", "Acme", email_count=50)
         _add_role(db, "joel", "Senior Pastor")
         # Thread-only person: would surface only via a batch overlay.
         _add_person(db, "batch-only", "Batch Only", "unknown", email_count=1)

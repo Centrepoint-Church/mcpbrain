@@ -66,7 +66,7 @@ def _seed_chunk(store, doc_id, thread_id, message_id, date="2026-04-18"):
 
 
 def _message_for(thread_id, message_id, date="2026-04-18",
-                 sender="Joel Chelliah <joel@centrepoint.church>"):
+                 sender="Joel Chelliah <joel@example.org>"):
     return {
         "message_id": message_id,
         "sender": sender,
@@ -121,7 +121,7 @@ def _patch_prepare_seams(monkeypatch, batches, messages_by_thread,
     monkeypatch.setattr(prepare, "_read_projects", lambda store: [])
     monkeypatch.setattr(prepare, "_read_areas", lambda store: [])
     monkeypatch.setattr(prepare, "_org_domain_lines",
-                        lambda: ["centrepoint.church -> Centrepoint"])
+                        lambda: ["example.org -> Acme"])
 
     if merge_review_pairs is not None:
         monkeypatch.setattr(prepare, "_merge_review_block",
@@ -214,11 +214,11 @@ def test_round_trip_with_merge_answers(store, home, monkeypatch):
     # shared 'joel'/'chelliah' tokens, high token-set ratio, different canonical
     # keys (so the deterministic tier leaves them for LLM adjudication).
     store.upsert_entity("joel-chelliah", "Joel Chelliah", "person",
-                        "Centrepoint", "2026-04-01")
+                        "Acme", "2026-04-01")
     store.upsert_entity("joel-chelliah", "Joel Chelliah", "person",
-                        "Centrepoint", "2026-04-02")  # mentions=2 -> winner
+                        "Acme", "2026-04-02")  # mentions=2 -> winner
     store.upsert_entity("joel-chelliah-snr", "Joel Chelliah Snr", "person",
-                        "Centrepoint", "2026-04-01")  # mentions=1 -> loser
+                        "Acme", "2026-04-01")  # mentions=1 -> loser
 
     # Real _merge_review_block (merge_review_pairs left None).
     _patch_prepare_seams(monkeypatch, batches, messages_by_thread)
@@ -279,7 +279,7 @@ def test_real_phase1_round_trip(store, home, monkeypatch):
     """
     # Human thread: lead sender is a real person -> kept.
     _seed_real_chunk(store, "d-human", "t-human", "m-human-1",
-                     sender="Joel Chelliah <joel@centrepoint.church>",
+                     sender="Joel Chelliah <joel@example.org>",
                      subject="Hall B for Wednesday college")
     # Noise thread: lead sender is automated (noreply) -> dropped by the filter.
     _seed_real_chunk(store, "d-noise", "t-noise", "m-noise-1",

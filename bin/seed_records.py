@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""One-time seeding script: creates ~/joshbrain from ops-brain source files.
+"""One-time seeding script: creates a records repo from ops-brain source files.
 
-Run once on the Mac, then delete this script — it is a migration tool, not a mirror.
+Run once, then delete this script — it is a migration tool, not a mirror.
 Re-runs are rejected if the destination already exists.
 
 Usage:
-    python3 bin/seed_joshbrain.py [--src PATH] [--dest PATH]
+    python3 bin/seed_records.py [--src PATH] [--dest PATH]
 
 Defaults:
     --src   ~/ops-brain
-    --dest  ~/joshbrain
+    --dest  ~/records
 """
 import argparse
 import shutil
@@ -62,23 +62,21 @@ _CLAUDE_MD = """\
 
 <!-- GARDENER-PROTECTED-START: identity and core rules — gardener cannot modify this block -->
 
-## Org tagging rules (critical — Josh works across four orgs)
+## Org tagging rules
 
 <important if="this session involves people, organisations, or roles">
-- Josh's orgs: `Centrepoint Church` (Operations Manager / College Coordinator), `ACC` (Strategic Projects Lead), `Courageous Church` (board member — separate org, not Centrepoint), `Curtin` (MBA student).
-- Every person entity must include org affiliation in its first observation: "(Centrepoint)", "(Courageous Church)", "(ACC)", "(external)" etc.
-- Every `brain_ingest` call must name the org in body text. Start with "Centrepoint — " or "Courageous Church board — " so searches surface org context.
-- Courageous Church items must be clearly tagged. Don't surface them for Centrepoint questions.
-- When memory results appear, check the org tag before using them. If ambiguous, flag it rather than assume Centrepoint.
+- List your orgs and roles in context/identity.md.
+- Every person entity must include org affiliation in its first observation.
+- Every `brain_ingest` call must name the org in body text so searches surface org context.
+- When memory results appear, check the org tag before using them.
 </important>
 
 ## Role attribution rules
 
 <important if="this session involves people, roles, or attribution">
-- Never attribute a role/title to a person based on text Josh wrote — including his own email signature or correspondence context.
-- Only record a person's role if they stated it themselves, it's in their own email signature, or Josh explicitly confirms it.
+- Never attribute a role/title to a person based on text you wrote — including your own email signature or correspondence context.
+- Only record a person's role if they stated it themselves, it's in their own email signature, or you explicitly confirm it.
 - If role is uncertain, omit. Bad attribution is worse than no attribution.
-- Email ingest strips signatures from 2026-04 onward; older indexed content may still contain Josh's signature — treat role info from pre-strip emails with lower confidence.
 </important>
 
 <!-- GARDENER-PROTECTED-END -->
@@ -99,16 +97,10 @@ _CLAUDE_MD = """\
    | Job description / PD | `templates/job-description.md` | `reference/examples/job-description.md` |
    | Meeting minutes | `templates/meeting-minutes.md` | `reference/examples/meeting-minutes.md` |
    | SOP | `templates/sop.md` | `reference/examples/sop.md` |
-   | Staff update | `templates/staff-update.md` | — |
-   | Board paper | `templates/board-report.md` | — |
-   | Risk assessment | `templates/risk-assessment.md` | — |
-   | Project brief | `templates/project-brief.md` | — |
-   | Comms brief | `templates/comms-brief.md` | — |
 
-6. Centrepoint-specific context → `reference/ministry-context.md`.
-7. Related prior decision → `state/decisions.md`.
-8. Compliance work → `state/compliance.md`.
-9. Plan-writing, architecture work, rebuilding any named system → `state/retired.md`.
+6. Related prior decision → `state/decisions.md`.
+7. Compliance work → `state/compliance.md`.
+8. Plan-writing, architecture work, rebuilding any named system → `state/retired.md`.
 
 **Extended thinking:** use for risk assessments, strategic recommendations, financial analysis, compliance reviews, multi-stakeholder planning.
 
@@ -123,7 +115,7 @@ _CLAUDE_MD = """\
 | Active in-progress work, < 7 days old | `state/hot.md` "Just decided" | 2-4 line entry, date-prefixed |
 | One-shot session detail (what shipped, what bug) | Commit message | Don't write to hot.md |
 | Cross-session learning from a mistake | `memory/feedback_*.md` | Standalone file + link from MEMORY.md |
-| Centrepoint context / project status change | `reference/ministry-context.md` or `reference/projects.md` | Inline update |
+| Context / project status change | `reference/projects.md` | Inline update |
 | Tool / system / integration change | `reference/systems.md` | Inline update |
 
 **hot.md discipline:** entries are 2-4 lines max with a `**YYYY-MM-DD:**` prefix. Anything older than 14 days is auto-pruned by `bin/prune_hot_md.py`.
@@ -132,19 +124,14 @@ _CLAUDE_MD = """\
 
 ## Output File Convention
 
-- **Cross-cutting deliverables** → `~/joshbrain/outputs/`
-- **Project-specific deliverables** → `~/joshbrain/projects/<project-name>/outputs/`
+- **Cross-cutting deliverables** → `~/records/outputs/`
+- **Project-specific deliverables** → `~/records/projects/<project-name>/outputs/`
 
 ---
 
 ## Quality Standard
 
 voice.md and preferences.md are loaded at session start. Apply them to all output. Before presenting any draft, run the voice.md self-check. Fix issues before presenting, not after.
-
-## Drafting Defaults
-
-- **Default tone for board responses and emails is direct and collegial**, not formal or legalistic.
-- **When drafting about structural changes:** lead with the reason for the change and contrast with the prior approach in the first paragraph.
 
 ---
 
@@ -160,29 +147,9 @@ Reach for subagents when a task genuinely needs an isolated context window — t
 - **Don't add features that weren't explicitly requested.** Build the best long-term solution within scope.
 - **Before drafting any plan: run a retirement and supersession check.** Read `state/retired.md` in full; grep `state/decisions.md` for Retired rows + last 30 days of Active rows.
 
-## Plan Execution Drift Check
-
-Before executing any task in a plan:
-1. Read the plan's `Staleness markers` header.
-2. If `Last cross-checked against state/decisions.md` is missing OR older than 7 days, halt and run a fresh retirement check.
-3. If any retirement matches a system the plan touches, halt and surface the conflict.
-4. If clean, refresh the staleness header to today's date and commit that bump as a standalone commit.
-
 ---
 
 ## Proactive Behaviours
-
-**Invoke /deep-review automatically when:**
-- Josh mentions "board paper", "board prep", "ACC review", "risk assessment", or "make a decision about X"
-- A significant compliance, financial, or multi-stakeholder decision is being discussed
-
-<important if="this session involves people, organisations, or roles">
-(See Org tagging rules above — in protected block.)
-</important>
-
-<important if="this session involves people, roles, or attribution">
-(See Role attribution rules above — in protected block.)
-</important>
 
 **Proactively `brain_ingest` at natural capture points:**
 - After extended discussion of a topic with no explicit capture → ingest before closing.
@@ -193,30 +160,27 @@ Before executing any task in a plan:
 
 **Use `brain_actions` for task/deadline questions.**
 
-**Use `content_type` filtering when the question implies a specific email type:**
-- "What has been decided about X" → `brain_search` with `content_type="decision"`.
-
 **Search discipline:** for factual lookups, allow up to 5 brain_search queries. If the answer hasn't surfaced by then, say "not in the index". Treat top score < 0.35 as no real match.
 
 ---
 
 ## Self-Evolution Protocol
 
-Update files when things occur — don't defer to end of session. The routing rules above tell you the destination for each kind of change. Propose. Josh approves.
+Update files when things occur — don't defer to end of session. The routing rules above tell you the destination for each kind of change. Propose. Owner approves.
 
 ---
 
 ## Platform Notes
 
-- **Claude Code (Mac):** Working directory is `~/joshbrain`. Edit files directly. mcpbrain MCP is registered; use `brain_*` tools for knowledge graph access.
-- **Cowork:** Working folder is `~/joshbrain` with `~/.mcpbrain` as a connected folder. Project instructions are in `cowork/`.
+- **Claude Code (Mac):** Working directory is `~/records`. Edit files directly. mcpbrain MCP is registered; use `brain_*` tools for knowledge graph access.
+- **Cowork:** Working folder is `~/records` with `~/.mcpbrain` as a connected folder. Project instructions are in `cowork/`.
 - **Claude Desktop:** Reads context via MCP resources from `~/.mcpbrain/context/` (@-mentionable via the mcpbrain MCP server).
 """
 
 _BOOTSTRAP_MD = """\
-# joshbrain Bootstrap Checklist
+# Records Bootstrap Checklist
 
-Use this when setting up a new Mac from scratch. Steps are in dependency order.
+Use this when setting up mcpbrain on a new machine. Steps are in dependency order.
 
 ## Prerequisites
 
@@ -233,8 +197,8 @@ Add SSH key to GitHub: `cat ~/.ssh/id_ed25519.pub` → GitHub Settings → SSH k
 ```bash
 mkdir -p ~/Documents/GitHub
 cd ~/Documents/GitHub
-git clone git@github.com:itsjoshuakemp/mcpbrain.git
-git clone git@github.com:itsjoshuakemp/joshbrain.git
+git clone git@github.com:<your-org>/mcpbrain.git
+git clone git@github.com:<your-org>/records.git
 ```
 
 ## 2. Set up mcpbrain venv
@@ -305,12 +269,12 @@ launchctl list | grep com.mcpbrain
 Register the server with `claude mcp add` (not by hand-editing JSON):
 
 ```bash
-claude mcp add --transport stdio --scope user ops-brain-search \
-  -e MCPBRAIN_HOME=/Users/joshkemp/.mcpbrain \
-  -- /Users/joshkemp/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain mcp
+claude mcp add --transport stdio --scope user mcpbrain-search \\
+  -e MCPBRAIN_HOME=/home/user/.mcpbrain \\
+  -- /home/user/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain mcp
 ```
 
-This writes to `~/.claude.json` (user scope) — NOT `~/.claude/settings.json`, which Claude Code does not read MCP servers from. The `-e KEY=value` flag sets the environment variable (long form: `--env MCPBRAIN_HOME=...`). Verify with `claude mcp list`.
+This writes to `~/.claude.json` (user scope). The `-e KEY=value` flag sets the environment variable. Verify with `claude mcp list`.
 
 ## 6. Register mcpbrain MCP — Claude Desktop
 
@@ -319,11 +283,11 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "ops-brain-search": {
-      "command": "/Users/joshkemp/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain",
+    "mcpbrain-search": {
+      "command": "/home/user/Documents/GitHub/mcpbrain/.venv/bin/mcpbrain",
       "args": ["mcp"],
       "env": {
-        "MCPBRAIN_HOME": "/Users/joshkemp/.mcpbrain"
+        "MCPBRAIN_HOME": "/home/user/.mcpbrain"
       }
     }
   }
@@ -343,13 +307,13 @@ Restart Claude Desktop. Verify: in a chat, type `@memory.md` — should show mem
 
 Create two projects in Cowork:
 
-**Context project ("Josh — Context"):**
-- Working folder: `~/Documents/GitHub/joshbrain`
+**Context project ("Records — Context"):**
+- Working folder: `~/Documents/GitHub/records`
 - Connected folder: `~/.mcpbrain`
 - Instructions: paste the full content of `cowork/context-project.md`
 
 **Memory Gardener ("Memory Gardener"):**
-- Working folder: `~/Documents/GitHub/joshbrain`
+- Working folder: `~/Documents/GitHub/records`
 - Connected folder: `~/.mcpbrain`
 - Instructions: paste the full content of `cowork/memory-gardener.md`
 - Schedule: weekly, Monday 08:00
@@ -363,8 +327,8 @@ launchctl list | grep com.mcpbrain
 # mcpbrain daemon log
 tail -20 ~/.mcpbrain/com.mcpbrain.log
 
-# joshbrain git healthy
-git -C ~/Documents/GitHub/joshbrain log --oneline | head -5
+# Records repo git healthy
+git -C ~/Documents/GitHub/records log --oneline | head -5
 
 # Brain search works
 cd ~/Documents/GitHub/mcpbrain
@@ -373,33 +337,24 @@ cd ~/Documents/GitHub/mcpbrain
 """
 
 _COWORK_CONTEXT_PROJECT_MD = """\
-# Josh Kemp — Context Project
+# Records — Context Project
 
-This Cowork project provides Claude with Josh's complete working context across all sessions.
+This Cowork project provides Claude with your complete working context across all sessions.
 
 ## Working setup
 
-- **Working folder:** ~/Documents/GitHub/joshbrain (identity, voice, preferences, state, reference, templates)
+- **Working folder:** ~/records (identity, voice, preferences, state, reference, templates)
 - **Connected folder:** ~/.mcpbrain (memory.md, config.json, brain.sqlite3)
 
 ## Identity
 
-See `context/identity.md` in the working folder for Josh's full profile.
+See `context/identity.md` in the working folder for your full profile.
 
-Key points:
-- Operations Manager + College Coordinator, Centrepoint Church
-- Strategic Projects Lead, Australian Christian Churches (ACC)
-- Board member, Courageous Church (separate org, not affiliated with Centrepoint)
-- MBA student, Curtin University (low priority — ignore unless explicitly asked)
-- Expertise: Google Apps Script, financial/operational analytics, workflow automation, governance, multi-campus operations
+Fill in your orgs, roles, and areas of responsibility there.
 
 ## Voice
 
-See `context/voice.md` for full style guide. Core:
-- Write like a competent colleague talking to another competent colleague
-- No em dashes, no banned words (crucial, pivotal, leverage, robust, streamline, etc.)
-- Australian English spelling
-- Direct, warm, specific, useful first
+See `context/voice.md` for the style guide.
 
 ## Preferences
 
@@ -407,9 +362,9 @@ See `context/preferences.md` for format defaults, collaboration style, and hard 
 
 ## Memory
 
-The file `context/memory.md` in the connected ~/.mcpbrain folder contains Josh's current memory index. Read it when cross-session context helps ("what do we know about X", "what was decided about Y").
+The file `context/memory.md` in the connected ~/.mcpbrain folder contains the current memory index. Read it when cross-session context helps ("what do we know about X", "what was decided about Y").
 
-`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/joshbrain/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
+`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/records/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
 
 ## Routing
 
@@ -419,21 +374,12 @@ When something worth recording happens this session:
 |---|---|
 | Decision superseding prior behaviour | `state/decisions.md` — dated row |
 | Active work < 7 days | `state/hot.md` — 2-4 line entry, date-prefixed |
-| Project context change | `reference/projects.md` or `reference/ministry-context.md` |
+| Project context change | `reference/projects.md` |
 | Tool/system change | `reference/systems.md` |
 | Cross-session learning | new `memory/feedback_*.md` + link in `MEMORY.md` |
 
-## Org tagging rules
-
-Josh works across four orgs: Centrepoint Church, ACC, Courageous Church (board — separate from Centrepoint), Curtin (MBA). Every person entity needs org affiliation. Every brain_ingest call names the org explicitly. Courageous Church items stay clearly separate from Centrepoint.
-
-## Role attribution rules
-
-Never attribute a title to someone based on text Josh wrote. Only record a role if they stated it themselves, it's in their own email signature, or Josh explicitly confirms it. If uncertain, omit.
-
 ## Proactive behaviours
 
-- Invoke /deep-review automatically for board papers, risk assessments, ACC reviews, multi-stakeholder decisions
 - Run brain_search before answering historical questions
 - Ingest new durable facts at natural capture points before closing
 """
@@ -442,35 +388,34 @@ _COWORK_MEMORY_GARDENER_MD = """\
 # Memory Gardener — Weekly Scheduled Task
 
 **Schedule:** weekly, Monday 08:00
-**Working folder:** ~/Documents/GitHub/joshbrain
+**Working folder:** ~/records
 **Connected folder:** ~/.mcpbrain
 
 ## Purpose
 
-Each week: review new memory captures, check context files for drift, and apply focused updates to joshbrain within defined boundaries. Commit all changes with a descriptive message. If nothing needs changing, log that instead — don't make cosmetic edits.
+Each week: review new memory captures, check context files for drift, and apply focused updates to records within defined boundaries. Commit all changes with a descriptive message. If nothing needs changing, log that instead — don't make cosmetic edits.
 
 ## What to read first
 
 1. `context/memory.md` in the connected ~/.mcpbrain folder — current memory index (daemon-maintained)
 2. `state/hot.md` — entries from the last 7 days
-3. `MEMORY.md` in joshbrain — the Claude Code auto-memory index
+3. `MEMORY.md` in records — the Claude Code auto-memory index
 4. Recent entries in `~/.mcpbrain/change_log` (if accessible) — system-applied changes since last gardener run
 
-`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/joshbrain/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
+`~/.mcpbrain/context/memory.md` is the daemon-maintained note index; `~/records/MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
 
 ## What you can update
 
 - `MEMORY.md` — add new pointers, update descriptions, remove pointers for files that no longer exist
 - `memory/*.md` files — update or add memory files when new durable facts emerge from recent captures
 - `reference/projects.md` — update project status, add new projects when confirmed in recent captures
-- `reference/ministry-context.md` — add new org/personnel context confirmed in recent captures
 
 ## What you cannot modify
 
 - Anything between `<!-- GARDENER-PROTECTED-START -->` and `<!-- GARDENER-PROTECTED-END -->` in `CLAUDE.md`
 - `context/identity.md`, `context/voice.md`, `context/preferences.md`
 - `state/decisions.md`, `state/retired.md`, `state/compliance.md`
-- `CLAUDE.md` itself (outside the non-protected routing sections — ask Josh for those changes)
+- `CLAUDE.md` itself (outside the non-protected routing sections — ask the owner for those changes)
 
 ## Caps per run
 
@@ -487,10 +432,6 @@ git add state/decisions.md reference/projects.md memory/feedback_xyz.md MEMORY.m
 git commit -m "gardener: [brief description of what changed and why]"
 ```
 
-Example messages:
-- `gardener: add Courageous Church succession context; update projects.md ACC CAMS status`
-- `gardener: expire stale memory about Nexus infrastructure; no other changes`
-
 ## If nothing needs changing
 
 ```bash
@@ -499,11 +440,7 @@ echo "$(date -I): gardener ran, no changes needed" >> ~/.mcpbrain/gardener.log
 
 ## Quality check before committing
 
-Read every file you changed. Confirm:
-- No banned words (crucial, pivotal, leverage, robust, streamline — see context/voice.md)
-- No em dashes
-- Org tags correct (Courageous Church items not mixed with Centrepoint)
-- Role attributions only from confirmed sources
+Read every file you changed. Confirm no banned words, no em dashes, org tags correct.
 """
 
 _MEMORY_MD = """\
@@ -514,7 +451,7 @@ Populated by the Memory Gardener (weekly, Monday). One line per memory file in m
 
 _CONTEXT_HEALTH_PY = """\
 #!/usr/bin/env python3
-\"\"\"Weekly context health check for joshbrain.
+\"\"\"Weekly context health check for the records repo.
 
 Checks:
   - MEMORY.md line count (warn if approaching 200-line truncation limit)
@@ -528,7 +465,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-JOSHBRAIN = Path(__file__).parent.parent
+RECORDS = Path(__file__).parent.parent
 MCPBRAIN_HOME = Path(os.environ.get("MCPBRAIN_HOME", Path.home() / ".mcpbrain"))
 
 _WARN_MEMORY_LINES = 180
@@ -537,7 +474,7 @@ _WARN_BRAIN_MEMORY_DAYS = 7
 
 
 def _check_memory_md():
-    path = JOSHBRAIN / "MEMORY.md"
+    path = RECORDS / "MEMORY.md"
     if not path.exists():
         return [f"MISSING: {path}"]
     n = len(path.read_text().splitlines())
@@ -547,7 +484,7 @@ def _check_memory_md():
 
 
 def _check_hot_md():
-    path = JOSHBRAIN / "state" / "hot.md"
+    path = RECORDS / "state" / "hot.md"
     if not path.exists():
         return []
     cutoff = date.today() - timedelta(days=_WARN_HOT_DAYS)
@@ -594,12 +531,12 @@ if __name__ == "__main__":
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="One-time script: seed ~/joshbrain from ops-brain source files."
+        description="One-time script: seed a records repo from ops-brain source files."
     )
     parser.add_argument("--src", default=str(Path.home() / "ops-brain"),
                         help="Path to ops-brain checkout (default: ~/ops-brain)")
-    parser.add_argument("--dest", default=str(Path.home() / "joshbrain"),
-                        help="Destination path for joshbrain (default: ~/joshbrain)")
+    parser.add_argument("--dest", default=str(Path.home() / "records"),
+                        help="Destination path for records repo (default: ~/records)")
     args = parser.parse_args()
 
     src = Path(args.src)
@@ -666,27 +603,27 @@ def main() -> None:
     subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
     subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
     # Resolve author identity: prefer global git config, fall back to env.
-    import shlex as _shlex
+    import shlex as _shlex  # noqa: F401
     def _git_cfg(key: str, fallback: str) -> str:
         r = subprocess.run(["git", "config", "--global", key],
                            capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else fallback
 
-    git_name = _git_cfg("user.name", "Josh Kemp")
-    git_email = _git_cfg("user.email", "josh.k@centrepoint.church")
+    git_name = _git_cfg("user.name", "Records Owner")
+    git_email = _git_cfg("user.email", "owner@example.org")
 
     subprocess.run(
         ["git",
          "-c", f"user.name={git_name}",
          "-c", f"user.email={git_email}",
          "commit", "-m",
-         "feat: seed joshbrain from ops-brain\n\n"
+         "feat: seed records repo from ops-brain\n\n"
          "Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"],
         cwd=dest, check=True, capture_output=True,
     )
 
     print(
-        f"joshbrain seeded at {dest} "
+        f"records repo seeded at {dest} "
         f"({copied} files copied, {generated} files generated, 1 commit)"
     )
 

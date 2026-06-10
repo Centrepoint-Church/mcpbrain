@@ -458,17 +458,17 @@ def drain_captures(store, *, home=None) -> int:
                 file_ok = False
         elif kind in ("decision", "continuity", "memory"):
             try:
-                from mcpbrain import joshbrain_write as jw
+                from mcpbrain import records_write as rw
                 if _records_repo_path is None:
                     _records_repo_path = _records_repo(str(home_dir))
                 repo = _records_repo_path
                 if kind == "decision":
-                    committed = jw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
+                    committed = rw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
                                        owner=env.get("owner", ""), supersedes=env.get("supersedes", ""))
                 elif kind == "continuity":
-                    committed = jw.append_continuity(repo, text=env["text"])
+                    committed = rw.append_continuity(repo, text=env["text"])
                 else:  # memory
-                    committed = jw.write_memory(repo, slug=env["slug"], description=env.get("description", ""),
+                    committed = rw.write_memory(repo, slug=env["slug"], description=env.get("description", ""),
                                     body=env["body"], memory_type=env.get("memory_type", "project"))
                 if committed:
                     applied += 1

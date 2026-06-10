@@ -268,17 +268,17 @@ def test_apply_to_reconcile_round_trip(store):
     """End-to-end producer -> consumer: apply() flags an action waiting on a
     person, and the reconciler clears it when that person's chunk arrives."""
     ext = {
-        "thread_id": "t-wait", "org": "Centrepoint", "content_type": "request",
-        "summary": "Josh asks Taryn to confirm the venue.", "contextual_summary": "",
+        "thread_id": "t-wait", "org": "Acme", "content_type": "request",
+        "summary": "Sam asks Taryn to confirm the venue.", "contextual_summary": "",
         "entities": [{"name": "Taryn Hamilton", "type": "person",
-                      "org": "Centrepoint", "role": ""}],
+                      "org": "Acme", "role": ""}],
         "topics": [], "reply_needed": True, "reply_reason": "",
         "resolved_action_ids": [], "updated_actions": [], "relations": [],
         "actions": [{"description": "Confirm the venue booking.",
-                     "owner_name": "Josh Kemp", "owner_fallback": "",
+                     "owner_name": "Sam Chen", "owner_fallback": "",
                      "due_date": "", "waiting_on": "Taryn Hamilton"}],
         "messages": [{"message_id": "wait-m1",
-                      "sender": "Josh Kemp <josh.k@centrepoint.church>",
+                      "sender": "Sam Chen <sam@example.org>",
                       "date": "2026-06-01", "labels": "INBOX", "subject": "Venue"}],
     }
     gw.apply(store, ext, doc_ids=["t-wait"])

@@ -3,24 +3,24 @@
   "prepared_at": "2026-06-02T10:15:00Z",
   "context": {
     "known_people": [
-      {"name": "Joel Chelliah", "org": "Centrepoint", "role": "Senior Pastor"}
+      {"name": "Joel Chelliah", "org": "Acme", "role": "Senior Pastor"}
     ],
     "projects": [
-      {"id": "byford-grant", "name": "Byford Building Grant", "org": "Centrepoint",
+      {"id": "byford-grant", "name": "Byford Building Grant", "org": "Acme",
        "status_line": "Awaiting council approval on the stage-two plans."}
     ],
     "areas": [
-      {"id": "centrepoint-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."}
+      {"id": "acme-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."}
     ],
     "org_domain_map": [
-      "centrepoint.church → Centrepoint"
+      "example.org → Acme"
     ]
   },
   "threads": [
     {"thread_id": "t-merge-a", "prior_thread_context": "",
      "open_actions": [],
      "messages": [
-       {"message_id": "m-ma1", "sender": "Joel Chelliah <joel@centrepoint.church>",
+       {"message_id": "m-ma1", "sender": "Joel Chelliah <joel@example.org>",
         "date": "2026-06-02", "labels": "INBOX", "subject": "Worship night logistics",
         "text": "Can we lock in the AV crew for the worship night next Friday?"}
      ]}

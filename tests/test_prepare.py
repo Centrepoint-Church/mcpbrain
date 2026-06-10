@@ -74,7 +74,7 @@ def _stub_reassemble(monkeypatch):
 
 def test_is_noise_sender():
     assert prepare._is_noise("noreply@x.com", "Hello") is True
-    assert prepare._is_noise("joel@centrepoint.church", "Hello") is False
+    assert prepare._is_noise("joel@example.org", "Hello") is False
 
 
 def test_is_noise_subject():
@@ -91,11 +91,11 @@ def test_is_noise_decorated_subject():
 def test_thread_is_noise_uses_lead_message():
     noise = prepare.thread_is_noise([
         _msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "..."),
-        _msg("m2", "joel@centrepoint.church", "2026-06-02", "Re: Newsletter", "thanks"),
+        _msg("m2", "joel@example.org", "2026-06-02", "Re: Newsletter", "thanks"),
     ])
     assert noise is True
     clean = prepare.thread_is_noise([
-        _msg("m1", "joel@centrepoint.church", "2026-06-01", "Hall B booking", "..."),
+        _msg("m1", "joel@example.org", "2026-06-01", "Hall B booking", "..."),
         _msg("m2", "noreply@x.com", "2026-06-02", "Unsubscribe", "..."),
     ])
     assert clean is False
@@ -157,7 +157,7 @@ def test_thread_is_noise_clean_thread_with_body_not_flagged():
     # False-positive guard: a real internal thread whose body mentions
     # 'unsubscribe' in passing must NOT be flagged.
     assert prepare.thread_is_noise([
-        _msg("m1", "joel@centrepoint.church", "2026-06-01", "Re: Hall B booking",
+        _msg("m1", "joel@example.org", "2026-06-01", "Re: Hall B booking",
              "Confirmed for Saturday. Please unsubscribe me from the old roster thread."),
     ]) is False
 
@@ -168,9 +168,9 @@ def test_guard_introducing_internal_announcement_not_noise():
     # Fix 1: ^introducing removed. A genuine ministry announcement from a real
     # sender must NOT be flagged as noise.
     assert prepare.thread_is_noise([
-        _msg("m1", "joel@centrepoint.church", "2026-06-01",
+        _msg("m1", "joel@example.org", "2026-06-01",
              "Introducing our new College Coordinator",
-             "Excited to share that Josh will be coordinating the new college."),
+             "Excited to share that Sam will be coordinating the new college."),
     ]) is False
 
 
@@ -191,7 +191,7 @@ def test_guard_percent_off_mid_subject_not_noise():
     assert prepare.thread_is_noise([
         _msg("m1", "accounts@venuehire.com.au", "2026-06-01",
              "Approved: 10% off the venue quote",
-             "Hi Josh, we have approved the discount. See attached."),
+             "Hi Sam, we have approved the discount. See attached."),
     ]) is False
 
 
@@ -204,7 +204,7 @@ def test_guard_shop_floor_walkthrough_not_noise():
     # Fix 3: adjacency required. "Shop floor walkthrough today" must NOT match
     # the tightened \bshop (?:now|today)\b pattern.
     assert prepare.thread_is_noise([
-        _msg("m1", "taryn@centrepoint.church", "2026-06-01",
+        _msg("m1", "taryn@example.org", "2026-06-01",
              "Shop floor walkthrough today",
              "Can we do the op-shop walkthrough at 2pm?"),
     ]) is False
@@ -227,7 +227,7 @@ def test_prepare_skips_noise_threads_and_marks_them(tmp_path, monkeypatch):
     noise = FakeBatch("t-noise", ["d-n1"],
                       [_msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "x")])
     good = FakeBatch("t-good", ["d-g1"],
-                     [_msg("m2", "joel@centrepoint.church", "2026-06-01", "Hall B", "x")])
+                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B", "x")])
     store = FakeStore()
     monkeypatch.setattr(prepare, "_group_unenriched_threads",
                         lambda store, **kw: [noise, good])
@@ -258,7 +258,7 @@ def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
     noise = FakeBatch("t-noise", ["d-n1"], [raw_chunk])
     good = FakeBatch("t-good", ["d-g1"],
                      [{"doc_id": "d-g1", "text": "body",
-                       "metadata": {"thread_id": "t-good", "sender": "joel@centrepoint.church",
+                       "metadata": {"thread_id": "t-good", "sender": "joel@example.org",
                                     "subject": "Hall B", "date": "2026-06-01"}}])
     store = FakeStore()
     monkeypatch.setattr(prepare, "_group_unenriched_threads",
@@ -288,10 +288,10 @@ def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
 def test_prepare_thread_block_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"],
-                      [_msg("m1", "joel@centrepoint.church", "2026-06-01", "Hall B", "body text")])
+                      [_msg("m1", "joel@example.org", "2026-06-01", "Hall B", "body text")])
     store = FakeStore(
         contexts={"t-a": "Prior summary."},
-        actions={"t-a": [{"id": 42, "owner": "Josh", "text": "Lodge it.", "deadline": "2026-06-10"}]},
+        actions={"t-a": [{"id": 42, "owner": "Sam", "text": "Lodge it.", "deadline": "2026-06-10"}]},
     )
     monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
@@ -340,15 +340,15 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
 
     def fake_people(store, batch_thread_ids):
         captured["ids"] = batch_thread_ids
-        return [{"name": "Joel Chelliah", "org": "Centrepoint", "role": "Senior Pastor"}]
+        return [{"name": "Joel Chelliah", "org": "Acme", "role": "Senior Pastor"}]
 
     monkeypatch.setattr(prepare, "_build_known_people", fake_people)
     monkeypatch.setattr(prepare, "_read_projects",
-                        lambda store: [{"id": "p1", "name": "Byford", "org": "Centrepoint", "status_line": "x"}])
+                        lambda store: [{"id": "p1", "name": "Byford", "org": "Acme", "status_line": "x"}])
     monkeypatch.setattr(prepare, "_read_areas",
                         lambda store: [{"id": "a1", "name": "Facilities", "description": "x"}])
     monkeypatch.setattr(prepare, "_org_domain_lines",
-                        lambda: ["centrepoint.church → Centrepoint"])
+                        lambda: ["example.org → Acme"])
 
     prepare.prepare(store, thread_cap=10, char_budget=100000,
                     resolution_due=False, now=_NOW)
@@ -358,7 +358,7 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
     assert ctx["known_people"][0]["name"] == "Joel Chelliah"
     assert ctx["projects"][0]["id"] == "p1"
     assert ctx["areas"][0]["id"] == "a1"
-    assert ctx["org_domain_map"] == ["centrepoint.church → Centrepoint"]
+    assert ctx["org_domain_map"] == ["example.org → Acme"]
 
 
 def test_prepare_caps_threads(tmp_path, monkeypatch):

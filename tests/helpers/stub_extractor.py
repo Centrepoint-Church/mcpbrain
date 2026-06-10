@@ -28,21 +28,21 @@ def _extraction_for_thread(thread: dict) -> dict:
     """
     return {
         "thread_id": thread["thread_id"],
-        "org": "Centrepoint",
+        "org": "Acme",
         "content_type": "request",
-        "summary": "Joel asks Josh to confirm Hall B availability.",
+        "summary": "Joel asks Sam to confirm Hall B availability.",
         "contextual_summary": "College term-one room booking thread.",
         "entities": [
             {"name": "Joel Chelliah", "type": "person",
-             "org": "Centrepoint", "role": "Senior Pastor"},
-            {"name": "Centrepoint Church", "type": "org",
-             "org": "Centrepoint", "role": ""},
+             "org": "Acme", "role": "Senior Pastor"},
+            {"name": "Acme Corp", "type": "org",
+             "org": "Acme", "role": ""},
         ],
         "topics": ["facilities", "college"],
         "actions": [],
         "relations": [
             {"source_name": "Joel Chelliah", "type": "works_at",
-             "target_name": "Centrepoint Church"},
+             "target_name": "Acme Corp"},
         ],
         "reply_needed": True,
         "reply_reason": "Direct question: 'can you confirm Hall B?'",

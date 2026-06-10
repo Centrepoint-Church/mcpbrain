@@ -14,7 +14,7 @@ The Nexus DB is opened READ-ONLY. Both DBs must be reachable when this runs
 running — the seed is the sole writer for its duration.
 
 Nexus path convention (for reference, not hardcoded — pass it on the CLI):
-the memory graph lives at db_for("josh", "memory") per src/memory_db.py:80-97.
+the memory graph lives at db_for("<user>", "memory") per src/memory_db.py:80-97.
 
 Usage:
     seed_from_nexus.py --nexus-db /path/to/memory.sqlite3 \\
@@ -326,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Seed mcpbrain's graph from a Nexus memory DB (idempotent).")
     parser.add_argument(
         "--nexus-db", required=True,
-        help="Path to the Nexus memory sqlite DB (db_for('josh','memory')).")
+        help="Path to the Nexus memory sqlite DB (db_for('<user>','memory')).")
     parser.add_argument(
         "--mcpbrain-home", default=None,
         help="mcpbrain home dir (default: MCPBRAIN_HOME or the OS default). "

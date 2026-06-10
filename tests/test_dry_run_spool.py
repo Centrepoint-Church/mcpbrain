@@ -68,7 +68,7 @@ def _fake_run_claude(prompt, *, model=None, timeout=None):
 
 def test_dry_run_grows_graph_and_is_idempotent(store, home):
     _seed_real_chunk(store, "d-human", "t-human", "m-human-1",
-                     sender="Joel Chelliah <joel@centrepoint.church>",
+                     sender="Joel Chelliah <joel@example.org>",
                      subject="Hall B for Wednesday college")
 
     result = dry_run_spool.run_dry_run(
@@ -143,7 +143,7 @@ def test_gemini_tripwire_fires_if_client_constructed(store, home, monkeypatch):
         return _fake_run_claude(prompt, model=model, timeout=timeout)
 
     _seed_real_chunk(store, "d-human", "t-human", "m-human-1",
-                     sender="Joel Chelliah <joel@centrepoint.church>",
+                     sender="Joel Chelliah <joel@example.org>",
                      subject="Hall B for Wednesday college")
 
     with pytest.raises(AssertionError, match="Gemini constructed during spool dry-run"):

@@ -114,9 +114,9 @@ class FakeGmailService:
 
 # Fake Gemini enrich client (Task-4.2 JSON contract), mirroring test_enrich.py.
 _ENRICH_JSON = {
-    "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint"}],
+    "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Acme"}],
     "relations": [{"from": "Taryn Hamilton", "relation": "reports_to", "to": "Joel Chelliah"}],
-    "actions": [{"text": "Send the budget", "owner": "Josh", "deadline": "2026-06-10"}],
+    "actions": [{"text": "Send the budget", "owner": "Sam", "deadline": "2026-06-10"}],
     "decisions": [{"text": "Approved AV spend", "decided_on": "2026-05-30"}],
 }
 
@@ -194,7 +194,7 @@ def test_run_cycle_runs_one_cycle_against_fixtures(tmp_path):
 
 
 def test_run_cycle_surfaces_agent_err_as_finding(tmp_path, monkeypatch):
-    """A cycle with a joshbrain .err file in the home records an open finding."""
+    """A cycle with a records .err file in the home records an open finding."""
     from mcpbrain.agent_errs import FINDING_TYPE
 
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -732,7 +732,7 @@ def _backup_config(tmp_path, files, *, out_name="snapshot.enc", key=None):
         key=key or generate_escrow_key(),
         drive_service=FakeService(files),
         shared_drive_id="drive-XYZ",
-        user_id="josh",
+        user_id="sam",
         out_path=tmp_path / out_name,
     )
 
@@ -827,7 +827,7 @@ def test_backup_failure_does_not_crash_and_loop_continues(tmp_path):
 
 def test_backup_artifact_decrypts_to_a_valid_store(tmp_path):
     store = _store_with_chunk(tmp_path)
-    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     store.set_cursor("gmail", "cursor-42")
 
     files = FakeFiles(list_response={"files": []})
@@ -913,8 +913,8 @@ def _seed_duplicate_entities(store):
     """Upsert two id-distinct, same-type entities that share a canonical key
     ('Ps Joel' and 'Joel' both -> 'joel', type person). The deterministic
     resolver folds them into one survivor; without resolution both remain."""
-    store.upsert_entity("ps-joel", "Ps Joel", "person", org="Centrepoint")
-    store.upsert_entity("joel", "Joel", "person", org="Centrepoint")
+    store.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme")
+    store.upsert_entity("joel", "Joel", "person", org="Acme")
     return ["ps-joel", "joel"]
 
 
@@ -962,8 +962,8 @@ def test_resolve_not_due_skips_then_due_runs_again(tmp_path):
     assert len(store.list_entities()) == 1
 
     # Seed a fresh duplicate pair so a re-run would have work to do.
-    store.upsert_entity("ps-taryn", "Ps Taryn", "person", org="Centrepoint")
-    store.upsert_entity("taryn", "Taryn", "person", org="Centrepoint")
+    store.upsert_entity("ps-taryn", "Ps Taryn", "person", org="Acme")
+    store.upsert_entity("taryn", "Taryn", "person", org="Acme")
 
     # Not due yet: maybe_resolve returns None and the new dup is NOT merged.
     clock.advance(50.0)

@@ -1,4 +1,4 @@
-"""generate_draft writes the reply from the configured owner, not 'Josh Kemp'."""
+"""generate_draft writes the reply from the configured owner, not 'Sam Chen'."""
 from mcpbrain import draft
 
 
@@ -11,7 +11,7 @@ def test_generate_draft_prompt_uses_owner(monkeypatch):
         {"key_points": []}, "voice", "", owner_full_name="Sam Jones",
     )
     assert "Sam Jones" in captured["p"]
-    assert "Josh Kemp" not in captured["p"]
+    assert "Sam Chen" not in captured["p"]
 
 
 def test_generate_draft_owner_fallback(monkeypatch):

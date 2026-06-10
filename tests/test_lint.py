@@ -81,7 +81,7 @@ def test_check_missing_org_flags(tmp_path):
     """Entity with email_count>0, type!='topic', empty org -> flagged."""
     s = _store(tmp_path)
     _add_entity(s, "e1", "Alice Smith", org="", email_count=3)
-    _add_entity(s, "e2", "Bob Jones", org="Centrepoint", email_count=3)
+    _add_entity(s, "e2", "Bob Jones", org="Acme", email_count=3)
     _add_entity(s, "e3", "some-topic", etype="topic", org="", email_count=5)
 
     with s._connect() as db:
@@ -100,8 +100,8 @@ def test_check_missing_org_flags(tmp_path):
 def test_check_orphan_entities_flags(tmp_path):
     """Entity with email_count=0 and no relations -> flagged; with relation -> not."""
     s = _store(tmp_path)
-    _add_entity(s, "orphan", "Orphan", org="Centrepoint", email_count=0)
-    _add_entity(s, "connected", "Connected", org="Centrepoint", email_count=0)
+    _add_entity(s, "orphan", "Orphan", org="Acme", email_count=0)
+    _add_entity(s, "connected", "Connected", org="Acme", email_count=0)
     _add_relation(s, "orphan", "connected")  # now connected has a relation
 
     with s._connect() as db:
@@ -116,7 +116,7 @@ def test_check_orphan_entities_flags(tmp_path):
 def test_check_orphan_entities_truly_orphaned(tmp_path):
     """Entity with email_count=0 and genuinely no relations is flagged."""
     s = _store(tmp_path)
-    _add_entity(s, "truly-orphan", "Truly Orphan", org="Centrepoint", email_count=0)
+    _add_entity(s, "truly-orphan", "Truly Orphan", org="Acme", email_count=0)
 
     with s._connect() as db:
         flagged = check_orphan_entities(db)
@@ -130,30 +130,30 @@ def test_check_orphan_entities_truly_orphaned(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_check_ambiguous_org_flags(tmp_path, monkeypatch):
-    """Entity with org='external', email_addr contains centrepoint.church -> flagged."""
+    """Entity with org='external', email_addr contains example.org -> flagged."""
     (tmp_path / "config.json").write_text(json.dumps({"orgs": [
-        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+        {"name": "Acme", "domains": ["example.org"]},
     ]}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     _add_entity(s, "amb1", "Jane Doe", org="external",
-                email_addr="jane@centrepoint.church", email_count=3)
+                email_addr="jane@example.org", email_count=3)
     _add_entity(s, "amb2", "John External", org="external",
                 email_addr="john@gmail.com", email_count=3)
-    _add_entity(s, "amb3", "Already Tagged", org="Centrepoint",
-                email_addr="tagged@centrepoint.church", email_count=3)
+    _add_entity(s, "amb3", "Already Tagged", org="Acme",
+                email_addr="tagged@example.org", email_count=3)
 
     with s._connect() as db:
         flagged = check_ambiguous_org(db)
 
     ids = [r["id"] for r in flagged]
-    assert "amb1" in ids, "amb1 (external + centrepoint domain) should be flagged"
+    assert "amb1" in ids, "amb1 (external + acme domain) should be flagged"
     assert "amb2" not in ids, "amb2 (external but unknown domain) should not be flagged"
     assert "amb3" not in ids, "amb3 (already correct org) should not be flagged"
 
     # Check should_be is set correctly
     amb1_row = next(r for r in flagged if r["id"] == "amb1")
-    assert amb1_row["should_be"] == "Centrepoint"
+    assert amb1_row["should_be"] == "Acme"
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,8 @@ def test_check_ambiguous_org_flags(tmp_path, monkeypatch):
 def test_check_possible_duplicates_flags(tmp_path):
     """Two person entities 'Taryn Hamilton' / 'Taryn H' same org -> flagged (score >= 75)."""
     s = _store(tmp_path)
-    _add_entity(s, "taryn-hamilton", "Taryn Hamilton", org="Centrepoint", email_count=5)
-    _add_entity(s, "taryn-h", "Taryn H", org="Centrepoint", email_count=2)
+    _add_entity(s, "taryn-hamilton", "Taryn Hamilton", org="Acme", email_count=5)
+    _add_entity(s, "taryn-h", "Taryn H", org="Acme", email_count=2)
 
     with s._connect() as db:
         flagged = check_possible_duplicates(db)
@@ -184,14 +184,14 @@ def test_check_possible_duplicates_flags(tmp_path):
 def test_check_possible_duplicates_different_org_not_flagged(tmp_path):
     """Two persons with same first name but different orgs -> not flagged."""
     s = _store(tmp_path)
-    _add_entity(s, "josh-centrepoint", "Josh Smith", org="Centrepoint", email_count=3)
-    _add_entity(s, "josh-acc", "Josh Smith", org="ACC", email_count=3)
+    _add_entity(s, "sam-acme", "Sam Smith", org="Acme", email_count=3)
+    _add_entity(s, "sam-acc", "Sam Smith", org="ACC", email_count=3)
 
     with s._connect() as db:
         flagged = check_possible_duplicates(db)
 
     # Different org should reduce score below threshold (score -= 20 penalty)
-    # "Josh Smith" vs "Josh Smith" base score is 100, -20 for different org = 80
+    # "Sam Smith" vs "Sam Smith" base score is 100, -20 for different org = 80
     # Still >= 75, so this pair MAY be flagged — just verify no crash
     # The test is really about the score reduction, not a hard not-flagged assertion
     assert isinstance(flagged, list)
@@ -205,7 +205,7 @@ def test_check_ownerless_actions_flags(tmp_path):
     """actions row with owner='', source='email' -> flagged."""
     s = _store(tmp_path)
     _add_action(s, 1, "Review budget", owner="", source="email")
-    _add_action(s, 2, "Send report", owner="Josh", source="email")
+    _add_action(s, 2, "Send report", owner="Sam", source="email")
     _add_action(s, 3, "Manual note", owner="", source="manual")  # not email source
 
     with s._connect() as db:
@@ -239,40 +239,40 @@ def test_check_ownerless_actions_joins_email_context(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_check_duplicate_orgs_flags(tmp_path, monkeypatch):
-    """Entity with org='Centrepoint Church WA' -> flagged as variant (score >= 60)."""
+    """Entity with org='Acme Corp WA' -> flagged as variant (score >= 60)."""
     (tmp_path / "config.json").write_text(json.dumps({"orgs": [
-        {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+        {"name": "Acme", "domains": ["example.org"]},
     ]}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
-    _add_entity(s, "e1", "Alice", org="Centrepoint Church WA", email_count=1)
-    _add_entity(s, "e2", "Bob", org="Centrepoint", email_count=1)  # canonical
+    _add_entity(s, "e1", "Alice", org="Acme Corp WA", email_count=1)
+    _add_entity(s, "e2", "Bob", org="Acme", email_count=1)  # canonical
 
     with s._connect() as db:
         flagged = check_duplicate_orgs(db)
 
     variants = [r["variant_org"] for r in flagged]
-    assert "Centrepoint Church WA" in variants, (
-        "Centrepoint Church WA should be flagged as a Centrepoint variant"
+    assert "Acme Corp WA" in variants, (
+        "Acme Corp WA should be flagged as a Acme variant"
     )
-    assert "Centrepoint" not in variants, "Canonical orgs should never be flagged"
+    assert "Acme" not in variants, "Canonical orgs should never be flagged"
 
-    row = next(r for r in flagged if r["variant_org"] == "Centrepoint Church WA")
+    row = next(r for r in flagged if r["variant_org"] == "Acme Corp WA")
     assert row["score"] >= 60
-    assert row["canonical_org"] == "Centrepoint"
+    assert row["canonical_org"] == "Acme"
 
 
 def test_check_duplicate_orgs_canonical_not_flagged(tmp_path):
     """Canonical org values are never flagged."""
     s = _store(tmp_path)
-    for org in ("Centrepoint", "ACC", "Courageous Church", "external"):
+    for org in ("Acme", "ACC", "Courageous Church", "external"):
         _add_entity(s, f"e-{org.lower().replace(' ', '-')}", "Person", org=org, email_count=1)
 
     with s._connect() as db:
         flagged = check_duplicate_orgs(db)
 
     variants = [r["variant_org"] for r in flagged]
-    for org in ("Centrepoint", "ACC", "Courageous Church", "external"):
+    for org in ("Acme", "ACC", "Courageous Church", "external"):
         assert org not in variants, f"{org} should not be flagged as a variant"
 
 
@@ -323,7 +323,7 @@ def test_lint_records_findings(tmp_path):
     # Plant an ownerless action
     _add_action(s, 88, "Another unowned task", owner="", source="email")
     # Plant a high-volume thread with no summary (>= 5 emails required by the check)
-    _add_thread_context(s, "thread-no-summary-1", subject="Big Thread", org="Centrepoint",
+    _add_thread_context(s, "thread-no-summary-1", subject="Big Thread", org="Acme",
                         email_count=7, summary=None)
 
     now = "2026-06-03T00:00:00Z"
@@ -368,7 +368,7 @@ def test_lint_resolves_stale_findings(tmp_path):
 
     # Fix the entity (give it an org)
     with s._connect() as db:
-        db.execute("UPDATE entities SET org='Centrepoint' WHERE id='fix-me'")
+        db.execute("UPDATE entities SET org='Acme' WHERE id='fix-me'")
 
     # Second run: fix-me is no longer flagged — finding should be resolved
     now2 = "2026-06-03T01:00:00Z"

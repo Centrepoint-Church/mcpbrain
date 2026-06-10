@@ -838,7 +838,7 @@ def test_maybe_audit_runs_when_due(tmp_path):
     store, daemon = _audit_daemon(tmp_path, audit_interval_s=3600.0)
 
     fake_reqs = [{"entity_id": "e-1", "name": "Taryn", "role": "Executive Pastor",
-                  "profile": "...", "org": "Centrepoint"}]
+                  "profile": "...", "org": "Acme"}]
 
     with patch("mcpbrain.profile_audit.build_audit_requests",
                return_value=fake_reqs) as mock_build:
