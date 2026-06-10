@@ -1335,14 +1335,37 @@ class Daemon:
     # -- periodic pass orchestration ----------------------------------------
 
     def _run_periodic_passes(self) -> None:
-        """Call the five periodic maintenance passes in spec order (§54, §165).
+        """Call the periodic maintenance passes in spec order (§54, §165).
 
         communities first so lint's duplicate-detection reads fresh
         entity_communities. Each pass self-gates on its cadence and swallows
         its own errors, but this method also wraps each call individually so
         an unexpected raise (e.g. a mocked exception in tests) from one pass
         never blocks the remaining passes.
+
+        auto_update and verify_connections are identity-independent and always
+        run.  All graph-writers are gated on is_configured so they never write
+        blank/empty attribution into the graph on an unconfigured install.
         """
+        configured = config.is_configured(str(app_dir()))
+
+        # Always run (independent of identity): updates + connection verification.
+        for pass_fn in (
+            self.maybe_auto_update,
+            self.maybe_verify_connections,
+        ):
+            try:
+                pass_fn()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "periodic pass %s failed unexpectedly: %s",
+                    getattr(pass_fn, "__name__", repr(pass_fn)), exc, exc_info=True,
+                )
+
+        if not configured:
+            return  # graph-writers need identity + orgs; skip until configured
+
+        # Graph-writing passes: communities first (lint reads fresh entity_communities).
         for pass_fn in (
             self.maybe_communities,
             self.maybe_lint,
@@ -1353,8 +1376,6 @@ class Daemon:
             self.maybe_audit,
             self.maybe_clickup_sync,
             self.maybe_stale_reextract,
-            self.maybe_auto_update,
-            self.maybe_verify_connections,
         ):
             try:
                 pass_fn()
@@ -1447,7 +1468,8 @@ class Daemon:
                 self.maybe_backup()
                 # Resolution self-gates on configured + due; reuses the
                 # single-writer lock this loop thread already holds.
-                self.maybe_resolve()
+                if config.is_configured(str(app_dir())):
+                    self.maybe_resolve()
                 # Five periodic maintenance passes in spec order (§54, §165).
                 # communities first (lint reads fresh entity_communities).
                 self._run_periodic_passes()
