@@ -179,7 +179,7 @@ def test_actions_waiting_on_columns_added(tmp_path):
     # reply_received defaults to 0.
     with s._connect() as db:
         db.execute(
-            "INSERT INTO actions(text, owner) VALUES('Test action', 'Josh')"
+            "INSERT INTO actions(text, owner) VALUES('Test action', 'Sam')"
         )
         row = db.execute(
             "SELECT waiting_on, reply_received FROM actions ORDER BY id DESC LIMIT 1"
@@ -207,7 +207,7 @@ def test_actions_waiting_on_backfilled_on_old_store(tmp_path):
         status           TEXT DEFAULT 'open',
         created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at       TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    db.execute("INSERT INTO actions(text, owner) VALUES('Existing action', 'Josh')")
+    db.execute("INSERT INTO actions(text, owner) VALUES('Existing action', 'Sam')")
     db.commit()
     db.close()
 
@@ -222,7 +222,7 @@ def test_actions_waiting_on_backfilled_on_old_store(tmp_path):
 
     with s._connect() as db:
         row = db.execute(
-            "SELECT text, owner FROM actions WHERE owner='Josh'"
+            "SELECT text, owner FROM actions WHERE owner='Sam'"
         ).fetchone()
     assert row is not None
     assert row["text"] == "Existing action"
@@ -340,7 +340,7 @@ def test_store_upsert_thread_context_insert_and_update(tmp_path):
     s.upsert_thread_context(
         "t-1",
         subject="Budget meeting",
-        org="Centrepoint",
+        org="Acme",
         email_count=3,
         summary="Budget Q3 discussed",
         contextual_summary="Follow-up needed",
@@ -351,7 +351,7 @@ def test_store_upsert_thread_context_insert_and_update(tmp_path):
             "SELECT * FROM thread_context WHERE thread_id='t-1'"
         ).fetchone())
     assert row["subject"] == "Budget meeting"
-    assert row["org"] == "Centrepoint"
+    assert row["org"] == "Acme"
     assert row["email_count"] == 3
     assert row["summary"] == "Budget Q3 discussed"
     assert row["participant_ids"] == "alice,bob"
@@ -360,7 +360,7 @@ def test_store_upsert_thread_context_insert_and_update(tmp_path):
     s.upsert_thread_context(
         "t-1",
         subject="Budget meeting",
-        org="Centrepoint",
+        org="Acme",
         email_count=5,
         summary="Budget finalised",
     )
@@ -380,7 +380,7 @@ def test_store_upsert_thread_context_insert_and_update(tmp_path):
             "SELECT * FROM thread_context WHERE thread_id='t-1'"
         ).fetchone())
     assert row["subject"] == "Budget meeting", "subject should be preserved on partial upsert"
-    assert row["org"] == "Centrepoint", "org should be preserved on partial upsert"
+    assert row["org"] == "Acme", "org should be preserved on partial upsert"
     assert row["email_count"] == 5, "email_count should be preserved on partial upsert"
     assert row["summary"] == "Final summary only"
 
@@ -438,9 +438,9 @@ def test_store_record_finding_upsert(tmp_path):
     s.record_finding(
         finding_type="overdue",
         ref_id="act-42",
-        org="Centrepoint",
+        org="Acme",
         summary="Action overdue",
-        detail="Assigned to Josh; past deadline",
+        detail="Assigned to Sam; past deadline",
         severity="warn",
         detected_at="2026-06-01",
     )
@@ -450,7 +450,7 @@ def test_store_record_finding_upsert(tmp_path):
     assert rows[0]["finding_type"] == "overdue"
     assert rows[0]["ref_id"] == "act-42"
     assert rows[0]["severity"] == "warn"
-    assert rows[0]["org"] == "Centrepoint"
+    assert rows[0]["org"] == "Acme"
 
     # Upsert: same (finding_type, ref_id) updates in place.
     s.record_finding(
@@ -513,7 +513,7 @@ def test_store_resolve_findings_not_in(tmp_path):
 def test_store_open_waiting_actions_within_window(tmp_path):
     s = _store(tmp_path)
     # Insert an action with waiting_on set 5 days ago.
-    aid = s.add_unified_action(text="Chase invoice", owner="Josh")
+    aid = s.add_unified_action(text="Chase invoice", owner="Sam")
     five_days_ago = "2026-05-29T10:00:00Z"
     with s._connect() as db:
         db.execute(
@@ -531,7 +531,7 @@ def test_store_open_waiting_actions_within_window(tmp_path):
 
 def test_store_open_waiting_actions_excludes_old(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Old waiting action", owner="Josh")
+    aid = s.add_unified_action(text="Old waiting action", owner="Sam")
     old_date = "2026-04-01T10:00:00Z"
     with s._connect() as db:
         db.execute(
@@ -547,7 +547,7 @@ def test_store_open_waiting_actions_excludes_old(tmp_path):
 
 def test_store_clear_waiting(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Waiting action", owner="Josh")
+    aid = s.add_unified_action(text="Waiting action", owner="Sam")
     with s._connect() as db:
         db.execute(
             "UPDATE actions SET waiting_on='Finance', waiting_on_set_at='2026-05-01' "

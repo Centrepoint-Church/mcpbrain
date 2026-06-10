@@ -1,6 +1,6 @@
 """ensure_records_repo: git-inits and scaffolds a local records repo, idempotently."""
 from mcpbrain import records
-from mcpbrain.joshbrain_write import append_decision
+from mcpbrain.records_write import append_decision
 
 
 def test_creates_repo_and_scaffold(tmp_path):

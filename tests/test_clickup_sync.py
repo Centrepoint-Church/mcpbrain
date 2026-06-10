@@ -79,7 +79,7 @@ def _store(tmp_path):
 
 def test_import_links_by_text_and_creates_rest(tmp_path):
     s = _store(tmp_path)
-    a_match = s.add_unified_action(text="Order Missions T-Shirts", owner="Joshua")
+    a_match = s.add_unified_action(text="Order Missions T-Shirts", owner="Sam")
     client = FakeClient([
         _task("t1", "Order Missions T-Shirts"),  # matches a_match
         _task("t2", "Brand new task only in ClickUp", org="acc",
@@ -99,7 +99,7 @@ def test_import_links_by_text_and_creates_rest(tmp_path):
 
 def test_import_is_idempotent(tmp_path):
     s = _store(tmp_path)
-    s.add_unified_action(text="Order Missions T-Shirts", owner="Joshua")
+    s.add_unified_action(text="Order Missions T-Shirts", owner="Sam")
     client = FakeClient([_task("t1", "Order Missions T-Shirts")])
     clickup_sync.import_baseline(s, "/h", client=client, dry_run=False)
     before = len(s.unified_actions())
@@ -109,7 +109,7 @@ def test_import_is_idempotent(tmp_path):
 
 def test_import_dry_run_writes_nothing(tmp_path):
     s = _store(tmp_path)
-    s.add_unified_action(text="Order Missions T-Shirts", owner="Joshua")
+    s.add_unified_action(text="Order Missions T-Shirts", owner="Sam")
     client = FakeClient([_task("t2", "Unmatched")])
     plan = clickup_sync.import_baseline(s, "/h", client=client, dry_run=True)
     assert len(plan["create"]) == 1
@@ -120,7 +120,7 @@ def test_import_dry_run_writes_nothing(tmp_path):
 
 def test_sync_inbound_mirrors_clickup_edits(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Old name", owner="Joshua", org="centrepoint")
+    aid = s.add_unified_action(text="Old name", owner="Sam", org="acme")
     s.set_action_clickup_id(aid, "t1")
     client = FakeClient([_task("t1", "Renamed in ClickUp", org="acc",
                                priority="urgent", deadline="2026-07-01",
@@ -135,7 +135,7 @@ def test_sync_inbound_mirrors_clickup_edits(tmp_path):
 
 def test_sync_outbound_creates_only_new_open_actions(tmp_path):
     s = _store(tmp_path)
-    new_open = s.add_unified_action(text="Fresh action", owner="Joshua")
+    new_open = s.add_unified_action(text="Fresh action", owner="Sam")
     client = FakeClient([])
     summary = clickup_sync.sync(s, "/h", client=client)
     assert summary["created"] == 1
@@ -147,7 +147,7 @@ def test_sync_outbound_creates_only_new_open_actions(tmp_path):
 
 def test_sync_closes_task_when_action_closed_locally(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     s.set_action_status(aid, "done", "local")
     client = FakeClient([_task("t1", "Do thing", closed=False)])
@@ -158,9 +158,9 @@ def test_sync_closes_task_when_action_closed_locally(tmp_path):
 
 def test_sync_floor_suppresses_pre_cutover_backlog(tmp_path):
     s = _store(tmp_path)
-    old = s.add_unified_action(text="Pre-cutover backlog item", owner="Joshua")
+    old = s.add_unified_action(text="Pre-cutover backlog item", owner="Sam")
     s.set_meta("clickup_sync_floor", str(old))     # cutover at this id
-    new = s.add_unified_action(text="Post-cutover new action", owner="Joshua")
+    new = s.add_unified_action(text="Post-cutover new action", owner="Sam")
     client = FakeClient([])
     summary = clickup_sync.sync(s, "/h", client=client)
     assert summary["created"] == 1                  # only the post-cutover one
@@ -171,7 +171,7 @@ def test_sync_floor_suppresses_pre_cutover_backlog(tmp_path):
 def test_sync_does_not_duplicate_existing_unlinked_task(tmp_path):
     s = _store(tmp_path)
     # open action whose text already exists as a task but isn't linked yet
-    s.add_unified_action(text="Existing task", owner="Joshua")
+    s.add_unified_action(text="Existing task", owner="Sam")
     client = FakeClient([_task("t9", "Existing task")])
     summary = clickup_sync.sync(s, "/h", client=client)
     assert summary["created"] == 0      # matched by fingerprint, not duplicated
@@ -187,7 +187,7 @@ class FailingCloseClient(FakeClient):
 
 def test_reopen_when_clickup_reopens_llm_closed_action(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     # action was closed by the LLM (resolved_by = an email msg id), not ClickUp
     s.set_action_status(aid, "done", "gmail-19a2b3")
@@ -203,7 +203,7 @@ def test_reopen_when_clickup_reopens_llm_closed_action(tmp_path):
 
 def test_no_reopen_midpropagation_race(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     s.set_action_status(aid, "done", "local")    # just closed locally
     # clickup_closed is NULL (task never observed closed) -> outbound-close pending
@@ -216,7 +216,7 @@ def test_no_reopen_midpropagation_race(tmp_path):
 
 def test_failed_close_leaves_clickup_closed_false(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     s.set_action_status(aid, "done", "local")
     client = FailingCloseClient([_task("t1", "Do thing", closed=False)])
@@ -227,7 +227,7 @@ def test_failed_close_leaves_clickup_closed_false(tmp_path):
 
 def test_clickup_closed_set_on_outbound_create(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Fresh action", owner="Joshua")
+    aid = s.add_unified_action(text="Fresh action", owner="Sam")
     client = FakeClient([])
     clickup_sync.sync(s, "/h", client=client)
     assert s.get_unified_action(aid)["clickup_closed"] == 0   # created open
@@ -235,7 +235,7 @@ def test_clickup_closed_set_on_outbound_create(tmp_path):
 
 def test_clickup_closed_set_on_outbound_close(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     s.set_action_status(aid, "done", "local")
     client = FakeClient([_task("t1", "Do thing", closed=False)])
@@ -245,7 +245,7 @@ def test_clickup_closed_set_on_outbound_close(tmp_path):
 
 def test_roundtrip_close_then_clickup_reopen(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     s.set_action_clickup_id(aid, "t1")
     s.set_action_status(aid, "done", "local")
     client = FakeClient([_task("t1", "Do thing", closed=False)])

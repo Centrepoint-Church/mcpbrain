@@ -73,14 +73,14 @@ def test_store_email_context_writer(tmp_path):
     s = _store(tmp_path)
     s.upsert_email_context(
         "m-1", subject="Hall B", sender="Joel <joel@x>", sender_email="joel@x",
-        date_iso="2026-04-18", thread_id="t1", org="Centrepoint",
+        date_iso="2026-04-18", thread_id="t1", org="Acme",
         content_type="request", summary="Confirm Hall B", topics="facilities",
         labels="INBOX", contextual_summary="Room booking follow-up",
         reply_needed=True, reply_reason="Direct question")
     with s._connect() as db:
         row = dict(db.execute(
             "SELECT * FROM email_context WHERE message_id='m-1'").fetchone())
-    assert row["org"] == "Centrepoint"
+    assert row["org"] == "Acme"
     assert row["content_type"] == "request"
     assert row["summary"] == "Confirm Hall B"
     assert row["topics"] == "facilities"
@@ -89,7 +89,7 @@ def test_store_email_context_writer(tmp_path):
     assert row["reply_needed"] == 1
     assert row["reply_reason"] == "Direct question"
     # Upsert again with new situational fields — single row, fields refresh.
-    s.upsert_email_context("m-1", subject="Hall B", org="Centrepoint",
+    s.upsert_email_context("m-1", subject="Hall B", org="Acme",
                            summary="Confirmed Hall B", content_type="update")
     with s._connect() as db:
         n = db.execute("SELECT COUNT(*) FROM email_context").fetchone()[0]
@@ -265,7 +265,7 @@ def test_entity_relations_bitemporal_migration_preserves_data(tmp_path):
         source_doc_id TEXT DEFAULT '',
         UNIQUE(entity_a, relation, entity_b))""")
     db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id) "
-               "VALUES('joel','leads','centrepoint','doc1')")
+               "VALUES('joel','leads','acme','doc1')")
     db.commit()
     db.close()
 
@@ -314,7 +314,7 @@ def test_graph_tables_migrated_into_actions(tmp_path):
         decided_on TEXT DEFAULT '', source_doc_id TEXT DEFAULT '',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
     db.execute("INSERT INTO graph_actions(text,owner,deadline,status,thread_id) "
-               "VALUES('Send budget','Josh','2026-06-10','open','t1')")
+               "VALUES('Send budget','Sam','2026-06-10','open','t1')")
     db.execute("INSERT INTO graph_decisions(text,decided_on) "
                "VALUES('Approved AV spend','2026-05-01')")
     db.commit()
@@ -338,7 +338,7 @@ def test_graph_tables_migrated_into_actions(tmp_path):
     assert len(email_rows) == 1
     assert len(decision_rows) == 1
     assert email_rows[0]["text"] == "Send budget"
-    assert email_rows[0]["owner"] == "Josh"
+    assert email_rows[0]["owner"] == "Sam"
     assert email_rows[0]["deadline"] == "2026-06-10"
     assert email_rows[0]["status"] == "open"
     assert email_rows[0]["thread_id"] == "t1"
@@ -355,20 +355,20 @@ def test_graph_tables_migrated_into_actions(tmp_path):
 
 def test_unified_action_helpers(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Draft policy", owner="Josh", status="open",
+    aid = s.add_unified_action(text="Draft policy", owner="Sam", status="open",
                                thread_id="t9", source="meeting")
     assert isinstance(aid, int)
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["text"] == "Draft policy"
-    owned = s.actions_for_owner_unified("josh")
+    owned = s.actions_for_owner_unified("sam")
     assert len(owned) == 1
     assert s.actions_for_owner_unified("Nobody") == []
 
 
 def test_set_action_status_closes_and_reopens(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Run the audit", owner="Josh", status="open")
+    aid = s.add_unified_action(text="Run the audit", owner="Sam", status="open")
     s.set_action_status(aid, "done", resolved_by="m-99")
     row = [a for a in s.list_unified_actions() if a["id"] == aid][0]
     assert row["status"] == "done"
@@ -383,7 +383,7 @@ def test_set_action_status_closes_and_reopens(tmp_path):
 
 def test_set_action_text_rewrites_and_refingerprints(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Old text", owner="Josh",
+    aid = s.add_unified_action(text="Old text", owner="Sam",
                                text_fingerprint="stale")
     s.set_action_text(aid, "New clarified text")
     row = [a for a in s.list_unified_actions() if a["id"] == aid][0]
@@ -417,24 +417,24 @@ def test_upsert_topic_entity(tmp_path):
 
 def test_store_unified_actions_by_owner_status(tmp_path):
     s = _store(tmp_path)
-    s.add_unified_action(text="Draft policy", owner="Josh", status="open",
+    s.add_unified_action(text="Draft policy", owner="Sam", status="open",
                          thread_id="t1")
-    s.add_unified_action(text="Send budget", owner="Josh", status="done",
+    s.add_unified_action(text="Send budget", owner="Sam", status="done",
                          thread_id="t1")
     s.add_unified_action(text="Book hall", owner="Taryn", status="open",
                          thread_id="t2")
 
     # owner + status filter (owner is case-insensitive).
-    josh_open = s.unified_actions(owner="josh", status="open")
-    assert [a["text"] for a in josh_open] == ["Draft policy"]
+    sam_open = s.unified_actions(owner="sam", status="open")
+    assert [a["text"] for a in sam_open] == ["Draft policy"]
 
     # status-only filter.
     open_all = s.unified_actions(status="open")
     assert {a["text"] for a in open_all} == {"Draft policy", "Book hall"}
 
     # owner-only filter.
-    josh_all = s.unified_actions(owner="Josh")
-    assert {a["text"] for a in josh_all} == {"Draft policy", "Send budget"}
+    sam_all = s.unified_actions(owner="Sam")
+    assert {a["text"] for a in sam_all} == {"Draft policy", "Send budget"}
 
     # thread_id filter.
     t1 = s.unified_actions(thread_id="t1")
@@ -498,10 +498,10 @@ def test_store_get_project(tmp_path):
     with s._connect() as db:
         db.execute(
             "INSERT INTO projects(id, name, org_tag, status, owner_entity_id) "
-            "VALUES('p-1', 'College 2026', 'Centrepoint', 'active', 'josh')")
+            "VALUES('p-1', 'College 2026', 'Acme', 'active', 'sam')")
     proj = s.get_project("p-1")
     assert proj["name"] == "College 2026"
-    assert proj["org_tag"] == "Centrepoint"
+    assert proj["org_tag"] == "Acme"
     assert s.get_project("missing") is None
 
 
@@ -510,10 +510,10 @@ def test_store_get_area(tmp_path):
     with s._connect() as db:
         db.execute(
             "INSERT INTO areas(id, org_id, name, active) "
-            "VALUES('a-1', 'Centrepoint', 'Facilities', 1)")
+            "VALUES('a-1', 'Acme', 'Facilities', 1)")
     area = s.get_area("a-1")
     assert area["name"] == "Facilities"
-    assert area["org_id"] == "Centrepoint"
+    assert area["org_id"] == "Acme"
     assert s.get_area("missing") is None
 
 
@@ -521,20 +521,20 @@ def test_store_projects_and_areas_for_org(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO projects(id, name, org_tag, status) "
-                   "VALUES('p-1', 'Live', 'Centrepoint', 'active')")
+                   "VALUES('p-1', 'Live', 'Acme', 'active')")
         db.execute("INSERT INTO projects(id, name, org_tag, archived_at) "
-                   "VALUES('p-2', 'Archived', 'Centrepoint', '2025-01-01')")
+                   "VALUES('p-2', 'Archived', 'Acme', '2025-01-01')")
         db.execute("INSERT INTO projects(id, name, org_tag, status) "
                    "VALUES('p-3', 'Other org', 'ACC', 'active')")
         db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-1', 'Centrepoint', 'Facilities', 1)")
+                   "VALUES('a-1', 'Acme', 'Facilities', 1)")
         db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-2', 'Centrepoint', 'Retired', 0)")
+                   "VALUES('a-2', 'Acme', 'Retired', 0)")
         db.execute("INSERT INTO areas(id, org_id, name, active) "
                    "VALUES('a-3', 'ACC', 'CAMS', 1)")
-    projs = s.projects_for_org("Centrepoint")
+    projs = s.projects_for_org("Acme")
     assert {p["id"] for p in projs} == {"p-1"}  # active, not archived, matching org
-    areas = s.areas_for_org("Centrepoint")
+    areas = s.areas_for_org("Acme")
     assert {a["id"] for a in areas} == {"a-1"}  # active=1, matching org_id
 
 
@@ -542,13 +542,13 @@ def test_store_projects_owned_by(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO projects(id, name, owner_entity_id, status) "
-                   "VALUES('p-1', 'Owned', 'josh', 'active')")
+                   "VALUES('p-1', 'Owned', 'sam', 'active')")
         db.execute("INSERT INTO projects(id, name, owner_entity_id, status) "
                    "VALUES('p-2', 'Other', 'taryn', 'active')")
         db.execute("INSERT INTO projects(id, name, owner_entity_id, archived_at) "
-                   "VALUES('p-3', 'Archived', 'josh', '2025-01-01')")
+                   "VALUES('p-3', 'Archived', 'sam', '2025-01-01')")
     # Active, not archived, matching owner.
-    assert {p["id"] for p in s.projects_owned_by("josh")} == {"p-1"}
+    assert {p["id"] for p in s.projects_owned_by("sam")} == {"p-1"}
 
 
 def test_store_areas_owned_by(tmp_path):
@@ -557,9 +557,9 @@ def test_store_areas_owned_by(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-1', 'Centrepoint', 'Ops', 1)")
+                   "VALUES('a-1', 'Acme', 'Ops', 1)")
         db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-2', 'Centrepoint', 'Unrelated', 1)")
+                   "VALUES('a-2', 'Acme', 'Unrelated', 1)")
         db.execute("INSERT INTO projects(id, name, owner_entity_id, area_id, status) "
-                   "VALUES('p-1', 'Owned', 'josh', 'a-1', 'active')")
-    assert {a["id"] for a in s.areas_owned_by("josh")} == {"a-1"}
+                   "VALUES('p-1', 'Owned', 'sam', 'a-1', 'active')")
+    assert {a["id"] for a in s.areas_owned_by("sam")} == {"a-1"}

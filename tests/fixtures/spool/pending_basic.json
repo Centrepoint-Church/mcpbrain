@@ -3,21 +3,21 @@
   "prepared_at": "2026-06-02T09:30:00Z",
   "context": {
     "known_people": [
-      {"name": "Joel Chelliah", "org": "Centrepoint", "role": "Senior Pastor"},
-      {"name": "Taryn Hamilton", "org": "Centrepoint", "role": "Executive Pastor"}
+      {"name": "Joel Chelliah", "org": "Acme", "role": "Senior Pastor"},
+      {"name": "Taryn Hamilton", "org": "Acme", "role": "Executive Pastor"}
     ],
     "projects": [
-      {"id": "byford-grant", "name": "Byford Building Grant", "org": "Centrepoint",
+      {"id": "byford-grant", "name": "Byford Building Grant", "org": "Acme",
        "status_line": "Awaiting council approval on the stage-two plans."},
       {"id": "cams-review", "name": "CAMS Review", "org": "ACC",
        "status_line": "Field audit underway across WA region."}
     ],
     "areas": [
-      {"id": "centrepoint-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."},
+      {"id": "acme-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."},
       {"id": "acc-projects", "name": "ACC Projects", "description": "National strategic projects for ACC."}
     ],
     "org_domain_map": [
-      "centrepoint.church → Centrepoint",
+      "example.org → Acme",
       "acc.org.au → ACC"
     ]
   },
@@ -25,16 +25,16 @@
     {"thread_id": "t-basic-a", "prior_thread_context": "",
      "open_actions": [],
      "messages": [
-       {"message_id": "m-a1", "sender": "Joel Chelliah <joel@centrepoint.church>",
+       {"message_id": "m-a1", "sender": "Joel Chelliah <joel@example.org>",
         "date": "2026-06-01", "labels": "INBOX", "subject": "Hall B for Wednesday college",
-        "text": "Hi Josh, can you confirm Hall B is free for the Wednesday college session?"}
+        "text": "Hi Sam, can you confirm Hall B is free for the Wednesday college session?"}
      ]},
     {"thread_id": "t-basic-b", "prior_thread_context": "Earlier thread covered the stage-one council submission.",
      "open_actions": [
-       {"id": 42, "owner": "Josh", "text": "Lodge the stage-two grant paperwork.", "deadline": "2026-06-10"}
+       {"id": 42, "owner": "Sam", "text": "Lodge the stage-two grant paperwork.", "deadline": "2026-06-10"}
      ],
      "messages": [
-       {"message_id": "m-b1", "sender": "Taryn Hamilton <taryn@centrepoint.church>",
+       {"message_id": "m-b1", "sender": "Taryn Hamilton <taryn@example.org>",
         "date": "2026-06-02", "labels": "INBOX", "subject": "Byford grant timing",
         "text": "Any movement on the stage-two paperwork? Council wants it this week."}
      ]}

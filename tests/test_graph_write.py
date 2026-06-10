@@ -11,10 +11,10 @@ from pathlib import Path
 from mcpbrain import graph_write as gw, orgs
 from mcpbrain.store import Store
 
-_CENTREPOINT_ORGS = [
-    {"name": "Centrepoint", "domains": ["centrepoint.church", "centrepoint.com.au"],
-     "aliases": ["Centrepoint Church", "Centrepoint Church Incorporated",
-                 "Centrepoint Baptist Church"]},
+_ACME_ORGS = [
+    {"name": "Acme", "domains": ["example.org", "example.com.au"],
+     "aliases": ["Acme Corp", "Acme Corp Incorporated",
+                 "Acme Baptist"]},
     {"name": "ACC", "domains": ["acc.org.au", "acci.org.au", "accwa.org.au",
                                  "acc.net.au", "acc.church"]},
     {"name": "Courageous Church", "domains": ["courageouschurch.org.au"]},
@@ -23,32 +23,32 @@ _CENTREPOINT_ORGS = [
 
 
 _CP_TAXONOMY = orgs.OrgTaxonomy(
-    names=("Centrepoint", "ACC", "Courageous Church", "Curtin"),
+    names=("Acme", "ACC", "Courageous Church", "Curtin"),
     domain_map={
-        "centrepoint.church": "Centrepoint", "centrepoint.com.au": "Centrepoint",
+        "example.org": "Acme", "example.com.au": "Acme",
         "acc.org.au": "ACC", "acci.org.au": "ACC", "accwa.org.au": "ACC",
         "acc.net.au": "ACC", "acc.church": "ACC",
         "courageouschurch.org.au": "Courageous Church",
         "curtin.edu.au": "Curtin",
     },
     aliases={
-        "centrepoint church": "Centrepoint",
-        "centrepoint church incorporated": "Centrepoint",
-        "centrepoint baptist church": "Centrepoint",
+        "acme corp": "Acme",
+        "acme corp incorporated": "Acme",
+        "acme baptist": "Acme",
     },
 )
 
 
 def _write_cp_config(tmp_path):
-    (tmp_path / "config.json").write_text(json.dumps({"orgs": _CENTREPOINT_ORGS}))
+    (tmp_path / "config.json").write_text(json.dumps({"orgs": _ACME_ORGS}))
 
 FIXTURES = Path(__file__).parent / "fixtures" / "extractions"
 
 
-_JOSH_IDENTITY = gw.OwnerIdentity(
-    name="Josh",
-    entity_id="josh-kemp",
-    aliases=frozenset({"josh", "joshua", "josh kemp"}),
+_OWNER_IDENTITY = gw.OwnerIdentity(
+    name="Sam",
+    entity_id="sam-chen",
+    aliases=frozenset({"sam", "alex", "sam chen"}),
 )
 
 
@@ -65,7 +65,7 @@ def _load(name):
 # --- 2.1 org-domain map + slug/junk helpers -------------------------------
 
 def test_org_from_email_known_domains():
-    assert gw.org_from_email("joel@centrepoint.church", _CP_TAXONOMY) == "Centrepoint"
+    assert gw.org_from_email("joel@example.org", _CP_TAXONOMY) == "Acme"
     assert gw.org_from_email("x@gmail.com", _CP_TAXONOMY) == "external"
     assert gw.org_from_email("") == ""
 
@@ -80,7 +80,7 @@ def test_domain_org_lines_present_and_shaped():
     assert all(isinstance(line, str) for line in lines)
     assert len(lines) == len(_CP_TAXONOMY.domain_map)
     assert any(
-        "centrepoint.church" in line and "Centrepoint" in line for line in lines
+        "example.org" in line and "Acme" in line for line in lines
     )
     for domain, org in _CP_TAXONOMY.domain_map.items():
         assert any(domain in line and org in line for line in lines)
@@ -96,7 +96,7 @@ def test_is_junk_entity():
     # A person name with a 4-digit run is junk.
     assert gw.is_junk_entity("Booking 2026", "person") is True
     # An org name with a year is fine.
-    assert gw.is_junk_entity("Centrepoint 2026", "org") is False
+    assert gw.is_junk_entity("Acme 2026", "org") is False
     # A normal person name is fine.
     assert gw.is_junk_entity("Joel Chelliah", "person") is False
 
@@ -106,21 +106,21 @@ def test_is_junk_entity():
 def test_upsert_entity_new_returns_slug(tmp_path):
     s = _store(tmp_path)
     eid = gw.upsert_entity(s, name="Joel Chelliah", entity_type="person",
-                           org="Centrepoint")
+                           org="Acme")
     assert eid == "joel-chelliah"
     ent = s.get_entity(eid)
     assert ent["name"] == "Joel Chelliah"
     assert ent["type"] == "person"
-    assert ent["org"] == "Centrepoint"
+    assert ent["org"] == "Acme"
 
 
 def test_upsert_entity_email_dedup(tmp_path):
     s = _store(tmp_path)
     first = gw.upsert_entity(s, name="Joel Chelliah", entity_type="person",
-                             org="Centrepoint", email_addr="joel@centrepoint.church")
+                             org="Acme", email_addr="joel@example.org")
     # Same email, different display name → merges into the existing entity.
     second = gw.upsert_entity(s, name="J. Chelliah", entity_type="person",
-                              email_addr="joel@centrepoint.church")
+                              email_addr="joel@example.org")
     assert second == first
     # One person entity (the org is auto-created via works_at, so count persons).
     persons = [e for e in s.list_entities() if e["type"] == "person"]
@@ -328,7 +328,7 @@ def test_apply_writes_entities_and_email_context(tmp_path):
     s = _store(tmp_path)
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
-    # Joel entity exists (sender, from joel@centrepoint.church).
+    # Joel entity exists (sender, from joel@example.org).
     joel = s.find_entity("Joel Chelliah")
     assert joel is not None
     # email_context row written for the thread lead (m-1).
@@ -337,7 +337,7 @@ def test_apply_writes_entities_and_email_context(tmp_path):
             "SELECT * FROM email_context WHERE message_id='m-1'").fetchone())
         links = [dict(r) for r in db.execute(
             "SELECT * FROM email_entities WHERE message_id='m-1'").fetchall()]
-    assert ec["org"] == "Centrepoint"
+    assert ec["org"] == "Acme"
     assert ec["content_type"] == "request"
     assert ec["summary"]
     assert ec["contextual_summary"]
@@ -349,13 +349,13 @@ def test_apply_writes_entities_and_email_context(tmp_path):
     assert sender_links and sender_links[0]["role"] == "sender"
 
 
-def test_apply_excludes_josh(tmp_path):
+def test_apply_excludes_owner(tmp_path):
     s = _store(tmp_path)
-    ext = _load("thread_multi_message.json")  # has a "Josh Kemp" entity
+    ext = _load("thread_multi_message.json")  # has a "Sam Chen" entity
     gw.apply(s, ext, doc_ids=["t-multi-002"],
-             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
+             owner=_OWNER_IDENTITY, identity="sam@example.org")
     names = {e["name"].lower() for e in s.list_entities()}
-    assert not any("josh" in n for n in names)
+    assert not any("sam" in n for n in names)
 
 
 def test_apply_relations_resolved_via_name_map(tmp_path, monkeypatch):
@@ -365,8 +365,8 @@ def test_apply_relations_resolved_via_name_map(tmp_path, monkeypatch):
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
     joel = s.find_entity("Joel Chelliah")
-    # "Centrepoint Church" canonicalises to the single 'centrepoint' org node.
-    org = s.find_entity("Centrepoint")
+    # "Acme Corp" canonicalises to the single 'acme' org node.
+    org = s.find_entity("Acme")
     assert joel and org
     rels = s.relations_for(joel["id"])
     works = [r for r in rels if r["relation"] == "works_at"
@@ -394,8 +394,8 @@ def test_apply_email_count_stable_on_reapply(tmp_path):
 def test_apply_org_affiliation_single_node(tmp_path, monkeypatch):
     """A known org resolves to one canonical node, not a tag/full-name pair.
 
-    'Centrepoint' (the org tag) and 'Centrepoint Church' (the relation target)
-    must converge on the single 'centrepoint' entity with one valid works_at
+    'Acme' (the org tag) and 'Acme Corp' (the relation target)
+    must converge on the single 'acme' entity with one valid works_at
     edge — no phantom bare-slug node, no immediately-superseded edge.
     """
     _write_cp_config(tmp_path)
@@ -404,13 +404,13 @@ def test_apply_org_affiliation_single_node(tmp_path, monkeypatch):
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
     org_ids = sorted(e["id"] for e in s.list_entities() if e["type"] == "org")
-    assert org_ids == ["centrepoint"]
+    assert org_ids == ["acme"]
     valid_works = [
         r for r in s.list_relations()
         if r["relation"] == "works_at" and r["invalidated_at"] is None
     ]
     assert len(valid_works) == 1
-    assert valid_works[0]["entity_b"] == "centrepoint"
+    assert valid_works[0]["entity_b"] == "acme"
 
 
 def test_apply_populates_thread_context(tmp_path):
@@ -429,7 +429,7 @@ def test_apply_populates_thread_context(tmp_path):
             "SELECT * FROM thread_context WHERE thread_id = ?",
             ("t-simple-001",)).fetchone()
     assert row is not None
-    assert row["org"] == "Centrepoint"
+    assert row["org"] == "Acme"
     assert row["email_count"] == 1
     assert row["summary"]  # the thread headline summary is set
     assert "joel-chelliah" in (row["participant_ids"] or "")
@@ -446,10 +446,10 @@ def test_apply_writes_waiting_on(tmp_path):
     s = _store(tmp_path)
     ext = dict(_load("thread_simple.json"))
     ext["entities"] = ext["entities"] + [
-        {"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint", "role": ""}]
+        {"name": "Taryn Hamilton", "type": "person", "org": "Acme", "role": ""}]
     ext["actions"] = [{
         "description": "Wait for Taryn to confirm the venue.",
-        "owner_name": "Josh Kemp", "owner_fallback": "", "due_date": "",
+        "owner_name": "Sam Chen", "owner_fallback": "", "due_date": "",
         "project_id": "", "area_id": "", "waiting_on": "Taryn Hamilton"}]
     gw.apply(s, ext, doc_ids=["t-simple-001"])
     with s._connect() as db:
@@ -493,7 +493,7 @@ def _ext(thread_id, org, msg_id, topics, sender="A B <a@example.com>"):
 
 def test_topic_gate_blocks_single_org(tmp_path):
     s = _store(tmp_path)
-    gw.apply(s, _ext("t1", "Centrepoint", "m1", ["budget"]), doc_ids=["d1"])
+    gw.apply(s, _ext("t1", "Acme", "m1", ["budget"]), doc_ids=["d1"])
     # Only one org has carried "budget" → the topic entity is not created.
     assert s.get_entity("topic-budget") is None
 
@@ -501,23 +501,23 @@ def test_topic_gate_blocks_single_org(tmp_path):
 def test_topic_gate_allows_two_orgs(tmp_path):
     s = _store(tmp_path)
     # Two prior email_context rows under different orgs carry "budget".
-    gw.apply(s, _ext("t1", "Centrepoint", "m1", ["budget"]), doc_ids=["d1"])
+    gw.apply(s, _ext("t1", "Acme", "m1", ["budget"]), doc_ids=["d1"])
     gw.apply(s, _ext("t2", "ACC", "m2", ["budget"]), doc_ids=["d2"])
     assert s.get_entity("topic-budget") is None  # not yet (gate runs before this row counts)
     # The third apply now sees 2 distinct orgs already in email_context.
-    gw.apply(s, _ext("t3", "Centrepoint", "m3", ["budget"]), doc_ids=["d3"])
+    gw.apply(s, _ext("t3", "Acme", "m3", ["budget"]), doc_ids=["d3"])
     assert s.get_entity("topic-budget") is not None
 
 
 def test_topic_gate_escapes_like_metachars(tmp_path):
     s = _store(tmp_path)
     # Two prior rows under different orgs carry "q1_budget" (note the underscore).
-    gw.apply(s, _ext("t1", "Centrepoint", "m1", ["q1_budget"]), doc_ids=["d1"])
+    gw.apply(s, _ext("t1", "Acme", "m1", ["q1_budget"]), doc_ids=["d1"])
     gw.apply(s, _ext("t2", "ACC", "m2", ["q1_budget"]), doc_ids=["d2"])
     # A different topic "q1xbudget" would match "q1_budget" if "_" acted as a LIKE
     # wildcard. With ESCAPE it does not, so this topic has zero prior appearances
     # and the gate must keep it from being created.
-    gw.apply(s, _ext("t3", "Centrepoint", "m3", ["q1xbudget"]), doc_ids=["d3"])
+    gw.apply(s, _ext("t3", "Acme", "m3", ["q1xbudget"]), doc_ids=["d3"])
     assert s.get_entity("topic-q1xbudget") is None
     # Sanity: the literal "q1_budget" topic still opens its own gate on the third
     # appearance, confirming the escape didn't break legitimate matching.
@@ -528,7 +528,7 @@ def test_topic_gate_escapes_like_metachars(tmp_path):
 
 def _action_ext(project_id, area_id):
     return {
-        "thread_id": "t-act", "org": "Centrepoint", "content_type": "request",
+        "thread_id": "t-act", "org": "Acme", "content_type": "request",
         "summary": "s", "contextual_summary": "", "entities": [], "topics": [],
         "actions": [{"description": "Do thing", "owner_name": "A B",
                      "owner_fallback": "sender", "due_date": "2026-05-01",
@@ -564,12 +564,12 @@ def test_action_area_id_validated(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO areas(id,org_id,name,active) "
-                   "VALUES('centrepoint-it','Centrepoint','IT',1)")
+                   "VALUES('acme-it','Acme','IT',1)")
         db.execute("INSERT INTO areas(id,org_id,name,active) "
-                   "VALUES('dead-area','Centrepoint','Dead',0)")
-    a = {"description": "x", "project_id": "", "area_id": "centrepoint-it"}
+                   "VALUES('dead-area','Acme','Dead',0)")
+    a = {"description": "x", "project_id": "", "area_id": "acme-it"}
     gw._validate_action_targets(s, a)
-    assert a["area_id"] == "centrepoint-it"
+    assert a["area_id"] == "acme-it"
     b = {"description": "x", "project_id": "", "area_id": "made-up"}
     gw._validate_action_targets(s, b)
     assert b["area_id"] == ""
@@ -592,7 +592,7 @@ def _clock():
 
 def _thread(*, actions=None, content_type="request", lead_sender="A B <a@example.com>",
             lead_date="2026-05-20", labels="INBOX", is_self=None, subject="x",
-            body="", org="Centrepoint", resolved_action_ids=None,
+            body="", org="Acme", resolved_action_ids=None,
             updated_actions=None, entities=None, relations=None, topics=None,
             extra_messages=None, summary="s"):
     """Build a single-message (plus optional extra) thread extraction for the
@@ -655,7 +655,7 @@ def test_age_gate_self_exempt(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[_action("Send the WA region report")],
                   lead_date="2026-01-01", labels="SENT",
-                  lead_sender="Josh Kemp <josh.k@centrepoint.church>", is_self=True)
+                  lead_sender="Sam Chen <sam@example.org>", is_self=True)
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     assert len(s.list_unified_actions()) == 1
 
@@ -672,7 +672,7 @@ def test_notification_gate_self_exempt(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[_action("Renew the SSL certificate")],
                   content_type="notification", labels="SENT",
-                  lead_sender="Josh Kemp <josh.k@centrepoint.church>", is_self=True)
+                  lead_sender="Sam Chen <sam@example.org>", is_self=True)
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     assert len(s.list_unified_actions()) == 1
 
@@ -683,14 +683,14 @@ def test_self_email_synthesises_task_from_subject(tmp_path):
     s = _store(tmp_path)
     # Self thread, no actions, subject carries a self-prefix → confidence 1.0.
     ext = _thread(actions=[], content_type="fyi", labels="SENT",
-                  lead_sender="Josh Kemp <josh.k@centrepoint.church>",
+                  lead_sender="Sam Chen <sam@example.org>",
                   is_self=True, subject="TODO: book the Narrogin van")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
+             owner=_OWNER_IDENTITY, identity="sam@example.org")
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["text"] == "book the Narrogin van"  # prefix stripped
-    assert rows[0]["owner"] == "Josh"
+    assert rows[0]["owner"] == "Sam"
     assert rows[0]["confidence"] == 1.0
     assert rows[0]["context_tag"] == "self-email"
 
@@ -698,10 +698,10 @@ def test_self_email_synthesises_task_from_subject(tmp_path):
 def test_self_email_synthetic_no_prefix_lower_confidence(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[], content_type="fyi", labels="SENT",
-                  lead_sender="Josh Kemp <josh.k@centrepoint.church>",
+                  lead_sender="Sam Chen <sam@example.org>",
                   is_self=True, subject="Carpark briefing note")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-             owner=_JOSH_IDENTITY, identity="josh.k@centrepoint.church")
+             owner=_OWNER_IDENTITY, identity="sam@example.org")
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["text"] == "Carpark briefing note"
@@ -714,7 +714,7 @@ def test_self_email_empty_subject_fallback_no_em_dash(tmp_path):
     # fallback must use a plain hyphen, not an em-dash (project voice rule;
     # surfaces in ClickUp later).
     ext = _thread(actions=[], content_type="fyi", labels="SENT",
-                  lead_sender="Josh Kemp <josh.k@centrepoint.church>",
+                  lead_sender="Sam Chen <sam@example.org>",
                   is_self=True, subject="")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
@@ -739,39 +739,39 @@ def test_within_batch_dedup_drops_near_identical(tmp_path):
 
 def test_owner_inferred_when_empty(tmp_path):
     s = _store(tmp_path)
-    # Imperative-verb description, empty owner, no sender fallback → inferred Josh.
+    # Imperative-verb description, empty owner, no sender fallback → inferred owner.
     ext = _thread(actions=[_action("Review the draft policy before Friday",
                                    owner_name="", owner_fallback="")])
-    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
     rows = s.list_unified_actions()
     assert len(rows) == 1
-    assert rows[0]["owner"] == "Josh"
-    assert rows[0]["owner_entity_id"] == "josh-kemp"
+    assert rows[0]["owner"] == "Sam"
+    assert rows[0]["owner_entity_id"] == "sam-chen"
     assert rows[0]["confidence"] == 0.6  # imperative-verb inference
 
 
-def test_owner_josh_normalised(tmp_path):
-    for i, name in enumerate(("josh", "joshua", "Josh Kemp")):
+def test_owner_normalised(tmp_path):
+    for i, name in enumerate(("sam", "alex", "Sam Chen")):
         s2 = Store(tmp_path / f"g{i}.sqlite3", dim=4)
         s2.init()
         ext = _thread(actions=[_action("Confirm the booking", owner_name=name)])
-        gw.apply(s2, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
+        gw.apply(s2, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
         rows = s2.list_unified_actions()
         assert len(rows) == 1
-        assert rows[0]["owner"] == "Josh"
-        assert rows[0]["owner_entity_id"] == "josh-kemp"
+        assert rows[0]["owner"] == "Sam"
+        assert rows[0]["owner_entity_id"] == "sam-chen"
 
 
 def test_deadline_inferred_from_body(tmp_path):
     s = _store(tmp_path)
-    # No due_date on the action, but the body carries an ISO date. Owner is Josh
-    # so the deadline-inference confidence (0.6) is the value stamped on the row
-    # (the Nexus Josh/decision branch carries deadline_confidence; the non-Josh
-    # branch keeps action_confidence — see _write_actions routing).
+    # No due_date on the action, but the body carries an ISO date. Owner is the
+    # configured owner so the deadline-inference confidence (0.6) is the value
+    # stamped on the row (the owner/decision branch carries deadline_confidence;
+    # the non-owner branch keeps action_confidence — see _write_actions routing).
     ext = _thread(actions=[_action("Submit the grant paperwork",
-                                   owner_name="Josh", due_date="")],
+                                   owner_name="Sam", due_date="")],
                   body="Please get this in by 2026-06-20 at the latest.")
-    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_JOSH_IDENTITY)
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["deadline"] == "2026-06-20"
@@ -782,10 +782,10 @@ def test_deadline_inferred_from_body(tmp_path):
 
 def test_action_routed_with_owner_and_status(tmp_path):
     s = _store(tmp_path)
-    # Non-Josh confirmed owner (named, resolvable as sender) → that owner, open.
+    # Non-configured-owner confirmed owner (named, resolvable as sender) → that owner, open.
     ext = _thread(actions=[_action("Prepare the venue checklist",
                                    owner_name="Taryn Hamilton")],
-                  lead_sender="Taryn Hamilton <taryn@centrepoint.church>")
+                  lead_sender="Taryn Hamilton <taryn@example.org>")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
     assert len(rows) == 1
@@ -808,20 +808,20 @@ def test_unclear_owner_routed(tmp_path):
     assert rows[0]["confidence"] == 0.5
 
 
-def test_josh_action_routed(tmp_path):
+def test_owner_action_routed(tmp_path):
     s = _store(tmp_path)
-    ext = _thread(actions=[_action("Sign off the budget", owner_name="Josh")])
+    ext = _thread(actions=[_action("Sign off the budget", owner_name="Sam")])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
     assert len(rows) == 1
-    assert rows[0]["owner"] == "Josh"
+    assert rows[0]["owner"] == "Sam"
 
 
 def test_near_dup_guard_skips(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[_action("Prepare the venue checklist",
                                    owner_name="Taryn Hamilton")],
-                  lead_sender="Taryn Hamilton <taryn@centrepoint.church>")
+                  lead_sender="Taryn Hamilton <taryn@example.org>")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     # A second apply with the same open action does not insert a duplicate.
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
@@ -832,7 +832,7 @@ def test_near_dup_guard_skips(tmp_path):
 
 def test_resolved_action_ids_close_actions(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Run the field audit", owner="Josh",
+    aid = s.add_unified_action(text="Run the field audit", owner="Sam",
                                status="open", thread_id="t-act")
     ext = _thread(actions=[], resolved_action_ids=[aid])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
@@ -843,7 +843,7 @@ def test_resolved_action_ids_close_actions(tmp_path):
 
 def test_updated_actions_rewrite_text(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Run the field audit", owner="Josh",
+    aid = s.add_unified_action(text="Run the field audit", owner="Sam",
                                status="open", thread_id="t-act")
     ext = _thread(actions=[],
                   updated_actions=[{"id": aid, "new_text": "Run the WA field audit (done)"}])
@@ -854,7 +854,7 @@ def test_updated_actions_rewrite_text(tmp_path):
 
 def test_resolve_ignores_non_int_ids(tmp_path):
     s = _store(tmp_path)
-    aid = s.add_unified_action(text="Run the field audit", owner="Josh",
+    aid = s.add_unified_action(text="Run the field audit", owner="Sam",
                                status="open", thread_id="t-act")
     ext = _thread(actions=[], resolved_action_ids=["101", None, True, aid])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
@@ -867,7 +867,7 @@ def test_resolved_action_id_other_thread_not_closed(tmp_path):
     """A resolved id is scoped to the resolving thread: an id belonging to a
     different thread (e.g. a hallucinated or stale id) must not close it."""
     s = _store(tmp_path)
-    other = s.add_unified_action(text="Unrelated open work", owner="Josh",
+    other = s.add_unified_action(text="Unrelated open work", owner="Sam",
                                  status="open", thread_id="t-other")
     ext = _thread(actions=[], resolved_action_ids=[other])  # _thread is "t-act"
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
@@ -884,17 +884,17 @@ def test_apply_full_lifecycle_summary(tmp_path):
     # "audit" topic gate opens. Both belong to t-rich so the thread-scoped
     # resolve/update reach them.
     pre = s.add_unified_action(text="Run the WA credentialing audit",
-                               owner="Josh", status="open", thread_id="t-rich")
+                               owner="Sam", status="open", thread_id="t-rich")
     pre_upd = s.add_unified_action(text="Draft the audit cover note",
-                                   owner="Josh", status="open", thread_id="t-rich")
-    gw.apply(s, _ext("seed1", "Centrepoint", "seed-m1", ["audit"]), doc_ids=["s1"])
+                                   owner="Sam", status="open", thread_id="t-rich")
+    gw.apply(s, _ext("seed1", "Acme", "seed-m1", ["audit"]), doc_ids=["s1"])
     gw.apply(s, _ext("seed2", "ACC", "seed-m2", ["audit"]), doc_ids=["s2"])
 
     ext = {
         "thread_id": "t-rich", "org": "ACC", "content_type": "update",
         "summary": "CAMS audit thread", "contextual_summary": "",
         "entities": [
-            {"name": "Taryn Hamilton", "type": "person", "org": "Centrepoint",
+            {"name": "Taryn Hamilton", "type": "person", "org": "Acme",
              "role": "Executive Pastor"},
             {"name": "CAMS Review", "type": "project", "org": "ACC", "role": ""},
         ],
@@ -902,17 +902,17 @@ def test_apply_full_lifecycle_summary(tmp_path):
         "actions": [
             _action("Compile the regional credentialing summary",
                     owner_name="Taryn Hamilton"),
-            _action("Sign off the audit findings", owner_name="Josh"),
+            _action("Sign off the audit findings", owner_name="Sam"),
         ],
         "reply_needed": False, "reply_reason": "",
         "resolved_action_ids": [pre],
         "updated_actions": [{"id": pre_upd, "new_text": "Draft the audit cover note (revised)"}],
         "relations": [
             {"source_name": "Taryn Hamilton", "type": "works_at",
-             "target_name": "Centrepoint Church"},
+             "target_name": "Acme Corp"},
         ],
         "messages": [
-            {"message_id": "m-rich", "sender": "Taryn Hamilton <taryn@centrepoint.church>",
+            {"message_id": "m-rich", "sender": "Taryn Hamilton <taryn@example.org>",
              "date": "2026-05-28", "labels": "INBOX", "subject": "CAMS audit"},
         ],
     }
@@ -930,8 +930,8 @@ def test_apply_full_lifecycle_summary(tmp_path):
     # Graph state spot-checks.
     all_actions = s.list_unified_actions()
     taryn_act = [a for a in all_actions if a["owner"] == "Taryn Hamilton"]
-    josh_act = [a for a in all_actions if a["owner"] == "Josh" and a["status"] == "open"]
-    assert taryn_act and josh_act
+    owner_act = [a for a in all_actions if a["owner"] == "Sam" and a["status"] == "open"]
+    assert taryn_act and owner_act
     closed = [a for a in all_actions if a["id"] == pre][0]
     assert closed["status"] == "done"
     updated = [a for a in all_actions if a["id"] == pre_upd][0]
@@ -952,7 +952,7 @@ def test_strip_affiliation_strips_at_suffix():
 
 
 def test_strip_affiliation_strips_from_known_org():
-    assert gw.strip_affiliation("Joel from Centrepoint") == "Joel"
+    assert gw.strip_affiliation("Joel from Acme") == "Joel"
 
 
 def test_strip_affiliation_leaves_plain_names_untouched():
@@ -990,9 +990,9 @@ def _sender_ext(thread_org, sender):
     }
 
 
-def test_external_sender_in_centrepoint_thread_is_external(tmp_path):
+def test_external_sender_in_acme_thread_is_external(tmp_path):
     s = _store(tmp_path)
-    gw.apply(s, _sender_ext("Centrepoint", "Franz <franz@thechurchco.com>"),
+    gw.apply(s, _sender_ext("Acme", "Franz <franz@thechurchco.com>"),
              doc_ids=["d1"])
     franz = s.find_entity("Franz")
     assert franz is not None
@@ -1003,31 +1003,31 @@ def test_known_domain_sender_gets_its_org(tmp_path, monkeypatch):
     _write_cp_config(tmp_path)
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
-    gw.apply(s, _sender_ext("ACC", "Joel <joel@centrepoint.church>"),
+    gw.apply(s, _sender_ext("ACC", "Joel <joel@example.org>"),
              doc_ids=["d1"])
     joel = s.find_entity("Joel")
     assert joel is not None
-    assert joel["org"] == "Centrepoint"
+    assert joel["org"] == "Acme"
 
 
 def test_no_email_sender_inherits_thread_org(tmp_path):
     s = _store(tmp_path)
     # Display name only, no resolvable email address.
-    gw.apply(s, _sender_ext("Centrepoint", "Bob Builder"), doc_ids=["d1"])
+    gw.apply(s, _sender_ext("Acme", "Bob Builder"), doc_ids=["d1"])
     # No email → no sender entity is upserted (needs name + email); assert
     # that, then check the org logic via the email_context org instead.
     assert s.find_entity("Bob Builder") is None
     with s._connect() as db:
         ec = dict(db.execute(
             "SELECT * FROM email_context WHERE message_id='ms-1'").fetchone())
-    assert ec["org"] == "Centrepoint"
+    assert ec["org"] == "Acme"
 
 
 # Part 3 — reject relations whose endpoint is an org-classification TAG.
 
 def _rel_ext(target_name):
     return {
-        "thread_id": "tr-1", "org": "Centrepoint", "content_type": "update",
+        "thread_id": "tr-1", "org": "Acme", "content_type": "update",
         "summary": "s", "contextual_summary": "",
         "entities": [{"name": "Franz", "type": "person", "org": "external",
                       "role": ""}],
@@ -1045,9 +1045,9 @@ def test_relation_to_org_tag_is_skipped(tmp_path, monkeypatch):
     _write_cp_config(tmp_path)
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
-    gw.apply(s, _rel_ext("Centrepoint"), doc_ids=["d1"])
-    # The bare tag "Centrepoint" must not have been created as an entity.
-    assert s.get_entity("centrepoint") is None
+    gw.apply(s, _rel_ext("Acme"), doc_ids=["d1"])
+    # The bare tag "Acme" must not have been created as an entity.
+    assert s.get_entity("acme") is None
     franz = s.find_entity("Franz")
     assert franz is not None
     assert not s.relations_for(franz["id"])
@@ -1065,12 +1065,12 @@ def test_relation_to_real_org_is_kept(tmp_path, monkeypatch):
     _write_cp_config(tmp_path)
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
-    gw.apply(s, _rel_ext("Centrepoint Church"), doc_ids=["d1"])
+    gw.apply(s, _rel_ext("Acme Corp"), doc_ids=["d1"])
     franz = s.find_entity("Franz")
-    # "Centrepoint Church" is a real org name (contains a tag word but is not the
-    # bare tag), so it is NOT skipped — it canonicalises to the 'centrepoint' node
+    # "Acme Corp" is a real org name (contains a tag word but is not the
+    # bare tag), so it is NOT skipped — it canonicalises to the 'acme' node
     # and the works_at edge is written there.
-    org = s.find_entity("Centrepoint")
+    org = s.find_entity("Acme")
     assert franz and org
     rels = [r for r in s.relations_for(franz["id"])
             if r["relation"] == "works_at" and r["entity_b"] == org["id"]]
@@ -1084,14 +1084,14 @@ def test_franz_regression_lock(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     ext = {
-        "thread_id": "tf-1", "org": "Centrepoint", "content_type": "update",
+        "thread_id": "tf-1", "org": "Acme", "content_type": "update",
         "summary": "s", "contextual_summary": "",
         "entities": [{"name": "Franz from The Church Co", "type": "person",
-                      "org": "Centrepoint", "role": ""}],
+                      "org": "Acme", "role": ""}],
         "topics": [], "actions": [], "reply_needed": False, "reply_reason": "",
         "resolved_action_ids": [], "updated_actions": [],
         "relations": [{"source_name": "Franz from The Church Co",
-                       "type": "works_at", "target_name": "Centrepoint"}],
+                       "type": "works_at", "target_name": "Acme"}],
         "messages": [{"message_id": "mf-1",
                       "sender": "Franz from The Church Co <franz@thechurchco.com>",
                       "date": "2026-04-18", "labels": "INBOX", "subject": "x"}],
@@ -1109,8 +1109,8 @@ def test_franz_regression_lock(tmp_path, monkeypatch):
     names = {e["name"] for e in s.list_entities()}
     assert "Franz from The Church Co" not in names
 
-    # No works_at edge to the bare "Centrepoint" tag.
-    assert s.get_entity("centrepoint") is None
+    # No works_at edge to the bare "Acme" tag.
+    assert s.get_entity("acme") is None
     assert not s.relations_for(franz["id"])
 
 
@@ -1127,7 +1127,7 @@ def test_relation_to_org_containing_at_is_preserved(tmp_path):
     stored under its full name (not truncated)."""
     s = _store(tmp_path)
     ext = {
-        "thread_id": "tat-1", "org": "Centrepoint", "content_type": "update",
+        "thread_id": "tat-1", "org": "Acme", "content_type": "update",
         "summary": "s", "contextual_summary": "",
         "entities": [
             {"name": "Alice", "type": "person", "org": "external", "role": ""},

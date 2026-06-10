@@ -389,7 +389,7 @@ def test_fetch_text_docx_via_get_media(tmp_path):
         "name": "Budget.docx",
         "mimeType": DOCX_MIME,
         "modifiedTime": "2026-05-01T10:00:00Z",
-        "owners": [{"displayName": "Josh"}],
+        "owners": [{"displayName": "Sam"}],
     }
     svc2 = FakeDriveService(
         media={"d1": docx_bytes},

@@ -1,8 +1,8 @@
-"""Config-driven install-owner identity (replaces the hardcoded Josh identity).
+"""Config-driven install-owner identity (replaces the hardcoded owner identity).
 
 The enrichment pipeline attributes self-owned actions and excludes the install
-owner from the graph. Historically the identity was hardcoded ("Josh" /
-"josh-kemp" / the josh-variant alias set). These tests pin that an
+owner from the graph. Historically the identity was hardcoded ("Sam" /
+"sam-chen" / the owner-variant alias set). These tests pin that an
 unconfigured install keeps exactly that behaviour, and that a configured
 owner_name / owner_full_name flows through every identity-sensitive path:
 graph_write (attribution + exclusion), semantic (People line), prompt
@@ -59,9 +59,9 @@ class TestConfigHelpers:
             "owner_aliases": ["Sazza"]})
         assert "sazza" in owner_aliases(home)
 
-    def test_aliases_no_joshua_when_configured(self, tmp_path):
+    def test_aliases_no_alex_when_configured(self, tmp_path):
         home = _write_config(tmp_path, {"owner_name": "Tom"})
-        assert "joshua" not in owner_aliases(home)
+        assert "alex" not in owner_aliases(home)
 
     def test_email_defaults_to_empty(self, tmp_path):
         home = _write_config(tmp_path, {})
@@ -76,21 +76,21 @@ class TestConfigHelpers:
 # _is_owner matching semantics
 # ---------------------------------------------------------------------------
 
-_JOSH = gw.OwnerIdentity(
-    name="Josh", entity_id="josh-kemp",
-    aliases=frozenset({"josh", "joshua", "josh kemp"}))
+_OWNER = gw.OwnerIdentity(
+    name="Sam", entity_id="sam-chen",
+    aliases=frozenset({"sam", "alex", "sam chen"}))
 
 
 class TestIsOwner:
-    def test_explicit_identity_matches_josh_variants(self):
-        assert gw._is_owner("Josh Kemp", _JOSH)
-        assert gw._is_owner("Joshua", _JOSH)
-        assert gw._is_owner("josh.k", _JOSH)
+    def test_explicit_identity_matches_owner_variants(self):
+        assert gw._is_owner("Sam Chen", _OWNER)
+        assert gw._is_owner("Sam", _OWNER)
+        assert gw._is_owner("sam.k", _OWNER)
 
     def test_word_boundary_not_substring(self):
-        # Historical substring matching would have excluded Joshveer; the
+        # Historical substring matching would have excluded Amir; the
         # word-level match must not.
-        assert not gw._is_owner("Joshveer Singh", _JOSH)
+        assert not gw._is_owner("Amir Singh", _OWNER)
 
     def test_short_alias_does_not_swallow_longer_names(self):
         tom = gw.OwnerIdentity(name="Tom", entity_id="tom-li",
@@ -100,11 +100,11 @@ class TestIsOwner:
         assert not gw._is_owner("Tomlinson Smith", tom)
 
     def test_multi_word_alias_matches_substring(self):
-        assert gw._is_owner("Pastor Josh Kemp Jr", _JOSH)
+        assert gw._is_owner("Pastor Sam Chen Jr", _OWNER)
 
     def test_empty_identity_never_matches(self):
         empty = gw.OwnerIdentity()
-        assert not gw._is_owner("Josh Kemp", empty)
+        assert not gw._is_owner("Sam Chen", empty)
         assert not gw._is_owner("anyone", empty)
 
 
@@ -157,7 +157,7 @@ def _self_thread(sender="Sarah Chen <sarah@example.org>", subject="TODO: file BA
     lead = {"message_id": "m1", "sender": sender, "date": "2026-05-20",
             "labels": "SENT", "subject": subject, "body": "", "is_self": True}
     return {
-        "thread_id": "t-own", "org": "Centrepoint", "content_type": "request",
+        "thread_id": "t-own", "org": "Acme", "content_type": "request",
         "summary": "s", "contextual_summary": "", "entities": [], "topics": [],
         "actions": [], "reply_needed": False, "reply_reason": "",
         "resolved_action_ids": [], "updated_actions": [], "relations": [],
@@ -193,19 +193,19 @@ class TestApplyWithConfiguredOwner:
         assert acts[0]["owner"] == "Sarah"
         assert acts[0]["owner_entity_id"] == "sarah-chen"
 
-    def test_owner_excluded_josh_included_as_entity(self, tmp_path):
-        # On a Sarah install, Sarah is the excluded self; Josh Kemp is just a
+    def test_owner_excluded_other_included_as_entity(self, tmp_path):
+        # On a Sarah install, Sarah is the excluded self; Sam Chen is just a
         # person and must land in the graph.
         s = _store(tmp_path)
         ext = _self_thread()
         ext["entities"] = [
-            {"name": "Sarah Chen", "type": "person", "org": "Centrepoint"},
-            {"name": "Josh Kemp", "type": "person", "org": "Centrepoint"},
+            {"name": "Sarah Chen", "type": "person", "org": "Acme"},
+            {"name": "Sam Chen", "type": "person", "org": "Acme"},
         ]
         gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
                  identity="sarah@example.org", owner=SARAH)
         assert s.find_entity("Sarah Chen") is None
-        assert s.find_entity("Josh Kemp") is not None
+        assert s.find_entity("Sam Chen") is not None
 
     def test_llm_owner_alias_resolves_to_configured_owner(self, tmp_path):
         s = _store(tmp_path)
@@ -228,12 +228,12 @@ class TestApplyWithConfiguredOwner:
 # ---------------------------------------------------------------------------
 
 class TestSemanticPeopleLine:
-    def test_configured_owner_excluded_josh_included(self):
+    def test_configured_owner_excluded_other_included(self):
         extraction = {
-            "org": "Centrepoint", "summary": "s", "content_type": "update",
+            "org": "Acme", "summary": "s", "content_type": "update",
             "entities": [
                 {"name": "Sarah Chen", "type": "person"},
-                {"name": "Josh Kemp", "type": "person"},
+                {"name": "Sam Chen", "type": "person"},
             ],
             "actions": [], "topics": [],
         }
@@ -241,7 +241,7 @@ class TestSemanticPeopleLine:
                   "labels": ""}
         text, _meta = build_semantic_doc(extraction, thread, owner=SARAH)
         assert "Sarah Chen" not in text
-        assert "Josh Kemp" in text
+        assert "Sam Chen" in text
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +249,12 @@ class TestSemanticPeopleLine:
 # ---------------------------------------------------------------------------
 
 class TestKnownPeopleExclusion:
-    def test_configured_owner_excluded_josh_included(self, tmp_path):
+    def test_configured_owner_excluded_other_included(self, tmp_path):
         from mcpbrain.prompt import build_known_people
         s = _store(tmp_path)
-        for name in ("Sarah Chen", "Josh Kemp"):
+        for name in ("Sarah Chen", "Sam Chen"):
             eid = gw.upsert_entity(s, name=name, entity_type="person",
-                                   org="Centrepoint")
+                                   org="Acme")
             with s._connect() as conn:
                 conn.execute(
                     "UPDATE entities SET email_count = 10 WHERE id = ?", (eid,))
@@ -263,7 +263,7 @@ class TestKnownPeopleExclusion:
         people = build_known_people(s, batch_thread_ids=[], owner=SARAH)
         names = {p["name"] for p in people}
         assert "Sarah Chen" not in names
-        assert "Josh Kemp" in names
+        assert "Sam Chen" in names
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ class TestEnrichPromptOwner:
         assert "knowledge graph for Sarah Chen" in p
         assert "EXCLUDE Sarah Chen" in p
         assert "tasks Sarah must act on" in p
-        assert "Josh Kemp" not in p
+        assert "Sam Chen" not in p
 
 
 # ---------------------------------------------------------------------------

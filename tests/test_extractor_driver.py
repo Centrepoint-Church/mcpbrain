@@ -34,7 +34,7 @@ def _valid_batch_for(pending: dict) -> dict:
     for thread in pending["threads"]:
         extractions.append({
             "thread_id": thread["thread_id"],
-            "org": "Centrepoint",
+            "org": "Acme",
             "content_type": "request",
             "summary": "A plain sentence.",
             "entities": [],

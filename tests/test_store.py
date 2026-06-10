@@ -49,16 +49,16 @@ def _store(tmp_path):
 def test_upsert_entity_idempotent_on_id_and_bumps_mentions(tmp_path):
     s = _store(tmp_path)
     first = s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person",
-                            org="Centrepoint", seen="2026-05-30")
+                            org="Acme", seen="2026-05-30")
     second = s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person",
-                             org="Centrepoint", seen="2026-05-31")
+                             org="Acme", seen="2026-05-31")
     assert first is True   # new entity row created
     assert second is False  # existing entity merged
     ents = s.list_entities()
     assert len(ents) == 1
     e = s.get_entity("taryn-hamilton")
     assert e["name"] == "Taryn Hamilton"
-    assert e["org"] == "Centrepoint"
+    assert e["org"] == "Acme"
     assert e["mentions"] == 2
     assert e["first_seen"] == "2026-05-30"
     assert e["last_seen"] == "2026-05-31"
@@ -68,10 +68,10 @@ def test_upsert_entity_fills_empty_org_and_name(tmp_path):
     s = _store(tmp_path)
     s.upsert_entity("joel-chelliah", "", "unknown", org="", seen="2026-05-30")
     s.upsert_entity("joel-chelliah", "Joel Chelliah", "person",
-                    org="Centrepoint", seen="2026-05-30")
+                    org="Acme", seen="2026-05-30")
     e = s.get_entity("joel-chelliah")
     assert e["name"] == "Joel Chelliah"
-    assert e["org"] == "Centrepoint"
+    assert e["org"] == "Acme"
 
 
 def test_upsert_entity_backfills_empty_first_seen(tmp_path):
@@ -109,14 +109,14 @@ def test_add_relation_dedups(tmp_path):
 
 def test_add_action_roundtrip(tmp_path):
     s = _store(tmp_path)
-    rid = s.add_action("Send the campus budget", owner="Josh",
+    rid = s.add_action("Send the campus budget", owner="Sam",
                        deadline="2026-06-10", source_doc_id="d1", thread_id="t1")
     assert isinstance(rid, int)
     acts = s.list_actions()
     assert len(acts) == 1
     a = acts[0]
     assert a["text"] == "Send the campus budget"
-    assert a["owner"] == "Josh"
+    assert a["owner"] == "Sam"
     assert a["deadline"] == "2026-06-10"
     assert a["status"] == "open"
     assert a["source_doc_id"] == "d1"
@@ -195,8 +195,8 @@ def test_thread_chunks_returns_empty_for_unknown_thread(tmp_path):
 # --- graph readers for brain_context / brain_graph (Task 4.5) ------------
 
 def _seed_graph(s):
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
-    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
+    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
     s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", "doc-1")
     s.add_relation("taryn-hamilton", "works_on", "college-2026", "doc-2")
@@ -427,7 +427,7 @@ def test_merge_repoints_dedups_drops_self_loops_and_removes_loser(tmp_path):
     UNIQUE triple, drops self-loops, and removes the loser from relations."""
     s = _store(tmp_path)
     s.upsert_entity("joel", "joel", "person", org="", seen="2026-05-30")
-    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Centrepoint", seen="2026-05-30")
+    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme", seen="2026-05-30")
     s.upsert_entity("acc", "ACC", "org", org="", seen="2026-05-30")
 
     s.add_relation("ps-joel", "works_at", "acc")        # repoints cleanly
@@ -455,22 +455,22 @@ def test_merge_scalar_precedence_and_mention_sum(tmp_path):
     s = _store(tmp_path)
     # Winner is a stub: empty org, unknown type. Loser carries the real values.
     s.upsert_entity("joel", "joel", "unknown", org="", seen="2026-05-30")  # mentions=1
-    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Centrepoint", seen="2026-05-30")
-    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Centrepoint", seen="2026-05-31")  # mentions=2
+    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme", seen="2026-05-30")
+    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme", seen="2026-05-31")  # mentions=2
 
     s.merge_entities("ps-joel", "joel", canonical_name="Joel Chelliah", method="llm")
 
     win = s.get_entity("joel")
     assert win["name"] == "Joel Chelliah"      # canonical_name override
-    assert win["org"] == "Centrepoint"          # winner org was "" -> loser's real org
+    assert win["org"] == "Acme"          # winner org was "" -> loser's real org
     assert win["type"] == "person"              # winner was "unknown" -> upgraded
     assert win["mentions"] == 3                  # 1 + 2 summed
 
 
 def test_merge_writes_audit_row(tmp_path):
     s = _store(tmp_path)
-    s.upsert_entity("joel", "joel", "person", org="Centrepoint", seen="2026-05-30")
-    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Centrepoint", seen="2026-05-30")
+    s.upsert_entity("joel", "joel", "person", org="Acme", seen="2026-05-30")
+    s.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme", seen="2026-05-30")
 
     s.merge_entities("ps-joel", "joel", method="llm")
 
@@ -486,7 +486,7 @@ def test_merge_writes_audit_row(tmp_path):
 
 def test_merge_is_noop_when_loser_equals_winner(tmp_path):
     s = _store(tmp_path)
-    s.upsert_entity("joel", "Joel", "person", org="Centrepoint", seen="2026-05-30")
+    s.upsert_entity("joel", "Joel", "person", org="Acme", seen="2026-05-30")
     s.merge_entities("joel", "joel")
     assert {e["id"] for e in s.list_entities()} == {"joel"}
     assert s.list_entity_merges() == []
@@ -494,7 +494,7 @@ def test_merge_is_noop_when_loser_equals_winner(tmp_path):
 
 def test_merge_is_noop_when_an_id_is_missing(tmp_path):
     s = _store(tmp_path)
-    s.upsert_entity("joel", "Joel", "person", org="Centrepoint", seen="2026-05-30")
+    s.upsert_entity("joel", "Joel", "person", org="Acme", seen="2026-05-30")
     # Neither call should crash or mutate anything.
     s.merge_entities("ghost", "joel")
     s.merge_entities("joel", "ghost")
@@ -504,7 +504,7 @@ def test_merge_is_noop_when_an_id_is_missing(tmp_path):
 
 def test_entities_for_resolution_returns_five_fields(tmp_path):
     s = _store(tmp_path)
-    s.upsert_entity("joel", "Joel", "person", org="Centrepoint", seen="2026-05-30")
+    s.upsert_entity("joel", "Joel", "person", org="Acme", seen="2026-05-30")
     s.upsert_entity("acc", "ACC", "org", org="", seen="2026-05-30")
     rows = s.entities_for_resolution()
     assert len(rows) == 2
@@ -512,7 +512,7 @@ def test_entities_for_resolution_returns_five_fields(tmp_path):
         assert set(r.keys()) == {"id", "name", "type", "org", "mentions"}
     by_id = {r["id"]: r for r in rows}
     assert by_id["joel"]["name"] == "Joel"
-    assert by_id["joel"]["org"] == "Centrepoint"
+    assert by_id["joel"]["org"] == "Acme"
 
 
 def test_stale_reextract_roundtrip(tmp_path):
@@ -570,7 +570,7 @@ def test_clickup_closed_setter(tmp_path):
     from mcpbrain.store import Store
     s = Store(tmp_path / "b.sqlite3", dim=4)
     s.init()
-    aid = s.add_unified_action(text="Do thing", owner="Joshua")
+    aid = s.add_unified_action(text="Do thing", owner="Sam")
     # default is NULL (never observed)
     assert s.get_unified_action(aid)["clickup_closed"] is None
     s.set_action_clickup_closed(aid, True)

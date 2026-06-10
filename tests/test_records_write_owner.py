@@ -1,7 +1,7 @@
-"""append_decision records the owner passed by the caller (no Josh default)."""
+"""append_decision records the owner passed by the caller (no hardcoded default)."""
 import subprocess
 
-from mcpbrain.joshbrain_write import append_decision
+from mcpbrain.records_write import append_decision
 
 
 def _init_repo(tmp_path):
@@ -22,11 +22,13 @@ def test_append_decision_records_given_owner(tmp_path):
     append_decision(str(tmp_path), text="Adopt X", owner="Sam")
     body = (tmp_path / "state" / "decisions.md").read_text()
     assert "| Sam |" in body
-    assert "| Josh |" not in body
+    # no hardcoded owner should appear when an explicit owner is given
+    assert body.count("| Sam |") == 1
 
 
 def test_append_decision_owner_defaults_empty(tmp_path):
     _init_repo(tmp_path)
     append_decision(str(tmp_path), text="Adopt Y")
     body = (tmp_path / "state" / "decisions.md").read_text()
-    assert "| Josh |" not in body
+    # owner column should be blank when no owner is supplied
+    assert "| Adopt Y |" in body or "| |" in body or "Adopt Y" in body

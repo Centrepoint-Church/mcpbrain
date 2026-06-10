@@ -47,7 +47,7 @@ def test_latest_writes_survive_snapshot(tmp_path):
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d-latest", "the annual budget review", "h1", {})
-    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     store.set_cursor("gmail", "cursor-token-42")
 
     snap_path = snapshot(store.path, tmp_path / "snap.sqlite3")
@@ -265,7 +265,7 @@ def test_make_encrypted_snapshot_not_plaintext_and_roundtrips(tmp_path):
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d-latest", "the annual budget review", "h1", {})
-    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     store.set_cursor("gmail", "cursor-token-42")
 
     key = generate_escrow_key()
@@ -401,7 +401,7 @@ def test_upload_creates_folder_when_missing_then_uploads(tmp_path):
     service = FakeService(files)
 
     result = upload_snapshot(
-        service, src, "drive-XYZ", "josh", media_factory=_fake_media
+        service, src, "drive-XYZ", "sam", media_factory=_fake_media
     )
 
     # Folder was missing → exactly two create calls: folder, then file.
@@ -419,7 +419,7 @@ def test_upload_creates_folder_when_missing_then_uploads(tmp_path):
     assert len(file_creates) == 1
 
     fc = folder_creates[0]
-    assert fc["body"]["name"] == "josh"
+    assert fc["body"]["name"] == "sam"
     assert fc["body"]["mimeType"] == FakeFiles.FOLDER_MIME
     assert fc["body"]["parents"] == ["drive-XYZ"]
     assert fc["supportsAllDrives"] is True
@@ -438,12 +438,12 @@ def test_upload_reuses_existing_folder_no_folder_create(tmp_path):
     src.write_bytes(b"ciphertext")
 
     files = FakeFiles(
-        list_response={"files": [{"id": "folder-existing", "name": "josh"}]}
+        list_response={"files": [{"id": "folder-existing", "name": "sam"}]}
     )
     service = FakeService(files)
 
     result = upload_snapshot(
-        service, src, "drive-XYZ", "josh", media_factory=_fake_media
+        service, src, "drive-XYZ", "sam", media_factory=_fake_media
     )
 
     # No folder-create call — only the file upload create.
@@ -467,7 +467,7 @@ def test_upload_sets_supports_all_drives_on_every_call(tmp_path):
     files = FakeFiles(list_response={"files": []})
     service = FakeService(files)
 
-    upload_snapshot(service, src, "drive-XYZ", "josh", media_factory=_fake_media)
+    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
 
     # list + both create variants must set supportsAllDrives=True.
     for call in files.list_calls:
@@ -482,10 +482,10 @@ def test_upload_uses_injected_media_factory(tmp_path):
     src = tmp_path / "snap.enc"
     src.write_bytes(b"ciphertext")
 
-    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "josh"}]})
+    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "sam"}]})
     service = FakeService(files)
 
-    upload_snapshot(service, src, "drive-XYZ", "josh", media_factory=_fake_media)
+    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
 
     up = files.create_calls[0]
     # The fake media tuple must have reached media_body — proof no real
@@ -498,11 +498,11 @@ def test_upload_accepts_str_path_and_uses_basename(tmp_path):
     src.parent.mkdir(parents=True)
     src.write_bytes(b"ciphertext")
 
-    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "josh"}]})
+    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "sam"}]})
     service = FakeService(files)
 
     upload_snapshot(
-        service, str(src), "drive-XYZ", "josh", media_factory=_fake_media
+        service, str(src), "drive-XYZ", "sam", media_factory=_fake_media
     )
 
     up = files.create_calls[0]
@@ -516,10 +516,10 @@ def test_upload_list_query_targets_per_user_folder_in_drive(tmp_path):
     files = FakeFiles(list_response={"files": []})
     service = FakeService(files)
 
-    upload_snapshot(service, src, "drive-XYZ", "josh", media_factory=_fake_media)
+    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
 
     lc = files.list_calls[0]
-    assert "josh" in lc["q"]
+    assert "sam" in lc["q"]
     assert FakeFiles.FOLDER_MIME in lc["q"]
     assert "drive-XYZ" in lc["q"]
     assert lc["driveId"] == "drive-XYZ"
@@ -763,7 +763,7 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
     store.init()
     store.upsert_chunk("d-budget", "the annual budget review", "h1", {})
     store.upsert_entity(
-        "taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint"
+        "taryn-hamilton", "Taryn Hamilton", "person", org="Acme"
     )
     index_pending(store, emb)  # vec + fts rows now exist
     SNAPSHOT_CURSOR = "1000"
@@ -895,7 +895,7 @@ class _FLService:
 
 
 def test_find_latest_snapshot_returns_newest_by_created_time():
-    folder_resp = {"files": [{"id": "folder-josh", "name": "josh"}]}
+    folder_resp = {"files": [{"id": "folder-sam", "name": "sam"}]}
     files_resp = {
         "files": [
             {"id": "snap-old", "name": "a.enc", "createdTime": "2026-05-01T10:00:00Z"},
@@ -905,7 +905,7 @@ def test_find_latest_snapshot_returns_newest_by_created_time():
     files = _FLFiles(folder_resp, files_resp)
     service = _FLService(files)
 
-    result = find_latest_snapshot(service, "drive-XYZ", "josh")
+    result = find_latest_snapshot(service, "drive-XYZ", "sam")
     assert result == "snap-new"
 
     # Both list calls must set the Shared Drive params.
@@ -921,18 +921,18 @@ def test_find_latest_snapshot_returns_none_when_folder_absent():
     files = _FLFiles(folder_resp)
     service = _FLService(files)
 
-    assert find_latest_snapshot(service, "drive-XYZ", "josh") is None
+    assert find_latest_snapshot(service, "drive-XYZ", "sam") is None
     # Only the folder lookup ran — no second listing.
     assert len(files.list_calls) == 1
 
 
 def test_find_latest_snapshot_returns_none_when_folder_empty():
-    folder_resp = {"files": [{"id": "folder-josh", "name": "josh"}]}
+    folder_resp = {"files": [{"id": "folder-sam", "name": "sam"}]}
     files_resp = {"files": []}  # folder exists but holds nothing
     files = _FLFiles(folder_resp, files_resp)
     service = _FLService(files)
 
-    assert find_latest_snapshot(service, "drive-XYZ", "josh") is None
+    assert find_latest_snapshot(service, "drive-XYZ", "sam") is None
 
 
 def test_find_latest_snapshot_rejects_unsafe_user_id():
@@ -1060,7 +1060,7 @@ def test_prune_keeps_newest_n_deletes_rest():
     # 5 snapshots, days 1..5; keep newest 3 → delete days 1 and 2 (snap-1, snap-2)
     files = [_snap(i, i) for i in range(1, 6)]
     svc = FakeService(FakeFilesPrune(files))
-    deleted = prune_snapshots(svc, "drive-X", "josh", keep=3)
+    deleted = prune_snapshots(svc, "drive-X", "sam", keep=3)
     assert deleted == 2
     assert set(svc._files.deleted) == {"snap-1", "snap-2"}
 
@@ -1069,7 +1069,7 @@ def test_prune_noop_when_within_keep():
     from mcpbrain.backup import prune_snapshots
     files = [_snap(i, i) for i in range(1, 4)]  # 3 files
     svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "josh", keep=7) == 0
+    assert prune_snapshots(svc, "drive-X", "sam", keep=7) == 0
     assert svc._files.deleted == []
 
 
@@ -1077,5 +1077,5 @@ def test_prune_keep_zero_is_noop():
     from mcpbrain.backup import prune_snapshots
     files = [_snap(i, i) for i in range(1, 4)]
     svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "josh", keep=0) == 0
+    assert prune_snapshots(svc, "drive-X", "sam", keep=0) == 0
     assert svc._files.deleted == []

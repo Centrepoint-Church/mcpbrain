@@ -85,7 +85,7 @@ def test_action_is_stale_when_thread_has_resolution_reply(tmp_path):
     s.upsert_chunk("gmail-t1-b", "Done, sent it through.", "h2",
                    {"thread_id": "t1", "message_id": "msg-b",
                     "date": _DATE_LATE, "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t1-a", thread_id="t1")
     action = s.list_actions()[0]
 
@@ -102,7 +102,7 @@ def test_action_is_fresh_when_thread_has_no_resolution(tmp_path):
     s.upsert_chunk("gmail-t2-a", "Can you send the campus budget?", "h1",
                    {"thread_id": "t2", "message_id": "msg-a",
                     "date": _DATE_EARLY, "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t2-a", thread_id="t2")
     action = s.list_actions()[0]
 
@@ -117,7 +117,7 @@ def test_action_is_fresh_when_resolution_only_in_source_message(tmp_path):
     s.upsert_chunk("gmail-t3-a", "We need to get this done please.", "h1",
                    {"thread_id": "t3", "message_id": "msg-a",
                     "date": _DATE_EARLY, "source_type": "gmail"})
-    s.add_action("Get this done", owner="Josh",
+    s.add_action("Get this done", owner="Sam",
                  source_doc_id="gmail-t3-a", thread_id="t3")
     action = s.list_actions()[0]
 
@@ -134,7 +134,7 @@ def test_action_is_fresh_when_resolution_predates_request(tmp_path):
     s.upsert_chunk("gmail-t4-b", "All good, handled it.", "h2",
                    {"thread_id": "t4", "message_id": "msg-b",
                     "date": _DATE_EARLY, "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t4-a", thread_id="t4")
     action = s.list_actions()[0]
 
@@ -154,7 +154,7 @@ def test_action_is_stale_with_mixed_naive_and_aware_dates(tmp_path):
     s.upsert_chunk("gmail-t6-b", "Done, sent it through.", "h2",
                    {"thread_id": "t6", "message_id": "msg-b",
                     "date": "Mon, 26 May 2026 05:00:00 -0000", "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t6-a", thread_id="t6")
     action = s.list_actions()[0]
 
@@ -171,7 +171,7 @@ def test_action_is_fresh_with_forward_looking_done(tmp_path):
     s.upsert_chunk("gmail-t7-b", "I'll get it done next week.", "h2",
                    {"thread_id": "t7", "message_id": "msg-b",
                     "date": _DATE_LATE, "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t7-a", thread_id="t7")
     action = s.list_actions()[0]
 
@@ -187,7 +187,7 @@ def test_action_is_fresh_with_well_done(tmp_path):
     s.upsert_chunk("gmail-t8-b", "Well done everyone on the launch!", "h2",
                    {"thread_id": "t8", "message_id": "msg-b",
                     "date": _DATE_LATE, "source_type": "gmail"})
-    s.add_action("Send the campus budget", owner="Josh",
+    s.add_action("Send the campus budget", owner="Sam",
                  source_doc_id="gmail-t8-a", thread_id="t8")
     action = s.list_actions()[0]
 
@@ -197,7 +197,7 @@ def test_action_is_fresh_with_well_done(tmp_path):
 def test_action_is_fresh_when_no_thread_id(tmp_path):
     """No thread_id: cannot inspect thread, so default to fresh."""
     s = _freshness_store(tmp_path)
-    s.add_action("Some orphan action", owner="Josh",
+    s.add_action("Some orphan action", owner="Sam",
                  source_doc_id="", thread_id="")
     action = s.list_actions()[0]
 

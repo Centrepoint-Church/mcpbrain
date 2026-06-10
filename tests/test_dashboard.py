@@ -59,7 +59,7 @@ def _make_db(path: Path) -> None:
             "VALUES(?,?,?,?,?,?,?)",
             [
                 # overdue
-                ("Overdue task A", "open", yesterday, "Centrepoint", "next", None, "email"),
+                ("Overdue task A", "open", yesterday, "Acme", "next", None, "email"),
                 # due today
                 ("Due today task B", "open", today, "ACC", "scheduled", None, "manual"),
                 # upcoming with deadline
@@ -345,7 +345,7 @@ class TestCalendarTodayWithEvents:
                 {"email": "alice@x.com", "displayName": "Alice"},
                 {"email": "bob@x.com"},  # no displayName -> falls back to email
                 {"email": "room@resource.calendar.google.com", "resource": True},
-                {"email": "josh@x.com", "self": True, "displayName": "Josh"},
+                {"email": "sam@x.com", "self": True, "displayName": "Sam"},
             ],
         }]
         svc = self._make_service(items)
@@ -559,17 +559,17 @@ class TestActionsTodayOwnerFilter:
             db.executemany(
                 "INSERT INTO actions(text, owner, status, deadline) VALUES(?,?,?,?)",
                 [
-                    ("Mine explicit", "Josh", "open", _tomorrow()),
+                    ("Mine explicit", "Sam", "open", _tomorrow()),
                     ("Mine unowned", "", "open", _tomorrow()),
                     ("Someone else's", "Taryn", "open", _tomorrow()),
-                    ("Mine case-insensitive", "JOSH", "open", _tomorrow()),
+                    ("Mine case-insensitive", "SAM", "open", _tomorrow()),
                 ],
             )
         return db_path
 
     def test_excludes_other_owners(self, tmp_path):
         store = FakeStore(self._db_with_owners(tmp_path))
-        result = dashboard.actions_today(store, owner="Josh")
+        result = dashboard.actions_today(store, owner="Sam")
         texts = {a["text"] for a in result["upcoming"]}
         assert texts == {"Mine explicit", "Mine unowned", "Mine case-insensitive"}
 
@@ -587,5 +587,5 @@ class TestActionsTodayOwnerFilter:
              mock.patch("mcpbrain.dashboard.clickup_today", return_value=[]):
             result = dashboard.assemble(store, str(tmp_path))
         texts = {a["text"] for a in result["actions"]["upcoming"]}
-        # Taryn's view: her explicit action + the unowned one. Josh's are excluded.
+        # Taryn's view: her explicit action + the unowned one. Sam's are excluded.
         assert texts == {"Someone else's", "Mine unowned"}

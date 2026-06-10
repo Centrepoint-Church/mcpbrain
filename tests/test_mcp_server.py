@@ -54,8 +54,8 @@ from mcpbrain.mcp_server import make_brain_context, make_brain_graph
 def _seed_graph_store(tmp_path):
     s = Store(tmp_path / "g.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
-    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
+    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
     s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", "doc-1")
     s.add_relation("taryn-hamilton", "works_on", "college-2026", "doc-2")
@@ -132,7 +132,7 @@ def test_brain_context_actions_carry_freshness(tmp_path):
     action whose thread has a later resolution message reads as 'stale'."""
     s = Store(tmp_path / "f.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     # Source request and a later reply that resolves it, both on the same thread.
     s.upsert_chunk(
         "msg-req", "Can you confirm the college timetable?", "h-req",
@@ -164,7 +164,7 @@ def test_brain_context_actions_from_unified_table(tmp_path):
     legacy graph_actions_legacy table."""
     s = Store(tmp_path / "u.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     # Legacy table row must NOT surface.
     s.add_action("Legacy action", owner="Taryn Hamilton")
     # Unified table row MUST surface.
@@ -182,15 +182,15 @@ def test_brain_context_includes_projects_areas(tmp_path):
     surfaces them in the brain_context result."""
     s = Store(tmp_path / "pa.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("josh", "Josh Kemp", "person", org="Centrepoint")
+    s.upsert_entity("sam", "Sam Chen", "person", org="Acme")
     with s._connect() as db:
         db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-ops', 'Centrepoint', 'Operations', 1)")
+                   "VALUES('a-ops', 'Acme', 'Operations', 1)")
         db.execute("INSERT INTO projects(id, name, owner_entity_id, area_id, status) "
-                   "VALUES('p-college', 'College 2026', 'josh', 'a-ops', 'active')")
+                   "VALUES('p-college', 'College 2026', 'sam', 'a-ops', 'active')")
 
     tool = make_brain_context(s)
-    out = asyncio.run(tool("josh"))
+    out = asyncio.run(tool("sam"))
     assert {p["id"] for p in out["projects"]} == {"p-college"}
     assert {a["id"] for a in out["areas"]} == {"a-ops"}
 
@@ -236,28 +236,28 @@ from mcpbrain.mcp_server import make_brain_actions
 
 def test_make_brain_actions(tmp_path, monkeypatch):
     import json as _json
-    (tmp_path / "config.json").write_text(_json.dumps({"owner_name": "Josh"}))
+    (tmp_path / "config.json").write_text(_json.dumps({"owner_name": "Sam"}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
 
     s = Store(tmp_path / "act.sqlite3", dim=4)
     s.init()
-    s.add_unified_action(text="Draft policy", owner="Josh", status="open",
+    s.add_unified_action(text="Draft policy", owner="Sam", status="open",
                          thread_id="t1")
-    s.add_unified_action(text="Send budget", owner="Josh", status="done",
+    s.add_unified_action(text="Send budget", owner="Sam", status="done",
                          thread_id="t1")
     s.add_unified_action(text="Book hall", owner="Taryn", status="open")
 
     tool = make_brain_actions(s)
 
-    # Defaults: owner=configured owner (Josh), status=open.
+    # Defaults: owner=configured owner (Sam), status=open.
     out = asyncio.run(tool())
     assert [a["text"] for a in out] == ["Draft policy"]
     # Freshness annotation applied to every row.
     assert all(a["freshness"] in ("fresh", "stale") for a in out)
 
     # Owner + status filter.
-    josh_done = asyncio.run(tool(owner="Josh", status="done"))
-    assert [a["text"] for a in josh_done] == ["Send budget"]
+    sam_done = asyncio.run(tool(owner="Sam", status="done"))
+    assert [a["text"] for a in sam_done] == ["Send budget"]
 
     # Different owner.
     taryn = asyncio.run(tool(owner="Taryn", status="open"))
@@ -267,14 +267,14 @@ def test_make_brain_actions(tmp_path, monkeypatch):
 def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monkeypatch):
     """An MCP client passing an explicit null owner must default to the configured
     owner, not widen to every owner. unified_actions(owner=None) would return all
-    owners, leaking Taryn's actions into a Josh-scoped query."""
+    owners, leaking Taryn's actions into a Sam-scoped query."""
     import json
-    (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Josh"}))
+    (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Sam"}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
 
     s = Store(tmp_path / "null.sqlite3", dim=4)
     s.init()
-    s.add_unified_action(text="Draft policy", owner="Josh", status="open")
+    s.add_unified_action(text="Draft policy", owner="Sam", status="open")
     s.add_unified_action(text="Book hall", owner="Taryn", status="open")
 
     tool = make_brain_actions(s)
@@ -282,7 +282,7 @@ def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monk
     # Explicit None for both owner and status must fall back to the defaults.
     out = asyncio.run(tool(owner=None, status=None))
     texts = {a["text"] for a in out}
-    assert texts == {"Draft policy"}  # scoped to Josh, not all owners
+    assert texts == {"Draft policy"}  # scoped to Sam, not all owners
     assert "Book hall" not in texts
 
 
@@ -292,7 +292,7 @@ def test_brain_context_owner_shortform_does_not_match(tmp_path):
     surfaces no actions for it. This is understood, not a silent surprise."""
     s = Store(tmp_path / "sf.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     s.add_unified_action(text="Confirm college timetable", owner="Taryn")  # short form, no match
 
     tool = make_brain_context(s)
@@ -383,12 +383,12 @@ def test_brain_context_profile_included(tmp_path):
     the profile text written by the profile_synthesis block."""
     s = Store(tmp_path / "prof.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Centrepoint")
+    s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     # Simulate what the profile_synthesis drain writes.
     with s._connect() as db:
         db.execute(
             "UPDATE entities SET profile=? WHERE id=?",
-            ("Executive Pastor at Centrepoint Church, responsible for staff and ministry teams.",
+            ("Executive Pastor at Acme Corp, responsible for staff and ministry teams.",
              "taryn-hamilton"),
         )
 
@@ -417,7 +417,7 @@ def _seed_proactive_store(tmp_path, name="pf.sqlite3"):
     # Insert an area finding
     s.record_finding(
         "area_overdue", "a-ops",
-        org="Centrepoint",
+        org="Acme",
         summary="Area 'Operations' overdue by 3 days (weekly)",
         severity="info",
     )
@@ -547,7 +547,7 @@ class TestBrainDraftReply:
                 "thread_id, org, content_type, summary, reply_needed) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
                 ("msg1", "Budget Q2", "Alice", "alice@x.com",
-                 "thr1", "Centrepoint", "request", "Alice asks about budget timeline.", 1))
+                 "thr1", "Acme", "request", "Alice asks about budget timeline.", 1))
         return s
 
     def test_draft_reply_returns_draft_record_id(self, tmp_path, monkeypatch):
@@ -624,7 +624,7 @@ class TestBrainDraftReplyIntegration:
                 "thread_id, org, content_type, summary, reply_needed) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
                 ("msg1", "Budget Q2", "Alice", "alice@x.com",
-                 "thr1", "Centrepoint", "request", "Alice asks about budget timeline.", 1))
+                 "thr1", "Acme", "request", "Alice asks about budget timeline.", 1))
 
         read_store = Store(path, dim=4, read_only=True)
         write_store = Store(path, dim=4, read_only=False)
@@ -643,7 +643,7 @@ class TestBrainDraftReplyIntegration:
             return "INITIAL DRAFT BODY"  # generate_draft
         monkeypatch.setattr("mcpbrain.draft._call_llm", fake_llm)
 
-        # No joshbrain dir under tmp_path, so voice rules load empty (no real file IO).
+        # No records dir under tmp_path, so voice rules load empty (no real file IO).
         assert d._load_voice_rules(str(tmp_path)) == ""
 
         # Build the tool with the WRITABLE handle and run the real pipeline.
