@@ -17,7 +17,8 @@ def main(argv=None):
     # add_help only for mcp-server; every other subcommand delegates --help to its
     # own module parser (parse_known_args forwards --help into `rest`).
     for name in ("daemon","mcp-server","auth","setup","update","register","tray",
-                 "enrich-backfill","records-prune","records-health"):
+                 "enrich-backfill","records-prune","records-health",
+                 "records-gardener","meeting-packs"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -31,4 +32,6 @@ def main(argv=None):
         "enrich-backfill": lambda: __import__("mcpbrain.enrich_backfill", fromlist=["main"]).main(rest),
         "records-prune": lambda: _records_cadence_main(["records-prune", *rest]),
         "records-health": lambda: _records_cadence_main(["records-health", *rest]),
+        "records-gardener": lambda: __import__("mcpbrain.cowork", fromlist=["gardener_main"]).gardener_main(rest),
+        "meeting-packs": lambda: __import__("mcpbrain.cowork", fromlist=["meeting_packs_main"]).meeting_packs_main(rest),
     }[ns.cmd]()

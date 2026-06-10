@@ -1,6 +1,19 @@
 import mcpbrain.cli as cli
 
 
+def test_dispatch_cowork_cadences(monkeypatch):
+    import mcpbrain.cli as cli
+    seen = {}
+    monkeypatch.setattr("mcpbrain.cowork.gardener_main",
+                        lambda a: seen.setdefault("g", True) or 0)
+    monkeypatch.setattr("mcpbrain.cowork.meeting_packs_main",
+                        lambda a: seen.setdefault("m", True) or 0)
+    cli.main(["records-gardener"])
+    assert seen.get("g")
+    cli.main(["meeting-packs"])
+    assert seen.get("m")
+
+
 def test_dispatch_records_cadences(monkeypatch):
     import mcpbrain.cli as cli
     seen = {}
