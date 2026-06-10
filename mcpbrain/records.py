@@ -16,6 +16,10 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Per-process cache: tracks repo paths that have been fully ensured this process
+# lifetime.  A new daemon process re-verifies once; subsequent cycles are no-ops.
+_ENSURED: set[str] = set()
+
 _DECISIONS_MD = """# Decisions
 
 Decisions that supersede earlier behaviour. Newest first.
@@ -72,7 +76,10 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
     (never clobbers existing ones), and commits the scaffold on first creation.
     Idempotent; safe to call every cycle. Returns repo_dir.
     """
-    repo = Path(repo_dir)
+    repo = Path(repo_dir).resolve()
+    repo_key = str(repo)
+    if repo_key in _ENSURED:
+        return repo_dir
     repo.mkdir(parents=True, exist_ok=True)
     fresh = not (repo / ".git").is_dir()
     if fresh:
@@ -99,4 +106,5 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
         staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
         if staged:
             _git(repo_dir, "commit", "-m", "scaffold: add missing scaffold files")
+    _ENSURED.add(repo_key)
     return repo_dir
