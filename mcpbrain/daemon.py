@@ -647,7 +647,7 @@ class Daemon:
             cowork_tasks.write_enrichment_skill(home)
             records.scaffold_records(home)
         except Exception as exc:  # noqa: BLE001
-            log.debug("apply_config materialise degraded: %s", exc)
+            log.warning("apply_config materialise degraded: %s", exc)
 
     def register(self) -> str:
         """Register mcpbrain with Claude Desktop and return the config path."""
