@@ -67,6 +67,7 @@ include = ["mcpbrain*"]
 # client so a clean `uv tool install` carries it (auth.py finds it via its
 # bundled-path lookup, so no env var is needed on any machine).
 "mcpbrain" = ["*.json.example", "google_oauth_client.json", "enrich_prompt.md"]
+"mcpbrain.cowork" = ["*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
