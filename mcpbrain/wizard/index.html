@@ -71,6 +71,11 @@
   .spec{margin:0;padding:11px 13px;border:1px solid var(--line);border-radius:10px;
     background:#f9fafb;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
     white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;color:var(--ink)}
+  details.howto{margin:8px 0;border:1px solid #e6e8ec;border-radius:8px;padding:6px 10px}
+  details.howto summary{cursor:pointer;font-weight:600;color:#2563eb}
+  details.howto img{max-width:100%;border:1px solid #e6e8ec;border-radius:6px;margin:8px 0}
+  details.howto ol{margin:6px 0 6px 18px}
+  .copybtn{font-size:12px;margin-left:6px}
 </style>
 </head>
 <body>
@@ -127,6 +132,19 @@
       <button class="ghost" type="button" onclick="addOrgRow()">+ Add organisation</button>
     </div>
     <p class="desc" style="margin-top:14px">ClickUp integration syncs dashboard actions to a list. Both fields are optional.</p>
+    <details class="howto">
+      <summary>Show me how to get my ClickUp token &amp; list ID</summary>
+      <p><b>API token:</b> Settings → Apps → API Token</p>
+      <ol>
+        <li>In ClickUp, click your avatar (top-right) → <b>Settings</b>.</li>
+        <li>In the sidebar, click <b>Apps</b>.</li>
+        <li>Under <b>API Token</b>, click <b>Generate</b>, then <b>Copy</b> (it starts with <code>pk_</code>).</li>
+      </ol>
+      <img src="/img/clickup-apps-token.png" alt="ClickUp API Token screen" onerror="this.style.display='none'">
+      <p><b>List ID:</b> right-click the List in the sidebar → <b>Copy link</b>. The number after <code>/li/</code> in the link is your List ID.</p>
+      <img src="/img/clickup-list-copylink.png" alt="ClickUp Copy link" onerror="this.style.display='none'">
+      <p><a href="https://app.clickup.com" target="_blank" rel="noopener">Open ClickUp</a></p>
+    </details>
     <div class="row">
       <input id="clickup_api_key" type="password" placeholder="ClickUp API token (pk_…)" autocomplete="off" spellcheck="false">
     </div>
@@ -413,8 +431,46 @@ the owner's writing about them. Empty corrections means the record is fine:
     <p class="note">After registering, quit Claude Desktop completely and reopen it.</p>
   </section>
 
+  <section id="step-projects" class="card">
+    <h2><span class="num">5</span>Your two Cowork projects</h2>
+    <p class="desc">mcpbrain works through two Cowork projects. Click the button to create the working space, then point Cowork at the folders shown.</p>
+    <div class="row">
+      <button class="primary" type="button" onclick="prepareWorkspace()">Prepare my working space</button>
+      <span id="ws-state" class="badge idle hidden"></span>
+    </div>
+    <details class="howto">
+      <summary>1. mcpbrain Enrichment — the engine room</summary>
+      <p>A scheduled task that turns your mail into structured memory every hour.</p>
+      <ol>
+        <li>In Cowork: <b>Projects → + → Use an existing folder</b>.</li>
+        <li>Choose the mcpbrain home folder: <code id="home-path">~/.mcpbrain</code> <button class="copybtn" type="button" onclick="copyText('home-path')">Copy</button></li>
+        <li>Open <b>Scheduled → New → Local</b>, set the schedule to <b>Hourly</b>, and point it at the <code>mcpbrain-enrichment</code> skill (already written for you).</li>
+      </ol>
+      <img src="/img/cowork-scheduled-fields.png" alt="Cowork scheduled task" onerror="this.style.display='none'">
+    </details>
+    <details class="howto">
+      <summary>2. My Brain — where you work day to day</summary>
+      <p>Like Claude Code's memory, in Cowork. Its <code>CLAUDE.md</code> is already written with your identity, voice, and the memory tools.</p>
+      <ol>
+        <li>In Cowork: <b>Projects → + → Use an existing folder</b>.</li>
+        <li>Choose your records repo: <code id="records-path">~/.mcpbrain/records</code> <button class="copybtn" type="button" onclick="copyText('records-path')">Copy</button></li>
+        <li>Connect <code>~/.mcpbrain</code> as a read folder and make sure the mcpbrain tools are attached.</li>
+      </ol>
+      <img src="/img/cowork-use-existing-folder.png" alt="Cowork use existing folder" onerror="this.style.display='none'">
+    </details>
+  </section>
+
+  <section id="step-hooks" class="card">
+    <h2><span class="num">6</span>Turn on cross-session memory</h2>
+    <p class="desc">This lets Claude remember across sessions automatically — it primes each new session with your recent context and captures each one at the end (the same way Claude Code does). It edits <code>~/.claude/settings.json</code> and keeps anything already there. Applies to both Claude Code and Cowork.</p>
+    <div class="row">
+      <button class="primary" type="button" onclick="installHooks()">Turn on memory hooks</button>
+      <span id="hooks-state" class="badge idle hidden"></span>
+    </div>
+  </section>
+
   <section id="step-status" class="card">
-    <h2><span class="num">5</span>Status</h2>
+    <h2><span class="num">7</span>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
     <dl class="status-list">
       <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
@@ -502,6 +558,25 @@ async function saveProfile(){
   }catch(e){
     badge("p-state", "Could not save", "wait"); $("p-state").classList.remove("hidden");
   }
+}
+
+function copyText(id){
+  const t = $(id).textContent;
+  navigator.clipboard.writeText(t).catch(()=>{});
+}
+async function prepareWorkspace(){
+  $("ws-state").classList.remove("hidden");
+  badge("ws-state", "Preparing…", "wait");
+  try{
+    await P("/api/records/scaffold");
+    badge("ws-state", "Ready", "ok");
+  }catch(e){ badge("ws-state", "Could not prepare", "wait"); }
+}
+async function installHooks(){
+  $("hooks-state").classList.remove("hidden");
+  badge("hooks-state", "Turning on…", "wait");
+  try{ await P("/api/hooks/install"); badge("hooks-state", "On", "ok"); }
+  catch(e){ badge("hooks-state", "Could not turn on", "wait"); }
 }
 
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"

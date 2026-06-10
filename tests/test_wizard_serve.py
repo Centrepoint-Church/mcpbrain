@@ -124,3 +124,14 @@ def test_home_status_renders_before_main():
 
 def test_connection_order_includes_new_cards():
     assert '"enrichment"' in WIZ and '"memory-hooks"' in WIZ
+
+
+def test_guided_elements_present():
+    assert "Settings → Apps → API Token" in WIZ
+    assert "Copy link" in WIZ                       # List ID instructions
+    assert 'id="step-projects"' in WIZ
+    assert 'id="step-hooks"' in WIZ
+    assert "/api/records/scaffold" in WIZ
+    assert "/api/hooks/install" in WIZ
+    assert "onerror" in WIZ                          # screenshots hide when absent
+    assert "/img/clickup-apps-token.png" in WIZ
