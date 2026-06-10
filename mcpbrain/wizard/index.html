@@ -621,7 +621,7 @@ function renderHome(j){
   });
   if(configured){
     const h2 = document.querySelector("#step-profile h2");
-    if(h2) h2.textContent = "Your settings";
+    if(h2 && h2.textContent.trim() !== "Your settings") h2.textContent = "Your settings";
   }
   if(!configured) return;
   $("hs-version").textContent = j.version ? ("v" + j.version) : "";
