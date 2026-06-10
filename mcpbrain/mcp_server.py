@@ -8,6 +8,20 @@ from mcpbrain.retrieval import annotate_action_freshness, hybrid_search
 _log = logging.getLogger("mcpbrain.mcp_server")
 
 
+def write_heartbeat(home: str, *, now=None) -> None:
+    """Record that Claude Desktop launched this MCP server (the verified-connected
+    signal the status layer reads). Best-effort: never raise into startup."""
+    import json
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    try:
+        (Path(home) / "mcp_heartbeat.json").write_text(
+            json.dumps({"last_seen": now.isoformat()})
+        )
+    except OSError:
+        pass
+
+
 def _default_owner() -> str:
     """The install owner for MCP-initiated writes, from config (empty if unset)."""
     return config.owner_name(str(config.app_dir()))
@@ -344,6 +358,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     # writes by the MCP server (serialised via WAL + busy_timeout).
     draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
     home = str(config.app_dir())
+    write_heartbeat(home)
     draft_reply = make_brain_draft_reply(draft_store, home)
     draft_refine = make_brain_draft_refine(draft_store, home)
     server = Server("mcpbrain")
