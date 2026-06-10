@@ -11,10 +11,12 @@ import sys
 import urllib.request
 from importlib.metadata import version, PackageNotFoundError
 
+from packaging.version import Version, InvalidVersion
+
 # Maintainer sets this to the published Pages index (the dist repo's /simple/).
 DEFAULT_INDEX_URL = "https://CHANGE-ME.github.io/mcpbrain-dist/simple/"
 
-_WHEEL_RE = re.compile(r"mcpbrain-(\d+\.\d+\.\d+)-")
+_WHEEL_RE = re.compile(r"mcpbrain-([^-]+)-py3")
 
 
 def _index_url() -> str:
@@ -36,8 +38,11 @@ def _fetch(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
-def _parse(v: str) -> tuple:
-    return tuple(int(x) for x in v.split("."))
+def _parse(v: str) -> Version:
+    try:
+        return Version(v)
+    except InvalidVersion:
+        return Version("0")
 
 
 def _installed_version() -> str:
@@ -56,7 +61,7 @@ def _latest_version(index_url: str) -> str | None:
     versions = _WHEEL_RE.findall(html)
     if not versions:
         return None
-    return max(versions, key=_parse)
+    return str(max(versions, key=_parse))
 
 
 def _should_update(installed: str, latest: str | None) -> bool:
