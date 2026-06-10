@@ -659,6 +659,11 @@ data layer and the platform/label work are independent:
 - **Plan 7** — `2026-06-10-part7-backfill.md` — spec **Part 4**: `status().backfill`
   progress, **newest-first `unenriched_chunks`**, local Claude-Code runner + gated
   one-shot `mcpbrain enrich-backfill`, `/api/enrich-backfill/*` endpoints. *Written.*
+- **Plan 8** — `2026-06-10-part8-cowork-cadences.md` — spec **§1.6c**: gardener +
+  meeting-packs cross-platform — ship genericized cowork prompts as package data,
+  `mcpbrain/cowork.py` headless-claude runner, `mcpbrain records-gardener` /
+  `meeting-packs` subcommands, systemd/schtasks schedulers, `install_cadences`
+  extended. *Written.*
 
 **Cross-plan decisions recorded:** Plan 7 changes `store.unenriched_chunks` ordering
 to **newest-first** (affects ongoing spool/gemini order too — desired: recent
@@ -667,10 +672,13 @@ history enriches first). Plan 5 adds `mcpbrain.__version__`; Plan 6 surfaces it 
 `connections` block is the single source the menu bar + status center render from;
 reconnect reuses `POST /api/auth/start` (no new route).
 
-### §1.6c (follow-up, not yet planned) — gardener + meeting-packs cross-platform
+### §1.6c — gardener + meeting-packs cross-platform (planned: Plan 8)
 
-The remaining two cadences shell to `claude` headless against cowork prompt files in
-the records repo (`cowork/memory-gardener.md`, `cowork/meeting-packs.md`). Making
-them cross-platform needs that cowork-prompt content shipped as product scaffolding
-plus a `claude`-availability story. Deferred; stays launchd-only / dev-seed-installed
-until planned.
+The remaining two cadences shell to `claude` headless against cowork prompt files.
+**Plan 8** ships those prompts as genericized package data (`mcpbrain/cowork/*.md`),
+ports the shell wrappers into `mcpbrain records-gardener` / `mcpbrain meeting-packs`
+subcommands (a `mcpbrain/cowork.py` headless-claude runner reusing `draft._find_claude`),
+and adds systemd/schtasks schedulers + the `install_cadences` path. Safety note: the
+gardener runs `claude --dangerously-skip-permissions` with `Bash,Read,Edit,Write` in
+the records repo on a schedule — documented in the trust section (same model the
+maintainer already runs).
