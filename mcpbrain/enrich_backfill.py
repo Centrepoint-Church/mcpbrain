@@ -4,7 +4,6 @@ stays on the spool/cowork path."""
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 from mcpbrain import config, prepare, drain, extractor_driver

@@ -523,6 +523,7 @@ class Daemon:
             "is_configured": config.is_configured(str(app_dir())),
             "connections": connections,
             "backfill": backfill,
+            "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
     def _resolve_google_account(self, token_file) -> str:

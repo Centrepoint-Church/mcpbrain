@@ -70,6 +70,16 @@ class ControlClient:
     def resume(self) -> dict:
         return self._request("/api/resume", method="POST")
 
+    def reconnect_google(self) -> dict:
+        """POST /api/auth/start (re-run the OAuth consent flow)."""
+        return self._request("/api/auth/start", method="POST")
+
+    def start_enrich_backfill(self) -> dict:
+        return self._request("/api/enrich-backfill/start", method="POST")
+
+    def cancel_enrich_backfill(self) -> dict:
+        return self._request("/api/enrich-backfill/cancel", method="POST")
+
     def wizard_url(self) -> str:
         """The local setup-page URL, or '' if the daemon is not running."""
         try:
