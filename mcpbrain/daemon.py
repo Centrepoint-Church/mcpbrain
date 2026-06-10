@@ -653,6 +653,22 @@ class Daemon:
         finally:
             self._auth_lock.release()
 
+    def start_enrich_backfill(self) -> None:
+        """Spawn a one-shot enrich-backfill run on a daemon thread (non-blocking)."""
+        import threading
+        from mcpbrain import enrich_backfill
+        def _run():
+            try:
+                enrich_backfill.run_backfill(store=self._store, embedder=self._embedder)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("enrich-backfill failed: %s", exc)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def cancel_enrich_backfill(self) -> None:
+        """Write the cancel flag so the running enrich-backfill loop stops cleanly."""
+        from mcpbrain import enrich_backfill
+        enrich_backfill.request_cancel(str(app_dir()))
+
     # -- wake / stop --------------------------------------------------------
 
     def sync_now(self) -> None:

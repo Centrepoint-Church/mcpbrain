@@ -172,6 +172,11 @@ class ControlServer:
             if h.path == "/api/auth/start":
                 threading.Thread(target=d.start_auth, daemon=True).start()
                 return h_json(h, 202, {"started": True})
+            if h.path == "/api/enrich-backfill/start":
+                threading.Thread(target=d.start_enrich_backfill, daemon=True).start()
+                return h_json(h, 202, {"started": True})
+            if h.path == "/api/enrich-backfill/cancel":
+                d.cancel_enrich_backfill(); return h_json(h, 200, {"cancelled": True})
             if h.path == "/api/register": return h_json(h, 200, {"config_path": d.register()})
 
             m = re.match(r"^/api/dashboard/actions/(\d+)/done$", h.path)
