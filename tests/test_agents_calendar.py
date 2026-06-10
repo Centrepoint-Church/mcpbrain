@@ -85,25 +85,24 @@ def test_health_is_direct_invocation():
 class TestMeetingPacksPlist:
     def test_plist_has_calendar_intervals(self, tmp_path):
         from mcpbrain import agents
-        plist = agents.meeting_packs_plist(str(tmp_path))
+        plist = agents.meeting_packs_plist(home=str(tmp_path), mcpbrain_bin="/usr/bin/mcpbrain")
         assert "StartCalendarInterval" in plist
-        # Should fire twice daily
         assert plist.count("<key>Minute</key>") >= 2
 
     def test_plist_includes_mcpbrain_home(self, tmp_path):
         from mcpbrain import agents
-        plist = agents.meeting_packs_plist(str(tmp_path))
+        plist = agents.meeting_packs_plist(home=str(tmp_path), mcpbrain_bin="/usr/bin/mcpbrain")
         assert str(tmp_path) in plist
 
     def test_plist_calls_meeting_packs_script(self, tmp_path):
         from mcpbrain import agents
-        plist = agents.meeting_packs_plist(str(tmp_path))
-        assert "meeting-packs" in plist.lower() or "meeting_packs" in plist.lower()
+        plist = agents.meeting_packs_plist(home=str(tmp_path), mcpbrain_bin="/usr/bin/mcpbrain")
+        assert "meeting-packs" in plist.lower()
 
     def test_plist_fires_at_0745_and_1200(self, tmp_path):
         import plistlib
         from mcpbrain import agents
-        plist = agents.meeting_packs_plist(str(tmp_path))
+        plist = agents.meeting_packs_plist(home=str(tmp_path), mcpbrain_bin="/usr/bin/mcpbrain")
         parsed = plistlib.loads(plist.encode())
         intervals = parsed["StartCalendarInterval"]
         assert isinstance(intervals, list) and len(intervals) == 2
@@ -112,7 +111,7 @@ class TestMeetingPacksPlist:
 
 
 def _gardener(**kw):
-    defaults = dict(records_dir="/Users/x/records",
+    defaults = dict(mcpbrain_bin="/usr/local/bin/mcpbrain",
                     mcpbrain_home="/Users/x/.mcpbrain")
     return records_gardener_plist(**{**defaults, **kw})
 
@@ -134,10 +133,10 @@ def test_gardener_no_keep_alive():
 
 
 def test_gardener_program_arguments():
-    plist = _gardener(records_dir="/Users/x/records")
-    assert "/bin/bash" in plist
-    assert "run_memory_gardener.sh" in plist
-    assert "/Users/x/records/bin/run_memory_gardener.sh" in plist
+    plist = _gardener(mcpbrain_bin="/opt/homebrew/bin/mcpbrain")
+    assert "/opt/homebrew/bin/mcpbrain" in plist
+    assert "records-gardener" in plist
+    assert "run_memory_gardener.sh" not in plist
 
 
 def test_gardener_log_paths_under_mcpbrain_home():

@@ -245,8 +245,9 @@ plists = {
     "com.mcpbrain.records.context-health": records_context_health_plist(
         mcpbrain_bin=mcpbrain_bin, mcpbrain_home=mcpbrain_home),
     "com.mcpbrain.records.gardener": records_gardener_plist(
-        records_dir=records_dir, mcpbrain_home=mcpbrain_home),
-    "com.mcpbrain.records.meeting-packs": meeting_packs_plist(home=mcpbrain_home),
+        mcpbrain_bin=mcpbrain_bin, mcpbrain_home=mcpbrain_home),
+    "com.mcpbrain.records.meeting-packs": meeting_packs_plist(
+        home=mcpbrain_home, mcpbrain_bin=mcpbrain_bin),
 }
 
 for label, content in plists.items():
