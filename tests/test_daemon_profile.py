@@ -24,3 +24,6 @@ def test_config_profile_omits_secret(tmp_path, monkeypatch):
     assert prof["clickup_api_key_set"] is True
     assert "clickup_api_key" not in prof
     assert prof["timezone"] == "Australia/Perth"
+    assert prof["owner_name"] == ""           # absent in config -> normalised to ""
+    assert prof["orgs"] == [{"name": "Acme"}]
+    assert prof["clickup_list_id"] == "L1"
