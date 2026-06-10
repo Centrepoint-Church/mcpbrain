@@ -26,9 +26,121 @@ _DATED_BULLET = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Block-based parsing helpers (ported from ~/joshbrain/bin/prune_hot_md.py)
+# ---------------------------------------------------------------------------
 
-def prune_hot_md(repo: str, *, days: int = _PRUNE_DAYS, now=None) -> int:
-    """Drop hot.md dated-bullet lines older than `days`. Returns count removed.
+def _parse_blocks(text: str) -> list[str]:
+    """Split content into blocks.
+
+    Blocks are separated by blank lines.  Additionally, a new dated bullet
+    line always starts a new block even when no blank line precedes it —
+    continuation lines (indented / non-bullet non-header lines) stay attached
+    to the preceding dated bullet as part of its block.
+
+    Each blank line produces an empty-string sentinel ("") in the list so the
+    caller can collapse/strip them.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+
+    def _is_dated_bullet(line: str) -> bool:
+        return bool(_DATED_BULLET.match(line))
+
+    def _flush() -> None:
+        if current:
+            blocks.append("\n".join(current))
+            current.clear()
+
+    for line in text.splitlines():
+        if line.strip() == "":
+            _flush()
+            blocks.append("")  # preserve blank separator
+        elif _is_dated_bullet(line) and current:
+            # New dated bullet — always start a fresh block without requiring
+            # an explicit blank-line separator.
+            _flush()
+            current.append(line)
+        else:
+            current.append(line)
+    _flush()
+    return blocks
+
+
+def _block_date(block: str) -> date | None:
+    """Return the date in the leading bullet of a block, or None."""
+    if not block:
+        return None
+    first_line = block.splitlines()[0]
+    m = _DATED_BULLET.match(first_line)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _prune_blocks(
+    text: str, cutoff: date
+) -> tuple[str, list[tuple[date, str]]]:
+    """Return (pruned_text, dropped_list).
+
+    Drops every block whose leading bullet date < cutoff.
+    Collapses consecutive blank blocks to one; strips leading/trailing blanks.
+    Returned text always ends with a newline.
+    """
+    blocks = _parse_blocks(text)
+    kept: list[str] = []
+    dropped: list[tuple[date, str]] = []
+    for block in blocks:
+        d = _block_date(block)
+        if d is not None and d < cutoff:
+            snippet = block.splitlines()[0][:120]
+            dropped.append((d, snippet))
+            continue
+        kept.append(block)
+    # Collapse consecutive blank blocks to one
+    cleaned: list[str] = []
+    prev_blank = False
+    for b in kept:
+        is_blank = b == ""
+        if is_blank and prev_blank:
+            continue
+        cleaned.append(b)
+        prev_blank = is_blank
+    # Strip leading/trailing blank blocks
+    while cleaned and cleaned[0] == "":
+        cleaned.pop(0)
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return "\n".join(cleaned) + "\n", dropped
+
+
+def _write_prune_log(dropped: list[tuple[date, str]]) -> None:
+    """Append dropped entries to <app_dir>/logs/records_prune.log."""
+    if not dropped:
+        return
+    log_path = config.app_dir() / "logs" / "records_prune.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a") as f:
+        f.write(f"\n=== {now} pruned {len(dropped)} entries ===\n")
+        for d, snippet in dropped:
+            f.write(f"  [{d}] {snippet}\n")
+
+
+def prune_hot_md(
+    repo: str, *, days: int = _PRUNE_DAYS, now=None, dry_run: bool = False
+) -> int:
+    """Drop hot.md dated-bullet *blocks* older than `days`. Returns count removed.
+
+    Uses block-based parsing: a dated bullet plus its non-blank continuation
+    lines form one block, dropped or kept as a unit.  Consecutive blank lines
+    are collapsed; leading/trailing blanks are stripped.
+
+    When dry_run=True the count is computed but the file is NOT written and
+    nothing is logged.
 
     Idempotent. Does not commit — the subcommand layer commits.
     """
@@ -37,23 +149,12 @@ def prune_hot_md(repo: str, *, days: int = _PRUNE_DAYS, now=None) -> int:
     p = Path(repo) / "state" / "hot.md"
     if not p.exists():
         return 0
-    lines = p.read_text().splitlines(keepends=True)
-    out: list[str] = []
-    removed = 0
-    for line in lines:
-        m = _DATED_BULLET.match(line)
-        if m:
-            try:
-                d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-            except ValueError:
-                out.append(line)
-                continue
-            if d < cutoff:
-                removed += 1
-                continue
-        out.append(line)
-    if removed:
-        p.write_text("".join(out))
+    text = p.read_text()
+    pruned, dropped = _prune_blocks(text, cutoff)
+    removed = len(dropped)
+    if removed and not dry_run:
+        p.write_text(pruned)
+        _write_prune_log(dropped)
     return removed
 
 
@@ -112,12 +213,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mcpbrain records-cadence")
     ap.add_argument("cmd", choices=["records-prune", "records-health"])
     ap.add_argument("--days", type=int, default=_PRUNE_DAYS)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Show what would be pruned without writing")
     ns = ap.parse_args(argv)
     home = str(config.app_dir())
     repo = config.records_dir(home)
     if ns.cmd == "records-prune":
-        n = prune_hot_md(repo, days=ns.days)
-        if n:
+        n = prune_hot_md(repo, days=ns.days, dry_run=ns.dry_run)
+        if n and not ns.dry_run:
             records_write._commit_file(repo, "state/hot.md", "prune: hot.md")
         print(f"pruned {n} entries")
         return 0
