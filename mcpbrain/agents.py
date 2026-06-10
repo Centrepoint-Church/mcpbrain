@@ -605,7 +605,13 @@ def records_gardener_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
 # ---------------------------------------------------------------------------
 
 def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
-    """Schedule records-prune (daily) and records-health (weekly) for the given OS."""
+    """Schedule all four cadences for the given OS.
+
+    - records-prune: daily 06:00
+    - records-health: weekly Mon 07:00
+    - records-gardener: weekly Mon 08:00
+    - meeting-packs: twice-daily 07:45 + 12:00
+    """
     if platform == "darwin":
         _install_cadences_launchd(mcpbrain_bin=mcpbrain_bin, home=home)
     elif platform == "linux":

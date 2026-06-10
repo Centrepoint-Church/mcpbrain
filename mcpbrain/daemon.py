@@ -1596,7 +1596,8 @@ def main(argv=None) -> None:
                     blocks_interval_s=cadences["blocks_interval_s"],
                     audit_interval_s=cadences["audit_interval_s"],
                     clickup_interval_s=cadences["clickup_interval_s"],
-                    stale_reextract_interval_s=cadences["stale_reextract_interval_s"])  # services=None -> auto-build from token
+                    stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
+                    auto_update_interval_s=cadences["auto_update_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
