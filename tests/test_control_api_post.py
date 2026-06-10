@@ -396,3 +396,39 @@ def test_status_degrades_without_token(tmp_path, monkeypatch):
         "granted_scopes", "google_account", "enrich_enabled", "spool",
         "open_findings", "is_configured", "connections",
     }
+
+
+def test_enrich_backfill_start_cancel_endpoints(tmp_path):
+    import time
+
+    class _ExtFakeDaemon(FakeDaemon):
+        def __init__(self):
+            super().__init__()
+            self.backfill_started = False
+            self.backfill_cancelled = False
+
+        def start_enrich_backfill(self):
+            self.backfill_started = True
+
+        def cancel_enrich_backfill(self):
+            self.backfill_cancelled = True
+
+    d = _ExtFakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        r = _post(base + "/api/enrich-backfill/start", srv.token, {})
+        assert json.loads(r.read())["started"] is True
+        # start runs on a daemon thread — give it a beat
+        for _ in range(50):
+            if d.backfill_started:
+                break
+            time.sleep(0.01)
+        assert d.backfill_started
+
+        r = _post(base + "/api/enrich-backfill/cancel", srv.token, {})
+        assert json.loads(r.read())["cancelled"] is True
+        assert d.backfill_cancelled
+    finally:
+        srv.stop()
