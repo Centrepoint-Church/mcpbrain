@@ -116,12 +116,34 @@ def verify_connections(home, store=None) -> dict:
     return verified
 
 
+_BACKUP_DEFAULT_WINDOW = 7 * 86400  # 7 days in seconds
+
+
 def probe_backup(home) -> dict:
     cfg = config.read_config(home)
     if not cfg.get("backup"):
         return _state("not_started", "Backup off")
     snap = Path(home) / "snapshot.enc"
-    return _state("ok", "On", last_verified=_mtime(snap) if snap.exists() else None)
+    if not snap.exists():
+        return _state("needs_action", "No backup snapshot found")
+    try:
+        st = snap.stat()
+    except OSError:
+        return _state("needs_action", "Cannot read backup snapshot")
+    if st.st_size == 0:
+        return _state("needs_action", "Backup file is empty")
+    # Determine staleness window: use configured interval if available, else 7 days
+    backup_cfg = cfg["backup"]
+    if isinstance(backup_cfg, dict) and backup_cfg.get("interval_seconds"):
+        window = int(backup_cfg["interval_seconds"])
+    else:
+        window = _BACKUP_DEFAULT_WINDOW
+    import time
+    age_seconds = time.time() - st.st_mtime
+    if age_seconds > window:
+        age_days = int(age_seconds // 86400)
+        return _state("needs_action", f"Backup is stale (last {age_days} days ago)")
+    return _state("ok", "On", last_verified=_mtime(snap))
 
 
 def probe_records(home) -> dict:
