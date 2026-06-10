@@ -117,9 +117,10 @@ def all_connections(home, store=None) -> dict:
     out = {}
     for name, live in cheap.items():
         c = cached.get(name)
-        # Verified cache wins when present; cheap live state covers the gap
-        # for connections not yet in the cache.
-        if c:
+        # Verified cache wins when the connection is still live (not not_started).
+        # If the live probe returns not_started the connection was removed, so the
+        # stale cache must not mask that — flip immediately.
+        if c and live["state"] != "not_started":
             out[name] = c
         else:
             out[name] = live
