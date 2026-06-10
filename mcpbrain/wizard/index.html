@@ -74,6 +74,20 @@
 </style>
 </head>
 <body>
+<section id="home-status" class="hidden" style="max-width:660px;margin:0 auto;padding:48px 20px 64px">
+  <div id="self-heal-banners"></div>
+  <h2>mcpbrain <span id="hs-version"></span></h2>
+  <div id="hs-health"></div>
+  <div id="conn-cards" style="margin:16px 0"></div>
+  <div id="backfill-progress" style="margin:16px 0;color:#6b7280;font-size:14px"></div>
+  <div style="margin:16px 0">
+    <button id="enrich-history-btn">Enrich history with Claude Code</button>
+    <span id="enrich-note" style="color:#6b7280;font-size:13px;margin-left:8px">Uses your local Claude Code; may take a while.</span>
+    <span id="enrich-state" style="margin-left:8px;font-size:13px"></span>
+  </div>
+  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. Backup is off unless you enable it.</p>
+</section>
+
 <main class="wrap">
   <header>
     <div class="brand"><span class="dot"></span><h1>mcpbrain setup</h1></div>
@@ -413,20 +427,6 @@ the owner's writing about them. Empty corrections means the record is fine:
   <footer>mcpbrain runs locally. The only things that leave this machine are an encrypted backup, if you enable it, and the queries you send Claude.</footer>
 </main>
 
-<section id="home-status" class="hidden" style="max-width:660px;margin:0 auto;padding:48px 20px 64px">
-  <div id="self-heal-banners"></div>
-  <h2>mcpbrain <span id="hs-version"></span></h2>
-  <div id="hs-health"></div>
-  <div id="conn-cards" style="margin:16px 0"></div>
-  <div id="backfill-progress" style="margin:16px 0;color:#6b7280;font-size:14px"></div>
-  <div style="margin:16px 0">
-    <button id="enrich-history-btn">Enrich history with Claude Code</button>
-    <span id="enrich-note" style="color:#6b7280;font-size:13px;margin-left:8px">Uses your local Claude Code; may take a while.</span>
-    <span id="enrich-state" style="margin-left:8px;font-size:13px"></span>
-  </div>
-  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. Backup is off unless you enable it.</p>
-</section>
-
 <script>
 const T = "__MCPBRAIN_TOKEN__";
 const H = {headers:{Authorization:"Bearer " + T}};
@@ -587,7 +587,7 @@ function renderStatus(j){
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
-  const order = ["google","claude","clickup","backup","records"];
+  const order = ["google","claude","clickup","backup","records","enrichment","memory-hooks"];
   const cards = order.filter(k => conns[k]).map(k => {
     const c = conns[k];
     const detail = c.detail ? ` — ${esc(c.detail)}` : "";
@@ -614,7 +614,15 @@ function renderBackfill(bf){
 function renderHome(j){
   const configured = !!j.is_configured;
   $("home-status").classList.toggle("hidden", !configured);
-  document.querySelectorAll("main").forEach(s => s.classList.toggle("hidden", configured));
+  // Hide all wizard steps EXCEPT the profile form when configured (it doubles as settings).
+  document.querySelectorAll("main > section.card").forEach(s => {
+    if(s.id === "step-profile"){ s.classList.remove("hidden"); }
+    else { s.classList.toggle("hidden", configured); }
+  });
+  if(configured){
+    const h2 = document.querySelector("#step-profile h2");
+    if(h2) h2.textContent = "Your settings";
+  }
   if(!configured) return;
   $("hs-version").textContent = j.version ? ("v" + j.version) : "";
   $("hs-health").textContent = j.paused ? "Paused" : "Running";

@@ -115,3 +115,12 @@ def test_prefill_and_dropdown_bootstrap_present():
     assert "/api/config" in WIZ          # one-shot prefill fetch
     assert "/api/timezones" in WIZ       # dropdown population
     assert "leave blank to keep" in WIZ  # masked-token placeholder
+
+
+def test_home_status_renders_before_main():
+    # status-first: the home-status section must appear before the wizard <main>
+    assert WIZ.index('id="home-status"') < WIZ.index("<main")
+
+
+def test_connection_order_includes_new_cards():
+    assert '"enrichment"' in WIZ and '"memory-hooks"' in WIZ
