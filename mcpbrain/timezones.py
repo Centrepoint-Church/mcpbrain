@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 # Half-hour/45-min zones are intentionally omitted from the curated core; the
 # label still renders their true offset if added later.
 CURATED_ZONES: tuple[str, ...] = (
-    "Etc/GMT+12",            # GMT-12
+    "Etc/GMT+12",            # GMT-12 (POSIX sign inversion: Etc/GMT+N = UTC−N)
     "Pacific/Pago_Pago",     # GMT-11
     "Pacific/Honolulu",      # GMT-10
     "America/Anchorage",     # GMT-09
@@ -49,6 +49,8 @@ CURATED_ZONES: tuple[str, ...] = (
 def offset_label(zone: str, *, now: datetime) -> str:
     """Return '<zone> (GMT±HH:MM)' for `zone` at `now`."""
     off = ZoneInfo(zone).utcoffset(now)
+    if off is None:
+        return f"{zone} (GMT offset unknown)"
     total = int(off.total_seconds())
     sign = "+" if total >= 0 else "-"
     total = abs(total)
