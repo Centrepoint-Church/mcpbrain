@@ -160,9 +160,9 @@ config-driven is out of scope for Plan 1 and tracked as a follow-up.
 
 ### 1.5 Records repo → per-user local git in app-dir, renamed
 
-The "joshbrain" repo is the daemon's structured-records store (decisions, notes,
+The records repo is the daemon's structured-records store (decisions, notes,
 memories, continuity, voice, scaffolding). Its entire write path is git-based
-(`joshbrain_write.py` commits by name; the prune/gardener cadences commit), so
+(`records_write.py` commits by name; the prune/gardener cadences commit), so
 it must remain a git repo — but it does **not** need to be a separate *product*
 repo with a remote, and it must not be named after Josh.
 
@@ -170,10 +170,12 @@ repo with a remote, and it must not be named after Josh.
   `<home>/records` (`home` = app-dir). No remote, no clone, no shared repo.
   Per-user by construction; never pushed; already inside `backup.py`'s snapshot
   scope.
-- **Config (Plan 2):** new `config.records_dir(home)` resolves `records_dir` key →
-  **legacy `joshbrain_dir` key (back-compat for existing installs)** →
-  `<home>/records`. `config.joshbrain_dir` is kept as a thin alias so older callers
-  keep working.
+- **Config (Plan 2, as built):** `config.records_dir(home)` resolves the
+  `records_dir` config key → `<home>/records`. The legacy `joshbrain_dir` key and
+  the `config.joshbrain_dir` alias were **removed** during execution (the full
+  de-"joshbrain" purge), so there is **no back-compat fallback**. **Migration:** an
+  existing install with `joshbrain_dir` set in `config.json` must rename that key to
+  `records_dir`, or its records repo silently relocates to `<home>/records`.
 - **Creation (Plan 2):** a new module `mcpbrain/records.py` provides
   `ensure_records_repo(repo_dir, *, git_name, git_email)` — it `git init`s the dir,
   sets a local git identity only if none exists (from `owner_full_name`/`owner_email`,
@@ -187,13 +189,13 @@ repo with a remote, and it must not be named after Josh.
   `state/hot.md` (`## Just decided` anchor), `MEMORY.md`, `context/voice.md`, and a
   `memory/` dir. (The richer cowork-prompt scaffolding from `seed_joshbrain.py` is
   not required for the write path and stays in the dev seed tool.)
-- **Naming:** the user-facing surfaces lose "joshbrain": the directory, the config
-  key, `draft.py`'s voice path, and the MCP tool-description text all become
-  `records`. The Python module file **`joshbrain_write.py` keeps its name** (it is an
-  internal import, not a user-facing surface; renaming it would churn imports for no
-  user benefit). The **service/agent labels** (`church.centrepoint.joshbrain.*`) and
-  the `agent_errs.py` glob are renamed in **1.6 / Plan 3**, since they are coupled to
-  the launchd/Task-Scheduler label work, not the records data layer.
+- **Naming (as built):** "joshbrain" is purged from the codebase entirely. The
+  module file was renamed `joshbrain_write.py` → **`records_write.py`** (the earlier
+  plan kept the filename; execution chose the full rename and updated all imports).
+  The directory, config key, `draft.py` voice path, and MCP tool text are all
+  `records`. The **service/agent labels** and the `agent_errs.py` glob are renamed in
+  **1.6a / Plan 3** (done), as are the cadence-generator function names
+  (`records_prune_plist` etc.) — see 1.6a.
 
 ### 1.6 Windows cadence parity + platform hardening
 
@@ -212,14 +214,17 @@ subsystem that needs a discovery pass over the four records-repo cadence scripts
   (`{records}/bin/{prune_hot_md.py,context_health.py,run_memory_gardener.sh,build_meeting_packs.sh}`),
   and are installed **only by `seed_joshbrain.py`** — never by the product. So for
   any non-Mac (or non-Josh) user they do not run at all.
-- The fix: **Task Scheduler** generators (Windows, time-triggered) + **systemd
-  timer** generators (Linux) for the four cadences; **port the logic into
-  `python -m mcpbrain <subcommand>`s** so the "run then commit" is identical on
-  every OS and no longer depends on records-repo shell scripts or `/bin/bash`,
-  `/bin/sh`, `.sh`; and a **product install path** for cadences (today only the dev
-  seed installs them). The cadence generators' repo path moves to
-  `config.records_dir` and their `joshbrain_dir=` params are renamed as part of this
-  restructure.
+- The fix: **port the logic into `python -m mcpbrain <subcommand>`s** so the "run
+  then commit" is identical on every OS and no longer depends on records-repo shell
+  scripts or `/bin/bash`, `/bin/sh`, `.sh`; **Task Scheduler** (Windows,
+  time-triggered) + **systemd timer** (Linux) generators for the four cadences,
+  alongside the existing launchd calendar plists; and a **product install path** for
+  cadences (today only the dev seed installs them, and a fresh records repo no longer
+  even contains `bin/` scripts — see 1.5).
+- **Done already (1.6a deviation):** the generator functions are renamed
+  (`records_prune_plist`/`records_context_health_plist`/`records_gardener_plist`),
+  take a `records_dir` param, and point at `<records_dir>/bin/…`. 1.6b only needs the
+  cross-platform execution + install path.
 - **Prerequisite:** a discovery read of the four scripts (≈14 KB) to design the
   subcommand surface faithfully. This is why it is its own plan.
 
