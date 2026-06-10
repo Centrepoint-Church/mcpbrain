@@ -553,6 +553,8 @@ class Daemon:
             "clickup_list_id": cfg.get("clickup_list_id", "") or "",
             "clickup_api_key_set": bool(cfg.get("clickup_api_key")),
             "timezone": cfg.get("timezone", "") or "",
+            "home_dir": str(app_dir()),
+            "records_dir": config.records_dir(str(app_dir())),
         }
 
     def _resolve_google_account(self, token_file) -> str:

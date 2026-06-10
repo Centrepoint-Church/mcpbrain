@@ -100,6 +100,7 @@ def uninstall_session_hooks() -> Path:
     data = _load(p)
     hooks = data.get("hooks")
     if isinstance(hooks, dict):
+        changed = False
         for event, marker in _HOOKS:
             blocks = hooks.get(event)
             if not isinstance(blocks, list):
@@ -109,16 +110,20 @@ def uninstall_session_hooks() -> Path:
                 if not isinstance(blk, dict):
                     kept.append(blk)
                     continue
-                inner = [h for h in blk.get("hooks", [])
+                original = blk.get("hooks", [])
+                inner = [h for h in original
                          if not (isinstance(h, dict) and marker in (h.get("command") or ""))]
+                if len(inner) != len(original):
+                    changed = True
                 if inner:
                     kept.append({**blk, "hooks": inner})
             if kept:
                 hooks[event] = kept
             else:
                 hooks.pop(event, None)
-        data["hooks"] = hooks
-        _write(p, data)
+        if changed:
+            data["hooks"] = hooks
+            _write(p, data)
     return p
 
 
