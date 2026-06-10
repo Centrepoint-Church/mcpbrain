@@ -1,7 +1,7 @@
 # Audit Remediation — design
 
 **Date:** 2026-06-10
-**Status:** approved (brainstorm), pending spec review
+**Status:** implemented (Plan 9, all 13 tasks; suite green)
 **Owner:** Josh Kemp
 
 ## Goal
@@ -74,10 +74,13 @@ Split the probe layer:
 - `Daemon.start_enrich_backfill` acquires a **non-blocking `_backfill_lock`**
   (mirroring `_auth_lock`); a second `/api/enrich-backfill/start` while one runs is
   a no-op.
-- While a backfill runs, set a `_backfill_active` `threading.Event`; `run_one`
-  returns early (like pause) when it's set, so the daemon's own write cycle does
-  not overlap the backfill — only one writer at a time. Clear the flag + release
-  the lock in a `finally`.
+- While a backfill runs, set a `_backfill_active` `threading.Event`. **All of the
+  daemon's loop writers yield to it** (as-built): `run_one`, `maybe_resolve`,
+  `maybe_backup`, and `_run_periodic_passes` (which also covers `maybe_auto_update`
+  — so the daemon can't restart mid-backfill) each early-return when the flag is
+  set, so there is only ever one writer at a time. Clear the flag + release the
+  lock in a `finally`. (The plan originally gated only `run_one`; code review
+  extended the pause to every loop writer to actually meet the single-writer goal.)
 - The cancel flag (`enrich_backfill.request_cancel`) is unchanged and still
   honored in the loop.
 
