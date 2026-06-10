@@ -638,13 +638,39 @@ data layer and the platform/label work are independent:
 - **Plan 3** — `2026-06-09-part3-neutral-identity.md` — spec **1.6a** (neutral
   service identity: `agents.py` daemon/tray/cadence label rename, `agent_errs.py`
   glob, `os.uname` → `sys.platform` hardening). *Written.*
-- **Plan 3b** — cross-platform cadence execution — spec **1.6b** (port the four
-  cadences to `python -m mcpbrain` subcommands, systemd-timer + time-triggered
-  schtasks generators, product cadence-install path). Generator renames already
-  done in Plan 3 deviation (bb7b9b1). Discovery-gated on the four records-repo
-  scripts. *To write.*
-- **Plan 4** — status & connection-probe layer — spec **3.2** + `daemon.status()`
-  `configured`/probe fields (also unblocks the 1.1 UI surfacing). *To write.*
-- **Plan 5** — distribution & release — spec **Part 2**. *To write.*
-- **Plan 6** — UX surfaces — spec **3.1/3.3/3.4/3.5**. *To write.*
-- **Plan 7** — backfill — spec **Part 4**. *To write.*
+- **Plan 3b** — `2026-06-10-part3b-crossplatform-cadences.md` — spec **1.6b**
+  (port the **deterministic** cadences — prune + context-health — to
+  `mcpbrain records-prune`/`records-health` subcommands; launchd/systemd-timer/
+  schtasks generators; product `install_cadences` path wired into setup). Gardener
+  + meeting-packs deferred to **§1.6c** (they shell to `claude` against cowork
+  prompt files a fresh records repo doesn't ship). *Written.*
+- **Plan 4** — `2026-06-10-part4-status-probe-layer.md` — spec **3.2** + the §1.1
+  surfacing: `mcpbrain/probes.py` (per-connection tri-states), `status()` gains a
+  `connections` key, MCP-server `write_heartbeat` for the Claude signal.
+  (`is_configured` was already in `status()` from Plan 1.) *Written.*
+- **Plan 5** — `2026-06-10-part5-distribution.md` — spec **Part 2**: `__version__`
+  semver, `update.py` reinstalls from the Pages wheel index (`--index mcpbrain=…`),
+  daemon `maybe_auto_update` cadence, `bin/release.py`, index-based installers.
+  Pages URL is a maintainer `DEFAULT_INDEX_URL`/env value. *Written.*
+- **Plan 6** — `2026-06-10-part6-ux.md` — spec **3.1/3.3/3.4/3.5**: state-aware
+  home (wizard ↔ status center on `is_configured`), tray icon-state + attention +
+  contextual Reconnect + version, self-healing banners. Depends on Plan 4 + Plan 7.
+  *Written.*
+- **Plan 7** — `2026-06-10-part7-backfill.md` — spec **Part 4**: `status().backfill`
+  progress, **newest-first `unenriched_chunks`**, local Claude-Code runner + gated
+  one-shot `mcpbrain enrich-backfill`, `/api/enrich-backfill/*` endpoints. *Written.*
+
+**Cross-plan decisions recorded:** Plan 7 changes `store.unenriched_chunks` ordering
+to **newest-first** (affects ongoing spool/gemini order too — desired: recent
+history enriches first). Plan 5 adds `mcpbrain.__version__`; Plan 6 surfaces it via
+`status()["version"]` (one-line add — whichever plan runs first adds it). Plan 4's
+`connections` block is the single source the menu bar + status center render from;
+reconnect reuses `POST /api/auth/start` (no new route).
+
+### §1.6c (follow-up, not yet planned) — gardener + meeting-packs cross-platform
+
+The remaining two cadences shell to `claude` headless against cowork prompt files in
+the records repo (`cowork/memory-gardener.md`, `cowork/meeting-packs.md`). Making
+them cross-platform needs that cowork-prompt content shipped as product scaffolding
+plus a `claude`-availability story. Deferred; stays launchd-only / dev-seed-installed
+until planned.
