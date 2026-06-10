@@ -69,7 +69,6 @@ def test_all_connections_has_every_key(tmp_path):
 
 # --- Task 7 additions ---
 import json as _json
-from pathlib import Path as _Path
 from mcpbrain import probes as _probes
 
 

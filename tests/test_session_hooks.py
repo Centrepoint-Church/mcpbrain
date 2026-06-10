@@ -48,7 +48,8 @@ def test_session_end_skips_trivial(tmp_path, monkeypatch):
 
 
 def test_session_end_handles_list_content_blocks(tmp_path, monkeypatch):
-    import io, json
+    import io
+    import json
     from pathlib import Path
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("\n".join(json.dumps(x) for x in [
