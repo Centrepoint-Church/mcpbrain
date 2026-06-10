@@ -93,3 +93,11 @@ def test_cancel_enrich_backfill_route(tmp_path):
         assert body.get("cancelled") is True
         assert "cancel_enrich_backfill" in daemon.calls
     finally: srv.stop()
+
+
+def test_wizard_has_timezone_field(tmp_path):
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
+        assert 'id="timezone"' in html
+    finally: srv.stop()
