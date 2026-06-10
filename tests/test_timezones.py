@@ -25,6 +25,9 @@ def test_zone_options_shape_and_sorted():
     # sorted by offset then name
     offsets = [ZoneInfo(o["value"]).utcoffset(NOW) for o in opts]
     assert offsets == sorted(offsets)
+    # Tie-break: same-offset zones appear alphabetically
+    values = [o["value"] for o in opts]
+    assert values.index("Asia/Singapore") < values.index("Australia/Perth")
 
 
 def test_every_offset_minus12_to_plus14_present():
