@@ -65,8 +65,9 @@ hint) rather than ever crashing.
 | Cowork path fragility | **Resolve with fallbacks + degrade gracefully** |
 | Configured-view ordering | **Status summary on top, settings form below** |
 | Onboarding guidance | **Inline expandable help per step** — short always-visible explanation + a "Show me how" expander with screenshot, numbered steps, Copy buttons |
-| Cowork projects to seed | **Two local Cowork projects**: `mcpbrain Enrichment` (hosts the system scheduled task) and `My Brain` (the daily working space, seeded with instructions + context files) |
-| Project registration | **Seed folders + READMEs only**; the user registers each as a Cowork space in-app (we do NOT write `spaces.json`) |
+| The two Cowork projects | Both point at **existing mcpbrain-managed folders**, not new seeded dirs: **Enrichment project** → working folder = the mcpbrain home (`~/.mcpbrain`, where `enrich_queue/` + `enrich_inbox/` live), hosts the scheduled task. **"My Brain" working project** → working folder = the **records repo** (`records_dir = <home>/records`, read+write) + `~/.mcpbrain` connected read + mcpbrain MCP attached. |
+| How "My Brain" gets its instructions | **Enrich the records-repo scaffold** (`records.py`) with a `CLAUDE.md` + `context/`/`reference/` templates (profile-interpolated), modelled on `~/joshbrain/CLAUDE.md` and `cowork/context-project.md`. The working project's instructions ARE the records-repo `CLAUDE.md`. |
+| Project registration | The user registers each Cowork space in-app (we do NOT write `spaces.json`). We don't create folders under `~/Documents/Claude/Projects/`; both projects target folders mcpbrain already owns. |
 
 ## Cowork facts (anchored, researched 2026-06-10)
 
@@ -83,11 +84,35 @@ hint) rather than ever crashing.
 - **ClickUp List ID**: right-click the List in the sidebar → **Copy link** → the
   number after `/li/` in the URL (`…/v/li/<list_id>`).
 
+### Memory-architecture alignment (joshbrain blueprint)
+
+The working project mirrors `~/joshbrain/docs/superpowers/specs/2026-06-09-cowork-memory-architecture-design.md`
+and `~/joshbrain/cowork/context-project.md`. Key inherited facts:
+
+- The working Cowork project's folder is the **records repo** (the product's
+  rename of `joshbrain`): `records_dir = config.records_dir(home) = <home>/records`,
+  created/scaffolded by `records.ensure_records_repo`. The user edits
+  `context/`/`reference/` there; the daemon owns `state/decisions.md`,
+  `state/hot.md`, `memory/` via the existing **write tools** (`brain_decision`,
+  `brain_note`, `brain_memory_write`) — already shipped. Ownership split avoids
+  git races; **writes are queued** (one daemon cycle), never hand-edited.
+- `~/.mcpbrain` (the home) is the runtime (index, daemon, `enrich_queue/`,
+  `enrich_inbox/`) and is the **enrichment project's** working folder.
+- Determinism order from that design — **hooks > MCP tools > instructions** — is
+  why writes route through tools, not instructed file edits. A SessionStart
+  priming hook + SessionEnd capture hook are part of that blueprint; shipping them
+  in the product is noted as a **follow-up option** (see Out of scope), not in this
+  spec's core.
+- Today `records.ensure_records_repo` stamps only the writer anchors
+  (`state/decisions.md`, `state/hot.md`, `MEMORY.md`, `context/voice.md`,
+  `memory/`). It does **not** stamp a `CLAUDE.md` or identity/preferences/reference
+  — that is the gap this spec fills.
+
 ## Architecture
 
-All work is in three existing layers (`probes.py`, `daemon.py`, `control_api.py`,
-`wizard/index.html`) plus three small new modules (`timezones.py`,
-`cowork_tasks.py`, `projects.py`) and package data (`cowork/enrichment.md`,
+All work is in existing layers (`probes.py`, `daemon.py`, `control_api.py`,
+`records.py`, `wizard/index.html`) plus two small new modules (`timezones.py`,
+`cowork_tasks.py`) and package data (`cowork/enrichment.md`, `records_templates/`,
 `wizard/img/`). No new third-party dependencies (`zoneinfo` is stdlib).
 
 ### New / changed backend
@@ -145,9 +170,11 @@ daemon writes it to the Cowork SKILL.md. Front-matter (`name: mcpbrain-enrichmen
   and project ONLY: `owner_full_name, owner_name, owner_email, owner_role, orgs,
   clickup_list_id, timezone`, plus `clickup_api_key_set: bool`
   (`bool(clickup_api_key)`). **Never returns the raw key.**
-- `apply_config` (existing) calls `cowork_tasks.write_enrichment_skill(home)` after
-  a successful write so the SKILL.md is (re)materialised whenever the user saves
-  settings. Failure to write degrades silently (logged at debug).
+- `apply_config` (existing) calls `cowork_tasks.write_enrichment_skill(home)` **and**
+  `records.scaffold_records(home)` after a successful write, so saving settings both
+  (re)materialises the enrichment SKILL.md and stamps/refreshes the records-repo
+  working-project scaffold (profile interpolated). Both are best-effort: a failure
+  degrades silently (logged at debug) and never fails the POST.
 
 **`mcpbrain/control_api.py`**
 - `do_GET`: add `GET /api/config` → `h_json(200, daemon.config_profile())` and
@@ -158,26 +185,34 @@ daemon writes it to the Cowork SKILL.md. Front-matter (`name: mcpbrain-enrichmen
   `/api/status` (which the page polls every 3 s) so a poll can never overwrite
   what the user is typing.
 
-**`mcpbrain/projects.py` (new, isolated, unit-tested) — Cowork project scaffolding**
-- `projects_dir() -> Path | None` — resolve `~/Documents/Claude/Projects` (the
-  Cowork local-projects root); `None` if its parent doesn't exist (degrade).
-- `SEED_PROJECTS` — two entries:
-  - `mcpbrain Enrichment` → folder + `README.md` explaining it hosts the background
-    extraction scheduled task; the daemon drops `pending.json`, the task writes
-    `enrich_inbox/`. (The scheduled task is created against THIS project's folder.)
-  - `My Brain` → folder + seeded **context files** so Cowork approximates the
-    Claude-Code experience: `README.md` (what this space is for), `INSTRUCTIONS.md`
-    (how to use the mcpbrain MCP tools — `brain_search`, `brain_context`,
-    `brain_actions`, `brain_draft_reply`, … — plus the user's identity/orgs pulled
-    from config), and a `context/` folder pointer. Content is rendered from package
-    data templates with the user's profile interpolated.
-- `scaffold_projects(home) -> list[Path]` — create both folders + seed files
-  idempotently (never overwrite a user-edited file: write only if absent). Returns
-  created/seeded paths; degrades to `[]` if `projects_dir()` is `None`. Called from
-  `apply_config` (best-effort, alongside the skill write).
-- `project_status() -> dict` — for each seed project: `folder_present`,
-  `registered` (best-effort: read `spaces.json` if discoverable and check a folder
-  path match — read-only, degrade to `unknown`). Feeds a status card.
+**`mcpbrain/records.py` (extend) + `mcpbrain/records_templates/` (new package data) —
+enrich the records-repo scaffold so the working Cowork project has real instructions**
+- New package-data templates under `mcpbrain/records_templates/`, modelled on
+  `~/joshbrain` (genericised, no Josh content):
+  - `CLAUDE.md` — project instructions: `@context/identity.md` / `@context/voice.md`
+    / `@context/preferences.md` imports; an org-tagging block built from the user's
+    configured `orgs`; role-attribution rules; the **Memory Protocol** (read tools:
+    `brain_search`, `brain_read`, `brain_context`, `brain_actions`, …); the
+    **"Where Things Go"** write-routing table (`brain_decision` / `brain_note` /
+    `brain_memory_write` / `brain_ingest`, all QUEUED, daemon-owned — do not
+    hand-edit those files); proactive behaviours; platform notes (records repo =
+    working tree, `~/.mcpbrain` = runtime).
+  - `context/identity.md` — name/role/orgs interpolated from config; the rest left
+    as guided placeholders for the user to fill.
+  - `context/preferences.md`, `reference/systems.md`, `reference/projects.md` —
+    placeholder templates with section headings + "fill this in" guidance.
+  - (`context/voice.md`, `state/*`, `MEMORY.md`, `memory/` already scaffolded.)
+- `ensure_records_repo` gains a `profile: dict | None` arg; on first creation it
+  also stamps the new templates with `{owner_full_name, owner_role, orgs}`
+  interpolated. **Never clobbers an existing file** (write-if-absent), so a user's
+  edited `CLAUDE.md`/`identity.md` survives re-runs. `CLAUDE.md`'s org-tagging block
+  regenerates only when absent.
+- `scaffold_records(home) -> list[Path]` thin wrapper: resolve `records_dir`, read
+  the profile from config, call `ensure_records_repo(..., profile=...)`, return the
+  paths stamped. Called from `apply_config` (best-effort) so saving settings
+  materialises/refreshes the working-project scaffold. Degrades silently on error.
+- `records_status(home) -> dict` — `{present: bool, has_claude_md: bool,
+  path: str}` for the status card; read-only, degrades to `present=False`.
 
 **`mcpbrain/wizard/img/` (new package data) + static route** — onboarding
 screenshots shipped with the package. `control_api.do_GET` serves
@@ -223,24 +258,28 @@ steps + Copy buttons. Written for someone with zero prior context. Steps:
    "Open ClickUp" link. Timezone dropdown sits here (required for deadlines).
 4. **Connect to Claude Desktop** — the Register button (writes the MCP entry) +
    "fully quit & reopen Claude Desktop" with a screenshot; live registration status.
-5. **Your two Cowork projects** — a new step. Explains the two seeded projects and
-   *what each is for*:
+5. **Your two Cowork projects** — a new step. Explains *what each is for* and points
+   each at a folder mcpbrain already owns (the exact path is shown with a Copy
+   button, since Cowork's folder picker needs it):
    - **mcpbrain Enrichment** — "the engine room: a scheduled task that quietly turns
      your mail into structured memory every hour." Expander: create a Cowork project
-     from the seeded folder (Projects → + → Use an existing folder →
-     `~/Documents/Claude/Projects/mcpbrain Enrichment`), then add an **Hourly**
-     scheduled task pointed at the seeded `SKILL.md`. Screenshots for each click.
-   - **My Brain** — "where you actually work with your brain." Expander: create a
-     Cowork project from `~/Documents/Claude/Projects/My Brain`; the seeded
-     `INSTRUCTIONS.md` already tells Claude how to use the mcpbrain tools. Screenshot.
-   - A **"Create my project folders"** button calls a control endpoint that runs
-     `projects.scaffold_projects()` and reports which folders were seeded, so the
-     folders exist before the user opens Claude. Status card shows folder-present /
-     registered per project.
+     on the mcpbrain home folder (path shown, e.g. `~/.mcpbrain`), then add an
+     **Hourly** scheduled task pointed at the auto-written `SKILL.md`. Screenshots
+     for each click.
+   - **My Brain** — "where you actually work with your brain — like Claude Code's
+     memory, in Cowork." Expander: create a Cowork project on the **records repo**
+     (path shown, e.g. `~/.mcpbrain/records`), connect `~/.mcpbrain` as a read
+     folder, and attach the mcpbrain MCP. Its `CLAUDE.md` (just scaffolded) already
+     tells Claude the identity, voice, memory protocol, and write-tool routing.
+     Screenshot.
+   - A **"Prepare my working space"** button calls `POST /api/records/scaffold`
+     (→ `records.scaffold_records`), which creates + stamps the records repo
+     (`CLAUDE.md`, context/, reference/) so it's ready before the user points Cowork
+     at it. Status card shows records-repo-ready + enrichment-skill-installed.
 6. **Status** — the configured home (already covered).
 
-New control routes: `POST /api/projects/scaffold` → `scaffold_projects()`;
-`project_status` is merged into `/api/status` connections (read-only, cheap).
+New control routes: `POST /api/records/scaffold` → `scaffold_records()`;
+`records_status` + `probe_enrichment` are merged into `/api/status` (read-only, cheap).
 
 ## Data flow
 
@@ -250,7 +289,8 @@ page load ─► GET /api/timezones ─► populate <select>
         └─► every 3s: GET /api/status ─► renderStatus + renderHome (never touches form inputs)
 
 Save ─► POST /api/config {non-blank fields} ─► write_config (merge)
-                                            └─► cowork_tasks.write_enrichment_skill() [best-effort]
+                                            ├─► cowork_tasks.write_enrichment_skill() [best-effort]
+                                            └─► records.scaffold_records(profile) [best-effort]
 
 status poll ─► probes.all_connections ─► {google, claude(+registration), clickup, backup, records, enrichment}
 ```
@@ -280,11 +320,12 @@ status poll ─► probes.all_connections ─► {google, claude(+registration),
   and the prefill bootstrap; `#home-status` precedes `<main>`.
 - `tests/test_daemon.py` — `config_profile` projection (no secret); `apply_config`
   invokes the skill writer best-effort (and a writer failure doesn't fail the POST).
-- `tests/test_projects.py` — `projects_dir` resolution/`None`; `scaffold_projects`
-  creates both folders + seeds files, is idempotent, never overwrites a user-edited
-  file, degrades to `[]` when unresolved; `project_status` read-only + degrades to
-  `unknown`; seeded `INSTRUCTIONS.md` interpolates the profile.
-- `tests/test_control_api.py` — `POST /api/projects/scaffold` returns seeded paths;
+- `tests/test_records.py` (extend) — `ensure_records_repo(profile=…)` stamps
+  `CLAUDE.md` + `context/identity.md` with the profile interpolated; is idempotent;
+  **never clobbers** a user-edited `CLAUDE.md`/`identity.md`; org-tagging block built
+  from configured `orgs`; `scaffold_records` degrades silently when `records_dir`
+  unresolved; `records_status` read-only.
+- `tests/test_control_api.py` — `POST /api/records/scaffold` returns stamped paths;
   `GET /img/<name>` serves a shipped PNG and 404s an unknown/sneaky name (path
   traversal rejected).
 
@@ -309,7 +350,7 @@ shown live, so it needs none.
 | 5 | `clickup-list-id-url.png` | The copied URL with the `…/li/<list_id>` portion highlighted |
 | 6 | `claude-quit-reopen.png` | macOS menu bar **Claude → Quit** (caption: then reopen) |
 | 7 | `cowork-projects-plus.png` | Cowork left nav **Projects → +** showing the 3 options |
-| 8 | `cowork-use-existing-folder.png` | "Use an existing folder" picker at `~/Documents/Claude/Projects/…` |
+| 8 | `cowork-use-existing-folder.png` | "Use an existing folder" picker (caption notes the path is shown in-app with a Copy button: home for Enrichment, records repo for My Brain) |
 | 9 | `cowork-project-create.png` | Naming the project + **Create** |
 | 10 | `cowork-scheduled-new.png` | **Routines/Scheduled → New → Local** |
 | 11 | `cowork-scheduled-fields.png` | Routine form: name `mcpbrain-enrichment`, folder = Enrichment project, **Schedule = Hourly** |
@@ -323,9 +364,13 @@ is hidden via `onerror`), so the feature ships before the art is captured.
 - Programmatic creation of the schedule **cadence / enabled state** (structurally
   impossible from an external process — see findings). The wizard guides the user
   to set it in Claude Desktop with screenshots instead.
-- Programmatic **Cowork project registration** (writing `spaces.json`). We seed
-  folders + READMEs/instructions; the user registers each space in-app. Reading
-  `spaces.json` for status is read-only + best-effort.
+- Programmatic **Cowork project registration** (writing `spaces.json`). We enrich
+  the records-repo scaffold and point the user at the right folders; they register
+  each space in-app.
+- **SessionStart priming + SessionEnd capture hooks** (the determinism layer from
+  the joshbrain memory-architecture design). Strengthens Claude-Code-parity but
+  means installing user-scope `~/.claude/settings.json` hooks — sensitive enough to
+  be its own opt-in feature. Flagged as a follow-up, not built here.
 - Capturing the screenshots themselves (maintainer action — see plan above). The
   feature ships text-only until the PNGs land.
 - Windows live validation of the Cowork/ClickUp paths (no Windows machine;
