@@ -1,9 +1,12 @@
 import json
 import urllib.request
 import urllib.error
+from pathlib import Path
 import pytest
 from mcpbrain import control_api
 from mcpbrain.control_api import ControlServer
+
+WIZ = Path("mcpbrain/wizard/index.html").read_text()
 
 class FakeDaemon:
     def __init__(self):
@@ -101,3 +104,34 @@ def test_wizard_has_timezone_field(tmp_path):
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         assert 'id="timezone"' in html
     finally: srv.stop()
+
+
+def test_timezone_is_a_select():
+    assert '<select id="timezone"' in WIZ
+    assert '<input id="timezone"' not in WIZ
+
+
+def test_prefill_and_dropdown_bootstrap_present():
+    assert "/api/config" in WIZ          # one-shot prefill fetch
+    assert "/api/timezones" in WIZ       # dropdown population
+    assert "leave blank to keep" in WIZ  # masked-token placeholder
+
+
+def test_home_status_renders_before_main():
+    # status-first: the home-status section must appear before the wizard <main>
+    assert WIZ.index('id="home-status"') < WIZ.index("<main")
+
+
+def test_connection_order_includes_new_cards():
+    assert '"enrichment"' in WIZ and '"memory-hooks"' in WIZ
+
+
+def test_guided_elements_present():
+    assert "Settings → Apps → API Token" in WIZ
+    assert "Copy link" in WIZ                       # List ID instructions
+    assert 'id="step-projects"' in WIZ
+    assert 'id="step-hooks"' in WIZ
+    assert "/api/records/scaffold" in WIZ
+    assert "/api/hooks/install" in WIZ
+    assert "onerror" in WIZ                          # screenshots hide when absent
+    assert "/img/clickup-apps-token.png" in WIZ
