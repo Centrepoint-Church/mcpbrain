@@ -149,8 +149,10 @@ def owner_aliases(home) -> frozenset[str]:
 
 
 def user_timezone(home) -> str:
-    """IANA timezone name for the install owner. Defaults to 'Australia/Perth'."""
-    return read_config(home).get("user_timezone", "Australia/Perth") or "Australia/Perth"
+    """The install owner's IANA timezone (e.g. 'Australia/Perth'). Empty until
+    configured — required for correct ClickUp deadline conversion; no default so a
+    wrong timezone is never silently assumed."""
+    return read_config(home).get("timezone", "") or ""
 
 
 def clickup_closed_status(home) -> str:
