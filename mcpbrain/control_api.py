@@ -75,6 +75,12 @@ class ControlServer:
                 if self.path == "/dashboard": return server._serve_dashboard(self)
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
+                if self.path == "/api/config":
+                    return h_json(self, 200, server.daemon.config_profile())
+                if self.path == "/api/timezones":
+                    from mcpbrain import timezones
+                    return h_json(self, 200,
+                                  {"zones": timezones.zone_options(now=datetime.now(timezone.utc))})
                 if self.path == "/api/auth/status":
                     st = server.daemon.status()
                     return h_json(self, 200, {"connected": st["google_connected"],
