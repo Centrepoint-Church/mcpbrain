@@ -231,7 +231,6 @@ from mcpbrain.agents import (
 import subprocess
 from pathlib import Path
 
-python_bin = subprocess.check_output(["which", "python3"], text=True).strip()
 records_dir = str(Path.home() / ".mcpbrain" / "records")
 mcpbrain_home = str(Path.home() / ".mcpbrain")
 mcpbrain_bin = str(Path.home() / "Documents/GitHub/mcpbrain/.venv/bin/mcpbrain")
@@ -242,9 +241,9 @@ plists = {
     "com.mcpbrain": launchd_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
     "com.mcpbrain.tray": launchd_tray_plist(mcpbrain_bin=mcpbrain_bin, home=mcpbrain_home),
     "com.mcpbrain.records.prune": records_prune_plist(
-        python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
+        mcpbrain_bin=mcpbrain_bin, mcpbrain_home=mcpbrain_home),
     "com.mcpbrain.records.context-health": records_context_health_plist(
-        python_bin=python_bin, records_dir=records_dir, mcpbrain_home=mcpbrain_home),
+        mcpbrain_bin=mcpbrain_bin, mcpbrain_home=mcpbrain_home),
     "com.mcpbrain.records.gardener": records_gardener_plist(
         records_dir=records_dir, mcpbrain_home=mcpbrain_home),
     "com.mcpbrain.records.meeting-packs": meeting_packs_plist(home=mcpbrain_home),
