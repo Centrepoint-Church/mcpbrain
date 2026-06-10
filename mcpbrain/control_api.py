@@ -73,6 +73,14 @@ class ControlServer:
                 # must load the wizard page, which then injects the token into the HTML.
                 if self.path == "/": return server._serve_wizard(self)   # Task 2.3
                 if self.path == "/dashboard": return server._serve_dashboard(self)
+                # Served before the auth gate: a browser <img> tag carries no
+                # token, so any /img/ request must be answered here. The whole
+                # /img/ prefix is claimed (not just a matching name) so an
+                # unknown or traversal-shaped name 404s rather than slipping
+                # through to the auth gate and confusing the browser with a 401.
+                if self.path.startswith("/img/"):
+                    m = re.match(r"^/img/([A-Za-z0-9._-]+\.png)$", self.path)
+                    return server._serve_image(self, m.group(1) if m else "")
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
                 if self.path == "/api/config":
@@ -142,6 +150,15 @@ class ControlServer:
         h.send_response(200); h.send_header("Content-Type","text/html")
         h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
 
+    def _serve_image(self, h, name):
+        root = (Path(__file__).parent / "wizard" / "img").resolve()
+        p = (root / name).resolve()
+        if root not in p.parents or not p.is_file():
+            h.send_response(404); h.end_headers(); return
+        data = p.read_bytes()
+        h.send_response(200); h.send_header("Content-Type", "image/png")
+        h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
+
     def _handle_post(self, h):
         # Clamp Content-Length to a non-negative int. A negative or unparseable
         # value would otherwise slip past the size cap below and turn the
@@ -184,6 +201,13 @@ class ControlServer:
             if h.path == "/api/enrich-backfill/cancel":
                 d.cancel_enrich_backfill(); return h_json(h, 200, {"cancelled": True})
             if h.path == "/api/register": return h_json(h, 200, {"config_path": d.register()})
+            if h.path == "/api/records/scaffold":
+                from mcpbrain import records
+                return h_json(h, 200, {"scaffolded": records.scaffold_records(str(self.home))})
+            if h.path == "/api/hooks/install":
+                from mcpbrain import hooks
+                hooks.install_session_hooks()
+                return h_json(h, 200, {"installed": True})
 
             m = re.match(r"^/api/dashboard/actions/(\d+)/done$", h.path)
             if m:
