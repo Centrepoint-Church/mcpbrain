@@ -45,3 +45,21 @@ def test_session_end_skips_trivial(tmp_path, monkeypatch):
                         lambda home, env: called.update(n=called["n"] + 1))
     session_hooks.session_end(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
     assert called["n"] == 0  # single trivial turn -> skipped
+
+
+def test_session_end_handles_list_content_blocks(tmp_path, monkeypatch):
+    import io, json
+    from pathlib import Path
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "Investigate the failing migration thoroughly please"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "and then summarise what you changed in detail"}]}},
+    ]))
+    hook = {"transcript_path": str(transcript), "session_id": "s3", "cwd": str(tmp_path)}
+    captured = {}
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: captured.setdefault("env", env) or Path("x"))
+    session_hooks.session_end(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    assert "migration" in captured["env"]["content"].lower()

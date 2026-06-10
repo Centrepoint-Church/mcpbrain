@@ -89,6 +89,8 @@ def session_end(home: str, stdin=None) -> None:
     joined = " ".join(t.strip() for t in user_texts if t.strip())
     if len(user_texts) < _MIN_TURNS and len(joined) < _MIN_CHARS:
         return  # trivial / headless single-shot -> skip
+    if not joined.strip():
+        return  # no usable user text -> nothing to capture
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     envelope = {
         "kind": "ingest",
