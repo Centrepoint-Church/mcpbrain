@@ -35,9 +35,15 @@ def test_clickup_needs_action_with_key_but_no_list(tmp_path):
     assert probes.probe_clickup(home)["state"] == "needs_action"
 
 
-def test_clickup_ok_with_key_and_list(tmp_path):
-    home = _home(tmp_path, {"clickup_api_key": "pk_x", "clickup_list_id": "L1"})
+def test_clickup_ok_with_key_list_and_tz(tmp_path):
+    home = _home(tmp_path, {"clickup_api_key": "pk_x", "clickup_list_id": "L1",
+                             "timezone": "Australia/Perth"})
     assert probes.probe_clickup(home)["state"] == "ok"
+
+
+def test_clickup_needs_action_without_timezone(tmp_path):
+    home = _home(tmp_path, {"clickup_api_key": "pk_x", "clickup_list_id": "L1"})
+    assert probes.probe_clickup(home)["state"] == "needs_action"
 
 
 def test_records_ok_when_git_repo(tmp_path):
