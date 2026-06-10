@@ -156,6 +156,33 @@ class TrayController:
 
 
 # ---------------------------------------------------------------------------
+# Pure notification-decision helper (testable, no GUI imports)
+# ---------------------------------------------------------------------------
+
+def _next_notification(
+    attention_details: list[str],
+    last_attention: str,
+    review_count: int,
+    last_review: int,
+) -> tuple:
+    """Decide the next OS notification.
+
+    A connection needing action outranks the review-count nudge, and only fires
+    when it's NEW (different from last shown).  Returns
+    ``(message|None, new_last_attention, new_last_review)``.  The caller passes
+    the previous tracking values and stores the returned ones.
+    """
+    cur_attention = attention_details[0] if attention_details else ""
+    if cur_attention and cur_attention != last_attention:
+        msg: str | None = cur_attention
+    elif not cur_attention and review_count > last_review:
+        msg = f"{review_count} items to review"
+    else:
+        msg = None
+    return msg, cur_attention, review_count
+
+
+# ---------------------------------------------------------------------------
 # Render layer (lazy pystray import — manual smoke only, not unit-tested)
 # ---------------------------------------------------------------------------
 
@@ -176,13 +203,19 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
 
     _POLL_SECONDS = 3.0
 
-    def _make_icon_image(size: int = 64) -> "Image.Image":
+    def _make_icon_image(icon_state: str = "running", size: int = 64) -> "Image.Image":
+        colors = {
+            "running": (0, 102, 255, 255),        # electric-blue
+            "paused": (128, 128, 128, 255),        # grey
+            "attention": (255, 102, 0, 255),       # orange
+            "unavailable": (192, 192, 192, 255),   # light grey
+        }
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         margin = size // 8
         draw.ellipse(
             [margin, margin, size - margin, size - margin],
-            fill=(0, 102, 255, 255),  # electric-blue dot
+            fill=colors.get(icon_state, colors["running"]),
         )
         return img
 
@@ -195,24 +228,34 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
 
     def _setup(icon: "pystray.Icon") -> None:
         icon.visible = True
-        last_n = 0
+        last_attention = ""
+        last_review = 0
+        last_state: str | None = None
         while not controller.should_exit():
             controller.refresh()
+            state = controller.icon_state()
+            if state != last_state:
+                icon.icon = _make_icon_image(state)
+                last_state = state
             icon.title = f"mcpbrain — {controller.status_text()}"
             icon.update_menu()
-            n = controller.review_count()
-            if n > last_n:
+            msg, last_attention, last_review = _next_notification(
+                [a["detail"] for a in controller.attention()],
+                last_attention,
+                controller.review_count(),
+                last_review,
+            )
+            if msg:
                 try:
-                    icon.notify(f"{n} items to review", "mcpbrain")
+                    icon.notify(msg, "mcpbrain")
                 except Exception:
                     pass
-            last_n = n
             time.sleep(_POLL_SECONDS)
         icon.stop()
 
     icon = pystray.Icon(
         "mcpbrain",
-        _make_icon_image(),
+        _make_icon_image("running"),
         title="mcpbrain",
         menu=pystray.Menu(_menu_items),
     )
