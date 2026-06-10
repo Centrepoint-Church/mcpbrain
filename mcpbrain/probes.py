@@ -69,6 +69,53 @@ def probe_clickup(home) -> dict:
     return _state("ok", "Connected")
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _verify_clickup(home) -> dict:
+    """Real ClickUp check: key+list+tz present AND a test API call resolves the list."""
+    base = probe_clickup(home)
+    if base["state"] != "ok":
+        return base
+    try:
+        from mcpbrain import clickup
+        clickup.list_tasks_full(home, include_closed=False)  # one API call
+        return _state("ok", "Verified", last_verified=_now_iso())
+    except Exception as exc:  # noqa: BLE001
+        return _state("needs_action", f"ClickUp call failed — check the key ({exc.__class__.__name__})")
+
+
+def _verify_google(home) -> dict:
+    """Real Google check: attempt a token refresh (network)."""
+    base = probe_google(home)
+    if base["state"] == "not_started":
+        return base
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        creds = Credentials.from_authorized_user_file(str(auth.token_path()), auth.SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return _state("ok", "Verified", last_verified=_now_iso())
+    except Exception:  # noqa: BLE001
+        return _state("needs_action", "Sign-in expired — reconnect")
+
+
+def verify_connections(home, store=None) -> dict:
+    """Run the expensive (network) checks and cache them to connections.json atomically."""
+    verified = {"clickup": _verify_clickup(home), "google": _verify_google(home)}
+    import os
+    import tempfile
+    p = Path(home) / "connections.json"
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".conn.", suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(verified))
+    os.replace(tmp, p)
+    return verified
+
+
 def probe_backup(home) -> dict:
     cfg = config.read_config(home)
     if not cfg.get("backup"):
