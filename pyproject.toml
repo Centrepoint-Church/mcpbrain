@@ -63,11 +63,23 @@ include = ["mcpbrain*"]
 # onboarding wizard HTML and the example OAuth client, breaking the browser
 # wizard served by control_api._serve_wizard.
 [tool.setuptools.package-data]
-"mcpbrain.wizard" = ["*"]
+"mcpbrain.wizard" = ["*.html"]
 # Ship the wizard assets, the example client, and the SHARED desktop OAuth
 # client so a clean `uv tool install` carries it (auth.py finds it via its
 # bundled-path lookup, so no env var is needed on any machine).
-"mcpbrain" = ["*.json.example", "google_oauth_client.json", "enrich_prompt.md"]
+# wizard/img/ and records_templates/ are NOT importable subpackages (no
+# __init__.py), so their data files must be listed under the parent "mcpbrain"
+# key as relative-path globs (setuptools package-data globs are relative to the
+# owning package's directory). records.py reads records_templates/ via
+# Path(__file__).parent, and control_api serves wizard/img/*.png.
+"mcpbrain" = [
+    "*.json.example",
+    "google_oauth_client.json",
+    "enrich_prompt.md",
+    "wizard/img/*",
+    "records_templates/*",
+    "records_templates/**/*",
+]
 "mcpbrain.cowork" = ["*.md"]
 
 [tool.pytest.ini_options]
