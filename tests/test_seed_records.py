@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).parent.parent
-_SCRIPT = _REPO / "bin" / "seed_joshbrain.py"
+_SCRIPT = _REPO / "bin" / "seed_records.py"
 
 
 def _make_src(tmp_path: Path) -> Path:
@@ -112,7 +112,7 @@ def test_seed_generates_memory_index_and_gitkeep(tmp_path):
 
 
 def _load_context_health(dest: Path):
-    """Import the seeded context_health.py as a module bound to dest as JOSHBRAIN."""
+    """Import the seeded context_health.py as a module bound to dest as RECORDS."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "seeded_context_health", str(dest / "bin" / "context_health.py")
@@ -132,7 +132,7 @@ def test_context_health_hot_md_regex_fires_on_stale_bullet(tmp_path):
         "# Hot\n\n- **2020-01-01: Old.** stale entry that should be pruned\n"
     )
     mod = _load_context_health(dest)
-    # The module computes JOSHBRAIN from __file__ — the seeded dest IS the tree.
+    # The module computes the records root from __file__ — the seeded dest IS the tree.
     warnings = mod._check_hot_md()
     assert warnings, "expected a stale-entry warning, got none"
     assert "2020-01-01" in warnings[0]

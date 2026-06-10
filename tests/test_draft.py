@@ -99,7 +99,7 @@ class TestPretrialAndPlan:
         monkeypatch.setattr(d, "_call_llm", lambda prompt, model=None, timeout=None: response)
         result = d.pretrial_and_plan(
             email_subject="Timeline check",
-            email_body="Hi Josh, can you confirm when the report is due?",
+            email_body="Hi Sam, can you confirm when the report is due?",
             sender="Alice",
             voice_rules="Be direct.")
         assert result["intent"] == "reply"
@@ -169,7 +169,7 @@ from mcpbrain.store import Store
 
 def _seed_email(store, *, message_id="msg1", subject="Timeline check",
                 sender="Alice", sender_email="alice@example.com",
-                thread_id="thread1", org="Centrepoint",
+                thread_id="thread1", org="Acme",
                 content_type="request",
                 summary="Can you confirm when the report is due?",
                 reply_needed=1):

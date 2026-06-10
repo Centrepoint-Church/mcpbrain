@@ -26,7 +26,7 @@ def _stale_thread(s, thread_id, *, enriched):
            f"{thread_id}h2", enriched=enriched,
            date="Tue, 02 Jun 2026 09:00:00 +0000")
     return s.add_unified_action(
-        text="Send the report", owner="Joshua", status="open",
+        text="Send the report", owner="Sam", status="open",
         source_doc_id=f"{thread_id}-src", thread_id=thread_id)
 
 
@@ -84,7 +84,7 @@ def _reextraction_for(thread_id, aid):
     """The contract envelope the LLM produces when handed this thread's
     open_actions and a resolving message — it resolves the open action."""
     return {
-        "thread_id": thread_id, "org": "Centrepoint", "content_type": "request",
+        "thread_id": thread_id, "org": "Acme", "content_type": "request",
         "summary": "s", "contextual_summary": "",
         "entities": [], "topics": [], "actions": [],
         "reply_needed": False, "reply_reason": "",

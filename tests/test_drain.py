@@ -43,7 +43,7 @@ def _envelope(thread_id, **overrides):
     """A minimal contract envelope that passes validate_batch_file."""
     env = {
         "thread_id": thread_id,
-        "org": "Centrepoint",
+        "org": "Acme",
         "content_type": "update",
         "summary": "A short summary.",
         "entities": [],
@@ -51,7 +51,7 @@ def _envelope(thread_id, **overrides):
         "actions": [],
         "relations": [],
         "messages": [
-            {"message_id": f"{thread_id}-m1", "sender": "Dana <dana@centrepoint.church>",
+            {"message_id": f"{thread_id}-m1", "sender": "Dana <dana@example.org>",
              "date": "2026-04-18", "labels": "INBOX", "subject": "Subject"}
         ],
         "resolved_action_ids": [],
@@ -202,7 +202,7 @@ def test_drain_sanitizes_empty_relations_keeps_extraction(store, home):
     # (empty fields) — the LLM noise that used to fail the whole batch. The stub
     # is dropped; the extraction applies with its good relation intact.
     env = _envelope("t-rel", relations=[
-        {"source_name": "Dana", "type": "works_with", "target_name": "Josh"},
+        {"source_name": "Dana", "type": "works_with", "target_name": "Sam"},
         {"source_name": "", "type": "", "target_name": ""},
     ])
     _write_inbox(home, "rel.json", _batch("batch-rel", [env]))
@@ -375,9 +375,9 @@ def _pair_id(a_id, b_id):
 
 def test_drain_applies_merge_answers(store, home):
     # winner is the higher-mentions entity; loser folds into it.
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Centrepoint", "2026-04-01")
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Centrepoint", "2026-04-02")  # mentions=2
-    store.upsert_entity("j-okafor", "J Okafor", "person", "Centrepoint", "2026-04-01")  # mentions=1
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-01")
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-02")  # mentions=2
+    store.upsert_entity("j-okafor", "J Okafor", "person", "Acme", "2026-04-01")  # mentions=1
 
     ans = {"pair_id": _pair_id("dana-okafor", "j-okafor"),
            "same": True, "canonical": "Dana Okafor"}
@@ -397,8 +397,8 @@ def test_drain_applies_merge_answers(store, home):
 
 
 def test_drain_merge_answer_same_false_noop(store, home):
-    store.upsert_entity("ent-a", "Alpha", "person", "Centrepoint", "2026-04-01")
-    store.upsert_entity("ent-b", "Beta", "person", "Centrepoint", "2026-04-01")
+    store.upsert_entity("ent-a", "Alpha", "person", "Acme", "2026-04-01")
+    store.upsert_entity("ent-b", "Beta", "person", "Acme", "2026-04-01")
     ans = {"pair_id": _pair_id("ent-a", "ent-b"), "same": False, "canonical": ""}
     _write_inbox(home, "batch.json", _batch("batch-1", [], merge_answers=[ans]))
 
@@ -459,8 +459,8 @@ def test_drain_merge_failure_is_nonfatal(store, home, monkeypatch):
     # (try/continue), so file_ok stays True: the file is still deleted and the
     # successful extraction's chunks stay marked. Merges are idempotent, so a
     # dropped one is re-adjudicated next cycle rather than blocking the file.
-    store.upsert_entity("ent-a", "Alpha Longname", "person", "Centrepoint", "2026-04-01")
-    store.upsert_entity("ent-b", "Beta", "person", "Centrepoint", "2026-04-01")
+    store.upsert_entity("ent-a", "Alpha Longname", "person", "Acme", "2026-04-01")
+    store.upsert_entity("ent-b", "Beta", "person", "Acme", "2026-04-01")
 
     def _boom(*args, **kwargs):
         raise RuntimeError("merge exploded")
@@ -481,9 +481,9 @@ def test_drain_merge_failure_is_nonfatal(store, home, monkeypatch):
 
 
 def test_drain_summary_counts(store, home):
-    store.upsert_entity("ent-a", "Alpha Longname", "person", "Centrepoint", "2026-04-01")
-    store.upsert_entity("ent-a", "Alpha Longname", "person", "Centrepoint", "2026-04-02")  # mentions=2
-    store.upsert_entity("ent-b", "Beta", "person", "Centrepoint", "2026-04-01")
+    store.upsert_entity("ent-a", "Alpha Longname", "person", "Acme", "2026-04-01")
+    store.upsert_entity("ent-a", "Alpha Longname", "person", "Acme", "2026-04-02")  # mentions=2
+    store.upsert_entity("ent-b", "Beta", "person", "Acme", "2026-04-01")
     _seed_chunk(store, "d-a", "t-a")
     _seed_chunk(store, "d-b", "t-b")
     ans = {"pair_id": _pair_id("ent-a", "ent-b"), "same": True, "canonical": "Alpha Longname"}

@@ -58,7 +58,7 @@ def test_index_pending_prepends_contextual_prefix(tmp_path):
         "sender": "finance@example.com",
         "date": "2026-03-01",
         "subject": "Q1 Budget",
-        "org": "Centrepoint",
+        "org": "Acme",
     }
     s.upsert_chunk("d2", chunk_text, "h2", meta)
 
@@ -77,10 +77,10 @@ def test_index_pending_prefix_gmail_contains_sender(tmp_path):
     s.init()
     meta = {
         "source_type": "gmail",
-        "sender": "alice@centrepoint.church",
+        "sender": "alice@example.org",
         "date": "2026-04-15",
         "subject": "Staff Update",
-        "org": "Centrepoint",
+        "org": "Acme",
     }
     s.upsert_chunk("d3", "staff meeting notes", "h3", meta)
 
@@ -88,4 +88,4 @@ def test_index_pending_prefix_gmail_contains_sender(tmp_path):
     index_pending(s, emb)
 
     passage = emb.captured_texts[0]
-    assert "alice@centrepoint.church" in passage
+    assert "alice@example.org" in passage

@@ -78,7 +78,7 @@ def test_validate_accepts_unconfigured_org_string():
 def test_validate_rejects_action_without_description():
     from mcpbrain.contract import validate_extraction
     d = _load("thread_simple")
-    d["actions"] = [{"owner_name": "Josh Kemp", "description": ""}]
+    d["actions"] = [{"owner_name": "Sam Chen", "description": ""}]
     problems = validate_extraction(d)
     assert any("description" in p for p in problems)
 

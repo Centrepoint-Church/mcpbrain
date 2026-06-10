@@ -1,4 +1,4 @@
-"""Owner identity helpers default to empty (neutral), never Josh."""
+"""Owner identity helpers default to empty (neutral), never the owner."""
 import json
 from pathlib import Path
 

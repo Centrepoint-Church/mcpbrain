@@ -158,8 +158,8 @@ def test_normalise_includes_key_fields(tmp_path):
         location="Novotel Perth Langley",
         description="Annual strategy review day.",
         attendees=[
-            {"displayName": "Marcus Reyes", "email": "marcus@centrepoint.church"},
-            {"email": "dana@centrepoint.church"},
+            {"displayName": "Marcus Reyes", "email": "marcus@example.org"},
+            {"email": "dana@example.org"},
         ],
     )
 

@@ -73,12 +73,12 @@ def test_seed_entities_and_relations(tmp_path):
     db.execute(
         "INSERT INTO entities(id,name,type,org,email_addr,aliases,first_seen,"
         "last_seen,email_count,notes,degree) VALUES "
-        "('marcus-reyes','Marcus Reyes','person','Centrepoint',"
+        "('marcus-reyes','Marcus Reyes','person','Acme',"
         "'marcus@cp.church','Taz','2025-01-01','2025-06-01',12,'exec',5)")
     db.execute(
         "INSERT INTO entities(id,name,type,org,email_addr,aliases,first_seen,"
         "last_seen,email_count,notes,degree) VALUES "
-        "('dana-okafor','Dana Okafor','person','Centrepoint',"
+        "('dana-okafor','Dana Okafor','person','Acme',"
         "'dana@cp.church','','2025-02-01','2025-05-01',8,'',3)")
     db.execute(
         "INSERT INTO entity_relations(entity_a,relation,entity_b,valid_from,"
@@ -93,7 +93,7 @@ def test_seed_entities_and_relations(tmp_path):
 
     ents = {e["id"]: e for e in store.list_entities()}
     assert set(ents) == {"marcus-reyes", "dana-okafor"}
-    assert ents["marcus-reyes"]["org"] == "Centrepoint"
+    assert ents["marcus-reyes"]["org"] == "Acme"
     assert ents["marcus-reyes"]["degree"] == 5
     assert ents["marcus-reyes"]["email_count"] == 12
     assert ents["marcus-reyes"]["aliases"] == "Taz"
@@ -217,7 +217,7 @@ def test_seed_projects_and_areas(tmp_path):
         "archived_at,area_id,owner_entity_id) VALUES "
         "('proj-cams','CAMS Review','ACC','in flight','active','2025-01-01',"
         "NULL,'area-ops','marcus-reyes'),"
-        "('proj-done','Old Project','Centrepoint','wrapped','done','2024-01-01',"
+        "('proj-done','Old Project','Acme','wrapped','done','2024-01-01',"
         "'2024-12-01','area-ops',NULL)")
     db.commit()
     db.close()

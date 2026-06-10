@@ -49,14 +49,14 @@ def test_promotion_finding_carries_org(tmp_path):
     s.upsert_chunk(doc_id="note-org", text="Prefers tables\n\nbody",
                    content_hash="note-org",
                    metadata={"source": "note", "title": "Prefers tables",
-                             "observation_type": "memory", "org": "Centrepoint",
+                             "observation_type": "memory", "org": "Acme",
                              "captured_at": "2026-06-01T00:00:00Z"})
     memory_distil.drain_distil(s, {"memory_distil": [
         {"doc_id": "note-org", "verdict": "promote",
          "reason": "stated 4 times", "target_hint": "preferences.md"},
     ]})
     finds = s.open_findings("memory_promotion")
-    assert finds and finds[0]["org"] == "Centrepoint"
+    assert finds and finds[0]["org"] == "Acme"
 
 
 def test_unknown_doc_or_verdict_skipped(tmp_path):

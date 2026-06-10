@@ -25,7 +25,7 @@ def _insert_project(store, project_id, name="Test", status="active", archived_at
         )
 
 
-def _insert_action(store, project_id=None, area_id=None, status="open", owner="Josh"):
+def _insert_action(store, project_id=None, area_id=None, status="open", owner="Sam"):
     with store._connect() as db:
         db.execute(
             "INSERT INTO actions(text, project_id, area_id, status, owner) VALUES (?,?,?,?,?)",
@@ -39,7 +39,7 @@ def _insert_area(store, area_id, name="Test Area", review_cadence="weekly",
         db.execute(
             "INSERT OR REPLACE INTO areas(id, org_id, name, review_cadence, last_reviewed_at, active) "
             "VALUES (?,?,?,?,?,?)",
-            (area_id, "Centrepoint", name, review_cadence, last_reviewed_at, active),
+            (area_id, "Acme", name, review_cadence, last_reviewed_at, active),
         )
 
 

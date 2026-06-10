@@ -1,4 +1,4 @@
-"""import_baseline creates actions owned by the configured owner, not 'Joshua'."""
+"""import_baseline creates actions owned by the configured owner, not the configured owner."""
 import json
 
 from mcpbrain.store import Store

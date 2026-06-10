@@ -64,8 +64,8 @@ class TestClickupUserId:
 
     def test_returns_int_when_present(self, tmp_path):
         from mcpbrain.config import clickup_user_id
-        home = _write_config(tmp_path, {"clickup_user_id": 72748441})
-        assert clickup_user_id(home) == 72748441
+        home = _write_config(tmp_path, {"clickup_user_id": 12345678})
+        assert clickup_user_id(home) == 12345678
 
     def test_parses_numeric_string(self, tmp_path):
         from mcpbrain.config import clickup_user_id

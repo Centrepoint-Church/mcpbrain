@@ -12,7 +12,7 @@ def test_prefix_gmail_contains_sender_and_subject():
         "sender": "alice@example.com",
         "date": "2026-03-15T09:00:00Z",
         "subject": "Budget Review Q1",
-        "org": "Centrepoint",
+        "org": "Acme",
     }
     result = contextual_prefix(meta)
     assert result.startswith("[Context:")
@@ -27,10 +27,10 @@ def test_prefix_gmail_includes_org_when_not_unknown():
         "sender": "bob@example.com",
         "date": "2026-01-01",
         "subject": "Hello",
-        "org": "Centrepoint",
+        "org": "Acme",
     }
     result = contextual_prefix(meta)
-    assert "(Centrepoint)" in result
+    assert "(Acme)" in result
 
 
 def test_prefix_gmail_omits_org_when_unknown():

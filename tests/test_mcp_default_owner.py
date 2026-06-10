@@ -1,4 +1,4 @@
-"""brain_decision's owner default reads config, not 'Josh'."""
+"""brain_decision's owner default reads config, not the configured owner."""
 import json
 
 
