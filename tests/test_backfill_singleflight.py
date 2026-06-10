@@ -35,3 +35,60 @@ def test_run_one_skips_while_backfill_active(tmp_path, monkeypatch):
     d = _daemon(tmp_path, monkeypatch)
     d._backfill_active.set()
     assert d.run_one() is None
+
+
+def test_periodic_passes_skip_while_backfill_active(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    # Wire communities so it would run when not blocked (interval=0 means always due).
+    d._communities_interval_s = 0.0
+    d._last_communities = None
+
+    called = {"n": 0}
+    monkeypatch.setattr(d, "maybe_communities", lambda: called.__setitem__("n", called["n"] + 1))
+
+    # Backfill active — should early-return; communities NOT called.
+    d._backfill_active.set()
+    d._run_periodic_passes()
+    assert called["n"] == 0
+
+    # Backfill cleared — communities should now be called.
+    d._backfill_active.clear()
+    d._run_periodic_passes()
+    assert called["n"] == 1
+
+
+def test_maybe_resolve_and_backup_skip_while_backfill_active(tmp_path, monkeypatch):
+    """Guards must fire BEFORE the real cadence checks, not rely on them."""
+    d = _daemon(tmp_path, monkeypatch)
+    # Force resolve and backup to be due so the ONLY thing stopping them is the
+    # backfill guard.
+    d._resolve_interval_s = 1.0
+    d._last_resolve = None   # first call is always due
+
+    import mcpbrain.backup as _backup_mod
+    from mcpbrain.daemon import BackupConfig
+    d._backup = BackupConfig(
+        key=b"k" * 32,
+        drive_service=object(),
+        shared_drive_id="sid",
+        user_id="uid",
+        out_path=tmp_path / "snap.enc",
+    )
+    d._backup_interval_s = 1.0
+    d._last_backup = None    # first call is always due
+
+    inner_called = {"resolve": 0, "backup": 0}
+    monkeypatch.setattr(
+        "mcpbrain.resolve.resolve_entities",
+        lambda *a, **kw: inner_called.__setitem__("resolve", inner_called["resolve"] + 1) or {},
+    )
+    monkeypatch.setattr(
+        _backup_mod, "make_encrypted_snapshot",
+        lambda *a, **kw: inner_called.__setitem__("backup", inner_called["backup"] + 1) or (tmp_path / "snap.enc"),
+    )
+
+    # With backfill active: both should return None without doing any work.
+    d._backfill_active.set()
+    assert d.maybe_resolve() is None
+    assert d.maybe_backup() is None
+    assert inner_called == {"resolve": 0, "backup": 0}
