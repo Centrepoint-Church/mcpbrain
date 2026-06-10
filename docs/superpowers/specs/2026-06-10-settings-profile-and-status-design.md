@@ -5,7 +5,7 @@
 
 ## Problem
 
-Five gaps in the post-install experience, all in the daemon control API + wizard:
+Six gaps in the post-install experience, all in the daemon control API + wizard:
 
 1. **No pre-fill.** The setup form (`mcpbrain/wizard/index.html`) can only *write*
    config (POST `/api/config`); it never reads saved values back. Every revisit
@@ -27,9 +27,15 @@ Five gaps in the post-install experience, all in the daemon control API + wizard
 
 5. **No hand-holding for a non-technical user.** The wizard has bare fields and no
    guidance: someone with zero context doesn't know how to get a ClickUp token,
-   find a List ID, set up the two Cowork projects (system vs daily-work), or attach
-   the schedule to a project. Setup must walk through *every* element with
-   real, anchored instructions + screenshots, and pre-create what it safely can.
+   find a List ID, set up the two Cowork projects (system vs daily-work), attach
+   the schedule to a project, or turn on cross-session memory. Setup must walk
+   through *every* element with real, anchored instructions + screenshots, assume
+   nothing, and pre-create/configure everything it safely can.
+
+6. **No cross-session memory by default.** Claude Code-style "remember across
+   sessions" relies on SessionStart/SessionEnd hooks (the joshbrain determinism
+   layer). A fresh install has none, so Cowork forgets between sessions. The product
+   should install these hooks (cross-platform) as a guided, one-click step.
 
 ## Research findings (Cowork constraints)
 
@@ -99,10 +105,9 @@ and `~/joshbrain/cowork/context-project.md`. Key inherited facts:
 - `~/.mcpbrain` (the home) is the runtime (index, daemon, `enrich_queue/`,
   `enrich_inbox/`) and is the **enrichment project's** working folder.
 - Determinism order from that design — **hooks > MCP tools > instructions** — is
-  why writes route through tools, not instructed file edits. A SessionStart
-  priming hook + SessionEnd capture hook are part of that blueprint; shipping them
-  in the product is noted as a **follow-up option** (see Out of scope), not in this
-  spec's core.
+  why writes route through tools, not instructed file edits, and why the
+  SessionStart priming + SessionEnd capture hooks are **in scope** here (shipped as
+  cross-platform `mcpbrain` subcommands, installed into `~/.claude/settings.json`).
 - Today `records.ensure_records_repo` stamps only the writer anchors
   (`state/decisions.md`, `state/hot.md`, `MEMORY.md`, `context/voice.md`,
   `memory/`). It does **not** stamp a `CLAUDE.md` or identity/preferences/reference
@@ -111,9 +116,10 @@ and `~/joshbrain/cowork/context-project.md`. Key inherited facts:
 ## Architecture
 
 All work is in existing layers (`probes.py`, `daemon.py`, `control_api.py`,
-`records.py`, `wizard/index.html`) plus two small new modules (`timezones.py`,
-`cowork_tasks.py`) and package data (`cowork/enrichment.md`, `records_templates/`,
-`wizard/img/`). No new third-party dependencies (`zoneinfo` is stdlib).
+`records.py`, `cli.py`, `wizard/index.html`) plus three small new modules
+(`timezones.py`, `cowork_tasks.py`, `hooks.py`) and package data
+(`cowork/enrichment.md`, `records_templates/`, `wizard/img/`). No new third-party
+dependencies (`zoneinfo` is stdlib).
 
 ### New / changed backend
 
@@ -189,14 +195,20 @@ daemon writes it to the Cowork SKILL.md. Front-matter (`name: mcpbrain-enrichmen
 enrich the records-repo scaffold so the working Cowork project has real instructions**
 - New package-data templates under `mcpbrain/records_templates/`, modelled on
   `~/joshbrain` (genericised, no Josh content):
-  - `CLAUDE.md` — project instructions: `@context/identity.md` / `@context/voice.md`
-    / `@context/preferences.md` imports; an org-tagging block built from the user's
-    configured `orgs`; role-attribution rules; the **Memory Protocol** (read tools:
-    `brain_search`, `brain_read`, `brain_context`, `brain_actions`, …); the
+  - `CLAUDE.md` — a **full** project-instructions file mirroring `~/joshbrain/CLAUDE.md`
+    section-for-section (genericised, not a lean starter): `@context/identity.md` /
+    `@context/voice.md` / `@context/preferences.md` imports; a gardener-protected
+    identity block; an **org-tagging** block built from the user's configured `orgs`;
+    **role-attribution** rules; the **Memory Protocol** (read tools: `brain_search`,
+    `brain_read`, `brain_context`, `brain_actions`, `brain_graph`, `brain_proactive`,
+    `brain_draft_reply`/`brain_draft_refine` + the load-on-demand order); the
     **"Where Things Go"** write-routing table (`brain_decision` / `brain_note` /
     `brain_memory_write` / `brain_ingest`, all QUEUED, daemon-owned — do not
-    hand-edit those files); proactive behaviours; platform notes (records repo =
-    working tree, `~/.mcpbrain` = runtime).
+    hand-edit those files); output-file convention; quality standard; planning &
+    retirement-check rules; proactive behaviours; session-capture rules;
+    self-evolution protocol; platform notes (records repo = working tree,
+    `~/.mcpbrain` = runtime; the three surfaces). The user's name/role/orgs are
+    interpolated; org-specific examples become the configured org names.
   - `context/identity.md` — name/role/orgs interpolated from config; the rest left
     as guided placeholders for the user to fill.
   - `context/preferences.md`, `reference/systems.md`, `reference/projects.md` —
@@ -213,6 +225,31 @@ enrich the records-repo scaffold so the working Cowork project has real instruct
   materialises/refreshes the working-project scaffold. Degrades silently on error.
 - `records_status(home) -> dict` — `{present: bool, has_claude_md: bool,
   path: str}` for the status card; read-only, degrades to `present=False`.
+
+**`mcpbrain/hooks.py` (new) + two CLI subcommands — the determinism layer**
+Replaces Josh's bash hooks with cross-platform `mcpbrain` subcommands the hooks
+invoke directly (mcpbrain is on PATH on macOS/Windows/Linux; shell scripts are not
+portable):
+- `mcpbrain session-start` — prints priming context to stdout: the recent
+  `state/hot.md` continuity lines from `records_dir` + open actions (read
+  `control_port`/`control_token`, GET `/api/dashboard/today`). Bounded (≤8 lines
+  each), never hard-fails — a missing repo/daemon prints a short "(unavailable)"
+  note. This is the Python port of `session_prime.sh`.
+- `mcpbrain session-end` — reads the Claude Code hook JSON from **stdin**, parses
+  the transcript at `transcript_path`, and writes a session-summary capture to the
+  spool (reusing `capture.write_capture`, same envelope as `/api/session/ingest`).
+  Skips trivial/headless single-shot runs so the brain isn't flooded. Python port
+  of `session_extract.sh`; stdin is read as a stream, never shell-interpolated.
+- `hooks.py`: `install_session_hooks() -> Path` merges `SessionStart` +
+  `SessionEnd` `command` hooks (calling `mcpbrain session-start` / `session-end`)
+  into `~/.claude/settings.json` (honouring `CLAUDE_CONFIG_DIR`). Idempotent + merge-
+  safe: preserves any existing hooks/keys, refuses to clobber a malformed file
+  (same atomic-write + 0600 pattern as `wizard.register`), and does not duplicate
+  an already-present mcpbrain hook entry. `hooks_status() -> dict`
+  (`{installed: bool}`) for the status card; `uninstall_session_hooks()` for symmetry.
+- These hooks are **user-scope** (`~/.claude/settings.json`), so they fire in every
+  Claude Code AND Cowork session (interactive + scheduled) — exactly the
+  determinism the joshbrain architecture relies on.
 
 **`mcpbrain/wizard/img/` (new package data) + static route** — onboarding
 screenshots shipped with the package. `control_api.do_GET` serves
@@ -244,9 +281,13 @@ required — generic product art, no secrets). Missing file → 404, never raise
 
 #### Guided onboarding (the "walk them through every element" change)
 
-Each wizard step gets a short, always-visible plain-language explanation of *what
-it is and why*, plus a **"Show me how" expander** revealing a screenshot + numbered
-steps + Copy buttons. Written for someone with zero prior context. Steps:
+**Nothing is assumed.** Every element needed for a fully working install is an
+explicit, walked-through step — no "you probably already…" gaps. Each wizard step
+gets a short, always-visible plain-language explanation of *what it is and why*,
+plus a **"Show me how" expander** revealing a screenshot + numbered steps + Copy
+buttons. Written for someone with zero prior context. A persistent checklist down
+the side shows which steps are done (driven by the live connection states) so the
+user always knows what's left. Steps:
 
 1. **Connect Google** — what read-only access means; screenshot of the
    "Google hasn't verified this app → Advanced → Continue" consent screen so the
@@ -276,10 +317,18 @@ steps + Copy buttons. Written for someone with zero prior context. Steps:
      (→ `records.scaffold_records`), which creates + stamps the records repo
      (`CLAUDE.md`, context/, reference/) so it's ready before the user points Cowork
      at it. Status card shows records-repo-ready + enrichment-skill-installed.
-6. **Status** — the configured home (already covered).
+6. **Memory hooks** — a new step. Explains in plain language that this makes Claude
+   *remember across sessions automatically* (prime each session with recent context,
+   capture each session at the end), the same mechanism Claude Code uses. A
+   **"Turn on memory hooks"** button calls `POST /api/hooks/install`
+   (→ `hooks.install_session_hooks`) and the status card flips to "On". Explains it
+   edits `~/.claude/settings.json` (preserving anything already there) and applies to
+   both Claude Code and Cowork.
+7. **Status** — the configured home (already covered).
 
 New control routes: `POST /api/records/scaffold` → `scaffold_records()`;
-`records_status` + `probe_enrichment` are merged into `/api/status` (read-only, cheap).
+`POST /api/hooks/install` → `install_session_hooks()`; `records_status`,
+`probe_enrichment`, and `hooks_status` are merged into `/api/status` (read-only, cheap).
 
 ## Data flow
 
@@ -292,7 +341,11 @@ Save ─► POST /api/config {non-blank fields} ─► write_config (merge)
                                             ├─► cowork_tasks.write_enrichment_skill() [best-effort]
                                             └─► records.scaffold_records(profile) [best-effort]
 
-status poll ─► probes.all_connections ─► {google, claude(+registration), clickup, backup, records, enrichment}
+status poll ─► probes.all_connections + records_status + hooks_status
+            ─► {google, claude(+registration), clickup, backup, records, enrichment, memory-hooks}
+
+SessionStart hook ─► `mcpbrain session-start` ─► prints hot.md + open actions into context
+SessionEnd   hook ─► `mcpbrain session-end` (stdin transcript) ─► capture spool ─► daemon drain
 ```
 
 ## Error handling
@@ -302,6 +355,10 @@ status poll ─► probes.all_connections ─► {google, claude(+registration),
   state or a no-op, consistent with the existing probe contract.
 - `GET /api/config` never includes the ClickUp secret (bool only).
 - `zoneinfo` lookups are wrapped; an unknown curated zone is skipped, not fatal.
+- Hook install refuses a malformed `~/.claude/settings.json` (raises a clear error
+  surfaced to the wizard) rather than overwriting it; the `session-start`/
+  `session-end` subcommands never hard-fail a session (bounded output / silent skip
+  on error) so a broken hook can't block Claude Code or Cowork from starting.
 
 ## Testing
 
@@ -325,9 +382,16 @@ status poll ─► probes.all_connections ─► {google, claude(+registration),
   **never clobbers** a user-edited `CLAUDE.md`/`identity.md`; org-tagging block built
   from configured `orgs`; `scaffold_records` degrades silently when `records_dir`
   unresolved; `records_status` read-only.
+- `tests/test_hooks.py` — `install_session_hooks` writes both hooks, is idempotent
+  (no duplicate entry on re-run), preserves existing hooks/keys, refuses a malformed
+  settings file, 0600; `hooks_status`; `uninstall_session_hooks` removes only ours.
+- `tests/test_session_hooks.py` — `mcpbrain session-start` prints bounded
+  continuity + actions and degrades when repo/daemon absent; `mcpbrain session-end`
+  parses a sample transcript JSON on stdin into a capture envelope and skips a
+  trivial/headless run.
 - `tests/test_control_api.py` — `POST /api/records/scaffold` returns stamped paths;
-  `GET /img/<name>` serves a shipped PNG and 404s an unknown/sneaky name (path
-  traversal rejected).
+  `POST /api/hooks/install` returns installed; `GET /img/<name>` serves a shipped PNG
+  and 404s an unknown/sneaky name (path traversal rejected).
 
 ## Screenshot capture plan (maintainer action)
 
@@ -367,10 +431,6 @@ is hidden via `onerror`), so the feature ships before the art is captured.
 - Programmatic **Cowork project registration** (writing `spaces.json`). We enrich
   the records-repo scaffold and point the user at the right folders; they register
   each space in-app.
-- **SessionStart priming + SessionEnd capture hooks** (the determinism layer from
-  the joshbrain memory-architecture design). Strengthens Claude-Code-parity but
-  means installing user-scope `~/.claude/settings.json` hooks — sensitive enough to
-  be its own opt-in feature. Flagged as a follow-up, not built here.
 - Capturing the screenshots themselves (maintainer action — see plan above). The
   feature ships text-only until the PNGs land.
 - Windows live validation of the Cowork/ClickUp paths (no Windows machine;
