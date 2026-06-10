@@ -145,6 +145,13 @@ def main(argv=None) -> int:
 
     _install_tray_best_effort(home)
 
+    try:
+        from mcpbrain import agents
+        agents.install_cadences(_platform(), mcpbrain_bin=_mcpbrain_bin(), home=home)
+        print("Records cadences scheduled (prune daily, health weekly).")
+    except Exception as exc:  # noqa: BLE001 — optional; never block onboarding
+        print(f"Skipped scheduling records cadences ({exc}).", file=sys.stderr)
+
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
     webbrowser.open(url)
