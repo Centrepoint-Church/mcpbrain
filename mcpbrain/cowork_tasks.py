@@ -42,11 +42,16 @@ def scheduled_dir() -> Path | None:
 
 
 def _skill_body() -> str:
-    return (Path(__file__).parent / "cowork" / "enrichment.md").read_text()
+    return (Path(__file__).parent / "cowork" / "enrichment.md").read_text(encoding="utf-8")
 
 
 def write_enrichment_skill(home: str) -> Path | None:
-    """Write <scheduled_dir>/mcpbrain-enrichment/SKILL.md. Returns path or None."""
+    """Write <scheduled_dir>/mcpbrain-enrichment/SKILL.md. Returns path or None.
+
+    `home` is accepted for interface consistency with the other writers but is
+    unused — the Cowork scheduled-tasks directory is always resolved from the OS
+    home (Path.home()), not from the mcpbrain app dir.
+    """
     d = scheduled_dir()
     if d is None:
         return None
@@ -55,7 +60,7 @@ def write_enrichment_skill(home: str) -> Path | None:
         task_dir.mkdir(parents=True, exist_ok=True)
         front = f"---\nname: {ENRICHMENT_TASK}\ndescription: {_DESCRIPTION}\n---\n\n"
         out = task_dir / "SKILL.md"
-        out.write_text(front + _skill_body())
+        out.write_text(front + _skill_body(), encoding="utf-8")
         return out
     except OSError as exc:
         log.debug("write_enrichment_skill degraded: %s", exc)

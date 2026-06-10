@@ -13,6 +13,7 @@ def test_scheduled_dir_prefers_documents_claude(tmp_path, monkeypatch):
 
 
 def test_scheduled_dir_none_when_no_parent(tmp_path, monkeypatch):
+    assert not (tmp_path / ".claude").exists()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))  # nothing exists
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     assert cowork_tasks.scheduled_dir() is None
