@@ -796,6 +796,8 @@ class Daemon:
         rather than propagating. _last_backup advances only on a clean run, so a
         failed attempt retries on the next due tick.
         """
+        if self._backfill_active.is_set():
+            return None  # single-writer: yield to the backfill
         # Snapshot the (backup, interval) pair atomically under the lock so a
         # concurrent apply_config can't hand us a new config with the old
         # interval. Use the locals for the rest of the method.
@@ -924,6 +926,8 @@ class Daemon:
         small resolve_interval_s therefore drives frequent LLM calls — pick an
         interval well above the sync interval (resolution is cheap to defer).
         """
+        if self._backfill_active.is_set():
+            return None  # single-writer: yield to the backfill
         if not self._resolve_due():
             return None
 
@@ -1368,6 +1372,8 @@ class Daemon:
         run.  All graph-writers are gated on is_configured so they never write
         blank/empty attribution into the graph on an unconfigured install.
         """
+        if self._backfill_active.is_set():
+            return  # single-writer: yield the whole cycle to the backfill
         configured = config.is_configured(str(app_dir()))
 
         # Always run (independent of identity): updates + connection verification.
