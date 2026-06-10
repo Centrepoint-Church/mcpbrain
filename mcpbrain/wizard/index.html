@@ -578,17 +578,20 @@ function renderStatus(j){
     $("e-inbox").textContent = (j.spool.inbox != null) ? j.spool.inbox : "—";
   }
 }
+function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
   const order = ["google","claude","clickup","backup","records"];
   const cards = order.filter(k => conns[k]).map(k => {
     const c = conns[k];
+    const detail = c.detail ? ` — ${esc(c.detail)}` : "";
     const fix = (k === "google" && c.state === "needs_action")
       ? ' <button onclick="reconnectGoogle()">Reconnect</button>' : "";
-    return `<div class="conn ${c.state}" style="margin:4px 0;padding:6px 10px;border:1px solid #e6e8ec;border-radius:8px"><b>${k}</b>: ${c.state}${c.detail ? " — " + c.detail : ""}${fix}</div>`;
+    const state = esc(c.state);
+    return `<div class="conn ${state}" style="margin:4px 0;padding:6px 10px;border:1px solid #e6e8ec;border-radius:8px"><b>${esc(k)}</b>: ${state}${detail}${fix}</div>`;
   }).join("");
   $("conn-cards").innerHTML = cards;
   const banners = order.filter(k => conns[k] && conns[k].state === "needs_action")
-    .map(k => `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:8px 12px;margin:4px 0">${conns[k].detail||k}` +
+    .map(k => `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:8px 12px;margin:4px 0">${esc(conns[k].detail||k)}` +
               (k==="google"?' <button onclick="reconnectGoogle()">Reconnect</button>':"") + `</div>`).join("");
   $("self-heal-banners").innerHTML = banners;
 }
