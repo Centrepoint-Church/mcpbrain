@@ -672,13 +672,14 @@ history enriches first). Plan 5 adds `mcpbrain.__version__`; Plan 6 surfaces it 
 `connections` block is the single source the menu bar + status center render from;
 reconnect reuses `POST /api/auth/start` (no new route).
 
-### §1.6c — gardener + meeting-packs cross-platform (planned: Plan 8)
+### §1.6c — gardener + meeting-packs cross-platform ✅ (Plan 8 complete)
 
 The remaining two cadences shell to `claude` headless against cowork prompt files.
-**Plan 8** ships those prompts as genericized package data (`mcpbrain/cowork/*.md`),
-ports the shell wrappers into `mcpbrain records-gardener` / `mcpbrain meeting-packs`
-subcommands (a `mcpbrain/cowork.py` headless-claude runner reusing `draft._find_claude`),
-and adds systemd/schtasks schedulers + the `install_cadences` path. Safety note: the
-gardener runs `claude --dangerously-skip-permissions` with `Bash,Read,Edit,Write` in
-the records repo on a schedule — documented in the trust section (same model the
-maintainer already runs).
+**Plan 8** shipped those prompts as genericized package data (`mcpbrain/cowork/*.md`),
+ported the shell wrappers into `mcpbrain records-gardener` / `mcpbrain meeting-packs`
+subcommands (runner in `mcpbrain/cowork/__init__.py` reusing `draft._find_claude`),
+and added systemd/schtasks schedulers + the full `install_cadences` dispatcher. Safety
+note: the gardener runs `claude --dangerously-skip-permissions` with
+`Bash,Read,Edit,Write` scoped to the records repo — a deliberate trust grant the user
+accepts at install time, equivalent to the maintainer running the same session manually.
+This is documented in the README's trust section so the user can make an informed choice.
