@@ -63,10 +63,31 @@ class TrayController:
         """Return the number of open findings from the last status snapshot."""
         return int(self._last.get("open_findings") or 0) if self._last else 0
 
+    def attention(self) -> list[dict]:
+        """Connections that need the user to act, as [{connection, detail}]."""
+        if not self._last:
+            return []
+        conns = self._last.get("connections") or {}
+        return [{"connection": name, "detail": c.get("detail", "")}
+                for name, c in conns.items() if c.get("state") == "needs_action"]
+
+    def icon_state(self) -> str:
+        """One of: unavailable | paused | attention | running."""
+        if not self._available or self._last is None:
+            return "unavailable"
+        if self.attention():
+            return "attention"
+        if self._last.get("paused"):
+            return "paused"
+        return "running"
+
     def status_text(self) -> str:
         """Short, user-facing status line."""
         if not self._available or self._last is None:
             return "Daemon not running"
+        att = self.attention()
+        if att:
+            return f"Needs attention: {att[0]['detail']}"
         if self._last.get("paused"):
             return "Paused"
         count = self._last.get("chunk_count")
@@ -106,29 +127,32 @@ class TrayController:
         """Close the tray icon. Does NOT stop the daemon (login agent owns it)."""
         self._quit = True
 
+    def on_reconnect_google(self) -> None:
+        try:
+            self._client.reconnect_google()
+        except DaemonUnavailable:
+            pass
+
     # -- menu description (no pystray types) ----------------------------------
 
     def menu_items(self) -> list[tuple[str, object, bool]]:
-        """Return a plain (label, handler, enabled) description of the menu.
-
-        Shape:
-          - status line        disabled label showing status_text()
-          - Pause / Resume      toggles on cached paused state; enabled only
-                                when the daemon is reachable
-          - Open setup…         always enabled (opens the local page)
-          - Quit                always enabled (closes the icon only)
-        """
+        """Return a plain (label, handler, enabled) description of the menu."""
         if self.is_paused():
             toggle = ("Resume", self.on_resume, self._available)
         else:
             toggle = ("Pause", self.on_pause, self._available)
-        return [
+        items = [
             (self.status_text(), None, False),
             ("Open Dashboard", self.on_open_dashboard, True),
             toggle,
-            ("Open setup…", self.on_open_setup, True),
-            ("Quit", self.on_quit, True),
         ]
+        if any(a["connection"] == "google" for a in self.attention()):
+            items.append(("Reconnect Google", self.on_reconnect_google, self._available))
+        items.append(("Open setup…", self.on_open_setup, True))
+        ver = (self._last or {}).get("version")
+        items.append((f"Up to date · v{ver}" if ver else "mcpbrain", None, False))
+        items.append(("Quit", self.on_quit, True))
+        return items
 
 
 # ---------------------------------------------------------------------------

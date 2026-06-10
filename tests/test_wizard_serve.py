@@ -16,6 +16,16 @@ def test_root_serves_wizard_with_token(tmp_path):
         for a in ("step-google","step-enrich","step-register","step-status"): assert a in html
     finally: srv.stop()
 
+def test_home_has_status_center_elements(tmp_path):
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
+        for el in ("home-status", "conn-cards", "backfill-progress",
+                   "enrich-history-btn", "self-heal-banners", "privacy-note"):
+            assert f'id="{el}"' in html, f"missing #{el}"
+    finally: srv.stop()
+
+
 def test_root_500s_when_template_missing(tmp_path, monkeypatch):
     # Simulate a packaging error where wizard/index.html is absent, without
     # touching the real file. Path.exists is patched to False only for this test.

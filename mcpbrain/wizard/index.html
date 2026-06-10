@@ -408,6 +408,20 @@ the owner's writing about them. Empty corrections means the record is fine:
   <footer>mcpbrain runs locally. The only things that leave this machine are an encrypted backup, if you enable it, and the queries you send Claude.</footer>
 </main>
 
+<section id="home-status" class="hidden" style="max-width:660px;margin:0 auto;padding:48px 20px 64px">
+  <div id="self-heal-banners"></div>
+  <h2>mcpbrain <span id="hs-version"></span></h2>
+  <div id="hs-health"></div>
+  <div id="conn-cards" style="margin:16px 0"></div>
+  <div id="backfill-progress" style="margin:16px 0;color:#6b7280;font-size:14px"></div>
+  <div style="margin:16px 0">
+    <button id="enrich-history-btn">Enrich history with Claude Code</button>
+    <span id="enrich-note" style="color:#6b7280;font-size:13px;margin-left:8px">Uses your local Claude Code; may take a while.</span>
+    <span id="enrich-state" style="margin-left:8px;font-size:13px"></span>
+  </div>
+  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. Backup is off unless you enable it.</p>
+</section>
+
 <script>
 const T = "__MCPBRAIN_TOKEN__";
 const H = {headers:{Authorization:"Bearer " + T}};
@@ -564,9 +578,53 @@ function renderStatus(j){
     $("e-inbox").textContent = (j.spool.inbox != null) ? j.spool.inbox : "—";
   }
 }
+function renderConnections(conns){
+  const order = ["google","claude","clickup","backup","records"];
+  const cards = order.filter(k => conns[k]).map(k => {
+    const c = conns[k];
+    const fix = (k === "google" && c.state === "needs_action")
+      ? ' <button onclick="reconnectGoogle()">Reconnect</button>' : "";
+    return `<div class="conn ${c.state}" style="margin:4px 0;padding:6px 10px;border:1px solid #e6e8ec;border-radius:8px"><b>${k}</b>: ${c.state}${c.detail ? " — " + c.detail : ""}${fix}</div>`;
+  }).join("");
+  $("conn-cards").innerHTML = cards;
+  const banners = order.filter(k => conns[k] && conns[k].state === "needs_action")
+    .map(k => `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:8px 12px;margin:4px 0">${conns[k].detail||k}` +
+              (k==="google"?' <button onclick="reconnectGoogle()">Reconnect</button>':"") + `</div>`).join("");
+  $("self-heal-banners").innerHTML = banners;
+}
+
+function renderBackfill(bf){
+  const parts = Object.keys(bf).map(src => {
+    const s = bf[src];
+    return `${src}: ` + (s.done ? "history complete" : ("indexing… " + (s.reached || "recent")));
+  });
+  $("backfill-progress").textContent = parts.join(" · ");
+}
+
+function renderHome(j){
+  const configured = !!j.is_configured;
+  $("home-status").classList.toggle("hidden", !configured);
+  document.querySelectorAll("main").forEach(s => s.classList.toggle("hidden", configured));
+  if(!configured) return;
+  $("hs-version").textContent = j.version ? ("v" + j.version) : "";
+  $("hs-health").textContent = j.paused ? "Paused" : "Running";
+  renderConnections(j.connections || {});
+  renderBackfill(j.backfill || {});
+}
+
+async function reconnectGoogle(){ try{ await P("/api/auth/start"); }catch(e){} }
+
+$("enrich-history-btn").addEventListener("click", async () => {
+  $("enrich-state").textContent = "Starting…";
+  try{ await P("/api/enrich-backfill/start"); $("enrich-state").textContent = "Running in background…"; }
+  catch(e){ $("enrich-state").textContent = "Could not start"; }
+});
+
 async function refresh(){
   try{
-    renderStatus(await (await fetch("/api/status", H)).json());
+    const j = await (await fetch("/api/status", H)).json();
+    renderStatus(j);
+    renderHome(j);
   }catch(e){}
   setTimeout(refresh, 3000);
 }
