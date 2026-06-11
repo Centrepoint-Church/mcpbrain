@@ -567,9 +567,12 @@ function copyText(id){
 async function prepareWorkspace(){
   $("ws-state").classList.remove("hidden");
   badge("ws-state", "Preparing…", "wait");
+  // The route returns 200 with {"scaffolded":[...]} on success, [] on failure
+  // (scaffold_records swallows errors), so HTTP ok isn't enough — check the list.
   const res = await P("/api/records/scaffold").catch(() => null);
-  if(res && res.ok){ badge("ws-state", "Ready", "ok"); }
-  else { badge("ws-state", "Could not prepare", "wait"); }
+  const j = (res && res.ok) ? await res.json().catch(() => ({})) : {};
+  if(j.scaffolded && j.scaffolded.length){ badge("ws-state", "Ready", "ok"); }
+  else { badge("ws-state", "Could not prepare — check the records folder", "wait"); }
 }
 async function installHooks(){
   $("hooks-state").classList.remove("hidden");
