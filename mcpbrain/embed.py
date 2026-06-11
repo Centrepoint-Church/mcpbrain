@@ -84,7 +84,4 @@ class _LocalEmbedder:
 def get_embedder(kind: str = "bge-small"):
     if kind == "bge-small":
         return _LocalEmbedder("BAAI/bge-small-en-v1.5", 384, _BGE_Q)
-    if kind == "voyage":
-        from mcpbrain.embed_voyage import VoyageEmbedder  # opt-in Voyage embedder
-        return VoyageEmbedder()
     raise ValueError(f"unknown embedder {kind!r}")

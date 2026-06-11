@@ -27,7 +27,7 @@ def _mcpbrain_bin() -> str:
 def _mcp_config(home: str) -> str:
     return json.dumps({"mcpServers": {"ops-brain-search": {
         "command": _mcpbrain_bin(), "args": ["mcp-server"],
-        "env": {"MCPBRAIN_HOME": home, "MCPBRAIN_EMBEDDER": config.EMBEDDER}}}})
+        "env": {"MCPBRAIN_HOME": home}}}})
 
 
 def run_cowork(prompt_name: str, *, tools: str, extra_context: str,

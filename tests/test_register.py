@@ -32,7 +32,6 @@ def test_register_into_missing_file(tmp_path):
         config_path=cfg,
         mcpbrain_bin="/usr/local/bin/mcpbrain",
         mcpbrain_home=tmp_path / "home",
-        embedder="voyage",
     )
     assert out == cfg
     assert cfg.exists()
@@ -41,7 +40,7 @@ def test_register_into_missing_file(tmp_path):
     assert entry["command"] == "/usr/local/bin/mcpbrain"
     assert entry["args"] == ["mcp-server"]
     assert entry["env"]["MCPBRAIN_HOME"] == str(tmp_path / "home")
-    assert entry["env"]["MCPBRAIN_EMBEDDER"] == "voyage"
+    assert "MCPBRAIN_EMBEDDER" not in entry["env"]
 
 
 def test_register_preserves_other_server(tmp_path):
@@ -61,14 +60,12 @@ def test_register_idempotent(tmp_path):
         config_path=cfg,
         mcpbrain_bin="/usr/local/bin/mcpbrain",
         mcpbrain_home=tmp_path / "h",
-        embedder="voyage",
     )
     first = cfg.read_bytes()
     register.register_mcpbrain(
         config_path=cfg,
         mcpbrain_bin="/usr/local/bin/mcpbrain",
         mcpbrain_home=tmp_path / "h",
-        embedder="voyage",
     )
     second = cfg.read_bytes()
     assert first == second
@@ -102,15 +99,15 @@ def test_register_malformed_config_raises_no_clobber(tmp_path):
 
 
 # Repurposed from test_register_omits_env_when_no_vars: the new form ALWAYS
-# sets MCPBRAIN_HOME + MCPBRAIN_EMBEDDER.
-def test_register_always_sets_home_and_embedder_env(tmp_path):
+# sets MCPBRAIN_HOME.
+def test_register_always_sets_home_env(tmp_path):
     cfg = tmp_path / "cfg.json"
     register.register_mcpbrain(
         config_path=cfg, mcpbrain_bin="/usr/local/bin/mcpbrain", mcpbrain_home=tmp_path / "h"
     )
     entry = json.loads(cfg.read_text())["mcpServers"]["mcpbrain"]
     assert entry["env"]["MCPBRAIN_HOME"] == str(tmp_path / "h")
-    assert entry["env"]["MCPBRAIN_EMBEDDER"] == "bge-small"
+    assert "MCPBRAIN_EMBEDDER" not in entry["env"]
 
 
 # Repurposed from test_register_python_path_coerced_to_str: the bin Path arg
@@ -155,7 +152,7 @@ def test_registers_mcpbrain_console_command(tmp_path, monkeypatch):
     cfgp.write_text('{"mcpServers": {"other": {"command": "x"}}}')
     monkeypatch.setattr(reg, "claude_desktop_config_path", lambda platform=None: str(cfgp))
     monkeypatch.setattr(reg.shutil, "which", lambda n: "/usr/local/bin/mcpbrain")
-    reg.register_mcpbrain(mcpbrain_home=str(tmp_path), embedder="bge-small")
+    reg.register_mcpbrain(mcpbrain_home=str(tmp_path))
     cfg = json.loads(cfgp.read_text())
     assert cfg["mcpServers"]["other"]["command"] == "x"            # preserved
     e = cfg["mcpServers"]["mcpbrain"]

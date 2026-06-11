@@ -355,7 +355,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.embed import get_embedder
-    emb = get_embedder(config.EMBEDDER)
+    emb = get_embedder("bge-small")
     _store_path, _store_dim = config.store_path(), emb.dim
     store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
     search = make_brain_search(store, emb)
