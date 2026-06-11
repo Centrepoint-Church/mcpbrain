@@ -152,7 +152,24 @@ A 5-subsystem audit found ~2,300 lines of redundant/dead/over-built code. Fold t
 
 ### 9D. Over-engineering / structure
 - **Collapse the 13 near-identical `maybe_X` cadence methods (~580 lines) into one dispatch table (~80)** — a `CadencePass` list `_run_periodic_passes` iterates; keep thin public wrappers if tests call them directly. This also makes the backfill/pause gate consistent (today it appears at three levels).
-- **Promote user-invisible interval knobs to constants.** Keep only `sync_interval_s`, `backup_interval_s`, `clickup_interval_s` as real config (the wizard exposes none of the others anyway); the rest become module constants with sensible defaults. Removes ~7 touch-points per cadence.
+- **Every intelligence cadence ships ON by default (the fresh-install fix).** Today nothing writes a `cadences` block, so `_cadences_from_config` maps all 11 `_CADENCE_KEYS` to `None` (OFF) — a brand-new user gets sync + store + live enrichment but *none* of the periodic intelligence. Promote the knobs to **module constants with the values proven on the working machine**, applied whenever the config doesn't override them, so a fresh install is fully functional with no `config.json` editing:
+
+  | Pass | Default | Notes |
+  |---|---|---|
+  | `communities` | 24h | clustering + summaries (also §9G) |
+  | `blocks` (profile/community synth + memory distil) | 24h | |
+  | `proactive` | 24h | the Review-card findings |
+  | `waiting_on` | 24h | |
+  | `lint` | 24h | (shrunk per §9B) |
+  | `stale_reextract` | 24h | |
+  | `synthesise` | 7d | thread summaries |
+  | `audit` (profile audit) | 7d | |
+  | `verify` | 1h | network connection cache |
+  | `auto_update` | 24h | already special-cased once configured |
+
+  A `cadences` block in `config.json` still **overrides** any default (power-user escape hatch), and `0`/absent can still mean "off" for a specific pass — but the absence of the *whole* block now means "sensible defaults," not "everything off." `resolve` is deleted (§9A), not defaulted.
+- **ClickUp sync is ON whenever a key + list are configured** — no separate cadence knob. Drop `clickup_interval_s` from the user-facing config; gate the ClickUp sync pass on `config.clickup_api_key(home)` + `config.clickup_list_id(home)` being present, running at a fixed internal default (300s). Configuring ClickUp in the wizard is the single switch; nothing else to set.
+- **Net result:** the only genuinely user-exposed cadence config becomes `sync_interval_s` and the `backup` block. Everything else is a constant (overridable for power users). Removes ~7 touch-points per cadence and makes every install smart out of the box.
 - **Inline `synthesise_threads.py`** (3 fns, 1 caller each) into `prepare`/`drain`/`daemon`.
 
 ### 9E. Feature cut — projects/areas GTD (decision 8)
