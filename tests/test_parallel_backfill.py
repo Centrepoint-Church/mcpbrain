@@ -17,3 +17,18 @@ def test_helpers_are_importable():
     for name in ("extract_answer", "parse_extractor_json", "patch_extractions",
                  "atomic_write_inbox", "quarantine", "daemon_status"):
         assert hasattr(parallel_backfill, name), name
+
+
+def test_partition_splits_into_disjoint_sub_batches():
+    from mcpbrain import parallel_backfill
+    items = list(range(45))           # 45 threads
+    parts = parallel_backfill._partition(items, batch_size=20)
+    assert [len(p) for p in parts] == [20, 20, 5]
+    # disjoint + complete
+    flat = [x for p in parts for x in p]
+    assert flat == items and len(set(flat)) == 45
+
+
+def test_partition_empty_returns_empty():
+    from mcpbrain import parallel_backfill
+    assert parallel_backfill._partition([], batch_size=20) == []
