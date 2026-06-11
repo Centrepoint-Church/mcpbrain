@@ -693,8 +693,6 @@ def test_cadences_from_config_absent_keys_map_to_none(tmp_path):
 
     config.write_config(str(tmp_path), {})  # no cadences block
     result = _cadences_from_config(str(tmp_path))
-    # Enrichment is ON by default (30 min); every other absent key maps to None.
-    assert result.pop("enrich_interval_s") == 1800.0
     assert all(v is None for v in result.values())
 
 
@@ -726,7 +724,6 @@ def test_apply_config_rewires_cadences(tmp_path):
              "stale_reextract_interval_s": None,
              "auto_update_interval_s": None,
              "verify_interval_s": None,
-             "enrich_interval_s": 1800.0,
          }):
         daemon.apply_config(new_config)
 

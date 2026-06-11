@@ -334,7 +334,6 @@ class Daemon:
                  stale_reextract_interval_s: float | None = None,
                  auto_update_interval_s: float | None = None,
                  verify_interval_s: float | None = None,
-                 enrich_interval_s: float | None = 1800.0,
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
@@ -422,11 +421,6 @@ class Daemon:
         # thread so it shares the single-writer lock.
         self._clickup_interval_s: float | None = clickup_interval_s
         self._last_clickup = None
-        # Ongoing enrichment runs the headless-Claude-Code backfill loop on this
-        # cadence (default 30 min). Reuses start_enrich_backfill (single-flight);
-        # gated on is_configured + not paused in maybe_enrich. ON by default.
-        self._enrich_interval_s: float | None = enrich_interval_s
-        self._last_enrich = None
         # Periodic stale -> re-extraction trigger (Gap A) is OFF unless
         # stale_reextract_interval_s is set. Same three-shape cadence contract.
         self._stale_reextract_interval_s: float | None = stale_reextract_interval_s
@@ -677,12 +671,11 @@ class Daemon:
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
             self._verify_interval_s = cadences["verify_interval_s"]
-            self._enrich_interval_s = cadences["enrich_interval_s"]
-        # Best-effort: keep the records-repo scaffold current whenever settings are
-        # saved. Failures never fail the POST. (Enrichment runs via the daemon's
-        # maybe_enrich cadence now — no Cowork skill to materialise.)
+        # Best-effort: keep the personal skills + records-repo scaffold current
+        # whenever settings are saved. Failures never fail the POST.
         try:
-            from mcpbrain import records
+            from mcpbrain import records, skills
+            skills.write_personal_skills()
             records.scaffold_records(home)
         except Exception as exc:  # noqa: BLE001
             log.warning("apply_config materialise degraded: %s", exc)
@@ -1081,35 +1074,6 @@ class Daemon:
         self._last_clickup = now
         return summary
 
-    def maybe_enrich(self) -> None:
-        """Kick the headless-Claude-Code enrichment loop on the cadence (default 30 min).
-
-        Ongoing enrichment IS the backfill loop (prepare -> local claude -> drain),
-        reused via start_enrich_backfill (single-flight + pauses the write cycle, so
-        a manual 'Enrich history' run and this cadence never collide). Gated on
-        is_configured + not paused. Writes a heartbeat to logs/enrich.log when it
-        kicks, giving probe_enrichment a durable 'cadence is running' signal that
-        doesn't depend on the transient enrich_inbox files. OFF if interval is None.
-        """
-        if self._enrich_interval_s is None:
-            return
-        if self._last_enrich is not None and (self._clock() - self._last_enrich) < self._enrich_interval_s:
-            return
-        self._last_enrich = self._clock()
-        from mcpbrain import config as _config
-        home = str(_config.app_dir())
-        if not _config.is_configured(home) or self.is_paused():
-            return
-        try:
-            from datetime import datetime, timezone
-            logs = Path(home) / "logs"
-            logs.mkdir(parents=True, exist_ok=True)
-            with (logs / "enrich.log").open("a") as f:
-                f.write(f"[{datetime.now(timezone.utc).isoformat()}] enrich cadence tick\n")
-        except OSError:
-            pass
-        self.start_enrich_backfill()
-
     # -- periodic stale -> re-extraction trigger (Gap A) --------------------
 
     def maybe_stale_reextract(self) -> dict | None:
@@ -1492,7 +1456,6 @@ class Daemon:
             self.maybe_audit,
             self.maybe_clickup_sync,
             self.maybe_stale_reextract,
-            self.maybe_enrich,
         ):
             try:
                 pass_fn()
@@ -1700,7 +1663,6 @@ _CADENCE_KEYS = (
     "stale_reextract_interval_s",
     "auto_update_interval_s",
     "verify_interval_s",
-    "enrich_interval_s",
 )
 
 
@@ -1726,10 +1688,6 @@ def _cadences_from_config(home) -> dict:
         except (TypeError, ValueError) as exc:
             log.warning("cadences.%s invalid (%r); disabling: %s", key, raw, exc)
             result[key] = None
-    # Enrichment is ON by default: an absent key means 30 min, not OFF. (An
-    # explicit valid value is honoured; an explicit invalid value disables it.)
-    if "enrich_interval_s" not in cadences_block:
-        result["enrich_interval_s"] = 1800.0
     return result
 
 
@@ -1781,8 +1739,7 @@ def main(argv=None) -> None:
                     clickup_interval_s=cadences["clickup_interval_s"],
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
                     auto_update_interval_s=cadences["auto_update_interval_s"],
-                    verify_interval_s=cadences["verify_interval_s"],
-                    enrich_interval_s=cadences["enrich_interval_s"])  # services=None -> auto-build from token
+                    verify_interval_s=cadences["verify_interval_s"])  # services=None -> auto-build from token
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
@@ -1812,6 +1769,13 @@ def main(argv=None) -> None:
         ctrl = control_api.ControlServer(daemon, home=str(config.app_dir()), store=store)
         ctrl.start()
         log.info("control API + wizard on http://127.0.0.1:%d/", ctrl.port)
+        # Materialise the personal skills at startup so a fresh install has the
+        # mcpbrain-enrichment + mcpbrain-setup skills before the user opens Cowork.
+        try:
+            from mcpbrain import skills
+            skills.write_personal_skills()
+        except Exception as exc:  # noqa: BLE001 — best-effort, never block startup
+            log.warning("skill materialise at startup degraded: %s", exc)
         try:
             daemon.run()           # loop until Ctrl-C / stop
         finally:
