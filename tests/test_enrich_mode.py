@@ -19,11 +19,6 @@ def test_enrich_mode_spool(tmp_path):
     assert config.enrich_mode(str(tmp_path)) == "spool"
 
 
-def test_enrich_mode_gemini(tmp_path):
-    config.write_config(str(tmp_path), {"enrich_mode": "gemini"})
-    assert config.enrich_mode(str(tmp_path)) == "gemini"
-
-
 def test_enrich_mode_off(tmp_path):
     config.write_config(str(tmp_path), {"enrich_mode": "off"})
     assert config.enrich_mode(str(tmp_path)) == "off"

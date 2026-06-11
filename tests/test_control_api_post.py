@@ -176,21 +176,18 @@ def _make_daemon(tmp_path):
 
 
 def test_apply_config_writes_and_rewires(tmp_path, monkeypatch):
-    """apply_config persists the config and re-wires the enrich client from it."""
+    """apply_config persists the config and re-wires backup from it."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    sentinel = object()
-    monkeypatch.setattr(daemon_mod, "_enrich_client_from_config", lambda home: sentinel)
     monkeypatch.setattr(daemon_mod, "_backup_from_config", lambda home: (None, None))
 
     d = _make_daemon(tmp_path)
-    d.apply_config({"gemini_key": "k"})
+    d.apply_config({"owner_name": "Sam"})
 
-    assert d._enrich_client is sentinel
     assert d._backup is None
     assert d._backup_interval_s is None
     # Key landed on disk.
     written = json.loads((tmp_path / "config.json").read_text())
-    assert written["gemini_key"] == "k"
+    assert written["owner_name"] == "Sam"
 
 
 def test_apply_config_rewires_backup_pair_together(tmp_path, monkeypatch):
@@ -202,7 +199,6 @@ def test_apply_config_rewires_backup_pair_together(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     sentinel_backup = object()
-    monkeypatch.setattr(daemon_mod, "_enrich_client_from_config", lambda home: None)
     monkeypatch.setattr(
         daemon_mod, "_backup_from_config", lambda home: (sentinel_backup, 1800.0)
     )
@@ -282,7 +278,6 @@ def test_apply_config_rewires_enrich_mode(tmp_path, monkeypatch):
     returns after the write.
     """
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    monkeypatch.setattr(daemon_mod, "_enrich_client_from_config", lambda home: None)
     monkeypatch.setattr(daemon_mod, "_backup_from_config", lambda home: (None, None))
     # Patch config.enrich_mode so it returns "spool" regardless of what is on disk.
     monkeypatch.setattr(daemon_mod.config, "enrich_mode", lambda home: "spool")

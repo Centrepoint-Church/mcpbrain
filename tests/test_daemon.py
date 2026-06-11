@@ -112,34 +112,6 @@ class FakeGmailService:
         return self._users
 
 
-# Fake Gemini enrich client (Task-4.2 JSON contract), mirroring test_enrich.py.
-_ENRICH_JSON = {
-    "entities": [{"name": "Taryn Hamilton", "type": "person", "org": "Acme"}],
-    "relations": [{"from": "Taryn Hamilton", "relation": "reports_to", "to": "Joel Chelliah"}],
-    "actions": [{"text": "Send the budget", "owner": "Sam", "deadline": "2026-06-10"}],
-    "decisions": [{"text": "Approved AV spend", "decided_on": "2026-05-30"}],
-}
-
-
-class _EnrichResp:
-    def __init__(self, text):
-        self.text = text
-
-
-class _EnrichModels:
-    def __init__(self, text):
-        self._text = text
-
-    def generate_content(self, model=None, contents=None, config=None):
-        return _EnrichResp(self._text)
-
-
-class FakeEnrichClient:
-    def __init__(self, payload):
-        import json as _json
-        self.models = _EnrichModels(_json.dumps(payload))
-
-
 def _make_page(msg_ids, history_id, next_page_token=None):
     history = [
         {
@@ -226,119 +198,12 @@ def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
     assert store.get_chunk("gmail-m1-body-0") is not None
 
 
-# ---------------------------------------------------------------------------
-# enrich-in-loop (Task H1)
-# ---------------------------------------------------------------------------
-
-def test_cycle_with_enrich_client_enriches_and_marks(tmp_path, monkeypatch):
-    """A cycle with an injected enrich client: graph rows land AND the synced
-    chunks are marked enriched (unenriched_chunks empties)."""
-    import json as _json
-    (tmp_path / "config.json").write_text(_json.dumps({
-        "owner_name": "Sam", "owner_email": "sam@x.org",
-        "orgs": [{"name": "Org", "domains": ["x.org"]}],
-    }))
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    emb = FakeEmbedder()
-    fake = _gmail_fake_one_message()
-    enrich = FakeEnrichClient(_ENRICH_JSON)
-    daemon = Daemon(store, emb, services={"gmail_service": fake},
-                    enrich_client=enrich, enrich_mode="gemini",
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-
-    res = daemon.run_one()
-
-    assert res["gmail"] >= 1
-    assert res["embedded"] >= 1
-    assert res["enrich"]["mode"] == "live"
-    assert len(store.list_entities()) > 0   # graph rows exist
-    assert len(store.list_actions()) > 0
-    assert store.unenriched_chunks() == []  # synced chunks marked enriched
-
-
-def test_cycle_without_enrich_client_defers(tmp_path, monkeypatch):
-    """enrich_client=None: sync+embed happen, NO graph rows, chunks stay enriched=0."""
-    import json as _json
-    (tmp_path / "config.json").write_text(_json.dumps({
-        "owner_name": "Sam", "owner_email": "sam@x.org",
-        "orgs": [{"name": "Org", "domains": ["x.org"]}],
-    }))
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    emb = FakeEmbedder()
-    fake = _gmail_fake_one_message()
-    daemon = Daemon(store, emb, services={"gmail_service": fake},
-                    enrich_mode="gemini",
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-
-    res = daemon.run_one()
-
-    assert res["gmail"] >= 1
-    assert res["embedded"] >= 1
-    assert res["enrich"]["mode"] == "deferred"
-    assert store.list_entities() == []      # no graph rows
-    assert store.list_actions() == []
-    assert len(store.unenriched_chunks()) >= 1  # chunks remain enriched=0
-
-
-def test_enrich_batch_caps_per_cycle_and_drains_progressively(tmp_path, monkeypatch):
-    """enrich_batch caps how many chunks enrich per cycle. With 5 unenriched
-    chunks and enrich_batch=2, one cycle enriches exactly 2 (count drops by 2,
-    not to 0); the next cycle drains the next batch."""
-    import json as _json
-    (tmp_path / "config.json").write_text(_json.dumps({
-        "owner_name": "Sam", "owner_email": "sam@x.org",
-        "orgs": [{"name": "Org", "domains": ["x.org"]}],
-    }))
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    emb = FakeEmbedder()
-    enrich = FakeEnrichClient(_ENRICH_JSON)
-    # Seed 5 unenriched chunks directly; no sync source this cycle.
-    for i in range(5):
-        store.upsert_chunk(f"seed-{i}", f"body {i}", f"h{i}", {"source_type": "gmail"})
-    assert len(store.unenriched_chunks()) == 5
-
-    daemon = Daemon(store, emb, services={}, enrich_client=enrich,
-                    enrich_mode="gemini", enrich_batch=2,
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-
-    daemon.run_one()
-    assert len(store.unenriched_chunks()) == 3  # dropped by 2, not to 0
-
-    daemon.run_one()
-    assert len(store.unenriched_chunks()) == 1  # next batch drained
-
-
-def test_run_cycle_function_accepts_enrich_client(tmp_path, monkeypatch):
-    """The module-level run_cycle also takes enrich_client and enriches."""
-    import json as _json
-    (tmp_path / "config.json").write_text(_json.dumps({
-        "owner_name": "Sam", "owner_email": "sam@x.org",
-        "orgs": [{"name": "Org", "domains": ["x.org"]}],
-    }))
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    emb = FakeEmbedder()
-    fake = _gmail_fake_one_message()
-    enrich = FakeEnrichClient(_ENRICH_JSON)
-
-    res = run_cycle(store, emb, gmail_service=fake, enrich_client=enrich,
-                    enrich_mode="gemini")
-
-    assert res["enrich"]["mode"] == "live"
-    assert store.unenriched_chunks() == []
-
-
 def test_paused_cycle_writes_nothing_including_no_enrich(tmp_path):
     """Paused run_one returns None and writes nothing — no sync, no enrich."""
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     fake = _gmail_fake_one_message()
-    enrich = FakeEnrichClient(_ENRICH_JSON)
     daemon = Daemon(store, emb, services={"gmail_service": fake},
-                    enrich_client=enrich,
                     lock=SingleWriterLock(tmp_path / "d.lock"))
 
     before_chunks = _chunk_count(store)

@@ -4,8 +4,8 @@ The orchestrator runs the full spool loop (prepare -> extract -> drain ->
 re-drain) against a real Store and reports PASS/FAIL. These tests exercise the
 real Phase-1 seams over seeded chunks (mirroring
 test_integration_spool.test_real_phase1_round_trip), inject a fake run_claude
-so no live Claude/claude_pool is touched, and assert the graph grew, the second
-drain is a no-op, and the Gemini tripwire fired never (and fires when provoked).
+so no live Claude/claude_pool is touched, and assert the graph grew and the
+second drain is a no-op.
 
 bin/ is not a package, so the script is loaded via importlib from its path.
 """
@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from mcpbrain import enrich
 from mcpbrain.store import Store
 from tests.helpers import stub_extractor
 
@@ -85,7 +84,6 @@ def test_dry_run_grows_graph_and_is_idempotent(store, home):
     assert result["entities_after"] > result["entities_before"]
     assert result["relations_after"] > result["relations_before"]
     assert result["drain2_noop"] is True
-    assert result["gemini_called"] is False
 
 
 def test_print_report_gate_uses_apply_counts(capsys):
@@ -104,7 +102,6 @@ def test_print_report_gate_uses_apply_counts(capsys):
         "entities_before": 5, "entities_after": 5,
         "relations_before": 3, "relations_after": 3,
         "drain2_noop": True,
-        "gemini_called": False,
     }
 
     # No-op apply: nothing written -> activity FAILS -> overall False.
@@ -127,28 +124,5 @@ def test_dry_run_nothing_to_enrich(store, home):
     assert result["prepared"] == 0
     assert result["extracted_path"] is None
     assert result["drain2_noop"] is True
-    assert result["gemini_called"] is False
     # nothing-to-do is a valid outcome: _print_report should return True.
     assert dry_run_spool._print_report(result, home=None) is True
-
-
-def test_gemini_tripwire_fires_if_client_constructed(store, home, monkeypatch):
-    """Prove the tripwire works: a run_claude that touches the Gemini client
-    constructor mid-run must raise AssertionError, and the constructor must be
-    restored afterwards."""
-    original = enrich.make_gemini_client
-
-    def run_claude_that_builds_gemini(prompt, *, model=None, timeout=None):
-        enrich.make_gemini_client("fake-key")  # should hit the tripwire
-        return _fake_run_claude(prompt, model=model, timeout=timeout)
-
-    _seed_real_chunk(store, "d-human", "t-human", "m-human-1",
-                     sender="Joel Chelliah <joel@example.org>",
-                     subject="Hall B for Wednesday college")
-
-    with pytest.raises(AssertionError, match="Gemini constructed during spool dry-run"):
-        dry_run_spool.run_dry_run(
-            store, home=home, run_claude=run_claude_that_builds_gemini, thread_cap=3)
-
-    # Tripwire restored the real constructor in its finally block.
-    assert enrich.make_gemini_client is original

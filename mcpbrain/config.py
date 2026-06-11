@@ -45,11 +45,11 @@ def read_config(home) -> dict:
         return {}
 
 
-ENRICH_MODES = {"spool", "gemini", "off"}
+ENRICH_MODES = {"spool", "off"}
 
 
 def enrich_mode(home) -> str:
-    """Resolve the daemon's enrichment source: spool | gemini | off.
+    """Resolve the daemon's enrichment source: spool | off.
 
     Reads config['enrich_mode'], defaulting to "off" so a fresh install enriches
     nothing until the mode is set. An unknown value clamps to "off" and is warned

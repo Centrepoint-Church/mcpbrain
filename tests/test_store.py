@@ -107,34 +107,6 @@ def test_add_relation_dedups(tmp_path):
     assert rels[0]["entity_b"] == "joel-chelliah"
 
 
-def test_add_action_roundtrip(tmp_path):
-    s = _store(tmp_path)
-    rid = s.add_action("Send the campus budget", owner="Sam",
-                       deadline="2026-06-10", source_doc_id="d1", thread_id="t1")
-    assert isinstance(rid, int)
-    acts = s.list_actions()
-    assert len(acts) == 1
-    a = acts[0]
-    assert a["text"] == "Send the campus budget"
-    assert a["owner"] == "Sam"
-    assert a["deadline"] == "2026-06-10"
-    assert a["status"] == "open"
-    assert a["source_doc_id"] == "d1"
-    assert a["thread_id"] == "t1"
-
-
-def test_add_decision_roundtrip(tmp_path):
-    s = _store(tmp_path)
-    rid = s.add_decision("Approved AV spend for Byford",
-                         decided_on="2026-05-30", source_doc_id="d1")
-    assert isinstance(rid, int)
-    decs = s.list_decisions()
-    assert len(decs) == 1
-    assert decs[0]["text"] == "Approved AV spend for Byford"
-    assert decs[0]["decided_on"] == "2026-05-30"
-    assert decs[0]["source_doc_id"] == "d1"
-
-
 # --- meta accessors (Task 4.3) -------------------------------------------
 
 def test_set_and_get_meta(tmp_path):
@@ -200,7 +172,7 @@ def _seed_graph(s):
     s.upsert_entity("college-2026", "College 2026", "project")
     s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", "doc-1")
     s.add_relation("taryn-hamilton", "works_on", "college-2026", "doc-2")
-    s.add_action("Confirm college timetable", owner="Taryn Hamilton")
+    s.add_unified_action(text="Confirm college timetable", owner="Taryn Hamilton")
 
 
 def test_find_entity_by_id(tmp_path):
@@ -246,15 +218,6 @@ def test_relations_for_returns_in_and_out_edges(tmp_path):
     assert len(joel) == 1
     assert joel[0]["entity_a"] == "taryn-hamilton"
     assert joel[0]["entity_b"] == "joel-chelliah"
-
-
-def test_actions_for_owner_case_insensitive(tmp_path):
-    s = _store(tmp_path)
-    _seed_graph(s)
-    acts = s.actions_for_owner("taryn hamilton")
-    assert len(acts) == 1
-    assert acts[0]["text"] == "Confirm college timetable"
-    assert s.actions_for_owner("Someone Else") == []
 
 
 # --- enriched-chunk tracker (Task H1) ------------------------------------
