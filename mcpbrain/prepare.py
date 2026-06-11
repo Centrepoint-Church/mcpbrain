@@ -363,6 +363,42 @@ def attach_extra_blocks(pending: dict, extra_blocks: dict | None) -> dict:
     return out
 
 
+def build_pending(store, batches, *, char_budget: int, now,
+                  batch_id: str | None = None, resolution_due: bool = False,
+                  synthesis_requests: list | None = None,
+                  extra_blocks: dict | None = None) -> dict:
+    """Assemble the pending.json dict for already-grouped, noise-filtered batches.
+
+    Pure assembly: builds thread blocks (splitting over-long threads), context,
+    and the optional merge-review block, then returns the dict. Does NOT write
+    any file and does NOT mark the store. `batch_id` defaults to a timestamped
+    id when not supplied. Callers that need many concurrent batches pass their
+    own unique batch_id.
+    """
+    threads = []
+    for batch in batches:
+        block = _thread_block(store, batch)
+        threads.extend(_split_long_thread(block, char_budget))
+
+    context = _build_context(store, [b.thread_id for b in batches])
+    merge_review = _merge_review_block(store) if resolution_due else []
+
+    if batch_id is None:
+        batch_id = f"batch-{now:%Y%m%d-%H%M%S}"
+    data = {
+        "batch_id": batch_id,
+        "prepared_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "context": context,
+        "threads": threads,
+        "merge_review": merge_review,
+    }
+    if synthesis_requests:
+        from mcpbrain.synthesise_threads import attach_synthesis_block
+        data = attach_synthesis_block(data, synthesis_requests)
+    data = attach_extra_blocks(data, extra_blocks)
+    return data
+
+
 def prepare(store, *, thread_cap: int, char_budget: int,
             resolution_due: bool, now=None,
             synthesis_requests: list | None = None,
@@ -384,26 +420,10 @@ def prepare(store, *, thread_cap: int, char_budget: int,
     if not kept:
         return {"batch_id": None, "threads": 0, "merge_pairs": 0}
 
-    threads = []
-    for batch in kept:
-        block = _thread_block(store, batch)
-        threads.extend(_split_long_thread(block, char_budget))
-
-    context = _build_context(store, [b.thread_id for b in kept])
-    merge_review = _merge_review_block(store) if resolution_due else []
-
-    batch_id = f"batch-{now:%Y%m%d-%H%M%S}"
-    data = {
-        "batch_id": batch_id,
-        "prepared_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "context": context,
-        "threads": threads,
-        "merge_review": merge_review,
-    }
-    if synthesis_requests:
-        from mcpbrain.synthesise_threads import attach_synthesis_block
-        data = attach_synthesis_block(data, synthesis_requests)
-    data = attach_extra_blocks(data, extra_blocks)
+    data = build_pending(store, kept, char_budget=char_budget, now=now,
+                         resolution_due=resolution_due,
+                         synthesis_requests=synthesis_requests,
+                         extra_blocks=extra_blocks)
     _write_pending(data)
-
-    return {"batch_id": batch_id, "threads": len(threads), "merge_pairs": len(merge_review)}
+    return {"batch_id": data["batch_id"], "threads": len(data["threads"]),
+            "merge_pairs": len(data["merge_review"])}
