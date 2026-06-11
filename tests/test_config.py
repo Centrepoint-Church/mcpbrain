@@ -35,15 +35,3 @@ def test_read_corrupt_config_returns_empty(tmp_path):
     assert read_config(str(tmp_path)) == {}
 
 
-def test_gemini_key_in_config_yields_enrich_client(tmp_path, monkeypatch):
-    from mcpbrain import daemon as dmod, enrich
-    from mcpbrain.config import write_config
-    write_config(str(tmp_path), {"gemini_key": "k"})
-    monkeypatch.setattr(enrich, "make_gemini_client", lambda key: f"client:{key}")
-    assert dmod._enrich_client_from_config(str(tmp_path)) == "client:k"
-
-
-def test_no_gemini_key_yields_no_enrich_client(tmp_path, monkeypatch):
-    from mcpbrain import daemon as dmod
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    assert dmod._enrich_client_from_config(str(tmp_path)) is None

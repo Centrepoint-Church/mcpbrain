@@ -42,10 +42,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from mcpbrain import auth, backup, config, control_api, drain, enrich, graph_write, prepare
+from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.config import app_dir
-from mcpbrain.enrich import run_enrichment
 from mcpbrain.sync import run_sync_cycle
 
 # Import block modules at startup so their BLOCK_DRAINERS entries are registered
@@ -236,10 +235,6 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     Sync each provided source and embed via run_sync_cycle (the tested core),
     then enrich according to enrich_mode:
 
-      - "gemini": the existing per-chunk path. run_enrichment over the un-enriched
-        chunks. Tiered on enrich_client: with a client it extracts into the graph
-        and marks chunks enriched; without one (None) it defers (no graph writes,
-        no marking, mode flag set).
       - "spool": prepare.prepare writes pending.json from the un-enriched threads,
         then drain.drain applies whatever the out-of-band extractor session has
         produced since last cycle. run_cycle does NOT call the extractor itself.
@@ -248,14 +243,9 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
       - "off": skip enrichment entirely.
 
     enrich_mode defaults to "off" (matching config.enrich_mode's default), so a
-    direct caller that forgets to pass a mode does NOT silently run the legacy
-    gemini path. The live daemon resolves the real mode from config in run_one
-    and passes it in explicitly.
-
-    enrich_limit caps how many un-enriched chunks the gemini path processes this
-    cycle so a large post-migration backlog drains progressively rather than
-    enriching the entire corpus in one tight, lock-holding loop. None enriches
-    every un-enriched chunk.
+    direct caller that forgets to pass a mode does NOT silently run any enrichment
+    path. The live daemon resolves the real mode from config in run_one and passes
+    it in explicitly.
 
     Returns the sync result dict ({"gmail","calendar","drive","embedded"}) plus
     an "enrich" key holding the chosen path's summary.
@@ -293,14 +283,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                                extra_blocks=extra_blocks)
         drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
-    elif enrich_mode == "off":
+    else:  # "off" (or any unknown value)
         result["enrich"] = {"mode": "off"}
-    else:  # "gemini": the existing path, unchanged.
-        docs = [
-            (c["doc_id"], c["text"], c["metadata"])
-            for c in store.unenriched_chunks(limit=enrich_limit)
-        ]
-        result["enrich"] = run_enrichment(store, docs, client=enrich_client)
     return result
 
 
@@ -647,14 +631,12 @@ class Daemon:
         config.write_config(home, body)
         # Build both off-lock (network/IO work), then set all daemon-config
         # mutation under _config_lock so the loop thread never reads a new
-        # _enrich_client or a _backup paired with a stale interval. Keep the
-        # lock hold time to the assignments only.
-        enrich_client = _enrich_client_from_config(home)
+        # _backup paired with a stale interval. Keep the lock hold time to
+        # the assignments only.
         enrich_mode = config.enrich_mode(home)
         backup_cfg, backup_interval = _backup_from_config(home)
         cadences = _cadences_from_config(home)  # IO off-lock; assign under lock below
         with self._config_lock:
-            self._enrich_client = enrich_client
             self._enrich_mode = enrich_mode
             self._backup = backup_cfg
             self._backup_interval_s = backup_interval
@@ -1565,17 +1547,6 @@ class Daemon:
                 log.error("auto-update install failed: %s", exc)
 
 
-def _enrich_client_from_config(home):
-    """Build the enrich client, config-first with env fallback.
-
-    Reads config['gemini_key'] from the app dir; falls back to GEMINI_API_KEY
-    for the existing dev path. Tiered: an empty key yields no client (enrichment
-    deferred). The key is never logged.
-    """
-    cfg = config.read_config(home)
-    return enrich.resolve_client(cfg.get("gemini_key") or os.getenv("GEMINI_API_KEY"))
-
-
 def maybe_restore_on_first_run(store, home) -> bool:
     """Restore the latest encrypted snapshot when starting with an empty store.
 
@@ -1721,11 +1692,10 @@ def main(argv=None) -> None:
     emb = get_embedder(config.EMBEDDER)
     store = Store(config.store_path(), dim=emb.dim)
     store.init()
-    enrich_client = _enrich_client_from_config(str(config.app_dir()))
     enrich_mode = config.enrich_mode(str(config.app_dir()))
     backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
     cadences = _cadences_from_config(str(config.app_dir()))
-    daemon = Daemon(store, emb, interval_s=args.interval, enrich_client=enrich_client,
+    daemon = Daemon(store, emb, interval_s=args.interval,
                     enrich_mode=enrich_mode,
                     backup=backup_cfg, backup_interval_s=backup_interval,
                     communities_interval_s=cadences["communities_interval_s"],

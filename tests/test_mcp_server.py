@@ -160,21 +160,16 @@ def test_brain_context_actions_carry_freshness(tmp_path):
 
 
 def test_brain_context_actions_from_unified_table(tmp_path):
-    """brain_context actions come from the unified `actions` table, not the
-    legacy graph_actions_legacy table."""
+    """brain_context actions come from the unified `actions` table."""
     s = Store(tmp_path / "u.sqlite3", dim=4)
     s.init()
     s.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
-    # Legacy table row must NOT surface.
-    s.add_action("Legacy action", owner="Taryn Hamilton")
-    # Unified table row MUST surface.
     s.add_unified_action(text="Unified action", owner="Taryn Hamilton", status="open")
 
     tool = make_brain_context(s)
     out = asyncio.run(tool("taryn-hamilton"))
     texts = {a["text"] for a in out["actions"]}
     assert "Unified action" in texts
-    assert "Legacy action" not in texts
 
 
 def test_brain_context_includes_projects_areas(tmp_path):
