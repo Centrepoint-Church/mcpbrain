@@ -400,11 +400,8 @@ function renderStatus(j){
       .filter(Boolean);
     $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
   }
-  // Spool queue depth for the cowork extractor step.
-  if(j.spool){
-    const ep = $("e-pending"); if(ep) ep.textContent = (j.spool.pending != null) ? j.spool.pending : "—";
-    const ei = $("e-inbox"); if(ei) ei.textContent = (j.spool.inbox != null) ? j.spool.inbox : "—";
-  }
+  // (Enrichment status is shown by the connection card; the old spool counters
+  // were removed with the inline extractor step.)
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
