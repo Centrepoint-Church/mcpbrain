@@ -22,22 +22,43 @@ _DESCRIPTION = (
 )
 
 
-def _candidate_dirs() -> list[Path]:
-    home = Path.home()
-    cands = [home / "Documents" / "Claude" / "Scheduled"]
+def _cowork_dir() -> Path:
+    """Claude Cowork's scheduled-tasks dir (the product's target)."""
+    return Path.home() / "Documents" / "Claude" / "Scheduled"
+
+
+def _code_desktop_dir() -> Path:
+    """Claude Code Desktop's scheduled-tasks dir (honours CLAUDE_CONFIG_DIR)."""
     cfg = os.getenv("CLAUDE_CONFIG_DIR")
-    cands.append((Path(cfg) if cfg else home / ".claude") / "scheduled-tasks")
-    return cands
+    return (Path(cfg) if cfg else Path.home() / ".claude") / "scheduled-tasks"
 
 
 def scheduled_dir() -> Path | None:
-    """First candidate whose PARENT exists (so we may create the task subdir)."""
-    for d in _candidate_dirs():
-        try:
-            if d.exists() or d.parent.exists():
-                return d
-        except OSError:
-            continue
+    """Resolve where to write the enrichment SKILL.md, biased to Cowork.
+
+    mcpbrain targets Claude Cowork, whose tasks live under ``~/Documents/Claude/
+    Scheduled``. We must NOT let ``~/.claude`` (which almost always exists for the
+    Claude Code CLI) hijack the choice — a fresh Cowork install that hasn't yet
+    created ``~/Documents/Claude`` would otherwise have its skill written to a dir
+    Cowork never reads, silently. Resolution order:
+
+    1. Cowork dir if it, or its ``~/Documents/Claude`` parent, already exists.
+    2. Claude Code Desktop's dir only if that dir *itself* already exists
+       (proof it is actually in use — not merely that ``~/.claude`` exists).
+    3. Default to the Cowork dir (to be created) when ``~/Documents`` exists.
+    4. Otherwise ``None`` (degrade — caller skips writing).
+    """
+    cowork = _cowork_dir()
+    code_desktop = _code_desktop_dir()
+    try:
+        if cowork.exists() or cowork.parent.exists():
+            return cowork
+        if code_desktop.exists():
+            return code_desktop
+        if cowork.parent.parent.exists():  # ~/Documents exists -> create Cowork dir
+            return cowork
+    except OSError:
+        return None
     return None
 
 

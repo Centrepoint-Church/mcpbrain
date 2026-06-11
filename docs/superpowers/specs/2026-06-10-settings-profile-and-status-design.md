@@ -137,11 +137,13 @@ dependencies (`zoneinfo` is stdlib).
   `^.+ \(GMT[+-]\d\d:\d\d\)$`; all values are valid IANA zones.
 
 **`mcpbrain/cowork_tasks.py` (new, isolated, unit-tested)**
-- `scheduled_dir() -> Path | None` — resolve the Cowork scheduled-tasks dir by
-  trying, in order: `~/Documents/Claude/Scheduled`, `~/.claude/scheduled-tasks`
-  (honouring `CLAUDE_CONFIG_DIR`). Returns the first whose *parent* exists (so we
-  can create the task subdir), else `None`. Pure path logic; filesystem root
-  injectable for tests.
+- `scheduled_dir() -> Path | None` — resolve the Cowork scheduled-tasks dir,
+  biased to Cowork (the product target). Order: (1) `~/Documents/Claude/Scheduled`
+  if it or its `~/Documents/Claude` parent exists; (2) `~/.claude/scheduled-tasks`
+  (honouring `CLAUDE_CONFIG_DIR`) only if that dir *itself* already exists — so the
+  near-ubiquitous `~/.claude` (Claude Code CLI) can't hijack a Cowork install; (3)
+  default to the Cowork dir (to be created) when `~/Documents` exists; else `None`.
+  Pure path logic; filesystem root injectable for tests.
 - `ENRICHMENT_TASK = "mcpbrain-enrichment"`.
 - `write_enrichment_skill(home) -> Path | None` — read the canonical skill body
   from package data `mcpbrain/cowork/enrichment.md`, render front-matter + body,
