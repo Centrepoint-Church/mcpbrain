@@ -13,9 +13,10 @@ def test_run_parallel_backfill_refuses_when_unconfigured(tmp_path, monkeypatch):
 
 
 def test_helpers_are_importable():
-    # The drain_backlog helpers must be reachable from the module.
+    # The drain_backlog helpers AND claude_runner must be reachable from the module.
     for name in ("extract_answer", "parse_extractor_json", "patch_extractions",
-                 "atomic_write_inbox", "quarantine", "daemon_status"):
+                 "atomic_write_inbox", "quarantine", "daemon_status",
+                 "claude_runner"):
         assert hasattr(parallel_backfill, name), name
 
 
@@ -239,3 +240,120 @@ def test_wave_loop_partial_wave_quarantine(tmp_path, monkeypatch):
     assert res["status"] == "done"
     assert res["quarantined"] == 1
     assert drained["n"] == 1             # drain barrier ran exactly once for the wave
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — per-wave backlog/ETA (store with chunk_count / enriched_count)
+# ---------------------------------------------------------------------------
+
+class _CountingStore:
+    """Minimal store stub that supports chunk_count/enriched_count."""
+    def __init__(self, total, enriched):
+        self._total = total
+        self._enriched = enriched
+
+    def chunk_count(self):
+        return self._total
+
+    def enriched_count(self):
+        return self._enriched
+
+
+def test_wave_loop_progress_with_counting_store(tmp_path, monkeypatch):
+    """When the store implements chunk_count/enriched_count, run_parallel_backfill
+    completes and the progress path is exercised without crashing."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    counting_store = _CountingStore(total=10, enriched=7)
+
+    waves = iter([[_Batch("t1"), _Batch("t2")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"],
+                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+
+    res = pb.run_parallel_backfill(
+        store=counting_store, embedder=object(), home=str(tmp_path),
+        workers=2, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: {})
+
+    assert res["status"] == "done"
+    assert res["waves"] == 1
+    assert res["threads_dispatched"] == 2
+
+
+def test_wave_loop_progress_graceful_without_counts(tmp_path, monkeypatch):
+    """store=object() (no chunk_count/enriched_count) must not crash the loop."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    waves = iter([[_Batch("t1")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"],
+                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=1, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: {})
+
+    assert res["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — pre-pool cancel check: cancel set before first pool launch
+# ---------------------------------------------------------------------------
+
+def test_pre_pool_cancel_check_stops_before_pool(tmp_path, monkeypatch):
+    """If cancel_event is set before the pool launches (e.g. during _filter_noise),
+    the loop must exit with status='cancelled' and _process_batch_worker must
+    never be called and drain_fn must run 0 times."""
+    import threading
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    cancel = threading.Event()
+
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: [_Batch("t1")])
+
+    def filter_then_cancel(store, batches):
+        # Set the cancel event during _filter_noise (simulates cancel arriving
+        # during the previous wave's work or between _filter_noise and pool launch).
+        cancel.set()
+        return batches
+
+    monkeypatch.setattr(pb.prepare, "_filter_noise", filter_then_cancel)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
+
+    worker_calls = {"n": 0}
+
+    def counting_worker(**kw):
+        worker_calls["n"] += 1
+        return True, ""
+
+    monkeypatch.setattr(pb, "_process_batch_worker", counting_worker)
+
+    drain_calls = {"n": 0}
+
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=1, batch_size=20, cancel_event=cancel,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: drain_calls.__setitem__("n", drain_calls["n"] + 1) or {})
+
+    assert res["status"] == "cancelled"
+    assert worker_calls["n"] == 0, "worker must not run when cancel set before pool"
+    assert drain_calls["n"] == 0, "drain must not run when cancel set before pool"
