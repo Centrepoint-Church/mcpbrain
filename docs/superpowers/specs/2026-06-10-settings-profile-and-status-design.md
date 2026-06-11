@@ -1,7 +1,14 @@
 # Guided onboarding: settings/profile, MCP-registration status, Cowork projects & skill automation
 
 **Date:** 2026-06-10
-**Status:** design — awaiting user review
+**Status:** implemented, then partly superseded.
+> **Superseded by `2026-06-11-cowork-skills-and-mcp-context-design.md`** for: the
+> `cowork_tasks.py` / scheduled-dir enrichment write (now a personal skill in
+> `~/.claude/skills/`), the "two Cowork projects" step (now one "My Brain" project
+> created from scratch + a `/mcpbrain-setup` skill), the records-`CLAUDE.md`
+> classification rules (moved to the enrichment skill), and context delivery (now
+> via MCP resources). The rest of this spec (prefill, timezone dropdown,
+> registration status, memory hooks, backfill) stands as built.
 
 ## Problem
 

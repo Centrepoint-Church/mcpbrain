@@ -45,7 +45,9 @@ def _resource_entries() -> list[tuple[str, Path]]:
     candidates: list[Path] = [records / "CLAUDE.md", records / "MEMORY.md",
                               records / "state" / "decisions.md"]
     for sub in ("context", "reference"):
-        candidates.extend(sorted((records / sub).glob("*.md")))
+        sub_dir = records / sub
+        if sub_dir.is_dir():  # guard: never raise if the repo isn't scaffolded yet
+            candidates.extend(sorted(sub_dir.glob("*.md")))
     for p in candidates:
         if p.is_file():
             entries.append((str(p.relative_to(records)), p.resolve()))
@@ -68,7 +70,10 @@ async def read_context_resource(uri) -> str:
     path we actually expose can be read, so no traversal or arbitrary-file read is
     possible regardless of the uri given.
     """
-    path = Path(str(uri).replace("file://", "")).resolve()
+    from urllib.parse import unquote, urlparse
+    # urlparse handles both file:///abs and file://localhost/abs forms a client
+    # might send; unquote decodes %20 etc. (the allowlist is the real guard).
+    path = Path(unquote(urlparse(str(uri)).path)).resolve()
     allowed = {p for _, p in _resource_entries()}
     if path not in allowed:
         raise ValueError(f"resource not in allowlist: {uri}")
