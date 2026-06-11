@@ -67,6 +67,31 @@ SPOOL_THREAD_CAP = 100
 SPOOL_CHAR_BUDGET = 24000
 
 
+def _render_project_instructions(name: str, orgs: list[str]) -> str:
+    """The copy-paste instructions for the user's 'My Brain' Cowork project.
+
+    Work-focused: the brain tools, applying voice, and the capture loop. Classifying
+    people/orgs/relationships is enrichment's job, so the project doesn't tag — it
+    just passes an org on a write when it's obviously one of the user's.
+    """
+    org_phrase = f" ({', '.join(orgs)})" if orgs else ""
+    return f"""\
+You're {name}'s assistant, working from here on. Memory + tools come from the mcpbrain MCP server:
+- brain_search / brain_context / brain_actions — recall by meaning, profile a person/org, see what's open
+- brain_draft_reply / brain_draft_refine — draft email in my voice
+
+Read my identity, voice, preferences, reference and decisions from the mcpbrain @-resources; apply my voice to everything. Run brain_search before answering from memory.
+
+Keep my brain current as we work — this is the point, it should get better over time:
+- A decision that changes how things are done -> brain_decision
+- A "just decided / where we're up to" note -> brain_note
+- A durable learning, preference, or fact worth keeping -> brain_memory_write
+- When a system or project materially changes, propose an edit to the matching reference file and I'll approve it.
+
+Captures are queued (the daemon writes them to my records repo within ~a minute; don't hand-edit those files). If something is clearly tied to one of my orgs{org_phrase} pass that org on a write; otherwise leave it — classifying people, orgs and relationships is automatic background enrichment, you don't tag anything.
+"""
+
+
 def _graph_apply():
     """Resolve Phase 1's graph_write.apply through an indirection seam.
 
@@ -544,6 +569,9 @@ class Daemon:
     def config_profile(self) -> dict:
         """Saved profile for the settings form — never includes the ClickUp secret."""
         cfg = config.read_config(str(app_dir()))
+        name = (cfg.get("owner_name") or cfg.get("owner_full_name") or "you").strip() or "you"
+        orgs = [str(o.get("name") or "").strip() for o in (cfg.get("orgs") or [])
+                if isinstance(o, dict) and str(o.get("name") or "").strip()]
         return {
             "owner_full_name": cfg.get("owner_full_name", "") or "",
             "owner_name": cfg.get("owner_name", "") or "",
@@ -555,6 +583,7 @@ class Daemon:
             "timezone": cfg.get("timezone", "") or "",
             "home_dir": str(app_dir()),
             "records_dir": config.records_dir(str(app_dir())),
+            "project_instructions": _render_project_instructions(name, orgs),
         }
 
     def _resolve_google_account(self, token_file) -> str:
