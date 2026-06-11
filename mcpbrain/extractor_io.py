@@ -87,20 +87,23 @@ def daemon_status(home: Path, timeout: float = 3.0) -> dict | None:
 
 def claude_runner(prompt: str, *, model: str = "sonnet", timeout: int = 600,
                   claude_bin: str | None = None) -> str:
-    """Shell to the local claude CLI headless (--print --bare --output-format
-    json); prompt via stdin. Returns raw stdout. Raises
-    subprocess.CalledProcessError (carrying stderr) on non-zero exit so callers
-    can classify rate-limit/overload responses, or TimeoutExpired on breach.
+    """Shell to the local claude CLI headless (--print --output-format json);
+    prompt via stdin. Returns raw stdout. Raises subprocess.CalledProcessError
+    (carrying stderr) on non-zero exit so callers can classify rate-limit/overload
+    responses, or TimeoutExpired on breach.
 
-    --bare is Claude Code's minimal mode: it skips hooks, LSP, plugins, CLAUDE.md
-    dirs, --mcp-config and --settings. That subsumes the old
-    `--settings {"disableAllHooks":true}` AND loads no MCP servers, so each cold
-    extractor session starts lean. It does not change extraction quality — the
-    full prompt + bundled pending.json context still reach the model unchanged."""
+    Lean startup WITHOUT --bare: `--strict-mcp-config --mcp-config '{}'` loads no
+    MCP servers and `--settings '{"disableAllHooks":true}'` disables hooks. We do
+    NOT use --bare here: --bare also skips the settings/OAuth config that carries
+    the Claude Code login, so a --bare headless call fails with "Not logged in".
+    None of this changes extraction quality — the full prompt + bundled
+    pending.json context still reach the model unchanged."""
     from mcpbrain.draft import _find_claude
     claude = claude_bin or _find_claude()
     return subprocess.run(
-        [claude, "--print", "--bare", "--model", model, "--output-format", "json"],
+        [claude, "--print", "--model", model, "--output-format", "json",
+         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+         "--settings", '{"disableAllHooks":true}'],
         input=prompt, capture_output=True, text=True, timeout=timeout, check=True,
     ).stdout
 
