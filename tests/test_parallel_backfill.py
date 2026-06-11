@@ -132,7 +132,7 @@ def test_wave_loop_runs_until_backlog_dry(tmp_path, monkeypatch):
         drain_fn=lambda **k: drained.__setitem__("n", drained["n"] + 1) or {})
     assert res["status"] == "done"
     assert res["waves"] == 1                 # one productive wave, then dry
-    assert res["threads"] == 3
+    assert res["threads_dispatched"] == 3
     # 3 threads / batch_size 2 => 2 sub-batches => 2 worker calls
     assert len(workered) == 2
     assert drained["n"] == 1                 # drain barrier ran once for the wave
@@ -202,3 +202,40 @@ def test_guard_force_overrides():
     from mcpbrain import parallel_backfill as pb
     ok, msg = pb.check_daemon_guard(status={"paused": False}, force=True)
     assert ok is True and "force" in msg.lower()
+
+
+def test_wave_loop_partial_wave_quarantine(tmp_path, monkeypatch):
+    """A wave where one sub-batch fails (quarantine) must still complete:
+    status=="done", quarantined==1, and the drain barrier still ran once."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+    # Wave 1: 3 threads; wave 2: empty (dry).
+    waves = iter([[_Batch("t1"), _Batch("t2"), _Batch("t3")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"],
+                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+
+    # batch_size=2 with 3 threads -> 2 sub-batches: "fastbf-0-0-..." and "fastbf-0-1-..."
+    # Return True for first sub-batch, False for second.
+    call_counter = {"n": 0}
+    def mixed_worker(**kw):
+        n = call_counter["n"]
+        call_counter["n"] += 1
+        if n == 0:
+            return True, ""
+        return False, "contract"
+    monkeypatch.setattr(pb, "_process_batch_worker", mixed_worker)
+
+    drained = {"n": 0}
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=8, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: drained.__setitem__("n", drained["n"] + 1) or {})
+
+    assert res["status"] == "done"
+    assert res["quarantined"] == 1
+    assert drained["n"] == 1             # drain barrier ran exactly once for the wave
