@@ -135,3 +135,9 @@ def test_guided_elements_present():
     assert "/api/hooks/install" in WIZ
     assert "onerror" in WIZ                          # screenshots hide when absent
     assert "/img/clickup-apps-token.png" in WIZ
+
+
+def test_prepare_workspace_verifies_scaffold_result():
+    # The button must check the returned scaffolded list, not just HTTP ok,
+    # because the route returns 200 even when scaffolding produced nothing.
+    assert "j.scaffolded" in WIZ
