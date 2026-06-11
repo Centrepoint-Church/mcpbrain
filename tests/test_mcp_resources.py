@@ -61,3 +61,45 @@ def test_read_rejects_parent_escape_path(tmp_path, monkeypatch):
 def test_missing_context_dir_lists_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     assert _run(list_context_resources()) == []
+
+
+def _seed_records(tmp_path):
+    rec = tmp_path / "records"
+    (rec / "context").mkdir(parents=True)
+    (rec / "reference").mkdir(parents=True)
+    (rec / "state").mkdir(parents=True)
+    (rec / "CLAUDE.md").write_text("# project manual\n")
+    (rec / "MEMORY.md").write_text("# Memory Index\n")
+    (rec / "context" / "identity.md").write_text("# Identity\nDana\n")
+    (rec / "reference" / "systems.md").write_text("# Systems\n")
+    (rec / "state" / "decisions.md").write_text("# Decisions\n")
+    return rec
+
+
+def test_records_repo_files_listed(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "context").mkdir()
+    (tmp_path / "context" / "memory.md").write_text("# memory\n")
+    _seed_records(tmp_path)
+    names = {r.name for r in _run(list_context_resources())}
+    assert "memory.md" in names                       # app-dir context
+    assert "CLAUDE.md" in names                        # records repo
+    assert "context/identity.md" in names
+    assert "reference/systems.md" in names
+    assert "state/decisions.md" in names
+    assert "MEMORY.md" in names
+
+
+def test_records_resource_readable(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    rec = _seed_records(tmp_path)
+    uri = f"file://{(rec / 'context' / 'identity.md').resolve()}"
+    assert "Dana" in _run(read_context_resource(uri))
+
+
+def test_degrades_to_app_dir_only_without_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "context").mkdir()
+    (tmp_path / "context" / "memory.md").write_text("# memory\n")
+    names = {r.name for r in _run(list_context_resources())}
+    assert names == {"memory.md"}  # no records repo -> just the app-dir context
