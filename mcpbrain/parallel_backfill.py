@@ -13,7 +13,6 @@ import importlib.util
 import json
 import logging
 import subprocess
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
