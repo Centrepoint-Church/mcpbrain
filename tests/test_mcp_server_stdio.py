@@ -66,7 +66,6 @@ async def _run_session(home: Path):
         "HOME": os.environ.get("HOME", ""),
         "PATH": os.environ.get("PATH", ""),
         "MCPBRAIN_HOME": str(home),
-        "MCPBRAIN_EMBEDDER": "bge-small",
         "PYTHONPATH": str(PRODUCT_ROOT),
     }
 

@@ -25,9 +25,6 @@ def store_path() -> Path:
     return app_dir() / "brain.sqlite3"
 
 
-EMBEDDER = os.getenv("MCPBRAIN_EMBEDDER", "bge-small")  # bge-small | voyage
-
-
 def _path(home) -> Path:
     return Path(home) / "config.json"
 

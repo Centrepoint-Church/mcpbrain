@@ -72,7 +72,7 @@ def main(argv=None) -> int:
     from mcpbrain.store import Store
     from mcpbrain.embed import get_embedder
     home = str(config.app_dir())
-    emb = get_embedder(config.EMBEDDER)
+    emb = get_embedder("bge-small")
     store = Store(config.store_path(), dim=emb.dim, read_only=False)
     res = run_backfill(store=store, embedder=emb, home=home)
     print(f"enrich-backfill: {res['status']} after {res['batches']} batches")

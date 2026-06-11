@@ -36,7 +36,6 @@ def claude_desktop_config_path(platform=None) -> Path:
 def register_mcpbrain(
     *,
     mcpbrain_home,
-    embedder="bge-small",
     mcpbrain_bin=None,
     config_path=None,
     server_name="mcpbrain",
@@ -73,7 +72,6 @@ def register_mcpbrain(
         "args": ["mcp-server"],
         "env": {
             "MCPBRAIN_HOME": str(mcpbrain_home),
-            "MCPBRAIN_EMBEDDER": embedder,
         },
     }
 
@@ -126,11 +124,9 @@ def main(argv=None):
     from mcpbrain.config import app_dir
     ap = argparse.ArgumentParser(prog="mcpbrain register")
     ap.add_argument("--home", default=None, help="MCPBRAIN_HOME (default: app_dir())")
-    ap.add_argument("--embedder", default=None, help="bge-small | voyage (default: MCPBRAIN_EMBEDDER env or bge-small)")
     ap.add_argument("--mcpbrain-bin", default=None, help="path to the mcpbrain executable")
     args = ap.parse_args(argv)
-    embedder = args.embedder or os.getenv("MCPBRAIN_EMBEDDER", "bge-small")
     home = args.home if args.home is not None else str(app_dir())
-    path = register_mcpbrain(mcpbrain_home=home, embedder=embedder, mcpbrain_bin=args.mcpbrain_bin)
+    path = register_mcpbrain(mcpbrain_home=home, mcpbrain_bin=args.mcpbrain_bin)
     print(f"registered mcpbrain in {path}")
     return 0

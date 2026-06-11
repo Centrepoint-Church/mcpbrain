@@ -147,3 +147,17 @@ def test_query_uses_bge_instruction(monkeypatch):
     monkeypatch.setattr(emb._model, "query_embed", spy)
     emb.embed_query("budget")
     assert captured["texts"][0].startswith("Represent this sentence")
+
+
+def test_get_embedder_voyage_raises_value_error():
+    import pytest
+    from mcpbrain.embed import get_embedder
+    with pytest.raises(ValueError, match="unknown embedder"):
+        get_embedder("voyage")
+
+
+def test_embed_voyage_module_not_importable():
+    import importlib
+    import pytest
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("mcpbrain.embed_voyage")
