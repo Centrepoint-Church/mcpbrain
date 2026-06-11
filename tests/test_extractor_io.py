@@ -35,8 +35,9 @@ def test_claude_runner_invokes_cli(monkeypatch):
     assert out == '{"result": "hello"}'
     assert seen["cmd"][0] == "/usr/bin/claude"
     assert "--print" in seen["cmd"]
-    assert "--bare" in seen["cmd"]            # minimal mode: no hooks/MCP/CLAUDE.md/plugins
-    assert "--settings" not in seen["cmd"]    # --bare subsumes disableAllHooks
+    assert "--strict-mcp-config" in seen["cmd"]   # no MCP servers loaded
+    assert "--bare" not in seen["cmd"]            # --bare strips auth/login → "Not logged in"
+    assert "--settings" in seen["cmd"]            # disableAllHooks (auth-safe, unlike --bare)
     assert "--model" in seen["cmd"]
     assert "sonnet" in seen["cmd"]
     assert "--output-format" in seen["cmd"]
