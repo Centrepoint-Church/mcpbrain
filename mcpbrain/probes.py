@@ -169,32 +169,18 @@ def probe_records(home) -> dict:
     return _state("not_started", "Records repo not created yet")
 
 
-def _claude_cli_present() -> bool:
-    """True when the Claude Code CLI is resolvable (enrichment runs through it)."""
-    try:
-        from mcpbrain.draft import _find_claude
-        return bool(_find_claude())
-    except Exception:  # noqa: BLE001 — missing/unresolvable -> not present
-        return False
-
-
 def probe_enrichment(home) -> dict:
-    """Enrichment runs as a 30-min daemon cadence via headless Claude Code.
-
-    Durable signal: the cadence appends to logs/enrich.log each time it fires, so a
-    fresh log means it's running (independent of the transient enrich_inbox files,
-    which the daemon deletes on apply).
-    """
-    if not _claude_cli_present():
-        return _state("needs_action", "Install Claude Code — enrichment runs through it")
+    """Enrichment runs in Cowork (subscription). Durable signal: the daemon stamps
+    logs/enrich.log whenever it drains an enrichment batch, so 'Running' survives
+    regardless of the transient enrich_inbox files it deletes on apply."""
     log = Path(home) / "logs" / "enrich.log"
     try:
-        fresh = (_time.time() - log.stat().st_mtime) < 70 * 60  # > the 30-min cadence
+        fresh = (_time.time() - log.stat().st_mtime) < 3 * 86400
     except OSError:
         fresh = False
     if fresh:
-        return _state("ok", "Running (every 30 min)", last_verified=_mtime(log))
-    return _state("needs_action", "Enrichment hasn't run yet — sign into Claude Code")
+        return _state("ok", "Running", last_verified=_mtime(log))
+    return _state("needs_action", "Idle — run the backfill skill in Cowork to enrich")
 
 
 def probe_memory_hooks(home) -> dict:

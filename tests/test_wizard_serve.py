@@ -137,13 +137,11 @@ def test_guided_elements_present():
     assert "/img/clickup-apps-token.png" in WIZ
 
 
-def test_workspace_step_is_from_scratch_and_enrichment_is_automatic():
+def test_workspace_step_is_from_scratch_and_setup_skill():
     assert "New from scratch" in WIZ
     assert "proj-instructions" in WIZ            # the pasteable instructions block
     assert "copyInstructions" in WIZ
-    assert "every 30 minutes" in WIZ             # enrichment is automatic now
-    assert "/mcpbrain-setup" not in WIZ          # the manual Cowork step is gone
-    assert "claude.ai/install.sh" in WIZ         # the one-time Claude Code install hint
+    assert "/mcpbrain-setup" in WIZ              # the enrichment setup command
     assert 'id="step-enrich"' not in WIZ         # old redundant step removed
     assert "Use an existing folder" not in WIZ   # no longer point Cowork at folders
 
