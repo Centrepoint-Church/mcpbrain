@@ -21,7 +21,8 @@ def _write_private(path, text):
     d = os.path.dirname(path)
     fd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(text)
         os.replace(tmp, path)
