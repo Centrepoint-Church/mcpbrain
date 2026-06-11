@@ -150,3 +150,16 @@ def test_prepare_workspace_verifies_scaffold_result():
     # The button must check the returned scaffolded list, not just HTTP ok,
     # because the route returns 200 even when scaffolding produced nothing.
     assert "j.scaffolded" in WIZ
+
+
+def test_generic_hidden_css_rule_exists():
+    # Without a generic `.hidden{display:none}` the home-status + step toggling
+    # silently no-ops (only .badge.hidden was defined). This regressed once.
+    assert ".hidden{display:none}" in WIZ.replace(" ", "")
+
+
+def test_configured_view_keeps_actionable_steps_reachable():
+    # renderHome must only hide the redundant google/status steps when configured,
+    # so Register / Prepare-workspace / memory-hooks buttons stay reachable.
+    assert 'HIDE_WHEN_CONFIGURED' in WIZ
+    assert '"step-google"' in WIZ and '"step-status"' in WIZ
