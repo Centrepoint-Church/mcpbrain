@@ -178,3 +178,27 @@ def test_wave_loop_cancels_after_current_wave(tmp_path, monkeypatch):
         drain_fn=drain_then_cancel)
     assert res["status"] == "cancelled"
     assert drained["n"] == 1                  # the in-flight wave's drain completed
+
+
+def test_guard_refuses_when_daemon_running_and_not_paused():
+    from mcpbrain import parallel_backfill as pb
+    ok, msg = pb.check_daemon_guard(status={"paused": False}, force=False)
+    assert ok is False and "pause" in msg.lower()
+
+
+def test_guard_proceeds_when_daemon_unreachable():
+    from mcpbrain import parallel_backfill as pb
+    ok, msg = pb.check_daemon_guard(status=None, force=False)
+    assert ok is True
+
+
+def test_guard_proceeds_when_daemon_paused():
+    from mcpbrain import parallel_backfill as pb
+    ok, msg = pb.check_daemon_guard(status={"paused": True}, force=False)
+    assert ok is True
+
+
+def test_guard_force_overrides():
+    from mcpbrain import parallel_backfill as pb
+    ok, msg = pb.check_daemon_guard(status={"paused": False}, force=True)
+    assert ok is True and "force" in msg.lower()
