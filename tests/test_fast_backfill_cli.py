@@ -15,11 +15,11 @@ def _load_cli():
 def test_cli_parses_workers_and_model():
     cli = _load_cli()
     args = cli.parse_args(["--workers", "12", "--model", "haiku",
-                           "--batch-size", "10", "--max-waves", "2"])
+                           "--batch-size", "10", "--max-batches", "2"])
     assert args.workers == 12
     assert args.model == "haiku"
     assert args.batch_size == 10
-    assert args.max_waves == 2
+    assert args.max_batches == 2
     assert args.force is False
 
 
@@ -39,7 +39,7 @@ def test_main_sets_mcpbrain_home_before_store(tmp_path, monkeypatch):
 
     def fake_run_parallel_backfill(**kwargs):
         captured_home["value"] = os.environ.get("MCPBRAIN_HOME")
-        return {"status": "done", "waves": 0, "threads_dispatched": 0,
+        return {"status": "done", "batches": 0, "threads_dispatched": 0,
                 "quarantined": 0}
 
     # daemon_status → None means "unreachable — proceeding as sole writer"
@@ -56,7 +56,7 @@ def test_main_sets_mcpbrain_home_before_store(tmp_path, monkeypatch):
     # side-effect of main(), not a pre-existing env var.
     monkeypatch.delenv("MCPBRAIN_HOME", raising=False)
 
-    rc = cli.main(["--home", str(tmp_path), "--max-waves", "0"])
+    rc = cli.main(["--home", str(tmp_path), "--max-batches", "0"])
 
     assert rc == 0
     assert captured_home["value"] == str(tmp_path.resolve()), (

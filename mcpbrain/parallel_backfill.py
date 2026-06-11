@@ -7,10 +7,23 @@ or stopped (the CLI guards this). The main thread is the SOLE SQLite writer;
 worker threads only run `claude --print` subprocesses and write inbox files.
 Ongoing steady-state enrichment stays on the daemon/cowork path.
 
-Cancellation note: a cancellation requested via cancel_event takes effect at the
-TOP of the wave loop, immediately before launching a fresh ThreadPoolExecutor.
-An in-flight wave still runs its workers to completion (up to `timeout`) before
-cancellation takes effect — cancellation is cooperative, not forceful.
+Continuous-pool design: `workers` sub-batches are kept in flight at all times.
+As soon as ONE future completes the main thread drains it and immediately submits
+a replacement. There are no wave boundaries — the slowest sub-batch never stalls
+the others.
+
+Single-writer invariant: ONLY the main thread calls group_unenriched_threads,
+prepare._filter_noise, prepare.build_pending, and drain_fn. Worker threads run
+ONLY _process_batch_worker (claude subprocess + inbox/quarantine file writes).
+
+In-flight exclusion: threads that have been dispatched but not yet drained are
+tracked in an `in_flight` set.  group_unenriched_threads queries enriched=0 rows,
+so a dispatched-but-undrained thread would be returned again. _pull_batch() skips
+any batch whose thread_id is in `in_flight`, preventing double-processing.
+
+Cancellation: setting cancel_event stops NEW submissions immediately. Futures
+already in flight are allowed to finish and are drained before the function
+returns — cancellation is cooperative, not forceful.
 """
 from __future__ import annotations
 
@@ -20,7 +33,7 @@ import logging
 import random
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
 from mcpbrain import config, prepare, drain as drain_mod
@@ -178,22 +191,32 @@ def _safe_backlog(store) -> int | None:
 
 def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
                           workers=8, batch_size=20, char_budget=_CHAR_BUDGET,
-                          timeout=600, max_waves=None, run_claude=None,
+                          timeout=600, max_batches=None, run_claude=None,
                           apply=None, cancel_event=None, drain_fn=None) -> dict:
-    """Drain the backlog wave-by-wave with `workers` parallel claude sessions.
+    """Drain the backlog with a continuous worker pool of `workers` claude sessions.
+
+    Keeps `workers` sub-batches in flight at all times. As soon as one future
+    completes the main thread drains it (single-writer) and immediately submits
+    a replacement, so the slowest sub-batch never stalls the others.
+
+    Single-writer invariant: group_unenriched_threads, prepare._filter_noise,
+    prepare.build_pending, and drain_fn are ONLY called from the main thread.
+    Worker threads run only _process_batch_worker.
+
+    In-flight exclusion: an `in_flight` set of thread_ids prevents re-dispatching
+    threads that have been submitted but not yet drained (they still appear as
+    enriched=0 in the DB until drain_fn runs).
 
     Gated on config.is_configured. Returns a summary dict with keys:
-    status ("done"|"max_waves"|"cancelled"|"not_configured"), waves,
+    status ("done"|"max_batches"|"cancelled"|"not_configured"), batches,
     threads_dispatched, quarantined.
 
-    Cancellation: setting cancel_event before or during a wave causes the loop
-    to exit after the current wave's drain barrier completes. An in-flight wave
-    still runs its workers to completion (up to `timeout`) before cancellation
-    takes effect — workers are not forcibly interrupted.
+    Cancellation: setting cancel_event stops NEW submissions immediately. Futures
+    already in flight are allowed to finish and are drained before returning.
     """
     home = home or str(config.app_dir())
     if not config.is_configured(home):
-        return {"status": "not_configured", "waves": 0, "threads_dispatched": 0,
+        return {"status": "not_configured", "batches": 0, "threads_dispatched": 0,
                 "quarantined": 0}
     if run_claude is None:
         run_claude = claude_runner
@@ -214,83 +237,126 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
     def _cancelled():
         return cancel_event is not None and cancel_event.is_set()
 
-    waves = 0
+    batches_done = 0
     threads_dispatched = 0
     quarantined = 0
-    wave_durations: collections.deque = collections.deque(maxlen=5)
+    batch_seq = 0
 
-    while True:
+    # Main-thread state for the continuous pool.
+    in_flight: set[str] = set()          # thread_ids dispatched but not yet drained
+    fut_threads: dict = {}               # Future -> set[str] of thread_ids
+
+    drain_durations: collections.deque = collections.deque(maxlen=5)
+    start_t = time.monotonic()
+
+    def _pull_batch():
+        """Pull the next batch of fresh (not in-flight) threads from the store.
+
+        Returns (pending_dict, thread_id_set) or (None, set()) when no work
+        remains or cancellation is requested. Marks noise threads enriched (DB
+        write) as a side-effect — safe because this runs on the main thread only.
+
+        The noise loop is guaranteed to terminate: each pass marks all-noise
+        chunks enriched, so `fresh` shrinks toward empty.
+        """
+        nonlocal batch_seq
+        while True:
+            if _cancelled():
+                return None, set()
+            # Pull with slack so that in-flight threads can be excluded and we
+            # still fill a full batch_size chunk from the remaining fresh ones.
+            cap = len(in_flight) + batch_size * 2
+            all_batches = group_unenriched_threads(store, thread_cap=cap)
+            fresh = [b for b in all_batches if b.thread_id not in in_flight]
+            if not fresh:
+                return None, set()          # truly drained (or all in-flight)
+            chunk = fresh[:batch_size]
+            kept = prepare._filter_noise(store, chunk)  # marks noise enriched (DB write)
+            if _cancelled():
+                return None, set()
+            if kept:
+                now = datetime.datetime.now(datetime.timezone.utc)
+                batch_seq += 1
+                batch_id = f"fastbf-{batch_seq}-{now:%H%M%S%f}"
+                pending = prepare.build_pending(
+                    store, kept, char_budget=char_budget, now=now, batch_id=batch_id)
+                tids = {b.thread_id for b in kept}
+                in_flight.update(tids)
+                return pending, tids
+            # chunk was entirely noise (now marked enriched) — loop to fetch next
+
+    def _try_submit(pool, futures):
+        """Submit one new batch to the pool. Returns True if submitted."""
         if _cancelled():
-            return {"status": "cancelled", "waves": waves,
-                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
-        if max_waves is not None and waves >= max_waves:
-            return {"status": "max_waves", "waves": waves,
-                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
+            return False
+        if max_batches is not None and (batches_done + len(futures)) >= max_batches:
+            return False
+        pending, tids = _pull_batch()
+        if pending is None:
+            return False
+        fut = pool.submit(
+            _process_batch_worker,
+            home=home_path, pending=pending, prompt_prefix=prompt_prefix,
+            run_claude=run_claude, model=model, timeout=timeout)
+        fut_threads[fut] = tids
+        futures.add(fut)
+        return True
 
-        batches = group_unenriched_threads(store, thread_cap=workers * batch_size)
-        if not batches:
-            return {"status": "done", "waves": waves,
-                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures: set = set()
 
-        kept = prepare._filter_noise(store, batches)   # DB write, main thread
-        if not kept:
-            continue                                   # all noise; pull next wave
+        # Prime the pool: fill up to `workers` concurrent futures.
+        for _ in range(workers):
+            if not _try_submit(pool, futures):
+                break
 
-        # Second cancel check: if a cancel arrived during the previous wave's
-        # drain barrier, don't start a fresh ThreadPoolExecutor.
-        if _cancelled():
-            return {"status": "cancelled", "waves": waves,
-                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
+        while futures:
+            done, futures = wait(futures, return_when=FIRST_COMPLETED)
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        sub_batches = _partition(kept, batch_size=batch_size)
-        pendings = []
-        for i, chunk in enumerate(sub_batches):
-            batch_id = f"fastbf-{waves}-{i}-{now:%H%M%S}"
-            pendings.append(prepare.build_pending(
-                store, chunk, char_budget=char_budget, now=now, batch_id=batch_id))
+            # Serial drain — ONLY the main thread touches the store.
+            drain_t0 = time.monotonic()
+            drain_fn(store=store, home=home, apply=apply, embedder=embedder)
+            drain_durations.append(time.monotonic() - drain_t0)
 
-        log.info("wave %d: %d threads -> %d sub-batches x %d workers (%s)",
-                 waves, len(kept), len(pendings), workers, model)
+            for fut in done:
+                tids = fut_threads.pop(fut)
+                ok, _reason = fut.result()   # worker never raises; returns (ok, reason)
+                batches_done += 1
+                threads_dispatched += len(tids)
+                if not ok:
+                    quarantined += 1
+                in_flight -= tids            # drained (enriched) or failed (re-queues later)
 
-        wave_t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(
-                lambda p: _process_batch_worker(
-                    home=home_path, pending=p, prompt_prefix=prompt_prefix,
-                    run_claude=run_claude, model=model, timeout=timeout),
-                pendings))
-        wave_elapsed = time.monotonic() - wave_t0
-        wave_durations.append(wave_elapsed)
+            # Progress log: throughput-oriented, emitted after each drain cycle.
+            backlog = _safe_backlog(store)
+            elapsed = max(time.monotonic() - start_t, 0.001)
+            tpm = threads_dispatched / elapsed * 60
+            if backlog is not None:
+                eta_s = (backlog / max(tpm / 60, 0.001)) if tpm > 0 else None
+                log.info(
+                    "drain cycle: batches=%d dispatched=%d backlog=%d "
+                    "quarantined=%d rate=%.1f threads/min ETA~%s",
+                    batches_done, threads_dispatched, backlog, quarantined,
+                    tpm, format_eta(eta_s) if eta_s is not None else "?",
+                )
+            else:
+                log.info(
+                    "drain cycle: batches=%d dispatched=%d quarantined=%d "
+                    "rate=%.1f threads/min",
+                    batches_done, threads_dispatched, quarantined, tpm,
+                )
 
-        quarantined += sum(1 for ok, _ in results if not ok)
+            # Refill the pool to keep it saturated.
+            while len(futures) < workers:
+                if not _try_submit(pool, futures):
+                    break
 
-        # Serial drain barrier — the only place the wave's results hit the store.
-        # drain_fn processes the ENTIRE enrich_inbox/ dir (by design, since the
-        # standalone backfill owns the spool while the daemon is paused), so any
-        # pre-existing inbox files are also applied/quarantined here.
-        drain_fn(store=store, home=home, apply=apply, embedder=embedder)
+    if _cancelled():
+        status = "cancelled"
+    elif max_batches is not None and batches_done >= max_batches:
+        status = "max_batches"
+    else:
+        status = "done"
 
-        waves += 1
-        threads_dispatched += len(kept)
-
-        # Per-wave backlog + ETA progress log.
-        # Backlog is read defensively — store=object() tests have no such methods.
-        backlog = _safe_backlog(store)
-        if backlog is not None and wave_durations:
-            avg_wave = sum(wave_durations) / len(wave_durations)
-            threads_per_wave = max(1, len(kept))
-            remaining_batches = backlog / threads_per_wave
-            eta_s = remaining_batches * avg_wave
-            log.info(
-                "wave %d done: +%d threads (cumulative %d), backlog %d, "
-                "avg_wave %.1fs, ETA ~%s",
-                waves, len(kept), threads_dispatched, backlog,
-                avg_wave, format_eta(eta_s),
-            )
-        else:
-            log.info(
-                "wave %d done: +%d threads (cumulative %d), avg_wave %.1fs",
-                waves, len(kept), threads_dispatched,
-                wave_durations[-1] if wave_durations else 0.0,
-            )
+    return {"status": status, "batches": batches_done,
+            "threads_dispatched": threads_dispatched, "quarantined": quarantined}
