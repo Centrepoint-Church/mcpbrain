@@ -85,12 +85,30 @@ Subscription, fresh-context-per-batch (the context-limit fix). The backfill skil
 Move the SessionStart/SessionEnd memory hooks into the plugin (they "run only in Cowork"). They call `mcpbrain session-start` / `session-end` (the daemon CLI). Retire `hooks.py`'s settings.json-writing install — the plugin manages them.
 
 ### 6. What's removed (decision 4 — keep it clean)
-The plugin + install skill is the **only** install path. Everything that duplicated it is deleted, not demoted:
-- `mcpbrain register` + `wizard/register.py` (edits `claude_desktop_config.json`) — **deleted**. The plugin's `.mcp.json` is the sole MCP registration. `probes.probe_claude` no longer imports `claude_desktop_config_path`; the Claude probe keys off the MCP heartbeat alone (registered-but-no-heartbeat state is dropped).
-- `hooks.install_session_hooks` (settings.json writer) — **deleted**; plugin `hooks/hooks.json` is the sole hook source.
+The plugin + install skill is the **only** install path. Everything that duplicated it is deleted, not demoted. Each removal has a **cascade** of now-dead callers — delete the whole chain, not just the entry point:
+
+**MCP registration (plugin `.mcp.json` replaces it):**
+- `mcpbrain register` subcommand (`cli.py`) + `wizard/register.py` (edits `claude_desktop_config.json`) — **deleted**.
+- `Daemon.register()` (`daemon.py`) + the `/api/register` route (`control_api.py`) — dead once `register_mcpbrain` is gone.
+- Wizard **`#step-register`** card + its `reg()` JS (`wizard/index.html`).
+- `probes.probe_claude` no longer imports `claude_desktop_config_path` / `_claude_registered`; the Claude probe keys off the MCP heartbeat alone (the registered-but-no-heartbeat state is dropped).
+
+**Hook installation (plugin `hooks/hooks.json` replaces the *installer*, not the executor):**
+- `hooks.py` `install_session_hooks` / `uninstall_session_hooks` / `hooks_status` + private helpers (settings.json writer) — **deleted**.
+- The `/api/hooks/install` route (`control_api.py`) + wizard **`#step-hooks`** card + its `installHooks()` JS.
+- `probes.probe_memory_hooks` — the plugin always provides the hooks, so the probe is removed (or hard-coded "on") rather than reading `hooks_status`.
+- **Kept:** `session_hooks.py` and the `mcpbrain session-start` / `session-end` CLI subcommands — the plugin's `hooks/hooks.json` *invokes* these (§5). Only the settings.json-writing installer goes.
+
+**Installer scripts:**
 - `curl|sh` installers (`install/setup.sh|.command|.ps1`) — **deleted**. No "advanced/manual" fallback; the install skill (which can also run in Claude Code, §3) covers the non-Cowork case.
-- The daemon, wheel index, `bin/release.py` — **unchanged** (daemon distribution). The fast headless `parallel_backfill`/`fast_backfill` stays (decision 6, opt-in paid power tool).
-- Test/grep sweep: remove the dead callers and their tests (`test_register*`, `test_setup_sh*`, register/hooks-install assertions in `test_probes.py`/`test_wizard_serve.py`) so the suite stays green.
+- **Kept:** `mcpbrain setup` / `setup.py` — the install skill opens it for Google sign-in + identity/timezone (§3 step 5).
+
+**Redundant third enrichment path:**
+- `bin/drain_backlog.py` — **deleted**. A serial-polling headless `claude --print` drainer that predates and is functionally dominated by `parallel_backfill`/`fast_backfill` (no tests; carries the load-time non-packaged-import hazard). `fast_backfill.py` is the one supported opt-in headless path; the Cowork-subagent backfill (§4) is the $0 steady-state path. Update the `extractor_io.py` module docstring that still calls `drain_backlog` a co-equal path.
+
+**Unchanged:** the daemon, wheel index, `bin/release.py` (daemon distribution); `extractor_io` / `extractor_driver` / `parallel_backfill` / `enrich_backfill` (all live, distinct roles).
+
+**Test/grep sweep:** delete `test_register.py`, `test_hooks.py`, and the register/hooks-install assertions in `test_control_api_post.py`, `test_control_api_actions.py`, `test_wizard_serve.py`, `test_probes.py` so the suite stays green; grep confirms no dangling import after each removal.
 
 ## 7. Infra migration to Centrepoint (decision 3)
 Move distribution off the personal `itsjoshuakemp` accounts onto Centrepoint-owned infra, as part of this work:
