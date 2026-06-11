@@ -91,9 +91,9 @@ def test_claude_registered_awaiting_restart(tmp_path, monkeypatch):
 
 def test_enrichment_states(tmp_path, monkeypatch):
     home = _home7(tmp_path, {})
-    monkeypatch.setattr(_probes.cowork_tasks, "enrichment_skill_present", lambda: False)
+    monkeypatch.setattr(_probes.skills, "enrichment_skill_present", lambda: False)
     assert _probes.probe_enrichment(home)["state"] == "not_started"
-    monkeypatch.setattr(_probes.cowork_tasks, "enrichment_skill_present", lambda: True)
+    monkeypatch.setattr(_probes.skills, "enrichment_skill_present", lambda: True)
     assert _probes.probe_enrichment(home)["state"] == "needs_action"
     inbox = tmp_path / "enrich_inbox"; inbox.mkdir()
     (inbox / "batch-1.json").write_text("{}")
@@ -109,7 +109,7 @@ def test_memory_hooks_probe(tmp_path, monkeypatch):
 
 def test_all_connections_has_new_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(_probes, "_claude_registered", lambda: False)
-    monkeypatch.setattr(_probes.cowork_tasks, "enrichment_skill_present", lambda: False)
+    monkeypatch.setattr(_probes.skills, "enrichment_skill_present", lambda: False)
     monkeypatch.setattr(_probes.hooks, "hooks_status", lambda: {"installed": False})
     conns = _probes.all_connections(_home7(tmp_path, {}))
     assert {"enrichment", "memory-hooks"} <= set(conns)

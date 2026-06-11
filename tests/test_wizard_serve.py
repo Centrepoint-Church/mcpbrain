@@ -32,7 +32,7 @@ def test_root_serves_wizard_with_token(tmp_path):
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         assert "<html" in html.lower() and srv.token in html
-        for a in ("step-google","step-enrich","step-register","step-status"): assert a in html
+        for a in ("step-google","step-register","step-projects","step-status"): assert a in html
     finally: srv.stop()
 
 def test_home_has_status_center_elements(tmp_path):
@@ -135,6 +135,15 @@ def test_guided_elements_present():
     assert "/api/hooks/install" in WIZ
     assert "onerror" in WIZ                          # screenshots hide when absent
     assert "/img/clickup-apps-token.png" in WIZ
+
+
+def test_workspace_step_is_from_scratch_and_setup_skill():
+    assert "New from scratch" in WIZ
+    assert "proj-instructions" in WIZ            # the pasteable instructions block
+    assert "copyInstructions" in WIZ
+    assert "/mcpbrain-setup" in WIZ              # the enrichment setup command
+    assert 'id="step-enrich"' not in WIZ         # old redundant step removed
+    assert "Use an existing folder" not in WIZ   # no longer point Cowork at folders
 
 
 def test_prepare_workspace_verifies_scaffold_result():
