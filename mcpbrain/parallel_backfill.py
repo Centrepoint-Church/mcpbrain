@@ -188,8 +188,8 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
     """Drain the backlog wave-by-wave with `workers` parallel claude sessions.
 
     Gated on config.is_configured. Returns a summary dict with keys:
-    status ("done"|"max_waves"|"cancelled"|"not_configured"), waves, threads,
-    quarantined.
+    status ("done"|"max_waves"|"cancelled"|"not_configured"), waves,
+    threads_dispatched, quarantined.
     """
     home = home or str(config.app_dir())
     if not config.is_configured(home):
