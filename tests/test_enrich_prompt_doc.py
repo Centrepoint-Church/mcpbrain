@@ -42,23 +42,16 @@ def test_four_block_keys_documented():
             assert key in text, f"{key} not found in {fname}"
 
 
-def test_wizard_spec_matches_cowork_doc():
-    """The wizard's copy-paste Task field embeds the cowork-task.md Task body.
+def test_enrichment_skill_body_names_contract():
+    """The shipped enrichment skill body (cowork/enrichment.md) is what now runs
+    as the mcpbrain-enrichment personal skill (see skills.py). It must keep naming
+    the contract fields + file roles so it can't drift from contract.py.
 
-    The wizard page is what actually gets pasted into Cowork on a fresh
-    install, so it must carry the same spec as the canonical doc — this pins
-    the two together (the wizard copy drifted once, missing the four block
-    sections added in Phase 2 Task 9).
+    (Replaces the old wizard `spec-task` check — the wizard no longer embeds the
+    prompt inline; the canonical copy lives in cowork/enrichment.md.)
     """
-    import html
-    import re
-
-    root = Path(__file__).parent.parent
-    doc = (root / "docs" / "cowork-task.md").read_text()
-    body = re.search(r"## Task.*?\n```\n(.*?)\n```\n", doc, re.DOTALL).group(1)
-    page = (root / "mcpbrain" / "wizard" / "index.html").read_text()
-    pre = re.search(r'<pre id="spec-task" class="spec">(.*?)</pre>',
-                    page, re.DOTALL).group(1)
-    assert html.unescape(pre) == body, (
-        "wizard spec-task drifted from docs/cowork-task.md — re-embed the "
-        "Task body (HTML-escaped) into mcpbrain/wizard/index.html")
+    body = (Path(__file__).parent.parent / "mcpbrain" / "cowork" / "enrichment.md").read_text()
+    for field in ("thread_id", "org", "content_type", "entities", "actions",
+                  "relations", "resolved_action_ids", "merge_answers"):
+        assert field in body, f"enrichment.md must name the contract field {field!r}"
+    assert "pending.json" in body and "enrich_inbox" in body
