@@ -12,7 +12,7 @@ import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mcpbrain import auth, config, cowork_tasks, hooks
+from mcpbrain import auth, config, hooks, skills
 
 _CLAUDE_STALE_DAYS = 14
 
@@ -170,8 +170,8 @@ def probe_records(home) -> dict:
 
 
 def probe_enrichment(home) -> dict:
-    """not_started (no SKILL.md) / ok (running) / needs_action (installed, idle)."""
-    if not cowork_tasks.enrichment_skill_present():
+    """not_started (no skill) / ok (running) / needs_action (installed, idle)."""
+    if not skills.enrichment_skill_present():
         return _state("not_started", "Enrichment skill not installed yet")
     inbox = Path(home) / "enrich_inbox"
     try:
@@ -183,7 +183,7 @@ def probe_enrichment(home) -> dict:
         recent = False
     if recent:
         return _state("ok", "Running")
-    return _state("needs_action", "Set up the schedule in Claude Desktop")
+    return _state("needs_action", "Run /mcpbrain-setup in Cowork to start the hourly schedule")
 
 
 def probe_memory_hooks(home) -> dict:
