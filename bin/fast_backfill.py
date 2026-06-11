@@ -62,6 +62,8 @@ def main(argv=None) -> int:
     cancel = threading.Event()
 
     def _on_signal(_sig, _frame):
+        # Note: cancellation is cooperative — the current wave's workers run to
+        # completion (up to --timeout) before the loop exits.
         print("\ncancellation requested — finishing current wave, then stopping")
         cancel.set()
 
