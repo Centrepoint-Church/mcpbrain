@@ -19,6 +19,26 @@ def test_scheduled_dir_none_when_no_parent(tmp_path, monkeypatch):
     assert cowork_tasks.scheduled_dir() is None
 
 
+def test_dot_claude_does_not_hijack_cowork(tmp_path, monkeypatch):
+    # Regression: a fresh Cowork install where ~/.claude exists (Claude Code CLI)
+    # but ~/Documents/Claude doesn't yet. The skill must still target the Cowork
+    # dir (which Cowork reads), NOT ~/.claude/scheduled-tasks (which it never scans).
+    (tmp_path / ".claude").mkdir()              # exists, but NO scheduled-tasks subdir
+    (tmp_path / "Documents").mkdir()            # ~/Documents exists; Claude/ does not
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert cowork_tasks.scheduled_dir() == tmp_path / "Documents" / "Claude" / "Scheduled"
+
+
+def test_uses_code_desktop_only_when_it_already_exists(tmp_path, monkeypatch):
+    # If Claude Code Desktop's scheduled-tasks dir actually exists and Cowork's
+    # tree does not, fall back to it.
+    (tmp_path / ".claude" / "scheduled-tasks").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert cowork_tasks.scheduled_dir() == tmp_path / ".claude" / "scheduled-tasks"
+
+
 def test_write_enrichment_skill_writes_frontmatter_and_body(tmp_path, monkeypatch):
     (tmp_path / "Documents" / "Claude").mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))

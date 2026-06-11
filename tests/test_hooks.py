@@ -72,3 +72,16 @@ def test_uninstall_removes_only_ours(tmp_path, monkeypatch):
     assert "/usr/local/bin/other" in starts
     assert not any("session-start" in c for c in starts)
     assert hooks.hooks_status()["installed"] is False
+
+
+def test_install_quotes_binary_path(tmp_path, monkeypatch):
+    # The binary path can contain spaces (Windows/macOS); the hook command runs
+    # via a shell, so the path must be quoted or the hook silently never runs.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(hooks, "_mcpbrain_bin", lambda: "/Apps/My Tools/mcpbrain")
+    p = hooks.install_session_hooks()
+    cmds = [h["command"] for grp in json.loads(p.read_text())["hooks"].values()
+            for blk in grp for h in blk["hooks"]]
+    assert '"/Apps/My Tools/mcpbrain" session-start' in cmds
+    assert '"/Apps/My Tools/mcpbrain" session-end' in cmds

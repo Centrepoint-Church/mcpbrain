@@ -107,7 +107,8 @@ def register_mcpbrain(
     # file is never briefly world-readable under a permissive umask.
     fd, tmp = tempfile.mkstemp(dir=str(config_path.parent), prefix=config_path.name + ".", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(data)
         os.replace(tmp, config_path)  # atomic rename on POSIX; same-dir avoids cross-device failure
