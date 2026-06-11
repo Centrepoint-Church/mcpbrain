@@ -46,6 +46,9 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     home = str(args.home.expanduser().resolve())
 
+    import os
+    os.environ["MCPBRAIN_HOME"] = home
+
     status = parallel_backfill.daemon_status(Path(home))
     ok, msg = parallel_backfill.check_daemon_guard(status=status, force=args.force)
     print(msg)
