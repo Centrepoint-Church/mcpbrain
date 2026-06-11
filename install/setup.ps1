@@ -33,6 +33,15 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     }
 }
 
+# Ensure Claude Code is on PATH (it runs background enrichment; needs a Pro/Max/Team account, sign in once).
+if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+    if ($DryRun) {
+        Write-Host "[dry-run] install Claude Code via https://claude.ai/install.ps1"
+    } else {
+        powershell -ExecutionPolicy ByPass -c "irm https://claude.ai/install.ps1 | iex"
+    }
+}
+
 Run uv tool install --python 3.12 --index "mcpbrain=$IndexUrl" mcpbrain --force
 
 $Bin = (Get-Command mcpbrain -ErrorAction SilentlyContinue).Source
