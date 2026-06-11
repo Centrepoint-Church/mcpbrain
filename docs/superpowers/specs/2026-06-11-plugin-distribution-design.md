@@ -4,6 +4,14 @@
 **Status:** approved in conversation — spec for review
 **Supersedes the *Claude-facing* install** in `2026-06-09-mcpbrain-productization-design.md` (the wheel-index + `curl|sh` + `mcpbrain register` + hooks/skills writing). The wheel index stays — but only for the daemon; the Claude integration moves into a plugin.
 
+## Decisions (Josh, 2026-06-11)
+1. **Team plan, Josh is Owner.** Plugin distribution = **available in the org marketplace, members click Install** (not force-auto-installed). Rollout = a **pilot** of the members who already have Claude.
+2. **Marketplace repo = a dedicated *public* repo under the Centrepoint GitHub org** (public so members need no GitHub account; the plugin has no secrets). Move the daemon wheel-index repo there too.
+3. **Move the distribution infra to Centrepoint** as part of this work: GitHub org repos (plugin + wheel index) **and** a Centrepoint Google Cloud project + its own desktop OAuth client (replacing the personal `itsjoshuakemp` infra). See §7.
+4. **Remove** `curl|sh` installers **and** `mcpbrain register` entirely — the plugin + install skill is the only path (keep it clean).
+5. **Monitoring ships in the plugin** (`monitors/`) — surface daemon/enrichment health in Cowork. See §8.
+6. Per-user **Google OAuth test users** are added by Josh in the Console (NOT in the plugin/skill). The **fast headless backfill** stays documented as an opt-in paid power tool (no Claude Code auto-install). Plugin name stays **mcpbrain**. The "My Brain" working project stays a guided manual wizard step.
+
 ## Goal
 
 Make onboarding for a non-technical org member: **the plugin is already there (org-pushed, auto-updating) → run one install skill in Cowork → done.** No terminal, no `curl|sh`, no manual MCP registration. One org-managed plugin carries everything Claude-facing (MCP server, skills, agents, hooks, commands) plus an install skill that bootstraps the daemon onto the machine from GitHub.
@@ -33,6 +41,7 @@ mcpbrain-plugin/
   .mcp.json                      # mcpbrain MCP server (see §2)
   bin/
     mcpbrain-mcp                 # shim: locate the installed mcpbrain + exec `mcpbrain mcp-server`
+    mcpbrain-monitor             # shim: locate the installed mcpbrain + exec `mcpbrain monitor` (§8)
   skills/
     install/SKILL.md             # the bootstrap install skill (§3)
     backfill/SKILL.md            # the Cowork-subagent $0 backfill (§4)
@@ -40,6 +49,8 @@ mcpbrain-plugin/
     enrich-batch.md              # the per-batch enrichment subagent (§4)
   hooks/
     hooks.json                   # SessionStart (prime) + SessionEnd (capture) — Cowork-only
+  monitors/
+    monitors.json                # daemon/enrichment/backup health surface — Cowork-only (§8)
   commands/                      # optional /mcpbrain status, etc.
 ```
 `version` is bumped per release so org members get controlled updates; the marketplace is org-added (managed) so it auto-installs/updates.
@@ -73,11 +84,27 @@ Subscription, fresh-context-per-batch (the context-limit fix). The backfill skil
 ### 5. Hooks (`hooks/hooks.json`)
 Move the SessionStart/SessionEnd memory hooks into the plugin (they "run only in Cowork"). They call `mcpbrain session-start` / `session-end` (the daemon CLI). Retire `hooks.py`'s settings.json-writing install — the plugin manages them.
 
-### 6. What's removed / repurposed
-- `mcpbrain register` (`wizard/register.py`, edits `claude_desktop_config.json`) — **removed** from the flow; the plugin's `.mcp.json` registers the MCP. (Keep the function only if needed for non-plugin users.)
-- `hooks.install_session_hooks` (settings.json) — **removed**; plugin `hooks/hooks.json` instead.
-- `curl|sh` installers (`install/setup.*`) — **demoted** to "advanced/manual"; the primary path is plugin + install skill. (Keep them for power users / CI.)
-- The daemon, wheel index, `bin/release.py` — **unchanged** (daemon distribution).
+### 6. What's removed (decision 4 — keep it clean)
+The plugin + install skill is the **only** install path. Everything that duplicated it is deleted, not demoted:
+- `mcpbrain register` + `wizard/register.py` (edits `claude_desktop_config.json`) — **deleted**. The plugin's `.mcp.json` is the sole MCP registration. `probes.probe_claude` no longer imports `claude_desktop_config_path`; the Claude probe keys off the MCP heartbeat alone (registered-but-no-heartbeat state is dropped).
+- `hooks.install_session_hooks` (settings.json writer) — **deleted**; plugin `hooks/hooks.json` is the sole hook source.
+- `curl|sh` installers (`install/setup.sh|.command|.ps1`) — **deleted**. No "advanced/manual" fallback; the install skill (which can also run in Claude Code, §3) covers the non-Cowork case.
+- The daemon, wheel index, `bin/release.py` — **unchanged** (daemon distribution). The fast headless `parallel_backfill`/`fast_backfill` stays (decision 6, opt-in paid power tool).
+- Test/grep sweep: remove the dead callers and their tests (`test_register*`, `test_setup_sh*`, register/hooks-install assertions in `test_probes.py`/`test_wizard_serve.py`) so the suite stays green.
+
+## 7. Infra migration to Centrepoint (decision 3)
+Move distribution off the personal `itsjoshuakemp` accounts onto Centrepoint-owned infra, as part of this work:
+- **GitHub**: a Centrepoint GitHub org with two **public** repos — `centrepoint/mcpbrain-plugin` (plugin + `marketplace.json`) and `centrepoint/mcpbrain-dist` (the PEP 503 wheel index, today on `itsjoshuakemp.github.io`). Public so members need no GitHub account and no secrets are exposed (decision 2/7).
+- **Google Cloud**: a Centrepoint GCP project with its **own** OAuth consent screen + **desktop OAuth client**, replacing the personal client. The new client ID/secret is bundled in the daemon wheel (as today) so sign-in is keyless for the member. Josh adds OAuth test users in the Console manually (decision 6) until the consent screen is verified.
+- **Cutover**: bump the wheel-index URL in the install skill + `bin/release.py` publish target to the Centrepoint Pages URL; bump the marketplace URL members add. Old personal repos can be archived once the pilot is on the new infra.
+- This is a maintainer/owner action (like standing up the original dist repo), not something the plugin or skill automates.
+
+## 8. Monitoring in the plugin (decision 5)
+Surface daemon/enrichment health inside Cowork so a non-technical member sees problems without opening the wizard:
+- The plugin ships `monitors/monitors.json` declaring one monitor that runs `${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-monitor` (a PATH-proof shim like `mcpbrain-mcp`) which calls a new `mcpbrain monitor` CLI.
+- `mcpbrain monitor` reads local state only (no network) and emits a compact health line + non-zero exit on trouble: **daemon down** (no recent heartbeat / launchd agent not loaded), **sync error** (last cycle errored in `logs/`), **enrichment idle** (the `probe_enrichment` durable signal stale), **backup stale** (`probe_backup` needs_action). It reuses `probes.all_connections` so the monitor and wizard never disagree.
+- Cowork renders the monitor output as a status surface/notification (monitors "run only in Cowork", like hooks). No new daemon endpoint — the CLI reads the same files the wizard polls.
+- Tests: `mcpbrain monitor` returns ok/exit-0 on a healthy home and a clear message/exit-1 per failure mode; `monitors/monitors.json` is valid and points at the shim.
 
 ## Cross-check (both repos)
 - **Productization spec**: distribution = wheel index + `curl|sh`. This spec keeps the wheel index for the daemon but moves the Claude-facing install into the plugin; the `curl|sh` becomes the install skill. No conflict — it's a cleaner front door.
@@ -90,7 +117,8 @@ Move the SessionStart/SessionEnd memory hooks into the plugin (they "run only in
 - `tests/test_plugin_assets.py`: the `enrich-batch` agent body embeds the `cowork/enrichment.md` rules; the backfill skill orchestrates subagents + loops-until-dry; the install skill contains the daemon-bootstrap steps + the VM-sandbox fallback.
 - `bin/mcpbrain-mcp` shim: resolves the binary, sets `MCPBRAIN_HOME`, execs `mcp-server`; degrades with a clear message if the binary is absent.
 - Daemon: drain stamps `logs/enrich.log`; the fast-cycle-while-backfilling endpoint.
-- Keep the suite green; `mcpbrain register`/`hooks.install` removal doesn't break remaining callers (grep + update).
+- `mcpbrain monitor` (§8): exit-0 + "ok" on a healthy home; exit-1 + a specific message for each failure mode (daemon down, sync error, enrichment idle, backup stale); `monitors/monitors.json` is valid JSON pointing at the `bin/mcpbrain-monitor` shim.
+- Keep the suite green after the §6 deletions: removing `mcpbrain register`/`wizard/register.py`/`hooks.install_session_hooks`/`install/setup.*` leaves no dangling import or test (grep + update `probes.py`, `test_probes.py`, `test_wizard_serve.py`).
 
 ## Out of scope / risks to verify at build
 - **Local MCP server in Cowork**: confirm a plugin's local stdio MCP runs on the host in a Cowork session (the existing `claude_desktop_config` registration already works in the desktop app, so likely yes — verify with the shipped plugin).
