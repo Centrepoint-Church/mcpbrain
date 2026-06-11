@@ -671,11 +671,10 @@ class Daemon:
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
             self._verify_interval_s = cadences["verify_interval_s"]
-        # Best-effort: keep the personal skills + records-repo scaffold current
-        # whenever settings are saved. Failures never fail the POST.
+        # Best-effort: keep the records-repo scaffold current whenever settings
+        # are saved. Failures never fail the POST.
         try:
-            from mcpbrain import records, skills
-            skills.write_personal_skills()
+            from mcpbrain import records
             records.scaffold_records(home)
         except Exception as exc:  # noqa: BLE001
             log.warning("apply_config materialise degraded: %s", exc)
@@ -1769,13 +1768,6 @@ def main(argv=None) -> None:
         ctrl = control_api.ControlServer(daemon, home=str(config.app_dir()), store=store)
         ctrl.start()
         log.info("control API + wizard on http://127.0.0.1:%d/", ctrl.port)
-        # Materialise the personal skills at startup so a fresh install has the
-        # mcpbrain-enrichment + mcpbrain-setup skills before the user opens Cowork.
-        try:
-            from mcpbrain import skills
-            skills.write_personal_skills()
-        except Exception as exc:  # noqa: BLE001 — best-effort, never block startup
-            log.warning("skill materialise at startup degraded: %s", exc)
         try:
             daemon.run()           # loop until Ctrl-C / stop
         finally:
