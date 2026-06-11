@@ -97,3 +97,84 @@ def test_worker_quarantines_unparseable_answer(tmp_path):
         model="sonnet", timeout=600, max_retries=2, backoff_base=0.0)
     assert ok is False
     assert list((tmp_path / "enrich_inbox" / "bad").glob("*.txt"))
+
+
+def _configure(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"owner_name": "Sam", "owner_email": "s@x.org", "orgs": [{"name": "Org"}]}))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+
+class _Batch:
+    def __init__(self, tid):
+        self.thread_id = tid; self.doc_ids = [f"d-{tid}"]; self.chunks = []
+
+
+def test_wave_loop_runs_until_backlog_dry(tmp_path, monkeypatch):
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+    # Wave 1: 3 threads; wave 2: empty (dry).
+    waves = iter([[_Batch("t1"), _Batch("t2"), _Batch("t3")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"],
+                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+    workered = []
+    monkeypatch.setattr(pb, "_process_batch_worker",
+                        lambda **kw: (workered.append(kw["pending"]["batch_id"]), (True, ""))[1])
+    drained = {"n": 0}
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=8, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: drained.__setitem__("n", drained["n"] + 1) or {})
+    assert res["status"] == "done"
+    assert res["waves"] == 1                 # one productive wave, then dry
+    assert res["threads"] == 3
+    # 3 threads / batch_size 2 => 2 sub-batches => 2 worker calls
+    assert len(workered) == 2
+    assert drained["n"] == 1                 # drain barrier ran once for the wave
+
+
+def test_wave_loop_honours_max_waves(tmp_path, monkeypatch):
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: [_Batch("t1")])   # never goes dry
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=1, batch_size=20, max_waves=3,
+        run_claude=lambda *a, **k: "{}", apply=lambda *a, **k: {},
+        drain_fn=lambda **k: {})
+    assert res["status"] == "max_waves" and res["waves"] == 3
+
+
+def test_wave_loop_cancels_after_current_wave(tmp_path, monkeypatch):
+    from mcpbrain import parallel_backfill as pb
+    import threading
+    _configure(tmp_path, monkeypatch)
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: [_Batch("t1")])
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending",
+                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+    cancel = threading.Event()
+    drained = {"n": 0}
+    def drain_then_cancel(**k):
+        drained["n"] += 1
+        cancel.set()                          # cancel during the first wave's drain
+        return {}
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=1, batch_size=20, cancel_event=cancel,
+        run_claude=lambda *a, **k: "{}", apply=lambda *a, **k: {},
+        drain_fn=drain_then_cancel)
+    assert res["status"] == "cancelled"
+    assert drained["n"] == 1                  # the in-flight wave's drain completed
