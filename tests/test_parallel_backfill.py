@@ -1,4 +1,5 @@
 import json
+import threading
 from mcpbrain import parallel_backfill
 
 
@@ -9,7 +10,7 @@ def test_run_parallel_backfill_refuses_when_unconfigured(tmp_path, monkeypatch):
         store=object(), embedder=object(), home=str(tmp_path),
         run_claude=lambda *a, **k: "{}", apply=lambda *a, **k: {})
     assert res["status"] == "not_configured"
-    assert res["waves"] == 0
+    assert res["batches"] == 0
 
 
 def test_helpers_are_importable():
@@ -111,75 +112,9 @@ class _Batch:
         self.thread_id = tid; self.doc_ids = [f"d-{tid}"]; self.chunks = []
 
 
-def test_wave_loop_runs_until_backlog_dry(tmp_path, monkeypatch):
-    from mcpbrain import parallel_backfill as pb
-    _configure(tmp_path, monkeypatch)
-    # Wave 1: 3 threads; wave 2: empty (dry).
-    waves = iter([[_Batch("t1"), _Batch("t2"), _Batch("t3")], []])
-    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
-    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"],
-                            "threads": [{"thread_id": b.thread_id} for b in batches]})
-    workered = []
-    monkeypatch.setattr(pb, "_process_batch_worker",
-                        lambda **kw: (workered.append(kw["pending"]["batch_id"]), (True, ""))[1])
-    drained = {"n": 0}
-    res = pb.run_parallel_backfill(
-        store=object(), embedder=object(), home=str(tmp_path),
-        workers=8, batch_size=2,
-        run_claude=lambda *a, **k: "{}",
-        apply=lambda *a, **k: {},
-        drain_fn=lambda **k: drained.__setitem__("n", drained["n"] + 1) or {})
-    assert res["status"] == "done"
-    assert res["waves"] == 1                 # one productive wave, then dry
-    assert res["threads_dispatched"] == 3
-    # 3 threads / batch_size 2 => 2 sub-batches => 2 worker calls
-    assert len(workered) == 2
-    assert drained["n"] == 1                 # drain barrier ran once for the wave
-
-
-def test_wave_loop_honours_max_waves(tmp_path, monkeypatch):
-    from mcpbrain import parallel_backfill as pb
-    _configure(tmp_path, monkeypatch)
-    monkeypatch.setattr(pb, "group_unenriched_threads",
-                        lambda store, **k: [_Batch("t1")])   # never goes dry
-    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
-    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
-    res = pb.run_parallel_backfill(
-        store=object(), embedder=object(), home=str(tmp_path),
-        workers=1, batch_size=20, max_waves=3,
-        run_claude=lambda *a, **k: "{}", apply=lambda *a, **k: {},
-        drain_fn=lambda **k: {})
-    assert res["status"] == "max_waves" and res["waves"] == 3
-
-
-def test_wave_loop_cancels_after_current_wave(tmp_path, monkeypatch):
-    from mcpbrain import parallel_backfill as pb
-    import threading
-    _configure(tmp_path, monkeypatch)
-    monkeypatch.setattr(pb, "group_unenriched_threads",
-                        lambda store, **k: [_Batch("t1")])
-    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
-    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
-    cancel = threading.Event()
-    drained = {"n": 0}
-    def drain_then_cancel(**k):
-        drained["n"] += 1
-        cancel.set()                          # cancel during the first wave's drain
-        return {}
-    res = pb.run_parallel_backfill(
-        store=object(), embedder=object(), home=str(tmp_path),
-        workers=1, batch_size=20, cancel_event=cancel,
-        run_claude=lambda *a, **k: "{}", apply=lambda *a, **k: {},
-        drain_fn=drain_then_cancel)
-    assert res["status"] == "cancelled"
-    assert drained["n"] == 1                  # the in-flight wave's drain completed
-
+# ---------------------------------------------------------------------------
+# Guard tests — unchanged
+# ---------------------------------------------------------------------------
 
 def test_guard_refuses_when_daemon_running_and_not_paused():
     from mcpbrain import parallel_backfill as pb
@@ -205,28 +140,207 @@ def test_guard_force_overrides():
     assert ok is True and "force" in msg.lower()
 
 
-def test_wave_loop_partial_wave_quarantine(tmp_path, monkeypatch):
-    """A wave where one sub-batch fails (quarantine) must still complete:
-    status=="done", quarantined==1, and the drain barrier still ran once."""
+# ---------------------------------------------------------------------------
+# Continuous-pipeline tests (replace the old wave-loop tests)
+# ---------------------------------------------------------------------------
+
+def _fake_build_pending(store, batches, **k):
+    """Minimal build_pending stub that returns a valid pending dict."""
+    return {"batch_id": k["batch_id"],
+            "threads": [{"thread_id": b.thread_id} for b in batches]}
+
+
+def test_pipeline_drains_backlog_dry(tmp_path, monkeypatch):
+    """group_unenriched_threads returns the remaining un-dispatched threads on
+    every call; once all are dispatched and drained (fake drain removes them) it
+    returns []. Pipeline must finish with status=='done', threads_dispatched==3,
+    worker invoked once per sub-batch (2 batches for 3 threads at batch_size=2),
+    and drain_fn called at least once."""
     from mcpbrain import parallel_backfill as pb
     _configure(tmp_path, monkeypatch)
-    # Wave 1: 3 threads; wave 2: empty (dry).
-    waves = iter([[_Batch("t1"), _Batch("t2"), _Batch("t3")], []])
-    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
-    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"],
-                            "threads": [{"thread_id": b.thread_id} for b in batches]})
 
-    # batch_size=2 with 3 threads -> 2 sub-batches: "fastbf-0-0-..." and "fastbf-0-1-..."
-    # Return True for first sub-batch, False for second.
+    # Remaining threads; fake drain removes them after each worker call.
+    remaining = {"t1", "t2", "t3"}
+
+    def fake_group(store, **k):
+        return [_Batch(tid) for tid in sorted(remaining)]
+
+    monkeypatch.setattr(pb, "group_unenriched_threads", fake_group)
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
+
+    worker_calls = []
+    monkeypatch.setattr(pb, "_process_batch_worker",
+                        lambda **kw: (worker_calls.append(kw["pending"]["batch_id"]), (True, ""))[1])
+
+    drain_count = {"n": 0}
+
+    def fake_drain(**k):
+        # Simulate drain: mark all dispatched threads enriched so they stop returning.
+        remaining.clear()
+        drain_count["n"] += 1
+
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=8, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=fake_drain)
+
+    assert res["status"] == "done"
+    assert res["threads_dispatched"] == 3
+    # 3 threads / batch_size 2 => 2 sub-batches => 2 worker calls
+    assert len(worker_calls) == 2
+    assert drain_count["n"] >= 1
+
+
+def test_pipeline_no_double_processing(tmp_path, monkeypatch):
+    """The in_flight exclusion must prevent the same thread_id being dispatched
+    to two workers concurrently.
+
+    Strategy: group_unenriched_threads always returns the same 3 _Batch objects
+    (simulating enriched=0 not yet flushed). A fake drain_fn marks the threads
+    enriched so the fake store stops returning them. Worker calls are recorded;
+    we assert each thread_id appears in exactly one worker's batch.
+    """
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    # Tracks which tids the fake store considers still-unenriched.
+    unenriched = {"t1", "t2", "t3"}
+
+    def fake_group(store, **k):
+        return [_Batch(tid) for tid in sorted(unenriched)]
+
+    monkeypatch.setattr(pb, "group_unenriched_threads", fake_group)
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
+
+    # Record every (batch_id -> set of thread_ids) the worker sees.
+    worker_batches: list[set] = []
+
+    def fake_worker(**kw):
+        tids = {t["thread_id"] for t in kw["pending"]["threads"]}
+        worker_batches.append(tids)
+        return True, ""
+
+    monkeypatch.setattr(pb, "_process_batch_worker", fake_worker)
+
+    # drain_fn marks the dispatched threads enriched so fake_group stops
+    # returning them after the first drain cycle.
+    def fake_drain(**k):
+        # All threads ever dispatched get marked enriched (removed from unenriched).
+        dispatched = set().union(*worker_batches) if worker_batches else set()
+        unenriched.difference_update(dispatched)
+
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=3, batch_size=2,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=fake_drain)
+
+    assert res["status"] == "done"
+    assert res["threads_dispatched"] == 3
+
+    # Flatten all dispatched thread_ids across all worker calls.
+    all_dispatched = [tid for batch in worker_batches for tid in batch]
+    # Each thread_id must appear exactly once — no double-processing.
+    from collections import Counter
+    counts = Counter(all_dispatched)
+    for tid, cnt in counts.items():
+        assert cnt == 1, f"thread {tid!r} dispatched {cnt} times (expected 1)"
+
+
+def test_pipeline_max_batches_honoured(tmp_path, monkeypatch):
+    """When max_batches is set the pipeline stops submitting new batches once
+    batches_done reaches max_batches. status must be 'max_batches'."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    # Never dries up — always returns work.
+    call_n = {"n": 0}
+    def fake_group(store, **k):
+        call_n["n"] += 1
+        return [_Batch(f"t{call_n['n']}-{i}") for i in range(4)]
+
+    monkeypatch.setattr(pb, "group_unenriched_threads", fake_group)
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+
+    max_b = 3
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=2, batch_size=2, max_batches=max_b,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=lambda **k: {})
+
+    assert res["status"] == "max_batches"
+    # batches_done must not exceed max_batches (workers=2 means at most 2 extra
+    # in-flight at the cutoff moment, but with fake instant workers it's exact).
+    assert res["batches"] == max_b
+
+
+def test_pipeline_cancellation(tmp_path, monkeypatch):
+    """Cancellation: once cancel_event is set, no NEW batches are submitted.
+    In-flight batches are drained. status must be 'cancelled'."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    cancel = threading.Event()
+
+    # Never dries up.
+    call_n = {"n": 0}
+    def fake_group(store, **k):
+        call_n["n"] += 1
+        return [_Batch(f"t{call_n['n']}")]
+
+    monkeypatch.setattr(pb, "group_unenriched_threads", fake_group)
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
+    monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
+
+    drained = {"n": 0}
+    def drain_then_cancel(**k):
+        drained["n"] += 1
+        cancel.set()   # cancel after the first drain cycle
+
+    res = pb.run_parallel_backfill(
+        store=object(), embedder=object(), home=str(tmp_path),
+        workers=1, batch_size=1, cancel_event=cancel,
+        run_claude=lambda *a, **k: "{}",
+        apply=lambda *a, **k: {},
+        drain_fn=drain_then_cancel)
+
+    assert res["status"] == "cancelled"
+    assert drained["n"] >= 1   # the in-flight batch was drained before we stopped
+
+
+def test_pipeline_partial_failure(tmp_path, monkeypatch):
+    """One batch's worker returns (False, 'contract'). quarantined==1, other
+    batches succeed, status=='done', drain_fn still ran."""
+    from mcpbrain import parallel_backfill as pb
+    _configure(tmp_path, monkeypatch)
+
+    batches_iter = iter([
+        [_Batch("t1"), _Batch("t2"), _Batch("t3")],
+        [],
+    ])
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: next(batches_iter, []))
+    monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
+
     call_counter = {"n": 0}
     def mixed_worker(**kw):
         n = call_counter["n"]
         call_counter["n"] += 1
         if n == 0:
-            return True, ""
-        return False, "contract"
+            return False, "contract"
+        return True, ""
+
     monkeypatch.setattr(pb, "_process_batch_worker", mixed_worker)
 
     drained = {"n": 0}
@@ -239,11 +353,11 @@ def test_wave_loop_partial_wave_quarantine(tmp_path, monkeypatch):
 
     assert res["status"] == "done"
     assert res["quarantined"] == 1
-    assert drained["n"] == 1             # drain barrier ran exactly once for the wave
+    assert drained["n"] >= 1
 
 
 # ---------------------------------------------------------------------------
-# Fix 2 — per-wave backlog/ETA (store with chunk_count / enriched_count)
+# Backlog/progress helpers (store with chunk_count / enriched_count)
 # ---------------------------------------------------------------------------
 
 class _CountingStore:
@@ -259,7 +373,7 @@ class _CountingStore:
         return self._enriched
 
 
-def test_wave_loop_progress_with_counting_store(tmp_path, monkeypatch):
+def test_pipeline_progress_with_counting_store(tmp_path, monkeypatch):
     """When the store implements chunk_count/enriched_count, run_parallel_backfill
     completes and the progress path is exercised without crashing."""
     from mcpbrain import parallel_backfill as pb
@@ -267,12 +381,11 @@ def test_wave_loop_progress_with_counting_store(tmp_path, monkeypatch):
 
     counting_store = _CountingStore(total=10, enriched=7)
 
-    waves = iter([[_Batch("t1"), _Batch("t2")], []])
-    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    batches_iter = iter([[_Batch("t1"), _Batch("t2")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: next(batches_iter, []))
     monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"],
-                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
     monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
 
     res = pb.run_parallel_backfill(
@@ -283,21 +396,19 @@ def test_wave_loop_progress_with_counting_store(tmp_path, monkeypatch):
         drain_fn=lambda **k: {})
 
     assert res["status"] == "done"
-    assert res["waves"] == 1
     assert res["threads_dispatched"] == 2
 
 
-def test_wave_loop_progress_graceful_without_counts(tmp_path, monkeypatch):
+def test_pipeline_progress_graceful_without_counts(tmp_path, monkeypatch):
     """store=object() (no chunk_count/enriched_count) must not crash the loop."""
     from mcpbrain import parallel_backfill as pb
     _configure(tmp_path, monkeypatch)
 
-    waves = iter([[_Batch("t1")], []])
-    monkeypatch.setattr(pb, "group_unenriched_threads", lambda store, **k: next(waves))
+    batches_iter = iter([[_Batch("t1")], []])
+    monkeypatch.setattr(pb, "group_unenriched_threads",
+                        lambda store, **k: next(batches_iter, []))
     monkeypatch.setattr(pb.prepare, "_filter_noise", lambda store, batches: batches)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"],
-                            "threads": [{"thread_id": b.thread_id} for b in batches]})
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
     monkeypatch.setattr(pb, "_process_batch_worker", lambda **kw: (True, ""))
 
     res = pb.run_parallel_backfill(
@@ -310,15 +421,10 @@ def test_wave_loop_progress_graceful_without_counts(tmp_path, monkeypatch):
     assert res["status"] == "done"
 
 
-# ---------------------------------------------------------------------------
-# Fix 4 — pre-pool cancel check: cancel set before first pool launch
-# ---------------------------------------------------------------------------
-
-def test_pre_pool_cancel_check_stops_before_pool(tmp_path, monkeypatch):
-    """If cancel_event is set before the pool launches (e.g. during _filter_noise),
-    the loop must exit with status='cancelled' and _process_batch_worker must
-    never be called and drain_fn must run 0 times."""
-    import threading
+def test_pre_pool_cancel_stops_before_any_submission(tmp_path, monkeypatch):
+    """If cancel_event is set during _filter_noise (before any future is submitted),
+    the pipeline must exit with status='cancelled', worker never called, drain
+    never called."""
     from mcpbrain import parallel_backfill as pb
     _configure(tmp_path, monkeypatch)
 
@@ -328,14 +434,11 @@ def test_pre_pool_cancel_check_stops_before_pool(tmp_path, monkeypatch):
                         lambda store, **k: [_Batch("t1")])
 
     def filter_then_cancel(store, batches):
-        # Set the cancel event during _filter_noise (simulates cancel arriving
-        # during the previous wave's work or between _filter_noise and pool launch).
         cancel.set()
         return batches
 
     monkeypatch.setattr(pb.prepare, "_filter_noise", filter_then_cancel)
-    monkeypatch.setattr(pb.prepare, "build_pending",
-                        lambda store, batches, **k: {"batch_id": k["batch_id"], "threads": []})
+    monkeypatch.setattr(pb.prepare, "build_pending", _fake_build_pending)
 
     worker_calls = {"n": 0}
 
@@ -355,5 +458,5 @@ def test_pre_pool_cancel_check_stops_before_pool(tmp_path, monkeypatch):
         drain_fn=lambda **k: drain_calls.__setitem__("n", drain_calls["n"] + 1) or {})
 
     assert res["status"] == "cancelled"
-    assert worker_calls["n"] == 0, "worker must not run when cancel set before pool"
-    assert drain_calls["n"] == 0, "drain must not run when cancel set before pool"
+    assert worker_calls["n"] == 0, "worker must not run when cancel set before submission"
+    assert drain_calls["n"] == 0, "drain must not run when cancel set before any future"
