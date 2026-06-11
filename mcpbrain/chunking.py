@@ -81,6 +81,75 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+import json as _json  # noqa: E402 — grouped after stdlib-only section
+
+# Allowed thread content types. Single owner: contract.py imports from here
+# rather than re-declaring it so the enum can't drift from the gate.
+_VALID_CONTENT_TYPES = {"request", "update", "decision", "fyi", "notification"}
+
+# Allowed declared entity types. A model-declared type outside this set is
+# clamped to "topic".
+_VALID_TYPES = ("person", "org", "project", "topic")
+
+# Structural junk patterns applied to both person AND org.
+_STRUCTURAL_JUNK = [
+    re.compile(r"^(Re|Fwd|FW|RE|FWD)\s*:", re.IGNORECASE),
+    re.compile(r"https?://"),
+    re.compile(r"\w+@\w+\.\w+"),
+    re.compile(r"[|{}\[\]<>]"),
+]
+
+# Numeric junk patterns applied to person ONLY.
+_NUMERIC_JUNK = [
+    re.compile(r"\d{4}"),
+    re.compile(r"\d{2,}/\d{2,}"),
+]
+
+
+def _is_junk_entity(name: str, etype: str) -> bool:
+    """Reject obviously-bad person/org entities."""
+    if etype not in ("person", "org"):
+        return False
+    name = (name or "").strip()
+    if len(name) < 2 or len(name) > 60:
+        return True
+    for pattern in _STRUCTURAL_JUNK:
+        if pattern.search(name):
+            return True
+    if etype == "person":
+        for pattern in _NUMERIC_JUNK:
+            if pattern.search(name):
+                return True
+    return False
+
+
+def _strip_fences(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    return s.strip()
+
+
+def _parse_first_json_object(raw: str) -> dict:
+    """Parse the first complete JSON OBJECT from raw, ignoring trailing content."""
+    s = _strip_fences(raw)
+    decoder = _json.JSONDecoder()
+    pos = 0
+    while True:
+        start = s.find("{", pos)
+        if start == -1:
+            raise ValueError("no JSON object in model output")
+        try:
+            obj, _end = decoder.raw_decode(s[start:])
+        except _json.JSONDecodeError:
+            pos = start + 1
+            continue
+        if isinstance(obj, dict):
+            return obj
+        pos = start + 1
+
+
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
     max_chars = max_tokens * 4
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
