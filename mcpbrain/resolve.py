@@ -9,8 +9,8 @@ LLM adjudicator added in R7; nothing is merged here.
 import json
 import logging
 
-from mcpbrain.chunking import slugify, _canonical_name
-from mcpbrain.enrich import _parse_first_json_object, _DEFAULT_MODEL
+from mcpbrain.chunking import slugify, _canonical_name, _parse_first_json_object
+_DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 log = logging.getLogger(__name__)
 

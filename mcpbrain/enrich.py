@@ -5,13 +5,17 @@ SDK (`google.genai`) is only imported inside `make_gemini_client`, so importing
 this module never requires the SDK to be installed.
 """
 
-import json
 import logging
 import os
-import re
 
 from mcpbrain.chunking import slugify  # re-export: keep `from mcpbrain.enrich import slugify` working
 from mcpbrain.chunking import _canonical_name  # re-export: keep `from mcpbrain.enrich import _canonical_name` working
+from mcpbrain.chunking import (  # noqa: F401 — re-exports for backward compat
+    _VALID_CONTENT_TYPES,
+    _VALID_TYPES,
+    _is_junk_entity,
+    _parse_first_json_object,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,57 +26,6 @@ _EMPTY = {"entities": [], "relations": [], "actions": [], "decisions": []}
 # installs clamp against their own org list.
 from mcpbrain import orgs as _orgs  # noqa: E402 — placed with the enum it owns
 _VALID_ORGS = set(_orgs.DEFAULT_TAXONOMY.valid_orgs)
-
-# Allowed thread content types. Single owner: the contract validator imports this
-# rather than re-declaring it, so the enrichment enum can't drift from the gate.
-_VALID_CONTENT_TYPES = {"request", "update", "decision", "fyi", "notification"}
-
-# Allowed declared entity types. A model-declared type outside this set is
-# clamped to "topic". The relation-endpoint STUB type ("unknown") is NOT a
-# declared type and is never clamped.
-_VALID_TYPES = ("person", "org", "project", "topic")
-
-# Structural junk patterns applied to both person AND org: subject-line prefixes,
-# URLs, email addresses, and structural punctuation that never appear in real names.
-_STRUCTURAL_JUNK = [
-    re.compile(r"^(Re|Fwd|FW|RE|FWD)\s*:", re.IGNORECASE),
-    re.compile(r"https?://"),
-    re.compile(r"\w+@\w+\.\w+"),
-    re.compile(r"[|{}\[\]<>]"),
-]
-
-# Numeric junk patterns applied to person ONLY: 4-digit runs (years/amounts) and
-# date-like fragments are valid in org/project names (e.g. "OrgName 2026",
-# "Vision 2030") but almost always junk in a person name.
-_NUMERIC_JUNK = [
-    re.compile(r"\d{4}"),
-    re.compile(r"\d{2,}/\d{2,}"),
-]
-
-
-def _is_junk_entity(name: str, etype: str) -> bool:
-    """Reject obviously-bad person/org entities. Ported from src memory_db.
-
-    person/org are length- and pattern-checked; topic/project are exempt from
-    those checks but still must be non-empty (handled by the empty-slug skip).
-
-    Structural patterns (URL, email, subject prefix, brackets) apply to both
-    person and org. Numeric patterns (4-digit runs, date fragments) apply to
-    person only — org/project names may legitimately contain years.
-    """
-    if etype not in ("person", "org"):
-        return False
-    name = (name or "").strip()
-    if len(name) < 2 or len(name) > 60:
-        return True
-    for pattern in _STRUCTURAL_JUNK:
-        if pattern.search(name):
-            return True
-    if etype == "person":
-        for pattern in _NUMERIC_JUNK:
-            if pattern.search(name):
-                return True
-    return False
 
 # Current, configurable extraction model. gemini-2.5-flash-lite matches the
 # main server's Flash-Lite choice; the old gemini-2.0-flash is 404 for new users.
@@ -161,38 +114,6 @@ def build_prompt(text: str, metadata: dict) -> str:
         "Document:\n"
         f"{text}"
     )
-
-
-def _strip_fences(raw: str) -> str:
-    s = raw.strip()
-    if s.startswith("```"):
-        # drop opening fence (optionally ```json) and trailing fence
-        s = re.sub(r"^```[a-zA-Z0-9]*\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-    return s.strip()
-
-
-def _parse_first_json_object(raw: str) -> dict:
-    """Parse the first complete JSON OBJECT from raw, ignoring any trailing
-    content (the model occasionally appends a second object or trailing text
-    despite response_mime_type=json). Scans each '{' in turn so an inline brace
-    in leading prose (e.g. "use {x} then {...}") doesn't abort the parse.
-    Raises ValueError if no decodable object is found."""
-    s = _strip_fences(raw)
-    decoder = json.JSONDecoder()
-    pos = 0
-    while True:
-        start = s.find("{", pos)
-        if start == -1:
-            raise ValueError("no JSON object in model output")
-        try:
-            obj, _end = decoder.raw_decode(s[start:])
-        except json.JSONDecodeError:
-            pos = start + 1  # this brace didn't start a valid value; try the next
-            continue
-        if isinstance(obj, dict):
-            return obj
-        pos = start + 1  # decoded a non-dict value here; keep scanning
 
 
 def extract(client, text: str, metadata: dict, model: str | None = None) -> dict:
