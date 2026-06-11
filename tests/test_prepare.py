@@ -517,6 +517,31 @@ def test_prepare_no_unenriched_writes_empty_or_skips(tmp_path, monkeypatch):
     assert not pending.exists()
 
 
+# --- build_pending: assemble dict without writing --------------------------
+
+def test_build_pending_returns_dict_without_writing(tmp_path, monkeypatch):
+    # build_pending must NOT touch the filesystem — no pending.json appears.
+    import datetime
+    from mcpbrain import prepare
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(prepare, "_reassemble_thread",
+                        lambda chunks: [{"message_id": "m1", "date": "2026-01-01",
+                                         "sender": "a@x.org", "subject": "Hi", "text": "hello"}])
+    monkeypatch.setattr(prepare, "_build_context", lambda store, tids: {"owner_name": "Sam"})
+
+    class _Batch:
+        thread_id = "t1"; doc_ids = ["d1"]; chunks = [{"doc_id": "d1"}]
+
+    now = datetime.datetime(2026, 6, 11, 9, 0, 0, tzinfo=datetime.timezone.utc)
+    data = prepare.build_pending(object(), [_Batch()], char_budget=200_000, now=now,
+                                 batch_id="fastbf-0-0")
+    assert data["batch_id"] == "fastbf-0-0"
+    assert data["prepared_at"] == "2026-06-11T09:00:00Z"
+    assert len(data["threads"]) == 1 and data["threads"][0]["thread_id"] == "t1"
+    assert data["merge_review"] == []
+    assert not (tmp_path / "enrich_queue" / "pending.json").exists()
+
+
 # --- helpers ---------------------------------------------------------------
 
 def _read_pending(home):
