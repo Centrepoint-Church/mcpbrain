@@ -6,10 +6,15 @@ the store read-write and runs prepare/drain itself, so the daemon must be paused
 or stopped (the CLI guards this). The main thread is the SOLE SQLite writer;
 worker threads only run `claude --print` subprocesses and write inbox files.
 Ongoing steady-state enrichment stays on the daemon/cowork path.
+
+Cancellation note: a cancellation requested via cancel_event takes effect at the
+TOP of the wave loop, immediately before launching a fresh ThreadPoolExecutor.
+An in-flight wave still runs its workers to completion (up to `timeout`) before
+cancellation takes effect — cancellation is cooperative, not forceful.
 """
 from __future__ import annotations
 
-import importlib.util
+import collections
 import json
 import logging
 import random
@@ -21,45 +26,22 @@ from pathlib import Path
 from mcpbrain import config, prepare, drain as drain_mod
 from mcpbrain.contract import validate_batch_file
 from mcpbrain.thread_enrich import group_unenriched_threads
-from mcpbrain.draft import _find_claude
+from mcpbrain.extractor_io import (
+    extract_answer,
+    parse_extractor_json,
+    patch_extractions,
+    atomic_write_inbox,
+    quarantine,
+    daemon_status,  # noqa: F401 — re-exported; bin/fast_backfill uses parallel_backfill.daemon_status
+    claude_runner,
+    format_eta,
+    _PREAMBLE,
+    _PENDING_DELIM,
+)
 
 log = logging.getLogger("mcpbrain.parallel_backfill")
 
 _CHAR_BUDGET = 200_000
-
-
-def _load_drain_backlog():
-    """Import bin/drain_backlog.py by path to reuse its pure helpers without
-    duplicating them. bin/ is not a package, so load it as a standalone module."""
-    script = Path(__file__).resolve().parents[1] / "bin" / "drain_backlog.py"
-    spec = importlib.util.spec_from_file_location("_drain_backlog", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_db = _load_drain_backlog()
-extract_answer = _db.extract_answer
-parse_extractor_json = _db.parse_extractor_json
-patch_extractions = _db.patch_extractions
-atomic_write_inbox = _db.atomic_write_inbox
-quarantine = _db.quarantine
-daemon_status = _db.daemon_status
-_PREAMBLE = _db._PREAMBLE
-_PENDING_DELIM = _db._PENDING_DELIM
-
-
-def local_claude_runner(prompt: str, *, model: str = "sonnet", timeout: int = 600) -> str:
-    """Shell to the local claude CLI in headless print mode; prompt via stdin.
-    Raises subprocess.CalledProcessError (carrying stderr) on non-zero exit so
-    the backoff layer can classify rate-limit/overload responses."""
-    claude = _find_claude()
-    return subprocess.run(
-        [claude, "--print", "--model", model, "--output-format", "json",
-         "--settings", '{"disableAllHooks":true}'],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-        check=True,
-    ).stdout
 
 
 # stderr substrings the claude CLI surfaces for transient back-pressure.
@@ -181,6 +163,19 @@ def check_daemon_guard(*, status, force) -> tuple[bool, str]:
             "Use --force to override.")
 
 
+def _safe_backlog(store) -> int | None:
+    """Return store.chunk_count() - store.enriched_count(), or None on any error.
+
+    Defensive helper: many tests pass store=object() which has no such methods.
+    Returns None when the store lacks the methods or raises, so the wave loop
+    degrades gracefully (skips ETA) rather than crashing.
+    """
+    try:
+        return store.chunk_count() - store.enriched_count()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
                           workers=8, batch_size=20, char_budget=_CHAR_BUDGET,
                           timeout=600, max_waves=None, run_claude=None,
@@ -190,13 +185,18 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
     Gated on config.is_configured. Returns a summary dict with keys:
     status ("done"|"max_waves"|"cancelled"|"not_configured"), waves,
     threads_dispatched, quarantined.
+
+    Cancellation: setting cancel_event before or during a wave causes the loop
+    to exit after the current wave's drain barrier completes. An in-flight wave
+    still runs its workers to completion (up to `timeout`) before cancellation
+    takes effect — workers are not forcibly interrupted.
     """
     home = home or str(config.app_dir())
     if not config.is_configured(home):
         return {"status": "not_configured", "waves": 0, "threads_dispatched": 0,
                 "quarantined": 0}
     if run_claude is None:
-        run_claude = local_claude_runner
+        run_claude = claude_runner
     if apply is None:
         from mcpbrain.graph_write import apply as _apply
         apply = _apply
@@ -205,8 +205,11 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
 
     import datetime
     home_path = Path(home)
-    prompt_prefix = (Path(__file__).resolve().parents[1] / "mcpbrain"
-                     / "enrich_prompt.md").read_text()
+
+    # enrich_prompt.md is the canonical HEADLESS extractor prompt (NOT the
+    # cowork/enrichment.md skill body, which is written for the file-touching
+    # Cowork flow). Enrichment-quality changes must be mirrored into BOTH files.
+    prompt_prefix = Path(__file__).with_name("enrich_prompt.md").read_text()
 
     def _cancelled():
         return cancel_event is not None and cancel_event.is_set()
@@ -214,6 +217,8 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
     waves = 0
     threads_dispatched = 0
     quarantined = 0
+    wave_durations: collections.deque = collections.deque(maxlen=5)
+
     while True:
         if _cancelled():
             return {"status": "cancelled", "waves": waves,
@@ -231,6 +236,12 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
         if not kept:
             continue                                   # all noise; pull next wave
 
+        # Second cancel check: if a cancel arrived during the previous wave's
+        # drain barrier, don't start a fresh ThreadPoolExecutor.
+        if _cancelled():
+            return {"status": "cancelled", "waves": waves,
+                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
+
         now = datetime.datetime.now(datetime.timezone.utc)
         sub_batches = _partition(kept, batch_size=batch_size)
         pendings = []
@@ -242,16 +253,44 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
         log.info("wave %d: %d threads -> %d sub-batches x %d workers (%s)",
                  waves, len(kept), len(pendings), workers, model)
 
+        wave_t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(
                 lambda p: _process_batch_worker(
                     home=home_path, pending=p, prompt_prefix=prompt_prefix,
                     run_claude=run_claude, model=model, timeout=timeout),
                 pendings))
+        wave_elapsed = time.monotonic() - wave_t0
+        wave_durations.append(wave_elapsed)
+
         quarantined += sum(1 for ok, _ in results if not ok)
 
         # Serial drain barrier — the only place the wave's results hit the store.
+        # drain_fn processes the ENTIRE enrich_inbox/ dir (by design, since the
+        # standalone backfill owns the spool while the daemon is paused), so any
+        # pre-existing inbox files are also applied/quarantined here.
         drain_fn(store=store, home=home, apply=apply, embedder=embedder)
 
         waves += 1
         threads_dispatched += len(kept)
+
+        # Per-wave backlog + ETA progress log.
+        # Backlog is read defensively — store=object() tests have no such methods.
+        backlog = _safe_backlog(store)
+        if backlog is not None and wave_durations:
+            avg_wave = sum(wave_durations) / len(wave_durations)
+            threads_per_wave = max(1, len(kept))
+            remaining_batches = backlog / threads_per_wave
+            eta_s = remaining_batches * avg_wave
+            log.info(
+                "wave %d done: +%d threads (cumulative %d), backlog %d, "
+                "avg_wave %.1fs, ETA ~%s",
+                waves, len(kept), threads_dispatched, backlog,
+                avg_wave, format_eta(eta_s),
+            )
+        else:
+            log.info(
+                "wave %d done: +%d threads (cumulative %d), avg_wave %.1fs",
+                waves, len(kept), threads_dispatched,
+                wave_durations[-1] if wave_durations else 0.0,
+            )
