@@ -27,40 +27,51 @@ def _default_owner() -> str:
     return config.owner_name(str(config.app_dir()))
 
 
-async def list_context_resources():
-    """Return types.Resource entries for every *.md in ~/.mcpbrain/context/.
+def _resource_entries() -> list[tuple[str, Path]]:
+    """(name, resolved_path) for every context resource we expose.
 
-    # NOTE: This serves files from app_dir/context/. Draft voice rules are read from
-    # records_dir/context/voice.md (see draft._load_voice_rules). These two paths differ
-    # when records_dir != app_dir/records. Align in a future pass.
+    Two roots: the app-dir context (the daemon-maintained note index, e.g.
+    memory.md) and the per-user records repo (identity, voice, preferences,
+    reference, decisions, MEMORY.md, CLAUDE.md) so the working Cowork project can
+    read standing context through the MCP server without any filesystem paths.
+    Only existing files are returned; a missing file or repo is simply absent.
     """
+    entries: list[tuple[str, Path]] = []
+    app_ctx = config.app_dir() / "context"
+    if app_ctx.is_dir():
+        for md in sorted(app_ctx.glob("*.md")):
+            entries.append((md.name, md.resolve()))
+    records = Path(config.records_dir(str(config.app_dir())))
+    candidates: list[Path] = [records / "CLAUDE.md", records / "MEMORY.md",
+                              records / "state" / "decisions.md"]
+    for sub in ("context", "reference"):
+        candidates.extend(sorted((records / sub).glob("*.md")))
+    for p in candidates:
+        if p.is_file():
+            entries.append((str(p.relative_to(records)), p.resolve()))
+    return entries
+
+
+async def list_context_resources():
+    """Return types.Resource entries for the app-dir context + the records repo."""
     from mcp import types
-    ctx = config.app_dir() / "context"
-    if not ctx.is_dir():
-        return []
-    resources = []
-    for md in sorted(ctx.glob("*.md")):
-        resources.append(types.Resource(
-            uri=f"file://{md.resolve()}",
-            name=md.name,
-            mimeType="text/markdown",
-        ))
-    return resources
+    return [
+        types.Resource(uri=f"file://{path}", name=name, mimeType="text/markdown")
+        for name, path in _resource_entries()
+    ]
 
 
 async def read_context_resource(uri) -> str:
-    """Return the text content of a context/*.md resource identified by uri.
+    """Return a resource's text, rejecting any uri not in the advertised allowlist.
 
-    Raises ValueError if the resolved path is outside the context directory.
+    Exact membership against _resource_entries() is the containment guard: only a
+    path we actually expose can be read, so no traversal or arbitrary-file read is
+    possible regardless of the uri given.
     """
-    ctx = (config.app_dir() / "context").resolve()
     path = Path(str(uri).replace("file://", "")).resolve()
-    # Containment, defence in depth: the file must sit directly in context/
-    # (parent == ctx) AND ctx must be an ancestor of the resolved path. The
-    # second check rejects nested subdirs and any ../ escape that resolves out
-    # of the context tree.
-    if path.parent != ctx or ctx not in path.parents:
-        raise ValueError(f"resource outside context dir: {uri}")
+    allowed = {p for _, p in _resource_entries()}
+    if path not in allowed:
+        raise ValueError(f"resource not in allowlist: {uri}")
     return path.read_text(encoding="utf-8")
 
 
