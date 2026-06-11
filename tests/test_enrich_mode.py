@@ -1,5 +1,5 @@
 """Tests for config.enrich_mode — the single source of truth for the daemon's
-enrichment-source branch (spool | gemini | off).
+enrichment-source branch (spool | off).
 
 A fresh install resolves to "off": nothing enriches until the mode is set
 explicitly. An unknown value clamps to "off" so a typo never silently enables a
