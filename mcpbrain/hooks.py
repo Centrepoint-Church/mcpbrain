@@ -55,7 +55,8 @@ def _write(p: Path, data: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # POSIX-only; on Windows mkstemp is already owner-only
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, p)
@@ -86,7 +87,9 @@ def install_session_hooks() -> Path:
             for h in blk.get("hooks", []) if isinstance(h, dict)
         )
         if not present:
-            blocks.append({"hooks": [{"type": "command", "command": f"{bin_path} {marker}"}]})
+            # Quote the binary path: it can contain spaces (Windows "C:\\Users\\First
+            # Last\\…", macOS "Application Support"), and the hook command runs via a shell.
+            blocks.append({"hooks": [{"type": "command", "command": f'"{bin_path}" {marker}'}]})
             changed = True
         hooks[event] = blocks
     if changed:
