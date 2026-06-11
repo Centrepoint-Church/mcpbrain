@@ -11,6 +11,8 @@ DRY="${1:-}"
 run() { if [ "$DRY" = "--dry-run" ]; then echo "[dry-run] $*"; else "$@"; fi; }
 
 command -v uv >/dev/null 2>&1 || run sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+# Claude Code runs background enrichment (needs a Pro/Max/Team account; sign in once).
+command -v claude >/dev/null 2>&1 || run sh -c 'curl -fsSL https://claude.ai/install.sh | bash'
 run uv tool install --python 3.12 --index "mcpbrain=$INDEX_URL" mcpbrain --force
 
 BIN="$(command -v mcpbrain || echo "$HOME/.local/bin/mcpbrain")"

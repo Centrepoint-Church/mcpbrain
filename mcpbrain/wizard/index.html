@@ -177,7 +177,7 @@
 
   <section id="step-projects" class="card">
     <h2><span class="num">4</span>Your workspace</h2>
-    <p class="desc">You work from one Cowork project ("My Brain"). Create it from scratch and paste the name and instructions below — your identity, voice and memory come through the mcpbrain tools, so there are no folders to attach. Enrichment runs as an hourly background task you start with one command.</p>
+    <p class="desc">You work from one Cowork project ("My Brain"). Create it from scratch and paste the name and instructions below — your identity, voice and memory come through the mcpbrain tools, so there are no folders to attach. Enrichment runs automatically every 30 minutes in the background — nothing to set up.</p>
     <div class="row">
       <button class="primary" type="button" onclick="prepareWorkspace()">Prepare my working space</button>
       <span id="ws-state" class="badge idle hidden"></span>
@@ -193,11 +193,9 @@
       </ol>
     </details>
     <details class="howto">
-      <summary>2. Start enrichment (the hourly background run)</summary>
-      <ol>
-        <li>Open any Cowork chat and run: <code id="setup-cmd">/mcpbrain-setup</code> <button class="copybtn" type="button" onclick="copyText('setup-cmd')">Copy</button></li>
-        <li>It finds your folders and creates the hourly task itself — nothing else to configure.</li>
-      </ol>
+      <summary>2. Enrichment runs automatically</summary>
+      <p>Every 30 minutes mcpbrain enriches new mail in the background using Claude Code — nothing to start. If status shows <b>Install Claude Code</b>, run this once and sign in:</p>
+      <div class="row"><code id="cc-install">curl -fsSL https://claude.ai/install.sh | bash</code> <button class="copybtn" type="button" onclick="copyText('cc-install')">Copy</button></div>
     </details>
   </section>
 
