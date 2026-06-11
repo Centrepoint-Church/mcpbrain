@@ -35,3 +35,23 @@ def test_every_offset_minus12_to_plus14_present():
     have = {int(ZoneInfo(o["value"]).utcoffset(NOW).total_seconds() // 3600) for o in opts}
     for hour in range(-12, 15):  # -12 .. +14 inclusive
         assert hour in have, f"no curated zone at GMT{hour:+d}"
+
+
+def test_fractional_offset_zones_present():
+    # Inhabited half-hour/45-min zones must be selectable, else those users are
+    # forced to pick a wrong whole-hour zone and ClickUp deadlines shift.
+    values = {z for z in timezones.CURATED_ZONES}
+    for z in ("Asia/Kolkata", "Asia/Kathmandu", "Australia/Adelaide",
+              "America/St_Johns", "Asia/Tehran", "Asia/Yangon",
+              "Pacific/Chatham", "Pacific/Marquesas"):
+        assert z in values, f"missing fractional zone {z}"
+
+
+def test_fractional_offset_labels():
+    # India is a stable +05:30 year-round; Nepal a stable +05:45.
+    assert timezones.offset_label("Asia/Kolkata", now=NOW).endswith("(GMT+05:30)")
+    assert timezones.offset_label("Asia/Kathmandu", now=NOW).endswith("(GMT+05:45)")
+
+
+def test_no_duplicate_zones():
+    assert len(timezones.CURATED_ZONES) == len(set(timezones.CURATED_ZONES))
