@@ -162,266 +162,8 @@
     </div>
   </section>
 
-  <section id="step-enrich" class="card">
-    <h2><span class="num">3</span>Schedule the extractor in Claude Cowork</h2>
-    <p class="desc">Enrichment runs out-of-band: the daemon writes <code>pending.json</code>, a scheduled Cowork task reads it and drops batches into <code>enrich_inbox/</code>, and the daemon applies them on the next sync cycle. Skip and search still works.</p>
-    <ol class="desc" style="padding-left:20px;margin:6px 0 10px">
-      <li>Open the Claude desktop app and go to <strong>Cowork</strong>.</li>
-      <li>Click <strong>Scheduled</strong>, then <strong>Create new task</strong>.</li>
-      <li>Copy each field below into the Cowork form (the spec uses <code>~/.mcpbrain/</code> so it works on every machine).</li>
-      <li>Set the frequency to <strong>hourly</strong> and save.</li>
-    </ol>
-
-    <div class="field">
-      <div class="field-head"><span>Name</span><button type="button" class="copy" onclick="copySpec('spec-name', this)">Copy</button></div>
-      <pre id="spec-name" class="spec">mcpbrain-enrichment</pre>
-    </div>
-
-    <div class="field">
-      <div class="field-head"><span>Description</span><button type="button" class="copy" onclick="copySpec('spec-desc', this)">Copy</button></div>
-      <pre id="spec-desc" class="spec">Reads a batch of email threads from ~/.mcpbrain/enrich_queue/pending.json, extracts structured knowledge (entities, actions, relations, org tags), and writes the result to ~/.mcpbrain/enrich_inbox/&lt;batch_id&gt;.json. No database access, no Gmail — two files in and out. Run when pending.json appears; the mcpbrain daemon handles everything else.</pre>
-    </div>
-
-    <div class="field">
-      <div class="field-head"><span>Task</span><button type="button" class="copy" onclick="copySpec('spec-task', this)">Copy</button></div>
-      <pre id="spec-task" class="spec">The base directory for all file operations is ~/.mcpbrain/ (your home dir's
-.mcpbrain folder). All paths below are relative to that base.
-
-You are extracting structured knowledge from a batch of email threads for an
-operations manager who works across several organisations. You read one input
-file and write one output file. You touch nothing else: no database, no Gmail,
-no marking, no sending. Two files, in and out.
-
-The two files
-
-Input: enrich_queue/pending.json. It carries a batch_id, a context
-block, a list of threads, and a merge_review list (often empty).
-Output: enrich_inbox/&lt;batch_id&gt;.json, where &lt;batch_id&gt; is the
-batch_id from the input, verbatim. Write valid JSON only.
-
-The task
-
-Produce exactly one extraction per thread in threads. Read each message's
-text body to do the extraction. Then assemble the output file:
-
-{"batch_id": "batch-...",
- "extractions": [ &lt;one extraction envelope per thread&gt; ],
- "merge_answers": [ &lt;one answer per merge_review pair, or []&gt; ],
- "synthesis": [ &lt;one answer per synthesis request, only if pending.json carries them&gt; ]}
-
-merge_answers and synthesis are present only when pending.json carries a
-merge_review or synthesis block respectively; otherwise omit them or use [].
-
-If a thread carries part and of keys (a long thread split across parts),
-still emit one extraction for that part; the daemon regroups parts by
-thread_id before applying. Keep the same thread_id on every part.
-
-The extraction envelope
-
-Each extraction uses this schema verbatim. Match the field names exactly.
-
-{
-  "thread_id": "t-abc123",
-  "org": "&lt;one of the valid_orgs tags&gt;",
-  "content_type": "request|update|decision|fyi|notification",
-  "summary": "One plain sentence.",
-  "contextual_summary": "Optional longer situational summary, or omit it.",
-  "entities": [{"name": "Person Name", "type": "person|org|project",
-                "org": "&lt;org tag&gt;", "role": "Job title"}],
-  "topics": ["facilities", "worship"],
-  "actions": [{"description": "...", "owner_name": "Person Name",
-               "owner_fallback": "sender", "due_date": "YYYY-MM-DD",
-               "project_id": "your-project-id", "area_id": "your-area-id",
-               "waiting_on": "Other Person"}],
-  "reply_needed": true,
-  "reply_reason": "Direct question: 'can you confirm Hall B?'",
-  "resolved_action_ids": [42],
-  "updated_actions": [{"id": 42, "new_text": "..."}],
-  "relations": [{"source_name": "Person Name", "type": "works_at",
-                 "target_name": "Org Name"}],
-  "messages": [{"message_id": "m-1",
-                "sender": "Person Name &lt;addr@example.com&gt;",
-                "date": "YYYY-MM-DD", "labels": "INBOX", "subject": "..."}]
-}
-
-Field notes:
-
-thread_id: copy the thread's thread_id exactly.
-org: one of the tags in the context block's valid_orgs list (the configured
-org names plus external and unknown). Use org_domain_map to map sender
-domains to an org. Use unknown only when nothing supports a choice.
-content_type: one of request, update, decision, fyi, notification.
-summary: one plain sentence. contextual_summary is optional; leave it as an
-empty string when there is nothing situational to add.
-entities, topics, actions, relations: lists. Empty lists are fine.
-waiting_on (on an action): optional. Set it to the name of the person the
-action is awaiting a reply or input from. Use the person's bare name, matching
-an entity you listed. Omit it for actions that are not blocked on someone's
-reply.
-messages: provenance only. For each message in the thread emit message_id,
-sender, date, labels, subject. Do NOT include the message text body in the
-output. You read the body; you do not echo it.
-
-Using the standing context
-
-The context block is given so you don't re-derive what is already known.
-
-known_people: each entry's org and role are confirmed. Trust them. Do not
-re-derive a person's org or role, and do not contradict these entries. Trust
-them even when the sender's email domain is absent from org_domain_map.
-valid_orgs: the org tags this install classifies against — the configured
-org names plus external and unknown. The thread-level org and any org tag
-you assign must come from this list.
-org_domain_map: maps email domains to orgs. Use it to set org and to decide
-whether a sender is internal or external.
-projects and areas: the valid project_id and area_id sets. When you attach a
-project_id or area_id to an action, it must be an id drawn from these lists.
-If no listed id fits, leave the field out rather than inventing one.
-
-Entity and relation discipline
-
-Entities and relations are the part most worth getting right.
-
-Naming. An entity name is the bare proper name, nothing else. Strip role
-descriptors, employer phrases, and articles. Affiliation belongs in org and
-title in role, never in the name. Consistent bare names let the same person or
-org collapse to one entity instead of several near-duplicates. When the entity
-is a message sender, take the name from the sender's display-name, but a
-sender display-name is often decorated and must be reduced to the bare
-personal name: strip any trailing "from &lt;org&gt;", "at &lt;org&gt;", or role phrasing.
-
-Type. person is a named individual. org is any company, church, store,
-venue, team, school, or agency. project is a named initiative or body of
-work, not a thing or a place. When torn between org and person, a name that
-could sign a contract or own a building is an org.
-
-Per-entity org. An entity's org is where THAT entity belongs, not the
-thread's org. It is fixed by THAT entity's own email domain (via
-org_domain_map) or a stated affiliation, NOT by what the email is about. A
-sender whose domain is not in org_domain_map is external, even when the body
-is entirely about your own org. Do not infer a person's org from the thread's
-subject matter or from the recipient's org, and do not default an outside
-person to your own org just because they emailed you. Use unknown when nothing
-supports a choice. When an entity appears in known_people, use that entry's
-org directly: the own-domain rule applies only to entities not already
-confirmed there.
-
-Relations. A relation joins two real, named entities that you have also listed
-in entities. Both source_name and target_name must be entity names, never an
-org tag (the valid_orgs values, external, and unknown are tags, not
-entities). works_at links a
-person to the org they belong to; do not assert it for venues, tools, or
-places. Emit only relations the text supports, and skip the rest rather than
-guessing.
-
-Thread-mode rules
-
-Each thread carries open_actions: actions already on record for that thread,
-each with an id. When open_actions is present, prefer resolving or updating
-over creating.
-
-resolved_action_ids: list the ids this thread clearly closes or supersedes.
-updated_actions: list ids where the action is still needed but the text should
-be corrected (scope clarified, date confirmed, wording improved). Give the
-corrected text in new_text.
-New actions: only add an action if the thread introduces work genuinely NOT
-covered by the open actions above. Prefer resolving or updating over creating
-a near-duplicate.
-
-Merge-review rules
-
-pending.json may carry a merge_review list of candidate entity pairs. For each
-pair, decide whether the two entries are the SAME real-world entity and, if
-so, give the single best canonical name. Emit one answer per pair into
-merge_answers:
-
-{"pair_id": "a-id|b-id", "same": true, "canonical": "Person Name"}
-
-Use the pair's pair_id verbatim. When same is false, canonical is an empty
-string. Guidance:
-
-Initials and short forms can match a full name ("Joel" = "Joel Chelliah").
-Different surnames or different initials are different people ("Daniel P" is
-not "Daniel F").
-When unsure, answer false.
-
-When merge_review is empty or absent, merge_answers is [].
-
-Thread-synthesis rules
-
-pending.json may carry a synthesis list: threads active enough to deserve a
-deeper situational narrative than the one-line summary already on record. Each
-item gives thread_id, subject, org, email_count, the date span, and
-email_summaries (the thread's per-message summary lines in date order).
-
-For each item, write a contextual_summary: a short paragraph (2-4 sentences)
-that says what the thread is actually about, where it has got to, who is
-involved, and what is outstanding. This is the standing context a colleague
-would want before opening the thread cold, not a restatement of the one-line
-summary. Emit one answer per item into synthesis:
-
-{"thread_id": "t-abc123", "contextual_summary": "The Hall B booking for the..."}
-
-Use each item's thread_id verbatim. When synthesis is empty or absent in the
-input, omit it from the output or use [].
-
-Profile-synthesis rules
-
-pending.json may carry a profile_synthesis list: people who need a standing
-profile. Each item gives entity_id, name, org, role, and relations.
-For each, write a 2-4 sentence profile: who they are, their role and org,
-how they relate to the owner's work. Factual, grounded in the given fields and
-thread context only — no speculation. Emit one answer per item:
-
-{"entity_id": "taryn-hamilton", "profile": "Executive Pastor at..."}
-
-When the block is absent, omit profile_synthesis from the output.
-
-Community-synthesis rules
-
-pending.json may carry a community_synthesis list: clusters of related
-people lacking a name. Each item gives community_id and members. Emit a
-short title (2-4 words naming what connects them) and a one-sentence
-summary per item:
-
-{"community_id": 3, "title": "Facilities team", "summary": "People who..."}
-
-Memory-distil rules
-
-pending.json may carry a memory_distil list: the owner's saved memory
-notes. Each item gives doc_id, title, content, captured_at. For each,
-emit a verdict:
-
-{"doc_id": "note-abc", "verdict": "keep|expire|promote",
- "reason": "...", "target_hint": "preferences.md"}
-
-- expire: stale, superseded, or a duplicate of another listed note (name it
-  in reason). When two notes duplicate each other, expire the OLDER one.
-- promote: a durable preference or rule stated repeatedly — worth moving to
-  a context file. target_hint names the file; reason says why.
-- keep: everything else. When unsure, keep.
-
-Profile-audit rules
-
-pending.json may carry a profile_audit list: people whose recorded
-profile, role, and org should be checked against what the threads in this
-batch actually show. Emit corrections ONLY where the batch contains clear
-evidence (their own signature, their own statement). Never infer a role from
-the owner's writing about them. Empty corrections means the record is fine:
-
-{"entity_id": "taryn-hamilton",
- "corrections": [{"field": "role|org", "new_value": "...",
-                  "evidence": "their signature in m-12"}]}</pre>
-    </div>
-
-    <p class="note">Cowork tasks only run while this machine is awake and the Claude desktop app is open.</p>
-    <div class="row">
-      <span id="e-state" class="badge idle">Spool: <span id="e-pending">…</span> pending / <span id="e-inbox">…</span> inbox</span>
-    </div>
-  </section>
-
   <section id="step-register" class="card">
-    <h2><span class="num">4</span>Register with Claude Desktop</h2>
+    <h2><span class="num">3</span>Register with Claude Desktop</h2>
     <p class="desc">Adds mcpbrain to Claude Desktop as a tool. Existing tools are kept.</p>
     <div class="row">
       <button class="primary" onclick="reg()">Register</button>
@@ -432,36 +174,33 @@ the owner's writing about them. Empty corrections means the record is fine:
   </section>
 
   <section id="step-projects" class="card">
-    <h2><span class="num">5</span>Your two Cowork projects</h2>
-    <p class="desc">mcpbrain works through two Cowork projects. Click the button to create the working space, then point Cowork at the folders shown.</p>
+    <h2><span class="num">4</span>Your workspace</h2>
+    <p class="desc">You work from one Cowork project ("My Brain"). Create it from scratch and paste the name and instructions below — your identity, voice and memory come through the mcpbrain tools, so there are no folders to attach. Enrichment runs as an hourly background task you start with one command.</p>
     <div class="row">
       <button class="primary" type="button" onclick="prepareWorkspace()">Prepare my working space</button>
       <span id="ws-state" class="badge idle hidden"></span>
     </div>
-    <details class="howto">
-      <summary>1. mcpbrain Enrichment — the engine room</summary>
-      <p>A scheduled task that turns your mail into structured memory every hour.</p>
+    <p class="note">This sets up your records repo so the brain can serve your identity, voice and decisions to the project.</p>
+    <details class="howto" open>
+      <summary>1. Create the "My Brain" project</summary>
       <ol>
-        <li>In Cowork: <b>Projects → + → Use an existing folder</b>.</li>
-        <li>Choose the mcpbrain home folder: <code id="home-path">~/.mcpbrain</code> <button class="copybtn" type="button" onclick="copyText('home-path')">Copy</button></li>
-        <li>Open <b>Scheduled → New → Local</b>, set the schedule to <b>Hourly</b>, and point it at the <code>mcpbrain-enrichment</code> skill (already written for you).</li>
+        <li>In Cowork: <b>Projects → + → New from scratch</b> (it saves under <code>~/Documents/Claude/Projects</code>).</li>
+        <li>Name it: <code id="proj-name">My Brain</code> <button class="copybtn" type="button" onclick="copyText('proj-name')">Copy</button></li>
+        <li>Paste these <b>project instructions</b> <button class="copybtn" type="button" onclick="copyInstructions()">Copy instructions</button>
+          <pre id="proj-instructions" class="spec" style="white-space:pre-wrap"></pre></li>
       </ol>
-      <img src="/img/cowork-scheduled-fields.png" alt="Cowork scheduled task" onerror="this.style.display='none'">
     </details>
     <details class="howto">
-      <summary>2. My Brain — where you work day to day</summary>
-      <p>Like Claude Code's memory, in Cowork. Its <code>CLAUDE.md</code> is already written with your identity, voice, and the memory tools.</p>
+      <summary>2. Start enrichment (the hourly background run)</summary>
       <ol>
-        <li>In Cowork: <b>Projects → + → Use an existing folder</b>.</li>
-        <li>Choose your records repo: <code id="records-path">~/.mcpbrain/records</code> <button class="copybtn" type="button" onclick="copyText('records-path')">Copy</button></li>
-        <li>Connect <code>~/.mcpbrain</code> as a read folder and make sure the mcpbrain tools are attached.</li>
+        <li>Open any Cowork chat and run: <code id="setup-cmd">/mcpbrain-setup</code> <button class="copybtn" type="button" onclick="copyText('setup-cmd')">Copy</button></li>
+        <li>It finds your folders and creates the hourly task itself — nothing else to configure.</li>
       </ol>
-      <img src="/img/cowork-use-existing-folder.png" alt="Cowork use existing folder" onerror="this.style.display='none'">
     </details>
   </section>
 
   <section id="step-hooks" class="card">
-    <h2><span class="num">6</span>Turn on cross-session memory</h2>
+    <h2><span class="num">5</span>Turn on cross-session memory</h2>
     <p class="desc">This lets Claude remember across sessions automatically — it primes each new session with your recent context and captures each one at the end (the same way Claude Code does). It edits <code>~/.claude/settings.json</code> and keeps anything already there. Applies to both Claude Code and Cowork.</p>
     <div class="row">
       <button class="primary" type="button" onclick="installHooks()">Turn on memory hooks</button>
@@ -470,7 +209,7 @@ the owner's writing about them. Empty corrections means the record is fine:
   </section>
 
   <section id="step-status" class="card">
-    <h2><span class="num">7</span>Status</h2>
+    <h2><span class="num">6</span>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
     <dl class="status-list">
       <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
@@ -562,6 +301,10 @@ async function saveProfile(){
 
 function copyText(id){
   const t = $(id).textContent;
+  navigator.clipboard.writeText(t).catch(()=>{});
+}
+function copyInstructions(){
+  const t = $("proj-instructions").textContent;
   navigator.clipboard.writeText(t).catch(()=>{});
 }
 async function prepareWorkspace(){
@@ -657,11 +400,8 @@ function renderStatus(j){
       .filter(Boolean);
     $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
   }
-  // Spool queue depth for the cowork extractor step.
-  if(j.spool){
-    $("e-pending").textContent = (j.spool.pending != null) ? j.spool.pending : "—";
-    $("e-inbox").textContent = (j.spool.inbox != null) ? j.spool.inbox : "—";
-  }
+  // (Enrichment status is shown by the connection card; the old spool counters
+  // were removed with the inline extractor step.)
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
@@ -766,8 +506,7 @@ async function prefillFromConfig(){
   if(c.clickup_api_key_set){
     $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
-  if(c.home_dir) $("home-path").textContent = c.home_dir;
-  if(c.records_dir) $("records-path").textContent = c.records_dir;
+  if(c.project_instructions) $("proj-instructions").textContent = c.project_instructions;
   await populateTimezones(c.timezone || "");
 }
 prefillFromConfig();

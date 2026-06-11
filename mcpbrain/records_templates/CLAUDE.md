@@ -4,25 +4,14 @@
 
 ---
 
-<!-- GARDENER-PROTECTED-START: identity and core rules — gardener cannot modify this block -->
+<!-- GARDENER-PROTECTED-START: identity — gardener cannot modify this block -->
 
-## Org tagging rules
+## Identity
 
-<important if="this session involves people, organisations, or roles">
-- Your organisations: {{ORG_LIST}}.
-{{ORG_BLOCK}}
-- Every person entity must include an org affiliation in its first observation.
-- Every `brain_ingest` call names the org in the body text so searches surface org context.
-- When memory results appear, check the org tag before using them. If ambiguous, flag it rather than assume.
-</important>
-
-## Role attribution rules
-
-<important if="this session involves people, roles, or attribution">
-- Never attribute a role/title to a person based on text you wrote about them.
-- Only record a role if they stated it themselves, it is in their own email signature, or the owner confirms it.
-- If a role is uncertain, omit it. Bad attribution is worse than none.
-</important>
+Your identity, voice and preferences are set in `context/` (imported above) — read
+them, apply the voice to everything, and don't rewrite them. Classifying people,
+orgs and relationships across the mail is handled automatically by background
+enrichment; this is the workspace, not the classifier.
 
 <!-- GARDENER-PROTECTED-END -->
 
@@ -57,6 +46,8 @@ Writes are **routed through MCP tools, not hand-edits.** Each write tool is **QU
 | Project/system reference change | Edit `reference/projects.md` or `reference/systems.md` | Hand-edit |
 
 **hot.md discipline:** entries are 2-4 lines max with a `**YYYY-MM-DD:**` prefix; anything older than 14 days is auto-pruned.
+
+**Org tags on writes:** if something is clearly tied to one of your orgs, pass that `org` on the write; otherwise leave it blank — enrichment places people, orgs and relationships automatically. You don't need to tag anything to work.
 
 ---
 
