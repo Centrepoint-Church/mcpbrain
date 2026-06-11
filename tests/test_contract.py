@@ -185,3 +185,22 @@ def test_validate_accepts_well_formed_merge_answers():
         {"pair_id": "c|d", "same": False},
     ])
     assert validate_batch_file(batch) == []
+
+
+# --- importability: constants must be reachable from their canonical homes ---
+
+def test_valid_content_types_importable_from_contract():
+    from mcpbrain.contract import _VALID_CONTENT_TYPES
+    assert "request" in _VALID_CONTENT_TYPES
+    assert "decision" in _VALID_CONTENT_TYPES
+
+
+def test_valid_types_importable_from_chunking():
+    from mcpbrain.chunking import _VALID_TYPES, _is_junk_entity
+    assert "person" in _VALID_TYPES
+    assert _is_junk_entity("Re: subject", "person") is True
+
+
+def test_parse_first_json_object_importable_from_chunking():
+    from mcpbrain.chunking import _parse_first_json_object
+    assert _parse_first_json_object('{"a": 1}') == {"a": 1}

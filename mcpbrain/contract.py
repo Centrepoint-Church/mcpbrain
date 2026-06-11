@@ -24,7 +24,7 @@ enum has a single owner and the gate can't diverge from it.
 """
 
 from mcpbrain import orgs
-from mcpbrain.enrich import _VALID_CONTENT_TYPES
+from mcpbrain.chunking import _VALID_CONTENT_TYPES
 
 
 def validate_extraction(d: object) -> list[str]:
