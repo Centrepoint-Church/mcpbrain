@@ -29,6 +29,14 @@ def main(argv=None) -> int:
     ap.add_argument("--dist", required=True, help="path to the public dist repo checkout")
     ap.add_argument("--repo", default=".", help="path to the mcpbrain source repo")
     ns = ap.parse_args(argv)
+    # Wipe stale build intermediates first. setuptools reuses build/lib, so a file
+    # deleted from the source can otherwise reship in the wheel (it happened once:
+    # a removed module rode along in a release build). Clean build/ + *.egg-info so
+    # the wheel reflects exactly the current source tree.
+    repo = Path(ns.repo)
+    shutil.rmtree(repo / "build", ignore_errors=True)
+    for egg in repo.glob("*.egg-info"):
+        shutil.rmtree(egg, ignore_errors=True)
     out = subprocess.run(["uv", "build", "--wheel", "--out-dir", f"{ns.repo}/dist", ns.repo],
                          capture_output=True, text=True)
     if out.returncode != 0:
