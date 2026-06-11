@@ -163,3 +163,12 @@ def test_configured_view_keeps_actionable_steps_reachable():
     # so Register / Prepare-workspace / memory-hooks buttons stay reachable.
     assert 'HIDE_WHEN_CONFIGURED' in WIZ
     assert '"step-google"' in WIZ and '"step-status"' in WIZ
+
+
+def test_step_badges_reflect_server_state_on_load():
+    # ws-state/hooks-state/r-state must be re-derived from /api/status connections
+    # each poll, so a click's badge survives a page reload (not just in-memory).
+    assert "reflectStepBadges" in WIZ
+    assert "reflectStepBadges(j.connections)" in WIZ
+    for key in ('"records"', '"memory-hooks"', '"claude"'):
+        assert key in WIZ

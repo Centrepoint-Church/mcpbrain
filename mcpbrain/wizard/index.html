@@ -463,11 +463,26 @@ $("enrich-history-btn").addEventListener("click", async () => {
   catch(e){ $("enrich-state").textContent = "Could not start"; }
 });
 
+// Reflect persistent server state into the step badges so they survive a reload
+// (a click sets them transiently; this re-derives them from the live probes).
+function reflectStepBadges(conns){
+  conns = conns || {};
+  const rec = conns.records || {};
+  if(rec.state === "ok"){
+    const ready = !rec.detail || /ready/i.test(rec.detail);
+    badge("ws-state", ready ? "Ready" : rec.detail, ready ? "ok" : "wait");
+  }
+  if((conns["memory-hooks"] || {}).state === "ok") badge("hooks-state", "On", "ok");
+  const cl = (conns.claude || {}).state;
+  if(cl && cl !== "not_started") badge("r-state", "Registered", "ok");
+}
+
 async function refresh(){
   try{
     const j = await (await fetch("/api/status", H)).json();
     renderStatus(j);
     renderHome(j);
+    reflectStepBadges(j.connections);
   }catch(e){}
   setTimeout(refresh, 3000);
 }
