@@ -214,7 +214,7 @@ def test_paused_cycle_writes_nothing_including_no_enrich(tmp_path):
     assert res is None
     assert _chunk_count(store) == before_chunks   # no sync
     assert store.list_entities() == []            # no enrichment
-    assert store.get_meta("enrich_mode") is None  # run_enrichment never called
+    assert store.get_meta("enrich_mode") is None  # enrichment never called
 
 
 # ---------------------------------------------------------------------------
