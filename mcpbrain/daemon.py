@@ -1689,7 +1689,7 @@ def main(argv=None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    emb = get_embedder(config.EMBEDDER)
+    emb = get_embedder("bge-small")
     store = Store(config.store_path(), dim=emb.dim)
     store.init()
     enrich_mode = config.enrich_mode(str(config.app_dir()))

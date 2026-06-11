@@ -43,9 +43,6 @@ mcpbrain = "mcpbrain.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
-# Voyage embedder (opt-in): voyageai is lazy-imported in embed_voyage.py and
-# only loaded when MCPBRAIN_EMBEDDER=voyage. Install with `pip install .[voyage]`.
-voyage = ["voyageai>=0.3"]
 
 [build-system]
 requires = ["setuptools>=68"]
