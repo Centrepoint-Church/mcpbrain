@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>mcpbrain setup</title>
 <style>
   :root{
@@ -53,6 +54,7 @@
   .badge.ok{background:var(--ok-bg);color:var(--ok)}
   .badge.wait{background:var(--wait-bg);color:var(--wait)}
   .badge.hidden{display:none}
+  .hidden{display:none}   /* generic: hides #home-status + any .card toggled by renderHome */
   .note{color:var(--muted);font-size:13px;margin:12px 0 0}
   .scopes{color:var(--muted);font-size:13px;margin:8px 0 0}
   .status-list{margin:4px 0 0;display:grid;gap:1px;background:var(--line);
@@ -124,8 +126,8 @@
     </div>
     <div id="org-rows">
       <div class="row org-row" style="margin-top:8px">
-        <input class="org-name" type="text" placeholder="Organisation name" autocomplete="off" spellcheck="false" style="flex:1 1 160px;min-width:160px">
-        <input class="org-domains" type="text" placeholder="Email domains (e.g. acme.com, comma-separated)" autocomplete="off" spellcheck="false" style="flex:2 1 220px;min-width:220px">
+        <input class="org-name" name="org-name" type="text" placeholder="Organisation name" autocomplete="off" spellcheck="false" style="flex:1 1 160px;min-width:160px">
+        <input class="org-domains" name="org-domains" type="text" placeholder="Email domains (e.g. acme.com, comma-separated)" autocomplete="off" spellcheck="false" style="flex:2 1 220px;min-width:220px">
       </div>
     </div>
     <div class="row" style="margin-top:8px">
@@ -429,13 +431,18 @@ function renderBackfill(bf){
   $("backfill-progress").textContent = parts.join(" · ");
 }
 
+// When configured, the dashboard (home-status) replaces the google + status steps,
+// but the actionable setup steps stay reachable so their buttons still work.
+const HIDE_WHEN_CONFIGURED = new Set(["step-google", "step-status"]);
 function renderHome(j){
   const configured = !!j.is_configured;
   $("home-status").classList.toggle("hidden", !configured);
-  // Hide all wizard steps EXCEPT the profile form when configured (it doubles as settings).
+  // Hide the wizard's own header when configured (the dashboard carries the title).
+  const mh = document.querySelector("main > header");
+  if(mh) mh.classList.toggle("hidden", configured);
   document.querySelectorAll("main > section.card").forEach(s => {
-    if(s.id === "step-profile"){ s.classList.remove("hidden"); }
-    else { s.classList.toggle("hidden", configured); }
+    // Unconfigured: show every step. Configured: hide only the redundant ones.
+    s.classList.toggle("hidden", configured && HIDE_WHEN_CONFIGURED.has(s.id));
   });
   if(configured){
     const h2 = document.querySelector("#step-profile h2");

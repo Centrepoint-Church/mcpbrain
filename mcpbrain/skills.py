@@ -22,10 +22,12 @@ log = logging.getLogger(__name__)
 ENRICHMENT_SKILL = "mcpbrain-enrichment"
 SETUP_SKILL = "mcpbrain-setup"
 
+# NOTE: descriptions must NOT contain angle brackets — Cowork rejects a SKILL.md
+# whose description contains XML-like tags. Keep these plain prose.
 _ENRICHMENT_DESC = (
     "Extract structured knowledge (entities, actions, relations, org tags) from a "
     "batch of email threads: reads ~/.mcpbrain/enrich_queue/pending.json and writes "
-    "~/.mcpbrain/enrich_inbox/<batch_id>.json. Two files in, two files out."
+    "a per-batch file into ~/.mcpbrain/enrich_inbox/. Two files in, two files out."
 )
 _SETUP_DESC = (
     "One-time setup: create the hourly mcpbrain enrichment scheduled task. Run this "

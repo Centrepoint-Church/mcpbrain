@@ -44,3 +44,15 @@ def test_enrichment_body_matches_package_data(tmp_path, monkeypatch):
     enr = (tmp_path / ".claude" / "skills" / "mcpbrain-enrichment" / "SKILL.md").read_text()
     canonical = (Path(skills.__file__).parent / "cowork" / "enrichment.md").read_text()
     assert canonical in enr  # the packaged body is embedded verbatim after front-matter
+
+
+def test_skill_descriptions_have_no_xml_tags(tmp_path, monkeypatch):
+    # Cowork rejects a SKILL.md whose YAML `description:` contains angle brackets.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    skills.write_personal_skills()
+    for name in ("mcpbrain-enrichment", "mcpbrain-setup"):
+        text = (tmp_path / ".claude" / "skills" / name / "SKILL.md").read_text()
+        # the front-matter description line is line 3 (---\nname:\ndescription:)
+        desc = [ln for ln in text.splitlines() if ln.startswith("description:")][0]
+        assert "<" not in desc and ">" not in desc, f"{name} description has a tag: {desc}"
