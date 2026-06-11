@@ -708,8 +708,7 @@ def test_apply_config_rewires_cadences(tmp_path):
 
     new_config = {"cadences": {"communities_interval_s": 500.0}}
 
-    with patch("mcpbrain.daemon._enrich_client_from_config", return_value=None), \
-         patch("mcpbrain.daemon._backup_from_config", return_value=(None, None)), \
+    with patch("mcpbrain.daemon._backup_from_config", return_value=(None, None)), \
          patch("mcpbrain.daemon.config.write_config"), \
          patch("mcpbrain.daemon.config.enrich_mode", return_value="static"), \
          patch("mcpbrain.daemon._cadences_from_config", return_value={

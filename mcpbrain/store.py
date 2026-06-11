@@ -203,11 +203,7 @@ class Store:
             # --- unified actions table (Phase 1, Task 1.7) ----------------
             # Single forward surface for actions + recorded decisions. The
             # legacy graph_actions/graph_decisions tables are migrated in once
-            # (below) and renamed to *_legacy; the existing add_action /
-            # add_decision / actions_for_owner / list_actions / list_decisions
-            # methods are repointed at those *_legacy tables so current callers
-            # and tests keep their exact behaviour. New code uses the
-            # *_unified helpers.
+            # (below) and renamed to *_legacy; all new code uses this table.
             db.execute("""CREATE TABLE IF NOT EXISTS actions(
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 text             TEXT NOT NULL,
@@ -1061,28 +1057,6 @@ class Store:
                 (winner_id, loser_id, loser["name"], method))
             db.execute("DELETE FROM entities WHERE id=?", (loser_id,))  # admin-delete-ok
 
-    def add_action(self, text, owner="", deadline="", status="open",
-                   source_doc_id="", thread_id="") -> int:
-        # No dedup: callers must ensure each doc is processed once (retries would duplicate).
-        # Writes to graph_actions_legacy (Task 1.7 renamed graph_actions). New
-        # code should prefer add_unified_action.
-        with self._connect() as db:
-            cur = db.execute(
-                "INSERT INTO graph_actions_legacy(text, owner, deadline, status, source_doc_id, thread_id) "
-                "VALUES(?,?,?,?,?,?)",
-                (text, owner, deadline, status, source_doc_id, thread_id))
-            return cur.lastrowid
-
-    def add_decision(self, text, decided_on="", source_doc_id="") -> int:
-        # No dedup: callers must ensure each doc is processed once (retries would duplicate).
-        # Writes to graph_decisions_legacy (Task 1.7 rename). Prefer the unified
-        # actions table for new code.
-        with self._connect() as db:
-            cur = db.execute(
-                "INSERT INTO graph_decisions_legacy(text, decided_on, source_doc_id) VALUES(?,?,?)",
-                (text, decided_on, source_doc_id))
-            return cur.lastrowid
-
     # --- unified actions table (Task 1.7) ---------------------------------
 
     def add_unified_action(self, *, text, owner="", owner_entity_id="",
@@ -1432,19 +1406,6 @@ class Store:
                 "WHERE p.owner_entity_id=? AND p.archived_at IS NULL AND a.active=1 "
                 "GROUP BY a.id ORDER BY a.id", (ent_id,)).fetchall()]
 
-    def actions_for_owner(self, owner: str) -> list[dict]:
-        """All legacy actions owned by `owner` (case-insensitive).
-
-        Reads graph_actions_legacy (Task 1.7 renamed graph_actions). New code
-        should use actions_for_owner_unified.
-        """
-        with self._connect() as db:
-            cur = db.execute(
-                "SELECT * FROM graph_actions_legacy WHERE lower(owner)=lower(?) ORDER BY id",
-                (owner,),
-            )
-            return [dict(r) for r in cur.fetchall()]
-
     def list_entities(self) -> list[dict]:
         with self._connect() as db:
             return [dict(r) for r in db.execute("SELECT * FROM entities ORDER BY id").fetchall()]
@@ -1465,16 +1426,6 @@ class Store:
             return [dict(r) for r in db.execute(
                 "SELECT winner_id,loser_id,loser_name,method,at FROM entity_merge_log "
                 "ORDER BY id").fetchall()]
-
-    def list_actions(self) -> list[dict]:
-        # Reads graph_actions_legacy (Task 1.7 rename); prefer list_unified_actions.
-        with self._connect() as db:
-            return [dict(r) for r in db.execute("SELECT * FROM graph_actions_legacy ORDER BY id").fetchall()]
-
-    def list_decisions(self) -> list[dict]:
-        # Reads graph_decisions_legacy (Task 1.7 rename).
-        with self._connect() as db:
-            return [dict(r) for r in db.execute("SELECT * FROM graph_decisions_legacy ORDER BY id").fetchall()]
 
     def thread_chunks(self, thread_id: str) -> list[dict]:
         """Return all chunks whose metadata.thread_id matches thread_id.

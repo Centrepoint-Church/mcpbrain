@@ -284,19 +284,3 @@ class TestExtractorSurfaces:
         assert prepare._org_domain_lines() == [
             "acme.com -> Acme", "uni.edu.au -> Study"]
 
-    def test_enrich_prompt_uses_configured_orgs(self, tmp_path, monkeypatch):
-        from mcpbrain.enrich import build_prompt
-        monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-        _write_config(tmp_path, ACME_CFG)
-        p = build_prompt("doc", {})
-        assert "Acme|Study|Personal|external|unknown" in p
-        assert "Acme, Study, Personal" in p
-        # no hardcoded org from a different install should leak in
-        assert "OtherOrg" not in p
-
-    def test_prompt_md_has_no_hardcoded_orgs(self):
-        from pathlib import Path
-        import mcpbrain
-        md = (Path(mcpbrain.__file__).parent / "enrich_prompt.md").read_text()
-        # the template uses a placeholder, not a hardcoded org name
-        assert "valid_orgs" in md

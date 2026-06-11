@@ -267,24 +267,6 @@ class TestKnownPeopleExclusion:
 
 
 # ---------------------------------------------------------------------------
-# legacy enrich prompt
-# ---------------------------------------------------------------------------
-
-class TestEnrichPromptOwner:
-    def test_configured_owner_named_in_prompt(self, tmp_path, monkeypatch):
-        from mcpbrain.enrich import build_prompt
-        monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-        _write_config(tmp_path, {
-            "owner_name": "Sarah", "owner_full_name": "Sarah Chen",
-            "orgs": [{"name": "Acme", "domains": ["acme.org"]}]})
-        p = build_prompt("doc text", {})
-        assert "knowledge graph for Sarah Chen" in p
-        assert "EXCLUDE Sarah Chen" in p
-        assert "tasks Sarah must act on" in p
-        assert "Sam Chen" not in p
-
-
-# ---------------------------------------------------------------------------
 # owner_role
 # ---------------------------------------------------------------------------
 
@@ -299,12 +281,3 @@ class TestOwnerRole:
         home = _write_config(tmp_path, {"owner_role": "Research Lead"})
         assert owner_role(home) == "Research Lead"
 
-    def test_role_named_in_enrich_prompt(self, tmp_path, monkeypatch):
-        from mcpbrain.enrich import build_prompt
-        monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-        _write_config(tmp_path, {
-            "owner_full_name": "Sarah Chen", "owner_role": "Research Lead",
-            "orgs": [{"name": "Acme", "domains": ["acme.org"]}]})
-        p = build_prompt("doc", {})
-        assert "Sarah Chen (Research Lead)" in p
-        assert "operations manager" not in p
