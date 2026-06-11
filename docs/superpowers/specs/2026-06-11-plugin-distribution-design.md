@@ -12,6 +12,14 @@
 5. **Monitoring ships in the plugin** (`monitors/`) — surface daemon/enrichment health in Cowork. See §8.
 6. Per-user **Google OAuth test users** are added by Josh in the Console (NOT in the plugin/skill). The **fast headless backfill** stays documented as an opt-in paid power tool (no Claude Code auto-install). Plugin name stays **mcpbrain**. The "My Brain" working project stays a guided manual wizard step.
 
+## Decisions — system simplification (Josh, 2026-06-11)
+A whole-system audit (5 parallel subsystem reviews) found ~2,300 lines of redundant/dead/over-built code. We fold the cleanup into this build (§9). Decisions:
+7. **Platform = exactly two, both first-class and actually used: macOS + Windows.** Not "keep everything" — *utilise* the two chosen platforms:
+   - **macOS (launchd)** and **Windows (Task Scheduler / `schtasks` + the `msvcrt` write-lock)** are both supported, exercised, and validated end-to-end. Fix the Windows `MCPBRAIN_HOME` bug (embed it in the agent/task definition, not just `setx` — otherwise a cleared env var starts the daemon home-less). Add a real clean-machine **Windows** validation pass to the runbook (today it's macOS-only), and exercise the Windows scheduler path beyond string-generation tests.
+   - The **install skill (§3) is the OS-agnostic installer**: it detects the OS and bootstraps launchd *or* Task Scheduler via the existing `agents.py` generators, so a Windows user gets the same terminal-free onboarding. The standalone `install/setup.ps1` is removed (the skill replaces it on Windows too).
+   - **Linux / systemd is the un-chosen third platform → removed.** Delete the systemd unit/timer generators + `_install/_uninstall/_restart_systemd` + their xplat tests. (This is the only platform code we cut — it trims ~150 lines while making the remaining two platforms first-class.)
+8. **Cut projects/areas (GTD)** — the two tables are only populated by the dead Nexus seed script and are empty for every fresh user. Remove the tables/columns and the proactive GTD-leak checks that read them. **Keep** community clustering and `brain_graph` (decision: differentiators worth keeping).
+
 ## Goal
 
 Make onboarding for a non-technical org member: **the plugin is already there (org-pushed, auto-updating) → run one install skill in Cowork → done.** No terminal, no `curl|sh`, no manual MCP registration. One org-managed plugin carries everything Claude-facing (MCP server, skills, agents, hooks, commands) plus an install skill that bootstraps the daemon onto the machine from GitHub.
@@ -123,6 +131,36 @@ Surface daemon/enrichment health inside Cowork so a non-technical member sees pr
 - `mcpbrain monitor` reads local state only (no network) and emits a compact health line + non-zero exit on trouble: **daemon down** (no recent heartbeat / launchd agent not loaded), **sync error** (last cycle errored in `logs/`), **enrichment idle** (the `probe_enrichment` durable signal stale), **backup stale** (`probe_backup` needs_action). It reuses `probes.all_connections` so the monitor and wizard never disagree.
 - Cowork renders the monitor output as a status surface/notification (monitors "run only in Cowork", like hooks). No new daemon endpoint — the CLI reads the same files the wizard polls.
 - Tests: `mcpbrain monitor` returns ok/exit-0 on a healthy home and a clear message/exit-1 per failure mode; `monitors/monitors.json` is valid and points at the shim.
+
+## 9. System simplification (decisions 7–8 + audit)
+A 5-subsystem audit found ~2,300 lines of redundant/dead/over-built code. Fold the cleanup into this build, in priority order. Each item is verified zero-caller or behaviour-preserving; the suite stays green after each.
+
+### 9A. Correctness fixes (do first — these make it work *better*, not just smaller)
+- **Dead entity-resolution cadence.** `maybe_resolve` is a permanent no-op in production: `resolve_interval_s` isn't in `_CADENCE_KEYS`/`_cadences_from_config` and no live config sets it. Resolution actually happens via the spool's per-batch `merge_review`. **Verify** spool merge_review covers the dedup cases, then delete the dead `maybe_resolve` cadence, the `resolve_interval_s` knob, and `resolve._adjudicate` (the unused LLM-adjudication path). Keep the deterministic `resolve_entities` merges if anything still calls them.
+- **Diverging name slugs.** `graph_write.entity_slug` strips accents (`Chané`→`chan`) while `resolve.canonical_key`/`chunking.slugify` fold them (`→chane`), so the writer and resolver can mint different IDs for one person. Unify on `slugify` (add `entity_slug`'s 80-char truncation to it); delete `entity_slug`. Document that this only affects newly-minted IDs (existing DBs unchanged).
+
+### 9B. Big dead paths
+- **Delete the entire "gemini" enrichment mode.** Live mode is `spool`; the wizard never sets `gemini`. Remove `enrich.py`'s `run_enrichment`/`enrich_document`/`build_prompt`/`make_gemini_client`/`resolve_client`, the daemon `"gemini"` branch + `gemini` from `ENRICH_MODES`, the legacy `graph_actions_legacy`/`graph_decisions_legacy` tables + `store.add_action`/`add_decision`/`list_actions`/`list_decisions`/`actions_for_owner`, and `test_enrich.py`. Relocate the still-used constants (`_VALID_CONTENT_TYPES`, `_VALID_TYPES`, `_is_junk_entity`, `_parse_first_json_object`) to `contract.py`/`chunking.py`.
+- **Delete three dead `bin/` migration scripts** (Nexus/ops-brain era, no prod callers): `seed_from_nexus.py`, `seed_records.py`, `dry_run_spool.py` + their tests. First move the 10-line `_existing_store_dim` helper into `store.py`.
+- **Delete `embed_voyage.py`** (paid hosted embedder on a $0 product, never configured): the file, the `voyage` branch in `embed.get_embedder()`, the `MCPBRAIN_EMBEDDER` env switch (lock to `bge-small`), the `voyage` pyproject extra, and `test_embed_voyage.py`.
+- **Shrink `lint_graph.py`** (663→~350): delete `check_possible_duplicates` (100-line O(n²) fuzzy match that duplicates `resolve.py`), `check_community_singletons`, and `check_threads_without_summary` (the synthesis pass already covers it). Keep the org-integrity + ownerless-action + unenriched checks.
+
+### 9C. Small dead code / duplication (batch as one commit each, near-zero risk)
+- **Dead schema in `store.py`**: drop the `doc_context` table, the `entity_relations.normalised_strength`/`since` columns, and the inert `suppressed_entities` table + its always-false guard in `graph_write.upsert_entity`.
+- **Dead/superseded functions**: `sync/cursors.py` (whole file — no prod callers), `sync/__init__`'s `backfill_windows`/`gmail_query`/`initial_backfill` (superseded by `progressive_backfill_step`), `clickup.update_task_status` (superseded by `close_task`), `orgs.py:46-47` dead vars — all with their tests.
+- **Collapse duplicated helpers**: `_home`×2 → `config.spool_home`; `extractor_driver._write_inbox` → `extractor_io.atomic_write_inbox`; the two Jaccard fns + `_norm_action`/`_normalise_title_for_dedup` → one each; `profile_synth`/`profile_audit` `_fetch_role` → shared; `enrich_backfill.local_claude_runner` → `extractor_io.claude_runner`; `extractor_io._VALID_CONTENT_TYPES` → import the canonical one.
+
+### 9D. Over-engineering / structure
+- **Collapse the 13 near-identical `maybe_X` cadence methods (~580 lines) into one dispatch table (~80)** — a `CadencePass` list `_run_periodic_passes` iterates; keep thin public wrappers if tests call them directly. This also makes the backfill/pause gate consistent (today it appears at three levels).
+- **Promote user-invisible interval knobs to constants.** Keep only `sync_interval_s`, `backup_interval_s`, `clickup_interval_s` as real config (the wizard exposes none of the others anyway); the rest become module constants with sensible defaults. Removes ~7 touch-points per cadence.
+- **Inline `synthesise_threads.py`** (3 fns, 1 caller each) into `prepare`/`drain`/`daemon`.
+
+### 9E. Feature cut — projects/areas GTD (decision 8)
+- Remove the `projects` and `areas` tables/columns from `store.py` (only ever populated by the deleted Nexus seed; empty for every real user) and the `proactive.py` GTD-leak checks that read them, plus `prompt.py`/`prepare.py`/`mcp_server.py` references. **Keep** community clustering (`communities.py` + `community_synth.py` + `brain_context` communities mode) and `brain_graph` — both retained as differentiators (decision 8).
+
+### 9F. Platform — utilise both chosen platforms (decision 7)
+- **macOS + Windows are both first-class.** Fix the Windows `MCPBRAIN_HOME` embedding bug; make the install skill detect-OS and bootstrap launchd *or* Task Scheduler; add a clean-machine **Windows** validation pass to the runbook; exercise the schtasks path beyond string-gen tests.
+- **Remove Linux/systemd** (the un-chosen third platform): the systemd unit/timer generators, `_install/_uninstall/_restart_systemd`, and their xplat-only tests (~150 lines).
 
 ## Cross-check (both repos)
 - **Productization spec**: distribution = wheel index + `curl|sh`. This spec keeps the wheel index for the daemon but moves the Claude-facing install into the plugin; the `curl|sh` becomes the install skill. No conflict — it's a cleaner front door.
