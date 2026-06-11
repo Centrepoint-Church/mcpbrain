@@ -9,11 +9,16 @@ def test_scaffold_stamps_claude_md_with_profile(tmp_path):
                "orgs": [{"name": "Acme"}, {"name": "Globex"}]}
     records._ENSURED.clear()
     records.ensure_records_repo(repo, profile=profile)
-    claude = (Path(repo) / "CLAUDE.md").read_text()
-    assert "Acme" in claude and "Globex" in claude
+    # Orgs are interpolated into identity.md (the workspace doesn't classify).
     ident = (Path(repo) / "context" / "identity.md").read_text()
+    assert "Acme" in ident and "Globex" in ident
     assert "Dana Lee" in ident and "Ops Lead" in ident
     assert "{{OWNER_FULL_NAME}}" not in ident  # token fully replaced
+    # CLAUDE.md keeps the memory/work protocol but NOT classification rules.
+    claude = (Path(repo) / "CLAUDE.md").read_text()
+    assert "Where Things Go" in claude and "Self-Evolution" in claude
+    assert "Role attribution" not in claude
+    assert "Every person" not in claude
 
 
 def test_scaffold_never_clobbers_user_edits(tmp_path):
