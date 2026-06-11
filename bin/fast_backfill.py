@@ -29,7 +29,7 @@ def parse_args(argv=None):
     ap.add_argument("--home", type=Path, default=DEFAULT_HOME)
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--batch-size", type=int, default=20)
+    ap.add_argument("--batch-size", type=int, default=10)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--max-waves", type=int, default=None)
     ap.add_argument("--force", action="store_true",
