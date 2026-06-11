@@ -18,7 +18,7 @@ A whole-system audit (5 parallel subsystem reviews) found ~2,300 lines of redund
    - **macOS (launchd)** and **Windows (Task Scheduler / `schtasks` + the `msvcrt` write-lock)** are both supported, exercised, and validated end-to-end. Fix the Windows `MCPBRAIN_HOME` bug (embed it in the agent/task definition, not just `setx` — otherwise a cleared env var starts the daemon home-less). Add a real clean-machine **Windows** validation pass to the runbook (today it's macOS-only), and exercise the Windows scheduler path beyond string-generation tests.
    - The **install skill (§3) is the OS-agnostic installer**: it detects the OS and bootstraps launchd *or* Task Scheduler via the existing `agents.py` generators, so a Windows user gets the same terminal-free onboarding. The standalone `install/setup.ps1` is removed (the skill replaces it on Windows too).
    - **Linux / systemd is the un-chosen third platform → removed.** Delete the systemd unit/timer generators + `_install/_uninstall/_restart_systemd` + their xplat tests. (This is the only platform code we cut — it trims ~150 lines while making the remaining two platforms first-class.)
-8. **Cut projects/areas (GTD)** — the two tables are only populated by the dead Nexus seed script and are empty for every fresh user. Remove the tables/columns and the proactive GTD-leak checks that read them. **Keep** community clustering and `brain_graph` (decision: differentiators worth keeping).
+8. **Cut projects/areas (GTD)** — the two tables are only populated by the dead Nexus seed script and are empty for every fresh user. Remove the tables/columns and the proactive GTD-leak checks that read them. **Keep _and actively utilise_ community clustering and `brain_graph`** — they're differentiators, but today they're computed and then barely surfaced. The build must wire them into the user experience so they earn their keep (§9G), not just leave them as dormant power-tools.
 
 ## Goal
 
@@ -158,9 +158,17 @@ A 5-subsystem audit found ~2,300 lines of redundant/dead/over-built code. Fold t
 ### 9E. Feature cut — projects/areas GTD (decision 8)
 - Remove the `projects` and `areas` tables/columns from `store.py` (only ever populated by the deleted Nexus seed; empty for every real user) and the `proactive.py` GTD-leak checks that read them, plus `prompt.py`/`prepare.py`/`mcp_server.py` references. **Keep** community clustering (`communities.py` + `community_synth.py` + `brain_context` communities mode) and `brain_graph` — both retained as differentiators (decision 8).
 
-### 9F. Platform — utilise both chosen platforms (decision 7)
+### 9F. Platform — make both chosen platforms work well (decision 7)
 - **macOS + Windows are both first-class.** Fix the Windows `MCPBRAIN_HOME` embedding bug; make the install skill detect-OS and bootstrap launchd *or* Task Scheduler; add a clean-machine **Windows** validation pass to the runbook; exercise the schtasks path beyond string-gen tests.
 - **Remove Linux/systemd** (the un-chosen third platform): the systemd unit/timer generators, `_install/_uninstall/_restart_systemd`, and their xplat-only tests (~150 lines).
+
+### 9G. Utilise the retained features — community clustering + `brain_graph` (decision 8)
+These are computed today but barely surfaced — wire them in so they're used, not dormant. (Read paths already exist: `store.list_communities`/`community_members`/`communities_for`; `brain_context(mode="communities")`; `brain_graph(entity, hops, at_time)`.)
+- **Make community detection actually run for every user.** Today `communities_interval_s` is OFF unless config sets it (fresh installs never cluster). The §9D knob→constant work must give `communities` (and `community_synth`) a sensible default cadence so clustering + summaries run out of the box.
+- **Teach Claude to use them.** `_render_project_instructions` (daemon.py:80) lists only `brain_search/brain_context/brain_actions`. Add `brain_graph` and `brain_context(mode="communities")` with concrete example prompts ("how is X connected to Y", "who are the key people around <org>", "everyone within 2 hops of …", time-travel via `at_time`) so the assistant reaches for multi-hop traversal and cluster context instead of ignoring them.
+- **Surface clusters to the user.** Add a compact "Circles / key people" element to the dashboard (`wizard/dashboard.html` + a `dashboard.py` reader over `store.list_communities()`), so the user can see the detected groups without prompting — the visible payoff for keeping the feature.
+- **Feed community context into reasoning.** Include the relevant community summary in the enrichment + proactive prompt context (via `communities_for(entity_ids)`) so the brain reasons about who-belongs-with-whom, not just isolated entities.
+- Tests: project-instructions render includes `brain_graph` + communities guidance; the dashboard `/api/dashboard/today` payload carries a `circles`/communities list; community detection has a non-None default cadence.
 
 ## Cross-check (both repos)
 - **Productization spec**: distribution = wheel index + `curl|sh`. This spec keeps the wheel index for the daemon but moves the Claude-facing install into the plugin; the `curl|sh` becomes the install skill. No conflict — it's a cleaner front door.
