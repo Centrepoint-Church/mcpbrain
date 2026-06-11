@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import random
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -86,8 +87,8 @@ def _run_with_backoff(run_claude, prompt, *, model, timeout, max_retries,
             if not _is_rate_limited(exc) or attempt >= max_retries:
                 raise
             delay = min(backoff_base * (2 ** attempt), _BACKOFF_CAP)
-            # Deterministic-ish jitter from attempt count (no Math.random need):
-            delay += (attempt % 3) * 0.5
+            # decorrelated jitter to avoid a thundering herd
+            delay += random.uniform(0, delay * 0.25)
             log.warning("rate-limited (attempt %d/%d); backing off %.1fs",
                         attempt + 1, max_retries, delay)
             if delay:
@@ -106,44 +107,52 @@ def _process_batch_worker(*, home, pending, prompt_prefix, run_claude, model,
     """
     home = Path(home)
     batch_id = pending["batch_id"]
-    full_prompt = (_PREAMBLE + prompt_prefix + _PENDING_DELIM +
-                   json.dumps(pending, ensure_ascii=False))
     try:
-        raw = _run_with_backoff(run_claude, full_prompt, model=model,
-                                timeout=timeout, max_retries=max_retries,
-                                backoff_base=backoff_base)
-    except subprocess.TimeoutExpired:
-        quarantine(home, batch_id, "", f"claude timed out after {timeout}s")
-        return False, "timeout"
-    except subprocess.CalledProcessError as exc:
-        tail = (exc.stderr or "").strip().splitlines()[-3:]
-        quarantine(home, batch_id, exc.stderr or "", f"claude exited {exc.returncode}")
-        return False, f"claude exited {exc.returncode}: {' | '.join(tail)}"
+        full_prompt = (_PREAMBLE + prompt_prefix + _PENDING_DELIM +
+                       json.dumps(pending, ensure_ascii=False))
+        try:
+            raw = _run_with_backoff(run_claude, full_prompt, model=model,
+                                    timeout=timeout, max_retries=max_retries,
+                                    backoff_base=backoff_base)
+        except subprocess.TimeoutExpired:
+            quarantine(home, batch_id, "", f"claude timed out after {timeout}s")
+            return False, "timeout"
+        except subprocess.CalledProcessError as exc:
+            tail = (exc.stderr or "").strip().splitlines()[-3:]
+            quarantine(home, batch_id, exc.stderr or "", f"claude exited {exc.returncode}")
+            return False, f"claude exited {exc.returncode}: {' | '.join(tail)}"
 
-    answer = extract_answer(raw)
-    try:
-        out = parse_extractor_json(answer)
-    except json.JSONDecodeError as exc:
-        quarantine(home, batch_id, raw, f"json decode: {exc}")
-        return False, f"unparseable: {exc}"
+        answer = extract_answer(raw)
+        try:
+            out = parse_extractor_json(answer)
+        except json.JSONDecodeError as exc:
+            quarantine(home, batch_id, raw, f"json decode: {exc}")
+            return False, f"unparseable: {exc}"
 
-    if out.get("batch_id") != batch_id:
-        quarantine(home, batch_id, raw,
-                   f"batch_id mismatch: {batch_id} vs {out.get('batch_id')!r}")
-        return False, "batch_id mismatch"
-    if not isinstance(out.get("extractions"), list):
-        quarantine(home, batch_id, raw, "answer missing 'extractions' list")
-        return False, "missing extractions"
+        if out.get("batch_id") != batch_id:
+            quarantine(home, batch_id, raw,
+                       f"batch_id mismatch: {batch_id} vs {out.get('batch_id')!r}")
+            return False, "batch_id mismatch"
+        if not isinstance(out.get("extractions"), list):
+            quarantine(home, batch_id, raw, "answer missing 'extractions' list")
+            return False, "missing extractions"
 
-    patch_extractions(pending, out)
-    problems = validate_batch_file(out)
-    if problems:
-        quarantine(home, batch_id, raw,
-                   f"contract errors after patch ({len(problems)}): {problems[0]}")
-        return False, f"contract: {problems[0]}"
+        patch_extractions(pending, out)
+        problems = validate_batch_file(out)
+        if problems:
+            quarantine(home, batch_id, raw,
+                       f"contract errors after patch ({len(problems)}): {problems[0]}")
+            return False, f"contract: {problems[0]}"
 
-    atomic_write_inbox(home, batch_id, out)
-    return True, ""
+        atomic_write_inbox(home, batch_id, out)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        log.exception("unexpected error in worker for batch %s", batch_id)
+        try:
+            quarantine(home, batch_id, "", f"unexpected: {exc}")
+        except Exception:  # noqa: BLE001
+            pass
+        return False, f"unexpected: {exc}"
 
 
 def _partition(items, *, batch_size):
@@ -184,7 +193,7 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
     """
     home = home or str(config.app_dir())
     if not config.is_configured(home):
-        return {"status": "not_configured", "waves": 0, "threads": 0,
+        return {"status": "not_configured", "waves": 0, "threads_dispatched": 0,
                 "quarantined": 0}
     if run_claude is None:
         run_claude = local_claude_runner
@@ -203,20 +212,20 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
         return cancel_event is not None and cancel_event.is_set()
 
     waves = 0
-    threads_done = 0
+    threads_dispatched = 0
     quarantined = 0
     while True:
         if _cancelled():
             return {"status": "cancelled", "waves": waves,
-                    "threads": threads_done, "quarantined": quarantined}
+                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
         if max_waves is not None and waves >= max_waves:
             return {"status": "max_waves", "waves": waves,
-                    "threads": threads_done, "quarantined": quarantined}
+                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
 
         batches = group_unenriched_threads(store, thread_cap=workers * batch_size)
         if not batches:
             return {"status": "done", "waves": waves,
-                    "threads": threads_done, "quarantined": quarantined}
+                    "threads_dispatched": threads_dispatched, "quarantined": quarantined}
 
         kept = prepare._filter_noise(store, batches)   # DB write, main thread
         if not kept:
@@ -245,4 +254,4 @@ def run_parallel_backfill(*, store, embedder, home=None, model="sonnet",
         drain_fn(store=store, home=home, apply=apply, embedder=embedder)
 
         waves += 1
-        threads_done += len(kept)
+        threads_dispatched += len(kept)
