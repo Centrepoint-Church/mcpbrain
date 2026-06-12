@@ -46,7 +46,8 @@ def test_periodic_passes_skip_while_backfill_active(tmp_path, monkeypatch):
     d._last_communities = None
 
     called = {"n": 0}
-    monkeypatch.setattr(d, "maybe_communities", lambda: called.__setitem__("n", called["n"] + 1))
+    # Patch _run_communities — the dispatch table calls _run_X directly.
+    monkeypatch.setattr(d, "_run_communities", lambda: called.__setitem__("n", called["n"] + 1))
 
     # Backfill active — should early-return; communities NOT called.
     d._backfill_active.set()

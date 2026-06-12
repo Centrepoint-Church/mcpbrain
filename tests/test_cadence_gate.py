@@ -17,21 +17,24 @@ def _daemon(tmp_path, configured, monkeypatch):
 def test_graph_writers_skipped_when_unconfigured(tmp_path, monkeypatch):
     d = _daemon(tmp_path, configured=False, monkeypatch=monkeypatch)
     called = {"n": 0}
-    monkeypatch.setattr(d, "maybe_communities", lambda: called.__setitem__("n", called["n"]+1))
+    # Patch _run_communities — the dispatch table calls _run_X directly.
+    monkeypatch.setattr(d, "_run_communities", lambda: called.__setitem__("n", called["n"]+1))
     d._run_periodic_passes()
     assert called["n"] == 0
 
 def test_graph_writers_run_when_configured(tmp_path, monkeypatch):
     d = _daemon(tmp_path, configured=True, monkeypatch=monkeypatch)
     called = {"n": 0}
-    monkeypatch.setattr(d, "maybe_communities", lambda: called.__setitem__("n", called["n"]+1))
+    # Patch _run_communities — the dispatch table calls _run_X directly.
+    monkeypatch.setattr(d, "_run_communities", lambda: called.__setitem__("n", called["n"]+1))
     d._run_periodic_passes()
     assert called["n"] == 1
 
 def test_update_and_verify_run_even_when_unconfigured(tmp_path, monkeypatch):
     d = _daemon(tmp_path, configured=False, monkeypatch=monkeypatch)
     calls = {"au": 0, "vc": 0}
-    monkeypatch.setattr(d, "maybe_auto_update", lambda: calls.__setitem__("au", calls["au"]+1))
-    monkeypatch.setattr(d, "maybe_verify_connections", lambda: calls.__setitem__("vc", calls["vc"]+1))
+    # Patch _run_X methods — the dispatch table calls these directly.
+    monkeypatch.setattr(d, "_run_auto_update", lambda: calls.__setitem__("au", calls["au"]+1))
+    monkeypatch.setattr(d, "_run_verify", lambda: calls.__setitem__("vc", calls["vc"]+1))
     d._run_periodic_passes()
     assert calls["au"] == 1 and calls["vc"] == 1  # exemptions fire regardless of config

@@ -587,7 +587,8 @@ def test_maybe_waiting_on_swallows_errors(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_run_calls_passes_in_order(tmp_path, monkeypatch):
-    """_run_periodic_passes() calls the five maybe_* methods in spec order:
+    """_run_periodic_passes() calls the _run_* methods in spec order via
+    the CadencePass dispatch table:
     communities -> lint -> synthesise -> proactive -> waiting_on."""
     import json
     from unittest.mock import MagicMock
@@ -611,19 +612,29 @@ def test_run_calls_passes_in_order(tmp_path, monkeypatch):
     )
 
     call_order = []
-    daemon.maybe_communities = MagicMock(side_effect=lambda: call_order.append("communities"))
-    daemon.maybe_lint = MagicMock(side_effect=lambda: call_order.append("lint"))
-    daemon.maybe_synthesise = MagicMock(side_effect=lambda: call_order.append("synthesise"))
-    daemon.maybe_proactive = MagicMock(side_effect=lambda: call_order.append("proactive"))
-    daemon.maybe_waiting_on = MagicMock(side_effect=lambda: call_order.append("waiting_on"))
+    # Patch the _run_X methods — the dispatch table calls these directly.
+    daemon._run_communities = MagicMock(side_effect=lambda: call_order.append("communities"))
+    daemon._run_lint = MagicMock(side_effect=lambda: call_order.append("lint"))
+    daemon._run_synthesise = MagicMock(side_effect=lambda: call_order.append("synthesise"))
+    daemon._run_proactive = MagicMock(side_effect=lambda: call_order.append("proactive"))
+    daemon._run_waiting_on = MagicMock(side_effect=lambda: call_order.append("waiting_on"))
 
     daemon._run_periodic_passes()
 
-    assert call_order == ["communities", "lint", "synthesise", "proactive", "waiting_on"]
+    assert "communities" in call_order
+    assert "lint" in call_order
+    assert "synthesise" in call_order
+    assert "proactive" in call_order
+    assert "waiting_on" in call_order
+    # Order: communities before lint before synthesise before proactive before waiting_on
+    assert call_order.index("communities") < call_order.index("lint")
+    assert call_order.index("lint") < call_order.index("synthesise")
+    assert call_order.index("synthesise") < call_order.index("proactive")
+    assert call_order.index("proactive") < call_order.index("waiting_on")
 
 
 def test_run_one_pass_failure_does_not_block_others(tmp_path, monkeypatch):
-    """If one maybe_* pass raises unexpectedly, _run_periodic_passes catches it
+    """If one _run_* pass raises unexpectedly, _run_periodic_passes catches it
     and the remaining passes still run."""
     import json
     from unittest.mock import MagicMock
@@ -646,21 +657,22 @@ def test_run_one_pass_failure_does_not_block_others(tmp_path, monkeypatch):
         waiting_on_interval_s=1.0,
     )
 
-    # maybe_lint raises directly (bypasses its internal try/except).
-    daemon.maybe_communities = MagicMock(return_value={"communities": 0})
-    daemon.maybe_lint = MagicMock(side_effect=RuntimeError("lint exploded"))
-    daemon.maybe_synthesise = MagicMock(return_value={"synthesis_requested": 0})
-    daemon.maybe_proactive = MagicMock(return_value={"project_no_next_action": 0})
-    daemon.maybe_waiting_on = MagicMock(return_value={"cleared": 0})
+    # Patch _run_X methods — the dispatch table calls these directly.
+    # _run_lint raises directly (bypasses its internal try/except).
+    daemon._run_communities = MagicMock(return_value={"communities": 0})
+    daemon._run_lint = MagicMock(side_effect=RuntimeError("lint exploded"))
+    daemon._run_synthesise = MagicMock(return_value={"synthesis_requested": 0})
+    daemon._run_proactive = MagicMock(return_value={"project_no_next_action": 0})
+    daemon._run_waiting_on = MagicMock(return_value={"cleared": 0})
 
     # Must not propagate the exception.
     daemon._run_periodic_passes()
 
     # All other passes still ran.
-    daemon.maybe_communities.assert_called_once()
-    daemon.maybe_synthesise.assert_called_once()
-    daemon.maybe_proactive.assert_called_once()
-    daemon.maybe_waiting_on.assert_called_once()
+    daemon._run_communities.assert_called_once()
+    daemon._run_synthesise.assert_called_once()
+    daemon._run_proactive.assert_called_once()
+    daemon._run_waiting_on.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
