@@ -307,13 +307,34 @@ def _merge_review_block(store) -> list:
 
 # --- context assembly ------------------------------------------------------
 
+def _community_summaries_for_people(store, known_people: list) -> list[dict]:
+    """Deduplicated community summaries for the communities the known-people
+    entities belong to. Degrades to [] on any error."""
+    if not known_people:
+        return []
+    try:
+        entity_ids = [p["id"] for p in known_people if p.get("id")]
+        if not entity_ids:
+            return []
+        memberships = store.communities_for(entity_ids)
+        cids = {m["community_id"] for m in memberships}
+        if not cids:
+            return []
+        return [s for s in store.list_communities() if s["community_id"] in cids]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("_community_summaries_for_people failed: %s", exc)
+        return []
+
+
 def _build_context(store, thread_ids) -> dict:
     home = str(config.app_dir())
+    known_people = _build_known_people(store, batch_thread_ids=thread_ids)
     return {
         "owner_name": config.owner_full_name(home) or config.owner_name(home),
-        "known_people": _build_known_people(store, batch_thread_ids=thread_ids),
+        "known_people": known_people,
         "org_domain_map": _org_domain_lines(),
         "valid_orgs": _valid_org_tags(),
+        "community_summaries": _community_summaries_for_people(store, known_people),
     }
 
 
