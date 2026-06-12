@@ -190,15 +190,6 @@
     </details>
   </section>
 
-  <section id="step-hooks" class="card">
-    <h2><span class="num">5</span>Turn on cross-session memory</h2>
-    <p class="desc">This lets Claude remember across sessions automatically — it primes each new session with your recent context and captures each one at the end (the same way Claude Code does). It edits <code>~/.claude/settings.json</code> and keeps anything already there. Applies to both Claude Code and Cowork.</p>
-    <div class="row">
-      <button class="primary" type="button" onclick="installHooks()">Turn on memory hooks</button>
-      <span id="hooks-state" class="badge idle hidden"></span>
-    </div>
-  </section>
-
   <section id="step-status" class="card">
     <h2><span class="num">6</span>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
@@ -308,14 +299,6 @@ async function prepareWorkspace(){
   if(j.scaffolded && j.scaffolded.length){ badge("ws-state", "Ready", "ok"); }
   else { badge("ws-state", "Could not prepare — check the records folder", "wait"); }
 }
-async function installHooks(){
-  $("hooks-state").classList.remove("hidden");
-  badge("hooks-state", "Turning on…", "wait");
-  const res = await P("/api/hooks/install").catch(() => null);
-  if(res && res.ok){ badge("hooks-state", "On", "ok"); }
-  else { badge("hooks-state", "Could not turn on", "wait"); }
-}
-
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
   const el = $(id);
   el.textContent = text;                   // server-derived text always via textContent
@@ -379,7 +362,7 @@ function renderStatus(j){
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
-  const order = ["google","claude","clickup","backup","records","enrichment","memory-hooks"];
+  const order = ["google","claude","clickup","backup","records","enrichment"];
   const cards = order.filter(k => conns[k]).map(k => {
     const c = conns[k];
     const detail = c.detail ? ` — ${esc(c.detail)}` : "";
@@ -444,7 +427,6 @@ function reflectStepBadges(conns){
     const ready = !rec.detail || /ready/i.test(rec.detail);
     badge("ws-state", ready ? "Ready" : rec.detail, ready ? "ok" : "wait");
   }
-  if((conns["memory-hooks"] || {}).state === "ok") badge("hooks-state", "On", "ok");
 }
 
 async function refresh(){

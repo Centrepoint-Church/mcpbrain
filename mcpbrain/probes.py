@@ -12,7 +12,7 @@ import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mcpbrain import auth, config, hooks
+from mcpbrain import auth, config
 
 _CLAUDE_STALE_DAYS = 14
 
@@ -166,11 +166,6 @@ def probe_enrichment(home) -> dict:
     return _state("needs_action", "Idle — run the backfill skill in Cowork to enrich")
 
 
-def probe_memory_hooks(home) -> dict:
-    return (_state("ok", "On") if hooks.hooks_status().get("installed")
-            else _state("not_started", "Off — turn on cross-session memory"))
-
-
 def _mtime(p: Path):
     try:
         return datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -201,7 +196,6 @@ def all_connections(home, store=None) -> dict:
         "backup": probe_backup(home),
         "records": probe_records(home),
         "enrichment": probe_enrichment(home),
-        "memory-hooks": probe_memory_hooks(home),
     }
     out = {}
     for name, live in cheap.items():

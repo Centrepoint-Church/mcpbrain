@@ -1,4 +1,4 @@
-"""POST scaffold/hooks endpoints + GET /img static serving (with traversal guard)."""
+"""POST scaffold endpoint + GET /img static serving (with traversal guard)."""
 import json
 import urllib.error
 import urllib.request
@@ -6,7 +6,7 @@ import urllib.request
 import pytest
 
 from mcpbrain.control_api import ControlServer
-from mcpbrain import records, hooks
+from mcpbrain import records
 
 
 class _Daemon:
@@ -33,13 +33,6 @@ def test_records_scaffold(server, monkeypatch):
     monkeypatch.setattr(records, "scaffold_records", lambda home: ["/x/CLAUDE.md"])
     code, body = _post(server, "/api/records/scaffold")
     assert code == 200 and body["scaffolded"] == ["/x/CLAUDE.md"]
-
-
-def test_hooks_install(server, monkeypatch):
-    from pathlib import Path
-    monkeypatch.setattr(hooks, "install_session_hooks", lambda: Path("/x/settings.json"))
-    code, body = _post(server, "/api/hooks/install")
-    assert code == 200 and body["installed"] is True
 
 
 def test_img_unknown_returns_404(server):
