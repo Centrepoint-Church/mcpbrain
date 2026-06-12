@@ -295,7 +295,8 @@ class Daemon:
     Orchestration scope: wires sync -> embed -> enrich -> maybe_backup.
     Enrichment is tiered via enrich_client (None -> defer no-op). Periodic backup
     is tiered via backup (None -> OFF); when configured it self-gates on a
-    time-based cadence using the injected clock.
+    time-based cadence using the injected clock. Entity resolution runs
+    deterministic-only each cycle (LLM adjudication removed in §9A).
 
     Threading model: pause/stop/wake are threading.Event objects so the tray
     (Task 3.2) and tests can drive the daemon without real timers. run() blocks
@@ -306,7 +307,6 @@ class Daemon:
                  interval_s: float = 300.0,
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
                  backup_interval_s: float | None = None,
-                 resolve_interval_s: float | None = None,
                  communities_interval_s: float | None = None,
                  lint_interval_s: float | None = None,
                  synthesise_interval_s: float | None = None,
@@ -353,20 +353,14 @@ class Daemon:
         # _backup and _backup_interval_s are a CONSISTENT PAIR: apply_config
         # (HTTP handler thread) writes both and maybe_backup (loop thread) reads
         # both, so they are guarded together by _config_lock to stop an
-        # interleave reading a new config with the old interval. _config_lock
-        # also guards _enrich_client (set by apply_config, read by run_one).
+        # interleave reading a new config with the old interval.
         self._config_lock = threading.Lock()
         self._backup = backup
         self._backup_interval_s = backup_interval_s
         if self._backup is not None and self._backup_interval_s is None:
             raise ValueError("backup_interval_s is required when backup is configured")
-        # Periodic entity resolution is OFF unless resolve_interval_s is set.
-        # Tiered like enrichment: reuses self._enrich_client (None -> resolve_entities
-        # does deterministic-only resolution). Time-based cadence via self._clock.
-        self._resolve_interval_s = resolve_interval_s
         self._clock = clock
         self._last_backup = None
-        self._last_resolve = None
         # Periodic community detection is OFF unless communities_interval_s is set.
         # Tiered like resolve: OFF by default; time-based cadence via self._clock.
         self._communities_interval_s: float | None = communities_interval_s
@@ -768,11 +762,10 @@ class Daemon:
             enrich_mode = self._enrich_mode
         # Gate: no enrichment until the install is configured. Sync still runs.
         enrich_mode = _gated_enrich_mode(enrich_mode, str(app_dir()))
-        # The spool prepare step folds in the merge-review block on the same
-        # cadence the deterministic resolve tier fires. Compute it here (without
-        # consuming the cadence) and pass it through; maybe_resolve still runs
-        # after this cycle and advances the clock.
-        resolution_due = self._resolve_due()
+        # The spool prepare step folds in the merge-review block every cycle —
+        # merge_review candidates are cheap to generate and the LLM adjudication
+        # tier has been removed (§9A), so there is no longer a cadence to gate on.
+        resolution_due = True
         # Stashed synthesis/block requests are RE-ATTACHED every cycle, not
         # consumed by one: prepare rewrites pending.json each cycle, so a
         # one-shot attach survives only until the next rewrite (~one interval)
@@ -917,71 +910,6 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.warning("verify_connections failed (loop continues): %s", exc)
             return None
-
-    # -- periodic entity resolution -----------------------------------------
-
-    def _resolve_due(self) -> bool:
-        """Whether an entity resolve is due this cycle, without consuming it.
-
-        OFF (False) unless resolve_interval_s was supplied. Otherwise due on the
-        first call (self._last_resolve is None) or once resolve_interval_s has
-        elapsed since the last resolve. Read-only: it does not advance the
-        cadence clock. maybe_resolve uses this as its gate, and run_one reuses it
-        to set the spool merge-review cadence (resolution_due), so the LLM merge
-        block is appended exactly when the deterministic resolve tier fires.
-        """
-        if self._resolve_interval_s is None:
-            return False
-        if self._last_resolve is None:
-            return True
-        return (self._clock() - self._last_resolve) >= self._resolve_interval_s
-
-    def maybe_resolve(self) -> dict | None:
-        """Run entity resolution, if it is due.
-
-        OFF unless resolve_interval_s was supplied: returns None when
-        self._resolve_interval_s is None (never resolves an unconfigured
-        daemon). Otherwise gates on a time-based cadence using the injected
-        clock — due on the first call (self._last_resolve is None) or once
-        resolve_interval_s has elapsed since the last resolve. Not due ->
-        returns None and does nothing.
-
-        Tiered: reuses self._enrich_client. With a client, resolve_entities
-        also LLM-adjudicates fuzzy candidates; without one (None) it does
-        deterministic-only resolution, which is safe.
-
-        A resolve failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"resolved": False, "error": ...} rather than
-        propagating. _last_resolve advances only on a clean run, so a failed
-        attempt retries on the next due tick.
-
-        Cost note: with an enrich_client set, resolution LLM-adjudicates fuzzy
-        candidates (up to resolve_entities' max_adjudications per run). A very
-        small resolve_interval_s therefore drives frequent LLM calls — pick an
-        interval well above the sync interval (resolution is cheap to defer).
-        """
-        if self._backfill_active.is_set():
-            return None  # single-writer: yield to the backfill
-        if not self._resolve_due():
-            return None
-
-        # Record the START time as the cadence anchor (unlike maybe_backup's
-        # end-time): a slow LLM-adjudicated resolve then doesn't eat into the
-        # next interval. _last_resolve is committed only on a clean run below.
-        now = self._clock()
-
-        try:
-            # Lazy import: keeps the daemon import light and resolution an
-            # optional path; also lets tests patch mcpbrain.resolve.resolve_entities.
-            from mcpbrain.resolve import resolve_entities
-            summary = resolve_entities(self._store, client=self._enrich_client)
-        except Exception as exc:  # noqa: BLE001 — resolve must never crash the loop
-            log.warning("resolve failed (will retry next due): %s", exc, exc_info=True)
-            return {"resolved": False, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean resolve.
-        self._last_resolve = now
-        return summary
 
     # -- periodic community detection ---------------------------------------
 
@@ -1527,10 +1455,6 @@ class Daemon:
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
                 self.maybe_backup()
-                # Resolution self-gates on configured + due; reuses the
-                # single-writer lock this loop thread already holds.
-                if config.is_configured(str(app_dir())):
-                    self.maybe_resolve()
                 # Five periodic maintenance passes in spec order (§54, §165).
                 # communities first (lint reads fresh entity_communities).
                 self._run_periodic_passes()

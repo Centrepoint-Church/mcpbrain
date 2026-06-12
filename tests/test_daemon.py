@@ -773,136 +773,6 @@ def test_daemon_constructs_fine_when_backup_is_not_configured(tmp_path):
 # ---------------------------------------------------------------------------
 # periodic entity resolution in the loop (Task R8)
 # ---------------------------------------------------------------------------
-
-def _seed_duplicate_entities(store):
-    """Upsert two id-distinct, same-type entities that share a canonical key
-    ('Ps Joel' and 'Joel' both -> 'joel', type person). The deterministic
-    resolver folds them into one survivor; without resolution both remain."""
-    store.upsert_entity("ps-joel", "Ps Joel", "person", org="Acme")
-    store.upsert_entity("joel", "Joel", "person", org="Acme")
-    return ["ps-joel", "joel"]
-
-
-def test_unconfigured_daemon_never_resolves(tmp_path):
-    """resolve_interval_s=None -> maybe_resolve() returns None and no merge runs;
-    the two key-identical duplicates both survive."""
-    store = _make_store(tmp_path)
-    _seed_duplicate_entities(store)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-
-    assert daemon.maybe_resolve() is None
-    assert len(store.list_entities()) == 2, "no resolution should have run"
-
-
-def test_configured_first_call_resolves_duplicates(tmp_path):
-    """resolve_interval_s set + due (first call) -> deterministic merge folds the
-    two duplicates into one. enrich_client is None: deterministic-only tier."""
-    store = _make_store(tmp_path)
-    _seed_duplicate_entities(store)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    resolve_interval_s=3600.0, clock=_Clock())
-
-    summary = daemon.maybe_resolve()
-
-    assert summary is not None
-    assert summary["mode"] == "deterministic"
-    assert summary["auto_merges"] == 1
-    assert len(store.list_entities()) == 1, "duplicates should be merged"
-
-
-def test_resolve_not_due_skips_then_due_runs_again(tmp_path):
-    """After a due resolve, advancing < interval -> None (no second run);
-    advancing >= interval -> runs again (a fresh dup is merged)."""
-    store = _make_store(tmp_path)
-    _seed_duplicate_entities(store)
-    clock = _Clock()
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    resolve_interval_s=100.0, clock=clock)
-
-    first = daemon.maybe_resolve()
-    assert first is not None and first["auto_merges"] == 1
-    assert len(store.list_entities()) == 1
-
-    # Seed a fresh duplicate pair so a re-run would have work to do.
-    store.upsert_entity("ps-taryn", "Ps Taryn", "person", org="Acme")
-    store.upsert_entity("taryn", "Taryn", "person", org="Acme")
-
-    # Not due yet: maybe_resolve returns None and the new dup is NOT merged.
-    clock.advance(50.0)
-    assert daemon.maybe_resolve() is None
-    assert len(store.list_entities()) == 3  # 1 survivor + 2 fresh dups
-
-    # Due again: runs and merges the fresh dup.
-    clock.advance(60.0)  # total 110 >= 100
-    second = daemon.maybe_resolve()
-    assert second is not None and second["auto_merges"] == 1
-    assert len(store.list_entities()) == 2  # both survivors
-
-
-def test_resolve_failure_does_not_crash_and_loop_continues(tmp_path, monkeypatch):
-    """A resolve_entities exception is logged and swallowed: maybe_resolve()
-    returns {"resolved": False, "error": ...} and never propagates."""
-    store = _make_store(tmp_path)
-    _seed_duplicate_entities(store)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    resolve_interval_s=0.0, clock=_Clock())
-
-    import mcpbrain.resolve as resolve_module
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("simulated resolve error")
-
-    monkeypatch.setattr(resolve_module, "resolve_entities", _boom)
-
-    failed = daemon.maybe_resolve()
-    assert failed is not None
-    assert failed["resolved"] is False
-    assert "error" in failed
-    # No merge happened; both duplicates still present.
-    assert len(store.list_entities()) == 2
-
-    # The daemon is still usable: undo the monkeypatch and resolve cleanly.
-    monkeypatch.undo()
-    ok = daemon.maybe_resolve()  # interval 0 -> always due
-    assert ok is not None and ok["auto_merges"] == 1
-    assert len(store.list_entities()) == 1
-
-
-def test_run_loop_runs_a_resolve_within_the_loop(tmp_path, monkeypatch):
-    """run() should call maybe_resolve() each iteration; with interval 0 the
-    first loop pass resolves. Proves the loop wiring, not maybe_resolve alone."""
-    import json
-    (tmp_path / "config.json").write_text(json.dumps(
-        {"owner_name": "S", "owner_email": "s@x.com", "orgs": [{"name": "O"}]}
-    ))
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    _seed_duplicate_entities(store)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    interval_s=0.01,
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    resolve_interval_s=0.0, clock=_Clock())
-
-    t = threading.Thread(target=daemon.run)
-    t.start()
-    poll = threading.Event()  # never set; bounded sleep
-    deadline = time.monotonic() + 5.0
-    while len(store.list_entities()) > 1:
-        if time.monotonic() >= deadline or not t.is_alive():
-            break
-        poll.wait(0.01)
-    daemon.stop()
-    t.join(timeout=5.0)
-
-    assert not t.is_alive(), "run() did not return promptly after stop()"
-    assert len(store.list_entities()) == 1, "loop did not run a resolve"
-
-
-# ---------------------------------------------------------------------------
 # G3 — daemon self-wires real services when not injected
 # ---------------------------------------------------------------------------
 
@@ -1066,6 +936,15 @@ def test_status_includes_is_configured(tmp_path, monkeypatch):
     s = d.status()
     assert "is_configured" in s
     assert isinstance(s["is_configured"], bool)
+
+
+def test_maybe_resolve_does_not_exist():
+    import inspect
+    from mcpbrain.daemon import Daemon
+    assert not hasattr(Daemon, "maybe_resolve")
+    assert not hasattr(Daemon, "_resolve_due")
+    sig = inspect.signature(Daemon.__init__)
+    assert "resolve_interval_s" not in sig.parameters
 
 
 def test_status_includes_connections_block(tmp_path, monkeypatch):
