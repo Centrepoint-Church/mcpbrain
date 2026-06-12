@@ -949,9 +949,6 @@ def test_maybe_resolve_does_not_exist():
 
 def test_status_includes_connections_block(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    # Hermetic: probe_claude reads the real claude_desktop_config.json otherwise.
-    from mcpbrain import probes
-    monkeypatch.setattr(probes, "_claude_registered", lambda: False)
     store = _make_store(tmp_path)
     emb = FakeEmbedder()
     d = Daemon(store, emb, enrich_mode="off")
