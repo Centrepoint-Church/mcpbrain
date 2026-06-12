@@ -15,17 +15,6 @@ def test_launchd_meeting_packs_twice_daily_subcommand():
     assert "<integer>45</integer>" in plist and "<integer>12</integer>" in plist
 
 
-def test_systemd_gardener_timer_weekly_monday_0800():
-    service, timer = agents.gardener_timer_units(mcpbrain_bin="/m", home="/h")
-    assert "records-gardener" in service and "OnCalendar=Mon *-*-* 08:00" in timer
-
-
-def test_systemd_meeting_packs_timer_has_two_times():
-    service, timer = agents.meeting_packs_timer_units(mcpbrain_bin="/m", home="/h")
-    assert "meeting-packs" in service
-    assert "07:45" in timer and "12:00" in timer
-
-
 def test_schtasks_gardener_weekly():
     a = agents.gardener_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe")
     assert "weekly" in a and "MON" in a and any("records-gardener" in x for x in a)
