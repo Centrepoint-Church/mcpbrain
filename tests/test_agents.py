@@ -17,9 +17,9 @@ def test_schtasks_args_at_logon():
 
 def test_schtasks_args_quotes_path_with_spaces():
     a = schtasks_args(mcpbrain_bin=r"C:\Program Files\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
-    # The /tr value must wrap the spaced path in double-quotes.
-    expected_tr = r'"C:\Program Files\mcpbrain.exe" daemon'
-    assert expected_tr in a
+    # The /tr action embeds MCPBRAIN_HOME and wraps the spaced path in double-quotes.
+    action = a[a.index("/tr") + 1]
+    assert r'"C:\Program Files\mcpbrain.exe" daemon' in action
 
 
 def test_launchd_tray_plist_runs_tray_and_does_not_respawn():

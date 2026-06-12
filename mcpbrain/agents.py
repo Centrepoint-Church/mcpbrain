@@ -100,28 +100,23 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
                           home=home, keep_alive="crashonly")
 
 
-def _schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str) -> list[str]:
-    # Conditional quoting: wrap a whitespace-containing path so Task Scheduler
-    # parses it correctly; leave bare paths unquoted.
+def _schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str, home: str) -> list[str]:
+    """schtasks args registering an on-logon task whose action embeds MCPBRAIN_HOME
+    so the daemon starts correctly even if the env var is cleared."""
     quoted_bin = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
-    return [
-        "schtasks",
-        "/create",
-        "/tn", task_name,
-        "/sc", "onlogon",
-        "/tr", f"{quoted_bin} {subcommand}",
-        "/f",
-    ]
+    quoted_home = f'"{home}"' if any(c.isspace() for c in home) else home
+    action = f'cmd /c "set MCPBRAIN_HOME={quoted_home} && {quoted_bin} {subcommand}"'
+    return ["schtasks", "/create", "/tn", task_name, "/sc", "onlogon", "/tr", action, "/f"]
 
 
 def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return the schtasks.exe argument list that registers ``mcpbrain daemon`` at logon."""
-    return _schtasks_args(task_name=_TASK_NAME, subcommand="daemon", mcpbrain_bin=mcpbrain_bin)
+    return _schtasks_args(task_name=_TASK_NAME, subcommand="daemon", mcpbrain_bin=mcpbrain_bin, home=home)
 
 
 def schtasks_tray_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return the schtasks.exe argument list that registers ``mcpbrain tray`` at logon."""
-    return _schtasks_args(task_name=_TRAY_TASK_NAME, subcommand="tray", mcpbrain_bin=mcpbrain_bin)
+    return _schtasks_args(task_name=_TRAY_TASK_NAME, subcommand="tray", mcpbrain_bin=mcpbrain_bin, home=home)
 
 
 # ---------------------------------------------------------------------------
@@ -209,13 +204,9 @@ def _restart_launchd() -> None:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    # MCPBRAIN_HOME is now embedded directly in the task action via
+    # `cmd /c "set MCPBRAIN_HOME=... && mcpbrain daemon"`, so no separate setx is needed.
     args = schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)
-    # Pass MCPBRAIN_HOME via the environment of the spawning process; the task
-    # inherits the user environment at logon, so set it as a persistent user env var.
-    subprocess.run(
-        ["setx", "MCPBRAIN_HOME", home],
-        check=True,
-    )
     subprocess.run(args, check=True)
     log.info("Windows scheduled task '%s' created", _TASK_NAME)
 
