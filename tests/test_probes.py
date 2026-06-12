@@ -57,8 +57,7 @@ def test_records_not_started_when_absent(tmp_path):
 
 def test_all_connections_has_every_key(tmp_path):
     conns = probes.all_connections(_home(tmp_path, {}), store=None)
-    assert set(conns) == {"google", "claude", "clickup", "backup", "records",
-                          "enrichment", "memory-hooks"}
+    assert set(conns) == {"google", "claude", "clickup", "backup", "records", "enrichment"}
     for v in conns.values():
         assert set(v) == {"state", "detail", "last_verified"}
         assert v["state"] in {"not_started", "ok", "needs_action"}
@@ -85,14 +84,6 @@ def test_enrichment_states(tmp_path, monkeypatch):
     assert _probes.probe_enrichment(home)["state"] == "ok"
 
 
-def test_memory_hooks_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr(_probes.hooks, "hooks_status", lambda: {"installed": True})
-    assert _probes.probe_memory_hooks(_home7(tmp_path, {}))["state"] == "ok"
-    monkeypatch.setattr(_probes.hooks, "hooks_status", lambda: {"installed": False})
-    assert _probes.probe_memory_hooks(_home7(tmp_path, {}))["state"] == "not_started"
-
-
-def test_all_connections_has_new_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(_probes.hooks, "hooks_status", lambda: {"installed": False})
+def test_all_connections_has_new_keys(tmp_path):
     conns = _probes.all_connections(_home7(tmp_path, {}))
-    assert {"enrichment", "memory-hooks"} <= set(conns)
+    assert {"enrichment"} <= set(conns)
