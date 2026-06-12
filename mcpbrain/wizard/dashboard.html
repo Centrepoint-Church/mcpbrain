@@ -189,6 +189,12 @@
       </div>
       <div id="inbox-body"><p class="empty">Loading…</p></div>
     </div>
+
+    <!-- Circles -->
+    <div class="card" id="card-circles">
+      <div class="card-head"><h2>Circles</h2><span id="circles-count" class="count-badge">0</span></div>
+      <div id="circles-body"><p class="empty">Loading…</p></div>
+    </div>
   </div>
 </main>
 
@@ -586,6 +592,50 @@ function renderInbox(items){
   body.appendChild(frag);
 }
 
+// ---- render circles ----
+
+function renderCircles(circles){
+  const body = $("circles-body");
+  $("circles-count").textContent = circles.length;
+  if(!circles.length){
+    body.innerHTML = '<p class="empty">No community circles detected.</p>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for(const c of circles){
+    const row = document.createElement("div");
+    row.className = "inbox-row";
+
+    const b = document.createElement("div");
+    b.className = "inbox-body";
+
+    const title = document.createElement("span");
+    title.className = "inbox-subject";
+    title.textContent = c.title || ("Circle " + c.community_id);
+
+    const meta = document.createElement("div");
+    meta.className = "inbox-meta";
+
+    const count = document.createElement("span");
+    count.className = "inbox-sender";
+    count.textContent = c.member_count + " members";
+    meta.appendChild(count);
+
+    const summary = document.createElement("p");
+    summary.style.cssText = "font-size:13px;color:var(--muted);margin:4px 0 0;line-height:1.4";
+    const text = c.summary || "";
+    summary.textContent = text.length > 120 ? text.slice(0, 120) + "…" : text;
+
+    b.appendChild(title);
+    b.appendChild(meta);
+    if(text) b.appendChild(summary);
+    row.appendChild(b);
+    frag.appendChild(row);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+}
+
 // ---- main refresh ----
 
 let fetching = false;
@@ -612,6 +662,7 @@ async function refresh(){
     renderClickUp(data.clickup || []);
     renderReview(data.findings || [], data.changes || []);
     renderInbox(data.inbox || []);
+    renderCircles(data.circles || []);
   } catch(e){
     showToast("Could not load data. Retrying in 60s.");
   } finally{
