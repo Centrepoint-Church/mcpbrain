@@ -18,7 +18,6 @@ class FakeDaemon:
     def __init__(self):
         self.paused = False
         self.cfg = None
-        self.registered = False
         self.auth = False
 
     def status(self):
@@ -33,10 +32,6 @@ class FakeDaemon:
 
     def apply_config(self, body):
         self.cfg = body
-
-    def register(self):
-        self.registered = True
-        return "/tmp/claude_desktop_config.json"
 
     def start_auth(self):
         self.auth = True
@@ -75,9 +70,6 @@ def test_post_endpoints(tmp_path):
             import time
             time.sleep(0.01)
         assert d.auth
-        r = _post(base + "/api/register", srv.token, {})
-        assert d.registered
-        assert "config" in json.loads(r.read())["config_path"]
     finally:
         srv.stop()
 
@@ -101,29 +93,6 @@ def test_post_malformed_json_returns_400(tmp_path):
     finally:
         srv.stop()
 
-
-def test_post_register_failure_returns_json_error(tmp_path):
-    """A handler that raises surfaces as a JSON {'error': ...} 500 so the wizard
-    can show the cause, not an opaque failure."""
-    import urllib.error
-
-    class FailingDaemon(FakeDaemon):
-        def register(self):
-            raise RuntimeError("could not find mcpbrain on PATH")
-
-    d = FailingDaemon()
-    srv = ControlServer(d, home=str(tmp_path))
-    srv.start()
-    try:
-        base = f"http://127.0.0.1:{srv.port}"
-        try:
-            _post(base + "/api/register", srv.token, {})
-            assert False, "expected HTTP 500"
-        except urllib.error.HTTPError as e:
-            assert e.code == 500
-            assert "could not find mcpbrain" in json.loads(e.read())["error"]
-    finally:
-        srv.stop()
 
 
 def test_post_oversize_body_returns_413(tmp_path):
@@ -255,17 +224,6 @@ def test_start_auth_is_single_flight(tmp_path, monkeypatch):
     d.start_auth()
     assert calls["n"] == 2
 
-
-def test_register_returns_path(tmp_path, monkeypatch):
-    """register() returns the str of the path register_mcpbrain produces."""
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    from pathlib import Path
-    target = Path("/tmp/claude_desktop_config.json")
-    import mcpbrain.wizard.register as reg_mod
-    monkeypatch.setattr(reg_mod, "register_mcpbrain", lambda **kw: target)
-
-    d = _make_daemon(tmp_path)
-    assert d.register() == str(target)
 
 
 def test_apply_config_rewires_enrich_mode(tmp_path, monkeypatch):

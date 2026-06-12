@@ -10,11 +10,9 @@ def _home(tmp_path, cfg):
     return str(tmp_path)
 
 
-def test_claude_not_started_when_no_heartbeat(tmp_path, monkeypatch):
-    monkeypatch.setattr(probes, "_claude_registered", lambda: False)
+def test_claude_not_started_when_no_heartbeat(tmp_path):
     r = probes.probe_claude(_home(tmp_path, {}))
-    assert r["state"] == "not_started"
-    assert r["last_verified"] is None
+    assert r["state"] == "not_started" and r["last_verified"] is None
 
 
 def test_claude_ok_when_heartbeat_present(tmp_path):
@@ -23,8 +21,7 @@ def test_claude_ok_when_heartbeat_present(tmp_path):
         json.dumps({"last_seen": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat()})
     )
     r = probes.probe_claude(home)
-    assert r["state"] == "ok"
-    assert r["last_verified"].startswith("2026-06-10")
+    assert r["state"] == "ok" and r["last_verified"].startswith("2026-06-10")
 
 
 def test_clickup_not_started_without_key(tmp_path):
@@ -77,17 +74,6 @@ def _home7(tmp_path, cfg):
     return str(tmp_path)
 
 
-def test_claude_not_registered(tmp_path, monkeypatch):
-    monkeypatch.setattr(_probes, "_claude_registered", lambda: False)
-    r = _probes.probe_claude(_home7(tmp_path, {}))
-    assert r["state"] == "not_started" and "register" in r["detail"].lower()
-
-
-def test_claude_registered_awaiting_restart(tmp_path, monkeypatch):
-    monkeypatch.setattr(_probes, "_claude_registered", lambda: True)
-    r = _probes.probe_claude(_home7(tmp_path, {}))  # no heartbeat file
-    assert r["state"] == "needs_action" and "reopen" in r["detail"].lower()
-
 
 def test_enrichment_states(tmp_path, monkeypatch):
     home = _home7(tmp_path, {})
@@ -107,7 +93,6 @@ def test_memory_hooks_probe(tmp_path, monkeypatch):
 
 
 def test_all_connections_has_new_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(_probes, "_claude_registered", lambda: False)
     monkeypatch.setattr(_probes.hooks, "hooks_status", lambda: {"installed": False})
     conns = _probes.all_connections(_home7(tmp_path, {}))
     assert {"enrichment", "memory-hooks"} <= set(conns)
