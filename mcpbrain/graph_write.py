@@ -1118,8 +1118,8 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
     Ported from enrich_gmail.py:1285-1539. The Nexus two-table routing
     (knowledge_actions vs decisions) collapses to a single store.add_unified_action
     call: the not-the-owner / unclear / owner branches differ only in the
-    owner/confidence/context_tag written. Each action's project_id/area_id is run
-    through _validate_action_targets first (the Task 2 helper).
+    owner/confidence/context_tag written. project_id/area_id pass through from the
+    extraction unvalidated (projects/areas tables removed in §9E).
 
     Gmail label writes (_apply_self_task_label) are intentionally omitted: there
     is no Gmail surface in Phase 1.
@@ -1179,18 +1179,11 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
 
     is_sender_owner = bool(sender_name and _is_owner(sender_name, owner))
 
-    # Load the active project/area sets once for the whole thread, not per action.
-    valid_projects = _active_project_ids(store)
-    valid_areas = _active_area_ids(store)
-
     actions_created = 0
     for action in actions_list:
         description = (action.get("description") or "").strip()
         if not description:
             continue
-
-        _validate_action_targets(store, action, valid_projects=valid_projects,
-                                 valid_areas=valid_areas)
 
         owner_name = (action.get("owner_name") or "").strip() or None
         owner_fallback = (action.get("owner_fallback") or "").strip() or None
@@ -1370,43 +1363,6 @@ def _topic_distinct_orgs(store, tag_clean: str, *, exclude_message_id="") -> int
     with store._connect() as conn:
         row = conn.execute(sql, params).fetchone()
     return row[0] if row else 0
-
-
-def _active_project_ids(store) -> set:
-    """Active project ids (archived_at IS NULL). Ported from enrich_gmail.py:887-898."""
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT id FROM projects WHERE archived_at IS NULL").fetchall()
-    return {r[0] for r in rows}
-
-
-def _active_area_ids(store) -> set:
-    """Active area ids (active=1). Mirrors hierarchy.active_areas() over the areas table."""
-    with store._connect() as conn:
-        rows = conn.execute("SELECT id FROM areas WHERE active = 1").fetchall()
-    return {r[0] for r in rows}
-
-
-def _validate_action_targets(store, action: dict, *, valid_projects=None,
-                             valid_areas=None) -> dict:
-    """Blank an action's project_id / area_id when it isn't an active id.
-
-    Ported from enrich_gmail._parse_extraction (enrich_gmail.py:868-882): Gemini
-    hallucinations (made-up ids, typos, archived/inactive references) are dropped
-    to "". Mutates and returns the action dict in place. valid_projects/valid_areas
-    may be precomputed by the caller (apply loads them once per thread rather than
-    once per action — the Nexus original loaded them once per call too).
-    """
-    if valid_projects is None:
-        valid_projects = _active_project_ids(store)
-    if valid_areas is None:
-        valid_areas = _active_area_ids(store)
-    ptag = str(action.get("project_id") or action.get("project_tag") or "").strip()
-    action["project_id"] = ptag if ptag in valid_projects else ""
-    action["project_tag"] = action["project_id"]  # back-compat alias
-    atag = str(action.get("area_id") or "").strip()
-    action["area_id"] = atag if atag in valid_areas else ""
-    return action
 
 
 # ---------------------------------------------------------------------------

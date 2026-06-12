@@ -172,22 +172,13 @@ def test_brain_context_actions_from_unified_table(tmp_path):
     assert "Unified action" in texts
 
 
-def test_brain_context_includes_projects_areas(tmp_path):
-    """An entity that owns a project (and an area carried by that project)
-    surfaces them in the brain_context result."""
-    s = Store(tmp_path / "pa.sqlite3", dim=4)
-    s.init()
+def test_brain_context_profile_has_no_projects_areas(tmp_path):
+    s = Store(tmp_path / "no_pa.sqlite3", dim=4); s.init()
     s.upsert_entity("sam", "Sam Chen", "person", org="Acme")
-    with s._connect() as db:
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-ops', 'Acme', 'Operations', 1)")
-        db.execute("INSERT INTO projects(id, name, owner_entity_id, area_id, status) "
-                   "VALUES('p-college', 'College 2026', 'sam', 'a-ops', 'active')")
-
     tool = make_brain_context(s)
     out = asyncio.run(tool("sam"))
-    assert {p["id"] for p in out["projects"]} == {"p-college"}
-    assert {a["id"] for a in out["areas"]} == {"a-ops"}
+    assert "projects" not in out and "areas" not in out
+    assert {"entity", "relations", "actions"} <= set(out)
 
 
 def test_brain_graph_at_time(tmp_path):
