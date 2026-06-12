@@ -1,10 +1,11 @@
-"""Tests for mcpbrain/lint_graph.py — Phase 3 Task 2.
+"""Tests for mcpbrain/lint_graph.py — Phase 3 Task 2 + Task A5.
 
 Sub-tasks covered:
   2.1  individual checks (check_missing_org, check_orphan_entities,
-       check_ambiguous_org, check_possible_duplicates, check_ownerless_actions,
-       check_duplicate_orgs)
+       check_ambiguous_org, check_ownerless_actions, check_duplicate_orgs)
   2.2  build_report counts + run() findings sink
+  A5   deleted three redundant checks (check_possible_duplicates,
+       check_community_singletons, check_threads_without_summary)
 """
 
 import json
@@ -14,7 +15,6 @@ from mcpbrain.lint_graph import (
     check_missing_org,
     check_orphan_entities,
     check_ambiguous_org,
-    check_possible_duplicates,
     check_ownerless_actions,
     check_duplicate_orgs,
     build_report,
@@ -62,15 +62,6 @@ def _add_email_context(store, message_id, thread_id="", subject="", date_iso="")
         thread_id=thread_id,
         date_iso=date_iso,
     )
-
-
-def _add_thread_context(store, thread_id, subject="", org="", email_count=0, summary=None):
-    with store._connect() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO thread_context"
-            "(thread_id, subject, org, email_count, summary) VALUES (?, ?, ?, ?, ?)",
-            (thread_id, subject, org, email_count, summary),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -156,45 +147,6 @@ def test_check_ambiguous_org_flags(tmp_path, monkeypatch):
     assert amb1_row["should_be"] == "Acme"
 
 
-# ---------------------------------------------------------------------------
-# Sub-task 2.1 — check_possible_duplicates (planted-inconsistency acceptance test)
-# ---------------------------------------------------------------------------
-
-def test_check_possible_duplicates_flags(tmp_path):
-    """Two person entities 'Taryn Hamilton' / 'Taryn H' same org -> flagged (score >= 75)."""
-    s = _store(tmp_path)
-    _add_entity(s, "taryn-hamilton", "Taryn Hamilton", org="Acme", email_count=5)
-    _add_entity(s, "taryn-h", "Taryn H", org="Acme", email_count=2)
-
-    with s._connect() as db:
-        flagged = check_possible_duplicates(db)
-
-    assert len(flagged) >= 1, "Expected at least one duplicate pair to be flagged"
-    ids_a = [r["id_a"] for r in flagged]
-    ids_b = [r["id_b"] for r in flagged]
-    all_ids = set(ids_a + ids_b)
-    assert "taryn-hamilton" in all_ids or "taryn-h" in all_ids, (
-        f"Taryn Hamilton / Taryn H pair not found in: {flagged}"
-    )
-    # Verify score >= 75
-    pair = next(r for r in flagged if "taryn-hamilton" in (r["id_a"], r["id_b"]))
-    assert pair["score"] >= 75, f"Score {pair['score']} is below threshold 75"
-
-
-def test_check_possible_duplicates_different_org_not_flagged(tmp_path):
-    """Two persons with same first name but different orgs -> not flagged."""
-    s = _store(tmp_path)
-    _add_entity(s, "sam-acme", "Sam Smith", org="Acme", email_count=3)
-    _add_entity(s, "sam-acc", "Sam Smith", org="ACC", email_count=3)
-
-    with s._connect() as db:
-        flagged = check_possible_duplicates(db)
-
-    # Different org should reduce score below threshold (score -= 20 penalty)
-    # "Sam Smith" vs "Sam Smith" base score is 100, -20 for different org = 80
-    # Still >= 75, so this pair MAY be flagged — just verify no crash
-    # The test is really about the score reduction, not a hard not-flagged assertion
-    assert isinstance(flagged, list)
 
 
 # ---------------------------------------------------------------------------
@@ -315,16 +267,12 @@ def test_build_report_ok_when_clean(tmp_path):
 
 def test_lint_records_findings(tmp_path):
     """run(store, now) writes one proactive_findings row per entity-level finding,
-    with finding_type='lint:<check_name>' and severity='info'.
-    Also verifies that lint:thread_no_summary is recorded for threads without summaries."""
+    with finding_type='lint:<check_name>' and severity='info'."""
     s = _store(tmp_path)
     # Plant a missing-org entity
     _add_entity(s, "no-org-2", "No Org Person 2", org="", email_count=5)
     # Plant an ownerless action
     _add_action(s, 88, "Another unowned task", owner="", source="email")
-    # Plant a high-volume thread with no summary (>= 5 emails required by the check)
-    _add_thread_context(s, "thread-no-summary-1", subject="Big Thread", org="Acme",
-                        email_count=7, summary=None)
 
     now = "2026-06-03T00:00:00Z"
     result = run(s, now=now, log_dir=tmp_path / "logs")
@@ -342,15 +290,6 @@ def test_lint_records_findings(tmp_path):
         if f["finding_type"].startswith("lint:"):
             assert f["severity"] == "info"
             assert f["ref_id"] != ""
-
-    # Verify the newly-covered check is recorded
-    assert "lint:thread_no_summary" in types, (
-        f"Expected lint:thread_no_summary in findings, got: {types}"
-    )
-    thread_findings = [f for f in open_findings if f["finding_type"] == "lint:thread_no_summary"]
-    assert any(f["ref_id"] == "thread-no-summary-1" for f in thread_findings), (
-        "Expected thread-no-summary-1 to appear as a thread_no_summary finding"
-    )
 
 
 def test_lint_resolves_stale_findings(tmp_path):
@@ -394,3 +333,15 @@ def test_lint_report_written_to_log_dir(tmp_path):
     assert result["report_path"] == str(report_path)
     content = report_path.read_text()
     assert "Knowledge Graph Lint" in content
+
+
+# ---------------------------------------------------------------------------
+# Task A5: Verify deleted checks are not importable
+# ---------------------------------------------------------------------------
+
+def test_deleted_lint_checks_not_importable():
+    """Verify that the three deleted lint checks are no longer present."""
+    from mcpbrain import lint_graph
+    assert not hasattr(lint_graph, "check_possible_duplicates")
+    assert not hasattr(lint_graph, "check_community_singletons")
+    assert not hasattr(lint_graph, "check_threads_without_summary")
