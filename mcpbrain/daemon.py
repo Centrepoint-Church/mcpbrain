@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 
 EMBED_BACKEND = "fastembed:bge-small:v1"
 DEFAULT_BACKUP_INTERVAL_S = 3600
+_CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
 # Spool prepare bounds. thread_cap is a belt-and-braces ceiling on top of the
 # cap group_unenriched_threads already applies; char_budget splits an over-long
@@ -163,8 +164,6 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
                 "_run_waiting_on"),
     CadencePass("blocks", "_blocks_interval_s", "_last_blocks", "_run_blocks"),
     CadencePass("audit", "_audit_interval_s", "_last_audit", "_run_audit"),
-    CadencePass("clickup_sync", "_clickup_interval_s", "_last_clickup",
-                "_run_clickup_sync"),
     CadencePass("stale_reextract", "_stale_reextract_interval_s",
                 "_last_stale_reextract", "_run_stale_reextract"),
 )
@@ -356,7 +355,6 @@ class Daemon:
                  waiting_on_interval_s: float | None = None,
                  blocks_interval_s: float | None = None,
                  audit_interval_s: float | None = None,
-                 clickup_interval_s: float | None = None,
                  stale_reextract_interval_s: float | None = None,
                  auto_update_interval_s: float | None = None,
                  verify_interval_s: float | None = None,
@@ -436,10 +434,11 @@ class Daemon:
         self._audit_interval_s: float | None = audit_interval_s
         self._last_audit = None
         self._pending_audit: dict = {}
-        # Periodic ClickUp two-way sync is OFF unless clickup_interval_s is set.
-        # Same three-shape contract as the other passes; runs in this loop
-        # thread so it shares the single-writer lock.
-        self._clickup_interval_s: float | None = clickup_interval_s
+        # Periodic ClickUp two-way sync is gated on clickup_api_key + clickup_list_id
+        # being configured; interval is hardcoded to _CLICKUP_SYNC_INTERVAL_S.
+        # _clickup_interval_s starts None and is set to the fixed constant on first
+        # eligible call (used as the cadence-clock bookkeeping attribute).
+        self._clickup_interval_s: float | None = None
         self._last_clickup = None
         # Periodic stale -> re-extraction trigger (Gap A) is OFF unless
         # stale_reextract_interval_s is set. Same three-shape cadence contract.
@@ -685,7 +684,6 @@ class Daemon:
             self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
             self._blocks_interval_s = cadences["blocks_interval_s"]
             self._audit_interval_s = cadences["audit_interval_s"]
-            self._clickup_interval_s = cadences["clickup_interval_s"]
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
             self._verify_interval_s = cadences["verify_interval_s"]
@@ -1014,29 +1012,27 @@ class Daemon:
     # -- periodic ClickUp two-way sync --------------------------------------
 
     def _run_clickup_sync(self) -> dict | None:
-        """Cadence-gated ClickUp sync. Called by the dispatch table and
-        directly by maybe_clickup_sync."""
+        """Run ClickUp sync if key+list are configured and the fixed interval elapsed.
+        Presence of clickup_api_key AND clickup_list_id is the single on/off switch."""
+        from mcpbrain import config as _cfg
+        home = str(app_dir())
+        if not (_cfg.clickup_api_key(home) and _cfg.clickup_list_id(home)):
+            return None
+        if self._clickup_interval_s is None:
+            self._clickup_interval_s = _CLICKUP_SYNC_INTERVAL_S
         if not self._is_due("_clickup_interval_s", "_last_clickup"):
             return None
         now = self._clock()
         try:
             from mcpbrain import clickup_sync
-            from mcpbrain import config as _config
-            summary = clickup_sync.sync(self._store, str(_config.app_dir()))
-        except Exception as exc:  # noqa: BLE001 — sync must never crash the loop
-            log.warning("clickup sync failed (will retry next due): %s", exc,
-                        exc_info=True)
+            summary = clickup_sync.sync(self._store, home)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("clickup sync failed: %s", exc, exc_info=True)
             return {"clickup": False, "error": str(exc)}
         self._last_clickup = now
         return summary
 
     def maybe_clickup_sync(self) -> dict | None:
-        """Run the ClickUp ⇄ actions sync, if due.
-
-        OFF unless clickup_interval_s is set (returns None). Runs in the loop
-        thread so it shares the single-writer lock. A failure is logged and
-        swallowed so the daemon loop keeps running.
-        """
         if self._backfill_active.is_set():
             return None
         return self._run_clickup_sync()
@@ -1504,7 +1500,6 @@ _CADENCE_KEYS = (
     "waiting_on_interval_s",
     "blocks_interval_s",
     "audit_interval_s",
-    "clickup_interval_s",
     "stale_reextract_interval_s",
     "auto_update_interval_s",
     "verify_interval_s",
@@ -1580,7 +1575,6 @@ def main(argv=None) -> None:
                     waiting_on_interval_s=cadences["waiting_on_interval_s"],
                     blocks_interval_s=cadences["blocks_interval_s"],
                     audit_interval_s=cadences["audit_interval_s"],
-                    clickup_interval_s=cadences["clickup_interval_s"],
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
                     auto_update_interval_s=cadences["auto_update_interval_s"],
                     verify_interval_s=cadences["verify_interval_s"])  # services=None -> auto-build from token
