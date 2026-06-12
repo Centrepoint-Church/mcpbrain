@@ -82,6 +82,15 @@ class FakeStore:
     def __init__(self, path: Path):
         self._path = path
 
+    def list_communities(self):
+        return []
+
+    def recent_changes(self, limit=20):
+        return []
+
+    def open_findings(self):
+        return []
+
 
 # ---------------------------------------------------------------------------
 # actions_today
@@ -492,14 +501,15 @@ class TestAssembleShape:
         mock_cu = [{"id": "t1", "name": "Task", "status": "open",
                     "due_date": _today(), "url": ""}]
 
-        monkeypatch.setattr(dashboard, "actions_today", lambda s: mock_actions)
+        monkeypatch.setattr(dashboard, "actions_today", lambda s, owner=None: mock_actions)
         monkeypatch.setattr(dashboard, "calendar_today", lambda h: mock_cal)
         monkeypatch.setattr(dashboard, "clickup_today", lambda h: mock_cu)
         monkeypatch.setattr(dashboard, "inbox_today", lambda s: [])
+        monkeypatch.setattr(dashboard, "circles_today", lambda s: [])
 
         result = dashboard.assemble(store, str(tmp_path))
 
-        assert set(result.keys()) == {"actions", "calendar", "clickup", "inbox", "changes", "findings", "as_of"}
+        assert set(result.keys()) == {"actions", "calendar", "clickup", "inbox", "circles", "changes", "findings", "as_of"}
         assert result["actions"] == mock_actions
         assert result["calendar"] == mock_cal
         assert result["clickup"] == mock_cu
