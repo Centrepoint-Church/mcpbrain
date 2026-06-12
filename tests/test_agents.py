@@ -1,6 +1,6 @@
 from mcpbrain.agents import (
-    launchd_plist, systemd_unit, schtasks_args,
-    launchd_tray_plist, systemd_tray_unit, schtasks_tray_args,
+    launchd_plist, schtasks_args,
+    launchd_tray_plist, schtasks_tray_args,
 )
 
 
@@ -8,12 +8,6 @@ def test_launchd_plist_runs_daemon():
     s = launchd_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
     assert "com.mcpbrain" in s and "/usr/local/bin/mcpbrain" in s and "daemon" in s
     assert "MCPBRAIN_HOME" in s and "<key>RunAtLoad</key>" in s
-
-
-def test_systemd_unit_runs_daemon():
-    s = systemd_unit(mcpbrain_bin="/home/j/.local/bin/mcpbrain", home="/home/j/.mcpbrain")
-    assert "ExecStart=/home/j/.local/bin/mcpbrain daemon" in s
-    assert "Environment=MCPBRAIN_HOME=/home/j/.mcpbrain" in s and "WantedBy=default.target" in s
 
 
 def test_schtasks_args_at_logon():
@@ -46,12 +40,6 @@ def test_daemon_launchd_plist_keeps_alive():
     s = launchd_plist(mcpbrain_bin="/usr/local/bin/mcpbrain", home="/Users/j/.mcpbrain")
     assert "<key>KeepAlive</key>\n    <true/>" in s
     assert "com.mcpbrain.tray" not in s   # daemon label is distinct
-
-
-def test_systemd_tray_unit_runs_tray():
-    s = systemd_tray_unit(mcpbrain_bin="/home/j/.local/bin/mcpbrain", home="/home/j/.mcpbrain")
-    assert "ExecStart=/home/j/.local/bin/mcpbrain tray" in s
-    assert "Restart=no" in s and "WantedBy=default.target" in s
 
 
 def test_schtasks_tray_args_at_logon():

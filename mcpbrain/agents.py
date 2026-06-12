@@ -1,13 +1,15 @@
 """OS-native login-agent generators for the mcpbrain daemon.
 
-Pure generator functions (launchd_plist, systemd_unit, schtasks_args) produce
-the text or argument list needed to register ``mcpbrain daemon`` as a login
-agent on macOS, Linux, or Windows. They are fully unit-tested and have no
-side effects.
+Pure generator functions (launchd_plist, schtasks_args) produce the text or
+argument list needed to register ``mcpbrain daemon`` as a login agent on macOS
+or Windows. They are fully unit-tested and have no side effects.
 
 The install/uninstall/restart helpers write those definitions to the canonical
 OS path and invoke the system loader. Their subprocess/loader bodies are marked
 ``# pragma: no cover`` because they require a real OS environment.
+
+Supported platforms: darwin (launchd), win32 (schtasks). All other platforms
+raise ``ValueError``.
 """
 
 from __future__ import annotations
@@ -27,8 +29,6 @@ _TRAY_LABEL = f"{_LABEL}.tray"
 # Canonical agent file locations by platform.
 _LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LABEL}.plist"
 _TRAY_LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_TRAY_LABEL}.plist"
-_SYSTEMD_PATH = Path.home() / ".config" / "systemd" / "user" / "mcpbrain.service"
-_TRAY_SYSTEMD_PATH = Path.home() / ".config" / "systemd" / "user" / "mcpbrain-tray.service"
 _TASK_NAME = "mcpbrain"
 _TRAY_TASK_NAME = "mcpbrain-tray"
 
@@ -100,35 +100,6 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
                           home=home, keep_alive="crashonly")
 
 
-def _systemd_unit(*, description: str, subcommand: str, mcpbrain_bin: str, home: str,
-                  restart_on_failure: bool) -> str:
-    restart = "Restart=on-failure\nRestartSec=5\n" if restart_on_failure else "Restart=no\n"
-    return f"""\
-[Unit]
-Description={description}
-After=network.target
-
-[Service]
-ExecStart={mcpbrain_bin} {subcommand}
-Environment=MCPBRAIN_HOME={home}
-{restart}
-[Install]
-WantedBy=default.target
-"""
-
-
-def systemd_unit(*, mcpbrain_bin: str, home: str) -> str:
-    """Return a systemd user unit that runs ``mcpbrain daemon`` at login."""
-    return _systemd_unit(description="mcpbrain background daemon", subcommand="daemon",
-                         mcpbrain_bin=mcpbrain_bin, home=home, restart_on_failure=True)
-
-
-def systemd_tray_unit(*, mcpbrain_bin: str, home: str) -> str:
-    """Return a systemd user unit that runs ``mcpbrain tray`` at login."""
-    return _systemd_unit(description="mcpbrain menu-bar tray", subcommand="tray",
-                         mcpbrain_bin=mcpbrain_bin, home=home, restart_on_failure=False)
-
-
 def _schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str) -> list[str]:
     # Conditional quoting: wrap a whitespace-containing path so Task Scheduler
     # parses it correctly; leave bare paths unquoted.
@@ -166,8 +137,6 @@ def install_agent(
     """Write the agent definition and register it with the OS loader."""
     if platform == "darwin":
         _install_launchd(mcpbrain_bin=mcpbrain_bin, home=home)
-    elif platform == "linux":
-        _install_systemd(mcpbrain_bin=mcpbrain_bin, home=home)
     elif platform == "win32":
         _install_schtasks(mcpbrain_bin=mcpbrain_bin, home=home)
     else:
@@ -178,8 +147,6 @@ def uninstall_agent(platform: str) -> None:
     """Remove the agent definition and deregister it from the OS loader."""
     if platform == "darwin":
         _uninstall_launchd()
-    elif platform == "linux":
-        _uninstall_systemd()
     elif platform == "win32":
         _uninstall_schtasks()
     else:
@@ -199,9 +166,6 @@ def restart_agent(platform: str) -> None:
     if platform == "darwin":
         _restart_launchd()
         _restart_launchd_tray()
-    elif platform == "linux":
-        _restart_systemd()
-        _restart_systemd_tray()
     elif platform == "win32":
         _restart_schtasks()
         _restart_schtasks_tray()
@@ -238,32 +202,6 @@ def _restart_launchd() -> None:  # pragma: no cover
     uid = getattr(os, "getuid", lambda: 0)()
     subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{_LABEL}"], check=True)
     log.info("launchd agent restarted")
-
-
-# ---------------------------------------------------------------------------
-# Linux helpers
-# ---------------------------------------------------------------------------
-
-def _install_systemd(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
-    unit = systemd_unit(mcpbrain_bin=mcpbrain_bin, home=home)
-    _SYSTEMD_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _SYSTEMD_PATH.write_text(unit)
-    log.info("wrote %s", _SYSTEMD_PATH)
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", "mcpbrain.service"], check=True)
-    log.info("systemd user service enabled and started")
-
-
-def _uninstall_systemd() -> None:  # pragma: no cover
-    subprocess.run(["systemctl", "--user", "disable", "--now", "mcpbrain.service"], check=False)
-    _SYSTEMD_PATH.unlink(missing_ok=True)
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-    log.info("systemd user service removed")
-
-
-def _restart_systemd() -> None:  # pragma: no cover
-    subprocess.run(["systemctl", "--user", "restart", "mcpbrain.service"], check=True)
-    log.info("systemd user service restarted")
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +248,6 @@ def install_tray_agent(platform: str, *, mcpbrain_bin: str, home: str) -> None:
     """Write the menu-bar tray login agent and register it with the OS loader."""
     if platform == "darwin":
         _install_launchd_tray(mcpbrain_bin=mcpbrain_bin, home=home)
-    elif platform == "linux":
-        _install_systemd_tray(mcpbrain_bin=mcpbrain_bin, home=home)
     elif platform == "win32":
         _install_schtasks_tray(mcpbrain_bin=mcpbrain_bin, home=home)
     else:
@@ -322,8 +258,6 @@ def uninstall_tray_agent(platform: str) -> None:
     """Remove the tray login agent and deregister it from the OS loader."""
     if platform == "darwin":
         _uninstall_launchd_tray()
-    elif platform == "linux":
-        _uninstall_systemd_tray()
     elif platform == "win32":
         _uninstall_schtasks_tray()
     else:
@@ -345,22 +279,6 @@ def _uninstall_launchd_tray() -> None:  # pragma: no cover
         log.info("launchd tray agent removed")
 
 
-def _install_systemd_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
-    unit = systemd_tray_unit(mcpbrain_bin=mcpbrain_bin, home=home)
-    _TRAY_SYSTEMD_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TRAY_SYSTEMD_PATH.write_text(unit)
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", "mcpbrain-tray.service"], check=True)
-    log.info("systemd tray user service enabled and started")
-
-
-def _uninstall_systemd_tray() -> None:  # pragma: no cover
-    subprocess.run(["systemctl", "--user", "disable", "--now", "mcpbrain-tray.service"], check=False)
-    _TRAY_SYSTEMD_PATH.unlink(missing_ok=True)
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-    log.info("systemd tray user service removed")
-
-
 def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     subprocess.run(schtasks_tray_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
     log.info("Windows scheduled task '%s' created", _TRAY_TASK_NAME)
@@ -379,13 +297,6 @@ def _restart_launchd_tray() -> None:  # pragma: no cover
     uid = getattr(os, "getuid", lambda: 0)()
     subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{_TRAY_LABEL}"], check=False)
     log.info("launchd tray agent restarted")
-
-
-def _restart_systemd_tray() -> None:  # pragma: no cover
-    if not _TRAY_SYSTEMD_PATH.exists():
-        return
-    subprocess.run(["systemctl", "--user", "restart", "mcpbrain-tray.service"], check=False)
-    log.info("systemd tray user service restarted")
 
 
 def _restart_schtasks_tray() -> None:  # pragma: no cover
@@ -544,27 +455,6 @@ def records_context_health_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> st
     )
 
 
-def _timer_units(*, label_desc: str, subcommand: str, mcpbrain_bin: str, home: str,
-                 on_calendar: str) -> tuple[str, str]:
-    service = (f"[Unit]\nDescription={label_desc}\n\n[Service]\nType=oneshot\n"
-               f"ExecStart={mcpbrain_bin} {subcommand}\nEnvironment=MCPBRAIN_HOME={home}\n")
-    timer = (f"[Unit]\nDescription={label_desc} timer\n\n[Timer]\n"
-             f"OnCalendar={on_calendar}\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
-    return service, timer
-
-
-def prune_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
-    """Return (service, timer) systemd unit strings for `mcpbrain records-prune` daily 06:00."""
-    return _timer_units(label_desc="mcpbrain records prune", subcommand="records-prune",
-                        mcpbrain_bin=mcpbrain_bin, home=home, on_calendar="*-*-* 06:00:00")
-
-
-def health_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
-    """Return (service, timer) systemd unit strings for `mcpbrain records-health` Mon 07:00."""
-    return _timer_units(label_desc="mcpbrain records health", subcommand="records-health",
-                        mcpbrain_bin=mcpbrain_bin, home=home, on_calendar="Mon *-*-* 07:00:00")
-
-
 def _cadence_schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str,
                            schedule: list[str]) -> list[str]:
     quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
@@ -614,8 +504,6 @@ def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
     """
     if platform == "darwin":
         _install_cadences_launchd(mcpbrain_bin=mcpbrain_bin, home=home)
-    elif platform == "linux":
-        _install_cadences_systemd(mcpbrain_bin=mcpbrain_bin, home=home)
     elif platform == "win32":
         _install_cadences_schtasks(mcpbrain_bin=mcpbrain_bin, home=home)
     else:
@@ -639,23 +527,6 @@ def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragm
         subprocess.run(["launchctl", "load", "-w", str(path)], check=True)
 
 
-def _install_cadences_systemd(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
-    import subprocess
-    from pathlib import Path
-    unit_dir = Path.home() / ".config" / "systemd" / "user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    for name, fn in [
-        ("mcpbrain-records-prune", lambda: prune_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
-        ("mcpbrain-records-health", lambda: health_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
-        ("mcpbrain-records-gardener", lambda: gardener_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
-        ("mcpbrain-meeting-packs", lambda: meeting_packs_timer_units(mcpbrain_bin=mcpbrain_bin, home=home)),
-    ]:
-        service, timer = fn()
-        (unit_dir / f"{name}.service").write_text(service)
-        (unit_dir / f"{name}.timer").write_text(timer)
-        subprocess.run(["systemctl", "--user", "enable", "--now", f"{name}.timer"], check=True)
-
-
 def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     import subprocess
     for args_fn in [
@@ -671,22 +542,6 @@ def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # prag
 # ---------------------------------------------------------------------------
 # Cowork cadence generators (gardener + meeting-packs)
 # ---------------------------------------------------------------------------
-
-def gardener_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
-    """Return (service, timer) systemd unit strings for `mcpbrain records-gardener` Mon 08:00."""
-    return _timer_units(label_desc="mcpbrain records gardener", subcommand="records-gardener",
-                        mcpbrain_bin=mcpbrain_bin, home=home, on_calendar="Mon *-*-* 08:00:00")
-
-
-def meeting_packs_timer_units(*, mcpbrain_bin: str, home: str) -> tuple[str, str]:
-    """Return (service, timer) systemd unit strings for meeting-packs (07:45 + 12:00)."""
-    service = (f"[Unit]\nDescription=mcpbrain meeting packs\n\n[Service]\nType=oneshot\n"
-               f"ExecStart={mcpbrain_bin} meeting-packs\nEnvironment=MCPBRAIN_HOME={home}\n")
-    timer = ("[Unit]\nDescription=mcpbrain meeting packs timer\n\n[Timer]\n"
-             "OnCalendar=*-*-* 07:45:00\nOnCalendar=*-*-* 12:00:00\nPersistent=true\n\n"
-             "[Install]\nWantedBy=timers.target\n")
-    return service, timer
-
 
 def gardener_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
     """Return schtasks args to schedule `mcpbrain records-gardener` weekly Monday at 08:00."""
