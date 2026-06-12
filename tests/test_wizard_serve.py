@@ -32,7 +32,7 @@ def test_root_serves_wizard_with_token(tmp_path):
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         assert "<html" in html.lower() and srv.token in html
-        for a in ("step-google","step-register","step-projects","step-status"): assert a in html
+        for a in ("step-google","step-projects","step-status"): assert a in html
     finally: srv.stop()
 
 def test_home_has_status_center_elements(tmp_path):

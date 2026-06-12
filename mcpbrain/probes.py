@@ -37,26 +37,11 @@ def probe_google(home) -> dict:
     return _state("ok", "Connected", last_verified=_mtime(token_file))
 
 
-def _claude_registered() -> bool:
-    """True when claude_desktop_config.json lists an mcpbrain server entry."""
-    try:
-        from mcpbrain.wizard.register import claude_desktop_config_path
-        p = claude_desktop_config_path()
-        data = json.loads(Path(p).read_text())
-        servers = data.get("mcpServers") or {}
-        return any("mcpbrain" in name for name in servers)
-    except (OSError, ValueError, KeyError):
-        return False
-
-
 def probe_claude(home) -> dict:
-    """Three states: not registered -> registered/awaiting restart -> connected."""
-    registered = _claude_registered()
+    """No heartbeat → not_started; heartbeat present and fresh → ok."""
     p = Path(home) / "mcp_heartbeat.json"
     if not p.exists():
-        if not registered:
-            return _state("not_started", "Not registered yet — finish setup")
-        return _state("needs_action", "Registered — quit & reopen Claude Desktop")
+        return _state("not_started", "Plugin not connected — install the mcpbrain plugin")
     try:
         last = json.loads(p.read_text()).get("last_seen")
         if last is None:
@@ -67,9 +52,7 @@ def probe_claude(home) -> dict:
         if datetime.now(timezone.utc) - last_dt > timedelta(days=_CLAUDE_STALE_DAYS):
             return _state("needs_action", "Not seen recently — open Claude Desktop", last_verified=last)
     except (OSError, ValueError):
-        if not registered:
-            return _state("not_started", "Not registered yet — finish setup")
-        return _state("needs_action", "Registered — quit & reopen Claude Desktop")
+        return _state("not_started", "Plugin not connected — install the mcpbrain plugin")
     return _state("ok", "Connected", last_verified=last)
 
 

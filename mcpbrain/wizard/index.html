@@ -164,17 +164,6 @@
     </div>
   </section>
 
-  <section id="step-register" class="card">
-    <h2><span class="num">3</span>Register with Claude Desktop</h2>
-    <p class="desc">Adds mcpbrain to Claude Desktop as a tool. Existing tools are kept.</p>
-    <div class="row">
-      <button class="primary" onclick="reg()">Register</button>
-      <span id="r-state" class="badge idle hidden"></span>
-    </div>
-    <p id="r-msg" class="note"></p>
-    <p class="note">After registering, quit Claude Desktop completely and reopen it.</p>
-  </section>
-
   <section id="step-projects" class="card">
     <h2><span class="num">4</span>Your workspace</h2>
     <p class="desc">You work from one Cowork project ("My Brain"). Create it from scratch and paste the name and instructions below — your identity, voice and memory come through the mcpbrain tools, so there are no folders to attach. Enrichment runs as an hourly background task you start with one command.</p>
@@ -366,23 +355,6 @@ async function pollAuth(armed){
   }
 }
 
-async function reg(){
-  $("r-state").classList.remove("hidden");
-  try{
-    const res = await P("/api/register");
-    const j = await res.json().catch(() => ({}));
-    if(res.ok && j.config_path){
-      badge("r-state", "Registered", "ok");
-      $("r-msg").textContent = "Wrote " + j.config_path;   // server path via textContent
-    }else{
-      badge("r-state", "Failed", "wait");
-      $("r-msg").textContent = j.error ? ("Error: " + j.error) : "Registration failed.";
-    }
-  }catch(e){
-    badge("r-state", "Failed", "wait");
-    $("r-msg").textContent = "Could not reach the daemon.";
-  }
-}
 
 function renderStatus(j){
   $("st-count").textContent = (j.chunk_count != null) ? j.chunk_count : "—";
@@ -473,8 +445,6 @@ function reflectStepBadges(conns){
     badge("ws-state", ready ? "Ready" : rec.detail, ready ? "ok" : "wait");
   }
   if((conns["memory-hooks"] || {}).state === "ok") badge("hooks-state", "On", "ok");
-  const cl = (conns.claude || {}).state;
-  if(cl && cl !== "not_started") badge("r-state", "Registered", "ok");
 }
 
 async function refresh(){
