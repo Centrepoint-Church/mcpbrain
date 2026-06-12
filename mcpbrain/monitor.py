@@ -10,11 +10,11 @@ import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
-_FAIL = "needs_action"
+# (message, set-of-failing-states)
 _MONITORED = {
-    "claude":     "Daemon down — MCP server not seen recently",
-    "enrichment": "Enrichment idle — run the backfill skill in Cowork",
-    "backup":     "Backup stale — snapshot is overdue",
+    "claude":     ("Daemon down — MCP server not seen recently",   {"needs_action", "not_started"}),
+    "enrichment": ("Enrichment idle — run the backfill skill in Cowork", {"needs_action"}),
+    "backup":     ("Backup stale — snapshot is overdue",           {"needs_action"}),
 }
 
 
@@ -35,8 +35,8 @@ def run_monitor(home: str) -> tuple[int, str]:
     problems: list[str] = []
     if _has_recent_error_log(home):
         problems.append("sync error — check logs/error.log")
-    for key, message in _MONITORED.items():
-        if conns.get(key, {}).get("state") == _FAIL:
+    for key, (message, fail_states) in _MONITORED.items():
+        if conns.get(key, {}).get("state") in fail_states:
             problems.append(message)
     return (1, "; ".join(problems)) if problems else (0, "ok")
 
