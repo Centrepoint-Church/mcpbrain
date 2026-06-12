@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 from mcpbrain import graph_write as gw, orgs
+from mcpbrain.chunking import slugify
 from mcpbrain.store import Store
 
 _ACME_ORGS = [
@@ -87,9 +88,9 @@ def test_domain_org_lines_present_and_shaped():
 
 
 def test_entity_slug():
-    assert gw.entity_slug("Taryn Hamilton") == "taryn-hamilton"
-    assert gw.entity_slug("ACC (National)") == "acc-national"
-    assert gw.entity_slug("") == ""
+    assert slugify("Taryn Hamilton") == "taryn-hamilton"
+    assert slugify("ACC (National)") == "acc-national"
+    assert slugify("") == ""
 
 
 def test_is_junk_entity():
