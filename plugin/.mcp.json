@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcpbrain": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-mcp",
+      "env": { "MCPBRAIN_HOME": "" }
+    }
+  }
+}
