@@ -32,6 +32,25 @@ def _fts_match_query(query: str) -> str:
     return " ".join(quoted)
 
 
+def store_dim_from_path(path) -> int | None:
+    """Read the vector dim a store was built with from its meta table.
+
+    Returns None when the file does not exist or has no dim row.
+    """
+    from pathlib import Path as _Path
+    import sqlite3 as _sqlite3
+    p = _Path(path)
+    if not p.exists():
+        return None
+    try:
+        db = _sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        row = db.execute("SELECT v FROM meta WHERE k='dim'").fetchone()
+        db.close()
+        return int(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     """Open a connection to the derived store with sqlite-vec loaded.
 

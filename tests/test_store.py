@@ -540,3 +540,15 @@ def test_clickup_closed_setter(tmp_path):
     assert s.get_unified_action(aid)["clickup_closed"] == 1
     s.set_action_clickup_closed(aid, False)
     assert s.get_unified_action(aid)["clickup_closed"] == 0
+
+
+def test_store_dim_from_path_returns_none_for_missing_db(tmp_path):
+    from mcpbrain.store import store_dim_from_path
+    assert store_dim_from_path(tmp_path / "missing.sqlite3") is None
+
+
+def test_store_dim_from_path_returns_dim_for_existing_store(tmp_path):
+    from mcpbrain.store import Store, store_dim_from_path
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    assert store_dim_from_path(tmp_path / "b.sqlite3") == 4
