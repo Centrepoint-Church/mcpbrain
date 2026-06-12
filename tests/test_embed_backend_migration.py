@@ -25,7 +25,7 @@ def test_backend_change_triggers_full_reembed(tmp_path):
 
     d = Daemon(s, FakeEmbedder(), services={}, interval_s=1, lock=None,
                enrich_client=None, backup=None, backup_interval_s=None,
-               clock=lambda: 0.0, resolve_interval_s=None)
+               clock=lambda: 0.0)
     count = d.migrate_embed_backend("fastembed:bge-small:v1")
     assert count == 1
 

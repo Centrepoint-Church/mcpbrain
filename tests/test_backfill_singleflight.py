@@ -62,11 +62,7 @@ def test_periodic_passes_skip_while_backfill_active(tmp_path, monkeypatch):
 def test_maybe_resolve_and_backup_skip_while_backfill_active(tmp_path, monkeypatch):
     """Guards must fire BEFORE the real cadence checks, not rely on them."""
     d = _daemon(tmp_path, monkeypatch)
-    # Force resolve and backup to be due so the ONLY thing stopping them is the
-    # backfill guard.
-    d._resolve_interval_s = 1.0
-    d._last_resolve = None   # first call is always due
-
+    # Force backup to be due so the ONLY thing stopping it is the backfill guard.
     import mcpbrain.backup as _backup_mod
     from mcpbrain.daemon import BackupConfig
     d._backup = BackupConfig(
@@ -79,18 +75,13 @@ def test_maybe_resolve_and_backup_skip_while_backfill_active(tmp_path, monkeypat
     d._backup_interval_s = 1.0
     d._last_backup = None    # first call is always due
 
-    inner_called = {"resolve": 0, "backup": 0}
-    monkeypatch.setattr(
-        "mcpbrain.resolve.resolve_entities",
-        lambda *a, **kw: inner_called.__setitem__("resolve", inner_called["resolve"] + 1) or {},
-    )
+    inner_called = {"backup": 0}
     monkeypatch.setattr(
         _backup_mod, "make_encrypted_snapshot",
         lambda *a, **kw: inner_called.__setitem__("backup", inner_called["backup"] + 1) or (tmp_path / "snap.enc"),
     )
 
-    # With backfill active: both should return None without doing any work.
+    # With backfill active: backup should return None without doing any work.
     d._backfill_active.set()
-    assert d.maybe_resolve() is None
     assert d.maybe_backup() is None
-    assert inner_called == {"resolve": 0, "backup": 0}
+    assert inner_called == {"backup": 0}
