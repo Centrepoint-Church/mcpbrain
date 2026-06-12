@@ -1483,6 +1483,19 @@ def _backup_from_config(home):
     return (bc, interval_s)
 
 
+_CADENCE_DEFAULTS: dict[str, float] = {
+    "communities_interval_s":    86400.0,
+    "blocks_interval_s":         86400.0,
+    "proactive_interval_s":      86400.0,
+    "waiting_on_interval_s":     86400.0,
+    "lint_interval_s":           86400.0,
+    "stale_reextract_interval_s":86400.0,
+    "synthesise_interval_s":     604800.0,
+    "audit_interval_s":          604800.0,
+    "verify_interval_s":         3600.0,
+    "auto_update_interval_s":    86400.0,
+}
+
 _CADENCE_KEYS = (
     "communities_interval_s",
     "lint_interval_s",
@@ -1499,19 +1512,19 @@ _CADENCE_KEYS = (
 
 
 def _cadences_from_config(home) -> dict:
-    """Read the cadences block from config.json. Returns a dict of the
-    interval keys in _CADENCE_KEYS; absent keys map to None (OFF). Invalid
-    values log a warning and map to None, mirroring the backup interval
-    validation in daemon.py.
+    """Read the cadences block. Absent keys use _CADENCE_DEFAULTS (so a fresh
+    install is fully functional); an explicit entry overrides, and an explicit
+    0/negative maps to None (OFF) as a power-user kill-switch. clickup is NOT
+    here — it is gated on api_key+list_id (C3).
     """
     cfg = config.read_config(home)
     cadences_block = cfg.get("cadences") or {}
     result = {}
     for key in _CADENCE_KEYS:
-        raw = cadences_block.get(key)
-        if raw is None:
-            result[key] = None
+        if key not in cadences_block:
+            result[key] = _CADENCE_DEFAULTS.get(key)
             continue
+        raw = cadences_block[key]
         try:
             val = float(raw)
             if val <= 0:

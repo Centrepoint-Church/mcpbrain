@@ -699,13 +699,18 @@ def test_cadences_from_config(tmp_path):
     assert result["waiting_on_interval_s"] == 3600.0
 
 
-def test_cadences_from_config_absent_keys_map_to_none(tmp_path):
-    from mcpbrain.daemon import _cadences_from_config
+def test_cadences_from_config_absent_keys_map_to_defaults(tmp_path):
+    from mcpbrain.daemon import _cadences_from_config, _CADENCE_DEFAULTS
     from mcpbrain import config
 
     config.write_config(str(tmp_path), {})  # no cadences block
     result = _cadences_from_config(str(tmp_path))
-    assert all(v is None for v in result.values())
+    # Absent keys map to defaults, except clickup_interval_s which has no default
+    for key, val in result.items():
+        if key == "clickup_interval_s":
+            assert val is None
+        else:
+            assert val == _CADENCE_DEFAULTS.get(key)
 
 
 def test_apply_config_rewires_cadences(tmp_path):
