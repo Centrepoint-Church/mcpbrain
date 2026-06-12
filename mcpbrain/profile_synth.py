@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from mcpbrain.graph_write import fetch_role
+
 log = logging.getLogger(__name__)
 
 # Minimum email_count for a person to be considered worth profiling.
@@ -61,7 +63,7 @@ def build_profile_requests(store, *, cap: int = 6) -> list[dict]:
     results = []
     for row in rows:
         eid = row["id"]
-        role = _fetch_role(store, eid)
+        role = fetch_role(store, eid, current_only=False)
         relations = _fetch_relations(store, eid)
         results.append({
             "entity_id": eid,
@@ -71,21 +73,6 @@ def build_profile_requests(store, *, cap: int = 6) -> list[dict]:
             "relations": relations,
         })
     return results
-
-
-def _fetch_role(store, entity_id: str) -> str:
-    """Pull the most-recent non-invalidated 'role' observation, or ''."""
-    with store._connect() as db:
-        row = db.execute(
-            """SELECT value FROM entity_observations
-               WHERE  entity_id = ?
-                 AND  attribute  = 'role'
-                 AND  (invalidated_at IS NULL OR invalidated_at = '')
-               ORDER  BY id DESC
-               LIMIT  1""",
-            (entity_id,),
-        ).fetchone()
-    return row["value"] if row else ""
 
 
 def _fetch_relations(store, entity_id: str) -> list[str]:
