@@ -35,3 +35,12 @@ def test_read_corrupt_config_returns_empty(tmp_path):
     assert read_config(str(tmp_path)) == {}
 
 
+def test_spool_home_default_is_app_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain.config import spool_home, app_dir
+    assert spool_home() == app_dir()
+
+
+def test_spool_home_override(tmp_path):
+    from mcpbrain.config import spool_home
+    assert spool_home(str(tmp_path / "x")) == (tmp_path / "x")

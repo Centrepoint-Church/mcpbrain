@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from mcpbrain.chunking import _VALID_CONTENT_TYPES
+
 QUARANTINE_DIRNAME = "bad"
 
 # A small instruction the script prepends so Claude returns JSON on stdout
@@ -34,11 +36,6 @@ _PENDING_DELIM = "\n\n=== pending.json (inlined below) ===\n\n"
 # Fallback fence stripper for older claude CLI builds whose --output-format
 # json envelope still contains markdown around the answer.
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```", re.MULTILINE)
-
-# Valid content_type values per the extractor contract (mcpbrain.contract).
-# Hardcoded so the patcher works even if the mcpbrain module isn't importable;
-# kept narrow on purpose — if the contract grows, update this set.
-_VALID_CONTENT_TYPES = {"request", "update", "decision", "fyi", "notification"}
 
 # Observed model fabrications mapped to the closest valid value. Anything
 # outside this map AND outside the valid set falls through to the catch-all

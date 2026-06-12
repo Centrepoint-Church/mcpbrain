@@ -244,6 +244,30 @@ def _source_rank(source) -> int:
     return _SOURCE_RANK.get(key, 0)
 
 
+def fetch_role(store, entity_id: str, *, current_only: bool = True) -> str:
+    """Return the most recent non-invalidated 'role' observation, or ''.
+
+    current_only=True (default): also requires valid_to IS NULL, returning only
+    observations that are still in effect (used by profile_audit). False: returns
+    the most recent observation regardless of valid_to (used by profile_synth).
+    Single canonical implementation replacing duplicate _fetch_role helpers in
+    profile_synth.py and profile_audit.py (§9C).
+    """
+    valid_to_clause = "AND (valid_to IS NULL OR valid_to = '')" if current_only else ""
+    with store._connect() as db:
+        row = db.execute(
+            f"""SELECT value FROM entity_observations
+               WHERE  entity_id = ?
+                 AND  attribute  = 'role'
+                 AND  (invalidated_at IS NULL OR invalidated_at = '')
+                 {valid_to_clause}
+               ORDER  BY id DESC
+               LIMIT  1""",
+            (entity_id,),
+        ).fetchone()
+    return row["value"] if row else ""
+
+
 def write_role_observation(store, entity_id: str, title: str, source: str,
                            valid_from: str, confidence: str) -> None:
     """Write a 'role' observation with provenance + supersession.
@@ -556,12 +580,6 @@ def _norm_action(t: str) -> str:
     """Lowercase, strip punctuation, drop short stopwords (enrich_gmail.py:1342)."""
     s = _ACTION_PUNCT.sub(" ", t.lower())
     return " ".join(w for w in s.split() if w and w not in _ACTION_STOP)
-
-
-def _jaccard_action(a: str, b: str) -> float:
-    """Token-set Jaccard over two normalised strings (enrich_gmail.py:1346)."""
-    sa, sb = set(a.split()), set(b.split())
-    return len(sa & sb) / len(sa | sb) if (sa and sb) else 0.0
 
 
 def _infer_owner(is_sender_owner: bool, action_text: str,
@@ -1158,7 +1176,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
     for action in actions_list:
         desc = (action.get("description") or "").strip()
         n = _norm_action(desc)
-        if any(n == s or n in s or s in n or _jaccard_action(n, s) >= 0.75
+        if any(n == s or n in s or s in n or _token_jaccard(n, s) >= 0.75
                for s in seen_norms):
             continue
         deduped_actions.append(action)
