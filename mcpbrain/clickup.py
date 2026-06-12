@@ -209,36 +209,6 @@ def search_tasks(home, *, due_date_lte: str | None = None) -> list[dict]:
     return tasks
 
 
-def update_task_status(home, task_id: str, status: str) -> bool:
-    """Update the status of a ClickUp task.
-
-    Args:
-        home: Path to the mcpbrain config directory.
-        task_id: The ClickUp task ID.
-        status: The new status string.
-
-    Returns:
-        True on success, False on any error.
-    """
-    token = config.clickup_api_key(home).strip()
-    if not token:
-        return False
-
-    url = f"{_BASE}/task/{task_id}"
-    body = json.dumps({"status": status}).encode()
-    req = urllib.request.Request(url, data=body, headers=_headers(token), method="PUT")
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        return True
-    except urllib.error.HTTPError as exc:
-        log.warning("ClickUp update_task_status HTTP %s for task %s: %s", exc.code, task_id, exc.reason)
-        return False
-    except (urllib.error.URLError, OSError) as exc:
-        log.warning("ClickUp update_task_status network error for task %s: %s", task_id, exc)
-        return False
-
 
 # --- two-way sync transport -------------------------------------------------
 
