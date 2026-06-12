@@ -48,10 +48,12 @@ def test_email_context_table_shape(tmp_path):
                 "topics", "labels", "contextual_summary", "reply_needed",
                 "reply_reason"):
         assert col in ec, f"email_context missing {col}"
-    dc = _cols(s, "doc_context")
-    for col in ("doc_id", "summary", "topics", "org", "content_type",
-                "contextual_summary"):
-        assert col in dc, f"doc_context missing {col}"
+    # doc_context table removed in Task A6
+    with s._connect() as db:
+        dc_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='doc_context'"
+        ).fetchone()
+    assert dc_exists is None, "doc_context table should not exist"
     idx = _indexes(s, "email_context")
     assert "idx_ec_org" in idx
     assert "idx_ec_thread" in idx
@@ -132,13 +134,7 @@ def test_entity_observations_bitemporal_shape(tmp_path):
     assert "valid_to IS NULL" in ddl
 
 
-# --- 1.4 suppressed_entities ----------------------------------------------
-
-def test_suppressed_entities_table(tmp_path):
-    s = _store(tmp_path)
-    cols = _cols(s, "suppressed_entities")
-    for col in ("name_lower", "original_name", "suppressed_at"):
-        assert col in cols, f"suppressed_entities missing {col}"
+# --- 1.4 suppressed_entities (REMOVED - Task A6) -------------------------
 
 
 # --- 1.5 entities: degree + email_count -----------------------------------
@@ -231,11 +227,14 @@ def test_entity_relations_bitemporal_columns(tmp_path):
     cols = _cols(s, "entity_relations")
     for col in ("valid_from", "valid_to", "invalidated_at",
                 "invalidated_by_relation_id", "superseded_reason", "confidence",
-                "evidence", "strength", "last_seen", "since"):
+                "evidence", "strength", "last_seen"):
         assert col in cols, f"entity_relations missing {col}"
     # The existing UNIQUE constraint columns + source_doc_id are preserved.
     for col in ("entity_a", "relation", "entity_b", "source_doc_id"):
         assert col in cols
+    # Dead columns removed in Task A6: normalised_strength, since
+    assert "normalised_strength" not in cols
+    assert "since" not in cols
 
 
 def test_entity_relations_temporal_indexes(tmp_path):
@@ -563,3 +562,26 @@ def test_store_areas_owned_by(tmp_path):
         db.execute("INSERT INTO projects(id, name, owner_entity_id, area_id, status) "
                    "VALUES('p-1', 'Owned', 'sam', 'a-1', 'active')")
     assert {a["id"] for a in s.areas_owned_by("sam")} == {"a-1"}
+
+
+# --- A6: dead schema removed -----------------------------------------------
+
+def test_doc_context_table_not_created(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        row = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='doc_context'").fetchone()
+    assert row is None
+
+
+def test_suppressed_entities_table_not_created(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        row = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='suppressed_entities'").fetchone()
+    assert row is None
+
+
+def test_entity_relations_has_no_normalised_strength_or_since(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)").fetchall()}
+    assert "normalised_strength" not in cols and "since" not in cols
