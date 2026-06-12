@@ -1,0 +1,15 @@
+#!/bin/sh
+# PATH-proof shim: locate the installed mcpbrain daemon binary, set MCPBRAIN_HOME,
+# and exec `mcpbrain mcp-server`. Resolution: PATH → ~/.local/bin → uv tool dir.
+set -eu
+_find() {
+  if command -v mcpbrain >/dev/null 2>&1; then command -v mcpbrain; return; fi
+  if [ -x "$HOME/.local/bin/mcpbrain" ]; then echo "$HOME/.local/bin/mcpbrain"; return; fi
+  if command -v uv >/dev/null 2>&1; then
+    b="$(uv tool dir 2>/dev/null)/bin/mcpbrain"; [ -x "$b" ] && { echo "$b"; return; }
+  fi
+  return 1
+}
+BIN="$(_find)" || { echo "mcpbrain: binary not found. Run the install skill in Cowork." >&2; exit 1; }
+export MCPBRAIN_HOME="${MCPBRAIN_HOME:-$HOME/.mcpbrain}"
+exec "$BIN" mcp-server "$@"
