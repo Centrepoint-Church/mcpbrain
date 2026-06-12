@@ -9,6 +9,7 @@ def _setup_main(argv):    from mcpbrain.setup import main as m; m(argv)
 def _update_main(argv):   from mcpbrain.update import main as m; m(argv)
 def _register_main(argv): from mcpbrain.wizard.register import main as m; m(argv)
 def _tray_main(argv):     from mcpbrain.tray import main as m; m(argv)
+def _monitor_main():      from mcpbrain.monitor import main as m; m()
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -18,7 +19,8 @@ def main(argv=None):
     # own module parser (parse_known_args forwards --help into `rest`).
     for name in ("daemon","mcp-server","auth","setup","update","register","tray",
                  "enrich-backfill","records-prune","records-health",
-                 "records-gardener","meeting-packs","session-start","session-end"):
+                 "records-gardener","meeting-packs","session-start","session-end",
+                 "monitor"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -36,4 +38,5 @@ def main(argv=None):
         "meeting-packs": lambda: __import__("mcpbrain.cowork", fromlist=["meeting_packs_main"]).meeting_packs_main(rest),
         "session-start": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_start_main"]).session_start_main(rest),
         "session-end": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_end_main"]).session_end_main(rest),
+        "monitor": _monitor_main,
     }[ns.cmd]()
