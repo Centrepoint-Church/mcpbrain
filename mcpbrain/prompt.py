@@ -1,12 +1,9 @@
 """Context-block builders for the enrichment prepare step (Phase 1, Task 4+6).
 
 prepare._build_context puts each list returned here verbatim into pending.json's
-`context` block, under keys `projects`, `areas`, and `known_people`. The LLM
-consumes them per mcpbrain/enrich_prompt.md:
+`context` block, under the key `known_people`. The LLM consumes them per
+mcpbrain/enrich_prompt.md:
 
-  - `projects` / `areas` are the valid `project_id` / `area_id` sets. The `id`
-    is the only load-bearing field; name/org/status give the model enough
-    context to match a thread against the right id.
   - `known_people` entries carry a confirmed `org` and `role`. The LLM is told
     to trust them and not re-derive a person's org or role.
 
@@ -14,12 +11,14 @@ The Claude-authored prompt (Task 4.1's old build_thread_prompt) is superseded:
 the static instructions live in enrich_prompt.md, and this module supplies only
 the context data those instructions reference.
 
-Ported and adapted from src/enrich_gmail.py (_build_known_context_block,
-_build_active_projects_block, _build_active_areas_block). Differences from
-Nexus: reads through store._connect() rather than memory_db; areas have a
-`description` column directly (no hierarchy module); role observations use the
-Spec-7 bitemporal shape (current role = valid_to IS NULL), ranked by
-graph_write._source_rank.
+Ported and adapted from src/enrich_gmail.py (_build_known_context_block).
+Differences from Nexus: reads through store._connect() rather than memory_db;
+role observations use the Spec-7 bitemporal shape (current role = valid_to IS
+NULL), ranked by graph_write._source_rank.
+
+Note: read_projects and read_areas were removed in §9E (projects/areas GTD
+tables cut). The actions table retains project_id/area_id columns for
+forward-compatibility.
 """
 
 from mcpbrain.graph_write import (
@@ -56,53 +55,6 @@ def _clean_role(value):
     if value and value.strip().lower() not in _JUNK_ROLE_VALUES:
         return value
     return None
-
-
-def read_projects(store) -> list[dict]:
-    """Active projects for the context block.
-
-    Active = archived_at IS NULL. Shape per entry:
-        {"id", "name", "org" (org_tag, '' if unset),
-         "status_line" (truncated to 120 chars, '' if unset)}.
-    The `id` is the valid project_id the LLM may attach to an action.
-    """
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT id, name, org_tag, status_line FROM projects "
-            "WHERE archived_at IS NULL ORDER BY id"
-        ).fetchall()
-    out = []
-    for r in rows:
-        out.append({
-            "id": r["id"],
-            "name": r["name"],
-            "org": r["org_tag"] or "",
-            "status_line": (r["status_line"] or "")[:120],
-        })
-    return out
-
-
-def read_areas(store) -> list[dict]:
-    """Active areas for the context block.
-
-    Active = active=1 AND archived_at IS NULL. Shape per entry:
-        {"id", "name", "org" (org_id), "description" ('' if unset)}.
-    The `id` is the valid area_id the LLM may attach to an action.
-    """
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT id, org_id, name, description FROM areas "
-            "WHERE active = 1 AND archived_at IS NULL ORDER BY id"
-        ).fetchall()
-    out = []
-    for r in rows:
-        out.append({
-            "id": r["id"],
-            "name": r["name"],
-            "org": r["org_id"] or "",
-            "description": r["description"] or "",
-        })
-    return out
 
 
 def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> list[dict]:

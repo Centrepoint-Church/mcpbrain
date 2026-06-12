@@ -3,9 +3,10 @@
 The prepare module codes against a Phase-1 contract (see prepare.py module
 docstring): batch objects expose .thread_id, .doc_ids, .chunks. Phase-1 module
 functions are reached through monkeypatchable seams (prepare._group_unenriched_threads,
-prepare._reassemble_thread, prepare._build_known_people, prepare._read_projects,
-prepare._read_areas, prepare._org_domain_lines). Tests stub those seams so the
-lazy real imports never fire.
+prepare._reassemble_thread, prepare._build_known_people, prepare._org_domain_lines).
+Tests stub those seams so the lazy real imports never fire.
+
+Note: _read_projects and _read_areas seams were removed in §9E.
 """
 
 import datetime as _datetime
@@ -53,11 +54,9 @@ def _msg(message_id, sender, date, subject, text, labels="INBOX"):
     }
 
 
-def _stub_context(monkeypatch, *, people=None, projects=None, areas=None, domains=None):
+def _stub_context(monkeypatch, *, people=None, domains=None):
     monkeypatch.setattr(prepare, "_build_known_people",
                         lambda store, batch_thread_ids: people or [])
-    monkeypatch.setattr(prepare, "_read_projects", lambda store: projects or [])
-    monkeypatch.setattr(prepare, "_read_areas", lambda store: areas or [])
     monkeypatch.setattr(prepare, "_org_domain_lines", lambda: domains or [])
 
 
@@ -343,10 +342,6 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
         return [{"name": "Joel Chelliah", "org": "Acme", "role": "Senior Pastor"}]
 
     monkeypatch.setattr(prepare, "_build_known_people", fake_people)
-    monkeypatch.setattr(prepare, "_read_projects",
-                        lambda store: [{"id": "p1", "name": "Byford", "org": "Acme", "status_line": "x"}])
-    monkeypatch.setattr(prepare, "_read_areas",
-                        lambda store: [{"id": "a1", "name": "Facilities", "description": "x"}])
     monkeypatch.setattr(prepare, "_org_domain_lines",
                         lambda: ["example.org → Acme"])
 
@@ -356,8 +351,8 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
 
     assert captured["ids"] == ["t-a"]
     assert ctx["known_people"][0]["name"] == "Joel Chelliah"
-    assert ctx["projects"][0]["id"] == "p1"
-    assert ctx["areas"][0]["id"] == "a1"
+    assert "projects" not in ctx
+    assert "areas" not in ctx
     assert ctx["org_domain_map"] == ["example.org → Acme"]
 
 

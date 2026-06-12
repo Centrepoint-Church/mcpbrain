@@ -88,9 +88,6 @@ org names plus external and unknown. The thread-level org and any org tag
 you assign must come from this list.
 org_domain_map: maps email domains to orgs. Use it to set org and to decide
 whether a sender is internal or external.
-projects and areas: the valid project_id and area_id sets. When you attach a
-project_id or area_id to an action, it must be an id drawn from these lists.
-If no listed id fits, leave the field out rather than inventing one.
 
 Entity and relation discipline
 

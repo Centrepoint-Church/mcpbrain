@@ -517,59 +517,6 @@ def test_topic_gate_escapes_like_metachars(tmp_path):
     assert s.get_entity("topic-q1-budget") is not None
 
 
-def _action_ext(project_id, area_id):
-    return {
-        "thread_id": "t-act", "org": "Acme", "content_type": "request",
-        "summary": "s", "contextual_summary": "", "entities": [], "topics": [],
-        "actions": [{"description": "Do thing", "owner_name": "A B",
-                     "owner_fallback": "sender", "due_date": "2026-05-01",
-                     "project_id": project_id, "area_id": area_id}],
-        "reply_needed": False, "reply_reason": "", "resolved_action_ids": [],
-        "updated_actions": [], "relations": [],
-        "messages": [{"message_id": "m1", "sender": "A B <a@example.com>",
-                      "date": "2026-04-18", "labels": "INBOX", "subject": "x"}],
-    }
-
-
-def test_action_project_id_validated(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute("INSERT INTO projects(id,name) VALUES('byford-grant','Byford')")
-    a = {"description": "x", "project_id": "byford-grant", "area_id": ""}
-    gw._validate_action_targets(s, a)
-    assert a["project_id"] == "byford-grant"
-    # A hallucinated id is dropped to empty.
-    b = {"description": "x", "project_id": "made-up-id", "area_id": ""}
-    gw._validate_action_targets(s, b)
-    assert b["project_id"] == ""
-    # An archived project is also dropped.
-    with s._connect() as db:
-        db.execute("INSERT INTO projects(id,name,archived_at) "
-                   "VALUES('old-proj','Old','2026-01-01')")
-    c = {"description": "x", "project_id": "old-proj", "area_id": ""}
-    gw._validate_action_targets(s, c)
-    assert c["project_id"] == ""
-
-
-def test_action_area_id_validated(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute("INSERT INTO areas(id,org_id,name,active) "
-                   "VALUES('acme-it','Acme','IT',1)")
-        db.execute("INSERT INTO areas(id,org_id,name,active) "
-                   "VALUES('dead-area','Acme','Dead',0)")
-    a = {"description": "x", "project_id": "", "area_id": "acme-it"}
-    gw._validate_action_targets(s, a)
-    assert a["area_id"] == "acme-it"
-    b = {"description": "x", "project_id": "", "area_id": "made-up"}
-    gw._validate_action_targets(s, b)
-    assert b["area_id"] == ""
-    # An inactive area is dropped.
-    c = {"description": "x", "project_id": "", "area_id": "dead-area"}
-    gw._validate_action_targets(s, c)
-    assert c["area_id"] == ""
-
-
 # --- Task 3 action lifecycle ----------------------------------------------
 # A fixed injected clock keeps the 60-day age boundary deterministic.
 from datetime import datetime, timezone  # noqa: E402

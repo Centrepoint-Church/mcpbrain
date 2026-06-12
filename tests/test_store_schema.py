@@ -24,18 +24,17 @@ def _indexes(s, table):
         return {r["name"] for r in db.execute(f"PRAGMA index_list({table})").fetchall()}
 
 
-# --- 1.1 projects + areas -------------------------------------------------
+# --- 1.1 projects + areas (REMOVED - Task B3) --------------------------
 
-def test_projects_and_areas_tables_exist(tmp_path):
+def test_projects_and_areas_tables_gone(tmp_path):
+    """projects and areas tables must not exist — removed in §9E."""
     s = _store(tmp_path)
-    proj = _cols(s, "projects")
-    for col in ("id", "name", "org_tag", "status_line", "status",
-                "archived_at", "area_id", "owner_entity_id"):
-        assert col in proj, f"projects missing {col}"
-    areas = _cols(s, "areas")
-    for col in ("id", "org_id", "name", "description", "active", "archived_at"):
-        assert col in areas, f"areas missing {col}"
-    assert "idx_projects_active" in _indexes(s, "projects")
+    with s._connect() as db:
+        for tbl in ("projects", "areas"):
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (tbl,)).fetchone()
+            assert exists is None, f"{tbl} table should not exist after §9E"
 
 
 # --- 1.2 email_context + doc_context --------------------------------------
@@ -490,78 +489,6 @@ def test_store_relations_legacy_rows_still_returned(tmp_path):
     s.add_relation("taryn", "reports_to", "joel", "doc-1")
     rels = s.relations_for("taryn")
     assert any(r["relation"] == "reports_to" for r in rels)
-
-
-def test_store_get_project(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute(
-            "INSERT INTO projects(id, name, org_tag, status, owner_entity_id) "
-            "VALUES('p-1', 'College 2026', 'Acme', 'active', 'sam')")
-    proj = s.get_project("p-1")
-    assert proj["name"] == "College 2026"
-    assert proj["org_tag"] == "Acme"
-    assert s.get_project("missing") is None
-
-
-def test_store_get_area(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute(
-            "INSERT INTO areas(id, org_id, name, active) "
-            "VALUES('a-1', 'Acme', 'Facilities', 1)")
-    area = s.get_area("a-1")
-    assert area["name"] == "Facilities"
-    assert area["org_id"] == "Acme"
-    assert s.get_area("missing") is None
-
-
-def test_store_projects_and_areas_for_org(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute("INSERT INTO projects(id, name, org_tag, status) "
-                   "VALUES('p-1', 'Live', 'Acme', 'active')")
-        db.execute("INSERT INTO projects(id, name, org_tag, archived_at) "
-                   "VALUES('p-2', 'Archived', 'Acme', '2025-01-01')")
-        db.execute("INSERT INTO projects(id, name, org_tag, status) "
-                   "VALUES('p-3', 'Other org', 'ACC', 'active')")
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-1', 'Acme', 'Facilities', 1)")
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-2', 'Acme', 'Retired', 0)")
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-3', 'ACC', 'CAMS', 1)")
-    projs = s.projects_for_org("Acme")
-    assert {p["id"] for p in projs} == {"p-1"}  # active, not archived, matching org
-    areas = s.areas_for_org("Acme")
-    assert {a["id"] for a in areas} == {"a-1"}  # active=1, matching org_id
-
-
-def test_store_projects_owned_by(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute("INSERT INTO projects(id, name, owner_entity_id, status) "
-                   "VALUES('p-1', 'Owned', 'sam', 'active')")
-        db.execute("INSERT INTO projects(id, name, owner_entity_id, status) "
-                   "VALUES('p-2', 'Other', 'taryn', 'active')")
-        db.execute("INSERT INTO projects(id, name, owner_entity_id, archived_at) "
-                   "VALUES('p-3', 'Archived', 'sam', '2025-01-01')")
-    # Active, not archived, matching owner.
-    assert {p["id"] for p in s.projects_owned_by("sam")} == {"p-1"}
-
-
-def test_store_areas_owned_by(tmp_path):
-    """areas has no owner_entity_id column, so an owned area is one carried by a
-    project the entity owns (project.area_id)."""
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-1', 'Acme', 'Ops', 1)")
-        db.execute("INSERT INTO areas(id, org_id, name, active) "
-                   "VALUES('a-2', 'Acme', 'Unrelated', 1)")
-        db.execute("INSERT INTO projects(id, name, owner_entity_id, area_id, status) "
-                   "VALUES('p-1', 'Owned', 'sam', 'a-1', 'active')")
-    assert {a["id"] for a in s.areas_owned_by("sam")} == {"a-1"}
 
 
 # --- A6: dead schema removed -----------------------------------------------
