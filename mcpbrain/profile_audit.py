@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from mcpbrain.graph_write import write_role_observation, _JUNK_ROLE_VALUES
+from mcpbrain.graph_write import fetch_role, write_role_observation, _JUNK_ROLE_VALUES
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def build_audit_requests(store, *, cap: int = 10) -> list[dict]:
     results = []
     for row in rows:
         eid = row["id"]
-        role = _fetch_role(store, eid)
+        role = fetch_role(store, eid, current_only=True)
         results.append({
             "entity_id": eid,
             "name": row["name"],
@@ -60,22 +60,6 @@ def build_audit_requests(store, *, cap: int = 10) -> list[dict]:
             "role": role,
         })
     return results
-
-
-def _fetch_role(store, entity_id: str) -> str:
-    """Return the most recent non-invalidated 'role' observation, or ''."""
-    with store._connect() as db:
-        row = db.execute(
-            """SELECT value FROM entity_observations
-               WHERE  entity_id = ?
-                 AND  attribute  = 'role'
-                 AND  (valid_to IS NULL OR valid_to = '')
-                 AND  (invalidated_at IS NULL OR invalidated_at = '')
-               ORDER  BY id DESC
-               LIMIT  1""",
-            (entity_id,),
-        ).fetchone()
-    return row["value"] if row else ""
 
 
 def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
@@ -144,7 +128,7 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
                         "profile_audit: role %r is junk value, skipping", new_value
                     )
                     continue
-                old_value = _fetch_role(store, eid)
+                old_value = fetch_role(store, eid, current_only=True)
                 # write_role_observation uses source="profile_audit" (rank 4)
                 # to supersede any existing lower-ranked role.
                 write_role_observation(

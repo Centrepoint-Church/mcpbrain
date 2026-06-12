@@ -25,6 +25,15 @@ def store_path() -> Path:
     return app_dir() / "brain.sqlite3"
 
 
+def spool_home(home=None) -> Path:
+    """Resolve the spool root: explicit override first, else app_dir().
+
+    Single canonical implementation replacing the duplicate _home() helpers
+    in drain.py and extractor_driver.py (§9C).
+    """
+    return Path(home) if home is not None else app_dir()
+
+
 def _path(home) -> Path:
     return Path(home) / "config.json"
 

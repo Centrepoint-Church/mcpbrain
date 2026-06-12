@@ -52,7 +52,7 @@ BLOCK_DRAINERS: dict = {}
 
 def _home(home) -> Path:
     """Resolve the spool root: explicit override first, else config.app_dir()."""
-    return Path(home) if home is not None else config.app_dir()
+    return config.spool_home(home)
 
 
 def _records_repo(home) -> str:
