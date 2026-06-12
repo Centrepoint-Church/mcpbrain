@@ -341,6 +341,22 @@ def inbox_today(store, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def circles_today(store) -> list[dict]:
+    """Detected community clusters (level=0) as a compact list. Degrades to []."""
+    try:
+        return [
+            {"community_id": r["community_id"],
+             "title": r.get("title") or f"Circle {r['community_id']}",
+             "summary": r.get("summary") or "",
+             "member_count": r.get("member_count") or 0,
+             "key_entities": r.get("key_entities") or ""}
+            for r in store.list_communities()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("circles_today failed: %s", exc)
+        return []
+
+
 def annotate_meeting_packs(store, calendar_events: list[dict]) -> list[dict]:
     """Set has_pack=True on calendar events that have a meeting pack in the store."""
     if not calendar_events:
@@ -370,12 +386,13 @@ def annotate_meeting_packs(store, calendar_events: list[dict]) -> list[dict]:
 def assemble(store, home) -> dict:
     """Fan-out to all data sources in parallel and return combined payload."""
     owner = config.owner_name(home)
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         fut_actions = pool.submit(actions_today, store, owner)
         fut_calendar = pool.submit(calendar_today, home)
         fut_clickup = pool.submit(clickup_today, home)
         fut_digest = pool.submit(changes_digest, store)
         fut_inbox = pool.submit(inbox_today, store)
+        fut_circles = pool.submit(circles_today, store)
 
         try:
             actions_result = fut_actions.result()
@@ -407,6 +424,12 @@ def assemble(store, home) -> dict:
             log.warning("assemble: inbox_today failed: %s", exc)
             inbox_result = []
 
+        try:
+            circles_result = fut_circles.result()
+        except Exception as exc:
+            log.warning("assemble: circles_today failed: %s", exc)
+            circles_result = []
+
     # Annotate calendar events with meeting pack status (read-only, fast)
     try:
         calendar_result = annotate_meeting_packs(store, calendar_result)
@@ -418,6 +441,7 @@ def assemble(store, home) -> dict:
         "calendar": calendar_result,
         "clickup": clickup_result,
         "inbox": inbox_result,
+        "circles": circles_result,
         "changes": digest_result["changes"],
         "findings": digest_result["findings"],
         "as_of": _now_iso(),
