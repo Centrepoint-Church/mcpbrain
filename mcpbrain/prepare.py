@@ -15,10 +15,12 @@ A "batch" (thread group) returned by group_unenriched_threads exposes:
 
 Phase-1 symbols are reached through the indirection seams below
 (_group_unenriched_threads, _reassemble_thread, _build_known_people,
-_read_projects, _read_areas, _org_domain_lines). Phase 1 has landed, so each
-seam now calls the real mcpbrain.thread_enrich / mcpbrain.prompt /
-mcpbrain.graph_write module imported at module top. The seams are kept as the
-unit-test monkeypatch surface (tests/test_prepare.py patches them).
+_org_domain_lines). Phase 1 has landed, so each seam now calls the real
+mcpbrain.thread_enrich / mcpbrain.prompt / mcpbrain.graph_write module
+imported at module top. The seams are kept as the unit-test monkeypatch
+surface (tests/test_prepare.py patches them).
+
+Note: _read_projects and _read_areas seams were removed in §9E.
 
 Store methods used (provided by the store passed in): mark_enriched(doc_ids),
 thread_context(thread_id), unified_actions(thread_id=, status=),
@@ -158,16 +160,6 @@ def _reassemble_thread(chunks):
 def _build_known_people(store, batch_thread_ids):
     # Indirection kept as the unit-test seam; backed by the real mcpbrain.prompt.
     return prompt.build_known_people(store, batch_thread_ids=batch_thread_ids)
-
-
-def _read_projects(store):
-    # Indirection kept as the unit-test seam; backed by the real mcpbrain.prompt.
-    return prompt.read_projects(store)
-
-
-def _read_areas(store):
-    # Indirection kept as the unit-test seam; backed by the real mcpbrain.prompt.
-    return prompt.read_areas(store)
 
 
 def _org_domain_lines():
@@ -320,8 +312,6 @@ def _build_context(store, thread_ids) -> dict:
     return {
         "owner_name": config.owner_full_name(home) or config.owner_name(home),
         "known_people": _build_known_people(store, batch_thread_ids=thread_ids),
-        "projects": _read_projects(store),
-        "areas": _read_areas(store),
         "org_domain_map": _org_domain_lines(),
         "valid_orgs": _valid_org_tags(),
     }

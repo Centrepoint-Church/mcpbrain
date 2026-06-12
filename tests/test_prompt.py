@@ -17,50 +17,10 @@ def _store(tmp_path):
     return s
 
 
-# --- A: read_projects / read_areas ----------------------------------------
+# --- A: read_projects / read_areas removed (§9E) --------------------------
 
-def test_active_projects_block_uses_store(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute(
-            "INSERT INTO projects(id,name,org_tag,status_line,archived_at) "
-            "VALUES(?,?,?,?,?)",
-            ("byford-grant", "Byford Grant", "Acme", "Awaiting council sign-off", None),
-        )
-        db.execute(
-            "INSERT INTO projects(id,name,org_tag,status_line,archived_at) "
-            "VALUES(?,?,?,?,?)",
-            ("old-fete", "Old Fete", "Acme", "done", "2026-01-01"),
-        )
-
-    rows = prompt.read_projects(s)
-
-    assert [r["id"] for r in rows] == ["byford-grant"]
-    r = rows[0]
-    assert r["name"] == "Byford Grant"
-    assert r["org"] == "Acme"
-    assert r["status_line"] == "Awaiting council sign-off"
-
-
-def test_active_areas_block_uses_store(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute(
-            "INSERT INTO areas(id,org_id,name,description,active) VALUES(?,?,?,?,?)",
-            ("acme-it", "Acme", "IT", "Systems and devices", 1),
-        )
-        db.execute(
-            "INSERT INTO areas(id,org_id,name,description,active) VALUES(?,?,?,?,?)",
-            ("retired-av", "Acme", "AV", "Old AV area", 0),
-        )
-
-    rows = prompt.read_areas(s)
-
-    assert [r["id"] for r in rows] == ["acme-it"]
-    r = rows[0]
-    assert r["name"] == "IT"
-    assert r["org"] == "Acme"
-    assert r["description"] == "Systems and devices"
+def test_read_projects_and_read_areas_removed():
+    assert not hasattr(prompt, "read_projects") and not hasattr(prompt, "read_areas")
 
 
 # --- B: build_known_people ------------------------------------------------

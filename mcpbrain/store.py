@@ -304,42 +304,6 @@ class Store:
                     db.execute("ALTER TABLE graph_decisions RENAME TO graph_decisions_legacy")
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('actions_migrated','1')")
 
-            # --- projects + areas (Phase 1, Task 1.1) ---------------------
-            # Ported from Nexus src/migrations.py:948-957 (+ ALTERs 1245-1259)
-            # and 1228-1239. The areas.org_id FK to organisations() is dropped:
-            # mcpbrain has no organisations table, so org_id is a plain TEXT tag.
-            db.execute("""CREATE TABLE IF NOT EXISTS projects(
-                id                TEXT PRIMARY KEY,
-                name              TEXT NOT NULL,
-                org_tag           TEXT,
-                status_line       TEXT,
-                status_updated_at TEXT,
-                created_at        TEXT,
-                archived_at       TEXT,
-                notes_path        TEXT,
-                outcome           TEXT,
-                status            TEXT DEFAULT 'active',
-                target_date       TEXT,
-                actual_done_date  TEXT,
-                priority          TEXT,
-                area_id           TEXT,
-                owner_entity_id   TEXT,
-                updated_at        TEXT)""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_projects_active "
-                       "ON projects(archived_at, status_updated_at DESC)")
-            db.execute("""CREATE TABLE IF NOT EXISTS areas(
-                id                TEXT PRIMARY KEY,
-                org_id            TEXT NOT NULL,
-                name              TEXT NOT NULL,
-                description       TEXT,
-                standard          TEXT,
-                review_cadence    TEXT,
-                last_reviewed_at  TEXT,
-                active            INTEGER NOT NULL DEFAULT 1,
-                created_at        TEXT DEFAULT (datetime('now')),
-                archived_at       TEXT)""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_areas_org ON areas(org_id) WHERE active=1")
-
             # --- email_context + doc_context (Phase 1, Task 1.2) ----------
             # email_context ports doc_db.py:124-143 and folds the two triage
             # signals (reply_needed, reply_reason) on, since mcpbrain has no
@@ -1363,47 +1327,6 @@ class Store:
         sql += " ORDER BY id"
         with self._connect() as db:
             return [dict(r) for r in db.execute(sql, params).fetchall()]
-
-    def get_project(self, project_id: str) -> dict | None:
-        with self._connect() as db:
-            r = db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-            return dict(r) if r else None
-
-    def get_area(self, area_id: str) -> dict | None:
-        with self._connect() as db:
-            r = db.execute("SELECT * FROM areas WHERE id=?", (area_id,)).fetchone()
-            return dict(r) if r else None
-
-    def projects_for_org(self, org: str) -> list[dict]:
-        """Active (archived_at IS NULL), org_tag-matching projects."""
-        with self._connect() as db:
-            return [dict(r) for r in db.execute(
-                "SELECT * FROM projects WHERE org_tag=? AND archived_at IS NULL "
-                "AND status='active' ORDER BY id", (org,)).fetchall()]
-
-    def areas_for_org(self, org: str) -> list[dict]:
-        """Active (active=1), org_id-matching areas."""
-        with self._connect() as db:
-            return [dict(r) for r in db.execute(
-                "SELECT * FROM areas WHERE org_id=? AND active=1 ORDER BY id",
-                (org,)).fetchall()]
-
-    def projects_owned_by(self, ent_id: str) -> list[dict]:
-        """Active, non-archived projects whose owner_entity_id matches ent_id."""
-        with self._connect() as db:
-            return [dict(r) for r in db.execute(
-                "SELECT * FROM projects WHERE owner_entity_id=? "
-                "AND archived_at IS NULL ORDER BY id", (ent_id,)).fetchall()]
-
-    def areas_owned_by(self, ent_id: str) -> list[dict]:
-        """Areas an entity owns. areas has no owner_entity_id column, so an owned
-        area is one carried by a project the entity owns (project.area_id)."""
-        with self._connect() as db:
-            return [dict(r) for r in db.execute(
-                "SELECT a.* FROM areas a "
-                "JOIN projects p ON p.area_id = a.id "
-                "WHERE p.owner_entity_id=? AND p.archived_at IS NULL AND a.active=1 "
-                "GROUP BY a.id ORDER BY a.id", (ent_id,)).fetchall()]
 
     def list_entities(self) -> list[dict]:
         with self._connect() as db:
