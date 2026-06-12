@@ -86,3 +86,17 @@ def test_word_split_chunks_overlap_and_lose_nothing():
             f"Chunk {i} tail {tail_words} not found at head of chunk {i+1}: "
             f"{head_words[:overlap]}"
         )
+
+
+def test_slugify_truncates_to_80_chars():
+    assert len(slugify("A" * 90)) <= 80
+
+
+def test_slugify_and_entity_path_agree_on_accented_name(tmp_path):
+    from mcpbrain.store import Store
+    from mcpbrain.graph_write import upsert_entity
+    from mcpbrain.resolve import canonical_key
+    assert slugify("Chané") == "chane"
+    store = Store(tmp_path / "slug.sqlite3", dim=4); store.init()
+    eid = upsert_entity(store, name="Chané", entity_type="person")
+    assert eid == "chane" == canonical_key("Chané")

@@ -24,6 +24,7 @@ from nameparser import HumanName
 
 from mcpbrain import config, orgs
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
+    slugify,
     _normalise_title_for_dedup,
     action_fingerprint as _compute_fingerprint,
 )
@@ -54,7 +55,7 @@ def owner_identity_from_config() -> OwnerIdentity:
     home = str(config.app_dir())
     return OwnerIdentity(
         name=config.owner_name(home),
-        entity_id=entity_slug(config.owner_full_name(home)),
+        entity_id=slugify(config.owner_full_name(home)),
         aliases=config.owner_aliases(home),
     )
 
@@ -115,13 +116,6 @@ def org_from_email(email_addr: str, taxonomy: "orgs.OrgTaxonomy | None" = None) 
     if taxonomy is None:
         taxonomy = orgs.taxonomy_from_config()
     return taxonomy.from_email(email_addr)
-
-
-def entity_slug(name: str) -> str:
-    name = name.strip().lower()
-    name = re.sub(r"[^a-z0-9\s]", "", name)
-    name = re.sub(r"\s+", "-", name)
-    return name.strip("-")[:80]
 
 
 def strip_title(name: str) -> tuple[str, str]:
@@ -1456,7 +1450,7 @@ def _ensure_works_at(conn, entity_id: str, org: str) -> None:
     """
     if not org or org in ("external", "unknown", ""):
         return
-    org_id = entity_slug(org)
+    org_id = slugify(org)
     if not org_id:
         return
     today = _today()
@@ -1513,7 +1507,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
     # the candidate display name.
     if email_addr:
         norm_email = email_addr.lower().strip()
-        candidate_id = entity_slug(name)
+        candidate_id = slugify(name)
         with store._connect() as conn:
             existing_by_email = conn.execute(
                 "SELECT id FROM entities WHERE lower(email_addr) = ? AND id != ?",
@@ -1537,7 +1531,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                     _append_alias(conn, winner_id, title_alias)
                 return winner_id
 
-    eid = entity_slug(name)
+    eid = slugify(name)
     if not eid:
         return None
     today = _today()

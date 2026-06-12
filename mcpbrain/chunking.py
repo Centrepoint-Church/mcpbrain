@@ -60,12 +60,13 @@ def action_fingerprint(text: str) -> str:
 
 
 def slugify(name: str) -> str:
-    """Lower-case, collapse runs of non-alphanumerics into single hyphens.
+    """Lower-case, collapse runs of non-alphanumerics into single hyphens, truncate to 80 chars.
 
     "Taryn Hamilton" -> "taryn-hamilton"; "ACC (National)" -> "acc-national".
     Empty or all-non-alphanumeric input returns "" (callers skip empty slugs).
     None / non-str input also returns "" (a present-but-null JSON name yields
     Python None, which would otherwise crash on .lower()).
+    Truncates to 80 characters to keep entity_id columns manageable.
     """
     if not name or not isinstance(name, str):
         return ""
@@ -74,7 +75,7 @@ def slugify(name: str) -> str:
     name = unicodedata.normalize("NFKD", name)
     name = "".join(ch for ch in name if not unicodedata.combining(ch))
     s = re.sub(r"[^a-z0-9]+", "-", name.lower())
-    return s.strip("-")
+    return s.strip("-")[:80]
 
 
 def content_hash(text: str) -> str:
