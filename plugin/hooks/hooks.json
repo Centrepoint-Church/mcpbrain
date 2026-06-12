@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "mcpbrain session-start" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "mcpbrain session-end" } ] }
+    ]
+  }
+}
