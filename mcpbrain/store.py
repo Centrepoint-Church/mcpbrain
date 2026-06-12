@@ -182,8 +182,6 @@ class Store:
                 ("confidence", "REAL DEFAULT 1.0"),
                 ("evidence", "TEXT"),
                 ("strength", "INTEGER DEFAULT 1"),
-                ("normalised_strength", "REAL DEFAULT 0.0"),
-                ("since", "TEXT"),
                 ("last_seen", "TEXT"),
             ):
                 if col_name not in er_cols:
@@ -381,17 +379,6 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_ee_entity  ON email_entities(entity_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ee_message ON email_entities(message_id)")
 
-            db.execute("""CREATE TABLE IF NOT EXISTS doc_context(
-                doc_id       TEXT PRIMARY KEY,
-                title        TEXT DEFAULT '',
-                org          TEXT DEFAULT '',
-                content_type TEXT DEFAULT '',
-                summary      TEXT DEFAULT '',
-                topics       TEXT DEFAULT '',
-                enriched_at  TEXT DEFAULT '',
-                contextual_summary TEXT)""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_dc_org ON doc_context(org)")
-
             # --- entity_observations (Phase 1, Task 1.3) ------------------
             # Bi-temporal role-provenance table ported verbatim from
             # memory_db.py:430-451 (Spec 7 shape: valid_to + REAL confidence +
@@ -415,13 +402,6 @@ class Store:
             # (entity_id, attribute) at once; rank is resolved at read time.
             db.execute("CREATE INDEX IF NOT EXISTS idx_eo_entity_attr "
                        "ON entity_observations(entity_id, attribute) WHERE valid_to IS NULL")
-
-            # --- suppressed_entities (Phase 1, Task 1.4) ------------------
-            # Ported from memory_db.py:649-653.
-            db.execute("""CREATE TABLE IF NOT EXISTS suppressed_entities(
-                name_lower    TEXT PRIMARY KEY,
-                original_name TEXT NOT NULL,
-                suppressed_at TEXT DEFAULT '')""")
 
             # --- entity merge audit (R4) ----------------------------------
             # IF NOT EXISTS so init() also back-fills the table on existing stores.

@@ -1461,8 +1461,8 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
     """Insert or merge an entity. Returns the surviving entity id, or None.
 
     Ported from memory_db.py:1581-1717, repointed at store._connect(). Dedup
-    order: (1) by email_addr, (2) suppressed_entities block, (3) alias / name
-    match, (4) plain id upsert. email_count is bumped only on the email-dedup
+    order: (1) by email_addr, (2) alias / name
+    match, (3) plain id upsert. email_count is bumped only on the email-dedup
     hit (matching Nexus). Title honorifics on person names are stripped and
     recorded as an alias.
     """
@@ -1530,14 +1530,8 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
 
         if not existing:
             normalised = name.lower().strip()
-            # (2) suppression block — only for genuinely new entities.
-            suppressed = conn.execute(
-                "SELECT 1 FROM suppressed_entities WHERE name_lower = ?",
-                (normalised,)).fetchone()
-            if suppressed:
-                return None
 
-            # (3) alias / name merge: another entity of the same type whose
+            # (2) alias / name merge: another entity of the same type whose
             # aliases (or display name) carry this name.
             normalised_original = title_alias.lower().strip() if title_alias else ""
             candidates = conn.execute(

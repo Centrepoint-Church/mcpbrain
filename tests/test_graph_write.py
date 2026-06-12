@@ -131,16 +131,6 @@ def test_upsert_entity_email_dedup(tmp_path):
     assert ent["email_count"] == 0
 
 
-def test_upsert_entity_suppressed_blocked(tmp_path):
-    s = _store(tmp_path)
-    with s._connect() as db:
-        db.execute(
-            "INSERT INTO suppressed_entities(name_lower, original_name) VALUES(?,?)",
-            ("spam sender", "Spam Sender"))
-    eid = gw.upsert_entity(s, name="Spam Sender", entity_type="person")
-    assert eid is None
-    assert s.list_entities() == []
-
 
 def test_upsert_entity_alias_merge(tmp_path):
     s = _store(tmp_path)
