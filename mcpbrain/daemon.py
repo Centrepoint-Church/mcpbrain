@@ -128,6 +128,48 @@ class BackupConfig:
         )
 
 
+@dataclass
+class CadencePass:
+    """Descriptor for a single periodic maintenance pass.
+
+    Each entry in _CADENCE_PASSES maps a named pass to the instance attributes
+    that hold its interval and last-run timestamp, and to the _run_X method that
+    executes it. needs_configured gates graph-writing passes on config.is_configured;
+    needs_backfill_clear is reserved for the dispatch loop (auto_update and verify
+    run even during backfill).
+    """
+
+    name: str
+    interval_attr: str
+    last_attr: str
+    fn_name: str
+    needs_configured: bool = True
+    needs_backfill_clear: bool = True
+
+
+_CADENCE_PASSES: tuple[CadencePass, ...] = (
+    CadencePass("auto_update", "_auto_update_interval_s", "_last_auto_update",
+                "_run_auto_update", needs_configured=False, needs_backfill_clear=False),
+    CadencePass("verify", "_verify_interval_s", "_last_verify",
+                "_run_verify", needs_configured=False, needs_backfill_clear=False),
+    CadencePass("communities", "_communities_interval_s", "_last_communities",
+                "_run_communities"),
+    CadencePass("lint", "_lint_interval_s", "_last_lint", "_run_lint"),
+    CadencePass("synthesise", "_synthesise_interval_s", "_last_synthesise",
+                "_run_synthesise"),
+    CadencePass("proactive", "_proactive_interval_s", "_last_proactive",
+                "_run_proactive"),
+    CadencePass("waiting_on", "_waiting_on_interval_s", "_last_waiting_on",
+                "_run_waiting_on"),
+    CadencePass("blocks", "_blocks_interval_s", "_last_blocks", "_run_blocks"),
+    CadencePass("audit", "_audit_interval_s", "_last_audit", "_run_audit"),
+    CadencePass("clickup_sync", "_clickup_interval_s", "_last_clickup",
+                "_run_clickup_sync"),
+    CadencePass("stale_reextract", "_stale_reextract_interval_s",
+                "_last_stale_reextract", "_run_stale_reextract"),
+)
+
+
 class AlreadyRunningError(RuntimeError):
     """Raised when another daemon already holds the single-writer lock."""
 
@@ -802,6 +844,23 @@ class Daemon:
                 del self._pending_audit[key]
         return result
 
+    # -- cadence helpers ----------------------------------------------------
+
+    def _is_due(self, interval_attr: str, last_attr: str) -> bool:
+        """Return True when the named cadence pass is overdue.
+
+        False if the interval attribute is None (pass is OFF).
+        True if last_attr is None (never run yet).
+        True if clock() - last >= interval.
+        """
+        interval = getattr(self, interval_attr)
+        if interval is None:
+            return False
+        last = getattr(self, last_attr)
+        if last is None:
+            return True
+        return (self._clock() - last) >= interval
+
     # -- periodic backup ----------------------------------------------------
 
     def maybe_backup(self) -> dict | None:
@@ -860,10 +919,9 @@ class Daemon:
 
     # -- silent auto-update ---------------------------------------------------
 
-    def maybe_auto_update(self) -> dict | None:
-        """Detect a newer published version; signal run() to install it OUTSIDE the
-        write lock. Default daily when configured; OFF when unconfigured. Never runs
-        the install/restart here (that would happen under the held lock)."""
+    def _run_auto_update(self) -> dict | None:
+        """Cadence-gated auto-update check. Called by _run_periodic_passes via the
+        dispatch table and directly by maybe_auto_update."""
         home = str(app_dir())
         with self._config_lock:
             interval = self._auto_update_interval_s
@@ -888,12 +946,17 @@ class Daemon:
             log.warning("auto-update check failed (loop continues): %s", exc)
         return None
 
+    def maybe_auto_update(self) -> dict | None:
+        """Detect a newer published version; signal run() to install it OUTSIDE the
+        write lock. Default daily when configured; OFF when unconfigured. Never runs
+        the install/restart here (that would happen under the held lock)."""
+        return self._run_auto_update()
+
     # -- verify connections cadence -------------------------------------------
 
-    def maybe_verify_connections(self) -> dict | None:
-        """Periodically verify connections (network) and cache the result.
-        OFF unless configured; default hourly when configured without an explicit
-        interval. Time-gated via self._clock."""
+    def _run_verify(self) -> dict | None:
+        """Cadence-gated connection verification. Called by the dispatch table
+        and directly by maybe_verify_connections."""
         home = str(app_dir())
         if not config.is_configured(home):
             return None
@@ -911,37 +974,20 @@ class Daemon:
             log.warning("verify_connections failed (loop continues): %s", exc)
             return None
 
+    def maybe_verify_connections(self) -> dict | None:
+        """Periodically verify connections (network) and cache the result.
+        OFF unless configured; default hourly when configured without an explicit
+        interval. Time-gated via self._clock."""
+        return self._run_verify()
+
     # -- periodic community detection ---------------------------------------
 
-    def maybe_communities(self) -> dict | None:
-        """Run community detection, if it is due.
-
-        OFF unless communities_interval_s was supplied: returns None when
-        self._communities_interval_s is None (never runs on an unconfigured
-        daemon). Otherwise gates on a time-based cadence using the injected
-        clock — due on the first call (self._last_communities is None) or once
-        communities_interval_s has elapsed since the last run. Not due ->
-        returns None and does nothing.
-
-        Records START time as the cadence anchor (same pattern as maybe_resolve)
-        so a long detection run doesn't eat into the next interval.
-        _last_communities advances only on a clean run.
-
-        A communities failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"communities": False, "error": ...} rather than
-        propagating.
-        """
-        if self._communities_interval_s is None:
+    def _run_communities(self) -> dict | None:
+        """Cadence-gated community detection. Called by the dispatch table
+        and directly by maybe_communities."""
+        if not self._is_due("_communities_interval_s", "_last_communities"):
             return None
-
-        if self._last_communities is not None:
-            elapsed = self._clock() - self._last_communities
-            if elapsed < self._communities_interval_s:
-                return None
-
-        # Record START time as cadence anchor before the (potentially slow) pass.
         now = self._clock()
-
         try:
             from mcpbrain.communities import run
             summary = run(self._store)
@@ -951,26 +997,27 @@ class Daemon:
                 exc_info=True,
             )
             return {"communities": False, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean run.
         self._last_communities = now
         return summary
 
+    def maybe_communities(self) -> dict | None:
+        """Run community detection, if it is due.
+
+        OFF unless communities_interval_s was supplied. Otherwise gates on a
+        time-based cadence using the injected clock. Backfill guard: returns
+        None while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_communities()
+
     # -- periodic ClickUp two-way sync --------------------------------------
 
-    def maybe_clickup_sync(self) -> dict | None:
-        """Run the ClickUp ⇄ actions sync, if due.
-
-        OFF unless clickup_interval_s is set (returns None). Otherwise gates on a
-        time-based cadence like maybe_communities. Runs in the loop thread so it
-        shares the single-writer lock. A failure is logged and swallowed so the
-        daemon loop keeps running.
-        """
-        if self._clickup_interval_s is None:
+    def _run_clickup_sync(self) -> dict | None:
+        """Cadence-gated ClickUp sync. Called by the dispatch table and
+        directly by maybe_clickup_sync."""
+        if not self._is_due("_clickup_interval_s", "_last_clickup"):
             return None
-        if self._last_clickup is not None:
-            if (self._clock() - self._last_clickup) < self._clickup_interval_s:
-                return None
         now = self._clock()
         try:
             from mcpbrain import clickup_sync
@@ -983,21 +1030,24 @@ class Daemon:
         self._last_clickup = now
         return summary
 
+    def maybe_clickup_sync(self) -> dict | None:
+        """Run the ClickUp ⇄ actions sync, if due.
+
+        OFF unless clickup_interval_s is set (returns None). Runs in the loop
+        thread so it shares the single-writer lock. A failure is logged and
+        swallowed so the daemon loop keeps running.
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_clickup_sync()
+
     # -- periodic stale -> re-extraction trigger (Gap A) --------------------
 
-    def maybe_stale_reextract(self) -> dict | None:
-        """Reset stale, idle threads to enriched=0 so the normal cycle gives the
-        LLM closer another at-bat, if due.
-
-        OFF unless stale_reextract_interval_s is set (returns None). Does no LLM
-        work itself; the re-extraction happens in the normal enrichment cycle. A
-        failure is logged and swallowed so the loop keeps running.
-        """
-        if self._stale_reextract_interval_s is None:
+    def _run_stale_reextract(self) -> dict | None:
+        """Cadence-gated stale-reextract sweep. Called by the dispatch table
+        and directly by maybe_stale_reextract."""
+        if not self._is_due("_stale_reextract_interval_s", "_last_stale_reextract"):
             return None
-        if self._last_stale_reextract is not None:
-            if (self._clock() - self._last_stale_reextract) < self._stale_reextract_interval_s:
-                return None
         now = self._clock()
         import datetime as _dt
         now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -1011,40 +1061,27 @@ class Daemon:
         self._last_stale_reextract = now
         return summary
 
+    def maybe_stale_reextract(self) -> dict | None:
+        """Reset stale, idle threads to enriched=0 so the normal cycle gives the
+        LLM closer another at-bat, if due.
+
+        OFF unless stale_reextract_interval_s is set (returns None). Backfill
+        guard: returns None while a backfill is active.
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_stale_reextract()
+
     # -- periodic graph lint ------------------------------------------------
 
-    def maybe_lint(self) -> dict | None:
-        """Run the graph lint pass, if it is due.
-
-        OFF unless lint_interval_s was supplied: returns None when
-        self._lint_interval_s is None (never runs on an unconfigured daemon).
-        Otherwise gates on a time-based cadence using the injected clock —
-        due on the first call (self._last_lint is None) or once
-        lint_interval_s has elapsed since the last run. Not due -> returns
-        None and does nothing.
-
-        Records START time as the cadence anchor (same pattern as
-        maybe_communities) so a long lint run doesn't eat into the next
-        interval. _last_lint advances only on a clean run.
-
-        A lint failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"lint": False, "error": ...} rather than
-        propagating.
-        """
-        if self._lint_interval_s is None:
+    def _run_lint(self) -> dict | None:
+        """Cadence-gated graph lint. Called by the dispatch table and
+        directly by maybe_lint."""
+        if not self._is_due("_lint_interval_s", "_last_lint"):
             return None
-
-        if self._last_lint is not None:
-            elapsed = self._clock() - self._last_lint
-            if elapsed < self._lint_interval_s:
-                return None
-
-        # Record START time as cadence anchor before the (potentially slow) pass.
         now = self._clock()
-
         import datetime as _dt
         now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
-
         try:
             # Lazy import: keeps the daemon import light and lint an optional
             # path; also lets tests patch mcpbrain.lint_graph.run.
@@ -1055,48 +1092,27 @@ class Daemon:
                 "lint pass failed (will retry next due): %s", exc, exc_info=True
             )
             return {"lint": False, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean run.
         self._last_lint = now
         return summary
 
+    def maybe_lint(self) -> dict | None:
+        """Run the graph lint pass, if it is due.
+
+        OFF unless lint_interval_s was supplied. Backfill guard: returns None
+        while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_lint()
+
     # -- periodic thread synthesis ------------------------------------------
 
-    def maybe_synthesise(self) -> dict | None:
-        """Build synthesis requests, if synthesis is due.
-
-        OFF unless synthesise_interval_s was supplied: returns None when
-        self._synthesise_interval_s is None (never synthesises an unconfigured
-        daemon). Otherwise gates on a time-based cadence using the injected
-        clock — due on the first call (self._last_synthesise is None) or once
-        synthesise_interval_s has elapsed since the last run. Not due ->
-        returns None and does nothing.
-
-        When due: calls build_synthesis_requests(store) and stashes the result
-        on self._pending_synthesis so run_one() can forward it to
-        prepare.prepare() in the next spool cycle. Returns a summary dict with
-        synthesis_requested=N.
-
-        Records START time as the cadence anchor (same pattern as maybe_resolve)
-        so a slow build doesn't eat into the next interval. _last_synthesise
-        advances only on a clean run.
-
-        A synthesis failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"synthesis_requested": 0, "error": ...} rather
-        than propagating. _last_synthesise is NOT advanced on failure, so the
-        next call retries.
-        """
-        if self._synthesise_interval_s is None:
+    def _run_synthesise(self) -> dict | None:
+        """Cadence-gated synthesis-request build. Called by the dispatch table
+        and directly by maybe_synthesise."""
+        if not self._is_due("_synthesise_interval_s", "_last_synthesise"):
             return None
-
-        if self._last_synthesise is not None:
-            elapsed = self._clock() - self._last_synthesise
-            if elapsed < self._synthesise_interval_s:
-                return None
-
-        # Record START time as cadence anchor before the build pass.
         now = self._clock()
-
         try:
             # Lazy import: keeps the daemon import light and synthesis an
             # optional path; also lets tests patch build_synthesis_requests.
@@ -1109,45 +1125,29 @@ class Daemon:
                 exc_info=True,
             )
             return {"synthesis_requested": 0, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean build.
         self._last_synthesise = now
         return {"synthesis_requested": len(requests)}
 
+    def maybe_synthesise(self) -> dict | None:
+        """Build synthesis requests, if synthesis is due.
+
+        OFF unless synthesise_interval_s was supplied. Backfill guard: returns
+        None while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_synthesise()
+
     # -- periodic proactive detection pass ---------------------------------
 
-    def maybe_proactive(self) -> dict | None:
-        """Run the proactive detection pass, if it is due.
-
-        OFF unless proactive_interval_s was supplied: returns None when
-        self._proactive_interval_s is None (never runs on an unconfigured
-        daemon). Otherwise gates on a time-based cadence using the injected
-        clock — due on the first call (self._last_proactive is None) or once
-        proactive_interval_s has elapsed since the last run. Not due ->
-        returns None and does nothing.
-
-        Records START time as the cadence anchor (same pattern as
-        maybe_resolve) so a long detection run doesn't eat into the next
-        interval. _last_proactive advances only on a clean run.
-
-        A proactive failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"proactive": False, "error": ...} rather than
-        propagating.
-        """
-        if self._proactive_interval_s is None:
+    def _run_proactive(self) -> dict | None:
+        """Cadence-gated proactive detection. Called by the dispatch table
+        and directly by maybe_proactive."""
+        if not self._is_due("_proactive_interval_s", "_last_proactive"):
             return None
-
-        if self._last_proactive is not None:
-            elapsed = self._clock() - self._last_proactive
-            if elapsed < self._proactive_interval_s:
-                return None
-
-        # Record START time as cadence anchor before the (potentially slow) pass.
         now = self._clock()
-
         import datetime as _dt
         now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
-
         try:
             # Lazy import: keeps the daemon import light and the proactive path
             # an optional dependency; also lets tests patch mcpbrain.proactive.run.
@@ -1159,45 +1159,29 @@ class Daemon:
                 exc_info=True,
             )
             return {"proactive": False, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean run.
         self._last_proactive = now
         return summary
 
+    def maybe_proactive(self) -> dict | None:
+        """Run the proactive detection pass, if it is due.
+
+        OFF unless proactive_interval_s was supplied. Backfill guard: returns
+        None while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_proactive()
+
     # -- periodic waiting-on reconciliation ---------------------------------
 
-    def maybe_waiting_on(self) -> dict | None:
-        """Run the waiting-on reconciliation pass, if it is due.
-
-        OFF unless waiting_on_interval_s was supplied: returns None when
-        self._waiting_on_interval_s is None (never runs on an unconfigured
-        daemon). Otherwise gates on a time-based cadence using the injected
-        clock — due on the first call (self._last_waiting_on is None) or once
-        waiting_on_interval_s has elapsed since the last run. Not due ->
-        returns None and does nothing.
-
-        Records START time as the cadence anchor (same pattern as maybe_proactive)
-        so a long pass doesn't eat into the next interval. _last_waiting_on
-        advances only on a clean run.
-
-        A waiting_on failure is logged and swallowed so the daemon loop keeps
-        running — it returns {"waiting_on": False, "error": ...} rather than
-        propagating.
-        """
-        if self._waiting_on_interval_s is None:
+    def _run_waiting_on(self) -> dict | None:
+        """Cadence-gated waiting-on reconciliation. Called by the dispatch table
+        and directly by maybe_waiting_on."""
+        if not self._is_due("_waiting_on_interval_s", "_last_waiting_on"):
             return None
-
-        if self._last_waiting_on is not None:
-            elapsed = self._clock() - self._last_waiting_on
-            if elapsed < self._waiting_on_interval_s:
-                return None
-
-        # Record START time as cadence anchor before the pass.
         now = self._clock()
-
         import datetime as _dt
         now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
-
         try:
             # Lazy import: keeps the daemon import light and lets tests patch
             # mcpbrain.waiting_on.run.
@@ -1211,40 +1195,27 @@ class Daemon:
                 exc_info=True,
             )
             return {"waiting_on": False, "error": str(exc)}
-
-        # Advance the cadence clock only after a clean run.
         self._last_waiting_on = now
         return summary
 
+    def maybe_waiting_on(self) -> dict | None:
+        """Run the waiting-on reconciliation pass, if it is due.
+
+        OFF unless waiting_on_interval_s was supplied. Backfill guard: returns
+        None while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_waiting_on()
+
     # -- periodic block requests (profile_synthesis + community_synthesis + memory_distil) ---
 
-    def maybe_blocks(self) -> dict | None:
-        """Build block requests for profile/community/memory, if due.
-
-        OFF unless blocks_interval_s was supplied: returns None when
-        self._blocks_interval_s is None (never builds on an unconfigured daemon).
-        Otherwise gates on a time-based cadence using the injected clock —
-        due on the first call (self._last_blocks is None) or once
-        blocks_interval_s has elapsed since the last run.
-
-        When due: calls build_profile_requests, build_community_requests, and
-        build_distil_requests; stashes the results in self._pending_blocks so
-        run_one() can forward them to prepare.prepare() as extra_blocks in the
-        next spool cycle. Returns a summary dict.
-
-        Records START time as cadence anchor. _last_blocks advances only on a
-        clean run. Failures are logged and swallowed.
-        """
-        if self._blocks_interval_s is None:
+    def _run_blocks(self) -> dict | None:
+        """Cadence-gated block-request build. Called by the dispatch table
+        and directly by maybe_blocks."""
+        if not self._is_due("_blocks_interval_s", "_last_blocks"):
             return None
-
-        if self._last_blocks is not None:
-            elapsed = self._clock() - self._last_blocks
-            if elapsed < self._blocks_interval_s:
-                return None
-
         now = self._clock()
-
         try:
             from mcpbrain.profile_synth import build_profile_requests
             from mcpbrain.community_synth import build_community_requests
@@ -1268,7 +1239,6 @@ class Daemon:
                 "memory_distil_requested": 0,
                 "error": str(exc),
             }
-
         self._last_blocks = now
         log.info("blocks stashed: profiles=%d communities=%d distil=%d",
                  len(profile_reqs), len(community_reqs), len(distil_reqs))
@@ -1278,34 +1248,24 @@ class Daemon:
             "memory_distil_requested": len(distil_reqs),
         }
 
+    def maybe_blocks(self) -> dict | None:
+        """Build block requests for profile/community/memory, if due.
+
+        OFF unless blocks_interval_s was supplied. Backfill guard: returns None
+        while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_blocks()
+
     # -- periodic profile audit ---------------------------------------------
 
-    def maybe_audit(self) -> dict | None:
-        """Build profile audit requests, if due.
-
-        OFF unless audit_interval_s was supplied: returns None when
-        self._audit_interval_s is None (never builds on an unconfigured daemon).
-        Otherwise gates on a time-based cadence using the injected clock —
-        due on the first call (self._last_audit is None) or once
-        audit_interval_s has elapsed since the last run.
-
-        When due: calls build_audit_requests; stashes the results in
-        self._pending_audit so run_one() can forward them to prepare.prepare()
-        as extra_blocks in the next spool cycle. Returns a summary dict.
-
-        Records START time as cadence anchor. _last_audit advances only on a
-        clean run. Failures are logged and swallowed.
-        """
-        if self._audit_interval_s is None:
+    def _run_audit(self) -> dict | None:
+        """Cadence-gated profile audit build. Called by the dispatch table
+        and directly by maybe_audit."""
+        if not self._is_due("_audit_interval_s", "_last_audit"):
             return None
-
-        if self._last_audit is not None:
-            elapsed = self._clock() - self._last_audit
-            if elapsed < self._audit_interval_s:
-                return None
-
         now = self._clock()
-
         try:
             from mcpbrain.profile_audit import build_audit_requests
             audit_reqs = build_audit_requests(self._store)
@@ -1315,64 +1275,42 @@ class Daemon:
                 "audit build failed (will retry next due): %s", exc, exc_info=True
             )
             return {"audit_requested": 0, "error": str(exc)}
-
         self._last_audit = now
         return {"audit_requested": len(audit_reqs)}
+
+    def maybe_audit(self) -> dict | None:
+        """Build profile audit requests, if due.
+
+        OFF unless audit_interval_s was supplied. Backfill guard: returns None
+        while a backfill is active (single-writer).
+        """
+        if self._backfill_active.is_set():
+            return None
+        return self._run_audit()
 
     # -- periodic pass orchestration ----------------------------------------
 
     def _run_periodic_passes(self) -> None:
-        """Call the periodic maintenance passes in spec order (§54, §165).
+        """Iterate _CADENCE_PASSES; each entry self-gates on its cadence.
 
-        communities first so lint's duplicate-detection reads fresh
-        entity_communities. Each pass self-gates on its cadence and swallows
-        its own errors, but this method also wraps each call individually so
-        an unexpected raise (e.g. a mocked exception in tests) from one pass
-        never blocks the remaining passes.
-
-        auto_update and verify_connections are identity-independent and always
-        run.  All graph-writers are gated on is_configured so they never write
-        blank/empty attribution into the graph on an unconfigured install.
+        The dispatch table in _CADENCE_PASSES drives the order (communities
+        first so lint reads fresh entity_communities). needs_backfill_clear
+        gates the whole call when a backfill is running. needs_configured gates
+        graph-writing passes on config.is_configured so they never write blank
+        attribution into the graph on an unconfigured install. Each _run_X call
+        is individually wrapped so an unexpected raise from one pass never
+        blocks the remaining passes.
         """
         if self._backfill_active.is_set():
             return  # single-writer: yield the whole cycle to the backfill
         configured = config.is_configured(str(app_dir()))
-
-        # Always run (independent of identity): updates + connection verification.
-        for pass_fn in (
-            self.maybe_auto_update,
-            self.maybe_verify_connections,
-        ):
+        for cp in _CADENCE_PASSES:
+            if cp.needs_configured and not configured:
+                continue
             try:
-                pass_fn()
+                getattr(self, cp.fn_name)()
             except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "periodic pass %s failed unexpectedly: %s",
-                    getattr(pass_fn, "__name__", repr(pass_fn)), exc, exc_info=True,
-                )
-
-        if not configured:
-            return  # graph-writers need identity + orgs; skip until configured
-
-        # Graph-writing passes: communities first (lint reads fresh entity_communities).
-        for pass_fn in (
-            self.maybe_communities,
-            self.maybe_lint,
-            self.maybe_synthesise,
-            self.maybe_proactive,
-            self.maybe_waiting_on,
-            self.maybe_blocks,
-            self.maybe_audit,
-            self.maybe_clickup_sync,
-            self.maybe_stale_reextract,
-        ):
-            try:
-                pass_fn()
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "periodic pass %s failed unexpectedly: %s",
-                    getattr(pass_fn, "__name__", repr(pass_fn)), exc, exc_info=True,
-                )
+                log.warning("periodic pass %s failed: %s", cp.name, exc, exc_info=True)
 
     # -- the loop -----------------------------------------------------------
 
