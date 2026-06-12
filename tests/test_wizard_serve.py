@@ -123,16 +123,14 @@ def test_home_status_renders_before_main():
 
 
 def test_connection_order_includes_new_cards():
-    assert '"enrichment"' in WIZ and '"memory-hooks"' in WIZ
+    assert '"enrichment"' in WIZ
 
 
 def test_guided_elements_present():
     assert "Settings → Apps → API Token" in WIZ
     assert "Copy link" in WIZ                       # List ID instructions
     assert 'id="step-projects"' in WIZ
-    assert 'id="step-hooks"' in WIZ
     assert "/api/records/scaffold" in WIZ
-    assert "/api/hooks/install" in WIZ
     assert "onerror" in WIZ                          # screenshots hide when absent
     assert "/img/clickup-apps-token.png" in WIZ
 
@@ -160,15 +158,15 @@ def test_generic_hidden_css_rule_exists():
 
 def test_configured_view_keeps_actionable_steps_reachable():
     # renderHome must only hide the redundant google/status steps when configured,
-    # so Register / Prepare-workspace / memory-hooks buttons stay reachable.
+    # so Register / Prepare-workspace buttons stay reachable.
     assert 'HIDE_WHEN_CONFIGURED' in WIZ
     assert '"step-google"' in WIZ and '"step-status"' in WIZ
 
 
 def test_step_badges_reflect_server_state_on_load():
-    # ws-state/hooks-state/r-state must be re-derived from /api/status connections
+    # ws-state/r-state must be re-derived from /api/status connections
     # each poll, so a click's badge survives a page reload (not just in-memory).
     assert "reflectStepBadges" in WIZ
     assert "reflectStepBadges(j.connections)" in WIZ
-    for key in ('"records"', '"memory-hooks"', '"claude"'):
+    for key in ('"records"', '"claude"'):
         assert key in WIZ

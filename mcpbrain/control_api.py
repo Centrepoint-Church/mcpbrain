@@ -204,10 +204,6 @@ class ControlServer:
             if h.path == "/api/records/scaffold":
                 from mcpbrain import records
                 return h_json(h, 200, {"scaffolded": records.scaffold_records(str(self.home))})
-            if h.path == "/api/hooks/install":
-                from mcpbrain import hooks
-                hooks.install_session_hooks()
-                return h_json(h, 200, {"installed": True})
 
             m = re.match(r"^/api/dashboard/actions/(\d+)/done$", h.path)
             if m:
