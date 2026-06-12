@@ -8,16 +8,16 @@ opened via ``with store._connect() as db:``.
 DROPPED checks (tables/columns not present in mcpbrain):
 - check_unsynthesised  — mcpbrain entities has no summary / summary_updated columns
 - check_stale_summaries — same reason
+- check_possible_duplicates (redundant — deletion scheduled Task A5)
+- check_community_singletons (redundant — deletion scheduled Task A5)
+- check_threads_without_summary (redundant — deletion scheduled Task A5)
 
 KEPT checks (all tables exist from Phase 1 / Phase 3 Task 0):
 - check_missing_org
 - check_orphan_entities
 - check_ambiguous_org
-- check_duplicate_orgs
-- check_possible_duplicates (entity_communities join works — Task 1 populates it)
 - check_ownerless_actions (adapted to unified actions table)
-- check_community_singletons (community_summaries from Task 0.1)
-- check_threads_without_summary (thread_context from Task 0.2)
+- check_duplicate_orgs
 - check_unenriched_emails (email_context from Phase 1)
 """
 
@@ -27,14 +27,9 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from nameparser import HumanName
-from nameparser.config import CONSTANTS as _NP_CONSTANTS
 from rapidfuzz import fuzz
 
 from mcpbrain import config, orgs
-
-for _t in ("ps", "pastor", "rev", "reverend", "bishop", "elder", "deacon"):
-    _NP_CONSTANTS.titles.add(_t)
 
 log = logging.getLogger(__name__)
 
@@ -90,172 +85,7 @@ def check_ownerless_actions(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def check_possible_duplicates(conn) -> list[dict]:
-    """Find person entity pairs that may be the same person.
 
-    Uses nameparser to block by first name, then rapidfuzz token_set_ratio
-    to score similarity. Returns pairs scoring >= 75, capped at 50.
-    The entity_communities join is included — Task 1 populates it.
-    """
-    rows = conn.execute("""
-        SELECT e.id, e.name, e.type, e.org, e.email_addr, e.email_count,
-               ec.community_id
-        FROM entities e
-        LEFT JOIN entity_communities ec ON ec.entity_id = e.id AND ec.level = 0
-        WHERE e.type = 'person' AND e.email_count > 0
-    """).fetchall()
-
-    entities = []
-    for r in rows:
-        parsed = HumanName(r["name"] or "")
-        first = (parsed.first or r["name"] or "").lower().strip()
-        entities.append({
-            "id": r["id"],
-            "name": r["name"],
-            "org": r["org"] or "",
-            "email_addr": r["email_addr"] or "",
-            "email_count": r["email_count"],
-            "community": r["community_id"],
-            "first": first,
-            "parsed": parsed,
-        })
-
-    blocks: dict[str, list[dict]] = {}
-    for e in entities:
-        blocks.setdefault(e["first"], []).append(e)
-
-    candidates = []
-    for block in blocks.values():
-        if len(block) < 2:
-            continue
-        for i, a in enumerate(block):
-            for b in block[i + 1:]:
-                name_a = a["name"] or ""
-                name_b = b["name"] or ""
-                score = fuzz.token_set_ratio(name_a.lower(), name_b.lower())
-
-                has_last_a = bool(a["parsed"].last)
-                has_last_b = bool(b["parsed"].last)
-                domain_a = a["email_addr"].split("@")[-1] if "@" in a["email_addr"] else ""
-                domain_b = b["email_addr"].split("@")[-1] if "@" in b["email_addr"] else ""
-
-                # Gate 1: both have last names — last names must overlap
-                if has_last_a and has_last_b:
-                    la = a["parsed"].last.lower()
-                    lb = b["parsed"].last.lower()
-                    is_abbrev = (len(la) <= 3 and lb.startswith(la)) or (len(lb) <= 3 and la.startswith(lb))
-                    last_score = fuzz.token_set_ratio(la, lb)
-                    if last_score < 65 and not is_abbrev:
-                        continue
-                    if is_abbrev and last_score < 65:
-                        score += 8
-
-                # Gate 2: one is first-name only — require corroborating signal
-                if has_last_a != has_last_b:
-                    same_org = a["org"] and b["org"] and a["org"] == b["org"]
-                    same_domain = domain_a and domain_b and domain_a == domain_b
-                    same_community = (
-                        a["community"] is not None
-                        and a["community"] == b["community"]
-                    )
-                    if not (same_org or same_domain or same_community):
-                        continue
-
-                if a["org"] and b["org"]:
-                    if a["org"] == b["org"]:
-                        score += 10
-                    else:
-                        score -= 20
-
-                if domain_a and domain_b and domain_a == domain_b:
-                    score += 15
-
-                reasons = []
-                if score >= 95:
-                    reasons.append("near-exact match")
-                elif has_last_a != has_last_b:
-                    reasons.append("first name only — same org/domain/community")
-                else:
-                    reasons.append(f"fuzzy {fuzz.token_set_ratio(name_a.lower(), name_b.lower())}%")
-                if a["org"] and b["org"] and a["org"] == b["org"]:
-                    reasons.append("same org")
-                elif a["org"] and b["org"]:
-                    reasons.append("different org")
-
-                if score >= 75:
-                    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
-                    a_first = a if a["id"] == pair[0] else b
-                    b_first = b if b["id"] == pair[1] else a
-                    ambiguous = has_last_a != has_last_b
-                    candidates.append({
-                        "id_a": pair[0],
-                        "name_a": a_first["name"],
-                        "type_a": "person",
-                        "count_a": a_first["email_count"],
-                        "org_a": a_first["org"],
-                        "id_b": pair[1],
-                        "name_b": b_first["name"],
-                        "type_b": "person",
-                        "count_b": b_first["email_count"],
-                        "org_b": b_first["org"],
-                        "score": score,
-                        "ambiguous_first_name": ambiguous,
-                        "reason": ", ".join(reasons),
-                    })
-
-    # Additional pass: same email address = almost certain duplicate
-    email_blocks: dict[str, list[dict]] = {}
-    for e in entities:
-        addr = e["email_addr"].lower().strip()
-        if addr:
-            email_blocks.setdefault(addr, []).append(e)
-
-    seen_pairs = {(c["id_a"], c["id_b"]) for c in candidates}
-    for addr, group in email_blocks.items():
-        if len(group) < 2:
-            continue
-        for i, a in enumerate(group):
-            for b in group[i + 1:]:
-                pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
-                if pair in seen_pairs:
-                    continue
-                seen_pairs.add(pair)
-                a_first = a if a["id"] == pair[0] else b
-                b_first = b if b["id"] == pair[1] else a
-                candidates.append({
-                    "id_a": pair[0],
-                    "name_a": a_first["name"],
-                    "type_a": "person",
-                    "count_a": a_first["email_count"],
-                    "org_a": a_first["org"],
-                    "id_b": pair[1],
-                    "name_b": b_first["name"],
-                    "type_b": "person",
-                    "count_b": b_first["email_count"],
-                    "org_b": b_first["org"],
-                    "score": 100,
-                    "ambiguous_first_name": False,
-                    "reason": f"same email: {addr}",
-                })
-
-    best: dict[tuple, dict] = {}
-    for c in candidates:
-        key = (c["id_a"], c["id_b"])
-        if key not in best or c["score"] > best[key]["score"]:
-            best[key] = c
-
-    return sorted(best.values(), key=lambda x: -x["score"])[:50]
-
-
-def check_community_singletons(conn) -> list[dict]:
-    """Communities with only one member — likely noise or needs merging."""
-    rows = conn.execute("""
-        SELECT cs.community_id, cs.level, cs.title, cs.member_count
-        FROM community_summaries cs
-        WHERE cs.member_count <= 1
-        ORDER BY cs.level, cs.community_id
-    """).fetchall()
-    return [dict(r) for r in rows]
 
 
 def check_ambiguous_org(conn) -> list[dict]:
@@ -316,18 +146,6 @@ def check_duplicate_orgs(conn) -> list[dict]:
 
     return sorted(results, key=lambda x: -x["entity_count"])
 
-
-def check_threads_without_summary(conn) -> list[dict]:
-    """High-volume threads with no summary."""
-    rows = conn.execute("""
-        SELECT thread_id, subject, org, email_count, last_updated
-        FROM thread_context
-        WHERE email_count >= 5
-          AND (summary IS NULL OR summary = '')
-        ORDER BY email_count DESC
-        LIMIT 20
-    """).fetchall()
-    return [dict(r) for r in rows]
 
 
 def check_unenriched_emails(conn) -> list[dict]:
@@ -447,23 +265,6 @@ def build_report(conn) -> str:
         ],
     )
 
-    section(
-        "Community singletons",
-        check_community_singletons(conn),
-        lambda rows: [
-            f"- Community {r['community_id']} (level {r['level']}): {r['title'] or 'untitled'}"
-            for r in rows
-        ],
-    )
-
-    section(
-        "Threads without summary (>=5 emails)",
-        check_threads_without_summary(conn),
-        lambda rows: [
-            f"- [{r['org']}] {r['subject']} ({r['email_count']} emails)"
-            for r in rows
-        ],
-    )
 
     unenriched = check_unenriched_emails(conn)
     if unenriched:
@@ -473,16 +274,6 @@ def build_report(conn) -> str:
         lines.append(f"- Range: {r['oldest']} to {r['newest']}\n")
     else:
         lines.append("## Unenriched emails — OK\n")
-
-    section(
-        "Possible duplicate entities",
-        check_possible_duplicates(conn),
-        lambda rows: [
-            f"- `{r['id_a']}` ({r['name_a']}, {r['org_a']}) vs "
-            f"`{r['id_b']}` ({r['name_b']}, {r['org_b']}) — score {r['score']}: {r['reason']}"
-            for r in rows
-        ],
-    )
 
     section(
         "Duplicate org variants",
@@ -564,25 +355,6 @@ def run(store, *, now: str, log_dir=None) -> dict:
         finding_type = f"lint:{check_name}"
         store.resolve_findings_not_in(finding_type, live_lint_ref_ids[check_name], now)
 
-    # check_possible_duplicates
-    with store._connect() as db:
-        rows = check_possible_duplicates(db)
-    live_refs: list[str] = []
-    for r in rows:
-        ref_id = f"{r['id_a']}|{r['id_b']}"
-        store.record_finding(
-            "lint:possible_duplicate",
-            ref_id,
-            org="",
-            summary=f"Possible duplicate: {r['name_a']} / {r['name_b']}",
-            detail=str(r),
-            severity="info",
-            detected_at=now,
-        )
-        live_refs.append(ref_id)
-        findings_count += 1
-    store.resolve_findings_not_in("lint:possible_duplicate", live_refs, now)
-
     # check_duplicate_orgs
     with store._connect() as db:
         rows = check_duplicate_orgs(db)
@@ -601,44 +373,6 @@ def run(store, *, now: str, log_dir=None) -> dict:
         live_refs.append(ref_id)
         findings_count += 1
     store.resolve_findings_not_in("lint:duplicate_org", live_refs, now)
-
-    # check_community_singletons
-    with store._connect() as db:
-        rows = check_community_singletons(db)
-    live_refs = []
-    for r in rows:
-        ref_id = str(r["community_id"])
-        store.record_finding(
-            "lint:community_singleton",
-            ref_id,
-            org="",
-            summary=f"Singleton community {r['community_id']}",
-            detail=str(r),
-            severity="info",
-            detected_at=now,
-        )
-        live_refs.append(ref_id)
-        findings_count += 1
-    store.resolve_findings_not_in("lint:community_singleton", live_refs, now)
-
-    # check_threads_without_summary
-    with store._connect() as db:
-        rows = check_threads_without_summary(db)
-    live_refs = []
-    for r in rows:
-        ref_id = r["thread_id"]
-        store.record_finding(
-            "lint:thread_no_summary",
-            ref_id,
-            org=r.get("org", "") or "",
-            summary=f"Thread {r['thread_id'][:40]} has no summary ({r['email_count']} emails)",
-            detail=str(r),
-            severity="info",
-            detected_at=now,
-        )
-        live_refs.append(ref_id)
-        findings_count += 1
-    store.resolve_findings_not_in("lint:thread_no_summary", live_refs, now)
 
     # check_unenriched_emails
     with store._connect() as db:
