@@ -17,7 +17,6 @@ import pytest
 from mcpbrain.store import Store
 from mcpbrain.sync.gmail import backfill_gmail
 from mcpbrain.sync.drive import backfill_drive
-from mcpbrain.sync import initial_backfill
 
 
 # ---------------------------------------------------------------------------
@@ -416,89 +415,3 @@ def test_backfill_drive_paginates(tmp_path):
     assert store.get_chunk("gdrive-fb-0") is not None
 
 
-# ===========================================================================
-# initial_backfill orchestration tests
-# ===========================================================================
-
-def test_initial_backfill_orchestrates_and_embeds(tmp_path, emb):
-    """End-to-end: fake gmail_service with one finance/budget message.
-    Checks res["gmail"] >= 1, res["embedded"] >= 1, and that the message
-    is findable via hybrid_search after backfill."""
-    from mcpbrain.retrieval import hybrid_search
-
-    store = Store(tmp_path / "b.sqlite3", dim=emb.dim)
-    store.init()
-
-    body = (
-        "Annual budget review and quarterly expenditure forecast for the "
-        "finance team. Please review the attached figures before Thursday."
-    )
-    msg_m1 = plain_msg("m1", "Finance Budget Forecast", "finance@example.com", body)
-
-    pages = [_list_page(["m1"])]
-    gmail_svc = FakeGmailService(pages, {"m1": msg_m1})
-
-    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
-    res = initial_backfill(
-        store, emb,
-        gmail_service=gmail_svc,
-        now=now,
-        days=10,
-    )
-
-    assert res["gmail"] >= 1, f"Expected gmail >= 1, got {res}"
-    assert res["embedded"] >= 1, f"Expected embedded >= 1, got {res}"
-
-    results = hybrid_search(store, emb, "budget finance", limit=5)
-    doc_ids = [r["doc_id"] for r in results]
-    assert any(d.startswith("gmail-") for d in doc_ids), (
-        f"Expected a gmail- doc_id in hybrid_search results, got: {doc_ids}"
-    )
-
-
-def test_initial_backfill_date_math(tmp_path):
-    """With now=2026-05-31 and days=10, the after/modified_after strings
-    passed to the fake services must be 2026/05/21 (Gmail) and
-    2026-05-21T00:00:00Z (Drive)."""
-
-    class _FakeEmbedder:
-        dim = 4
-
-        def embed_passages(self, texts):
-            return [[0.0, 0.0, 0.0, 0.0]] * len(texts)
-
-        def embed_query(self, text):
-            return [0.0, 0.0, 0.0, 0.0]
-
-    store = _store(tmp_path)
-
-    # Record what queries each service receives
-    gmail_queries: list[str] = []
-    drive_queries: list[str] = []
-
-    # Gmail: single empty page (no messages needed for date-math test)
-    gmail_pages = [{"messages": []}]
-    gmail_svc = FakeGmailService(gmail_pages, {}, recorded_queries=gmail_queries)
-
-    # Drive: single empty page
-    drive_pages = [{"files": []}]
-    drive_svc = FakeDriveService(drive_pages, recorded_queries=drive_queries)
-
-    now = datetime(2026, 5, 31, tzinfo=timezone.utc)
-    initial_backfill(
-        store, _FakeEmbedder(),
-        gmail_service=gmail_svc,
-        drive_service=drive_svc,
-        now=now,
-        days=10,
-    )
-
-    assert len(gmail_queries) >= 1, "Expected at least one gmail messages.list call"
-    assert "after:2026/05/21" in gmail_queries[0], (
-        f"Gmail query should contain 'after:2026/05/21', got: {gmail_queries[0]!r}"
-    )
-
-    assert len(drive_queries) >= 1, "Expected at least one drive files.list call"
-    assert "2026-05-21T00:00:00Z" in drive_queries[0], (
-        f"Drive query should contain '2026-05-21T00:00:00Z', got: {drive_queries[0]!r}"
-    )

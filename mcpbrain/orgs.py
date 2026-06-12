@@ -43,8 +43,6 @@ RESERVED_TAGS = ("external", "unknown")
 # No baked-in taxonomy: an unconfigured install classifies against nothing.
 # Orgs come from config.json's `orgs` key via taxonomy_from_config; the daemon's
 # enrichment gate (config.is_configured) prevents enrichment until >=1 org is set.
-_DEFAULT_DOMAIN_ORG: dict[str, str] = {}
-_DEFAULT_ALIASES: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
