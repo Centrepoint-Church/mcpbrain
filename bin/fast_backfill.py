@@ -72,7 +72,7 @@ def main(argv=None) -> int:
 
     from mcpbrain.store import Store
     from mcpbrain.embed import get_embedder
-    emb = get_embedder(config.EMBEDDER)
+    emb = get_embedder("bge-small")
     store = Store(config.store_path(), dim=emb.dim, read_only=False)
 
     res = parallel_backfill.run_parallel_backfill(
