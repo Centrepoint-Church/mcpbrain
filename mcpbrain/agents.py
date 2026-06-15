@@ -302,8 +302,6 @@ def _restart_schtasks_tray() -> None:  # pragma: no cover
 
 _PRUNE_LABEL = "com.mcpbrain.records.prune"
 _HEALTH_LABEL = "com.mcpbrain.records.context-health"
-_MEETING_PACKS_LABEL = "com.mcpbrain.records.meeting-packs"
-_GARDENER_LABEL = "com.mcpbrain.records.gardener"
 
 
 def _calendar_plist(
@@ -372,55 +370,6 @@ def _calendar_plist(
 """
 
 
-def meeting_packs_plist(*, home: str, mcpbrain_bin: str) -> str:
-    """Return a launchd plist: `mcpbrain meeting-packs` twice daily (07:45 + 12:00)."""
-    home_x = _xml_escape(home)
-    bin_x = _xml_escape(mcpbrain_bin)
-    label = _MEETING_PACKS_LABEL
-    return f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{bin_x}</string>
-        <string>meeting-packs</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>MCPBRAIN_HOME</key>
-        <string>{home_x}</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key>
-            <integer>7</integer>
-            <key>Minute</key>
-            <integer>45</integer>
-        </dict>
-        <dict>
-            <key>Hour</key>
-            <integer>12</integer>
-            <key>Minute</key>
-            <integer>0</integer>
-        </dict>
-    </array>
-    <key>StandardOutPath</key>
-    <string>{home_x}/{label}.log</string>
-    <key>StandardErrorPath</key>
-    <string>{home_x}/{label}.err</string>
-</dict>
-</plist>
-"""
-
-
 def records_prune_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
     """Return a launchd plist: `mcpbrain records-prune` daily at 06:00."""
     return _calendar_plist(
@@ -467,31 +416,15 @@ def health_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
                                   schedule=["/sc", "weekly", "/d", "MON", "/st", "07:00"])
 
 
-def records_gardener_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
-    """Return a launchd plist: `mcpbrain records-gardener` weekly Monday 08:00 (no RunAtLoad)."""
-    return _calendar_plist(
-        label=_GARDENER_LABEL,
-        program_args=[mcpbrain_bin, "records-gardener"],
-        mcpbrain_home=mcpbrain_home,
-        hour=8,
-        minute=0,
-        weekday=1,
-        run_at_load=False,
-        env_vars={"MCPBRAIN_HOME": mcpbrain_home},
-    )
-
-
 # ---------------------------------------------------------------------------
 # Cross-platform cadence install dispatcher
 # ---------------------------------------------------------------------------
 
 def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
-    """Schedule all four cadences for the given OS.
+    """Schedule prune + health cadences for the given OS.
 
     - records-prune: daily 06:00
     - records-health: weekly Mon 07:00
-    - records-gardener: weekly Mon 08:00
-    - meeting-packs: twice-daily 07:45 + 12:00
     """
     if platform == "darwin":
         _install_cadences_launchd(mcpbrain_bin=mcpbrain_bin, home=home)
@@ -509,8 +442,6 @@ def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragm
     for label, plist_fn in [
         (_PRUNE_LABEL, lambda: records_prune_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
         (_HEALTH_LABEL, lambda: records_context_health_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
-        (_GARDENER_LABEL, lambda: records_gardener_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
-        (_MEETING_PACKS_LABEL, lambda: meeting_packs_plist(mcpbrain_bin=mcpbrain_bin, home=home)),
     ]:
         path = agents_dir / f"{label}.plist"
         path.write_text(plist_fn())
@@ -523,29 +454,5 @@ def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # prag
     for args_fn in [
         lambda: prune_schtasks_args(mcpbrain_bin=mcpbrain_bin),
         lambda: health_schtasks_args(mcpbrain_bin=mcpbrain_bin),
-        lambda: gardener_schtasks_args(mcpbrain_bin=mcpbrain_bin),
     ]:
         subprocess.run(args_fn(), check=True)
-    for task_args in meeting_packs_schtasks_args(mcpbrain_bin=mcpbrain_bin):
-        subprocess.run(task_args, check=True)
-
-
-# ---------------------------------------------------------------------------
-# Cowork cadence generators (gardener + meeting-packs)
-# ---------------------------------------------------------------------------
-
-def gardener_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
-    """Return schtasks args to schedule `mcpbrain records-gardener` weekly Monday at 08:00."""
-    return _cadence_schtasks_args(task_name="mcpbrain-records-gardener",
-                                  subcommand="records-gardener", mcpbrain_bin=mcpbrain_bin,
-                                  schedule=["/sc", "weekly", "/d", "MON", "/st", "08:00"])
-
-
-def meeting_packs_schtasks_args(*, mcpbrain_bin: str) -> list[list[str]]:
-    """Return two schtasks arg-lists for meeting-packs (07:45 am + 12:00 pm)."""
-    return [
-        _cadence_schtasks_args(task_name="mcpbrain-meeting-packs-am", subcommand="meeting-packs",
-                               mcpbrain_bin=mcpbrain_bin, schedule=["/sc", "daily", "/st", "07:45"]),
-        _cadence_schtasks_args(task_name="mcpbrain-meeting-packs-pm", subcommand="meeting-packs",
-                               mcpbrain_bin=mcpbrain_bin, schedule=["/sc", "daily", "/st", "12:00"]),
-    ]
