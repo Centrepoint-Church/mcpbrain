@@ -11,7 +11,7 @@ def test_local_claude_runner_invokes_cli(monkeypatch):
     def fake_run(cmd, *, input=None, capture_output=None, text=None, timeout=None):
         seen["cmd"] = cmd; seen["input"] = input; seen["timeout"] = timeout
         return _Result()
-    monkeypatch.setattr(enrich_backfill, "_find_claude", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("mcpbrain.config.find_claude", lambda: "/usr/bin/claude")
     monkeypatch.setattr(enrich_backfill.subprocess, "run", fake_run)
     out = enrich_backfill.local_claude_runner("PROMPT", model="sonnet", timeout=120)
     assert out == '{"batch_id": "b1"}'
