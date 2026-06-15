@@ -24,7 +24,7 @@ def test_prompts_are_generic():
 
 def test_run_cowork_builds_claude_command(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    monkeypatch.setattr(cowork, "_find_claude", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("mcpbrain.config.find_claude", lambda: "/usr/bin/claude")
     monkeypatch.setattr(cowork, "_mcpbrain_bin", lambda: "/usr/bin/mcpbrain")
     seen = {}
 

@@ -7,7 +7,6 @@ import subprocess
 from pathlib import Path
 
 from mcpbrain import config, prepare, drain, extractor_driver
-from mcpbrain.draft import _find_claude
 
 _THREAD_CAP = 20
 _CHAR_BUDGET = 200_000
@@ -17,7 +16,7 @@ def local_claude_runner(prompt: str, *, model: str = "sonnet", timeout: int = 60
     """run_claude implementation for extractor_driver: shell to the local claude
     CLI in headless print mode, prompt piped via stdin, return stdout (the model's
     text — the extractor json.loads it)."""
-    claude = _find_claude()
+    claude = config.find_claude()
     result = subprocess.run(
         [claude, "-p", "--model", model, "--settings", '{"disableAllHooks":true}'],
         input=prompt, capture_output=True, text=True, timeout=timeout,
