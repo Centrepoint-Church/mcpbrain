@@ -72,7 +72,9 @@ def draft_context(store, home: str, email_id: str, intent: str = "") -> dict:
         return {"error": "email not found"}
     return {
         "subject": ec.get("subject", ""),
-        "body": ec.get("summary", ""),
+        # email_context stores no raw body; use contextual_summary when available
+        # (richer situational narrative), falling back to the one-line summary.
+        "body": ec.get("contextual_summary") or ec.get("summary", ""),
         "sender": ec.get("sender", ""),
         "thread_id": ec.get("thread_id", ""),
         "voice_rules": _load_voice_rules(home),

@@ -23,7 +23,7 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
         key_bytes = backup.generate_escrow_key()
 
     shared_drive_id = _resolve_shared_drive(drive_service)
-    _escrow_key_to_drive(drive_service, user_id, key_bytes)
+    _escrow_key_to_drive(drive_service, user_id, key_bytes, folder_id=shared_drive_id)
 
     # Fernet.generate_key() returns urlsafe-base64-encoded bytes; decode to str.
     key_str = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
@@ -54,11 +54,17 @@ def _resolve_shared_drive(drive_service) -> str:
     return folder["id"]
 
 
-def _escrow_key_to_drive(drive_service, user_id: str, key: bytes) -> None:
-    """Upload <user_id>.key to the mcpbrain-escrow folder."""
+def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
+                         *, folder_id: str | None = None) -> None:
+    """Upload <user_id>.key to the mcpbrain-escrow folder.
+
+    folder_id: pre-resolved folder ID from _resolve_shared_drive; if None,
+    resolves it internally (legacy path / direct calls in tests).
+    """
     from googleapiclient.http import MediaInMemoryUpload
 
-    folder_id = _resolve_shared_drive(drive_service)
+    if folder_id is None:
+        folder_id = _resolve_shared_drive(drive_service)
     name = f"{user_id}.key"
     # Check if it already exists (idempotent update)
     resp = drive_service.files().list(
