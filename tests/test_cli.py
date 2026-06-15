@@ -1,19 +1,6 @@
 import mcpbrain.cli as cli
 
 
-def test_dispatch_cowork_cadences(monkeypatch):
-    import mcpbrain.cli as cli
-    seen = {}
-    monkeypatch.setattr("mcpbrain.cowork.gardener_main",
-                        lambda a: seen.setdefault("g", True) or 0)
-    monkeypatch.setattr("mcpbrain.cowork.meeting_packs_main",
-                        lambda a: seen.setdefault("m", True) or 0)
-    cli.main(["records-gardener"])
-    assert seen.get("g")
-    cli.main(["meeting-packs"])
-    assert seen.get("m")
-
-
 def test_dispatch_records_cadences(monkeypatch):
     import mcpbrain.cli as cli
     seen = {}
@@ -25,13 +12,6 @@ def test_dispatch_records_cadences(monkeypatch):
     assert seen["argv"][0] == "records-prune" and "--days" in seen["argv"]
     cli.main(["records-health"])
     assert seen["argv"][0] == "records-health"
-
-
-def test_dispatch_enrich_backfill(monkeypatch):
-    seen = {}
-    monkeypatch.setattr("mcpbrain.enrich_backfill.main", lambda argv: seen.setdefault("hit", True) or 0)
-    cli.main(["enrich-backfill"])
-    assert seen.get("hit") is True
 
 
 def test_dispatch_routes_each_subcommand(monkeypatch):
@@ -49,3 +29,19 @@ def test_dispatch_routes_each_subcommand(monkeypatch):
     assert called["auth"] == ["--client-secrets", "x"]
     cli.main(["setup"]);  cli.main(["update"]);  cli.main(["tray"])
     assert {"setup","update","tray"} <= set(called)
+
+
+def test_gardener_meeting_subcommands_removed():
+    import pytest
+    for c in ("records-gardener", "meeting-packs"):
+        with pytest.raises(SystemExit):
+            cli.main([c])
+
+
+def test_home_subcommand(capsys):
+    import mcpbrain.cli as _cli
+    import mcpbrain.config as _cfg
+    import unittest.mock as mock
+    with mock.patch.object(_cfg, "app_dir", return_value="/fake/home"):
+        _cli.main(["home"])
+    assert "/fake/home" in capsys.readouterr().out
