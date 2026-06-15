@@ -43,3 +43,29 @@ def test_backfill_skill_orchestrates_loop():
     assert "enrich-batch" in b
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
     assert "pending.json" in b or "spool" in b.lower()
+
+def test_gardener_skill_exists():
+    assert (_PLUGIN / "skills" / "gardener" / "SKILL.md").exists()
+
+def test_gardener_skill_resolves_home():
+    b = _read("skills/gardener/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_gardener_skill_has_content():
+    b = _read("skills/gardener/SKILL.md")
+    assert len(b) > 1500  # full port, not a stub
+    assert "MEMORY.md" in b  # key section
+    assert "GARDENER-PROTECTED" in b  # protected sections mentioned
+
+def test_meeting_packs_skill_exists():
+    assert (_PLUGIN / "skills" / "meeting-packs" / "SKILL.md").exists()
+
+def test_meeting_packs_skill_resolves_home():
+    b = _read("skills/meeting-packs/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_meeting_packs_skill_has_content():
+    b = _read("skills/meeting-packs/SKILL.md")
+    assert len(b) > 1500  # full port, not a stub
+    assert "meeting-packs/upsert" in b  # control API
+    assert "brain_search" in b  # MCP tool usage
