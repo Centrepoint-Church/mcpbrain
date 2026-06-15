@@ -18,13 +18,13 @@ proposals_file="$records/reference/_proposals/$today.md"
 
 ## Step 1 — Gather evidence
 
-Use the brain MCP tools to gather recent evidence:
+Use the brain MCP tools to gather evidence from **the past 7 days only**. Limit all searches to recent activity — do not pull the full corpus history.
 
-- `brain_search("recent decisions")` — decisions logged this week
-- `brain_search("new projects")` — projects that appeared in recent threads
-- `brain_search("people introductions")` — new contacts or org changes
+- `brain_search("decisions this week")` — decisions logged recently
+- `brain_search("new project started")` — projects that appeared in recent threads
+- `brain_search("new contact introduction")` — new contacts or org changes
 - `brain_context` — read the current `reference/org-context.md`, `reference/projects.md`, `reference/systems.md`, `context/preferences.md`, `context/voice.md` to understand the current world-model
-- `brain_graph` — check for new orgs, people, or relations that do not appear in the current reference files
+- `brain_graph` — check for new orgs, people, or relations added recently that do not appear in the current reference files
 - `brain_actions` — any standing actions that suggest a project or org entry is missing
 
 Read the current corpus files from `$records/`:
@@ -41,6 +41,8 @@ For each corpus file, compare the evidence gathered in Step 1 against the curren
 - **New entries** — a project, person, org, or system that appears repeatedly in the evidence but is absent from the file
 - **Stale entries** — an entry whose status or facts appear to have changed (e.g. a project described as "planning" that recent threads show as "completed")
 - **Missing context** — a recurring topic that would benefit from a standing note
+
+**Skip rule:** if evidence only confirms what is already in the file without contradiction — the entry exists and the facts match — do not propose a change for that entry. Only propose when the evidence adds something new or contradicts what is recorded.
 
 If nothing has changed that warrants a proposal, stop here and do not write a proposals file. Log a `brain_note`: "Reference-gardener ran — no changes to propose."
 
