@@ -17,14 +17,15 @@ Provide an `email_id` (message_id from the brain) and optionally an `intent` hin
 
 Call `brain_draft_context(email_id, intent)` to load the email context.
 
-Analyse the context and determine:
+Analyse the context and capture the following for use in later stages:
 
+- **`thread_id`:** from the context (pass to `brain_draft_save`)
 - **Intent:** one of "reply", "acknowledge", "decline", "decide", "inform"
 - **Audience tier:** one of "board", "staff_internal", "external", "unknown"
 - **Key points:** 2–4 things the reply must address
 - **Tone notes:** one sentence on tone (informed by `voice_rules` from the context)
 
-Use the `voice_rules` excerpt returned by `brain_draft_context` to guide the tone notes. State the intent, audience tier, key points, and tone notes before proceeding.
+Use the `voice_rules` excerpt returned by `brain_draft_context` to guide the tone notes. State all five items before proceeding.
 
 ### Stage 2 — Draft
 
