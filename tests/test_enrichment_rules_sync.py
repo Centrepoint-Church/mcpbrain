@@ -2,8 +2,9 @@
 
 The extraction rules are authored once, in mcpbrain/enrich_prompt.md, between
 the SHARED-EXTRACTION-RULES:BEGIN and :END markers. That exact block is mirrored
-byte-for-byte into plugin/agents/enrich-batch.md (the Cowork agent). These tests
-fail loudly if the two copies drift apart.
+byte-for-byte into plugin/agents/enrich-batch.md (the Cowork agent) and
+plugin/skills/enrich/SKILL.md (the Cowork scheduled-task skill). These tests
+fail loudly if any copy drifts.
 """
 from pathlib import Path
 
@@ -33,13 +34,9 @@ def _extract_block(path: Path) -> str:
 
 
 def test_each_file_has_exactly_one_marker_pair():
-    # _extract_block asserts the marker counts; calling it covers both files.
-    _extract_block(_CANONICAL)
-    _extract_block(_MIRROR)
-
-
-def test_enrich_skill_has_marker_pair():
-    _extract_block(_ENRICH_SKILL)
+    # _extract_block asserts the marker counts; calling it covers all guarded files.
+    for path in (_CANONICAL, _MIRROR, _ENRICH_SKILL):
+        _extract_block(path)
 
 
 def test_enrich_skill_rules_identical_to_canonical():
