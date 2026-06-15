@@ -84,3 +84,17 @@ def test_draft_reply_skill_names_all_four_stages():
     b = _read("skills/draft-reply/SKILL.md").lower()
     for stage in ("plan", "draft", "critique", "voice"):
         assert stage in b, f"skill must name the {stage!r} stage"
+
+def test_bootstrap_skill_exists():
+    assert (_PLUGIN / "skills" / "bootstrap" / "SKILL.md").exists()
+
+def test_bootstrap_skill_resolves_home():
+    b = _read("skills/bootstrap/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_bootstrap_skill_targets_corpus_files():
+    b = _read("skills/bootstrap/SKILL.md")
+    for f in ("reference/projects.md", "reference/systems.md",
+              "reference/org-context.md", "context/preferences.md",
+              "context/voice.md"):
+        assert f in b, f"bootstrap must write to {f!r}"
