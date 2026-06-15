@@ -32,3 +32,9 @@ def test_install_cadences_dispatches_by_platform(monkeypatch):
     assert calls[-1] == "win32"
     with pytest.raises(ValueError):
         agents.install_cadences("plan9", mcpbrain_bin="/x", home="/h")
+
+
+def test_gardener_and_meeting_packs_generators_removed():
+    import mcpbrain.agents as agents
+    for n in ("records_gardener_plist","meeting_packs_plist","gardener_schtasks_args","meeting_packs_schtasks_args"):
+        assert not hasattr(agents, n)
