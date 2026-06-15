@@ -116,3 +116,12 @@ def test_reference_gardener_skill_propose_not_overwrite():
     assert "no changes to propose" in b.lower() or "nothing" in b.lower()
     # skip rule: don't propose for entries that already match
     assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
+
+def test_install_full_autonomous_setup():
+    b = _read("skills/install/SKILL.md")
+    assert "scheduled task" in b.lower() and "hourly" in b.lower()
+    for t in ("mcpbrain-enrich", "gardener", "meeting-packs", "reference-gardener"):
+        assert t in b
+    assert "bootstrap" in b.lower()   # runs the interview
+    assert "login" in b.lower()       # instruct: open Claude at login
+    assert "backup" in b.lower()      # offer Enable backup
