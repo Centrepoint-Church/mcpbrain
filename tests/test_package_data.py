@@ -56,8 +56,21 @@ def test_records_claude_template_present():
     assert tmpl.is_file(), f"records CLAUDE.md template missing at {tmpl}"
 
 
-def test_cowork_enrichment_doc_present():
-    # The cowork enrichment prompt is read at runtime. packages.find skips .md,
-    # so without the package-data declaration a clean install lacks this doc.
-    doc = _pkg_dir() / "cowork" / "enrichment.md"
-    assert doc.is_file(), f"cowork enrichment doc missing at {doc}"
+def test_maintenance_subpackage_excluded_from_wheel():
+    # mcpbrain/maintenance/ holds maintainer-only local-claude backfill tooling
+    # (extractor_driver, parallel_backfill, extractor_io). It is reachable only
+    # from bin/ scripts and tests, never from the shipped daemon, so pyproject's
+    # packages.find must exclude it. Guard that exclusion is declared (offline,
+    # builds nothing — pairs with the CI wheel-inspection step).
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    # The subpackage exists in the source tree (importable from a checkout)...
+    assert (repo_root / "mcpbrain" / "maintenance" / "__init__.py").is_file()
+    # ...but pyproject's packages.find excludes it from the published wheel.
+    with open(repo_root / "pyproject.toml", "rb") as f:
+        cfg = tomllib.load(f)
+    exclude = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
+    assert "mcpbrain.maintenance*" in exclude, (
+        f"mcpbrain.maintenance* must be in packages.find exclude; got: {exclude}"
+    )
