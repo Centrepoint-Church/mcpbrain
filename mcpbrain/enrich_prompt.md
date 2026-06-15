@@ -31,6 +31,7 @@ If a thread carries `part` and `of` keys (a long thread split across parts),
 still emit one extraction for that part; the daemon regroups parts by
 `thread_id` before applying. Keep the same `thread_id` on every part.
 
+<!-- SHARED-EXTRACTION-RULES:BEGIN -->
 ## The extraction envelope
 
 Each extraction uses this schema verbatim. Match the field names exactly.
@@ -246,3 +247,4 @@ the owner's writing about them. Empty `corrections` means the record is fine:
  "corrections": [{"field": "role|org", "new_value": "...",
                   "evidence": "their signature in m-12"}]}
 ```
+<!-- SHARED-EXTRACTION-RULES:END -->
