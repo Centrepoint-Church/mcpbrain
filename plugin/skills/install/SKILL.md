@@ -56,7 +56,15 @@ Note: Cowork Desktop Scheduled Tasks run only while Claude is open and the machi
 
 ### 6. Create four Desktop Scheduled Tasks
 
-In Cowork, create four **Desktop Scheduled Tasks** (Settings → Scheduled Tasks → New). For each task, set the **working folder** to the output of `mcpbrain home`.
+First, resolve and show the user their brain home path — they will paste it into each task's working-folder field:
+
+```bash
+mcpbrain home
+```
+
+Show the user the output (e.g. `/Users/yourname/Library/Application Support/mcpbrain`). They will need this string when creating each task.
+
+In Cowork, create four **Desktop Scheduled Tasks** (Settings → Scheduled Tasks → New). For each task, set the **working folder** to that path.
 
 | Task name | Schedule | Skill |
 |---|---|---|
