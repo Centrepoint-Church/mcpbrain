@@ -516,3 +516,24 @@ def test_brain_proactive_error_returns_empty_list(tmp_path, caplog):
             out = asyncio.run(tool())
         s.open_findings = original
     assert out == []
+
+
+# --- brain_draft_context + brain_draft_save (Task A4) ---------------------
+
+from mcpbrain.mcp_server import make_brain_draft_context, make_brain_draft_save
+
+
+def test_context_and_save(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO email_context(message_id,thread_id,sender,date_iso,subject,summary)"
+                   " VALUES('m1','t1','Sam <s@x.com>','2026-06-01','Hi','q')")
+    ctx = asyncio.run(make_brain_draft_context(s, str(tmp_path))("m1", intent="reply"))
+    assert ctx["subject"] == "Hi"
+    out = asyncio.run(make_brain_draft_save(s, str(tmp_path))("m1", "t1", "reply", "Hi Sam, yes — confirmed."))
+    assert isinstance(out.get("draft_record_id"), int)
+
+
+def test_old_draft_tools_removed():
+    import mcpbrain.mcp_server as m
+    assert not hasattr(m, "make_brain_draft_reply") and not hasattr(m, "make_brain_draft_refine")
