@@ -98,3 +98,17 @@ def test_bootstrap_skill_targets_corpus_files():
               "reference/org-context.md", "context/preferences.md",
               "context/voice.md"):
         assert f in b, f"bootstrap must write to {f!r}"
+
+def test_reference_gardener_skill_exists():
+    assert (_PLUGIN / "skills" / "reference-gardener" / "SKILL.md").exists()
+
+def test_reference_gardener_skill_resolves_home():
+    b = _read("skills/reference-gardener/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_reference_gardener_skill_propose_not_overwrite():
+    b = _read("skills/reference-gardener/SKILL.md")
+    assert "reference/_proposals/" in b  # writes proposals, not directly
+    assert "brain_note" in b             # surfaces to owner
+    # must not silently overwrite
+    assert "must not" in b.lower() or "do not overwrite" in b.lower() or "propose" in b.lower()
