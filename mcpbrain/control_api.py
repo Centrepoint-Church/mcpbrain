@@ -278,6 +278,18 @@ class ControlServer:
                 p = write_capture(str(self.home), envelope)
                 return h_json(h, 200, {"queued": True, "path": str(p)})
 
+            if h.path == "/api/backup/enable":
+                try:
+                    from mcpbrain import backup_setup, auth as _auth, config as _config
+                    creds = _auth.load_credentials()
+                    svc = _auth.build_service("drive", "v3", creds)
+                    owner = _config.owner_email(str(self.home)) or "unknown"
+                    cfg = backup_setup.enable_backup(str(self.home), drive_service=svc, user_id=owner)
+                    return h_json(h, 200, {"enabled": True, "shared_drive_id": cfg["backup"]["shared_drive_id"]})
+                except Exception as exc:
+                    log.exception("backup/enable failed")
+                    return h_json(h, 500, {"error": str(exc)})
+
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
             return h_json(h, 500, {"error": str(exc)})
