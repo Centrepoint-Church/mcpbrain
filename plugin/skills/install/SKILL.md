@@ -23,7 +23,7 @@ command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 2. Install the mcpbrain daemon
 ```bash
-uv tool install --python 3.12 --index "mcpbrain=https://centrepoint.github.io/mcpbrain-dist/simple/" mcpbrain --force
+uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
