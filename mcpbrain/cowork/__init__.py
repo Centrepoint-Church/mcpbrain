@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mcpbrain import config
-from mcpbrain.draft import _find_claude
 
 _PROMPT_DIR = Path(__file__).parent
 
@@ -41,7 +40,7 @@ def run_cowork(prompt_name: str, *, tools: str, extra_context: str,
     """
     home = str(config.app_dir())
     prompt = (_PROMPT_DIR / prompt_name).read_text() + "\n\n" + extra_context
-    cmd = [_find_claude(), "-p", "--tools", tools,
+    cmd = [config.find_claude(), "-p", "--tools", tools,
            "--settings", '{"disableAllHooks":true}',
            "--strict-mcp-config", "--mcp-config", _mcp_config(home),
            "--dangerously-skip-permissions"]

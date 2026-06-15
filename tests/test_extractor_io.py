@@ -27,7 +27,7 @@ def test_claude_runner_invokes_cli(monkeypatch):
         seen["timeout"] = timeout
         return _Result()
 
-    monkeypatch.setattr("mcpbrain.draft._find_claude", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("mcpbrain.config.find_claude", lambda: "/usr/bin/claude")
     monkeypatch.setattr(extractor_io.subprocess, "run", fake_run)
 
     out = extractor_io.claude_runner("MY PROMPT", model="sonnet", timeout=120)
@@ -65,7 +65,7 @@ def test_claude_runner_honours_explicit_claude_bin(monkeypatch):
 
 def test_claude_runner_raises_on_nonzero(monkeypatch):
     """Non-zero exit must propagate as CalledProcessError."""
-    monkeypatch.setattr("mcpbrain.draft._find_claude", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("mcpbrain.config.find_claude", lambda: "/usr/bin/claude")
 
     def bad_run(cmd, **kw):
         raise subprocess.CalledProcessError(1, cmd, stderr="boom")
