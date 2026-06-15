@@ -67,18 +67,16 @@ Create parent directories if they do not exist.
 
 ### Commit
 
-After writing all files:
+After writing all files, ensure the records repo exists and commit:
 
 ```bash
+# Initialise if this is a fresh install
+if [ ! -d "$records/.git" ]; then
+  git init "$records"
+fi
 cd "$records"
 git add reference/ context/
 git commit -m "bootstrap: seed initial reference/context corpus"
-```
-
-If the repo does not yet exist, initialise it first:
-
-```bash
-git init "$records"
 ```
 
 ## Confirm
