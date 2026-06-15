@@ -112,3 +112,7 @@ def test_reference_gardener_skill_propose_not_overwrite():
     assert "brain_note" in b             # surfaces to owner
     # must not silently overwrite
     assert "must not" in b.lower() or "do not overwrite" in b.lower() or "propose" in b.lower()
+    # no-changes stop condition
+    assert "no changes to propose" in b.lower() or "nothing" in b.lower()
+    # skip rule: don't propose for entries that already match
+    assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
