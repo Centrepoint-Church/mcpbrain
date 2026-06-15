@@ -77,6 +77,8 @@ def test_draft_reply_skill_uses_mcp_tools():
     b = _read("skills/draft-reply/SKILL.md")
     assert "brain_draft_context" in b
     assert "brain_draft_save" in b
+    assert "parent_draft_id" in b   # refinement path documented
+    assert len(b) > 1200            # full port, not a stub
 
 def test_draft_reply_skill_names_all_four_stages():
     b = _read("skills/draft-reply/SKILL.md").lower()
