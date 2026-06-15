@@ -80,7 +80,7 @@ You're {name}'s assistant, working from here on. Memory + tools come from the mc
 - brain_search / brain_context / brain_actions — recall by meaning, profile a person/org, see what's open
 - brain_graph — traverse the relationship graph: "how is X connected to Y?", "who are the key people around <org>?", "everyone within 2 hops of …" — use hops=2 for broader reach; at_time="YYYY-MM-DD" for time-travel
 - brain_context(mode="communities") — list detected clusters/circles; brain_context(mode="communities", community_id=N) — who's in cluster N; use when asked "what are the main groups here?" or "which circle is X in?"
-- brain_draft_reply / brain_draft_refine — draft email in my voice
+- brain_draft_context / brain_draft_save — draft email in my voice (use the draft-reply skill for the full pipeline)
 
 Read my identity, voice, preferences, reference and decisions from the mcpbrain @-resources; apply my voice to everything. Run brain_search before answering from memory.
 
