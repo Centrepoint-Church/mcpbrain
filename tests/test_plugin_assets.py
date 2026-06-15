@@ -69,3 +69,16 @@ def test_meeting_packs_skill_has_content():
     assert len(b) > 1500  # full port, not a stub
     assert "meeting-packs/upsert" in b  # control API
     assert "brain_search" in b  # MCP tool usage
+
+def test_draft_reply_skill_exists():
+    assert (_PLUGIN / "skills" / "draft-reply" / "SKILL.md").exists()
+
+def test_draft_reply_skill_uses_mcp_tools():
+    b = _read("skills/draft-reply/SKILL.md")
+    assert "brain_draft_context" in b
+    assert "brain_draft_save" in b
+
+def test_draft_reply_skill_names_all_four_stages():
+    b = _read("skills/draft-reply/SKILL.md").lower()
+    for stage in ("plan", "draft", "critique", "voice"):
+        assert stage in b, f"skill must name the {stage!r} stage"
