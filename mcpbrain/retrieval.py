@@ -124,23 +124,46 @@ def annotate_action_freshness(store, actions: list[dict]) -> list[dict]:
     ]
 
 
-def _rrf(rankings: list[list[str]], k: int = 60) -> dict[str, float]:
+# Default RRF constant and per-ranker fusion weights. Tunable via the eval
+# harness (see tests/eval/run_eval.py). Equal weights = the historical
+# behaviour; vec_weight/kw_weight scale each ranker's contribution before sum.
+_RRF_K = 60
+_VEC_WEIGHT = 1.0
+_KW_WEIGHT = 1.0
+
+
+def _rrf(rankings: list[list[str]], k: int = _RRF_K,
+         vec_weight: float = _VEC_WEIGHT,
+         kw_weight: float = _KW_WEIGHT) -> dict[str, float]:
+    """Weighted Reciprocal Rank Fusion.
+
+    rankings is [semantic_ranking, keyword_ranking] (the order hybrid_search
+    passes). The two weights scale each ranker's reciprocal-rank contribution
+    so the fusion can be tuned without changing call sites. A missing third+
+    ranking falls back to weight 1.0.
+    """
+    weights = [vec_weight, kw_weight]
     scores: dict[str, float] = {}
-    for ranking in rankings:
+    for idx, ranking in enumerate(rankings):
+        w = weights[idx] if idx < len(weights) else 1.0
         for rank, doc_id in enumerate(ranking):
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+            scores[doc_id] = scores.get(doc_id, 0.0) + w / (k + rank + 1)
     return scores
 
 
-def hybrid_search(store, embedder, query: str, limit: int = 10) -> list[dict]:
+def hybrid_search(store, embedder, query: str, limit: int = 10, *,
+                  rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
+                  kw_weight: float = _KW_WEIGHT) -> list[dict]:
     qv = embedder.embed_query(query)
     sem = [d for d, _ in store.vec_knn(qv, limit * 2)]
     kw = [d for d, _ in store.fts_search(query, limit * 2)]
-    fused = _rrf([sem, kw])
-    # Over-fetch then drop expired notes so the expiry flag is honoured on the
-    # read path. store.get_chunk returns metadata already parsed to a dict, but
-    # guard for a raw JSON string in case a caller passes an unparsed chunk.
+    fused = _rrf([sem, kw], k=rrf_k, vec_weight=vec_weight, kw_weight=kw_weight)
     ordered = sorted(fused, key=lambda d: -fused[d])
+    # Normalise against the top fused score so the strongest hit is 1.0 and
+    # callers can compare relevance across queries. Computed over the FULL
+    # fused set (before expiry filtering) so dropping an expired top hit does
+    # not silently rescale the survivors.
+    top = fused[ordered[0]] if ordered else 0.0
     results = []
     for d in ordered:
         c = store.get_chunk(d)
@@ -154,6 +177,7 @@ def hybrid_search(store, embedder, query: str, limit: int = 10) -> list[dict]:
                 meta = {}
         if meta.get("expired"):
             continue
+        c["score"] = (fused[d] / top) if top > 0 else 0.0
         results.append(c)
         if len(results) == limit:
             break
