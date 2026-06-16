@@ -11,12 +11,14 @@ def test_install_skill_bootstrap_steps():
     assert "uv tool install" in b and "--python 3.12" in b
     assert "mcpbrain setup" in b and "/reload-plugins" in b
 
-def test_install_skill_terminal_first():
-    # Terminal is the standard host install path; no sandbox probe / Claude Code dance.
+def test_install_skill_runs_in_claude_code():
+    # Install runs in Claude Code (host-native); Cowork is the usage surface.
+    # No sandbox probe / fallback dance.
     b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "Terminal" in b
-    assert "curl -LsSf https://astral.sh/uv/install.sh" in b  # the paste-in-Terminal script
-    assert "HOST_OK" not in b and "SANDBOX" not in b          # sandbox check removed
+    assert "Claude Code" in b
+    assert "uv tool install" in b                     # the step the Claude Code agent runs
+    assert "Cowork" in b                              # usage surface named
+    assert "HOST_OK" not in b and "SANDBOX" not in b  # sandbox check removed
 
 def test_install_skill_os_detection():
     b = _read("skills/mcpbrain-install/SKILL.md")
