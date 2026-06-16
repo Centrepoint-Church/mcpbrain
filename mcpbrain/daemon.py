@@ -878,7 +878,13 @@ class Daemon:
 
         cfg = backup
         try:
-            path = make_encrypted_snapshot(self._store.path, cfg.out_path, cfg.key)
+            # Bundle the whole system: store + the local records repo (world-model,
+            # continuity, memory — its only off-machine copy) + config.json.
+            home = str(app_dir())
+            path = make_encrypted_snapshot(
+                self._store.path, cfg.out_path, cfg.key,
+                records_dir=config.records_dir(home),
+                config_path=str(Path(home) / "config.json"))
             file_id = upload_snapshot(
                 cfg.drive_service, path, cfg.shared_drive_id, cfg.user_id
             )
