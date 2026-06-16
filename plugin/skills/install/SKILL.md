@@ -43,6 +43,30 @@ Complete Google sign-in, identity, and timezone in the wizard.
 
 **Fleet (Centrepoint org):** The wizard's **Fleet setup** section is pre-filled with the Centrepoint `mcpbrain-fleet` and `mcpbrain-escrow` folder IDs. Leave them as-is to join the org fleet (your install writes an hourly health beacon the maintainer can see in the fleet status report), or clear them if you're not part of the org. The escrow folder ID is also where your backup key is stored, so leave it set if you enable backup.
 
+### 3a. Recover an existing brain (only if you've used mcpbrain before)
+
+Right after Google sign-in, check whether this account already has a backup on the
+Shared Drive — e.g. you're reinstalling, or moving to a new machine:
+
+```bash
+mcpbrain restore --check
+```
+
+- If it reports **"No restorable backup found"** — this is a fresh start; continue to step 4.
+- If it reports a **restorable backup**, offer to recover it. This pulls your last
+  snapshot and restores **everything** — the knowledge graph and enrichment (the
+  store), your world-model and memory (the records repo), and your settings
+  (config) — fetching the decryption key automatically from the escrow folder (no
+  key to type):
+
+  ```bash
+  mcpbrain restore --auto
+  ```
+
+  After a successful restore, **skip step 5 (bootstrap)** — your world-model is
+  already back. (Use `--force` only if you intend to overwrite a non-empty store.)
+  Only the Google token isn't restored — you just signed in, so you're set.
+
 ### 4. Create the "My Brain" Cowork project
 
 **Project creation is a manual Cowork step by design** — the project and its instructions live in the Cowork desktop app's database, which plugins cannot register. Do this once by hand; it does not need re-investigating.
@@ -65,7 +89,9 @@ All recurring brain work runs as Cowork Desktop Scheduled Tasks on your Claude s
 
 ### 5. Run the bootstrap interview
 
-Run the **`mcpbrain-bootstrap`** skill. This is a one-time interview that seeds your initial world-model: your orgs, projects, systems, writing voice, and working preferences. It writes the answers into your records repo so the brain understands context from day one.
+**Skip this step if you restored an existing brain in step 3a** — your world-model is already back.
+
+Otherwise, run the **`mcpbrain-bootstrap`** skill. This is a one-time interview that seeds your initial world-model: your orgs, projects, systems, writing voice, and working preferences. It writes the answers into your records repo so the brain understands context from day one.
 
 ### 6. Open Claude at login
 
