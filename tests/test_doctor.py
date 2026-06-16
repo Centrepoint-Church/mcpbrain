@@ -128,3 +128,13 @@ def test_output_is_never_empty():
     code, msg = doctor.run_doctor("/tmp/home", conns=_conns(), repairs={})
     assert msg.strip(), "doctor must always print a report, even on the all-ok path"
     assert "mcpbrain doctor" in msg
+
+
+def test_cli_dispatches_doctor(monkeypatch):
+    import mcpbrain.cli as cli
+    called = {}
+    monkeypatch.setattr("mcpbrain.doctor.run_doctor_main",
+                        lambda rest: called.setdefault("rest", rest))
+    cli.main(["doctor", "--whatever"])
+    assert "rest" in called
+    assert called["rest"] == ["--whatever"]
