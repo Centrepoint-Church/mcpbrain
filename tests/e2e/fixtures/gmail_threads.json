@@ -1,0 +1,74 @@
+[
+  [
+    {
+      "id": "msg001",
+      "threadId": "thread001",
+      "labelIds": ["INBOX"],
+      "payload": {
+        "mimeType": "text/plain",
+        "headers": [
+          {"name": "From", "value": "Joel Chelliah <joel@acme.org>"},
+          {"name": "Date", "value": "Mon, 10 Jun 2026 09:00:00 +0000"},
+          {"name": "Subject", "value": "Hall B booking request"},
+          {"name": "To", "value": "sam@acme.org"}
+        ],
+        "body": {
+          "data": "Sm9lbCBhc2tzOiBJcyBIYWxsIEIgZnJlZSBmb3IgV2VkbmVzZGF5IGNvbGxlZ2U_IFdlIG5lZWQgaXQgZnJvbSA5YW0gdG8gMTJwbSBmb3IgeW91dGggZ3JvdXAgc2V0dXAu"
+        }
+      }
+    },
+    {
+      "id": "msg002",
+      "threadId": "thread001",
+      "labelIds": ["INBOX"],
+      "payload": {
+        "mimeType": "text/plain",
+        "headers": [
+          {"name": "From", "value": "Sam Jones <sam@acme.org>"},
+          {"name": "Date", "value": "Mon, 10 Jun 2026 10:15:00 +0000"},
+          {"name": "Subject", "value": "Re: Hall B booking request"},
+          {"name": "To", "value": "joel@acme.org"}
+        ],
+        "body": {
+          "data": "SGkgU2FtLCB0aGFua3MgZm9yIGNoZWNraW5nLiBIYWxsIEIgaXMgYXZhaWxhYmxlIFdlZG5lc2RheSBtb3JuaW5nLiBQbGVhc2UgY29uZmlybSB0aGUgYm9va2luZy4="
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": "msg003",
+      "threadId": "thread002",
+      "labelIds": ["INBOX"],
+      "payload": {
+        "mimeType": "text/plain",
+        "headers": [
+          {"name": "From", "value": "Joel Chelliah <joel@acme.org>"},
+          {"name": "Date", "value": "Tue, 11 Jun 2026 08:30:00 +0000"},
+          {"name": "Subject", "value": "AV equipment for Hall B session"},
+          {"name": "To", "value": "av@acme.org"}
+        ],
+        "body": {
+          "data": "Q2FuIHdlIGFsc28gZGlzY3VzcyB0aGUgcHJvamVjdG9yIHNldHVwIGZvciB0aGUgSGFsbCBCIHNlc3Npb24_IExhc3QgdGltZSBpdCBoYWQgaXNzdWVzLg=="
+        }
+      }
+    },
+    {
+      "id": "msg004",
+      "threadId": "thread002",
+      "labelIds": ["INBOX"],
+      "payload": {
+        "mimeType": "text/plain",
+        "headers": [
+          {"name": "From", "value": "AV Team <av@acme.org>"},
+          {"name": "Date", "value": "Tue, 11 Jun 2026 09:45:00 +0000"},
+          {"name": "Subject", "value": "Re: AV equipment for Hall B session"},
+          {"name": "To", "value": "joel@acme.org"}
+        ],
+        "body": {
+          "data": "U3VyZSwgSSB3aWxsIG1ha2Ugc3VyZSB0aGUgQVYgdGVhbSBjaGVja3MgdGhlIHByb2plY3RvciBpbiBIYWxsIEIgYmVmb3JlIFdlZG5lc2RheS4="
+        }
+      }
+    }
+  ]
+]

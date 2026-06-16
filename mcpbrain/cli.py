@@ -20,7 +20,7 @@ def main(argv=None):
     for name in ("daemon","mcp-server","auth","setup","update","tray","home",
                  "records-prune","records-health",
                  "session-start","session-end",
-                 "monitor","restore","fleet-report"):
+                 "monitor","restore","fleet-report","doctor"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -40,4 +40,5 @@ def main(argv=None):
         "restore": lambda: __import__("mcpbrain.restore", fromlist=["run_restore_main"]).run_restore_main(rest),
         "fleet-report": lambda: __import__(
             "mcpbrain.fleet_cli", fromlist=["main"]).main(rest),
+        "doctor": lambda: __import__("mcpbrain.doctor", fromlist=["run_doctor_main"]).run_doctor_main(rest),
     }[ns.cmd]()
