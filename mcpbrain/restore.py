@@ -102,13 +102,17 @@ def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) 
 
 
 def _escrow_folder(home: str) -> str:
-    """The escrow folder ID: config first, else the baked-in org default (so
-    detection works on a fresh machine before the wizard has written config)."""
+    """The escrow FOLDER id for the auto-restore convention.
+
+    Prefers fleet.escrow_folder_id, else the baked-in org default (so detection
+    works on a fresh machine before the wizard writes config). Deliberately does
+    NOT read backup.shared_drive_id — in legacy configs that is the Shared Drive
+    ROOT (the daemon's drive-root upload target), not the nested escrow folder.
+    """
     from mcpbrain import config as _cfg, org_defaults
     cfg = _cfg.read_config(home)
     return (
-        (cfg.get("backup") or {}).get("shared_drive_id")
-        or (cfg.get("fleet") or {}).get("escrow_folder_id")
+        (cfg.get("fleet") or {}).get("escrow_folder_id")
         or org_defaults.ESCROW_FOLDER_ID
     )
 
@@ -122,8 +126,10 @@ def detect_restorable(home: str, drive_service) -> dict:
     Never raises — degrades to available=False.
     """
     from mcpbrain import backup as _backup, config as _cfg
-    user_email = (_cfg.read_config(home).get("backup") or {}).get("user_id") \
-        or _cfg.owner_email(home)
+    # The escrow convention is email-keyed (snapshot subfolder <email>/ and
+    # <email>.key). Use the signed-in owner_email, NOT the legacy backup.user_id.
+    user_email = _cfg.owner_email(home) \
+        or (_cfg.read_config(home).get("backup") or {}).get("user_id")
     if not user_email:
         return {"available": False, "reason": "no account signed in yet"}
     folder = _escrow_folder(home)
