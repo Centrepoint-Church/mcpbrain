@@ -1,0 +1,15 @@
+[
+  {
+    "id": "evt-1",
+    "status": "confirmed",
+    "summary": "College planning with Joel",
+    "description": "Confirm Hall B availability for Wednesday college.",
+    "start": {"dateTime": "2026-06-10T09:00:00+08:00"},
+    "end": {"dateTime": "2026-06-10T10:00:00+08:00"},
+    "attendees": [
+      {"email": "sam@acme.org", "displayName": "Sam Admin"},
+      {"email": "joel@acme.org", "displayName": "Joel Chelliah"},
+      {"email": "room-hallb@acme.org", "displayName": "Hall B", "resource": true}
+    ]
+  }
+]
