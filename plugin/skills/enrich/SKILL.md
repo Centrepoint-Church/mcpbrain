@@ -7,17 +7,21 @@ description: Hourly email enrichment — reads the pending spool and writes stru
 
 Run once per hour as a Cowork Desktop Scheduled Task. Reads one pending batch from the enrichment spool and writes the extraction result.
 
-## Setup (run first)
-
-```bash
-home=$(mcpbrain home)
-```
-
 ## Protocol
 
-1. Check `$home/enrich_queue/pending.json`. If the file is absent or its `threads` list is empty, stop quietly — return `DONE: spool empty`.
-2. Process the batch using the extraction rules below.
-3. Write the result to `$home/enrich_inbox/<batch_id>.json` where `<batch_id>` is the `batch_id` field from the input, verbatim.
+Use the **MCP tools** — not shell or files. The mcpbrain MCP server runs natively
+on the host, so this works regardless of how Cowork sandboxes shell/code (which
+may run in an isolated VM that can't see the host's spool).
+
+1. Call **`brain_enrich_pull`**. If it returns `{"empty": true}`, stop quietly —
+   return `DONE: spool empty`. Otherwise it returns the batch: a `batch_id`, a
+   `threads` list, and a `context` block.
+2. Process every thread using the extraction rules below — one extraction object
+   per thread.
+3. Call **`brain_enrich_push`** with `batch_id` (verbatim from step 1),
+   `extractions` (the list you built), and `merge_answers` (`[]` unless the batch
+   asked for merge-review answers). The daemon drains the result on its next
+   cycle. Confirm the response is `{"written": true}`.
 4. Return a one-line status: `DONE: batch <id> — N threads enriched` or `ERROR: <reason>`.
 
 <!-- SHARED-EXTRACTION-RULES:BEGIN -->
