@@ -113,3 +113,39 @@ def test_action_needed_empty_when_all_ok(monkeypatch):
         for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
     })
     assert session_hooks._action_needed("/some/home") == ""
+
+
+def test_action_needed_caps_at_three_in_priority_order(monkeypatch):
+    # All six broken -> only the top 3 by priority survive: google, claude, records.
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "needs_action", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
+    block = session_hooks._action_needed("/some/home")
+    lines = block.splitlines()
+    assert lines[0] == "## ⚠️ Action needed"
+    body = lines[1:]
+    assert len(body) == 3  # capped
+    assert body[0] == "- Google sign-in expired → run: mcpbrain auth"
+    assert body[1] == "- Daemon/plugin not seen recently → run: mcpbrain doctor"
+    assert body[2] == "- Records repo problem → run: mcpbrain doctor"
+    # lower-priority remedies dropped
+    assert "ClickUp key invalid" not in block
+    assert "Enrichment stalled" not in block
+
+
+def test_action_needed_orders_subset(monkeypatch):
+    # Only enrichment + claude broken -> claude first (higher priority), enrichment second.
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        "google": {"state": "ok", "detail": "", "last_verified": None},
+        "claude": {"state": "needs_action", "detail": "", "last_verified": None},
+        "clickup": {"state": "ok", "detail": "", "last_verified": None},
+        "backup": {"state": "ok", "detail": "", "last_verified": None},
+        "records": {"state": "ok", "detail": "", "last_verified": None},
+        "enrichment": {"state": "needs_action", "detail": "", "last_verified": None},
+    })
+    body = session_hooks._action_needed("/some/home").splitlines()[1:]
+    assert body == [
+        "- Daemon/plugin not seen recently → run: mcpbrain doctor",
+        "- Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix",
+    ]
