@@ -1459,6 +1459,29 @@ def _backup_from_config(home):
     return (bc, interval_s)
 
 
+def _build_drive_service():
+    """Build a Drive v3 service from the user's OAuth token, or raise."""
+    from mcpbrain import auth
+    creds = auth.load_credentials()
+    return auth.build_service("drive", "v3", creds)
+
+
+def _maybe_merge_org_config(home) -> None:
+    """If fleet.folder_id is set, merge org-config into local config. Best-effort.
+
+    Never raises: a missing token or a Drive failure leaves local config intact.
+    The daemon NEVER calls an LLM here — this is pure Drive I/O.
+    """
+    if not (config.read_config(home).get("fleet") or {}).get("folder_id"):
+        return
+    try:
+        from mcpbrain import fleet
+        svc = _build_drive_service()
+        fleet.merge_org_config(home, svc)
+    except Exception as exc:  # noqa: BLE001 — org-config is best-effort
+        log.warning("org-config merge skipped: %s", exc)
+
+
 _CADENCE_DEFAULTS: dict[str, float] = {
     "communities_interval_s":    86400.0,
     "blocks_interval_s":         86400.0,
@@ -1542,6 +1565,7 @@ def main(argv=None) -> None:
     emb = get_embedder("bge-small")
     store = Store(config.store_path(), dim=emb.dim)
     store.init()
+    _maybe_merge_org_config(str(config.app_dir()))
     enrich_mode = config.enrich_mode(str(config.app_dir()))
     backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
     cadences = _cadences_from_config(str(config.app_dir()))
