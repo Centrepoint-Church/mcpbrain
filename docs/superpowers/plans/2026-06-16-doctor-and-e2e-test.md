@@ -1,5 +1,7 @@
 # Doctor + End-to-End Test Implementation Plan
 
+> **Session summary (2026-06-16):** Implemented in full on branch `worktree-doctor-e2e` via subagent-driven-development. PR #2 open at Centrepoint-Church/mcpbrain. All tasks complete: 13 commits, 1235 tests passing (1234 + maintenance/__init__.py fix), 4 e2e tests in 1.25s, ruff clean. Key decisions: injectable reprobe/agent_installed seams to avoid OS side effects in tests; enrichment double-count fixed via `enr_already_counted` guard; FTS populated via zero-vector `write_embedding` calls (no real ML model); `_run_full_loop` helper deduplicated the pipeline in e2e tests. Merge note: 2-line conflict with Spec 1 (fleet-report) in `mcpbrain/cli.py` — keep both entries on their own lines.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `mcpbrain doctor` (a pure-Python diagnose-and-auto-fix entrypoint that reuses the existing probes and agent-repair calls) plus a CI-runnable end-to-end test that drives the real sync→prepare→drain→graph+dashboard loop with only Google and the Cowork extractor stubbed.
