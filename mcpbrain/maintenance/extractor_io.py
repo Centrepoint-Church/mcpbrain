@@ -95,8 +95,8 @@ def claude_runner(prompt: str, *, model: str = "sonnet", timeout: int = 600,
     the Claude Code login, so a --bare headless call fails with "Not logged in".
     None of this changes extraction quality — the full prompt + bundled
     pending.json context still reach the model unchanged."""
-    from mcpbrain.draft import _find_claude
-    claude = claude_bin or _find_claude()
+    from mcpbrain import config as _config
+    claude = claude_bin or _config.find_claude()
     return subprocess.run(
         [claude, "--print", "--model", model, "--output-format", "json",
          "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',

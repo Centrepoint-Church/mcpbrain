@@ -30,7 +30,7 @@ from mcpbrain.contract import validate_batch_file
 # Separates the standing instructions from the input payload in the prompt.
 _DELIMITER = "\n\n=== pending.json ===\n\n"
 
-_PROMPT_PATH = Path(__file__).with_name("enrich_prompt.md")
+_PROMPT_PATH = Path(__file__).parent.parent / "enrich_prompt.md"
 
 
 def _home(home) -> Path:

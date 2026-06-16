@@ -307,42 +307,39 @@ def make_brain_memory_write():
     return brain_memory_write
 
 
-def make_brain_draft_reply(store, home: str):
-    async def brain_draft_reply(email_id: str, intent: str = "") -> dict:
-        """Draft an email reply using the 4-stage pipeline (pretrial → generate → critique → voice).
+def make_brain_draft_context(store, home: str):
+    async def brain_draft_context(email_id: str, intent: str = "") -> dict:
+        """Return context for drafting a reply (subject, body, sender, voice_rules, samples).
 
         email_id: message_id from email_context.
-        intent: optional override — 'reply' | 'acknowledge' | 'decline' | 'decide' | 'inform'.
-        Returns {draft_record_id, final_draft, critique, voice_issues, audience_tier} or {error}.
+        intent: optional — 'reply' | 'acknowledge' | 'decline' | 'decide' | 'inform'.
+        Returns context dict or {"error": "email not found"}.
+        """
+        from mcpbrain import draft as _draft
+        return _draft.draft_context(store, home, email_id, intent=intent)
+    return brain_draft_context
+
+
+def make_brain_draft_save(store, home: str):
+    async def brain_draft_save(email_id: str, thread_id: str, intent: str,
+                                final_draft: str, parent_draft_id: int | None = None) -> dict:
+        """Persist a completed draft to draft history.
+
+        Call after the Cowork skill has finished drafting.
+        Returns {"draft_record_id": <id>} or {"error": ...}.
         """
         try:
-            from mcpbrain import draft as _draft
-            return _draft.draft_email(store, home, email_id, intent=intent)
-        except ValueError as exc:
+            record_id = store.save_draft(
+                email_id=email_id, thread_id=thread_id, intent=intent,
+                audience_tier="", draft_text=final_draft, critique="",
+                voice_issues=[], samples_used=0, model="cowork",
+                parent_draft_id=parent_draft_id,
+            )
+            return {"draft_record_id": record_id}
+        except Exception as exc:
+            _log.exception("brain_draft_save failed for email_id=%r", email_id)
             return {"error": str(exc)}
-        except Exception:
-            _log.exception("brain_draft_reply failed for email_id=%r", email_id)
-            return {"error": "draft pipeline failed — check daemon log"}
-    return brain_draft_reply
-
-
-def make_brain_draft_refine(store, home: str):
-    async def brain_draft_refine(draft_record_id: int, refinement: str) -> dict:
-        """Refine an existing draft.
-
-        draft_record_id: id from a prior brain_draft_reply call.
-        refinement: 'warmer' | 'shorter' | 'firmer' | 'direct_about:<topic>'
-        Returns {draft_record_id, final_draft, critique, voice_issues, audience_tier} or {error}.
-        """
-        try:
-            from mcpbrain import draft as _draft
-            return _draft.refine_draft(store, home, draft_record_id, refinement)
-        except ValueError as exc:
-            return {"error": str(exc)}
-        except Exception:
-            _log.exception("brain_draft_refine failed for record_id=%r", draft_record_id)
-            return {"error": "refine pipeline failed — check daemon log"}
-    return brain_draft_refine
+    return brain_draft_save
 
 
 def main() -> None:  # stdio entry point, exercised manually + in P3 integration
@@ -372,8 +369,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
     home = str(config.app_dir())
     write_heartbeat(home)
-    draft_reply = make_brain_draft_reply(draft_store, home)
-    draft_refine = make_brain_draft_refine(draft_store, home)
+    draft_context_fn = make_brain_draft_context(draft_store, home)
+    draft_save_fn = make_brain_draft_save(draft_store, home)
     server = Server("mcpbrain")
 
     @server.list_resources()
@@ -583,40 +580,23 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 },
             ),
             types.Tool(
-                name="brain_draft_reply",
-                description=(
-                    "Draft an email reply using a 4-stage pipeline. "
-                    "Stages: pretrial+plan (intent, audience tier), generate, critique+revise, voice check. "
-                    "Returns draft_record_id for use with brain_draft_refine."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "email_id": {"type": "string",
-                                     "description": "message_id from email_context"},
-                        "intent": {"type": "string",
-                                   "description": "override intent: reply|acknowledge|decline|decide|inform",
-                                   "default": ""},
-                    },
-                    "required": ["email_id"],
-                },
+                name="brain_draft_context",
+                description="Get email context for drafting a reply (subject, body, sender, voice rules, thread samples). Returns context dict to use in the draft-reply skill.",
+                inputSchema={"type": "object", "properties": {
+                    "email_id": {"type": "string", "description": "message_id from email_context"},
+                    "intent": {"type": "string", "description": "optional intent override"},
+                }, "required": ["email_id"]},
             ),
             types.Tool(
-                name="brain_draft_refine",
-                description=(
-                    "Refine a draft from brain_draft_reply. "
-                    "Runs critique+revise+voice stages with a refinement instruction. "
-                    "Returns a new draft_record_id."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "draft_record_id": {"type": "integer"},
-                        "refinement": {"type": "string",
-                                       "description": "warmer | shorter | firmer | direct_about:<topic>"},
-                    },
-                    "required": ["draft_record_id", "refinement"],
-                },
+                name="brain_draft_save",
+                description="Persist a completed draft to draft history. Call after the Cowork draft-reply skill has finished. Returns draft_record_id.",
+                inputSchema={"type": "object", "properties": {
+                    "email_id": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "intent": {"type": "string"},
+                    "final_draft": {"type": "string", "description": "The finished draft text to save"},
+                    "parent_draft_id": {"type": "integer", "description": "optional: id of prior draft being replaced"},
+                }, "required": ["email_id", "thread_id", "intent", "final_draft"]},
             ),
         ]
 
@@ -696,16 +676,19 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 memory_type=arguments.get("memory_type", "project"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
-        if name == "brain_draft_reply":
-            out = await draft_reply(
+        if name == "brain_draft_context":
+            out = await draft_context_fn(
                 email_id=arguments.get("email_id", ""),
                 intent=arguments.get("intent", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
-        if name == "brain_draft_refine":
-            out = await draft_refine(
-                draft_record_id=arguments.get("draft_record_id", 0),
-                refinement=arguments.get("refinement", ""),
+        if name == "brain_draft_save":
+            out = await draft_save_fn(
+                email_id=arguments.get("email_id", ""),
+                thread_id=arguments.get("thread_id", ""),
+                intent=arguments.get("intent", ""),
+                final_draft=arguments.get("final_draft", ""),
+                parent_draft_id=arguments.get("parent_draft_id"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         results = await search(arguments["query"], arguments.get("limit", 10))

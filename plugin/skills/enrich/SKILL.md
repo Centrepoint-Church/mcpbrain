@@ -1,18 +1,24 @@
-# enrich-batch
+---
+name: mcpbrain-enrich
+description: Hourly email enrichment — reads the pending spool and writes structured knowledge extractions.
+---
 
-Single-batch enrichment subagent. Reads one pending batch from the spool, extracts structured knowledge from the email threads it contains, and writes the result to the inbox. Two files in, two files out — you touch nothing else.
+# mcpbrain Enrich
+
+Run once per hour as a Cowork Desktop Scheduled Task. Reads one pending batch from the enrichment spool and writes the extraction result.
+
+## Setup (run first)
+
+```bash
+home=$(mcpbrain home)
+```
 
 ## Protocol
 
-1. Read `~/.mcpbrain/enrich_queue/pending.json`.
-2. If the file is absent or its `threads` list is empty, return exactly: `DONE: spool empty`
-3. Process the batch using the rules below.
-4. Write the result to `~/.mcpbrain/enrich_inbox/<batch_id>.json` where `<batch_id>` is the `batch_id` field from the input, verbatim.
-5. Return a one-line status: `DONE: batch <id> — N threads enriched` or `ERROR: <reason>`
-
----
-
-## Enrichment rules
+1. Check `$home/enrich_queue/pending.json`. If the file is absent or its `threads` list is empty, stop quietly — return `DONE: spool empty`.
+2. Process the batch using the extraction rules below.
+3. Write the result to `$home/enrich_inbox/<batch_id>.json` where `<batch_id>` is the `batch_id` field from the input, verbatim.
+4. Return a one-line status: `DONE: batch <id> — N threads enriched` or `ERROR: <reason>`.
 
 <!-- SHARED-EXTRACTION-RULES:BEGIN -->
 ## The extraction envelope
