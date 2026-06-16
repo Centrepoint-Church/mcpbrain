@@ -173,7 +173,7 @@ The only required step is removing the user from Claude Team in claude.ai/settin
 ## Testing
 
 - `tests/test_fleet.py` — unit tests for `write_beacon` (mock Drive, assert JSON shape), `read_org_config` (missing file → `{}`; present → merged dict), `generate_report` (pure function, assert HTML contains user rows + colour classes + stale badge), org-config blocklist (blocklisted keys not applied)
-- `tests/test_agents_cadence_xplat.py` — assert beacon cadence present when `fleet.folder_id` set, absent when not
+- `tests/test_agents_cadence_xplat.py` — assert beacon cadence present when `fleet.folder_id` set, absent when not (Spec 1 owns this file; Spec 4 adds its Windows asserts in a separate new file to avoid collision)
 - `tests/test_backup_setup.py` — assert escrow write uses configured folder ID, not a Drive search
 - No integration test against live Drive — Drive calls are fully mockable at the `drive_service` boundary
 
@@ -187,4 +187,21 @@ The only required step is removing the user from Claude Team in claude.ai/settin
 4. Daemon: org-config read on startup
 5. Daemon: beacon cadence (agents.py + daemon wiring)
 6. CLI: `fleet-report` subcommand
-7. Install skill: document the fleet folder ID step for the admin pre-install checklist
+7. Install skill (`plugin/skills/install/SKILL.md`): **all** edits to this file land here — (a) the fleet folder ID note, and (b) the onboarding copy delegated from Spec 4 #9 (Cowork "My Brain" project: exact name + instructions + the resolved `mcpbrain home` working-folder path as a single copy-paste). Consolidating both here keeps Spec 1 the sole editor of this file so the parallel worktrees never collide.
+
+---
+
+## Dependencies (for parallel-worktree execution)
+
+**Files this worktree owns exclusively:** `mcpbrain/fleet.py` (new), `mcpbrain/daemon.py`, `mcpbrain/backup_setup.py`, `mcpbrain/wizard/index.html`, `mcpbrain/control_api.py` (if the enable endpoint needs the folder ID), new `tests/test_fleet.py`.
+
+**Files SHARED with another spec (expect a small merge conflict):**
+- `mcpbrain/cli.py` — Spec 1 adds the `fleet-report` subcommand; **Spec 3 adds `doctor`** to the same registration tuple + dispatch dict. Whichever merges second resolves a ~2-line conflict. No logic dependency — the adds are independent.
+- `mcpbrain/agents.py` + `tests/test_agents_cadence_xplat.py` — owned by Spec 1 (beacon cadence). **Spec 4 deliberately does NOT extend this test file** (its Windows asserts live in a new file), so there is no conflict here despite the roadmap's original plan.
+- `plugin/skills/install/SKILL.md` — **Spec 1 is the sole editor**; it carries Spec 4 #9's onboarding paragraph. Spec 4 does not touch this file.
+
+**Depends on other specs' new code:** none. Builds entirely against current 0.0.6.
+
+**Provides to other specs:** the consolidated `install/SKILL.md` edit (carries Spec 4's onboarding copy). No code symbols are consumed by other specs.
+
+**Shared read-only:** `probes.all_connections` (also read by Specs 2 + 3; none of the three modify `probes.py`).
