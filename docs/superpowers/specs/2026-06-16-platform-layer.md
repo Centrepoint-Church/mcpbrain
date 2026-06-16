@@ -28,7 +28,7 @@ Every mcpbrain install is an island. The maintainer has no cross-user visibility
 **Non-code prerequisite (DONE):**
 Both Shared Drive subfolders exist on the Centrepoint Shared Drive:
 - `mcpbrain-fleet/` — folder ID `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o` → ships as the pre-filled default for `fleet.folder_id`.
-- `mcpbrain-escrow/` — folder ID `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi` → ships as the pre-filled default for `backup.shared_drive_id` (replaces the personal-Drive auto-create bug).
+- `mcpbrain-escrow/` — folder ID `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi` → ships as the pre-filled default for `fleet.escrow_folder_id` (consumed by the backup-enable flow, replacing the personal-Drive auto-create bug).
 
 ---
 
@@ -51,17 +51,18 @@ The folder ID is stored in per-user config as `fleet.folder_id`. If absent, all 
 
 ### Config changes
 
-`config.json` gains a `fleet` block:
+`config.json` gains a `fleet` block holding **both** Shared Drive folder IDs:
 
 ```json
 {
   "fleet": {
-    "folder_id": "<Drive folder ID for mcpbrain-fleet subfolder>"
+    "folder_id": "<Drive folder ID for mcpbrain-fleet subfolder>",
+    "escrow_folder_id": "<Drive folder ID for mcpbrain-escrow subfolder>"
   }
 }
 ```
 
-Set during `mcpbrain setup` (wizard). The existing `backup.shared_drive_id` field continues to hold the escrow folder ID — but is fixed to point at the Shared Drive subfolder instead of the personal Drive folder it currently creates (a pre-existing bug).
+Both are set during `mcpbrain setup` (wizard). **Config-merge safety:** `config.write_config` is a shallow merge (nested dicts are replaced wholesale), so to avoid two writers clobbering each other, the **wizard is the sole writer of the `fleet` block** (posts both keys together) and `backup_setup.enable_backup` only *reads* `fleet.escrow_folder_id` — it writes the runtime value into the existing `backup.shared_drive_id` field (fixing the pre-existing bug where it auto-created a personal-Drive folder). So the `fleet` block is the source of truth set by the wizard; `backup.shared_drive_id` is the derived runtime value.
 
 ---
 
@@ -117,14 +118,14 @@ New `fleet-report` subcommand. Builds `drive_service` from the user's OAuth toke
 
 ### `mcpbrain/backup_setup.py` (modified)
 
-`_resolve_shared_drive()` currently searches the user's personal Drive for a folder named `mcpbrain-escrow` — this is a bug. Fix: use `fleet.escrow_folder_id` from config (set during wizard setup) instead of a Drive search. `_escrow_key_to_drive` uploads to that folder with `supportsAllDrives=True` so it reaches the Shared Drive.
+`_resolve_shared_drive()` currently searches the user's personal Drive for a folder named `mcpbrain-escrow` — this is a bug. Fix: read `fleet.escrow_folder_id` from config (set during wizard setup) instead of a Drive search, and write the resolved value into `backup.shared_drive_id`. `_escrow_key_to_drive` uploads to that folder with `supportsAllDrives=True` so it reaches the Shared Drive. If `fleet.escrow_folder_id` is unset, raise a clear error.
 
 ### Wizard `index.html` (modified)
 
 New optional "Fleet setup" section below backup:
 - "Fleet folder ID" text input → saved to `fleet.folder_id`, **pre-filled with the org default** `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o` so a Centrepoint user just clicks through; editable/clearable for non-org installs.
 - Help text: "This is the Centrepoint mcpbrain-fleet folder. Leave as-is, or clear it if you're not part of the org fleet."
-- The existing "Enable backup" flow is updated to use the `mcpbrain-escrow` subfolder ID (saved to `backup.shared_drive_id`), **pre-filled with the org default** `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi`, rather than auto-creating a personal Drive folder.
+- An "Escrow folder ID" input → saved to `fleet.escrow_folder_id`, **pre-filled with the org default** `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi`. The wizard posts both fleet keys together (sole writer of the `fleet` block). The "Enable backup" flow then reads `fleet.escrow_folder_id` instead of auto-creating a personal Drive folder.
 
 ---
 
