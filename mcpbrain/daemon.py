@@ -1372,6 +1372,9 @@ class Daemon:
                 # Five periodic maintenance passes in spec order (§54, §165).
                 # communities first (lint reads fresh entity_communities).
                 self._run_periodic_passes()
+                # Stamp the daemon's own liveness so the fleet beacon (written by
+                # a separate process) reports real daemon health, not cached probes.
+                write_daemon_heartbeat(str(config.app_dir()))
                 if self._pending_update or self._stop.is_set():
                     break
                 # Block until woken (sync_now/stop) or the interval elapses.
@@ -1383,6 +1386,24 @@ class Daemon:
                 upd.update_from_index(upd._index_url())  # uv install + restart, lock released
             except Exception as exc:  # noqa: BLE001
                 log.error("auto-update install failed: %s", exc)
+
+
+def write_daemon_heartbeat(home) -> None:
+    """Persist the daemon's last-cycle timestamp to ``daemon_heartbeat.json``.
+
+    The fleet beacon is written by a SEPARATE process (the hourly
+    ``mcpbrain fleet-report --beacon`` job), so without this it could only report
+    cached probe state — a dead daemon would still look healthy. This file is the
+    daemon's own liveness signal: the beacon reads it so the fleet report can
+    distinguish "daemon alive" from "beacon job alive" from "offboarded".
+    """
+    from datetime import datetime, timezone
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (Path(home) / "daemon_heartbeat.json").write_text(
+            json.dumps({"last_cycle": stamp}))
+    except OSError as exc:
+        log.warning("daemon heartbeat write failed (continuing): %s", exc)
 
 
 def maybe_restore_on_first_run(store, home) -> bool:
