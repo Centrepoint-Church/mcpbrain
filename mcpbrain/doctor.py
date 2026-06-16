@@ -79,10 +79,13 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         agents.install_agent(platform, mcpbrain_bin=mcpbrain_bin, home=home)
 
     def _repair_records():
+        # Pass profile so ensure_records_repo renders the CLAUDE.md + context/
+        # reference templates, not just the git scaffold anchors.
         records.ensure_records_repo(
             config.records_dir(home),
             git_name=config.owner_full_name(home) or "mcpbrain",
             git_email=config.owner_email(home) or "mcpbrain@localhost",
+            profile=config.read_config(home),
         )
 
     return {"daemon": _repair_daemon, "agent": _repair_agent, "records": _repair_records}
@@ -132,7 +135,14 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         label = disp["label"]
 
         if not _is_problem(key, state):
-            lines.append(f"✅ {label:<16} {probe.get('detail') or 'OK'}")
+            # Distinguish "configured + healthy" (✅) from "deliberately not set
+            # up" (➖). A green ✅ next to "Not connected" / "Backup off" reads as
+            # working to a non-technical user, which it is not.
+            if state == "not_started":
+                lines.append(f"➖ {label:<16} {probe.get('detail') or 'Not set up'} "
+                             f"(optional — not configured)")
+            else:
+                lines.append(f"✅ {label:<16} {probe.get('detail') or 'OK'}")
             continue
 
         if disp["kind"] == "auto" and state in _FAIL_STATES:
@@ -158,7 +168,8 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                 need_action += 1
                 continue
             if not _is_problem(key, new_state):
-                lines.append(f"❌ {label:<16} {probe.get('detail')} → restarting... ✅ fixed")
+                action = "re-registering agent" if repair_key == "agent" else "restarting"
+                lines.append(f"❌ {label:<16} {probe.get('detail')} → {action}... ✅ fixed")
                 fixed += 1
             else:
                 lines.append(f"❌ {label:<16} {probe.get('detail')} → repair did not fix it; "
