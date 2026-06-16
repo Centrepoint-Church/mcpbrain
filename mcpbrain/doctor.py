@@ -113,8 +113,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
     platform = platform or _platform()
     mcpbrain_bin = mcpbrain_bin or _mcpbrain_bin()
-    reprobe = reprobe or _reprobe
-    agent_installed = agent_installed or _agent_installed
+    if reprobe is None:
+        reprobe = _reprobe
+    if agent_installed is None:
+        agent_installed = _agent_installed
     if conns is None:
         conns = probes.all_connections(home)
     if repairs is None:
@@ -143,6 +145,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             else:
                 repair_key = disp["repair"]
             repair = repairs.get(repair_key)
+            if repair is None:
+                lines.append(f"❌ {label:<16} no repair registered for '{repair_key}'")
+                need_action += 1
+                continue
             try:
                 repair()
                 new_probe = reprobe(home, key, probe)
@@ -162,6 +168,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
         if key == "records" and state == "not_started":
             repair = repairs.get("records")
+            if repair is None:
+                lines.append(f"❌ {label:<16} no repair registered for 'records'")
+                need_action += 1
+                continue
             try:
                 repair()
                 new_probe = reprobe(home, "records", probe)
@@ -183,13 +193,15 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
+    enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
     if enr == "ok":
         lines.append("✅ Scheduled tasks  enrichment fresh ⇒ enrich task firing")
     else:
         lines.append("⚠️  Scheduled tasks  not directly checkable → "
                      "run /mcpbrain-fix in Cowork to recreate the enrich/gardener/"
                      "meeting-packs/reference-gardener tasks")
-        need_action += 1
+        if not enr_already_counted:
+            need_action += 1
 
     header = (f"mcpbrain doctor — {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC   "
               f"(home: {home})")
