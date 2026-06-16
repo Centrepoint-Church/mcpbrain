@@ -197,6 +197,18 @@
       <button class="primary" id="enable-backup-btn" onclick="enableBackup()">Enable backup</button>
       <span id="backup-status" class="badge idle hidden"></span>
     </div>
+    <details class="sub">
+      <summary>Fleet setup (Centrepoint org)</summary>
+      <p class="desc">This is the Centrepoint mcpbrain-fleet folder. Leave as-is, or clear it if you're not part of the org fleet.</p>
+      <label>Fleet folder ID
+        <input id="fleet_folder_id" type="text" value="1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o">
+      </label>
+      <label>Escrow folder ID (backup key)
+        <input id="fleet_escrow_folder_id" type="text" value="1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi">
+      </label>
+      <button class="primary" type="button" onclick="saveFleet()">Save fleet settings</button>
+      <span id="fleet-status" class="badge idle hidden"></span>
+    </details>
   </section>
 
   <section id="step-status" class="card">
@@ -438,6 +450,21 @@ async function enableBackup(){
   }
 }
 
+async function saveFleet(){
+  // The fleet block is shallow-merged server-side, so always post BOTH keys
+  // together — a partial post would wipe the other. Empty strings clear a key.
+  const body = {fleet: {
+    folder_id: $("fleet_folder_id").value.trim(),
+    escrow_folder_id: $("fleet_escrow_folder_id").value.trim(),
+  }};
+  try{
+    await P("/api/config", body);
+    badge("fleet-status", "Saved", "ok"); $("fleet-status").classList.remove("hidden");
+  }catch(e){
+    badge("fleet-status", "Could not save", "wait"); $("fleet-status").classList.remove("hidden");
+  }
+}
+
 $("enrich-history-btn").addEventListener("click", async () => {
   $("enrich-state").textContent = "Starting…";
   try{ await P("/api/enrich-backfill/start"); $("enrich-state").textContent = "Running in background…"; }
@@ -507,6 +534,9 @@ async function prefillFromConfig(){
     $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
   if(c.project_instructions) $("proj-instructions").textContent = c.project_instructions;
+  const fleet = c.fleet || {};
+  if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;
+  if(fleet.escrow_folder_id !== undefined && fleet.escrow_folder_id !== "") $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
   await populateTimezones(c.timezone || "");
 }
 prefillFromConfig();
