@@ -41,11 +41,33 @@ Complete Google sign-in, identity, and timezone in the wizard.
 
 **Enable backup:** In the wizard, click **Enable backup**. This generates an encryption key, escrows a copy to the shared Drive folder, and starts hourly encrypted snapshots. Strongly recommended — it is the recovery path if you lose this machine.
 
-### 4. Run the bootstrap interview
+**Fleet (Centrepoint org):** The wizard's **Fleet setup** section is pre-filled with the Centrepoint `mcpbrain-fleet` and `mcpbrain-escrow` folder IDs. Leave them as-is to join the org fleet (your install writes an hourly health beacon the maintainer can see in the fleet status report), or clear them if you're not part of the org. The escrow folder ID is also where your backup key is stored, so leave it set if you enable backup.
+
+### 4. Create the "My Brain" Cowork project
+
+**Project creation is a manual Cowork step by design** — the project and its instructions live in the Cowork desktop app's database, which plugins cannot register. Do this once by hand; it does not need re-investigating.
+
+First resolve your brain home path — you will paste it as the project's working folder:
+
+```bash
+mcpbrain home
+```
+
+This prints an absolute path, e.g. `/Users/yourname/Library/Application Support/mcpbrain` (the folder is created during setup; this just shows you where it is). In Cowork, create a new project:
+
+- **Project name:** `My Brain`
+- **Working folder:** paste the exact path printed by `mcpbrain home` above.
+- **Project instructions** (paste verbatim):
+
+> You are working inside my personal brain. Use the mcpbrain tools (`brain_search`, `brain_actions`, `brain_context`, `brain_read`, `brain_note`, `brain_decision`) to ground every answer in what the brain already knows before responding. When I tell you something worth remembering, write it back with `brain_note` or `brain_memory_write`. Treat the working folder as my records repo — read CLAUDE.md and the records there for context.
+
+All recurring brain work runs as Cowork Desktop Scheduled Tasks on your Claude subscription — no Anthropic API and no background Claude CLI.
+
+### 5. Run the bootstrap interview
 
 Run the **`mcpbrain-bootstrap`** skill. This is a one-time interview that seeds your initial world-model: your orgs, projects, systems, writing voice, and working preferences. It writes the answers into your records repo so the brain understands context from day one.
 
-### 5. Open Claude at login
+### 6. Open Claude at login
 
 Tell the user: **Set Claude to open at login so your scheduled tasks run automatically.**
 
@@ -54,7 +76,7 @@ Tell the user: **Set Claude to open at login so your scheduled tasks run automat
 
 Note: Cowork Desktop Scheduled Tasks run only while Claude is open and the machine is awake. Opening at login ensures the hourly enrichment task fires each morning.
 
-### 6. Create four Desktop Scheduled Tasks
+### 7. Create four Desktop Scheduled Tasks
 
 First, resolve and show the user their brain home path — they will paste it into each task's working-folder field:
 
@@ -75,7 +97,7 @@ In Cowork, create four **Desktop Scheduled Tasks** (Settings → Scheduled Tasks
 
 These tasks are **subscription-only** — they run in your Claude session. No API key, no background CLI process.
 
-### 7. Reload plugins
+### 8. Reload plugins
 
 ```
 /reload-plugins
