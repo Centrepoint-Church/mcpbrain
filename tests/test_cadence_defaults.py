@@ -1,5 +1,5 @@
 import json
-from mcpbrain.daemon import _cadences_from_config, _CADENCE_DEFAULTS
+from mcpbrain.daemon import _cadences_from_config
 
 
 def test_empty_config_yields_defaults(tmp_path):

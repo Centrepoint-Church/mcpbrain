@@ -16,7 +16,9 @@ def test_mcp_json_points_at_shim():
     cmd = d["mcpServers"]["mcpbrain"]["command"]
     assert "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-mcp" in cmd
 
-import subprocess, os, stat
+import subprocess
+import os
+import stat
 
 def test_shims_executable():
     for name in ("mcpbrain-mcp", "mcpbrain-monitor"):
