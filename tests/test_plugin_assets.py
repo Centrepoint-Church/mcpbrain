@@ -60,14 +60,18 @@ def test_gardener_skill_has_content():
 def test_meeting_packs_skill_exists():
     assert (_PLUGIN / "skills" / "meeting-packs" / "SKILL.md").exists()
 
-def test_meeting_packs_skill_resolves_home():
+def test_meeting_packs_skill_uses_host_native_mcp_tools():
+    # Routed through MCP (host-native) instead of curl-to-localhost, which the
+    # Cowork VM isolates. No shell/curl dependency on the host.
     b = _read("skills/meeting-packs/SKILL.md")
-    assert "mcpbrain home" in b
+    assert "brain_meetings_today" in b
+    assert "brain_meeting_pack_get" in b
+    assert "brain_meeting_pack_upsert" in b
 
 def test_meeting_packs_skill_has_content():
     b = _read("skills/meeting-packs/SKILL.md")
     assert len(b) > 1500  # full port, not a stub
-    assert "meeting-packs/upsert" in b  # control API
+    assert "context_hash" in b  # change detection
     assert "brain_search" in b  # MCP tool usage
 
 def test_draft_reply_skill_exists():
