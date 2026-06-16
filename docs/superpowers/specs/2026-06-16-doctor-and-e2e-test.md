@@ -132,3 +132,20 @@ The e2e test *is* the test. Guard against it silently passing on a no-op: assert
 ## Sequencing
 
 Doctor and e2e are independent and can be built in either order. Suggested: doctor first (smaller, immediately useful for support), then the e2e harness (locks the seams doctor diagnoses).
+
+---
+
+## Dependencies (for parallel-worktree execution)
+
+**Files this worktree owns exclusively:** `mcpbrain/doctor.py` (new), new `tests/test_doctor.py`, new `tests/e2e/*` (incl. `conftest.py` + fixtures), and the CI workflow file (no other spec edits CI).
+
+**Files SHARED with another spec (expect a small merge conflict):**
+- `mcpbrain/cli.py` — Spec 3 adds the `doctor` subcommand; **Spec 1 adds `fleet-report`** to the same registration tuple + dispatch dict. Whichever merges second resolves a ~2-line conflict. No logic dependency.
+
+**Depends on other specs' new code:** none. `doctor` reuses `probes` + `agents` + the records-bootstrap helper, all of which exist in current 0.0.6. Builds without Specs 1/2/4.
+
+**Provides to other specs:** the `mcpbrain doctor` subcommand + `/mcpbrain-fix` skill that **Spec 2's remedy strings reference**. Important: this is a one-way, text-only reference — Spec 2 does **not** import or call anything here, so Spec 3 has **no** reciprocal dependency on Spec 2 and the two can merge in any order. (If Spec 3 lands first, Spec 2's remedies are immediately runnable; if second, they light up on merge.)
+
+**Shared read-only:** `probes.all_connections` (also read by Specs 1 + 2; none modify `probes.py`).
+
+**Merge note:** only collision is the `cli.py` 2-liner with Spec 1.

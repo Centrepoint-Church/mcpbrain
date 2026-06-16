@@ -92,7 +92,7 @@ A Windows clean-machine validation checklist mirroring the macOS hard gate (C3 i
 Fix any gaps found (likely candidates: PATH/uv-shim differences, `mcpbrain home` resolution, schtasks arg quoting).
 
 ### Code deliverable
-- **`tests/test_agents_cadence_xplat.py`** (extend): assert the win32 schtasks arg lists for the daemon, tray, prune, and health cadences are well-formed (the cross-platform paths are exercised in CI even though the live validation is manual).
+- **`tests/test_agents_windows_xplat.py`** (**new file** — deliberately not extending `test_agents_cadence_xplat.py`, which Spec 1 also touches, so the two worktrees never collide): assert the win32 schtasks arg lists for the daemon, tray, prune, and health cadences are well-formed (the cross-platform paths are exercised in CI even though the live validation is manual).
 
 ### Dependency
 - Requires a Windows machine + a non-author Centrepoint Google account. Manual gate; cannot be fully automated.
@@ -114,11 +114,11 @@ Fix any gaps found (likely candidates: PATH/uv-shim differences, `mcpbrain home`
 3. **Document the manual reality.** State plainly in the skill that project creation is a manual Cowork step by design, so it isn't re-investigated later.
 
 ### Components
-- **Modified `plugin/skills/install/SKILL.md`:** the project-creation step shows the resolved `mcpbrain home` path inline and presents name + instructions as a single copy-paste.
-- **Setup** already creates `mcpbrain home`; add an explicit existence guarantee + path echo if not already surfaced.
+- **`plugin/skills/install/SKILL.md` edit is OWNED BY Spec 1**, not this worktree. To keep the two parallel sessions collision-free, all `install/SKILL.md` edits (Spec 1's fleet-folder note **and** this onboarding copy) are made in Spec 1's worktree. This spec contributes the *content* of the onboarding paragraph (project name + instructions + resolved `mcpbrain home` working-folder path as a single copy-paste); Spec 1 lands the actual file change. **This worktree does not touch `install/SKILL.md`.**
+- **Setup** already creates `mcpbrain home`; if an explicit existence guarantee / path echo is needed it goes in `mcpbrain/setup.py` (not touched by any other spec — safe here).
 
 ### Flag
-No Cowork API dependency remains — this part is **documentation + a path echo**, not a capability spike.
+No Cowork API dependency remains — this part is **documentation + a path echo**, not a capability spike. Its only cross-spec tie is the delegated `install/SKILL.md` edit (see Dependencies).
 
 ---
 
@@ -126,5 +126,21 @@ No Cowork API dependency remains — this part is **documentation + a path echo*
 
 1. **Retrieval scores + eval** (self-contained, immediately measurable).
 2. **Calendar → person context** (self-contained, pure-data graph writes).
-3. **Onboarding** (cheap; install-skill copy + working-folder path echo — no spike).
+3. **Onboarding** (cheap; setup path echo here, install-skill copy delegated to Spec 1).
 4. **Windows validation** (needs hardware; do last, after the above land so the runbook tests the full current build).
+
+---
+
+## Dependencies (for parallel-worktree execution)
+
+**Files this worktree owns (no other spec touches them):** `mcpbrain/retrieval.py`, `mcpbrain/mcp_server.py`, `mcpbrain/sync/calendar.py`, `mcpbrain/setup.py`, new `tests/eval/*`, new `tests/test_calendar_graph.py`, new `tests/test_agents_windows_xplat.py`.
+
+**Does NOT touch:** `plugin/skills/install/SKILL.md` (delegated to Spec 1) and `tests/test_agents_cadence_xplat.py` (Spec 1's; Windows asserts live in the new file above).
+
+**Depends on other specs' new code:** none. Every part of this spec builds against the **current 0.0.6 codebase** and needs nothing from Specs 1/2/3 to compile, test, or run.
+
+**Provides to other specs:** nothing required by them.
+
+**Shared read-only:** none. (Unlike Specs 1/2/3, this spec does not read `probes`.)
+
+**Merge note:** fully independent — can be built and merged in any order relative to the other three. The only cross-spec coordination is that Spec 1 carries this spec's onboarding paragraph into `install/SKILL.md`.

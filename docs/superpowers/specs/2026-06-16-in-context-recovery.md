@@ -95,3 +95,20 @@ The exact remedy strings live in a single `_REMEDIES` dict in `session_hooks.py`
 - Proactive daily brief (#1) — dropped.
 - A push/notification channel beyond the session hook.
 - Auto-repair — that's `mcpbrain doctor` (separate spec); here we only *surface* + point at the remedy.
+
+---
+
+## Dependencies (for parallel-worktree execution)
+
+**Files this worktree owns exclusively:** `mcpbrain/session_hooks.py`, `tests/test_session_hooks.py`. Nothing else. This spec is the most isolated of the four.
+
+**Depends on other specs' new code: NONE — and this is a hard rule.**
+- The remedy strings reference `mcpbrain doctor` (created by **Spec 3**) and `/mcpbrain-fix` (Cowork skill). These are emitted as **plain text only**. This worktree must **NOT** import `mcpbrain.doctor`, must **NOT** call it, and must **NOT** assert in tests that `mcpbrain doctor` is runnable or even exists. Printing a string that names a command does not require that command to exist at build time.
+- `mcpbrain auth` (referenced for the Google remedy) **already exists** in the current 0.0.6 `cli.py` — safe to name.
+- Consequence: this spec compiles, tests green, and merges **before, after, or without** Spec 3. The remedy lines simply become runnable once Spec 3's `doctor` lands; until then they still correctly tell the user what to do (and `mcpbrain auth` works immediately).
+
+**Provides to other specs:** nothing.
+
+**Shared read-only:** `probes.all_connections` (also read by Specs 1 + 3; none modify `probes.py`).
+
+**Merge note:** zero file collisions with any other spec. Mergeable in any order.
