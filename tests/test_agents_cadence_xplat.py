@@ -38,3 +38,35 @@ def test_gardener_and_meeting_packs_generators_removed():
     import mcpbrain.agents as agents
     for n in ("records_gardener_plist","meeting_packs_plist","gardener_schtasks_args","meeting_packs_schtasks_args"):
         assert not hasattr(agents, n)
+
+
+def test_launchd_beacon_calls_subcommand_hourly(tmp_path):
+    plist = agents.fleet_beacon_plist(
+        mcpbrain_bin="/usr/local/bin/mcpbrain", mcpbrain_home="/h")
+    assert "fleet-report" in plist and "--beacon" in plist
+    assert "/bin/sh" not in plist
+    # hourly via StartInterval (3600s) — not a calendar time
+    assert "<integer>3600</integer>" in plist
+    assert "StartInterval" in plist
+
+
+def test_schtasks_beacon_hourly():
+    a = agents.fleet_beacon_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe")
+    assert "/sc" in a and "hourly" in a
+    assert any("fleet-report" in x and "--beacon" in x for x in a)
+
+
+def test_cadence_specs_include_beacon_only_when_fleet_configured():
+    # _cadence_specs is the pure (label, thunk) builder the OS installers iterate;
+    # it gates the beacon on fleet config without invoking launchctl/schtasks.
+    specs_on = agents._cadence_specs(home_fleet_configured=True,
+                                     mcpbrain_bin="/x", home="/h")
+    labels_on = [label for label, _ in specs_on]
+    assert agents._FLEET_BEACON_LABEL in labels_on
+    # the beacon thunk renders a valid plist
+    beacon_thunk = dict(specs_on)[agents._FLEET_BEACON_LABEL]
+    assert "fleet-report" in beacon_thunk()
+
+    specs_off = agents._cadence_specs(home_fleet_configured=False,
+                                      mcpbrain_bin="/x", home="/h")
+    assert agents._FLEET_BEACON_LABEL not in [label for label, _ in specs_off]
