@@ -92,3 +92,24 @@ def test_action_needed_single_google(monkeypatch):
     assert "Google sign-in expired → run: mcpbrain auth" in block
     # only one remedy line
     assert block.count("\n- ") == 1
+
+
+def test_action_needed_ignores_not_started(monkeypatch):
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        "google": {"state": "ok", "detail": "", "last_verified": None},
+        "claude": {"state": "ok", "detail": "", "last_verified": None},
+        # never configured -> must NOT produce a line
+        "clickup": {"state": "not_started", "detail": "", "last_verified": None},
+        "backup": {"state": "not_started", "detail": "", "last_verified": None},
+        "records": {"state": "ok", "detail": "", "last_verified": None},
+        "enrichment": {"state": "ok", "detail": "", "last_verified": None},
+    })
+    assert session_hooks._action_needed("/some/home") == ""
+
+
+def test_action_needed_empty_when_all_ok(monkeypatch):
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "ok", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
+    assert session_hooks._action_needed("/some/home") == ""
