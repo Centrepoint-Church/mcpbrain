@@ -7,6 +7,7 @@ errors are logged and swallowed so a failed beacon never affects the daemon.
 from __future__ import annotations
 
 import html as _html
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -98,3 +99,59 @@ th,td{{border:1px solid #ddd;padding:6px 10px;text-align:left;}}
 </tbody></table>
 </body></html>
 """
+
+
+def _find_file_id(drive_service, folder_id: str, name: str):
+    """Return the id of ``name`` in ``folder_id`` (Shared-Drive aware), or None."""
+    resp = drive_service.files().list(
+        q=f"name='{name}' and '{folder_id}' in parents and trashed=false",
+        fields="files(id,name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def _upload_text(drive_service, folder_id: str, name: str, text: str, mimetype: str) -> None:
+    """Create or update ``name`` in ``folder_id`` with ``text`` (Shared-Drive aware)."""
+    from googleapiclient.http import MediaInMemoryUpload
+    media = MediaInMemoryUpload(text.encode("utf-8"), mimetype=mimetype)
+    existing = _find_file_id(drive_service, folder_id, name)
+    if existing:
+        drive_service.files().update(
+            fileId=existing, media_body=media, supportsAllDrives=True,
+        ).execute()
+    else:
+        meta = {"name": name, "parents": [folder_id]}
+        drive_service.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True,
+        ).execute()
+
+
+def write_beacon(home, drive_service) -> None:
+    """Build this install's health beacon and upload it as ``<owner_email>.json``.
+
+    Payload = ``probes.all_connections(home)`` plus ``user_email``,
+    ``mcpbrain_version``, ``reported_at`` (UTC ISO, trailing Z). All errors are
+    logged and swallowed — a failed beacon write never affects the daemon.
+    """
+    try:
+        from mcpbrain import __version__, config, probes
+        folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+        if not folder_id:
+            return  # fleet not configured -> silently skip
+        email = config.owner_email(home)
+        if not email:
+            return
+        payload = {
+            "user_email": email,
+            "mcpbrain_version": __version__,
+            "reported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "probes": probes.all_connections(home),
+        }
+        _upload_text(drive_service, folder_id, f"{email}.json",
+                     json.dumps(payload, indent=2), "application/json")
+        log.info("fleet beacon written for %s", email)
+    except Exception as exc:  # noqa: BLE001 — beacon failure must never crash the daemon
+        log.warning("fleet beacon write failed (swallowed): %s", exc)
