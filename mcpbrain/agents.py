@@ -302,6 +302,7 @@ def _restart_schtasks_tray() -> None:  # pragma: no cover
 
 _PRUNE_LABEL = "com.mcpbrain.records.prune"
 _HEALTH_LABEL = "com.mcpbrain.records.context-health"
+_FLEET_BEACON_LABEL = "com.mcpbrain.fleet.beacon"
 
 
 def _calendar_plist(
@@ -395,6 +396,47 @@ def records_context_health_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> st
     )
 
 
+def fleet_beacon_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
+    """Return a launchd plist: `mcpbrain fleet-report --beacon` every hour.
+
+    Uses StartInterval (3600s) rather than a calendar time so the beacon fires
+    roughly hourly regardless of wall-clock; RunAtLoad catches up a run missed
+    while powered off."""
+    label = _FLEET_BEACON_LABEL
+    log_path = f"{mcpbrain_home}/{label}.log"
+    err_path = f"{mcpbrain_home}/{label}.err"
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{_xml_escape(mcpbrain_bin)}</string>
+        <string>fleet-report</string>
+        <string>--beacon</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MCPBRAIN_HOME</key>
+        <string>{_xml_escape(mcpbrain_home)}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{err_path}</string>
+</dict>
+</plist>
+"""
+
+
 def _cadence_schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str,
                            schedule: list[str]) -> list[str]:
     quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
@@ -416,9 +458,35 @@ def health_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
                                   schedule=["/sc", "weekly", "/d", "MON", "/st", "07:00"])
 
 
+def fleet_beacon_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+    """Return schtasks args to run `mcpbrain fleet-report --beacon` hourly."""
+    quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
+    return ["schtasks", "/create", "/tn", "mcpbrain-fleet-beacon",
+            "/sc", "hourly", "/tr", f"{quoted} fleet-report --beacon", "/f"]
+
+
 # ---------------------------------------------------------------------------
 # Cross-platform cadence install dispatcher
 # ---------------------------------------------------------------------------
+
+def _fleet_configured(home: str) -> bool:
+    from mcpbrain import config
+    return bool((config.read_config(home).get("fleet") or {}).get("folder_id"))
+
+
+def _cadence_specs(*, home_fleet_configured: bool, mcpbrain_bin: str, home: str):
+    """The (label, plist-thunk) pairs to install on launchd. The beacon pair is
+    included only when fleet.folder_id is configured."""
+    specs = [
+        (_PRUNE_LABEL, lambda: records_prune_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
+        (_HEALTH_LABEL, lambda: records_context_health_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
+    ]
+    if home_fleet_configured:
+        specs.append(
+            (_FLEET_BEACON_LABEL,
+             lambda: fleet_beacon_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)))
+    return specs
+
 
 def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
     """Schedule cadences for the given OS.
@@ -439,10 +507,9 @@ def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragm
     from pathlib import Path
     agents_dir = Path.home() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
-    for label, plist_fn in [
-        (_PRUNE_LABEL, lambda: records_prune_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
-        (_HEALTH_LABEL, lambda: records_context_health_plist(mcpbrain_bin=mcpbrain_bin, mcpbrain_home=home)),
-    ]:
+    for label, plist_fn in _cadence_specs(
+            home_fleet_configured=_fleet_configured(home),
+            mcpbrain_bin=mcpbrain_bin, home=home):
         path = agents_dir / f"{label}.plist"
         path.write_text(plist_fn())
         subprocess.run(["launchctl", "unload", "-w", str(path)], capture_output=True)
@@ -451,8 +518,11 @@ def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragm
 
 def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     import subprocess
-    for args_fn in [
+    args_fns = [
         lambda: prune_schtasks_args(mcpbrain_bin=mcpbrain_bin),
         lambda: health_schtasks_args(mcpbrain_bin=mcpbrain_bin),
-    ]:
+    ]
+    if _fleet_configured(home):
+        args_fns.append(lambda: fleet_beacon_schtasks_args(mcpbrain_bin=mcpbrain_bin))
+    for args_fn in args_fns:
         subprocess.run(args_fn(), check=True)
