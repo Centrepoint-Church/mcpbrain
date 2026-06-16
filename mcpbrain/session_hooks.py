@@ -14,12 +14,39 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcpbrain import config
+from mcpbrain import config, probes
 from mcpbrain.capture import write_capture
 
 _MAX_LINES = 8
 _MIN_TURNS = 2          # at least this many user turns to count as "substantial"
 _MIN_CHARS = 200        # ...or this much user text
+
+# In-context recovery: each needs_action probe maps to one copy-pasteable remedy.
+# Strings are kept here (single source) so they stay consistent with monitor.py.
+# NOTE: `mcpbrain doctor` and `/mcpbrain-fix` are named as text only — this module
+# must never import or call them. `mcpbrain auth` already exists in cli.py.
+_REMEDIES: dict[str, str] = {
+    "google": "Google sign-in expired → run: mcpbrain auth",
+    "claude": "Daemon/plugin not seen recently → run: mcpbrain doctor",
+    "clickup": "ClickUp key invalid → re-enter it in the mcpbrain wizard",
+    "backup": "Backup overdue → run: mcpbrain doctor",
+    "records": "Records repo problem → run: mcpbrain doctor",
+    "enrichment": (
+        "Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix"
+    ),
+}
+
+# Priority for the action-needed block: google, claude, then daemon/records, then the rest.
+_REMEDY_PRIORITY: tuple[str, ...] = (
+    "google",
+    "claude",
+    "records",
+    "backup",
+    "clickup",
+    "enrichment",
+)
+
+_MAX_ACTIONS = 3
 
 
 def session_start(home: str, out=None) -> None:
@@ -34,6 +61,9 @@ def session_start(home: str, out=None) -> None:
         print("(none)", file=out)
     print("\n## Open actions", file=out)
     print(_open_actions(home), file=out)
+    block = _action_needed(home)
+    if block:
+        print("\n" + block, file=out)
 
 
 def _open_actions(home: str) -> str:
@@ -58,6 +88,31 @@ def _open_actions(home: str) -> str:
             if t:
                 rows.append(f"- [{bucket}] {t[:80]}")
     return "\n".join(rows[:_MAX_LINES]) if rows else "(no open actions)"
+
+
+def _action_needed(home: str) -> str:
+    """Build the in-context recovery block: one remedy per needs_action probe.
+
+    Returns the formatted block, or "" when nothing needs action. Never raises:
+    if all_connections blows up, the caller still gets "" and the session is fine.
+    not_started is deliberately ignored (mid-onboarding, not a regression).
+    """
+    try:
+        conns = probes.all_connections(home, store=None) or {}
+    except Exception:  # noqa: BLE001 — surfacing must never hard-fail the session
+        return ""
+    broken = [name for name, c in conns.items()
+              if isinstance(c, dict) and c.get("state") == "needs_action"
+              and name in _REMEDIES]
+
+    def _rank(name: str) -> int:
+        return _REMEDY_PRIORITY.index(name) if name in _REMEDY_PRIORITY else len(_REMEDY_PRIORITY)
+
+    broken.sort(key=_rank)
+    lines = [f"- {_REMEDIES[name]}" for name in broken[:_MAX_ACTIONS]]
+    if not lines:
+        return ""
+    return "## ⚠️ Action needed\n" + "\n".join(lines)
 
 
 def session_end(home: str, stdin=None) -> None:
