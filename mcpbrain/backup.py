@@ -485,6 +485,69 @@ def _default_downloader(fh, request):
     return MediaIoBaseDownload(fh, request)
 
 
+# --- Folder-based Drive helpers (escrow folder lives INSIDE a Shared Drive) ---
+# The escrow/fleet folders are plain folders nested in a Shared Drive, not Shared
+# Drive roots — so their contents must be queried by parent with corpora=allDrives
+# (a folder id is NOT a valid driveId). upload_snapshot/find_latest_snapshot above
+# stay driveId-based for the legacy <shared-drive-root>/<user> convention.
+
+def _list_in_drives(service, q: str, *, fields="files(id, name, createdTime, modifiedTime)") -> list[dict]:
+    return service.files().list(
+        q=q, spaces="drive", corpora="allDrives",
+        includeItemsFromAllDrives=True, supportsAllDrives=True, fields=fields,
+    ).execute().get("files", [])
+
+
+def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
+    """Return the id of subfolder `name` under parent_folder_id, creating it if absent."""
+    found = _list_in_drives(
+        service,
+        f"name = '{name}' and mimeType = '{FOLDER_MIME}' and trashed = false "
+        f"and '{parent_folder_id}' in parents",
+        fields="files(id, name)")
+    if found:
+        return found[0]["id"]
+    return service.files().create(
+        body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_folder_id]},
+        supportsAllDrives=True, fields="id").execute()["id"]
+
+
+def upload_to_folder(service, file_path, parent_folder_id: str, *,
+                     name=None, media_factory=None) -> str:
+    """Upload file_path directly into parent_folder_id (a folder anywhere, incl.
+    inside a Shared Drive). Returns the created file id."""
+    file_path = Path(file_path)
+    media = (media_factory or _default_media)(str(file_path))
+    created = service.files().create(
+        body={"name": name or file_path.name, "parents": [parent_folder_id]},
+        media_body=media, supportsAllDrives=True, fields="id",
+    ).execute(num_retries=5)
+    return created["id"]
+
+
+def find_latest_in_subfolder(service, parent_folder_id: str, subfolder_name: str) -> str | None:
+    """Newest non-folder file in <parent_folder_id>/<subfolder_name>/, or None.
+
+    Parent-based (corpora=allDrives) so it works for a folder nested in a Shared
+    Drive, where the folder id is not a valid driveId.
+    """
+    subs = _list_in_drives(
+        service,
+        f"name = '{subfolder_name}' and mimeType = '{FOLDER_MIME}' and trashed = false "
+        f"and '{parent_folder_id}' in parents",
+        fields="files(id, name)")
+    if not subs:
+        return None
+    files = _list_in_drives(
+        service,
+        f"'{subs[0]['id']}' in parents and trashed = false and mimeType != '{FOLDER_MIME}'")
+    if not files:
+        return None
+    files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
+               reverse=True)
+    return files[0]["id"]
+
+
 def download_snapshot(service, file_id: str, dest_path, *, downloader_factory=None) -> Path:
     """Download a (encrypted) Drive file to dest_path. Returns dest Path.
 
