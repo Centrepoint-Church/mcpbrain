@@ -342,6 +342,102 @@ def make_brain_draft_save(store, home: str):
     return brain_draft_save
 
 
+# --- Autonomous-loop tools (host-native; VM-proof) --------------------------
+# The Cowork enrich + meeting-packs scheduled tasks must reach the host's app
+# data and store. Per the Cowork desktop architecture, shell commands and curl
+# run in an isolated VM, but local plugin MCP servers run natively on the host —
+# so these tools are the reliable channel. The enrich tools are pure file I/O on
+# the app-data dir (mirroring brain_ingest); the meeting tools wrap the store +
+# dashboard the control API also uses.
+
+def make_brain_enrich_pull(home: str):
+    async def brain_enrich_pull() -> dict:
+        """Return the pending enrichment batch (enrich_queue/pending.json), or
+        {"empty": true} when there is nothing to enrich."""
+        import json as _json
+        from pathlib import Path
+        p = Path(home) / "enrich_queue" / "pending.json"
+        try:
+            data = _json.loads(p.read_text())
+        except (OSError, ValueError):
+            return {"empty": True}
+        if not isinstance(data, dict) or not (data.get("threads") or []):
+            return {"empty": True}
+        return data
+    return brain_enrich_pull
+
+
+def make_brain_enrich_push(home: str):
+    async def brain_enrich_push(batch_id: str, extractions: list,
+                                merge_answers: list | None = None) -> dict:
+        """Write an enrichment result to enrich_inbox/<batch_id>.json for the
+        daemon to drain on its next cycle. Returns {"written": bool, path|error}."""
+        import json as _json
+        from pathlib import Path
+        if not batch_id or not isinstance(extractions, list):
+            return {"written": False, "error": "batch_id and extractions[] required"}
+        try:
+            inbox = Path(home) / "enrich_inbox"
+            inbox.mkdir(parents=True, exist_ok=True)
+            payload = {"batch_id": batch_id, "extractions": extractions,
+                       "merge_answers": merge_answers or []}
+            target = inbox / f"{batch_id}.json"
+            tmp = inbox / f".{batch_id}.json.tmp"
+            tmp.write_text(_json.dumps(payload, ensure_ascii=False))
+            tmp.replace(target)  # atomic; the daemon never sees a half-written file
+            return {"written": True, "path": str(target)}
+        except OSError as exc:
+            return {"written": False, "error": str(exc)}
+    return brain_enrich_push
+
+
+def make_brain_meetings_today(store, home: str):
+    async def brain_meetings_today() -> list:
+        """Today's calendar events, each annotated with has_pack. Same data the
+        meeting-packs task used to read via curl /api/dashboard/today."""
+        from mcpbrain import dashboard
+        try:
+            return dashboard.annotate_meeting_packs(store, dashboard.calendar_today(home))
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("brain_meetings_today failed")
+            return [{"error": str(exc)}]
+    return brain_meetings_today
+
+
+def make_brain_meeting_pack_get(store):
+    async def brain_meeting_pack_get(event_id: str) -> dict:
+        """Return the stored pack for event_id (incl. context_hash), or
+        {"found": false} when none exists."""
+        try:
+            return store.get_meeting_pack(event_id) or {"found": False}
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("brain_meeting_pack_get failed")
+            return {"found": False, "error": str(exc)}
+    return brain_meeting_pack_get
+
+
+def make_brain_meeting_pack_upsert(store):
+    async def brain_meeting_pack_upsert(event_id: str, event_title: str,
+                                        event_date: str, pack_text: str,
+                                        attendees: list | None = None,
+                                        context_hash: str = "",
+                                        cowork_session: str = "meeting-packs") -> dict:
+        """Create or update a meeting pack, storing context_hash so the next
+        hourly run can skip it when unchanged. Returns {"ok": bool, error?}."""
+        if not event_id:
+            return {"ok": False, "error": "event_id required"}
+        try:
+            store.upsert_meeting_pack(
+                event_id=event_id, event_title=event_title, event_date=event_date,
+                pack_text=pack_text, attendees=attendees or [],
+                cowork_session=cowork_session, context_hash=context_hash)
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("brain_meeting_pack_upsert failed")
+            return {"ok": False, "error": str(exc)}
+    return brain_meeting_pack_upsert
+
+
 def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     import mcp.server.stdio
     from mcp.server import Server
@@ -371,6 +467,13 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     write_heartbeat(home)
     draft_context_fn = make_brain_draft_context(draft_store, home)
     draft_save_fn = make_brain_draft_save(draft_store, home)
+    # Autonomous-loop tools (host-native). Reads use the RO store; pack upsert
+    # needs the writable handle (same one the draft tools use).
+    enrich_pull = make_brain_enrich_pull(home)
+    enrich_push = make_brain_enrich_push(home)
+    meetings_today = make_brain_meetings_today(store, home)
+    meeting_pack_get = make_brain_meeting_pack_get(store)
+    meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
     server = Server("mcpbrain")
 
     @server.list_resources()
@@ -598,6 +701,46 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                     "parent_draft_id": {"type": "integer", "description": "optional: id of prior draft being replaced"},
                 }, "required": ["email_id", "thread_id", "intent", "final_draft"]},
             ),
+            types.Tool(
+                name="brain_enrich_pull",
+                description="Pull the pending enrichment batch (the spool the daemon prepared). Returns the batch JSON, or {\"empty\": true} when there is nothing to enrich. Use in the hourly enrich task instead of reading files via shell.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
+                name="brain_enrich_push",
+                description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Use in the hourly enrich task instead of writing files via shell.",
+                inputSchema={"type": "object", "properties": {
+                    "batch_id": {"type": "string", "description": "the batch_id from brain_enrich_pull, verbatim"},
+                    "extractions": {"type": "array", "items": {"type": "object"},
+                                    "description": "one extraction object per thread"},
+                    "merge_answers": {"type": "array", "items": {"type": "object"},
+                                      "description": "optional merge-review answers"},
+                }, "required": ["batch_id", "extractions"]},
+            ),
+            types.Tool(
+                name="brain_meetings_today",
+                description="Today's calendar events, each with has_pack. Use in the meeting-packs task instead of curl /api/dashboard/today.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
+                name="brain_meeting_pack_get",
+                description="Get the stored meeting pack for an event (incl. context_hash for change detection), or {\"found\": false}.",
+                inputSchema={"type": "object", "properties": {
+                    "event_id": {"type": "string"},
+                }, "required": ["event_id"]},
+            ),
+            types.Tool(
+                name="brain_meeting_pack_upsert",
+                description="Create or update a meeting pack. Always pass context_hash so the next hourly run can skip it when unchanged.",
+                inputSchema={"type": "object", "properties": {
+                    "event_id": {"type": "string"},
+                    "event_title": {"type": "string"},
+                    "event_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "pack_text": {"type": "string", "description": "the markdown pack"},
+                    "attendees": {"type": "array", "items": {"type": "string"}},
+                    "context_hash": {"type": "string", "description": "fingerprint of the pack's inputs"},
+                }, "required": ["event_id", "event_title", "event_date", "pack_text"]},
+            ),
         ]
 
     @server.call_tool()
@@ -689,6 +832,32 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 intent=arguments.get("intent", ""),
                 final_draft=arguments.get("final_draft", ""),
                 parent_draft_id=arguments.get("parent_draft_id"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_pull":
+            out = await enrich_pull()
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_push":
+            out = await enrich_push(
+                batch_id=arguments.get("batch_id", ""),
+                extractions=arguments.get("extractions") or [],
+                merge_answers=arguments.get("merge_answers") or [],
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_meetings_today":
+            out = await meetings_today()
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_meeting_pack_get":
+            out = await meeting_pack_get(arguments.get("event_id", ""))
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_meeting_pack_upsert":
+            out = await meeting_pack_upsert(
+                event_id=arguments.get("event_id", ""),
+                event_title=arguments.get("event_title", ""),
+                event_date=arguments.get("event_date", ""),
+                pack_text=arguments.get("pack_text", ""),
+                attendees=arguments.get("attendees") or [],
+                context_hash=arguments.get("context_hash", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         results = await search(arguments["query"], arguments.get("limit", 10))
