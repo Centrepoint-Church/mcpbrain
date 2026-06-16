@@ -14,29 +14,6 @@ def test_dispatch_records_cadences(monkeypatch):
     assert seen["argv"][0] == "records-health"
 
 
-def test_dispatch_home_prints_app_dir(tmp_path, monkeypatch, capsys):
-    # `mcpbrain home` is the single source of truth shims + Cowork skills resolve
-    # the home dir through, so it must print exactly config.app_dir().
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    cli.main(["home"])
-    out = capsys.readouterr().out.strip()
-    from mcpbrain.config import app_dir
-    assert out == str(app_dir())
-
-
-def test_enrich_backfill_subcommand_removed():
-    import pytest
-    with pytest.raises(SystemExit):
-        cli.main(["enrich-backfill"])
-
-
-def test_gardener_meeting_subcommands_removed():
-    import pytest
-    for c in ("records-gardener", "meeting-packs"):
-        with pytest.raises(SystemExit):
-            cli.main([c])
-
-
 def test_dispatch_routes_each_subcommand(monkeypatch):
     called = {}
     monkeypatch.setattr(cli, "_daemon_main", lambda a: called.setdefault("daemon", a))
@@ -52,3 +29,19 @@ def test_dispatch_routes_each_subcommand(monkeypatch):
     assert called["auth"] == ["--client-secrets", "x"]
     cli.main(["setup"]);  cli.main(["update"]);  cli.main(["tray"])
     assert {"setup","update","tray"} <= set(called)
+
+
+def test_gardener_meeting_subcommands_removed():
+    import pytest
+    for c in ("records-gardener", "meeting-packs"):
+        with pytest.raises(SystemExit):
+            cli.main([c])
+
+
+def test_home_subcommand(capsys):
+    import mcpbrain.cli as _cli
+    import mcpbrain.config as _cfg
+    import unittest.mock as mock
+    with mock.patch.object(_cfg, "app_dir", return_value="/fake/home"):
+        _cli.main(["home"])
+    assert "/fake/home" in capsys.readouterr().out

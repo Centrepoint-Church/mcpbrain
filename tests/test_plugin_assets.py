@@ -43,3 +43,85 @@ def test_backfill_skill_orchestrates_loop():
     assert "enrich-batch" in b
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
     assert "pending.json" in b or "spool" in b.lower()
+
+def test_gardener_skill_exists():
+    assert (_PLUGIN / "skills" / "gardener" / "SKILL.md").exists()
+
+def test_gardener_skill_resolves_home():
+    b = _read("skills/gardener/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_gardener_skill_has_content():
+    b = _read("skills/gardener/SKILL.md")
+    assert len(b) > 1500  # full port, not a stub
+    assert "MEMORY.md" in b  # key section
+    assert "GARDENER-PROTECTED" in b  # protected sections mentioned
+
+def test_meeting_packs_skill_exists():
+    assert (_PLUGIN / "skills" / "meeting-packs" / "SKILL.md").exists()
+
+def test_meeting_packs_skill_resolves_home():
+    b = _read("skills/meeting-packs/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_meeting_packs_skill_has_content():
+    b = _read("skills/meeting-packs/SKILL.md")
+    assert len(b) > 1500  # full port, not a stub
+    assert "meeting-packs/upsert" in b  # control API
+    assert "brain_search" in b  # MCP tool usage
+
+def test_draft_reply_skill_exists():
+    assert (_PLUGIN / "skills" / "draft-reply" / "SKILL.md").exists()
+
+def test_draft_reply_skill_uses_mcp_tools():
+    b = _read("skills/draft-reply/SKILL.md")
+    assert "brain_draft_context" in b
+    assert "brain_draft_save" in b
+    assert "parent_draft_id" in b   # refinement path documented
+    assert len(b) > 1200            # full port, not a stub
+
+def test_draft_reply_skill_names_all_four_stages():
+    b = _read("skills/draft-reply/SKILL.md").lower()
+    for stage in ("plan", "draft", "critique", "voice"):
+        assert stage in b, f"skill must name the {stage!r} stage"
+
+def test_bootstrap_skill_exists():
+    assert (_PLUGIN / "skills" / "bootstrap" / "SKILL.md").exists()
+
+def test_bootstrap_skill_resolves_home():
+    b = _read("skills/bootstrap/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_bootstrap_skill_targets_corpus_files():
+    b = _read("skills/bootstrap/SKILL.md")
+    for f in ("reference/projects.md", "reference/systems.md",
+              "reference/org-context.md", "context/preferences.md",
+              "context/voice.md"):
+        assert f in b, f"bootstrap must write to {f!r}"
+
+def test_reference_gardener_skill_exists():
+    assert (_PLUGIN / "skills" / "reference-gardener" / "SKILL.md").exists()
+
+def test_reference_gardener_skill_resolves_home():
+    b = _read("skills/reference-gardener/SKILL.md")
+    assert "mcpbrain home" in b
+
+def test_reference_gardener_skill_propose_not_overwrite():
+    b = _read("skills/reference-gardener/SKILL.md")
+    assert "reference/_proposals/" in b  # writes proposals, not directly
+    assert "brain_note" in b             # surfaces to owner
+    # must not silently overwrite
+    assert "must not" in b.lower() or "do not overwrite" in b.lower() or "propose" in b.lower()
+    # no-changes stop condition
+    assert "no changes to propose" in b.lower() or "nothing" in b.lower()
+    # skip rule: don't propose for entries that already match
+    assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
+
+def test_install_full_autonomous_setup():
+    b = _read("skills/install/SKILL.md")
+    assert "scheduled task" in b.lower() and "hourly" in b.lower()
+    for t in ("mcpbrain-enrich", "gardener", "meeting-packs", "reference-gardener"):
+        assert t in b
+    assert "bootstrap" in b.lower()   # runs the interview
+    assert "login" in b.lower()       # instruct: open Claude at login
+    assert "backup" in b.lower()      # offer Enable backup

@@ -1,11 +1,26 @@
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def find_claude() -> str:
+    """Locate the claude CLI. Checks CLAUDE_BIN env → PATH → ~/.local/bin/claude."""
+    env_path = os.environ.get("CLAUDE_BIN", "")
+    if env_path:
+        return env_path
+    found = shutil.which("claude")
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / "claude"
+    if fallback.exists():
+        return str(fallback)
+    raise RuntimeError("claude CLI not found; set CLAUDE_BIN or install Claude Code")
 
 
 def app_dir() -> Path:
