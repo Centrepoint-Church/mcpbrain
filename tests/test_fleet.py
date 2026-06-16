@@ -148,35 +148,77 @@ def test_read_org_config_download_failure_returns_empty():
     assert fleet.read_org_config("FLEET1", _Boom()) == {}
 
 
-def test_merge_org_config_applies_allowed_keys_and_drops_blocklisted(tmp_path, monkeypatch):
+def test_merge_org_config_stages_allowlisted_into_overlay_and_drops_rest(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain import config
     config.write_config(str(tmp_path), {
         "owner_email": "real@me.com",
         "clickup_api_key": "MYKEY",
+        "clickup_list_id": "MYLIST",
+        "records_dir": "/home/me/records",
+        "enrich_mode": "auto",
+        "cadences": {"lint": 100},                 # user's own cadence
         "fleet": {"folder_id": "FLEET1"},
         "backup": {"escrow_key": "SECRET", "shared_drive_id": "ESC"},
     })
     store = {
         "listed": [{"id": "OCID", "name": "org-config.json"}],
         "media_bytes": json.dumps({
-            "cadences": {"lint": 900},          # allowed
-            "owner_email": "attacker@evil.com",  # blocklisted
-            "owner_name": "Evil",                # blocklisted
-            "clickup_api_key": "STOLEN",         # blocklisted
-            "fleet": {"folder_id": "HIJACK"},    # blocklisted
-            "backup": {"shared_drive_id": "HIJACK"},  # blocklisted
-            "google_token": {"refresh_token": "x"},   # blocklisted (oauth)
+            "cadences": {"lint": 900},                # allowlisted
+            "owner_email": "attacker@evil.com",       # denied (identity)
+            "clickup_api_key": "STOLEN",              # denied (secret)
+            "clickup_list_id": "HIJACK_LIST",         # denied (misdirection)
+            "records_dir": "/tmp/evil",               # denied (write-anywhere)
+            "enrich_mode": "off",                     # denied
+            "fleet": {"folder_id": "HIJACK"},         # denied (binding)
+            "backup": {"shared_drive_id": "HIJACK"},  # denied (binding)
+            "google_token": {"refresh_token": "x"},   # denied (oauth)
         }).encode(),
     }
-    fleet.merge_org_config(str(tmp_path), _FakeDrive(store))
+    out = fleet.merge_org_config(str(tmp_path), _FakeDrive(store))
+    assert out == {"cadences": {"lint": 900}}          # only allowlisted returned
     cfg = config.read_config(str(tmp_path))
-    assert cfg["cadences"] == {"lint": 900}        # allowed key applied
-    assert cfg["owner_email"] == "real@me.com"     # identity untouched
-    assert cfg["clickup_api_key"] == "MYKEY"       # secret untouched
-    assert cfg["fleet"]["folder_id"] == "FLEET1"   # fleet binding untouched
-    assert cfg["backup"]["escrow_key"] == "SECRET"  # escrow untouched
-    assert "google_token" not in cfg               # oauth field dropped
+    # Allowlisted org value is staged into the managed overlay block, NOT the
+    # user's own top-level keys.
+    assert cfg["org_config"] == {"cadences": {"lint": 900}}
+    assert cfg["cadences"] == {"lint": 100}            # user's own cadence untouched
+    # Everything dangerous is left exactly as the user set it.
+    assert cfg["owner_email"] == "real@me.com"
+    assert cfg["clickup_api_key"] == "MYKEY"
+    assert cfg["clickup_list_id"] == "MYLIST"
+    assert cfg["records_dir"] == "/home/me/records"
+    assert cfg["enrich_mode"] == "auto"
+    assert cfg["fleet"]["folder_id"] == "FLEET1"
+    assert cfg["backup"]["escrow_key"] == "SECRET"
+    assert "google_token" not in cfg
+
+
+def test_merge_org_config_overlay_reverts_when_org_config_cleared(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
+    # First startup: org-config sets a cadence.
+    store = {
+        "listed": [{"id": "OCID", "name": "org-config.json"}],
+        "media_bytes": json.dumps({"cadences": {"lint": 900}}).encode(),
+    }
+    fleet.merge_org_config(str(tmp_path), _FakeDrive(store))
+    assert config.read_config(str(tmp_path))["org_config"] == {"cadences": {"lint": 900}}
+    # Later startup: org-config.json removed → overlay reverts to empty.
+    empty = {"listed": [], "media_bytes": b"{}"}
+    fleet.merge_org_config(str(tmp_path), _FakeDrive(empty))
+    assert config.read_config(str(tmp_path))["org_config"] == {}
+
+
+def test_org_cadences_overlay_wins_in_daemon_cadence_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, daemon
+    config.write_config(str(tmp_path), {
+        "cadences": {"lint_interval_s": 100},
+        "org_config": {"cadences": {"lint_interval_s": 900}},
+    })
+    cadences = daemon._cadences_from_config(str(tmp_path))
+    assert cadences["lint_interval_s"] == 900.0  # org overlay wins over the user's 100
 
 
 class _FilesMulti(_FakeFiles):

@@ -157,29 +157,28 @@ def write_beacon(home, drive_service) -> None:
         log.warning("fleet beacon write failed (swallowed): %s", exc)
 
 
-# Keys org-config may NEVER override (secrets + identity + machine bindings).
-# Any of these in org-config.json is silently dropped regardless of value.
-_BLOCKLIST = frozenset({
-    "owner_email", "owner_name", "owner_full_name", "owner_role",
-    "clickup_api_key", "fleet", "backup",
-})
+# Org-config may ONLY override the keys in this ALLOWLIST (default-DENY). A file
+# on the shared Drive must never be able to repoint records_dir, clickup_list_id,
+# enrich_mode, the org taxonomy, identity, or secrets — so we allow-list rather
+# than block-list. `cadences` is the one surface an admin legitimately pushes
+# org-wide, and the daemon already range-validates every cadence value
+# (_cadences_from_config), so a bad value can only disable a cadence — it cannot
+# exfiltrate data or misdirect sync/tasks. Extend this set deliberately, never
+# by default.
+_ALLOWLIST = frozenset({"cadences"})
 
-
-def _is_blocklisted(key: str) -> bool:
-    if key in _BLOCKLIST:
-        return True
-    # Drop any OAuth token field (e.g. google_token, *_token, token, credentials).
-    lower = key.lower()
-    return (lower in ("token", "credentials") or
-            lower.endswith("_token") or lower.endswith("_credential") or
-            lower.endswith("_credentials") or lower.endswith("_secret"))
+# The managed config block org-config is staged into. It is REPLACED wholesale
+# on every daemon startup (config.write_config is a shallow merge), so removing a
+# key from org-config.json reverts it on the next start, and the user's own
+# top-level config keys are never clobbered. Consumers overlay this at read time.
+_OVERLAY_KEY = "org_config"
 
 
 def read_org_config(folder_id: str, drive_service) -> dict:
     """Download and parse ``org-config.json`` from the fleet folder.
 
     Returns ``{}`` if the file is absent or the download/parse fails. No merge,
-    no blocklist applied here — that is ``merge_org_config``'s job.
+    no allowlist applied here — that is ``merge_org_config``'s job.
     """
     try:
         file_id = _find_file_id(drive_service, folder_id, "org-config.json")
@@ -196,25 +195,34 @@ def read_org_config(folder_id: str, drive_service) -> dict:
 
 
 def merge_org_config(home, drive_service) -> dict:
-    """Read org-config and persist the allowed overrides into local config.
+    """Read org-config and stage the allowlisted subset into a managed overlay.
 
-    Shallow merge: each top-level org-config key is applied unless it is
-    blocklisted (secrets, identity, fleet/backup bindings, any OAuth token).
-    Returns the dict of keys actually applied (empty if none).
+    The allowed keys are written into ``config["org_config"]`` (the overlay
+    block), which is REPLACED wholesale on every startup — so removing a key
+    from ``org-config.json`` reverts it on the next daemon start, and the user's
+    own top-level config keys are never touched. Non-allowlisted keys are
+    dropped. Consumers (e.g. the daemon's ``_cadences_from_config``) overlay
+    ``config["org_config"]`` at read time. Returns the staged overlay dict.
     """
     from mcpbrain import config
     folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
     if not folder_id:
         return {}
     org = read_org_config(folder_id, drive_service)
-    allowed = {k: v for k, v in org.items() if not _is_blocklisted(k)}
-    dropped = [k for k in org if _is_blocklisted(k)]
+    allowed = {k: v for k, v in org.items() if _is_allowed(k)}
+    dropped = sorted(k for k in org if not _is_allowed(k))
     if dropped:
-        log.info("org-config: ignoring blocklisted keys: %s", sorted(dropped))
+        log.info("org-config: ignoring non-allowlisted keys: %s", dropped)
+    # Always write (even when empty) so a cleared/removed org-config.json reverts
+    # the overlay on the next startup rather than leaving stale overrides.
+    config.write_config(home, {_OVERLAY_KEY: allowed})
     if allowed:
-        config.write_config(home, allowed)
-        log.info("org-config: applied keys: %s", sorted(allowed))
+        log.info("org-config: staged overlay keys: %s", sorted(allowed))
     return allowed
+
+
+def _is_allowed(key: str) -> bool:
+    return key in _ALLOWLIST
 
 
 def _list_beacon_files(drive_service, folder_id: str) -> list[dict]:
