@@ -83,7 +83,10 @@ exclude = ["mcpbrain.maintenance*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = ["slow: long-running integration tests (real subprocess + model load)"]
+markers = [
+    "slow: long-running integration tests (real subprocess + model load)",
+    "e2e: full sync→prepare→drain→graph loop (CI gate)",
+]
 
 [dependency-groups]
 dev = [
