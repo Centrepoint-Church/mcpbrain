@@ -1,0 +1,227 @@
+"""mcpbrain doctor — diagnose every health dimension and auto-fix the local,
+idempotent failures, pointing at the exact next step for anything only
+Claude/Cowork/the user can fix.
+
+Reuses probes.all_connections (so CLI, wizard, monitor and doctor never
+disagree) and adds a repair layer. Each probe maps to one of three
+dispositions:
+
+  auto    — a local idempotent fix exists: attempt it, re-probe, report fixed/❌
+  guided  — only Claude/Cowork/the user can fix it: print the exact remedy
+  ok/—    — healthy or deliberately unconfigured: report, do nothing
+
+The repair calls are INJECTED (default dispatch wraps agents.* and the
+records bootstrap) so the logic is unit-testable with stubs — no real
+launchd/git/agent side effects in tests.
+
+Scheduled-task health is INFERRED from probe_enrichment: the daemon cannot read
+the Cowork app DB, so doctor cannot verify the four scheduled tasks directly.
+It states this honestly. Recreating tasks is therefore always a guided step
+(/mcpbrain-fix), never auto.
+"""
+from __future__ import annotations
+
+import shutil
+import sys
+from datetime import datetime, timezone
+
+# Probe key -> disposition. "auto" keys carry the repair-dispatch key to call;
+# "guided" keys carry the remedy string to print. Keys absent here are reported
+# verbatim with no action.
+#
+# Note: probe keys are google/claude/clickup/backup/records/enrichment. The
+# report adds a synthetic "scheduled_tasks" line inferred from enrichment.
+_DISPOSITIONS: dict[str, dict] = {
+    "claude":     {"kind": "auto", "repair": "daemon",
+                   "label": "Daemon",
+                   "guided": "Install the mcpbrain plugin and run /reload-plugins"},
+    "records":    {"kind": "auto", "repair": "records", "label": "Records"},
+    "google":     {"kind": "guided", "label": "Google",
+                   "guided": "Run: mcpbrain auth"},
+    "clickup":    {"kind": "guided", "label": "ClickUp",
+                   "guided": "Re-enter your ClickUp key in the mcpbrain wizard"},
+    "enrichment": {"kind": "guided", "label": "Enrichment",
+                   "guided": "Open Claude or run /mcpbrain-fix in Cowork"},
+    "backup":     {"kind": "guided", "label": "Backup",
+                   "guided": "Re-run a backup from the mcpbrain wizard"},
+}
+
+# States that mean "needs attention". not_started is deliberately healthy for
+# the optional connections (clickup/backup/enrichment): an unconfigured feature
+# is not a fault. claude not_started (plugin never connected) and records
+# not_started (repo never created) ARE actionable, so they are handled per-key.
+_FAIL_STATES = {"needs_action"}
+
+
+def _platform() -> str:
+    p = sys.platform
+    if p.startswith("linux"):
+        return "linux"
+    if p == "darwin":
+        return "darwin"
+    if p in ("win32", "cygwin"):
+        return "win32"
+    return p
+
+
+def _mcpbrain_bin() -> str:
+    return shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
+
+
+def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
+    """The real repair dispatch: idempotent local fixes only."""
+    from mcpbrain import agents, config, records
+
+    def _repair_daemon():
+        agents.restart_agent(platform)
+
+    def _repair_agent():
+        agents.install_agent(platform, mcpbrain_bin=mcpbrain_bin, home=home)
+
+    def _repair_records():
+        records.ensure_records_repo(
+            config.records_dir(home),
+            git_name=config.owner_full_name(home) or "mcpbrain",
+            git_email=config.owner_email(home) or "mcpbrain@localhost",
+        )
+
+    return {"daemon": _repair_daemon, "agent": _repair_agent, "records": _repair_records}
+
+
+def _is_problem(key: str, state: str) -> bool:
+    """True when this probe state is an actionable problem for doctor."""
+    if key in ("claude", "records"):
+        return state in _FAIL_STATES or state == "not_started"
+    return state in _FAIL_STATES
+
+
+def _reprobe(home, key: str, fallback: dict) -> dict:
+    """Re-run the live probes and return this key's fresh result."""
+    from mcpbrain import probes
+    return probes.all_connections(home).get(key, fallback)
+
+
+def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
+               mcpbrain_bin=None, agent_installed=None) -> tuple[int, str]:
+    """Diagnose, auto-fix the idempotent local failures, report, return (code, msg).
+
+    Pure-ish: probes and repairs are injectable. With nothing injected it reads
+    the live probes and builds the real repair dispatch. Exit code is 0 when
+    nothing needs user action after auto-fix, else 1.
+    """
+    from mcpbrain import probes
+
+    platform = platform or _platform()
+    mcpbrain_bin = mcpbrain_bin or _mcpbrain_bin()
+    if reprobe is None:
+        reprobe = _reprobe
+    if agent_installed is None:
+        agent_installed = _agent_installed
+    if conns is None:
+        conns = probes.all_connections(home)
+    if repairs is None:
+        repairs = _default_repairs(str(home), platform, mcpbrain_bin)
+
+    lines: list[str] = []
+    fixed = 0
+    need_action = 0
+
+    for key, disp in _DISPOSITIONS.items():
+        probe = conns.get(key, {"state": "not_started", "detail": ""})
+        state = probe.get("state", "not_started")
+        label = disp["label"]
+
+        if not _is_problem(key, state):
+            lines.append(f"✅ {label:<16} {probe.get('detail') or 'OK'}")
+            continue
+
+        if disp["kind"] == "auto" and state in _FAIL_STATES:
+            # For claude needs_action: choose install vs restart based on agent presence
+            if key == "claude":
+                if not agent_installed(home, platform):
+                    repair_key = "agent"
+                else:
+                    repair_key = "daemon"
+            else:
+                repair_key = disp["repair"]
+            repair = repairs.get(repair_key)
+            if repair is None:
+                lines.append(f"❌ {label:<16} no repair registered for '{repair_key}'")
+                need_action += 1
+                continue
+            try:
+                repair()
+                new_probe = reprobe(home, key, probe)
+                new_state = new_probe.get("state", state)
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"❌ {label:<16} {probe.get('detail')} → repair failed: {exc}")
+                need_action += 1
+                continue
+            if not _is_problem(key, new_state):
+                lines.append(f"❌ {label:<16} {probe.get('detail')} → restarting... ✅ fixed")
+                fixed += 1
+            else:
+                lines.append(f"❌ {label:<16} {probe.get('detail')} → repair did not fix it; "
+                             f"run {disp.get('guided', 'mcpbrain setup')}")
+                need_action += 1
+            continue
+
+        if key == "records" and state == "not_started":
+            repair = repairs.get("records")
+            if repair is None:
+                lines.append(f"❌ {label:<16} no repair registered for 'records'")
+                need_action += 1
+                continue
+            try:
+                repair()
+                new_probe = reprobe(home, "records", probe)
+                if not _is_problem("records", new_probe.get("state", state)):
+                    lines.append(f"❌ {label:<16} not created → creating... ✅ fixed")
+                    fixed += 1
+                else:
+                    lines.append(f"❌ {label:<16} could not create records repo")
+                    need_action += 1
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"❌ {label:<16} records repo create failed: {exc}")
+                need_action += 1
+            continue
+
+        # guided (incl. claude not_started = plugin not connected)
+        remedy = disp.get("guided", "see the mcpbrain wizard")
+        lines.append(f"⚠️  {label:<16} {probe.get('detail')} → {remedy}")
+        need_action += 1
+
+    # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
+    enr = conns.get("enrichment", {}).get("state", "not_started")
+    enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
+    if enr == "ok":
+        lines.append("✅ Scheduled tasks  enrichment fresh ⇒ enrich task firing")
+    else:
+        lines.append("⚠️  Scheduled tasks  not directly checkable → "
+                     "run /mcpbrain-fix in Cowork to recreate the enrich/gardener/"
+                     "meeting-packs/reference-gardener tasks")
+        if not enr_already_counted:
+            need_action += 1
+
+    header = (f"mcpbrain doctor — {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC   "
+              f"(home: {home})")
+    summary = f"{fixed} fixed automatically, {need_action} need your action (see ↑)."
+    message = "\n".join([header, "", *lines, "", summary])
+    return (1 if need_action else 0), message
+
+
+def _agent_installed(home, platform) -> bool:
+    """True when the OS login agent is registered. Best-effort; defaults True
+    on platforms without a cheap check so doctor prefers a restart over a
+    redundant install."""
+    if platform == "darwin":
+        from mcpbrain import agents
+        return agents._LAUNCHD_PATH.exists()
+    return True
+
+
+def run_doctor_main(argv=None) -> None:
+    from mcpbrain import config
+    code, msg = run_doctor(str(config.app_dir()))
+    print(msg)
+    sys.exit(code)
