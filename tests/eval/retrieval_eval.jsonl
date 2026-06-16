@@ -1,0 +1,12 @@
+{"query": "annual budget planning", "expected_doc_ids": ["doc-budget"]}
+{"query": "money for next year", "expected_doc_ids": ["doc-budget"]}
+{"query": "volunteer roster", "expected_doc_ids": ["doc-roster"]}
+{"query": "who is serving on Sunday", "expected_doc_ids": ["doc-roster"]}
+{"query": "youth camp logistics", "expected_doc_ids": ["doc-camp"]}
+{"query": "summer retreat for teenagers", "expected_doc_ids": ["doc-camp"]}
+{"query": "building maintenance request", "expected_doc_ids": ["doc-facilities"]}
+{"query": "air conditioning broken in the hall", "expected_doc_ids": ["doc-facilities"]}
+{"query": "staff meeting agenda", "expected_doc_ids": ["doc-staffmtg"]}
+{"query": "leadership team gathering notes", "expected_doc_ids": ["doc-staffmtg"]}
+{"query": "child safety policy", "expected_doc_ids": ["doc-safeguarding"]}
+{"query": "safeguarding checks for kids ministry", "expected_doc_ids": ["doc-safeguarding"]}
