@@ -155,3 +155,61 @@ def write_beacon(home, drive_service) -> None:
         log.info("fleet beacon written for %s", email)
     except Exception as exc:  # noqa: BLE001 — beacon failure must never crash the daemon
         log.warning("fleet beacon write failed (swallowed): %s", exc)
+
+
+# Keys org-config may NEVER override (secrets + identity + machine bindings).
+# Any of these in org-config.json is silently dropped regardless of value.
+_BLOCKLIST = frozenset({
+    "owner_email", "owner_name", "owner_full_name", "owner_role",
+    "clickup_api_key", "fleet", "backup",
+})
+
+
+def _is_blocklisted(key: str) -> bool:
+    if key in _BLOCKLIST:
+        return True
+    # Drop any OAuth token field (e.g. google_token, *_token, token, credentials).
+    lower = key.lower()
+    return "token" in lower or "credential" in lower or lower.endswith("_secret")
+
+
+def read_org_config(folder_id: str, drive_service) -> dict:
+    """Download and parse ``org-config.json`` from the fleet folder.
+
+    Returns ``{}`` if the file is absent or the download/parse fails. No merge,
+    no blocklist applied here — that is ``merge_org_config``'s job.
+    """
+    try:
+        file_id = _find_file_id(drive_service, folder_id, "org-config.json")
+        if not file_id:
+            return {}
+        raw = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001 — org-config is best-effort
+        log.warning("org-config download failed (using local config): %s", exc)
+        return {}
+
+
+def merge_org_config(home, drive_service) -> dict:
+    """Read org-config and persist the allowed overrides into local config.
+
+    Shallow merge: each top-level org-config key is applied unless it is
+    blocklisted (secrets, identity, fleet/backup bindings, any OAuth token).
+    Returns the dict of keys actually applied (empty if none).
+    """
+    from mcpbrain import config
+    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+    if not folder_id:
+        return {}
+    org = read_org_config(folder_id, drive_service)
+    allowed = {k: v for k, v in org.items() if not _is_blocklisted(k)}
+    dropped = [k for k in org if _is_blocklisted(k)]
+    if dropped:
+        log.info("org-config: ignoring blocklisted keys: %s", sorted(dropped))
+    if allowed:
+        config.write_config(home, allowed)
+        log.info("org-config: applied keys: %s", sorted(allowed))
+    return allowed
