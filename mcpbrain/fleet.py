@@ -170,7 +170,9 @@ def _is_blocklisted(key: str) -> bool:
         return True
     # Drop any OAuth token field (e.g. google_token, *_token, token, credentials).
     lower = key.lower()
-    return "token" in lower or "credential" in lower or lower.endswith("_secret")
+    return (lower in ("token", "credentials") or
+            lower.endswith("_token") or lower.endswith("_credential") or
+            lower.endswith("_credentials") or lower.endswith("_secret"))
 
 
 def read_org_config(folder_id: str, drive_service) -> dict:
