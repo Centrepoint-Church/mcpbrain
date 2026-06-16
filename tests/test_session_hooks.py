@@ -12,6 +12,10 @@ def test_session_start_prints_hot_and_degrades(tmp_path, capsys, monkeypatch):
     (repo / "state" / "hot.md").write_text(
         "# Hot\n\n## Just decided\n- **2026-06-10:** shipped the thing\n## Open\n")
     monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "ok", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
     # no control_port/token in home -> actions degrade, never crash
     session_hooks.session_start(str(tmp_path / "home"))
     out = capsys.readouterr().out
