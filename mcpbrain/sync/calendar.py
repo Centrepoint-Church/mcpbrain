@@ -11,10 +11,11 @@ from googleapiclient.errors import HttpError
 
 from mcpbrain.chunking import content_hash
 from mcpbrain.graph_write import (
+    _is_owner,
     is_junk_entity,
+    owner_identity_from_config,
     upsert_entity,
     upsert_relation,
-    _is_owner,
 )
 from mcpbrain.sync.normalise import Chunk
 
@@ -208,6 +209,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
             break
 
     count = 0
+    owner = owner_identity_from_config()
     for ev in items:
         if max_events is not None and count >= max_events:
             break
@@ -216,6 +218,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if chunks:
             count += 1
+            _apply_attendees_to_graph(store, ev, owner)
     return count
 
 
@@ -246,6 +249,7 @@ def sync_calendar(
     non-cancelled events that were upserted).
     """
     cursor = store.get_cursor(source)
+    owner = owner_identity_from_config()
     now = datetime.now(timezone.utc)
     if time_min is None:
         time_min = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -277,6 +281,7 @@ def sync_calendar(
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if chunks:
             count += 1
+            _apply_attendees_to_graph(store, ev, owner)
 
     # Advance cursor only after all upserts are durable.
     if next_sync:
