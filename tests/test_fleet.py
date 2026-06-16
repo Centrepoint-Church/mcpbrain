@@ -1,4 +1,5 @@
 """Unit tests for mcpbrain.fleet — Drive mocked at the drive_service boundary."""
+import json
 from datetime import datetime, timedelta, timezone
 
 from mcpbrain import fleet
@@ -44,3 +45,83 @@ def test_generate_report_fresh_row_not_stale():
     html = fleet.generate_report([_beacon("sarah@centrepoint.church", reported_at=fresh)])
     # the fresh row must not carry the stale badge
     assert 'class="stale"' not in html
+
+
+class _FakeFiles:
+    def __init__(self, store):
+        self._store = store
+
+    def list(self, **kw):
+        self._store["last_list_q"] = kw.get("q", "")
+        return _Exec({"files": self._store.get("listed", [])})
+
+    def create(self, **kw):
+        self._store.setdefault("created", []).append(kw)
+        return _Exec({"id": "NEWID"})
+
+    def update(self, **kw):
+        self._store.setdefault("updated", []).append(kw)
+        return _Exec({"id": kw.get("fileId", "")})
+
+    def get_media(self, **kw):
+        self._store["get_media"] = kw
+        return _Exec(self._store.get("media_bytes", b"{}"))
+
+
+class _Exec:
+    def __init__(self, value):
+        self._value = value
+
+    def execute(self):
+        return self._value
+
+
+class _FakeDrive:
+    def __init__(self, store):
+        self._store = store
+
+    def files(self):
+        return _FakeFiles(self._store)
+
+
+def _read_uploaded_json(store):
+    """Decode the MediaInMemoryUpload bytes the fake captured on create/update."""
+    from googleapiclient.http import MediaInMemoryUpload  # noqa: F401
+    rec = (store.get("created") or store.get("updated"))[0]
+    media = rec["media_body"]
+    raw = media.getbytes(0, media.size())
+    return json.loads(raw.decode())
+
+
+def test_write_beacon_uploads_user_email_json_with_required_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, probes
+    config.write_config(str(tmp_path), {"owner_email": "john@centrepoint.church",
+                                        "fleet": {"folder_id": "FLEET1"}})
+    monkeypatch.setattr(probes, "all_connections",
+                        lambda home, store=None: {"google": {"state": "ok", "detail": "Connected"}})
+    store = {"listed": []}  # file does not yet exist -> create path
+    fleet.write_beacon(str(tmp_path), _FakeDrive(store))
+    rec = store["created"][0]
+    assert rec["body"]["name"] == "john@centrepoint.church.json"
+    assert rec["body"]["parents"] == ["FLEET1"]
+    payload = _read_uploaded_json(store)
+    assert payload["user_email"] == "john@centrepoint.church"
+    assert payload["mcpbrain_version"]
+    assert payload["reported_at"].endswith("Z")
+    assert payload["probes"]["google"]["state"] == "ok"
+
+
+def test_write_beacon_swallows_drive_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, probes
+    config.write_config(str(tmp_path), {"owner_email": "x@y.com",
+                                        "fleet": {"folder_id": "F"}})
+    monkeypatch.setattr(probes, "all_connections", lambda home, store=None: {})
+
+    class _Boom:
+        def files(self):
+            raise RuntimeError("drive down")
+
+    # Must not raise — beacon failure never affects the daemon.
+    fleet.write_beacon(str(tmp_path), _Boom())
