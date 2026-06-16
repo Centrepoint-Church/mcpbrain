@@ -132,32 +132,57 @@ def decrypt_file(in_path, out_path, key: bytes) -> Path:
     return out_path
 
 
-def make_encrypted_snapshot(store_path, out_path, key: bytes) -> Path:
-    """Snapshot the store (Task 5.1), encrypt it to out_path, return out_path.
+# Archive layout (the bundle format). A snapshot is the full system: the derived
+# store, the local records repo (world-model + continuity + memory, incl. its git
+# history), and config.json (identity/orgs/settings). The records repo is
+# local-only (no git remote) — bundling it here is its only off-machine copy.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_STORE_ARC = "store/brain.sqlite3"
+_RECORDS_ARC = "records"
+_CONFIG_ARC = "config.json"
 
-    The intermediate plaintext snapshot is written to a local temp file next to
-    out_path, then encrypted to out_path with the escrow key. The temp is always
-    deleted in a finally — even if the snapshot or encryption raises — so the
-    cleartext store never persists beyond that transient local temp. out_path is
-    the only artifact left behind, and it is encrypted.
+
+def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
+                            records_dir=None, config_path=None) -> Path:
+    """Snapshot the system, encrypt it to out_path, return out_path.
+
+    When ``records_dir`` (a local git repo) or ``config_path`` is given and
+    exists, the snapshot is a gzip tar bundling the checkpointed store, the whole
+    records repo (including ``.git`` history), and config.json. With neither, it
+    is a bare single-file store snapshot (raw sqlite). Either way the artifact is
+    encrypted with the escrow key, and all intermediate cleartext is written to a
+    private temp dir and removed in a finally — only the encrypted out_path
+    remains.
     """
+    import tarfile
+
     store_path = Path(store_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    records_dir = Path(records_dir) if records_dir else None
+    config_path = Path(config_path) if config_path else None
+    bundle = bool((records_dir and records_dir.exists())
+                  or (config_path and config_path.exists()))
 
-    # Temp next to out_path so it lands on the same filesystem and inside the
-    # caller's chosen directory (tests can assert no stray plaintext remains).
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=".snap-", suffix=".plain.sqlite3", dir=str(out_path.parent)
-    )
-    os.close(fd)
-    tmp_path = Path(tmp_name)
+    work = Path(tempfile.mkdtemp(prefix="mcpbrain-snap-"))
     try:
-        snapshot(store_path, tmp_path)
-        encrypt_file(tmp_path, out_path, key)
+        if not bundle:
+            plain = work / "store.sqlite3"
+            snapshot(store_path, plain)
+        else:
+            store_snap = work / "brain.sqlite3"
+            snapshot(store_path, store_snap)
+            plain = work / "bundle.tar.gz"
+            with tarfile.open(plain, "w:gz") as tar:
+                tar.add(store_snap, arcname=_STORE_ARC)
+                if records_dir and records_dir.exists():
+                    tar.add(records_dir, arcname=_RECORDS_ARC)
+                if config_path and config_path.exists():
+                    tar.add(config_path, arcname=_CONFIG_ARC)
+        encrypt_file(plain, out_path, key)
     finally:
-        # Promptly destroy the transient cleartext, regardless of outcome.
-        tmp_path.unlink(missing_ok=True)
+        # Promptly destroy all transient cleartext, regardless of outcome.
+        shutil.rmtree(work, ignore_errors=True)
     return out_path
 
 
@@ -275,26 +300,62 @@ def upload_snapshot(
     return created["id"]
 
 
-def restore(encrypted_path, dest_store_path, key: bytes) -> Path:
-    """Decrypt an encrypted snapshot artifact and place it as the live store.
+def restore(encrypted_path, dest_store_path, key: bytes, *,
+            records_dir=None, config_path=None) -> Path:
+    """Decrypt an encrypted snapshot and place the store (and bundled records +
+    config, if present in the artifact and destinations are given).
 
-    This is the decrypt -> place-file step of reinstall recovery: it takes the
-    encrypted artifact (from make_encrypted_snapshot, downloaded via
-    download_snapshot) and writes the cleartext SQLite store to
-    dest_store_path, the live store location. Reuses decrypt_file, so a wrong
-    key or tampered artifact raises cryptography.fernet.InvalidToken before any
-    file is placed at the destination.
+    Handles both artifact shapes make_encrypted_snapshot can produce:
+      - a bare sqlite store (raw) -> placed at dest_store_path;
+      - a gzip-tar bundle -> store -> dest_store_path, records repo ->
+        records_dir (replacing any existing dir, git history and all), and
+        config.json -> config_path.
 
-    The caller then runs a delta-sync (run_sync_cycle from mcpbrain.sync) to
-    catch everything that changed after the snapshot — the restored store
-    carries its sync cursors, so sync resumes from the snapshot point rather
-    than re-fetching from scratch.
+    Decryption happens first, so a wrong key or tampered artifact raises
+    cryptography.fernet.InvalidToken before anything is written. Archive
+    extraction uses the tarfile ``data`` filter, which refuses members that
+    would escape the destination (path traversal / absolute paths).
 
-    Creates dest_store_path's parent dir if needed. Accepts str or Path.
-    Returns the destination Path.
+    The caller then runs a delta-sync to catch changes after the snapshot — the
+    restored store carries its sync cursors, so sync resumes from the snapshot
+    point. Creates parent dirs as needed. Returns dest_store_path.
     """
+    import tarfile
+
     dest_store_path = Path(dest_store_path)
-    return decrypt_file(encrypted_path, dest_store_path, key)
+    dest_store_path.parent.mkdir(parents=True, exist_ok=True)
+    # Decrypt fully first — authenticates the token before any destination write.
+    plaintext = Fernet(key).decrypt(Path(encrypted_path).read_bytes())
+
+    if plaintext[:len(_SQLITE_MAGIC)] == _SQLITE_MAGIC:
+        dest_store_path.write_bytes(plaintext)  # bare store snapshot
+        return dest_store_path
+
+    work = Path(tempfile.mkdtemp(prefix="mcpbrain-restore-"))
+    try:
+        arc = work / "bundle.tar.gz"
+        arc.write_bytes(plaintext)
+        xroot = work / "x"
+        xroot.mkdir()
+        with tarfile.open(arc, "r:gz") as tar:
+            tar.extractall(xroot, filter="data")  # data filter blocks traversal
+        store_src = xroot / _STORE_ARC
+        if store_src.exists():
+            shutil.copy2(store_src, dest_store_path)
+        rec_src = xroot / _RECORDS_ARC
+        if records_dir and rec_src.is_dir():
+            dest_records = Path(records_dir)
+            if dest_records.exists():
+                shutil.rmtree(dest_records)
+            shutil.copytree(rec_src, dest_records)
+        cfg_src = xroot / _CONFIG_ARC
+        if config_path and cfg_src.exists():
+            cfg_dest = Path(config_path)
+            cfg_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cfg_src, cfg_dest)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return dest_store_path
 
 
 def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | None:
