@@ -10,6 +10,13 @@ from datetime import datetime, timedelta, timezone
 from googleapiclient.errors import HttpError
 
 from mcpbrain.chunking import content_hash
+from mcpbrain.graph_write import (
+    _is_owner,
+    is_junk_entity,
+    owner_identity_from_config,
+    upsert_entity,
+    upsert_relation,
+)
 from mcpbrain.sync.normalise import Chunk
 
 
@@ -59,6 +66,76 @@ def normalise_calendar(event: dict) -> list[Chunk]:
         "status": event.get("status", "confirmed"),
     }
     return [Chunk(doc_id=f"cal-{eid}", text=text, content_hash=content_hash(text), metadata=meta)]
+
+
+def _attendee_valid_from(event: dict) -> str:
+    """YYYY-MM-DD for the event's start (the date the meeting was attended).
+
+    Uses start.date or the date portion of start.dateTime; falls back to UTC
+    today so a malformed/floating event still produces a valid bi-temporal
+    valid_from (upsert_relation rejects an empty valid_from).
+    """
+    start = (event.get("start") or {})
+    raw = start.get("dateTime") or start.get("date") or ""
+    if raw[:10] and raw[4:5] == "-":
+        return raw[:10]
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _apply_attendees_to_graph(store, event: dict, owner) -> int:
+    """Write each external attendee as a person entity + an `attended` relation
+    from the owner to that attendee. Pure structured-data: no LLM, no enrich.
+
+    - Excludes the owner/self (by name aliases AND by email match).
+    - Filters junk/role names via graph_write.is_junk_entity.
+    - Idempotent on re-sync: upsert_entity dedups by email/name; upsert_relation
+      bumps the existing `attended` row (accumulating relation) rather than
+      duplicating it.
+
+    Returns the number of attendees written (entities upserted).
+    """
+    attendees = event.get("attendees") or []
+    if not attendees:
+        return 0
+
+    owner_email = ""
+    for a in owner.aliases:
+        if "@" in a:
+            owner_email = a
+            break
+
+    valid_from = _attendee_valid_from(event)
+    event_id = event.get("id", "")
+    written = 0
+    for a in attendees:
+        email_addr = (a.get("email") or "").strip().lower()
+        name = (a.get("displayName") or a.get("email") or "").strip()
+        if not name:
+            continue
+        # Self-exclusion: by configured name/alias, or by owner email.
+        if _is_owner(name, owner):
+            continue
+        if owner_email and email_addr == owner_email:
+            continue
+        # Skip room resources / junk names. Google marks rooms with
+        # resource=True; treat that as junk regardless of the display name.
+        if a.get("resource") is True:
+            continue
+        if is_junk_entity(name, "person"):
+            continue
+
+        entity_id = upsert_entity(
+            store, name=name, entity_type="person", email_addr=email_addr)
+        if not entity_id or entity_id == owner.entity_id:
+            continue
+
+        upsert_relation(
+            store, owner.entity_id, "attended", entity_id,
+            valid_from=valid_from,
+            evidence=f"cal-{event_id}" if event_id else "",
+            source_doc_id=f"cal-{event_id}" if event_id else None)
+        written += 1
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +209,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
             break
 
     count = 0
+    owner = owner_identity_from_config()
     for ev in items:
         if max_events is not None and count >= max_events:
             break
@@ -140,6 +218,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if chunks:
             count += 1
+            _apply_attendees_to_graph(store, ev, owner)
     return count
 
 
@@ -170,6 +249,7 @@ def sync_calendar(
     non-cancelled events that were upserted).
     """
     cursor = store.get_cursor(source)
+    owner = owner_identity_from_config()
     now = datetime.now(timezone.utc)
     if time_min is None:
         time_min = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -201,6 +281,7 @@ def sync_calendar(
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if chunks:
             count += 1
+            _apply_attendees_to_graph(store, ev, owner)
 
     # Advance cursor only after all upserts are durable.
     if next_sync:

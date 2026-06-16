@@ -135,6 +135,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     home = str(app_dir())
+    # The Cowork "My Brain" project's working folder is mcpbrain home — already
+    # created by app_dir(). Echo the absolute path so the user pastes a
+    # known-good folder into the (manual) Cowork project setup rather than
+    # browsing for it. Project creation itself is a manual Cowork step by design.
+    print(f"Your Cowork project working folder is: {home}")
 
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
