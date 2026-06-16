@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcpbrain import config
+from mcpbrain import config, probes
 from mcpbrain.capture import write_capture
 
 _MAX_LINES = 8
@@ -85,6 +85,31 @@ def _open_actions(home: str) -> str:
             if t:
                 rows.append(f"- [{bucket}] {t[:80]}")
     return "\n".join(rows[:_MAX_LINES]) if rows else "(no open actions)"
+
+
+def _action_needed(home: str) -> str:
+    """Build the in-context recovery block: one remedy per needs_action probe.
+
+    Returns the formatted block, or "" when nothing needs action. Never raises:
+    if all_connections blows up, the caller still gets "" and the session is fine.
+    not_started is deliberately ignored (mid-onboarding, not a regression).
+    """
+    try:
+        conns = probes.all_connections(home, store=None) or {}
+    except Exception:  # noqa: BLE001 — surfacing must never hard-fail the session
+        return ""
+    broken = [name for name, c in conns.items()
+              if isinstance(c, dict) and c.get("state") == "needs_action"
+              and name in _REMEDIES]
+
+    def _rank(name: str) -> int:
+        return _REMEDY_PRIORITY.index(name) if name in _REMEDY_PRIORITY else len(_REMEDY_PRIORITY)
+
+    broken.sort(key=_rank)
+    lines = [f"- {_REMEDIES[name]}" for name in broken[:_MAX_ACTIONS]]
+    if not lines:
+        return ""
+    return "## ⚠️ Action needed\n" + "\n".join(lines)
 
 
 def session_end(home: str, stdin=None) -> None:
