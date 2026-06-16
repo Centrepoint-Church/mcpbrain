@@ -22,7 +22,7 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
     else:
         key_bytes = backup.generate_escrow_key()
 
-    shared_drive_id = _resolve_shared_drive(drive_service)
+    shared_drive_id = _resolve_shared_drive(drive_service, home=home)
     _escrow_key_to_drive(drive_service, user_id, key_bytes, folder_id=shared_drive_id)
 
     # Fernet.generate_key() returns urlsafe-base64-encoded bytes; decode to str.
@@ -38,43 +38,41 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
     })
 
 
-def _resolve_shared_drive(drive_service) -> str:
-    """Find or create the 'mcpbrain-escrow' folder on Drive. Returns its file ID."""
-    resp = drive_service.files().list(
-        q="name='mcpbrain-escrow' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields="files(id,name)",
-        spaces="drive",
-    ).execute()
-    files = resp.get("files", [])
-    if files:
-        return files[0]["id"]
-    # Create it
-    meta = {"name": "mcpbrain-escrow", "mimeType": "application/vnd.google-apps.folder"}
-    folder = drive_service.files().create(body=meta, fields="id").execute()
-    return folder["id"]
+def _resolve_shared_drive(drive_service, *, home: str) -> str:
+    """Return the configured escrow folder ID (Shared Drive subfolder).
+
+    Previously this searched/created a personal-Drive 'mcpbrain-escrow' folder
+    — a bug, because escrow keys then landed on the user's personal Drive
+    instead of the org Shared Drive. The folder ID is now set during
+    `mcpbrain setup` (wizard) as ``fleet.escrow_folder_id`` and read straight
+    from config — no Drive search.
+    """
+    folder_id = (config.read_config(home).get("fleet") or {}).get("escrow_folder_id")
+    if not folder_id:
+        raise RuntimeError(
+            "fleet.escrow_folder_id not set — run mcpbrain setup to configure backup escrow."
+        )
+    return folder_id
 
 
 def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
-                         *, folder_id: str | None = None) -> None:
-    """Upload <user_id>.key to the mcpbrain-escrow folder.
-
-    folder_id: pre-resolved folder ID from _resolve_shared_drive; if None,
-    resolves it internally (legacy path / direct calls in tests).
-    """
+                         *, folder_id: str) -> None:
+    """Upload <user_id>.key to the Shared-Drive escrow folder (idempotent)."""
     from googleapiclient.http import MediaInMemoryUpload
 
-    if folder_id is None:
-        folder_id = _resolve_shared_drive(drive_service)
     name = f"{user_id}.key"
-    # Check if it already exists (idempotent update)
     resp = drive_service.files().list(
         q=f"name='{name}' and '{folder_id}' in parents and trashed=false",
         fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
     existing = resp.get("files", [])
     media = MediaInMemoryUpload(key, mimetype="application/octet-stream")
     if existing:
-        drive_service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+        drive_service.files().update(
+            fileId=existing[0]["id"], media_body=media, supportsAllDrives=True).execute()
     else:
         meta = {"name": name, "parents": [folder_id]}
-        drive_service.files().create(body=meta, media_body=media, fields="id").execute()
+        drive_service.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
