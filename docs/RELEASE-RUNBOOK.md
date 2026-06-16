@@ -101,3 +101,28 @@ git ls-files --others --exclude-standard -z \
 ```
 
 (Consider moving the repos out of iCloud, or adding the pattern to a global gitignore.)
+
+## 6. Windows clean-machine validation (HARD GATE — must pass before Windows rollout)
+
+Mirrors the macOS C3 gate. The schtasks generators are unit-tested
+(`tests/test_agents_windows_xplat.py`) but the live desktop flow has had zero
+real-machine testing. Run this once on a clean Windows box with a **non-author**
+`@centrepoint.church` Google account before any wider Windows rollout.
+
+- [ ] **1. Install plugin → `/mcpbrain-install`** on a clean Windows machine.
+- [ ] **2. uv + wheel install; PATH correct** — `irm https://itsjoshuakemp.github.io/mcpbrain-dist/install.ps1 | iex` runs; `mcpbrain --version` resolves in a fresh shell (validates uv shim + PATH).
+- [ ] **3. `mcpbrain setup` registers daemon + tray via schtasks** — confirm both tasks exist: `schtasks /query /tn mcpbrain` and `schtasks /query /tn mcpbrain-tray` (or `schtasks /query | findstr mcpbrain`).
+- [ ] **4. Wizard loads; non-author Google sign-in works** — the "Google hasn't verified this app → Advanced → Continue" path completes with a *different* Centrepoint account.
+- [ ] **5. The four Cowork Desktop Scheduled Tasks can be created** with working folder = the path printed by `mcpbrain setup` ("Your Cowork project working folder is: …").
+- [ ] **6. `/reload-plugins` connects MCP; `brain_search` returns** a result (with a `score` field, per Part 1).
+- [ ] **7. Hourly enrich task drains `enrich_inbox`** — drop a pending batch and confirm it is consumed.
+- [ ] **8. `mcpbrain restore` round-trips a snapshot.**
+- [ ] **9. `mcpbrain doctor` runs and its auto-fixes work on Windows** — restart/re-register via schtasks (`schtasks /end`+`/run`, `/create /f`).
+
+**Likely gap candidates to watch:** PATH / uv-shim differences, `mcpbrain home`
+resolution (`%APPDATA%\mcpbrain`), and schtasks arg quoting for paths with
+spaces (covered by `tests/test_agents_windows_xplat.py`). Fix any gap found in
+`agents.py` / `setup.py` (both owned by this worktree) and add a regression
+assertion to `tests/test_agents_windows_xplat.py`.
+
+**Record results here.** Do not proceed with Windows rollout until this gate passes.
