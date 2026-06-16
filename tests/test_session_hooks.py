@@ -187,3 +187,33 @@ def test_session_start_no_action_block_when_all_ok(tmp_path, monkeypatch):
     out = io.StringIO()
     session_hooks.session_start(str(tmp_path / "home"), out=out)
     assert "Action needed" not in out.getvalue()
+
+
+def test_session_start_survives_probe_exception(tmp_path, monkeypatch):
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text(
+        "# Hot\n- **2026-06-10:** shipped the thing\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+
+    def boom(home, store=None):
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(session_hooks.probes, "all_connections", boom)
+    out = io.StringIO()
+    # must NOT raise
+    session_hooks.session_start(str(tmp_path / "home"), out=out)
+    text = out.getvalue()
+    # continuity + actions still printed
+    assert "shipped the thing" in text
+    assert "## Open actions" in text
+    # no action block emitted
+    assert "Action needed" not in text
+
+
+def test_action_needed_returns_empty_on_exception(monkeypatch):
+    def boom(home, store=None):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(session_hooks.probes, "all_connections", boom)
+    assert session_hooks._action_needed("/some/home") == ""
