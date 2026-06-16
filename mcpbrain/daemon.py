@@ -1517,6 +1517,12 @@ def _cadences_from_config(home) -> dict:
     """
     cfg = config.read_config(home)
     cadences_block = cfg.get("cadences") or {}
+    # Org-config overlay (staged by fleet.merge_org_config under "org_config")
+    # wins over the user's local cadences — this is how an admin pushes a
+    # cadence change org-wide. Confined to cadences by the org-config allowlist.
+    org_cadences = (cfg.get("org_config") or {}).get("cadences") or {}
+    if org_cadences:
+        cadences_block = {**cadences_block, **org_cadences}
     result = {}
     for key in _CADENCE_KEYS:
         if key not in cadences_block:
