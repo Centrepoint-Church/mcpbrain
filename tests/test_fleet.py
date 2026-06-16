@@ -125,3 +125,55 @@ def test_write_beacon_swallows_drive_errors(tmp_path, monkeypatch):
 
     # Must not raise — beacon failure never affects the daemon.
     fleet.write_beacon(str(tmp_path), _Boom())
+
+
+def test_read_org_config_missing_returns_empty(tmp_path):
+    store = {"listed": []}  # org-config.json not present
+    assert fleet.read_org_config("FLEET1", _FakeDrive(store)) == {}
+
+
+def test_read_org_config_present_returns_parsed_dict(tmp_path):
+    store = {
+        "listed": [{"id": "OCID", "name": "org-config.json"}],
+        "media_bytes": b'{"cadences": {"lint": 900}}',
+    }
+    out = fleet.read_org_config("FLEET1", _FakeDrive(store))
+    assert out == {"cadences": {"lint": 900}}
+
+
+def test_read_org_config_download_failure_returns_empty():
+    class _Boom:
+        def files(self):
+            raise RuntimeError("drive down")
+    assert fleet.read_org_config("FLEET1", _Boom()) == {}
+
+
+def test_merge_org_config_applies_allowed_keys_and_drops_blocklisted(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {
+        "owner_email": "real@me.com",
+        "clickup_api_key": "MYKEY",
+        "fleet": {"folder_id": "FLEET1"},
+        "backup": {"escrow_key": "SECRET", "shared_drive_id": "ESC"},
+    })
+    store = {
+        "listed": [{"id": "OCID", "name": "org-config.json"}],
+        "media_bytes": json.dumps({
+            "cadences": {"lint": 900},          # allowed
+            "owner_email": "attacker@evil.com",  # blocklisted
+            "owner_name": "Evil",                # blocklisted
+            "clickup_api_key": "STOLEN",         # blocklisted
+            "fleet": {"folder_id": "HIJACK"},    # blocklisted
+            "backup": {"shared_drive_id": "HIJACK"},  # blocklisted
+            "google_token": {"refresh_token": "x"},   # blocklisted (oauth)
+        }).encode(),
+    }
+    fleet.merge_org_config(str(tmp_path), _FakeDrive(store))
+    cfg = config.read_config(str(tmp_path))
+    assert cfg["cadences"] == {"lint": 900}        # allowed key applied
+    assert cfg["owner_email"] == "real@me.com"     # identity untouched
+    assert cfg["clickup_api_key"] == "MYKEY"       # secret untouched
+    assert cfg["fleet"]["folder_id"] == "FLEET1"   # fleet binding untouched
+    assert cfg["backup"]["escrow_key"] == "SECRET"  # escrow untouched
+    assert "google_token" not in cfg               # oauth field dropped
