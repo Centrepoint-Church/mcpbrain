@@ -21,6 +21,33 @@ _MAX_LINES = 8
 _MIN_TURNS = 2          # at least this many user turns to count as "substantial"
 _MIN_CHARS = 200        # ...or this much user text
 
+# In-context recovery: each needs_action probe maps to one copy-pasteable remedy.
+# Strings are kept here (single source) so they stay consistent with monitor.py.
+# NOTE: `mcpbrain doctor` and `/mcpbrain-fix` are named as text only — this module
+# must never import or call them. `mcpbrain auth` already exists in cli.py.
+_REMEDIES: dict[str, str] = {
+    "google": "Google sign-in expired → run: mcpbrain auth",
+    "claude": "Daemon/plugin not seen recently → run: mcpbrain doctor",
+    "clickup": "ClickUp key invalid → re-enter it in the mcpbrain wizard",
+    "backup": "Backup overdue → run: mcpbrain doctor",
+    "records": "Records repo problem → run: mcpbrain doctor",
+    "enrichment": (
+        "Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix"
+    ),
+}
+
+# Priority for the action-needed block: google, claude, then daemon/records, then the rest.
+_REMEDY_PRIORITY: tuple[str, ...] = (
+    "google",
+    "claude",
+    "records",
+    "backup",
+    "clickup",
+    "enrichment",
+)
+
+_MAX_ACTIONS = 3
+
 
 def session_start(home: str, out=None) -> None:
     out = out or sys.stdout

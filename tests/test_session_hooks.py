@@ -64,3 +64,15 @@ def test_session_end_handles_list_content_blocks(tmp_path, monkeypatch):
                         lambda home, env: captured.setdefault("env", env) or Path("x"))
     session_hooks.session_end(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
     assert "migration" in captured["env"]["content"].lower()
+
+
+def test_remedies_map_has_exact_strings():
+    r = session_hooks._REMEDIES
+    assert r["google"] == "Google sign-in expired → run: mcpbrain auth"
+    assert r["claude"] == "Daemon/plugin not seen recently → run: mcpbrain doctor"
+    assert r["clickup"] == "ClickUp key invalid → re-enter it in the mcpbrain wizard"
+    assert r["backup"] == "Backup overdue → run: mcpbrain doctor"
+    assert r["records"] == "Records repo problem → run: mcpbrain doctor"
+    assert r["enrichment"] == (
+        "Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix"
+    )
