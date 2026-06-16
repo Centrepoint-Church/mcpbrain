@@ -270,6 +270,21 @@ function collectOrgs(){
   return out;
 }
 
+async function saveFleet(){
+  // The fleet block is shallow-merged server-side, so always post BOTH keys
+  // together — a partial post would wipe the other. Empty strings clear a key.
+  const body = {fleet: {
+    folder_id: $("fleet_folder_id").value.trim(),
+    escrow_folder_id: $("fleet_escrow_folder_id").value.trim(),
+  }};
+  try{
+    await P("/api/config", body);
+    badge("fleet-status", "Saved", "ok"); $("fleet-status").classList.remove("hidden");
+  }catch(e){
+    badge("fleet-status", "Could not save", "wait"); $("fleet-status").classList.remove("hidden");
+  }
+}
+
 async function saveProfile(){
   // Only post fields the user filled in. The daemon's write_config merges
   // posted keys over saved ones, so sending "" for an untouched field would
