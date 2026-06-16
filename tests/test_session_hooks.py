@@ -76,3 +76,19 @@ def test_remedies_map_has_exact_strings():
     assert r["enrichment"] == (
         "Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix"
     )
+
+
+def test_action_needed_single_google(monkeypatch):
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        "google": {"state": "needs_action", "detail": "", "last_verified": None},
+        "claude": {"state": "ok", "detail": "", "last_verified": None},
+        "clickup": {"state": "ok", "detail": "", "last_verified": None},
+        "backup": {"state": "ok", "detail": "", "last_verified": None},
+        "records": {"state": "ok", "detail": "", "last_verified": None},
+        "enrichment": {"state": "ok", "detail": "", "last_verified": None},
+    })
+    block = session_hooks._action_needed("/some/home")
+    assert "## ⚠️ Action needed" in block
+    assert "Google sign-in expired → run: mcpbrain auth" in block
+    # only one remedy line
+    assert block.count("\n- ") == 1
