@@ -21,6 +21,12 @@ def main(argv=None) -> None:
     home = str(config.app_dir())
     folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
     if not folder_id:
+        # --beacon runs on an hourly timer. If fleet was never configured (or was
+        # cleared), that is a benign no-op, not an error — exit 0 so an orphaned
+        # cadence doesn't spam the launchd error log every hour. The manual report
+        # path (no --beacon) still tells the human why there's nothing to show.
+        if args.beacon:
+            return
         print("fleet.folder_id not set — run mcpbrain setup to configure.")
         raise SystemExit(1)
 

@@ -69,7 +69,15 @@ def _hand_extraction(thread):
 
 
 def _run_full_loop(store, google, home):
-    """Run sync -> prepare -> drain once. Returns (batch dict, drain summary)."""
+    """Run sync -> prepare -> drain once. Returns (batch dict, drain summary).
+
+    Home-consistency note: `prepare` resolves its home from MCPBRAIN_HOME
+    (config.app_dir()) while `drain` is given home=str(home) explicitly. The
+    e2e_home fixture sets MCPBRAIN_HOME to that same path, so the pending.json
+    prepare writes is exactly the one drain consumes. If the two ever diverged
+    (the "home split-brain" class of bug), drain would find an empty inbox and
+    summary["applied"] would be 0 — which the assertions below would catch.
+    """
     backfill_gmail(google, store, after="2026/01/01")
     prepare.prepare(store, thread_cap=20, char_budget=24000, resolution_due=False)
     pending = json.loads((home / "enrich_queue" / "pending.json").read_text())

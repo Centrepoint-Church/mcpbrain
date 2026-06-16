@@ -35,3 +35,17 @@ def test_fleet_report_beacon_flag_calls_write_beacon(tmp_path, monkeypatch):
                         lambda home, svc: called.setdefault("args", (home, svc)))
     cli.main(["fleet-report", "--beacon"])
     assert called["args"][1] == "SVC"
+
+
+def test_fleet_report_beacon_unconfigured_exits_clean_no_error(tmp_path, monkeypatch):
+    """An orphaned hourly --beacon cadence on an unconfigured/cleared fleet must
+    no-op cleanly (exit 0, no Drive build, no error spam) — not exit 1 hourly."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {})  # no fleet.folder_id
+    built = {"n": 0}
+    monkeypatch.setattr("mcpbrain.fleet_cli._build_drive_service",
+                        lambda: built.update(n=built["n"] + 1))
+    # Returns normally (no SystemExit), and never tries to build a Drive service.
+    cli.main(["fleet-report", "--beacon"])
+    assert built["n"] == 0
