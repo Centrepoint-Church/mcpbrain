@@ -59,6 +59,22 @@ class TestMeetingPackRoutes:
         finally:
             srv.stop()
 
+    def test_upsert_persists_context_hash_for_change_detection(self, tmp_path):
+        srv, store = _server(tmp_path)
+        try:
+            status, body = _post(srv.port, srv.token, "/api/meeting-packs/upsert", {
+                "event_id": "evt-ch",
+                "event_title": "Planning",
+                "event_date": "2026-06-06",
+                "pack_text": "## Agenda",
+                "attendees": ["Alice"],
+                "context_hash": "abc123",
+            })
+            assert status == 200
+            assert store.get_meeting_pack("evt-ch")["context_hash"] == "abc123"
+        finally:
+            srv.stop()
+
     def test_upsert_missing_event_id_returns_400(self, tmp_path):
         srv, store = _server(tmp_path)
         try:
