@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "id": "doc-1",
+      "name": "Hall B Booking Policy",
+      "mimeType": "application/vnd.google-apps.document",
+      "modifiedTime": "2026-06-09T00:00:00Z",
+      "owners": [{"emailAddress": "sam@acme.org"}]
+    },
+    {
+      "id": "doc-2",
+      "name": "Camp Logistics",
+      "mimeType": "text/plain",
+      "modifiedTime": "2026-06-08T00:00:00Z",
+      "owners": [{"emailAddress": "sam@acme.org"}]
+    }
+  ],
+  "content": {
+    "doc-1": "Hall B is reserved for college use on Wednesday evenings. Contact Sam to confirm availability for other groups.",
+    "doc-2": "Camp logistics: the bus departs at 7am Friday from the Acme car park."
+  }
+}

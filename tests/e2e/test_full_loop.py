@@ -13,6 +13,8 @@ import pytest
 
 from mcpbrain import dashboard, drain, graph_write, prepare
 from mcpbrain.contract import validate_batch_file
+from mcpbrain.sync.calendar import backfill_calendar_window
+from mcpbrain.sync.drive import backfill_drive
 from mcpbrain.sync.gmail import backfill_gmail
 
 pytestmark = pytest.mark.e2e
@@ -111,3 +113,35 @@ def test_dashboard_and_search_after_loop(e2e_store, fake_google, e2e_home):
 
     hits = e2e_store.fts_search("Hall B", 5)
     assert hits, "a known chunk must be findable after the full loop"
+
+
+def test_drive_backfill_lands_doc_chunks_across_pages(e2e_store, fake_google):
+    # backfill_drive must page through DRIVE_P2 to see doc-2; both docs index.
+    n = backfill_drive(fake_google, e2e_store, modified_after="2026-01-01T00:00:00Z")
+    assert n == 2, "both Drive docs (across two pages) must be indexed"
+
+    for chunk in e2e_store.unembedded_chunks():
+        e2e_store.write_embedding(chunk["rowid"], [0.0, 0.0, 0.0, 0.0])
+
+    # Exported Google-Doc text (doc-1) and a text/plain file on page 2 (doc-2)
+    # are both searchable — proves the export AND get_media paths + pagination.
+    assert e2e_store.fts_search("reserved for college", 5), "exported Doc text must be indexed"
+    assert e2e_store.fts_search("bus departs", 5), "page-2 text/plain file must be indexed"
+
+
+def test_calendar_backfill_creates_attendee_graph(e2e_store, fake_google, e2e_home):
+    # Owner is sam@acme.org (e2e_home). The event has Sam (self), Joel (real
+    # attendee), and a room resource. Only Joel should become a person entity.
+    n = backfill_calendar_window(
+        fake_google, e2e_store,
+        time_min="2026-06-01T00:00:00Z", time_max="2026-06-30T00:00:00Z")
+    assert n >= 1, "the confirmed event must produce a chunk"
+
+    ents = e2e_store.list_entities()
+    names = {e["name"] for e in ents}
+    assert "Joel Chelliah" in names, "a non-owner attendee must become a person entity"
+    assert "Sam Admin" not in names, "the owner must be excluded"
+    assert "Hall B" not in names, "room resources must be excluded"
+
+    rels = e2e_store.list_relations()
+    assert any("attended" in str(r) for r in rels), "an 'attended' relation must be written"
