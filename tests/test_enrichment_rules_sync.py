@@ -3,7 +3,7 @@
 The extraction rules are authored once, in mcpbrain/enrich_prompt.md, between
 the SHARED-EXTRACTION-RULES:BEGIN and :END markers. That exact block is mirrored
 byte-for-byte into plugin/agents/enrich-batch.md (the Cowork agent) and
-plugin/skills/enrich/SKILL.md (the Cowork scheduled-task skill). These tests
+plugin/skills/mcpbrain-enrich/SKILL.md (the Cowork scheduled-task skill). These tests
 fail loudly if any copy drifts.
 """
 from pathlib import Path
@@ -11,7 +11,7 @@ from pathlib import Path
 _ROOT = Path(__file__).parent.parent
 _CANONICAL = _ROOT / "mcpbrain" / "enrich_prompt.md"
 _MIRROR = _ROOT / "plugin" / "agents" / "enrich-batch.md"
-_ENRICH_SKILL = _ROOT / "plugin" / "skills" / "enrich" / "SKILL.md"
+_ENRICH_SKILL = _ROOT / "plugin" / "skills" / "mcpbrain-enrich" / "SKILL.md"
 
 _BEGIN = "<!-- SHARED-EXTRACTION-RULES:BEGIN -->"
 _END = "<!-- SHARED-EXTRACTION-RULES:END -->"
