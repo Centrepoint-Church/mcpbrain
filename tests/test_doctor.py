@@ -41,3 +41,23 @@ def test_all_ok_exit_zero_no_repairs():
     assert code == 0
     assert all(r.calls == 0 for r in repairs.values())
     assert "mcpbrain doctor" in msg
+
+
+def test_daemon_down_repair_called_reprobe_fixed():
+    daemon = _Recorder()
+    repairs = {"daemon": daemon, "agent": _Recorder(), "records": _Recorder()}
+    # First probe: claude needs_action (daemon down). After repair, reprobe ok.
+    conns = _conns(claude="needs_action")
+    reprobed = {"claude": {"state": "ok", "detail": "Connected", "last_verified": None}}
+
+    def fake_reprobe(home, key, fallback):
+        return reprobed.get(key, fallback)
+
+    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+                                  reprobe=fake_reprobe,
+                                  agent_installed=lambda h, p: True)
+    assert daemon.calls == 1
+    assert "fixed" in msg
+    # daemon was the only problem and it fixed → exit 0 IF nothing else needs action.
+    # scheduled-tasks line keys off enrichment (ok here) so it does not add need_action.
+    assert code == 0
