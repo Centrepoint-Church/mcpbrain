@@ -177,3 +177,64 @@ def test_merge_org_config_applies_allowed_keys_and_drops_blocklisted(tmp_path, m
     assert cfg["fleet"]["folder_id"] == "FLEET1"   # fleet binding untouched
     assert cfg["backup"]["escrow_key"] == "SECRET"  # escrow untouched
     assert "google_token" not in cfg               # oauth field dropped
+
+
+class _FilesMulti(_FakeFiles):
+    """List returns beacon files; get_media returns per-file bytes from a map."""
+    def list(self, **kw):
+        import re
+        q = kw.get("q", "")
+        # Simple parsing: if "name='X'" is in the query, filter by that
+        match = re.search(r"name='([^']*)'", q)
+        if match:
+            target_name = match.group(1)
+            files = [f for f in self._store.get("listed", []) if f.get("name") == target_name]
+        else:
+            files = self._store.get("listed", [])
+        self._store["last_list_q"] = q
+        return _Exec({"files": files})
+
+    def get_media(self, **kw):
+        fid = kw.get("fileId")
+        return _Exec(self._store["media_by_id"][fid])
+
+
+class _DriveMulti(_FakeDrive):
+    def files(self):
+        return _FilesMulti(self._store)
+
+
+def test_write_report_uploads_status_html_excluding_org_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
+    store = {
+        "listed": [
+            {"id": "A", "name": "john@centrepoint.church.json"},
+            {"id": "B", "name": "org-config.json"},       # must be excluded
+            {"id": "C", "name": "bad.json"},               # malformed -> skipped
+        ],
+        "media_by_id": {
+            "A": json.dumps(_beacon("john@centrepoint.church")).encode(),
+            "C": b"{not json",
+        },
+    }
+    fleet.write_report(str(tmp_path), _DriveMulti(store))
+    rec = (store.get("created") or store.get("updated"))[0]
+    body = rec.get("body", {})
+    assert body.get("name") == "status.html"
+    # the uploaded HTML contains the valid beacon's user row
+    media = rec["media_body"]
+    html = media.getbytes(0, media.size()).decode()
+    assert "john@centrepoint.church" in html
+    assert "org-config" not in html  # org-config.json never parsed as a beacon
+
+
+def test_write_report_empty_folder_prints_no_beacons(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
+    store = {"listed": []}
+    fleet.write_report(str(tmp_path), _DriveMulti(store))
+    assert "No beacons found" in capsys.readouterr().out
+    assert "created" not in store and "updated" not in store  # nothing uploaded
