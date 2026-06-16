@@ -61,6 +61,9 @@ def session_start(home: str, out=None) -> None:
         print("(none)", file=out)
     print("\n## Open actions", file=out)
     print(_open_actions(home), file=out)
+    block = _action_needed(home)
+    if block:
+        print("\n" + block, file=out)
 
 
 def _open_actions(home: str) -> str:
