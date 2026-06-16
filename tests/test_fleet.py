@@ -5,13 +5,17 @@ from datetime import datetime, timedelta, timezone
 from mcpbrain import fleet
 
 
-def _beacon(email, *, ver="0.6.0", reported_at=None, probes=None):
+def _beacon(email, *, ver="0.6.0", reported_at=None, daemon_heartbeat=None, probes=None):
     if reported_at is None:
         reported_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A healthy install's daemon heartbeat tracks the beacon time; default to it.
+    if daemon_heartbeat is None:
+        daemon_heartbeat = reported_at
     return {
         "user_email": email,
         "mcpbrain_version": ver,
         "reported_at": reported_at,
+        "daemon_heartbeat": daemon_heartbeat,
         "probes": probes or {
             "google": {"state": "ok", "detail": "Connected"},
             "claude": {"state": "ok", "detail": ""},
@@ -125,6 +129,48 @@ def test_write_beacon_swallows_drive_errors(tmp_path, monkeypatch):
 
     # Must not raise — beacon failure never affects the daemon.
     fleet.write_beacon(str(tmp_path), _Boom())
+
+
+def test_write_beacon_includes_daemon_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, probes
+    config.write_config(str(tmp_path), {"owner_email": "j@x.com",
+                                        "fleet": {"folder_id": "F"}})
+    monkeypatch.setattr(probes, "all_connections", lambda home, store=None: {})
+    (tmp_path / "daemon_heartbeat.json").write_text(
+        json.dumps({"last_cycle": "2026-06-16T05:00:00Z"}))
+    store = {"listed": []}
+    fleet.write_beacon(str(tmp_path), _FakeDrive(store))
+    payload = _read_uploaded_json(store)
+    assert payload["daemon_heartbeat"] == "2026-06-16T05:00:00Z"
+
+
+def test_write_beacon_daemon_heartbeat_none_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, probes
+    config.write_config(str(tmp_path), {"owner_email": "j@x.com",
+                                        "fleet": {"folder_id": "F"}})
+    monkeypatch.setattr(probes, "all_connections", lambda home, store=None: {})
+    fleet.write_beacon(str(tmp_path), _FakeDrive({"listed": []}))
+
+
+def test_generate_report_flags_dead_daemon_even_when_beacon_fresh():
+    from datetime import datetime, timedelta, timezone
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (datetime.now(timezone.utc) - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    b = _beacon("zoe@x.com", reported_at=fresh)
+    b["daemon_heartbeat"] = old  # beacon job alive, daemon dead 3 days
+    html = fleet.generate_report([b])
+    assert "<th>Daemon</th>" in html
+    # the daemon cell must carry the stale badge even though Last seen is fresh
+    assert html.count("stale") >= 1
+
+
+def test_daemon_write_heartbeat_roundtrips(tmp_path):
+    from mcpbrain import daemon
+    daemon.write_daemon_heartbeat(str(tmp_path))
+    data = json.loads((tmp_path / "daemon_heartbeat.json").read_text())
+    assert data["last_cycle"].endswith("Z")
 
 
 class _PagedFiles(_FakeFiles):
