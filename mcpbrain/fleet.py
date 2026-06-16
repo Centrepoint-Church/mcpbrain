@@ -215,3 +215,52 @@ def merge_org_config(home, drive_service) -> dict:
         config.write_config(home, allowed)
         log.info("org-config: applied keys: %s", sorted(allowed))
     return allowed
+
+
+def _list_beacon_files(drive_service, folder_id: str) -> list[dict]:
+    """All ``*.json`` files in the fleet folder except org-config.json."""
+    resp = drive_service.files().list(
+        q=f"'{folder_id}' in parents and trashed=false",
+        fields="files(id,name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    out = []
+    for f in resp.get("files", []):
+        name = f.get("name", "")
+        if name == "org-config.json" or not name.endswith(".json"):
+            continue
+        out.append(f)
+    return out
+
+
+def write_report(home, drive_service) -> None:
+    """Aggregate all beacons into ``status.html`` and upload it to the fleet folder.
+
+    Skips malformed beacon JSON (logs a warning). Prints "No beacons found" and
+    writes nothing when the folder has no parseable beacons.
+    """
+    from mcpbrain import config
+    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+    if not folder_id:
+        print("fleet.folder_id not set — run mcpbrain setup to configure.")
+        return
+    files = _list_beacon_files(drive_service, folder_id)
+    beacons = []
+    for f in files:
+        try:
+            raw = drive_service.files().get_media(
+                fileId=f["id"], supportsAllDrives=True).execute()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                beacons.append(parsed)
+        except Exception as exc:  # noqa: BLE001 — one bad beacon must not abort the report
+            log.warning("skipping malformed beacon %s: %s", f.get("name"), exc)
+    if not beacons:
+        print("No beacons found")
+        return
+    html = generate_report(beacons)
+    _upload_text(drive_service, folder_id, "status.html", html, "text/html")
+    log.info("fleet report written: %d beacon(s)", len(beacons))
