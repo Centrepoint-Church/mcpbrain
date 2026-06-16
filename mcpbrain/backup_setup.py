@@ -61,13 +61,21 @@ def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
     from googleapiclient.http import MediaInMemoryUpload
 
     name = f"{user_id}.key"
-    resp = drive_service.files().list(
-        q=f"name='{name}' and '{folder_id}' in parents and trashed=false",
-        fields="files(id)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    existing = resp.get("files", [])
+    existing = []
+    page_token = None
+    while True:
+        resp = drive_service.files().list(
+            q=f"name='{name}' and '{folder_id}' in parents and trashed=false",
+            fields="nextPageToken, files(id)",
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token,
+        ).execute()
+        existing.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
     media = MediaInMemoryUpload(key, mimetype="application/octet-stream")
     if existing:
         drive_service.files().update(
