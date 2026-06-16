@@ -1,5 +1,22 @@
 # Retrieval + Calendar Graph + Windows + Onboarding Implementation Plan
 
+## Session Summary — 2026-06-16
+
+**Status: SHIPPED.** All 4 parts executed via subagent-driven-development on branch `worktree-retrieval-integration`, merged to main and pushed.
+
+**8 commits, 18 new tests, 1238→1252 passing (0 new failures).**
+
+| Part | Commits | Outcome |
+|------|---------|---------|
+| **1. Retrieval scores + eval** | `feat(retrieval)`, `feat(mcp)`, `test(eval)` | `hybrid_search` returns normalised `score` (top=1.0); `_rrf` tunable via `vec_weight`/`kw_weight`; eval harness at `tests/eval/retrieval_eval.jsonl` + `run_eval.py` + `test_eval_baseline.py` guards recall@5≥0.80/MRR≥0.70 (achieved 1.0/1.0 on fixture corpus at default params) |
+| **2. Calendar→person graph** | `feat(calendar)` ×2 | `_apply_attendees_to_graph` + `_attendee_valid_from` in `sync/calendar.py`; wired into `sync_calendar` + `backfill_calendar_window`; owner resolved once per sync; cancelled events never reach graph writer; idempotent on re-sync; 6 tests in `tests/test_calendar_graph.py` |
+| **3. Onboarding path echo** | `feat(setup)` | `mcpbrain setup` prints `"Your Cowork project working folder is: <path>"` before `_ensure_daemon_running` — appears on both `--dry-run` and normal paths |
+| **4. Windows parity** | `test(agents)`, `docs(runbook)` | `tests/test_agents_windows_xplat.py` (6 tests, separate file) pins schtasks arg shape for daemon/tray/prune/health; all passed immediately (no agents.py bugs found); §6 Windows hard gate appended to `docs/RELEASE-RUNBOOK.md` |
+
+**Constraints respected:** `plugin/skills/install/SKILL.md` untouched; `tests/test_agents_cadence_xplat.py` untouched; no LLM calls; daemon never calls an LLM; calendar→person is pure SQL graph writes.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Surface a normalised relevance `score` from hybrid retrieval (with tunable RRF fusion + a recall/MRR eval harness), write calendar attendees directly into the person graph at sync time (pure structured data, no LLM), add cross-platform Windows schtasks assertions, and remove the onboarding working-folder friction.
