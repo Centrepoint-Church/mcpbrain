@@ -78,15 +78,14 @@ def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) 
     from mcpbrain import backup as _backup
     name = f"{user_email}.key"
     try:
-        resp = drive_service.files().list(
-            q=f"name = '{name}' and trashed = false and '{escrow_folder_id}' in parents",
-            corpora="drive", driveId=escrow_folder_id,
-            includeItemsFromAllDrives=True, supportsAllDrives=True,
-            fields="files(id, name)",
-        ).execute()
+        # Parent-based query: the escrow folder is nested inside a Shared Drive,
+        # so its id is NOT a valid driveId — query by parent with corpora=allDrives.
+        files = _backup._list_in_drives(
+            drive_service,
+            f"name = '{name}' and trashed = false and '{escrow_folder_id}' in parents",
+            fields="files(id, name)")
     except Exception:  # noqa: BLE001 — best-effort detection; treat errors as "no key"
         return None
-    files = resp.get("files", [])
     if not files:
         return None
     import tempfile
@@ -131,7 +130,9 @@ def detect_restorable(home: str, drive_service) -> dict:
     key = _download_escrow_key(drive_service, folder, user_email)
     snapshot_id = None
     try:
-        snapshot_id = _backup.find_latest_snapshot(drive_service, folder, user_email)
+        # Snapshots live in <escrow folder>/<user_email>/ — parent-based lookup
+        # (the escrow folder is nested in a Shared Drive, not a Shared Drive root).
+        snapshot_id = _backup.find_latest_in_subfolder(drive_service, folder, user_email)
     except Exception:  # noqa: BLE001
         snapshot_id = None
     return {

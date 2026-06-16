@@ -17,7 +17,7 @@ def test_detect_restorable_true_when_key_and_snapshot_present(tmp_path, monkeypa
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
     monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: b"KEYBYTES")
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot",
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder",
                         lambda svc, folder, user: "SNAP1")
     out = restore.detect_restorable(str(tmp_path), drive_service=object())
     assert out["available"] is True
@@ -34,7 +34,7 @@ def test_detect_falls_back_to_org_default_escrow_folder(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(restore, "_download_escrow_key",
                         lambda svc, folder, email: seen.setdefault("folder", folder) or b"K")
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot",
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder",
                         lambda svc, folder, user: "SNAP")
     out = restore.detect_restorable(str(tmp_path), drive_service=object())
     assert seen["folder"] == org_defaults.ESCROW_FOLDER_ID
@@ -45,7 +45,7 @@ def test_detect_false_when_no_snapshot(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
     monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: b"K")
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot", lambda svc, folder, user: None)
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder", lambda svc, folder, user: None)
     assert restore.detect_restorable(str(tmp_path), drive_service=object())["available"] is False
 
 
@@ -53,7 +53,7 @@ def test_detect_false_when_no_key(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
     monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: None)
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot", lambda svc, folder, user: "SNAP")
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder", lambda svc, folder, user: "SNAP")
     assert restore.detect_restorable(str(tmp_path), drive_service=object())["available"] is False
 
 
@@ -67,7 +67,7 @@ def test_run_restore_auto_fetches_key_and_restores_bundle(tmp_path, monkeypatch)
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
     monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: b"KEYBYTES")
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot", lambda svc, folder, user: "SNAP1")
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder", lambda svc, folder, user: "SNAP1")
     monkeypatch.setattr("mcpbrain.backup.download_snapshot",
                         lambda svc, fid, dest: Path(dest).write_bytes(b"enc") or Path(dest))
     captured = {}
@@ -85,6 +85,6 @@ def test_run_restore_auto_raises_when_nothing_to_restore(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
     monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: None)
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot", lambda svc, folder, user: None)
+    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder", lambda svc, folder, user: None)
     with pytest.raises(RuntimeError, match="[Nn]o restorable backup"):
         restore.run_restore_auto(str(tmp_path), drive_service=object())
