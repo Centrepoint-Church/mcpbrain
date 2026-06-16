@@ -510,8 +510,15 @@ class Store:
                 pack_text      TEXT DEFAULT '',
                 attendees      TEXT DEFAULT '[]',
                 built_at       TEXT DEFAULT '',
-                cowork_session TEXT DEFAULT '')""")
+                cowork_session TEXT DEFAULT '',
+                context_hash   TEXT DEFAULT '')""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_mp_date ON meeting_packs(event_date)")
+            # context_hash (2026-06-16): a fingerprint of the inputs a pack was
+            # built from, so the hourly meeting-packs task rebuilds a pack only
+            # when its context actually changed. Back-filled on pre-existing stores.
+            mp_cols = {row["name"] for row in db.execute("PRAGMA table_info(meeting_packs)").fetchall()}
+            if "context_hash" not in mp_cols:
+                db.execute("ALTER TABLE meeting_packs ADD COLUMN context_hash TEXT DEFAULT ''")
 
             # --- stale_reextract (Gap A re-extraction trigger, 2026-06-09) ----
             # Records that a thread was reset to enriched=0 for a fresh LLM
@@ -544,22 +551,24 @@ class Store:
     def upsert_meeting_pack(self, event_id: str, event_title: str,
                             event_date: str, pack_text: str,
                             attendees: list | None = None,
-                            cowork_session: str = "") -> None:
+                            cowork_session: str = "",
+                            context_hash: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
             db.execute(
                 """INSERT INTO meeting_packs(event_id, event_title, event_date, pack_text,
-                       attendees, built_at, cowork_session)
-                   VALUES(?,?,?,?,?,?,?)
+                       attendees, built_at, cowork_session, context_hash)
+                   VALUES(?,?,?,?,?,?,?,?)
                    ON CONFLICT(event_id) DO UPDATE SET
                        event_title=excluded.event_title,
                        event_date=excluded.event_date,
                        pack_text=excluded.pack_text,
                        attendees=excluded.attendees,
                        built_at=excluded.built_at,
-                       cowork_session=excluded.cowork_session""",
+                       cowork_session=excluded.cowork_session,
+                       context_hash=excluded.context_hash""",
                 (event_id, event_title, event_date, pack_text,
-                 json.dumps(attendees or []), now, cowork_session))
+                 json.dumps(attendees or []), now, cowork_session, context_hash))
 
     def get_meeting_pack(self, event_id: str) -> dict | None:
         with self._connect() as db:
