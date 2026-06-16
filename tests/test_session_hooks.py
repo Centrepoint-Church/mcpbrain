@@ -149,3 +149,41 @@ def test_action_needed_orders_subset(monkeypatch):
         "- Daemon/plugin not seen recently → run: mcpbrain doctor",
         "- Enrichment stalled → open Claude so the hourly task can run, or run /mcpbrain-fix",
     ]
+
+
+def test_session_start_appends_action_block_after_actions(tmp_path, monkeypatch):
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text(
+        "# Hot\n- **2026-06-10:** shipped the thing\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        "google": {"state": "needs_action", "detail": "", "last_verified": None},
+        "claude": {"state": "ok", "detail": "", "last_verified": None},
+        "clickup": {"state": "ok", "detail": "", "last_verified": None},
+        "backup": {"state": "ok", "detail": "", "last_verified": None},
+        "records": {"state": "ok", "detail": "", "last_verified": None},
+        "enrichment": {"state": "ok", "detail": "", "last_verified": None},
+    })
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out)
+    text = out.getvalue()
+    assert "## Open actions" in text
+    assert "## ⚠️ Action needed" in text
+    assert "Google sign-in expired → run: mcpbrain auth" in text
+    # ordering: the action-needed block comes AFTER the open-actions heading
+    assert text.index("## Open actions") < text.index("## ⚠️ Action needed")
+
+
+def test_session_start_no_action_block_when_all_ok(tmp_path, monkeypatch):
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text("# Hot\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "ok", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out)
+    assert "Action needed" not in out.getvalue()
