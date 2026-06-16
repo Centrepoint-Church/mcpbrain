@@ -204,3 +204,43 @@ def test_action_is_fresh_when_no_thread_id(tmp_path):
     assert action_is_stale(s, action) is False
     annotated = annotate_action_freshness(s, [action])
     assert annotated[0]["freshness"] == "fresh"
+
+
+def test_hybrid_search_results_carry_normalised_score(tmp_path):
+    s = _seed(tmp_path)
+    results = hybrid_search(s, FakeEmbedder(), "budget", limit=2)
+    assert results, "expected at least one hit"
+    # Every result carries a float score in (0, 1].
+    for r in results:
+        assert "score" in r
+        assert isinstance(r["score"], float)
+        assert 0.0 < r["score"] <= 1.0
+    # Normalisation: the top result's score is exactly 1.0.
+    assert results[0]["score"] == 1.0
+    # Scores are monotonically non-increasing (results stay rank-ordered).
+    scores = [r["score"] for r in results]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_hybrid_search_score_is_stable_when_single_hit(tmp_path):
+    """A single-hit result set must not divide-by-zero; its score is 1.0."""
+    from mcpbrain.index import index_pending
+    s = Store(tmp_path / "one.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("only", "the annual budget review", "h1", {})
+    index_pending(s, FakeEmbedder())
+    results = hybrid_search(s, FakeEmbedder(), "budget", limit=5)
+    assert results[0]["score"] == 1.0
+
+
+def test_rrf_weighting_is_tunable(tmp_path):
+    """vec_weight / kw_weight scale each ranker's RRF contribution."""
+    from mcpbrain.retrieval import _rrf
+    sem = ["a", "b"]
+    kw = ["b", "a"]
+    base = _rrf([sem, kw])
+    weighted = _rrf([sem, kw], vec_weight=2.0, kw_weight=0.0)
+    # With kw zeroed, ordering follows the semantic ranking only.
+    assert weighted["a"] > weighted["b"]
+    # Base (equal weights) ties a and b (each appears once at rank 0 and once at rank 1).
+    assert base["a"] == base["b"]
