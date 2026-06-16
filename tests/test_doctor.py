@@ -43,6 +43,20 @@ def test_all_ok_exit_zero_no_repairs():
     assert "mcpbrain doctor" in msg
 
 
+def test_not_started_optional_renders_distinct_glyph_not_green_check():
+    # clickup/backup not configured = deliberately optional, not a fault and not
+    # "healthy". Must render with the ➖ glyph, NOT a green ✅, and not be counted.
+    conns = _conns(clickup="not_started", backup="not_started")
+    code, msg = doctor.run_doctor("/tmp/home", conns=conns,
+                                  repairs={"daemon": _Recorder(), "agent": _Recorder(),
+                                           "records": _Recorder()})
+    assert code == 0  # optional unconfigured features are not actionable
+    assert "➖ ClickUp" in msg
+    assert "➖ Backup" in msg
+    assert "optional — not configured" in msg
+    assert "✅ ClickUp" not in msg  # never a green check for "not set up"
+
+
 def test_daemon_down_repair_called_reprobe_fixed():
     daemon = _Recorder()
     repairs = {"daemon": daemon, "agent": _Recorder(), "records": _Recorder()}
@@ -138,3 +152,44 @@ def test_cli_dispatches_doctor(monkeypatch):
     cli.main(["doctor", "--whatever"])
     assert "rest" in called
     assert called["rest"] == ["--whatever"]
+
+
+def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_path):
+    """The REAL repair closures must call agents.*/records.* with the exact
+    argument shapes those functions expect. Every other test injects fakes, so
+    without this a signature drift in install_agent/restart_agent/
+    ensure_records_repo would ship a no-op doctor with a green suite.
+    """
+    from mcpbrain import agents, config, records
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    config.write_config(str(tmp_path), {
+        "owner_full_name": "Sam Admin", "owner_email": "sam@acme.org",
+        "records_dir": str(tmp_path / "records"),
+    })
+    calls = {}
+    monkeypatch.setattr(agents, "restart_agent",
+                        lambda platform: calls.setdefault("restart", {"platform": platform}))
+    monkeypatch.setattr(agents, "install_agent",
+                        lambda platform, *, mcpbrain_bin, home: calls.setdefault(
+                            "install", {"platform": platform, "bin": mcpbrain_bin, "home": home}))
+    monkeypatch.setattr(records, "ensure_records_repo",
+                        lambda repo_dir, **kw: calls.setdefault(
+                            "records", {"repo_dir": repo_dir, **kw}) or repo_dir)
+
+    repairs = doctor._default_repairs(str(tmp_path), "darwin", "/usr/local/bin/mcpbrain")
+    assert set(repairs) == {"daemon", "agent", "records"}
+
+    # Invoking each closure must dispatch to the real function with valid kwargs
+    # (a TypeError here is exactly the production-only failure we're guarding).
+    repairs["daemon"]()
+    repairs["agent"]()
+    repairs["records"]()
+
+    assert calls["restart"] == {"platform": "darwin"}
+    assert calls["install"] == {"platform": "darwin",
+                                "bin": "/usr/local/bin/mcpbrain",
+                                "home": str(tmp_path)}
+    assert calls["records"]["repo_dir"] == str(tmp_path / "records")
+    assert calls["records"]["git_name"] == "Sam Admin"
+    assert calls["records"]["git_email"] == "sam@acme.org"
