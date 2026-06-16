@@ -100,3 +100,28 @@ def test_resync_same_event_is_idempotent(tmp_path):
             "WHERE relation='attended' AND invalidated_at IS NULL").fetchone()["c"]
     assert ent_count == 1
     assert rel_count == 1
+
+
+def test_sync_calendar_applies_attendees_to_graph(tmp_path, monkeypatch):
+    import mcpbrain.sync.calendar as calmod
+    from tests.test_calendar_sync import FakeCalService, _event as _sync_event, _resp
+
+    monkeypatch.setattr(calmod, "owner_identity_from_config", lambda: _OWNER)
+
+    s = _store(tmp_path)
+    ev = _sync_event("evtX", "Project sync", attendees=[
+        {"displayName": "Sam Chen", "email": "sam@partner.org"},
+    ])
+    svc = FakeCalService(on_full=_resp([ev], next_sync_token="tok1"))
+
+    result = calmod.sync_calendar(svc, s)
+    assert result == 1
+    # Chunk still written (unchanged behaviour) ...
+    assert s.get_chunk("cal-evtX") is not None
+    # ... AND the attendee is now in the graph.
+    assert s.find_entity("Sam Chen") is not None
+    with s._connect() as db:
+        rel = db.execute(
+            "SELECT COUNT(*) c FROM entity_relations WHERE relation='attended'"
+        ).fetchone()["c"]
+    assert rel == 1
