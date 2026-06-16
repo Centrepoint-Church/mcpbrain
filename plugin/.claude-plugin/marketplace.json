@@ -1,11 +1,17 @@
 {
+  "name": "centrepoint-church",
+  "owner": {
+    "name": "Centrepoint Church",
+    "email": "josh.k@centrepoint.church"
+  },
+  "description": "Centrepoint Church internal Claude plugins.",
   "plugins": [
     {
       "name": "mcpbrain",
-      "version": "0.7.2",
+      "source": "./",
       "description": "Personal AI brain for Centrepoint — syncs Gmail and Drive, surfaces context, actions, and memory inside Cowork.",
-      "author": "Centrepoint",
-      "path": "."
+      "version": "0.7.2",
+      "author": { "name": "Centrepoint Church", "email": "josh.k@centrepoint.church" }
     }
   ]
 }
