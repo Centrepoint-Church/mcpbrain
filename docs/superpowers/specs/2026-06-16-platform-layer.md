@@ -30,6 +30,11 @@ Both Shared Drive subfolders exist on the Centrepoint Shared Drive:
 - `mcpbrain-fleet/` — folder ID `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o` → ships as the pre-filled default for `fleet.folder_id`.
 - `mcpbrain-escrow/` — folder ID `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi` → ships as the pre-filled default for `fleet.escrow_folder_id` (consumed by the backup-enable flow, replacing the personal-Drive auto-create bug).
 
+**Org deployment model (from the Claude plugins + Cowork Team/Enterprise docs, 2026-06-16):**
+- Distribute `mcpbrain-plugin` via the org **plugin marketplace** (Team/Enterprise: owner → marketplace). Set its install preference to **`default`** (auto-installs for all staff, removable) or **`required`** (auto-installed and non-removable) rather than merely **`available`**. This turns onboarding (#9) into "the plugin is already there" and strengthens lifecycle (#6b): central marketplace updates push new versions org-wide, and `required` prevents users from removing it. This supersedes the 0.0.6 C4 step's "set available".
+- **Telemetry (relates to 6c, which we dropped):** Team/Enterprise can stream **OpenTelemetry** events for monitoring. That is *Claude-usage* telemetry, not mcpbrain-daemon health — complementary to the fleet health-beacon, not a replacement. Noted so an admin can correlate the two; no mcpbrain code consumes OTel.
+- **Lifecycle granularity (6b):** on **Team** plans Cowork is all-or-nothing org-wide (no per-user/role controls); **Enterprise** adds groups and custom roles. Our offboarding model (remove the user from Claude Team → their beacon goes stale) fits the Team all-or-nothing reality; on Enterprise, group/role controls can scope access more finely.
+
 ---
 
 ## Architecture
