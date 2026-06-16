@@ -35,5 +35,6 @@ def test_install_cadences_dispatches_by_platform(monkeypatch):
 
 
 def test_gardener_and_meeting_packs_generators_removed():
-    for n in ("records_gardener_plist", "meeting_packs_plist", "gardener_schtasks_args", "meeting_packs_schtasks_args"):
+    import mcpbrain.agents as agents
+    for n in ("records_gardener_plist","meeting_packs_plist","gardener_schtasks_args","meeting_packs_schtasks_args"):
         assert not hasattr(agents, n)

@@ -190,6 +190,15 @@
     </details>
   </section>
 
+  <section id="step-backup" class="card">
+    <h2><span class="num">5</span>Backup <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
+    <p class="desc">Encrypt and back up your brain to Google Drive for recovery after machine loss. Your data never leaves in cleartext — only an admin-escrowed Fernet key can restore it.</p>
+    <div class="row">
+      <button class="primary" id="enable-backup-btn" onclick="enableBackup()">Enable backup</button>
+      <span id="backup-status" class="badge idle hidden"></span>
+    </div>
+  </section>
+
   <section id="step-status" class="card">
     <h2><span class="num">6</span>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
@@ -411,6 +420,23 @@ function renderHome(j){
 }
 
 async function reconnectGoogle(){ try{ await P("/api/auth/start"); }catch(e){} }
+
+async function enableBackup(){
+  badge("backup-status", "Enabling…", "wait");
+  $("backup-status").classList.remove("hidden");
+  try {
+    const r = await fetch("/api/backup/enable", {method:"POST", headers:{...H.headers, "Content-Type":"application/json"}, body:"{}"});
+    const j = await r.json();
+    if (j.enabled) {
+      badge("backup-status", "Enabled", "ok");
+      $("enable-backup-btn").disabled = true;
+    } else {
+      badge("backup-status", "Failed: " + (j.error || "unknown"), "idle");
+    }
+  } catch(e) {
+    badge("backup-status", "Error: " + e, "idle");
+  }
+}
 
 $("enrich-history-btn").addEventListener("click", async () => {
   $("enrich-state").textContent = "Starting…";

@@ -326,7 +326,7 @@ def test_integration_driver_round_trip(store, home, monkeypatch):
     extractor_driver.run_extractor with a monkeypatched run_claude that returns
     the fixture-derived batch JSON. Proves the driver wiring end to end without
     a live Claude."""
-    from mcpbrain import extractor_driver
+    from mcpbrain.maintenance import extractor_driver
 
     batches, messages_by_thread = _two_thread_setup(store)
     _patch_prepare_seams(monkeypatch, batches, messages_by_thread)

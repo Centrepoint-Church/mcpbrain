@@ -421,7 +421,7 @@ def health_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def install_cadences(platform: str, *, mcpbrain_bin: str, home: str) -> None:
-    """Schedule prune + health cadences for the given OS.
+    """Schedule cadences for the given OS.
 
     - records-prune: daily 06:00
     - records-health: weekly Mon 07:00

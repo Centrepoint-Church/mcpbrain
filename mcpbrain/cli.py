@@ -10,8 +10,6 @@ def _update_main(argv):   from mcpbrain.update import main as m; m(argv)
 def _tray_main(argv):     from mcpbrain.tray import main as m; m(argv)
 def _monitor_main():      from mcpbrain.monitor import main as m; m()
 def _home_main():
-    # Single source of truth for the mcpbrain home dir: shims, the Cowork skills,
-    # and the daemon all resolve the same path through this. Prints app_dir().
     from mcpbrain.config import app_dir
     print(str(app_dir()))
 
@@ -19,12 +17,10 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="mcpbrain")
     sub = p.add_subparsers(dest="cmd", required=True)
-    # add_help only for mcp-server; every other subcommand delegates --help to its
-    # own module parser (parse_known_args forwards --help into `rest`).
     for name in ("daemon","mcp-server","auth","setup","update","tray","home",
                  "records-prune","records-health",
                  "session-start","session-end",
-                 "monitor"):
+                 "monitor","restore"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -41,4 +37,5 @@ def main(argv=None):
         "session-start": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_start_main"]).session_start_main(rest),
         "session-end": lambda: __import__("mcpbrain.session_hooks", fromlist=["session_end_main"]).session_end_main(rest),
         "monitor": _monitor_main,
+        "restore": lambda: __import__("mcpbrain.restore", fromlist=["run_restore_main"]).run_restore_main(rest),
     }[ns.cmd]()

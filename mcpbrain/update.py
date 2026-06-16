@@ -14,7 +14,7 @@ from importlib.metadata import version, PackageNotFoundError
 from packaging.version import Version, InvalidVersion
 
 # Maintainer sets this to the published Pages index (the dist repo's /simple/).
-DEFAULT_INDEX_URL = "https://itsjoshuakemp.github.io/mcpbrain-dist/simple/"
+DEFAULT_INDEX_URL = "https://centrepoint-church.github.io/mcpbrain-dist/simple/"
 
 _WHEEL_RE = re.compile(r"mcpbrain-([^-]+)-py3")
 
