@@ -61,3 +61,17 @@ def test_daemon_down_repair_called_reprobe_fixed():
     # daemon was the only problem and it fixed → exit 0 IF nothing else needs action.
     # scheduled-tasks line keys off enrichment (ok here) so it does not add need_action.
     assert code == 0
+
+
+def test_agent_missing_install_called():
+    agent = _Recorder()
+    repairs = {"daemon": _Recorder(), "agent": agent, "records": _Recorder()}
+    # claude needs_action AND the OS agent is reported missing → install, not restart.
+    conns = _conns(claude="needs_action")
+    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+                                  reprobe=lambda h, k, f: {"state": "ok", "detail": "ok",
+                                                           "last_verified": None},
+                                  agent_installed=lambda h, p: False)
+    assert agent.calls == 1
+    assert repairs["daemon"].calls == 0
+    assert "fixed" in msg
