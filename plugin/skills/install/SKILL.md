@@ -56,7 +56,7 @@ mcpbrain home
 This prints an absolute path, e.g. `/Users/yourname/Library/Application Support/mcpbrain` (the folder is created during setup; this just shows you where it is). In Cowork, create a new project:
 
 - **Project name:** `My Brain`
-- **Working folder:** paste the exact path printed by `mcpbrain home` above.
+- **Working folder:** paste the exact path printed by `mcpbrain home` above. This working folder is what binds the project — the four scheduled tasks in step 7 point at the same path, so they run inside this project automatically.
 - **Project instructions** (paste verbatim):
 
 > You are working inside my personal brain. Use the mcpbrain tools (`brain_search`, `brain_actions`, `brain_context`, `brain_read`, `brain_note`, `brain_decision`) to ground every answer in what the brain already knows before responding. When I tell you something worth remembering, write it back with `brain_note` or `brain_memory_write`. Treat the working folder as my records repo — read CLAUDE.md and the records there for context.
@@ -78,24 +78,44 @@ Note: Cowork Desktop Scheduled Tasks run only while Claude is open and the machi
 
 ### 7. Create four Desktop Scheduled Tasks
 
-First, resolve and show the user their brain home path — they will paste it into each task's working-folder field:
+Create each task with the **`/schedule` skill** — the first-class way to make a Cowork
+scheduled task: type `/schedule` in the Cowork chat input and follow its prompts. (The
+Scheduled tasks page — left sidebar → **Scheduled** → **+ New task** — is the equivalent
+manual path if you prefer the form.)
+
+For every task set the **working folder** to your brain home path:
 
 ```bash
 mcpbrain home
 ```
 
-Show the user the output (e.g. `/Users/yourname/Library/Application Support/mcpbrain`). They will need this string when creating each task.
+Show the user the output (e.g. `/Users/yourname/Library/Application Support/mcpbrain`).
+The working folder **is** the Cowork project the task runs in — pointing all four tasks at
+this path binds them to your `My Brain` project (and creates that project if it doesn't
+exist yet), so they run with the brain's MCP tools and records context.
 
-In Cowork, create four **Desktop Scheduled Tasks** (Settings → Scheduled Tasks → New). For each task, set the **working folder** to that path.
+Create these four tasks. The schedule options Cowork offers are **hourly, daily, weekly,
+on weekdays, or manually** — use exactly these (pick any day/time when prompted for the
+weekly ones):
 
 | Task name | Schedule | Skill |
 |---|---|---|
 | `mcpbrain-enrich` | Hourly | `mcpbrain-enrich` |
-| `mcpbrain-gardener` | Weekly (Monday 08:00) | `mcpbrain-gardener` |
-| `mcpbrain-meeting-packs` | Daily at 07:45 and 12:00 | `mcpbrain-meeting-packs` |
-| `mcpbrain-reference-gardener` | Weekly (Sunday 20:00) | `mcpbrain-reference-gardener` |
+| `mcpbrain-meeting-packs` | Hourly | `mcpbrain-meeting-packs` |
+| `mcpbrain-gardener` | Weekly | `mcpbrain-gardener` |
+| `mcpbrain-reference-gardener` | Weekly | `mcpbrain-reference-gardener` |
 
-These tasks are **subscription-only** — they run in your Claude session. No API key, no background CLI process.
+`mcpbrain-meeting-packs` runs **hourly** but is change-detecting — it only rebuilds a
+meeting pack when that meeting's context has actually changed, so the hourly cadence is
+cheap and packs refresh as soon as new relevant context lands.
+
+These tasks are **subscription-only** — they run in your Claude session. No API key, no
+background CLI process.
+
+**Catch-up:** a scheduled task only fires while your computer is awake and the Claude
+Desktop app is open. If a run is missed (asleep / app closed), Cowork runs it
+automatically once you wake the machine or reopen the app — a skipped run is caught up,
+not lost.
 
 ### 8. Reload plugins
 
