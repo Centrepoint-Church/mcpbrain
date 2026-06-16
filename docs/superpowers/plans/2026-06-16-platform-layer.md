@@ -1,5 +1,33 @@
 # Platform Layer Implementation Plan
 
+## Session Summary — 2026-06-16
+
+**Status: COMPLETE — PR open at https://github.com/Centrepoint-Church/mcpbrain/pull/1**
+
+Executed via `superpowers:subagent-driven-development` with TDD + two-stage review (spec compliance → code quality) per task.
+
+**11 commits on branch `worktree-platform-layer`:**
+- `6c7e73a` feat(fleet): generate_report pure HTML renderer
+- `418f8bf` feat(fleet): write_beacon uploads health JSON to Shared Drive
+- `478fb47` feat(fleet): read/merge org-config with secret+identity blocklist
+- `ef0bd09` fix(fleet): use suffix matching in `_is_blocklisted` to avoid false positives
+- `9ebdb68` feat(fleet): write_report aggregates beacons to status.html
+- `1282667` fix(backup): escrow to configured Shared Drive folder, not personal Drive
+- `a0c2cc8` feat(agents): hourly fleet-beacon cadence gated on fleet.folder_id
+- `4200b2b` feat(daemon): merge org-config on startup behind fleet gate
+- `4f4418f` feat(cli): fleet-report subcommand (--beacon writes beacon, default writes report)
+- `202408a` test: backup-enable requires configured escrow folder
+- `449dc14` feat(wizard): fleet folder + escrow folder fields, pre-filled with org defaults
+- `0fd541f` docs(install): fleet folder note + My Brain project onboarding (carries Spec 4 #9)
+
+**Suite gate:** 1241 tests passed, ruff clean.
+
+**Merge note:** `cli.py` will have a ~2-line conflict with the `doctor` branch (Spec 3) — both add a subcommand to the same tuple + dispatch dict. Resolve by keeping both entries.
+
+**One code quality fix made during review:** `_is_blocklisted` was changed from broad substring matching (`"token" in lower`) to suffix/whole-word matching (`endswith("_token")` etc.) to avoid false positives on legitimate org-config keys.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the maintainer cross-user fleet visibility by having each install write an hourly health beacon to a Shared Drive folder, aggregate beacons into an HTML report via `mcpbrain fleet-report`, merge a central org-config on daemon startup, and fix the backup escrow to use the configured Shared-Drive folder.
