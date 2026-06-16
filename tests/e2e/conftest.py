@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from mcpbrain import config, orgs
 from mcpbrain.store import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -50,6 +51,37 @@ class FakeGoogleService:
 
     def files(self):
         return self
+
+
+@pytest.fixture
+def e2e_home(tmp_path, monkeypatch):
+    """Minimal MCPBRAIN_HOME for prepare tests.
+
+    Points config.app_dir() at a tmp dir, seeds a config.json with an owner
+    identity and one org whose domain matches the fixture sender (acme.org),
+    and creates the enrich_queue / enrich_inbox dirs prepare expects.
+
+    taxonomy_from_config is lru_cache'd, so the cache is cleared before and
+    after so the tmp config is not leaked to other tests.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "enrich_inbox").mkdir()
+    (home / "enrich_queue").mkdir()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    config.write_config(str(home), {
+        "owner_name": "Sam Admin",
+        "owner_full_name": "Sam Admin",
+        "owner_email": "sam@acme.org",
+        "orgs": [
+            {"name": "Acme", "domains": ["acme.org"], "aliases": []},
+        ],
+    })
+    # Clear the lru_cache so taxonomy_from_config reads the tmp config.
+    orgs.taxonomy_from_config.cache_clear()
+    yield home
+    # Restore: clear again so the tmp config doesn't bleed into later tests.
+    orgs.taxonomy_from_config.cache_clear()
 
 
 @pytest.fixture
