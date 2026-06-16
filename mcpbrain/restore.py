@@ -51,7 +51,14 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False) -> 
     tmp_path = Path(tmp)
     try:
         _backup.download_snapshot(drive_service, file_id, tmp_path)
-        _backup.restore(tmp_path, p, key)
+        # Restore the full bundle: store + the local records repo + config.json
+        # (a bare-store legacy artifact restores the store only — restore()
+        # detects the shape). records_dir/config_path are ignored when the
+        # artifact doesn't carry them.
+        _backup.restore(
+            tmp_path, p, key,
+            records_dir=_cfg.records_dir(home),
+            config_path=str(Path(home) / "config.json"))
     finally:
         try:
             tmp_path.unlink()

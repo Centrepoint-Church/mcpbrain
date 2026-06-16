@@ -21,7 +21,7 @@ from mcpbrain.daemon import (
     run_cycle,
 )
 from mcpbrain.store import Store
-from mcpbrain.backup import generate_escrow_key, decrypt_file
+from mcpbrain.backup import generate_escrow_key
 
 # Reuse the Drive fake shape from test_backup.py.
 from tests.test_backup import FakeFiles, FakeService
@@ -690,7 +690,9 @@ def test_backup_failure_does_not_crash_and_loop_continues(tmp_path):
     assert ok["file_id"] == "file-123"
 
 
-def test_backup_artifact_decrypts_to_a_valid_store(tmp_path):
+def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
+    # Isolate the home so the bundle reflects this test's data, not the dev box.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _store_with_chunk(tmp_path)
     store.upsert_entity("taryn-hamilton", "Taryn Hamilton", "person", org="Acme")
     store.set_cursor("gmail", "cursor-42")
@@ -705,8 +707,11 @@ def test_backup_artifact_decrypts_to_a_valid_store(tmp_path):
     summary = daemon.maybe_backup()
     assert summary["backed_up"] is True
 
-    dec = decrypt_file(cfg.out_path, tmp_path / "restored.sqlite3", key)
-    loaded = Store(dec, dim=4)
+    # Recover via the real restore path — handles either a bare-store or a
+    # bundled (store + records + config) artifact transparently.
+    from mcpbrain import backup as _bk
+    _bk.restore(cfg.out_path, tmp_path / "restored.sqlite3", key)
+    loaded = Store(tmp_path / "restored.sqlite3", dim=4)
     assert loaded.get_chunk("d-budget") is not None
     assert loaded.get_entity("taryn-hamilton") is not None
     assert loaded.get_cursor("gmail") == "cursor-42"
