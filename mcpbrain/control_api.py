@@ -257,6 +257,7 @@ class ControlServer:
                     pack_text=body.get("pack_text", ""),
                     attendees=body.get("attendees") or [],
                     cowork_session=body.get("cowork_session", ""),
+                    context_hash=body.get("context_hash", ""),
                 )
                 return h_json(h, 200, {"ok": True})
 

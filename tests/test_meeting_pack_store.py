@@ -29,6 +29,21 @@ class TestMeetingPacksTable:
         s = _store(tmp_path)
         assert s.get_meeting_pack("nope") is None
 
+    def test_context_hash_roundtrips_and_updates(self, tmp_path):
+        s = _store(tmp_path)
+        s.upsert_meeting_pack("evt1", "Budget", "2026-06-06", "v1",
+                              attendees=["Alice"], context_hash="h1")
+        assert s.get_meeting_pack("evt1")["context_hash"] == "h1"
+        # a later run with changed context stores the new hash
+        s.upsert_meeting_pack("evt1", "Budget", "2026-06-06", "v2",
+                              attendees=["Alice", "Bob"], context_hash="h2")
+        assert s.get_meeting_pack("evt1")["context_hash"] == "h2"
+
+    def test_context_hash_defaults_empty_when_omitted(self, tmp_path):
+        s = _store(tmp_path)
+        s.upsert_meeting_pack("evt1", "Budget", "2026-06-06", "v1")
+        assert s.get_meeting_pack("evt1")["context_hash"] == ""
+
     def test_pack_event_ids_for_date(self, tmp_path):
         s = _store(tmp_path)
         s.upsert_meeting_pack("evt1", "A", "2026-06-06", "x")
