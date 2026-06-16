@@ -10,6 +10,7 @@ import html as _html
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,17 @@ def generate_report(beacons: list[dict]) -> str:
             seen_cell = f'<td class="stale">⚠️ {_html.escape(seen)}</td>'
         else:
             seen_cell = f"<td>{_html.escape(seen)}</td>"
+        # Daemon liveness from the daemon's own heartbeat — independent of the
+        # beacon job and of cached probe state. Missing/old => the daemon is down
+        # even when the hourly beacon job (this row's "Last seen") is fresh.
+        hb_dt = _parse_reported_at(b.get("daemon_heartbeat") or "")
+        hb_stale = hb_dt is None or (
+            datetime.now(timezone.utc) - hb_dt).total_seconds() > _STALE_HOURS * 3600
+        hb_label = "down" if hb_dt is None else _age_label(hb_dt)
+        if hb_stale:
+            daemon_cell = f'<td class="stale">⚠️ {_html.escape(hb_label)}</td>'
+        else:
+            daemon_cell = f"<td>{_html.escape(hb_label)}</td>"
         probes = b.get("probes") or {}
         cells = []
         for name in _PROBE_ORDER:
@@ -76,7 +88,7 @@ def generate_report(beacons: list[dict]) -> str:
             glyph = _GLYPH.get(state, "")
             cells.append(f'<td class="{cls}">{glyph}</td>')
         rows.append(
-            f"<tr><td>{email}</td><td>{ver}</td>{seen_cell}{''.join(cells)}</tr>"
+            f"<tr><td>{email}</td><td>{ver}</td>{seen_cell}{daemon_cell}{''.join(cells)}</tr>"
         )
     headers = "".join(f"<th>{_PROBE_LABELS[n]}</th>" for n in _PROBE_ORDER)
     return f"""<!DOCTYPE html>
@@ -93,7 +105,7 @@ th,td{{border:1px solid #ddd;padding:6px 10px;text-align:left;}}
 </style></head><body>
 <h1>mcpbrain Fleet Status</h1>
 <p>Last generated {generated}</p>
-<table><thead><tr><th>User</th><th>Ver</th><th>Last seen</th>{headers}</tr></thead>
+<table><thead><tr><th>User</th><th>Ver</th><th>Last seen</th><th>Daemon</th>{headers}</tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody></table>
@@ -160,6 +172,15 @@ def _upload_text(drive_service, folder_id: str, name: str, text: str, mimetype: 
         ).execute()
 
 
+def _read_daemon_heartbeat(home) -> str | None:
+    """Return the daemon's last-cycle ISO timestamp, or None if never written."""
+    try:
+        data = json.loads((Path(home) / "daemon_heartbeat.json").read_text())
+        return data.get("last_cycle")
+    except (OSError, ValueError):
+        return None
+
+
 def write_beacon(home, drive_service) -> None:
     """Build this install's health beacon and upload it as ``<owner_email>.json``.
 
@@ -179,6 +200,11 @@ def write_beacon(home, drive_service) -> None:
             "user_email": email,
             "mcpbrain_version": __version__,
             "reported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # The daemon's own last-cycle stamp (written by the daemon process).
+            # reported_at = when this beacon job ran; daemon_heartbeat = when the
+            # daemon last completed a cycle. A live beacon + stale daemon = the
+            # daemon is down even though the hourly beacon job still fires.
+            "daemon_heartbeat": _read_daemon_heartbeat(home),
             "probes": probes.all_connections(home),
         }
         _upload_text(drive_service, folder_id, f"{email}.json",
