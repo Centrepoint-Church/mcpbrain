@@ -127,6 +127,63 @@ def test_write_beacon_swallows_drive_errors(tmp_path, monkeypatch):
     fleet.write_beacon(str(tmp_path), _Boom())
 
 
+class _PagedFiles(_FakeFiles):
+    """`list` returns two pages; `get_media` serves bytes from a per-id map."""
+    def list(self, **kw):
+        page_token = kw.get("pageToken")
+        pages = self._store["pages"]
+        self._store.setdefault("list_calls", []).append(page_token)
+        if page_token is None:
+            return _Exec({"files": pages[0], "nextPageToken": "PAGE2"})
+        return _Exec({"files": pages[1]})  # no nextPageToken -> loop ends
+
+    def get_media(self, **kw):
+        return _Exec(self._store["media_by_id"][kw["fileId"]])
+
+
+class _PagedDrive(_FakeDrive):
+    def files(self):
+        return _PagedFiles(self._store)
+
+
+def test_list_beacon_files_paginates_and_dedupes_by_newest(tmp_path):
+    # Page 1: alice + a stale duplicate of bob. Page 2: the fresh bob + org-config.
+    store = {
+        "pages": [
+            [{"id": "A", "name": "alice@x.com.json", "modifiedTime": "2026-06-16T01:00:00Z"},
+             {"id": "B_OLD", "name": "bob@x.com.json", "modifiedTime": "2026-06-16T01:00:00Z"}],
+            [{"id": "B_NEW", "name": "bob@x.com.json", "modifiedTime": "2026-06-16T05:00:00Z"},
+             {"id": "OC", "name": "org-config.json", "modifiedTime": "2026-06-16T05:00:00Z"}],
+        ],
+    }
+    files = fleet._list_beacon_files(_PagedDrive(store), "FLEET1")
+    # Both pages consulted (second call carried the page token).
+    assert store["list_calls"] == [None, "PAGE2"]
+    by_name = {f["name"]: f["id"] for f in files}
+    assert by_name == {"alice@x.com.json": "A", "bob@x.com.json": "B_NEW"}  # newest bob, no org-config
+
+
+def test_write_report_dedupes_duplicate_beacons_across_pages(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
+    store = {
+        "pages": [
+            [{"id": "B_OLD", "name": "bob@x.com.json", "modifiedTime": "2026-06-16T01:00:00Z"}],
+            [{"id": "B_NEW", "name": "bob@x.com.json", "modifiedTime": "2026-06-16T05:00:00Z"}],
+        ],
+        "media_by_id": {
+            "B_OLD": json.dumps(_beacon("bob@x.com")).encode(),
+            "B_NEW": json.dumps(_beacon("bob@x.com")).encode(),
+        },
+    }
+    fleet.write_report(str(tmp_path), _PagedDrive(store))
+    # status.html uploaded once; bob appears a single time (deduped to newest).
+    rec = (store.get("created") or store.get("updated"))[0]
+    html = rec["media_body"].getbytes(0, rec["media_body"].size()).decode()
+    assert html.count("bob@x.com") == 1
+
+
 def test_read_org_config_missing_returns_empty(tmp_path):
     store = {"listed": []}  # org-config.json not present
     assert fleet.read_org_config("FLEET1", _FakeDrive(store)) == {}

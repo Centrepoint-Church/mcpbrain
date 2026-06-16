@@ -101,16 +101,47 @@ th,td{{border:1px solid #ddd;padding:6px 10px;text-align:left;}}
 """
 
 
+def _list_all(drive_service, *, q: str, fields: str) -> list[dict]:
+    """List every file matching ``q``, following pagination (Shared-Drive aware).
+
+    Drive returns at most ``pageSize`` (max 1000) results per call; without
+    looping on ``nextPageToken`` everything past the first page is silently
+    dropped. Fleet folders accumulate one beacon per user and never auto-clean,
+    so the report must page through all of them.
+    """
+    out: list[dict] = []
+    page_token = None
+    while True:
+        resp = drive_service.files().list(
+            q=q,
+            fields=f"nextPageToken, {fields}",
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token,
+        ).execute()
+        out.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
 def _find_file_id(drive_service, folder_id: str, name: str):
-    """Return the id of ``name`` in ``folder_id`` (Shared-Drive aware), or None."""
-    resp = drive_service.files().list(
+    """Return the id of ``name`` in ``folder_id`` (Shared-Drive aware), or None.
+
+    If duplicates exist (a create/create race can produce two files with the
+    same name), returns the most recently modified so update targets the live one.
+    """
+    files = _list_all(
+        drive_service,
         q=f"name='{name}' and '{folder_id}' in parents and trashed=false",
-        fields="files(id,name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    files = resp.get("files", [])
-    return files[0]["id"] if files else None
+        fields="files(id,name,modifiedTime)",
+    )
+    if not files:
+        return None
+    files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
+    return files[0]["id"]
 
 
 def _upload_text(drive_service, folder_id: str, name: str, text: str, mimetype: str) -> None:
@@ -226,20 +257,26 @@ def _is_allowed(key: str) -> bool:
 
 
 def _list_beacon_files(drive_service, folder_id: str) -> list[dict]:
-    """All ``*.json`` files in the fleet folder except org-config.json."""
-    resp = drive_service.files().list(
+    """All beacon ``*.json`` files in the fleet folder (excluding org-config.json).
+
+    Paginates, and de-duplicates by filename keeping the most recently modified —
+    a create/create race (hourly cadence overlapping a manual ``--beacon``) can
+    leave two ``<email>.json`` files, which would otherwise show the user twice.
+    """
+    files = _list_all(
+        drive_service,
         q=f"'{folder_id}' in parents and trashed=false",
-        fields="files(id,name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    out = []
-    for f in resp.get("files", []):
+        fields="files(id,name,modifiedTime)",
+    )
+    newest: dict[str, dict] = {}
+    for f in files:
         name = f.get("name", "")
         if name == "org-config.json" or not name.endswith(".json"):
             continue
-        out.append(f)
-    return out
+        prev = newest.get(name)
+        if prev is None or f.get("modifiedTime", "") > prev.get("modifiedTime", ""):
+            newest[name] = f
+    return list(newest.values())
 
 
 def write_report(home, drive_service) -> None:
