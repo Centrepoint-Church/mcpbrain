@@ -10,7 +10,6 @@ and test_drive_sync.py. No real API calls are made.
 """
 
 import base64
-from datetime import datetime, timezone
 
 import pytest
 
