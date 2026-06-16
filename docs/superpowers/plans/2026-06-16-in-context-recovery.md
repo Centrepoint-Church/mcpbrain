@@ -1,5 +1,24 @@
 # In-Context Failure Recovery Implementation Plan
 
+## Session summary — 2026-06-16
+
+**Status:** Complete. Merged to `main` and pushed to `Centrepoint-Church/mcpbrain` (`77dd4f0`).
+
+**Executed by:** Claude (subagent-driven-development, 7 tasks × implementer + spec-reviewer + code-quality-reviewer)
+
+**What was built:**
+- `_REMEDIES` dict and `_REMEDY_PRIORITY`/`_MAX_ACTIONS` constants added to `mcpbrain/session_hooks.py`
+- `_action_needed(home) -> str` helper: calls `probes.all_connections`, filters `needs_action` probes, sorts by priority (google → claude → records → backup → clickup → enrichment), caps at 3, returns formatted block or `""`
+- `session_start` wired to print the block after the open-actions section (only when non-empty)
+- Exception safety: any error from `all_connections` is silently swallowed; session hook never hard-fails
+- 10 new tests added; pre-existing degradation test hardened with a probe monkeypatch (hermeticity fix caught by final reviewer)
+
+**Files changed:** `mcpbrain/session_hooks.py` (+56 lines), `tests/test_session_hooks.py` (+157 lines, 14 tests total)
+
+**Constraints honoured:** `mcpbrain.doctor` never imported or called; remedy strings plain text only; `probes.py` and `cli.py` untouched.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Surface broken connections inside the user's Cowork/Claude session at session-start by appending a bounded "Action needed" block (problem + one-step remedy) to the existing `mcpbrain session-start` hook output.
