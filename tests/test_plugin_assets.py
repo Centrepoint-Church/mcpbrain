@@ -11,9 +11,12 @@ def test_install_skill_bootstrap_steps():
     assert "uv tool install" in b and "--python 3.12" in b
     assert "mcpbrain setup" in b and "/reload-plugins" in b
 
-def test_install_skill_vm_sandbox_fallback():
+def test_install_skill_terminal_first():
+    # Terminal is the standard host install path; no sandbox probe / Claude Code dance.
     b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "Claude Code" in b and ("~/.local" in b or "sandbox" in b.lower())
+    assert "Terminal" in b
+    assert "curl -LsSf https://astral.sh/uv/install.sh" in b  # the paste-in-Terminal script
+    assert "HOST_OK" not in b and "SANDBOX" not in b          # sandbox check removed
 
 def test_install_skill_os_detection():
     b = _read("skills/mcpbrain-install/SKILL.md")
