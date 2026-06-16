@@ -26,7 +26,9 @@ Every mcpbrain install is an island. The maintainer has no cross-user visibility
 - An admin flag or separate install — Josh's install is identical to everyone else's
 
 **Non-code prerequisite (DONE):**
-The `mcpbrain-fleet/` subfolder exists on the Centrepoint Shared Drive — folder ID `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o`. This is the value users paste (or that ships as the default) for `fleet.folder_id`. The matching `mcpbrain-escrow/` subfolder ID still needs confirming for `backup.shared_drive_id`.
+Both Shared Drive subfolders exist on the Centrepoint Shared Drive:
+- `mcpbrain-fleet/` — folder ID `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o` → ships as the pre-filled default for `fleet.folder_id`.
+- `mcpbrain-escrow/` — folder ID `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi` → ships as the pre-filled default for `backup.shared_drive_id` (replaces the personal-Drive auto-create bug).
 
 ---
 
@@ -122,7 +124,7 @@ New `fleet-report` subcommand. Builds `drive_service` from the user's OAuth toke
 New optional "Fleet setup" section below backup:
 - "Fleet folder ID" text input → saved to `fleet.folder_id`, **pre-filled with the org default** `1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o` so a Centrepoint user just clicks through; editable/clearable for non-org installs.
 - Help text: "This is the Centrepoint mcpbrain-fleet folder. Leave as-is, or clear it if you're not part of the org fleet."
-- The existing "Enable backup" flow is updated to prompt for the `mcpbrain-escrow` subfolder ID (saved to `backup.shared_drive_id`) rather than auto-creating a personal Drive folder.
+- The existing "Enable backup" flow is updated to use the `mcpbrain-escrow` subfolder ID (saved to `backup.shared_drive_id`), **pre-filled with the org default** `1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi`, rather than auto-creating a personal Drive folder.
 
 ---
 
