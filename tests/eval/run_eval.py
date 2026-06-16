@@ -17,18 +17,48 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 EVAL = HERE / "retrieval_eval.jsonl"
 
-# The fixture corpus. doc_ids MUST match expected_doc_ids in the jsonl. Text is
-# deliberately varied so semantic paraphrase queries exercise the vector path
-# and exact-term queries exercise FTS. Distractors stress precision.
+# The fixture corpus. doc_ids MUST match expected_doc_ids in the jsonl.
+#
+# Organised into TOPICAL CLUSTERS (two near-miss docs per theme) plus lexical
+# collisions ("annual" appears in both the budget and staff-leave docs), so a
+# query must be ranked correctly against a confusable sibling — not merely
+# matched to the one obviously-relevant doc. This is what lets recall@5/MRR drop
+# below 1.0 and makes the regression floor load-bearing; a topically-disjoint
+# corpus scores 1.0/1.0 under any fusion params and measures nothing.
 FIXTURE_DOCS = {
-    "doc-budget": "The annual budget review covers next year's ministry finances and spending plan.",
-    "doc-roster": "Volunteer roster for Sunday services: who is serving on welcome, kids, and worship.",
-    "doc-camp": "Youth summer camp logistics for the teenagers' retreat: transport, food, cabins.",
-    "doc-facilities": "Building maintenance request: the air conditioning in the main hall is broken.",
-    "doc-staffmtg": "Staff meeting agenda and leadership team gathering notes for this week.",
-    "doc-safeguarding": "Child safety and safeguarding policy: background checks for kids ministry volunteers.",
-    "doc-distract-1": "Coffee order for the cafe and the weekly grocery shopping list.",
-    "doc-distract-2": "Car park resurfacing quote from the contractor for the south lot.",
+    # budget cluster
+    "doc-budget-annual": "Annual church budget review: next financial year's ministry income, "
+                         "expenditure and savings plan approved by the board.",
+    "doc-budget-camp": "Youth camp budget breakdown: cost per camper, bus hire, catering and the "
+                       "deposit for the campsite.",
+    # roster cluster
+    "doc-roster-sunday": "Sunday service volunteer roster: welcome team, kids church, worship band "
+                         "and sound desk for each week.",
+    "doc-roster-camp": "Camp leaders roster: which youth leaders supervise each cabin and activity "
+                       "during the retreat.",
+    # facilities cluster
+    "doc-facilities-aircon": "Maintenance request: the air conditioning in the main auditorium is "
+                             "broken and needs a technician.",
+    "doc-facilities-carpark": "Facilities project: resurfacing the south car park and repainting "
+                              "the line markings.",
+    # camp cluster
+    "doc-camp-logistics": "Youth summer camp logistics: transport timetable, cabin allocation and "
+                          "the meal roster for the teenagers' retreat.",
+    "doc-camp-program": "Camp program and session themes: morning devotions, afternoon activities "
+                        "and evening worship for the youth retreat.",
+    # staff cluster ('annual leave' collides lexically with the annual budget doc)
+    "doc-staff-agenda": "Staff meeting agenda: this week's leadership team discussion items and "
+                        "decisions.",
+    "doc-staff-leave": "Staff leave policy: how to request annual leave, sick days and time in lieu.",
+    # safeguarding cluster
+    "doc-safeguard-policy": "Child safeguarding policy: background checks and working-with-children "
+                            "clearances for kids ministry volunteers.",
+    "doc-safeguard-incident": "Safeguarding incident report form: how to record and escalate a "
+                              "child safety concern.",
+    # distractors
+    "doc-distract-cafe": "Cafe coffee order and the weekly grocery shopping list for the kitchen.",
+    "doc-distract-newsletter": "Monthly newsletter draft: announcements, upcoming events and a "
+                               "thank-you to volunteers.",
 }
 
 

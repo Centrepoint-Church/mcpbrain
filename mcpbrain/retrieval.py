@@ -159,10 +159,15 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     kw = [d for d, _ in store.fts_search(query, limit * 2)]
     fused = _rrf([sem, kw], k=rrf_k, vec_weight=vec_weight, kw_weight=kw_weight)
     ordered = sorted(fused, key=lambda d: -fused[d])
-    # Normalise against the top fused score so the strongest hit is 1.0 and
-    # callers can compare relevance across queries. Computed over the FULL
-    # fused set (before expiry filtering) so dropping an expired top hit does
-    # not silently rescale the survivors.
+    # `score` is an INTRA-QUERY confidence: each fused score divided by this
+    # query's top fused score, so the strongest hit is 1.0 and weaker hits trail
+    # below it. It is NOT comparable across queries (every query's best hit is
+    # 1.0 regardless of absolute match quality) and, because RRF contributions
+    # are ~1/(k+rank), hits present in both rankers cluster near 1.0 while
+    # single-ranker hits sit lower — treat it as "rank confidence within this
+    # result set", not an absolute relevance scale. Computed over the FULL fused
+    # set (before expiry filtering) so dropping an expired top hit does not
+    # silently rescale the survivors.
     top = fused[ordered[0]] if ordered else 0.0
     results = []
     for d in ordered:
