@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from mcpbrain import drain, graph_write, prepare
+from mcpbrain import dashboard, drain, graph_write, prepare
 from mcpbrain.contract import validate_batch_file
 from mcpbrain.sync.gmail import backfill_gmail
 
@@ -66,20 +66,26 @@ def _hand_extraction(thread):
     }
 
 
-def test_full_loop_grows_graph_and_dashboard(e2e_store, fake_google, e2e_home):
-    backfill_gmail(fake_google, e2e_store, after="2026/01/01")
-    prepare.prepare(e2e_store, thread_cap=20, char_budget=24000, resolution_due=False)
-    pending = json.loads((e2e_home / "enrich_queue" / "pending.json").read_text())
-
+def _run_full_loop(store, google, home):
+    """Run sync -> prepare -> drain once. Returns (batch dict, drain summary)."""
+    backfill_gmail(google, store, after="2026/01/01")
+    prepare.prepare(store, thread_cap=20, char_budget=24000, resolution_due=False)
+    pending = json.loads((home / "enrich_queue" / "pending.json").read_text())
     batch = {"batch_id": pending["batch_id"],
              "extractions": [_hand_extraction(t) for t in pending["threads"]],
              "merge_answers": []}
-    # validate against the real contract before drain consumes it
+    (home / "enrich_inbox" / f"{batch['batch_id']}.json").write_text(json.dumps(batch))
+    summary = drain.drain(store, home=str(home), apply=graph_write.apply)
+    return batch, summary
+
+
+def test_full_loop_grows_graph_and_dashboard(e2e_store, fake_google, e2e_home):
+    batch, summary = _run_full_loop(e2e_store, fake_google, e2e_home)
+
+    # validate the hand-written batch satisfied the contract
     errors = validate_batch_file(batch)
     assert errors == [], f"hand-written batch must satisfy the contract: {errors}"
-    (e2e_home / "enrich_inbox" / f"{batch['batch_id']}.json").write_text(json.dumps(batch))
 
-    summary = drain.drain(e2e_store, home=str(e2e_home), apply=graph_write.apply)
     assert summary["applied"] >= 2
 
     ents = e2e_store.list_entities()
@@ -89,3 +95,19 @@ def test_full_loop_grows_graph_and_dashboard(e2e_store, fake_google, e2e_home):
     assert any(e["type"] == "person" for e in ents)
     assert any(e["type"] == "org" for e in ents)
     assert any("works_at" in str(r) for r in rels)
+
+
+def test_dashboard_and_search_after_loop(e2e_store, fake_google, e2e_home):
+    _run_full_loop(e2e_store, fake_google, e2e_home)  # batch, summary discarded
+
+    # Index all chunks into FTS with dummy zero-vectors so FTS is populated.
+    for chunk in e2e_store.unembedded_chunks():
+        e2e_store.write_embedding(chunk["rowid"], [0.0, 0.0, 0.0, 0.0])
+
+    payload = dashboard.assemble(e2e_store, str(e2e_home))
+    actions = payload["actions"]
+    total = sum(len(actions[b]) for b in ("overdue", "due_today", "upcoming", "blocked"))
+    assert total >= 1, "the seeded action must surface in the dashboard"
+
+    hits = e2e_store.fts_search("Hall B", 5)
+    assert hits, "a known chunk must be findable after the full loop"
