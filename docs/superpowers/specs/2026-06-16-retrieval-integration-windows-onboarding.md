@@ -101,19 +101,24 @@ Fix any gaps found (likely candidates: PATH/uv-shim differences, `mcpbrain home`
 
 ## Part 4 — Onboarding: the Cowork "My Brain" project (#9)
 
-### Nature — capability investigation, not a build
+### Verdict (decided 2026-06-16 — no investigation needed)
 
-The one remaining friction point: creating the Cowork "My Brain" project + pasting project instructions is a manual wizard step. Whether this can be automated is the **same class of question as scheduled tasks** — the schedule/project config lives in the desktop app DB, and plugins can't register it. Likely a guided/instructed step, not an API.
+**Cowork project creation stays manual.** The project + its instructions cannot be created programmatically (same class as scheduled tasks — config lives in the desktop app DB, plugins can't register it). This is settled; the implementation plan does **not** spike an auto-create path.
+
+**But the project's working folder is auto-created.** The one friction point we *can* remove: the user shouldn't have to figure out *which* folder to point the Cowork project at. The install flow ensures that folder exists and hands the user its exact path.
 
 ### Deliverable
 
-A short investigation with a binary outcome:
+1. **Auto-create the project folder.** During `mcpbrain setup` / the install skill, ensure the Cowork project's working folder exists (this is `mcpbrain home` — already created at setup; this step just guarantees it and resolves its absolute path). No new location is invented.
+2. **Improve the how-to.** The install skill's "create the My Brain project" step is rewritten to be one clean, unambiguous copy-paste: the exact project name, the exact instructions block, and the **exact pre-resolved working-folder path** (from `mcpbrain home`) — so the user pastes a known-good path rather than browsing for it.
+3. **Document the manual reality.** State plainly in the skill that project creation is a manual Cowork step by design, so it isn't re-investigated later.
 
-- **If** a skill can programmatically create/configure the Cowork project (e.g. via a Cowork action the install skill can drive): spec that auto-create step and fold it into the install skill.
-- **If not** (the expected outcome): keep it a guided step, but improve the wizard/install-skill copy so the name + instructions are one clean copy-paste with zero ambiguity, and document explicitly that auto-create isn't possible (so it's not re-investigated later).
+### Components
+- **Modified `plugin/skills/install/SKILL.md`:** the project-creation step shows the resolved `mcpbrain home` path inline and presents name + instructions as a single copy-paste.
+- **Setup** already creates `mcpbrain home`; add an explicit existence guarantee + path echo if not already surfaced.
 
 ### Flag
-**Capability-dependent on Cowork.** This part may resolve to "documentation + improved copy" with no code, depending on what Cowork exposes. The implementation plan must start by confirming the capability before committing to an auto-create design.
+No Cowork API dependency remains — this part is **documentation + a path echo**, not a capability spike.
 
 ---
 
@@ -121,5 +126,5 @@ A short investigation with a binary outcome:
 
 1. **Retrieval scores + eval** (self-contained, immediately measurable).
 2. **Calendar → person context** (self-contained, pure-data graph writes).
-3. **Onboarding investigation** (cheap; resolves to code or docs).
+3. **Onboarding** (cheap; install-skill copy + working-folder path echo — no spike).
 4. **Windows validation** (needs hardware; do last, after the above land so the runbook tests the full current build).
