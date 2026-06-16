@@ -1,12 +1,26 @@
-{"query": "annual budget planning", "expected_doc_ids": ["doc-budget"]}
-{"query": "money for next year", "expected_doc_ids": ["doc-budget"]}
-{"query": "volunteer roster", "expected_doc_ids": ["doc-roster"]}
-{"query": "who is serving on Sunday", "expected_doc_ids": ["doc-roster"]}
-{"query": "youth camp logistics", "expected_doc_ids": ["doc-camp"]}
-{"query": "summer retreat for teenagers", "expected_doc_ids": ["doc-camp"]}
-{"query": "building maintenance request", "expected_doc_ids": ["doc-facilities"]}
-{"query": "air conditioning broken in the hall", "expected_doc_ids": ["doc-facilities"]}
-{"query": "staff meeting agenda", "expected_doc_ids": ["doc-staffmtg"]}
-{"query": "leadership team gathering notes", "expected_doc_ids": ["doc-staffmtg"]}
-{"query": "child safety policy", "expected_doc_ids": ["doc-safeguarding"]}
-{"query": "safeguarding checks for kids ministry", "expected_doc_ids": ["doc-safeguarding"]}
+{"query": "annual ministry budget for next financial year", "expected_doc_ids": ["doc-budget-annual"]}
+{"query": "board approved spending plan", "expected_doc_ids": ["doc-budget-annual"]}
+{"query": "cost per camper and campsite deposit", "expected_doc_ids": ["doc-budget-camp"]}
+{"query": "budget for the youth camp", "expected_doc_ids": ["doc-budget-camp"]}
+{"query": "who is on welcome and worship this Sunday", "expected_doc_ids": ["doc-roster-sunday"]}
+{"query": "sound desk volunteers", "expected_doc_ids": ["doc-roster-sunday"]}
+{"query": "which leaders supervise each cabin", "expected_doc_ids": ["doc-roster-camp"]}
+{"query": "roster for camp leaders", "expected_doc_ids": ["doc-roster-camp"]}
+{"query": "air conditioning broken in the auditorium", "expected_doc_ids": ["doc-facilities-aircon"]}
+{"query": "need a technician for the main hall", "expected_doc_ids": ["doc-facilities-aircon"]}
+{"query": "resurfacing the south car park", "expected_doc_ids": ["doc-facilities-carpark"]}
+{"query": "repainting the line markings in the lot", "expected_doc_ids": ["doc-facilities-carpark"]}
+{"query": "camp transport timetable and cabin allocation", "expected_doc_ids": ["doc-camp-logistics"]}
+{"query": "meal roster for the retreat", "expected_doc_ids": ["doc-camp-logistics"]}
+{"query": "camp session themes and evening worship", "expected_doc_ids": ["doc-camp-program"]}
+{"query": "morning devotions and afternoon activities at camp", "expected_doc_ids": ["doc-camp-program"]}
+{"query": "leadership team discussion items this week", "expected_doc_ids": ["doc-staff-agenda"]}
+{"query": "staff meeting agenda", "expected_doc_ids": ["doc-staff-agenda"]}
+{"query": "how to request annual leave", "expected_doc_ids": ["doc-staff-leave"]}
+{"query": "time in lieu and sick days policy", "expected_doc_ids": ["doc-staff-leave"]}
+{"query": "working with children checks for volunteers", "expected_doc_ids": ["doc-safeguard-policy"]}
+{"query": "background checks kids ministry", "expected_doc_ids": ["doc-safeguard-policy"]}
+{"query": "how to report a child safety concern", "expected_doc_ids": ["doc-safeguard-incident"]}
+{"query": "escalate a safeguarding incident", "expected_doc_ids": ["doc-safeguard-incident"]}
+{"query": "weekly grocery shopping list", "expected_doc_ids": ["doc-distract-cafe"]}
+{"query": "monthly newsletter announcements", "expected_doc_ids": ["doc-distract-newsletter"]}
