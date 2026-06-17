@@ -291,6 +291,38 @@ class ControlServer:
                     log.exception("backup/enable failed")
                     return h_json(h, 500, {"error": str(exc)})
 
+            if h.path == "/api/backup/auto":
+                # Automatic, no-choice recovery (called by the wizard once Google is
+                # connected): if a backup exists for this account AND the local store
+                # is empty, restore the whole brain; otherwise just ensure encrypted
+                # backup is on. We never clobber a populated local brain — a returning
+                # user who really wants to overwrite uses `mcpbrain restore --force`.
+                try:
+                    from mcpbrain import (restore as _restore, backup_setup,
+                                          auth as _auth, config as _config)
+                    owner = _config.owner_email(str(self.home))
+                    if not owner:
+                        return h_json(h, 200, {"action": "pending", "reason": "no account yet"})
+                    creds = _auth.load_credentials()
+                    svc = _auth.build_service("drive", "v3", creds)
+                    info = _restore.detect_restorable(str(self.home), svc)
+                    store_p = Path(_config.store_path())
+                    store_empty = not (store_p.exists() and store_p.stat().st_size > 0)
+                    if info.get("available") and store_empty:
+                        _restore.run_restore_auto(str(self.home), drive_service=svc)
+                        # The restored bundle carries the escrow key + backup config,
+                        # so backup is already on after a restore.
+                        return h_json(h, 200, {"action": "restored",
+                                               "snapshot_id": info.get("snapshot_id")})
+                    cur_backup = _config.read_config(str(self.home)).get("backup") or {}
+                    if not cur_backup.get("escrow_key"):
+                        backup_setup.enable_backup(str(self.home), drive_service=svc, user_id=owner)
+                    return h_json(h, 200, {"action": "backup_enabled",
+                                           "restorable": bool(info.get("available"))})
+                except Exception as exc:
+                    log.exception("backup/auto failed")
+                    return h_json(h, 500, {"error": str(exc)})
+
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
             return h_json(h, 500, {"error": str(exc)})

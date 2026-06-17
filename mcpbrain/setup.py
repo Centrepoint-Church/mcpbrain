@@ -39,7 +39,59 @@ def _platform() -> str:
 
 
 def _mcpbrain_bin() -> str:
-    return shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
+    found = shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
+    # Resolve to an absolute path: agent registration (launchd/schtasks) and the
+    # MCP registration below both run later under a minimal login PATH, so a bare
+    # name like "mcpbrain" would not resolve.
+    p = Path(found)
+    if p.exists():
+        return str(p.resolve())
+    return found
+
+
+def _register_mcp_server(*, dry_run: bool = False) -> None:
+    """Register the mcpbrain MCP server with Claude Code (user scope).
+
+    The brain is served through its stdio MCP server, ``mcpbrain mcp-server``.
+    We register it here, from setup, instead of via the plugin's ``.mcp.json``
+    because only setup knows the *absolute* path to the installed ``mcpbrain``
+    binary. That matters: a plugin ``.mcp.json`` cannot branch per-OS, and the
+    daemon/desktop app is launched at login (launchd on macOS) with a minimal
+    PATH that excludes ``~/.local/bin`` — so a bare ``mcpbrain`` command would
+    not resolve. An absolute path resolves the same on macOS and Windows.
+
+    User scope makes the ``brain_*`` tools available in every Claude Code session
+    (including scheduled tasks), which is what we want. Best-effort: a missing
+    ``claude`` CLI must never block onboarding.
+    """
+    from mcpbrain import config
+    mcpbrain_bin = _mcpbrain_bin()
+    manual = f"  claude mcp add mcpbrain --scope user -- {mcpbrain_bin} mcp-server"
+    try:
+        claude = config.find_claude()
+    except Exception as exc:  # noqa: BLE001 - registration is best-effort
+        print(f"Skipped connecting the mcpbrain MCP server ({exc}). Once the "
+              f"`claude` CLI is available, run:\n{manual}", file=sys.stderr)
+        return
+
+    add_cmd = [claude, "mcp", "add", "mcpbrain", "--scope", "user", "--",
+               mcpbrain_bin, "mcp-server"]
+    if dry_run:
+        print(f"would register MCP server: {' '.join(add_cmd)}")
+        return
+
+    import subprocess
+    # Idempotent: drop any prior registration (ignore if absent), then add.
+    subprocess.run([claude, "mcp", "remove", "mcpbrain", "--scope", "user"],
+                   capture_output=True, text=True)
+    res = subprocess.run(add_cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        print("Connected the mcpbrain MCP server to Claude Code (user scope) — the "
+              "brain_* tools are now available in every session.")
+    else:
+        print(f"Could not auto-connect the mcpbrain MCP server "
+              f"({(res.stderr or res.stdout).strip()}). Run this yourself:\n{manual}",
+              file=sys.stderr)
 
 
 def _install_tray_best_effort(home: str) -> None:
@@ -135,14 +187,15 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     home = str(app_dir())
-    # The Cowork "My Brain" project's working folder is mcpbrain home — already
-    # created by app_dir(). Echo the absolute path so the user pastes a
-    # known-good folder into the (manual) Cowork project setup rather than
-    # browsing for it. Project creation itself is a manual Cowork step by design.
-    print(f"Your Cowork project working folder is: {home}")
+    # The brain folder is only needed if the user later wants a dedicated project
+    # pointed at it — the recurring tasks reach mcpbrain via its MCP tools, not the
+    # filesystem, so they don't need this path. Surface it as optional info.
+    print(f"Your brain folder (optional — for a dedicated project) is:\n  {home}")
 
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
+
+    _register_mcp_server(dry_run=args.dry_run)
 
     if args.dry_run:
         print(f"would open {url}")
@@ -159,6 +212,9 @@ def main(argv=None) -> int:
 
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
+    print("Finish setup in the wizard (Google sign-in, your details). Backup and "
+          "recovery happen automatically. Then create the four Local scheduled tasks "
+          "from this Claude Code session (see the install prompt).")
     webbrowser.open(url)
     return 0
 
