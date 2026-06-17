@@ -45,21 +45,21 @@ background tasks as **Local** scheduled tasks.
 > restart the app (or run `/reload-plugins`). Create **each** task with **Model: Sonnet 4.6**
 > and **Permission mode: Auto** so it runs unattended without stopping to ask for approval.
 >
-> **Important — the task name must differ from the skill name.** If a task is *named* the
-> same as the skill it runs (e.g. a task called `mcpbrain-enrich` that says "run the
-> mcpbrain-enrich skill"), the instruction becomes self-referential and the task fails to
-> load the real plugin skill. Use the distinct names below. Each prompt invokes the plugin
-> skill via the **Skill tool** and must **not** read skill files from disk:
+> Each task's prompt is a single **plugin command** (`/mcpbrain:<name>`). A command
+> expands its full instructions into the prompt directly — there is nothing for the task
+> to "look up", so this works reliably in a scheduled run (unlike "run the X skill", which
+> depends on skill resolution that the scheduled-task runtime doesn't reliably do):
 >
 > | Task name | Schedule | Model | Permission mode | Instructions (the task's prompt) |
 > |---|---|---|---|---|
-> | `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-enrich` plugin skill. Do not read skill files from disk. |
-> | `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-meeting-packs` plugin skill. Do not read skill files from disk. |
-> | `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-gardener` plugin skill. Do not read skill files from disk. |
-> | `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-reference-gardener` plugin skill. Do not read skill files from disk. |
+> | `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | `/mcpbrain:enrich` |
+> | `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | `/mcpbrain:meeting-packs` |
+> | `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | `/mcpbrain:gardener` |
+> | `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | `/mcpbrain:reference-gardener` |
 >
-> After creating each one, click **Run now** once to confirm it works. The meeting-packs
-> task is change-detecting, so hourly is cheap.
+> (`mcpbrain` is the plugin name, so the commands are namespaced `/mcpbrain:…`. After
+> creating each task, click **Run now** once to confirm it works. The meeting-packs
+> command is change-detecting, so hourly is cheap.)
 >
 > **4. Open at login.** Remind me to set Claude to open at login (System Settings → General
 > → Login Items → add Claude) so the Local tasks actually fire.
