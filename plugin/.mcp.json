@@ -1,4 +1,4 @@
 {
-  "_comment": "The mcpbrain MCP server is registered by `mcpbrain setup` at user scope (cross-platform, absolute path) rather than here — a plugin .mcp.json can't branch per-OS and would not resolve under the minimal login PATH on macOS. See mcpbrain/setup.py:_register_mcp_server.",
+  "_comment": "The mcpbrain MCP server is registered by `mcpbrain setup` into the Claude Desktop config (claude_desktop_config.json) with the absolute install path — Claude Desktop, where the plugin runs, reads its MCP servers from there, not from this plugin manifest. See mcpbrain/setup.py:_register_desktop_mcp.",
   "mcpServers": {}
 }

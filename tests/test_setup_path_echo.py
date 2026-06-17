@@ -17,17 +17,36 @@ def test_setup_dry_run_echoes_working_folder(monkeypatch, tmp_path, capsys):
     assert "brain folder" in out.lower()
 
 
-def test_setup_dry_run_registers_mcp_server(monkeypatch, tmp_path, capsys):
-    # setup connects the brain by registering the `mcpbrain` MCP server with the
-    # `claude` CLI at user scope, using the ABSOLUTE mcpbrain path (so it resolves
-    # under the minimal login PATH). --dry-run must print that registration.
-    from mcpbrain import config
+def test_setup_dry_run_registers_desktop_mcp(monkeypatch, tmp_path, capsys):
+    # setup connects the brain to Claude DESKTOP by writing its MCP config
+    # (claude_desktop_config.json), using the ABSOLUTE mcpbrain path. --dry-run
+    # must print the target config path and the mcp-server command.
     monkeypatch.setattr(setup, "app_dir", lambda: tmp_path / "home")
     monkeypatch.setattr(setup, "_ensure_daemon_running", lambda h, dry_run=False: 8765)
     monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
-    monkeypatch.setattr(config, "find_claude", lambda: "/abs/bin/claude")
 
     rc = setup.main(["--dry-run"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "mcp add mcpbrain --scope user -- /abs/bin/mcpbrain mcp-server" in out
+    assert "Claude Desktop" in out and "claude_desktop_config.json" in out
+    assert "/abs/bin/mcpbrain" in out and "mcp-server" in out
+
+
+def test_register_desktop_mcp_merges_and_preserves(monkeypatch, tmp_path):
+    # Writing the entry must create the file, preserve other servers, and be
+    # idempotent (overwrite the mcpbrain entry, not duplicate it).
+    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('{"mcpServers": {"other": {"command": "x"}}, "keep": 1}')
+    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+
+    setup._register_desktop_mcp()
+    setup._register_desktop_mcp()  # twice → idempotent
+
+    import json
+    data = json.loads(cfg.read_text())
+    assert data["keep"] == 1                                   # untouched
+    assert data["mcpServers"]["other"] == {"command": "x"}     # preserved
+    assert data["mcpServers"]["mcpbrain"] == {
+        "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
