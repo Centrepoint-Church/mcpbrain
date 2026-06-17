@@ -8,14 +8,22 @@ def test_install_prompt_doc_exists():
     assert (_PLUGIN / "INSTALL.md").exists()
     assert not (_PLUGIN / "skills" / "mcpbrain-install").exists()  # skill removed
 
-def test_install_prompt_has_host_install_and_hands_off_to_cowork():
+def test_install_prompt_is_single_claude_code_flow():
     b = _read("INSTALL.md")
     assert "uv tool install" in b and "--python 3.12" in b   # the host install
     assert "mcpbrain setup" in b                              # wizard
-    assert "restore --auto" in b                              # recovery path
-    assert "Claude Code" in b                                 # Part 1 surface
-    assert "mcpbrain-cowork-setup" in b                       # ends → Part 2 in Cowork
-    assert "Do NOT create any scheduled task or routine here" in b  # no cloud routine
+    assert "Claude Code" in b                                 # the one surface
+    # All four recurring tasks are created in the same Claude Code flow…
+    for t in ("mcpbrain-enrich", "mcpbrain-meeting-packs",
+              "mcpbrain-gardener", "mcpbrain-reference-gardener"):
+        assert t in b
+    # …as LOCAL tasks, explicitly NOT cloud routines via /schedule.
+    assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
+    # Backup/restore is automatic — the prompt must NOT tell the user to run it.
+    assert "restore --auto" not in b and "restore --check" not in b
+    # The cowork-setup skill is gone; setup no longer hands off to a Cowork skill.
+    assert "mcpbrain-cowork-setup" not in b
+    assert not (_PLUGIN / "skills" / "mcpbrain-cowork-setup").exists()
 
 def test_backfill_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-backfill" / "SKILL.md").exists()
@@ -111,17 +119,7 @@ def test_reference_gardener_skill_propose_not_overwrite():
     # skip rule: don't propose for entries that already match
     assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
 
-def test_cowork_setup_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-cowork-setup" / "SKILL.md").exists()
-
-def test_cowork_setup_creates_local_tasks_not_cloud_routines():
-    # Part 2 (Cowork): the four scheduled tasks + project + reload, with an
-    # explicit warning that these are LOCAL Cowork tasks, not Claude Code routines.
-    b = _read("skills/mcpbrain-cowork-setup/SKILL.md")
-    assert "scheduled task" in b.lower() and "hourly" in b.lower()
-    for t in ("mcpbrain-enrich", "gardener", "meeting-packs", "reference-gardener"):
-        assert t in b
-    assert "/reload-plugins" in b
-    assert "My Brain" in b                       # creates the project
-    assert "cloud routine" in b.lower()          # warns against Claude Code routines
-    assert "Cowork" in b
+def test_cowork_setup_skill_removed():
+    # Scheduling now happens in the single Claude Code install prompt (creating
+    # Local scheduled tasks), so the separate Cowork-setup skill no longer exists.
+    assert not (_PLUGIN / "skills" / "mcpbrain-cowork-setup").exists()

@@ -87,12 +87,7 @@
   <div id="hs-health"></div>
   <div id="conn-cards" style="margin:16px 0"></div>
   <div id="backfill-progress" style="margin:16px 0;color:#6b7280;font-size:14px"></div>
-  <div style="margin:16px 0">
-    <button id="enrich-history-btn">Enrich history with Claude Code</button>
-    <span id="enrich-note" style="color:#6b7280;font-size:13px;margin-left:8px">Uses your local Claude Code; may take a while.</span>
-    <span id="enrich-state" style="margin-left:8px;font-size:13px"></span>
-  </div>
-  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. Backup is off unless you enable it.</p>
+  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. An encrypted backup runs automatically so the brain can be recovered.</p>
 </section>
 
 <main class="wrap">
@@ -165,37 +160,30 @@
   </section>
 
   <section id="step-projects" class="card">
-    <h2><span class="num">4</span>Your workspace</h2>
-    <p class="desc">You work from one Cowork project ("My Brain"). Create it from scratch and paste the name and instructions below — your identity, voice and memory come through the mcpbrain tools, so there are no folders to attach. Enrichment runs as an hourly background task you start with one command.</p>
-    <div class="row">
-      <button class="primary" type="button" onclick="prepareWorkspace()">Prepare my working space</button>
-      <span id="ws-state" class="badge idle hidden"></span>
-    </div>
-    <p class="note">This sets up your records repo so the brain can serve your identity, voice and decisions to the project.</p>
-    <details class="howto" open>
-      <summary>1. Create the "My Brain" project</summary>
+    <h2><span class="num">4</span>You're set up</h2>
+    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created back in the Claude Code session that installed mcpbrain — as <b>Local</b> scheduled tasks. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
+    <details class="howto">
+      <summary>Optional: a dedicated "My Brain" workspace</summary>
+      <p class="desc">Want a project that's always grounded in your brain? Create one in Cowork or Claude Code, point its working folder at the folder below, and paste the instructions. Optional — the <code>brain_*</code> tools work in any session.</p>
+      <div class="field">
+        <div class="field-head"><span>Your brain folder</span>
+          <button class="copy" type="button" onclick="copyText('brain-home')">Copy</button></div>
+        <pre id="brain-home" class="spec">…</pre>
+      </div>
       <ol>
-        <li>In Cowork: <b>Projects → + → New from scratch</b> (it saves under <code>~/Documents/Claude/Projects</code>).</li>
-        <li>Name it: <code id="proj-name">My Brain</code> <button class="copybtn" type="button" onclick="copyText('proj-name')">Copy</button></li>
+        <li>Create a project named <code id="proj-name">My Brain</code> <button class="copybtn" type="button" onclick="copyText('proj-name')">Copy</button> (New from scratch).</li>
+        <li>Set its <b>working folder</b> to the brain folder above.</li>
         <li>Paste these <b>project instructions</b> <button class="copybtn" type="button" onclick="copyInstructions()">Copy instructions</button>
           <pre id="proj-instructions" class="spec" style="white-space:pre-wrap"></pre></li>
-      </ol>
-    </details>
-    <details class="howto">
-      <summary>2. Start enrichment (the hourly background run)</summary>
-      <ol>
-        <li>Open any Cowork chat and run: <code id="setup-cmd">/mcpbrain-setup</code> <button class="copybtn" type="button" onclick="copyText('setup-cmd')">Copy</button></li>
-        <li>It finds your folders and creates the hourly task itself — nothing else to configure.</li>
       </ol>
     </details>
   </section>
 
   <section id="step-backup" class="card">
-    <h2><span class="num">5</span>Backup <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
-    <p class="desc">Encrypt and back up your brain to Google Drive for recovery after machine loss. Your data never leaves in cleartext — only an admin-escrowed Fernet key can restore it.</p>
+    <h2><span class="num">5</span>Backup &amp; recovery</h2>
+    <p class="desc">Automatic. Once you connect Google, mcpbrain either <b>restores your brain</b> if a backup already exists for your account, or <b>turns on encrypted backup</b> if it's a fresh start. Your data never leaves in cleartext — only an admin-escrowed key can restore it. No setting to choose.</p>
     <div class="row">
-      <button class="primary" id="enable-backup-btn" onclick="enableBackup()">Enable backup</button>
-      <span id="backup-status" class="badge idle hidden"></span>
+      <span id="backup-status" class="badge idle">Waiting for Google sign-in…</span>
     </div>
     <details class="sub">
       <summary>Fleet setup (Centrepoint org)</summary>
@@ -325,16 +313,6 @@ function copyInstructions(){
   const t = $("proj-instructions").textContent;
   navigator.clipboard.writeText(t).catch(()=>{});
 }
-async function prepareWorkspace(){
-  $("ws-state").classList.remove("hidden");
-  badge("ws-state", "Preparing…", "wait");
-  // The route returns 200 with {"scaffolded":[...]} on success, [] on failure
-  // (scaffold_records swallows errors), so HTTP ok isn't enough — check the list.
-  const res = await P("/api/records/scaffold").catch(() => null);
-  const j = (res && res.ok) ? await res.json().catch(() => ({})) : {};
-  if(j.scaffolded && j.scaffolded.length){ badge("ws-state", "Ready", "ok"); }
-  else { badge("ws-state", "Could not prepare — check the records folder", "wait"); }
-}
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
   const el = $(id);
   el.textContent = text;                   // server-derived text always via textContent
@@ -392,6 +370,8 @@ function renderStatus(j){
       .map(s => String(s).split("/").pop().replace(".readonly", ""))
       .filter(Boolean);
     $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
+    // Google is connected → run the one-shot automatic restore-or-backup.
+    autoBackup();
   }
   // (Enrichment status is shown by the connection card; the old spool counters
   // were removed with the inline extractor step.)
@@ -448,20 +428,32 @@ function renderHome(j){
 
 async function reconnectGoogle(){ try{ await P("/api/auth/start"); }catch(e){} }
 
-async function enableBackup(){
-  badge("backup-status", "Enabling…", "wait");
-  $("backup-status").classList.remove("hidden");
+// Backup is automatic and runs exactly once per page once Google is connected:
+// restore the brain if a backup exists, otherwise turn on encrypted backup.
+// There is no user choice — the server decides based on what's restorable and
+// whether the local store is already populated.
+let _autoBackupDone = false;
+async function autoBackup(){
+  if(_autoBackupDone) return;
+  _autoBackupDone = true;
+  badge("backup-status", "Checking for a backup…", "wait");
   try {
-    const r = await fetch("/api/backup/enable", {method:"POST", headers:{...H.headers, "Content-Type":"application/json"}, body:"{}"});
+    const r = await fetch("/api/backup/auto", {method:"POST", headers:{...H.headers, "Content-Type":"application/json"}, body:"{}"});
     const j = await r.json();
-    if (j.enabled) {
-      badge("backup-status", "Enabled", "ok");
-      $("enable-backup-btn").disabled = true;
+    if (j.action === "restored") {
+      badge("backup-status", "Brain restored from backup", "ok");
+    } else if (j.action === "backup_enabled") {
+      badge("backup-status", "Encrypted backup on", "ok");
+    } else if (j.action === "pending") {
+      _autoBackupDone = false;   // no account yet — let a later poll retry
+      badge("backup-status", "Waiting for Google sign-in…", "idle");
     } else {
-      badge("backup-status", "Failed: " + (j.error || "unknown"), "idle");
+      _autoBackupDone = false;
+      badge("backup-status", "Could not set up backup — retrying", "wait");
     }
   } catch(e) {
-    badge("backup-status", "Error: " + e, "idle");
+    _autoBackupDone = false;
+    badge("backup-status", "Backup error: " + e, "wait");
   }
 }
 
@@ -480,20 +472,13 @@ async function saveFleet(){
   }
 }
 
-$("enrich-history-btn").addEventListener("click", async () => {
-  $("enrich-state").textContent = "Starting…";
-  try{ await P("/api/enrich-backfill/start"); $("enrich-state").textContent = "Running in background…"; }
-  catch(e){ $("enrich-state").textContent = "Could not start"; }
-});
-
-// Reflect persistent server state into the step badges so they survive a reload
-// (a click sets them transiently; this re-derives them from the live probes).
+// Reflect persistent server state into the backup badge so it survives a reload
+// (a backup that was already enabled on a prior visit shows as on, not "waiting").
 function reflectStepBadges(conns){
   conns = conns || {};
-  const rec = conns.records || {};
-  if(rec.state === "ok"){
-    const ready = !rec.detail || /ready/i.test(rec.detail);
-    badge("ws-state", ready ? "Ready" : rec.detail, ready ? "ok" : "wait");
+  const bk = conns.backup || {};
+  if(bk.state === "ok" && !_autoBackupDone){
+    badge("backup-status", bk.detail && /restor/i.test(bk.detail) ? "Brain restored from backup" : "Encrypted backup on", "ok");
   }
 }
 
@@ -549,12 +534,17 @@ async function prefillFromConfig(){
     $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
   if(c.project_instructions) $("proj-instructions").textContent = c.project_instructions;
+  if(c.home_dir) $("brain-home").textContent = c.home_dir;
   const fleet = c.fleet || {};
   if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;
   if(fleet.escrow_folder_id !== undefined && fleet.escrow_folder_id !== "") $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
   await populateTimezones(c.timezone || "");
 }
 prefillFromConfig();
+
+// Records scaffolding used to be a button; it's idempotent (only creates missing
+// files), so just run it once on load to ensure the brain folder has its structure.
+P("/api/records/scaffold").catch(() => {});
 </script>
 </body>
 </html>

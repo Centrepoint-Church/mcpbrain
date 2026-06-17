@@ -1,17 +1,23 @@
 # Installing mcpbrain
 
-mcpbrain installs a background daemon on your **Mac** and is *used* in **Cowork**.
-The install must run in **Claude Code** (it can run commands on your machine);
-Cowork is sandboxed and can't. So it's two steps:
+mcpbrain installs a background daemon on your **Mac** and runs entirely on your machine.
+Everything is set up from **one Claude Code session** — paste the prompt below. It
+installs the daemon, opens a browser wizard for sign-in, and creates the recurring
+background tasks as **Local** scheduled tasks.
 
-1. **Part 1 — Claude Code:** paste the prompt below into a Claude Code session.
-2. **Part 2 — Cowork:** run the `mcpbrain-cowork-setup` skill.
+> **The one thing that matters:** the recurring tasks must be **Local** scheduled tasks
+> (Claude Code Desktop → Routines → New routine → **Local**), *not* **Cloud routines**.
+> Cloud routines (what `/schedule` creates) run on Anthropic's servers from a fresh clone
+> and **can't reach your local mcpbrain** — enrichment would silently do nothing. The
+> prompt below is explicit about this.
 
 ---
 
-## Part 1 — paste this into a Claude Code session
+## Paste this into a Claude Code (Desktop) session
 
-> Install mcpbrain on my Mac. Run these commands with the Bash tool:
+> Install and set up mcpbrain on my Mac.
+>
+> **1. Install.** Run these with the Bash tool:
 >
 > ```bash
 > command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -20,31 +26,43 @@ Cowork is sandboxed and can't. So it's two steps:
 > mcpbrain setup
 > ```
 >
-> `mcpbrain setup` registers the background agent (launchd) and opens a browser
-> wizard — I'll complete Google sign-in, my identity, and timezone there. Leave the
-> pre-filled Fleet / escrow folder IDs as-is.
+> `mcpbrain setup` registers the background agent (launchd), **connects the brain to
+> Claude Code automatically** (it registers the `mcpbrain` MCP server at user scope, so the
+> `brain_*` tools work in every session), and opens a browser wizard.
 >
-> **If I've used mcpbrain before (reinstall or new machine):** after I've signed in,
-> run `mcpbrain restore --check`; if it reports a backup, run
-> `mcpbrain restore --auto` (add `--force` if it says the store already exists) to
-> bring my whole brain back, and skip the bootstrap interview. Do **not** click
-> "Enable backup" in the wizard when restoring — the restore brings my key and
-> settings back.
+> **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
+> Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the
+> wizard restores my brain if a backup already exists for my account, or turns on encrypted
+> backup if it's a fresh start. Do not run any restore or bootstrap command yourself.
 >
-> **If it's a fresh start (no backup found):** run the `mcpbrain-bootstrap` skill to
-> seed my world-model.
+> **3. Create four scheduled tasks.** Once I confirm the wizard is done, create these four
+> recurring tasks (asking you to create a scheduled task here makes a **Local** task that
+> runs on this machine — that's what we want; do **not** use `/schedule`, which makes a
+> cloud routine that can't reach mcpbrain). The tasks do all their work through the
+> **mcpbrain MCP tools**, so the working folder doesn't matter — pick any trusted folder.
+> The `brain_*` tools were connected by `mcpbrain setup`; if they aren't visible yet,
+> restart the app (or run `/reload-plugins`). Create **each** task with **Model: Sonnet 4.6**
+> and **Permission mode: Auto** so it runs unattended without stopping to ask for
+> approval:
 >
-> Then remind me to set Claude to open at login (System Settings → General → Login
-> Items → add Claude).
+> | Task name | Schedule | Model | Permission mode | Instructions (the task's prompt) |
+> |---|---|---|---|---|
+> | `mcpbrain-enrich` | Hourly | Sonnet 4.6 | Auto | Run the mcpbrain-enrich skill. |
+> | `mcpbrain-meeting-packs` | Hourly | Sonnet 4.6 | Auto | Run the mcpbrain-meeting-packs skill. |
+> | `mcpbrain-gardener` | Weekly | Sonnet 4.6 | Auto | Run the mcpbrain-gardener skill. |
+> | `mcpbrain-reference-gardener` | Weekly | Sonnet 4.6 | Auto | Run the mcpbrain-reference-gardener skill. |
 >
-> **Do NOT create any scheduled task or routine here in Claude Code** — that's Part 2,
-> and it has to run in Cowork.
+> After creating each one, click **Run now** once to confirm it works.
+> `mcpbrain-meeting-packs` is change-detecting, so hourly is cheap.
+>
+> **4. Open at login.** Remind me to set Claude to open at login (System Settings → General
+> → Login Items → add Claude) so the Local tasks actually fire.
 
 ---
 
-## Part 2 — in Cowork
+## After setup
 
-When Part 1 is done, open a **Cowork** session and run the **`mcpbrain-cowork-setup`**
-skill. It creates your "My Brain" project, the four recurring Cowork scheduled tasks
-(enrich, meeting-packs, gardener, reference-gardener), and connects the brain — all in
-the place where they actually work.
+The brain runs in the background and is available wherever the mcpbrain plugin is
+connected. Use it day-to-day in **Cowork** or Claude Code: ask questions and the
+`brain_*` tools ground answers in what the brain knows — no folder to attach, because the
+brain is served through its MCP tools.

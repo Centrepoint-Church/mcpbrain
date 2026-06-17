@@ -11,10 +11,13 @@ def test_marketplace_lists_plugin():
     d = json.loads((_PLUGIN / ".claude-plugin" / "marketplace.json").read_text())
     assert "mcpbrain" in [p.get("name") for p in d["plugins"]]
 
-def test_mcp_json_points_at_shim():
+def test_mcp_json_bundles_no_server():
+    # The mcpbrain MCP server is registered by `mcpbrain setup` at user scope
+    # (absolute path, cross-platform). The plugin must NOT also bundle it, or a
+    # duplicate "mcpbrain" server would be defined — and the bundled one can't
+    # branch per-OS so it would fail under the minimal login PATH on macOS.
     d = json.loads((_PLUGIN / ".mcp.json").read_text())
-    cmd = d["mcpServers"]["mcpbrain"]["command"]
-    assert "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-mcp" in cmd
+    assert d.get("mcpServers") == {}
 
 import subprocess
 import os
@@ -32,6 +35,29 @@ def test_mcp_shim_execs_mcp_server(tmp_path):
     r = subprocess.run(["/bin/sh", str(_PLUGIN / "bin" / "mcpbrain-mcp")], env=env,
                        capture_output=True, text=True, timeout=5)
     assert "mcp-server" in r.stdout
+
+def test_mcp_shim_does_not_inject_dotmcpbrain_home(tmp_path):
+    # Regression: the shim must NOT default MCPBRAIN_HOME to ~/.mcpbrain. On macOS
+    # the daemon (and brain) live under ~/Library/Application Support/mcpbrain, so a
+    # ~/.mcpbrain default pointed the MCP server at an empty store. With the env
+    # unset, the shim must leave it unset and let mcpbrain resolve its own home.
+    fake = tmp_path / "mcpbrain"
+    fake.write_text('#!/bin/sh\necho "HOME_ENV:${MCPBRAIN_HOME:-UNSET}"\n'); fake.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:{os.environ.get('PATH','')}", "HOME": str(tmp_path)}
+    r = subprocess.run(["/bin/sh", str(_PLUGIN / "bin" / "mcpbrain-mcp")], env=env,
+                       capture_output=True, text=True, timeout=5)
+    assert "HOME_ENV:UNSET" in r.stdout
+    assert str(tmp_path / ".mcpbrain") not in r.stdout
+
+def test_mcp_shim_honours_explicit_home(tmp_path):
+    fake = tmp_path / "mcpbrain"
+    fake.write_text('#!/bin/sh\necho "HOME_ENV:${MCPBRAIN_HOME:-UNSET}"\n'); fake.chmod(0o755)
+    explicit = str(tmp_path / "custom-home")
+    env = {"PATH": f"{tmp_path}:{os.environ.get('PATH','')}", "HOME": str(tmp_path),
+           "MCPBRAIN_HOME": explicit}
+    r = subprocess.run(["/bin/sh", str(_PLUGIN / "bin" / "mcpbrain-mcp")], env=env,
+                       capture_output=True, text=True, timeout=5)
+    assert f"HOME_ENV:{explicit}" in r.stdout
 
 def test_monitor_shim_execs_monitor(tmp_path):
     fake = tmp_path / "mcpbrain"; fake.write_text('#!/bin/sh\necho "ARGS:$*"\n'); fake.chmod(0o755)
