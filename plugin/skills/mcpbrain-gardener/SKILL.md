@@ -13,14 +13,15 @@ Resolve the working directories:
 
 ```bash
 home=$(mcpbrain home)
+records="$home/records"
 ```
 
-Read `$home/config.json` to find `records_dir`. This is the working directory for all git operations.
+`$records` is the records repo — the working directory for all git operations.
 The app data folder is `$home`.
 
 ---
 
-**Working folder:** the records repo (resolved from `$home/config.json` → `records_dir`)
+**Working folder:** the records repo (`$records`, i.e. `$(mcpbrain home)/records`)
 **Connected folder:** the app data folder (`$(mcpbrain home)`)
 
 ## Purpose
@@ -38,10 +39,9 @@ If nothing needs tidying, log that instead — don't make cosmetic edits. If you
 
 ## What to read first
 
-1. `context/memory.md` in the app data folder (`$(mcpbrain home)`) — current memory index (daemon-maintained)
-2. `state/hot.md` — entries from the last 7 days
-3. `MEMORY.md` in the records repo — the Claude Code auto-memory index
-4. Recent entries in `$(mcpbrain home)/change_log` (if accessible) — system-applied changes since last gardener run
+1. `$(mcpbrain home)/context/memory.md` — current memory index (daemon-maintained)
+2. `$records/state/hot.md` — entries from the last 7 days
+3. `$records/MEMORY.md` — the Claude Code auto-memory index
 
 `$(mcpbrain home)/context/memory.md` is the daemon-maintained note index; the records repo `MEMORY.md` is the Claude Code auto-memory index maintained by the gardener. They are different files with different owners.
 
