@@ -13,12 +13,6 @@ def _frontmatter_field(text, field):
 _PROTOCOL_COMMANDS = ["meeting-packs", "gardener", "reference-gardener"]
 
 
-def _nonblank_body(text):
-    m = re.match(r"^---\n.*?\n---\n(.*)$", text, re.DOTALL)
-    body = m.group(1) if m else text
-    return [ln for ln in body.splitlines() if ln.strip()]
-
-
 def test_recurring_task_commands_exist_within_limits():
     # The four recurring scheduled tasks invoke plugin COMMANDS (/mcpbrain:<name>),
     # not skills — a command expands its content into the prompt, so there's no
@@ -31,15 +25,13 @@ def test_recurring_task_commands_exist_within_limits():
         assert desc and len(desc) <= 200, f"{n}: description {len(desc) if desc else 0} (>200)"
 
 
-def test_protocol_commands_match_their_skills():
-    # The three protocol commands carry the same body as their skill; this guard
-    # fails if they drift (regenerate the command from the skill). enrich is
-    # short/self-contained — its rules come from brain_enrich_pull, not the body.
-    for n in _PROTOCOL_COMMANDS:
-        cmd = (_PLUGIN / "commands" / f"{n}.md").read_text()
-        skill = (_PLUGIN / "skills" / f"mcpbrain-{n}" / "SKILL.md").read_text()
-        assert _nonblank_body(cmd) == _nonblank_body(skill), \
-            f"{n}: command body drifted from skill — regenerate commands/{n}.md"
+def test_recurring_tasks_have_no_duplicate_skill():
+    # The recurring tasks live ONLY as commands now; the old duplicate skills were
+    # removed (commands are the single source). A stray skill would re-create the
+    # name collision that broke task invocation.
+    for n in ["enrich", *_PROTOCOL_COMMANDS]:
+        assert not (_PLUGIN / "skills" / f"mcpbrain-{n}").exists(), \
+            f"mcpbrain-{n} skill should be gone — it's a command now"
 
 
 def test_skill_frontmatter_within_limits():
@@ -98,35 +90,23 @@ def test_backfill_skill_orchestrates_loop():
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
     assert "pending.json" in b or "spool" in b.lower()
 
-def test_gardener_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-gardener" / "SKILL.md").exists()
-
-def test_gardener_skill_resolves_home():
-    b = _read("skills/mcpbrain-gardener/SKILL.md")
+def test_gardener_command_resolves_home_and_has_content():
+    b = _read("commands/gardener.md")
     assert "mcpbrain home" in b
-
-def test_gardener_skill_has_content():
-    b = _read("skills/mcpbrain-gardener/SKILL.md")
-    assert len(b) > 1500  # full port, not a stub
+    assert len(b) > 1500  # full protocol, not a stub
     assert "MEMORY.md" in b  # key section
     assert "GARDENER-PROTECTED" in b  # protected sections mentioned
 
-def test_meeting_packs_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-meeting-packs" / "SKILL.md").exists()
-
-def test_meeting_packs_skill_uses_host_native_mcp_tools():
+def test_meeting_packs_command_uses_host_native_mcp_tools_and_content():
     # Routed through MCP (host-native) instead of curl-to-localhost, which the
     # Cowork VM isolates. No shell/curl dependency on the host.
-    b = _read("skills/mcpbrain-meeting-packs/SKILL.md")
+    b = _read("commands/meeting-packs.md")
     assert "brain_meetings_today" in b
     assert "brain_meeting_pack_get" in b
     assert "brain_meeting_pack_upsert" in b
-
-def test_meeting_packs_skill_has_content():
-    b = _read("skills/mcpbrain-meeting-packs/SKILL.md")
-    assert len(b) > 1500  # full port, not a stub
-    assert "context_hash" in b  # change detection
-    assert "brain_search" in b  # MCP tool usage
+    assert len(b) > 1500            # full protocol, not a stub
+    assert "context_hash" in b      # change detection
+    assert "brain_search" in b      # MCP tool usage
 
 def test_draft_reply_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-draft-reply" / "SKILL.md").exists()
@@ -157,15 +137,9 @@ def test_bootstrap_skill_targets_corpus_files():
               "context/voice.md"):
         assert f in b, f"bootstrap must write to {f!r}"
 
-def test_reference_gardener_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-reference-gardener" / "SKILL.md").exists()
-
-def test_reference_gardener_skill_resolves_home():
-    b = _read("skills/mcpbrain-reference-gardener/SKILL.md")
+def test_reference_gardener_command_resolves_home_and_proposes():
+    b = _read("commands/reference-gardener.md")
     assert "mcpbrain home" in b
-
-def test_reference_gardener_skill_propose_not_overwrite():
-    b = _read("skills/mcpbrain-reference-gardener/SKILL.md")
     assert "reference/_proposals/" in b  # writes proposals, not directly
     assert "brain_note" in b             # surfaces to owner
     # must not silently overwrite
