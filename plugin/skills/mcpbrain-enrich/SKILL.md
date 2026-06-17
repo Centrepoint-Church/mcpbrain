@@ -15,8 +15,11 @@ may run in an isolated VM that can't see the host's spool).
 
 1. Call **`brain_enrich_pull`**. If it returns `{"empty": true}`, stop quietly —
    return `DONE: spool empty`. Otherwise it returns the batch: a `batch_id`, a
-   `threads` list, and a `context` block.
-2. Process every thread using the extraction rules below — one extraction object
+   `threads` list, a `context` block, and a **`rules`** field containing the full
+   extraction protocol. **Follow the `rules` from the response** — it is the
+   authoritative, self-contained copy (the same rules are reproduced below for
+   reference, so you never need a skill file or the source repo).
+2. Process every thread using those extraction rules — one extraction object
    per thread.
 3. Call **`brain_enrich_push`** with `batch_id` (verbatim from step 1),
    `extractions` (the list you built), and `merge_answers` (`[]` unless the batch

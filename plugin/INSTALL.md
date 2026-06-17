@@ -43,18 +43,23 @@ background tasks as **Local** scheduled tasks.
 > **mcpbrain MCP tools**, so the working folder doesn't matter — pick any trusted folder.
 > The `brain_*` tools were connected by `mcpbrain setup`; if they aren't visible yet,
 > restart the app (or run `/reload-plugins`). Create **each** task with **Model: Sonnet 4.6**
-> and **Permission mode: Auto** so it runs unattended without stopping to ask for
-> approval:
+> and **Permission mode: Auto** so it runs unattended without stopping to ask for approval.
+>
+> **Important — the task name must differ from the skill name.** If a task is *named* the
+> same as the skill it runs (e.g. a task called `mcpbrain-enrich` that says "run the
+> mcpbrain-enrich skill"), the instruction becomes self-referential and the task fails to
+> load the real plugin skill. Use the distinct names below. Each prompt invokes the plugin
+> skill via the **Skill tool** and must **not** read skill files from disk:
 >
 > | Task name | Schedule | Model | Permission mode | Instructions (the task's prompt) |
 > |---|---|---|---|---|
-> | `mcpbrain-enrich` | Hourly | Sonnet 4.6 | Auto | Run the mcpbrain-enrich skill. |
-> | `mcpbrain-meeting-packs` | Hourly | Sonnet 4.6 | Auto | Run the mcpbrain-meeting-packs skill. |
-> | `mcpbrain-gardener` | Weekly | Sonnet 4.6 | Auto | Run the mcpbrain-gardener skill. |
-> | `mcpbrain-reference-gardener` | Weekly | Sonnet 4.6 | Auto | Run the mcpbrain-reference-gardener skill. |
+> | `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-enrich` plugin skill. Do not read skill files from disk. |
+> | `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-meeting-packs` plugin skill. Do not read skill files from disk. |
+> | `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-gardener` plugin skill. Do not read skill files from disk. |
+> | `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Use the Skill tool to run the `mcpbrain-reference-gardener` plugin skill. Do not read skill files from disk. |
 >
-> After creating each one, click **Run now** once to confirm it works.
-> `mcpbrain-meeting-packs` is change-detecting, so hourly is cheap.
+> After creating each one, click **Run now** once to confirm it works. The meeting-packs
+> task is change-detecting, so hourly is cheap.
 >
 > **4. Open at login.** Remind me to set Claude to open at login (System Settings → General
 > → Login Items → add Claude) so the Local tasks actually fire.
