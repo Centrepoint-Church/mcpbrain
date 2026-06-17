@@ -2,7 +2,7 @@
 
 Concrete maintainer steps to publish a new mcpbrain version and put it on a
 colleague's computer. Companion to `docs/DISTRIBUTION.md` (the *why*); this is the
-*do*. **Current version: 0.7.0.**
+*do*. See `docs/ARCHITECTURE.md` for the system overview. **Current version: 0.7.9.**
 
 ## Distribution topology (all under the Centrepoint-Church org)
 
@@ -14,8 +14,11 @@ colleague's computer. Companion to `docs/DISTRIBUTION.md` (the *why*); this is t
   shipped `update.py` `DEFAULT_INDEX_URL` pulls from, so a published bump
   auto-updates installed daemons within ~a day.
 - **`Centrepoint-Church/mcpbrain-plugin`** — public plugin assets (skills, hooks,
-  MCP shim, monitors, `.claude-plugin/{plugin,marketplace}.json`). Distributed to
-  staff through the org **plugin marketplace**.
+  monitors, `.claude-plugin/{plugin,marketplace}.json`). Distributed to staff
+  through the org **plugin marketplace**. Note: the plugin's `.mcp.json` bundles
+  **no** MCP server — the `mcpbrain` connector is registered by `mcpbrain setup`
+  at user scope (see `docs/ARCHITECTURE.md` for why). The `bin/` shims remain only
+  as a documented manual fallback.
 
 Local clones used for publishing live at `~/Documents/GitHub/mcpbrain-dist` and
 `~/Documents/GitHub/mcpbrain-plugin`, both with `origin` = the Centrepoint-Church
@@ -25,17 +28,23 @@ repos. **Always confirm the remote is the org** before pushing
 
 ## How a colleague installs (current flow)
 
-There is **no `curl install.sh` one-liner any more.** Installation is plugin-driven:
+There is **no `curl install.sh` one-liner and no `/mcpbrain-install` skill any
+more.** Installation is a single Claude Code session driven by a copy-paste
+prompt — the canonical copy lives in `plugin/INSTALL.md`:
 
 1. The org admin makes `mcpbrain-plugin` available in Claude Team/Enterprise
-   settings (see step 4) — ideally **required/default** so it auto-installs.
-2. The colleague runs the **`/mcpbrain-install`** skill in Cowork (or Claude Code
-   if Cowork is sandboxed). It installs uv if missing, then:
+   settings (see step 2 below) — ideally **required/default** so it auto-installs.
+2. The colleague pastes the `plugin/INSTALL.md` prompt into a **Claude Code
+   (Desktop)** session. It installs uv if missing, then:
    `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force`,
-   runs `mcpbrain setup` (daemon + wizard), the bootstrap interview, and creates
-   the four Cowork scheduled tasks.
-3. They complete the browser wizard (Google sign-in + identity + optional
-   ClickUp + fleet/backup folder IDs) and **set Claude to open at login**.
+   and runs `mcpbrain setup`.
+3. `mcpbrain setup` registers the login agent (launchd/schtasks), **registers the
+   `mcpbrain` MCP server with Claude Code** (`claude mcp add mcpbrain --scope user
+   -- <abs-path> mcp-server`), and opens the browser wizard. Backup/recovery is
+   automatic in the wizard — no manual `restore`/bootstrap step.
+4. The colleague completes the wizard (Google sign-in + identity + timezone),
+   creates the four **Local** scheduled tasks (Sonnet 4.6 + Auto permission mode)
+   in the same session, and **sets Claude to open at login**.
 
 The `--python 3.12` pin is **required**: without it the install fails on any
 machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
@@ -122,8 +131,8 @@ Only a Claude **Team/Enterprise org owner** can do this, in claude.ai settings:
 
 - Add/refresh the `Centrepoint-Church/mcpbrain-plugin` marketplace.
 - Set the install preference to **`required`** (auto-installed, non-removable) or
-  **`default`** (auto-installed, removable) — **not** merely `available` — so 0.7.0
-  reaches all staff without each person installing by hand. This is the onboarding
+  **`default`** (auto-installed, removable) — **not** merely `available` — so the
+  current release reaches all staff without each person installing by hand. This is the onboarding
   (#9) + lifecycle (#6b) win from the platform-layer spec.
 
 Until this is set, staff cannot install the plugin (and existing installs keep
@@ -147,13 +156,15 @@ The bundled OAuth client belongs to the **Centrepoint** Google Cloud project
 
 On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` account:
 
-- Install the plugin (org marketplace) → run `/mcpbrain-install` end to end.
+- Install the plugin (org marketplace) → paste the `plugin/INSTALL.md` prompt and
+  run it end to end.
 - Confirm: uv + wheel install; `mcpbrain --version` resolves in a fresh shell;
-  daemon starts (menu-bar icon); wizard completes with the *different* Google
-  account; **Enable backup** works; bootstrap writes the reference/context corpus;
-  the four Cowork scheduled tasks are created; `/reload-plugins` connects MCP
-  (`brain_search` returns a result with a `score` field); the hourly enrich task
-  drains `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
+  daemon starts (menu-bar icon); **`mcpbrain setup` registered the MCP server**
+  (`claude mcp get mcpbrain` → ✔ Connected, no `MCPBRAIN_HOME` in its env); wizard
+  completes with the *different* Google account; backup/recovery runs
+  automatically; the four Local scheduled tasks are created; `brain_search`
+  returns a result with a `score` field; the hourly enrich task drains
+  `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
   `mcpbrain restore` round-trips a snapshot.
 
 ## 5. Windows clean-machine validation (HARD GATE — must pass before Windows rollout)
@@ -162,25 +173,31 @@ The schtasks generators are unit-tested (`tests/test_agents_windows_xplat.py`) b
 the live desktop flow has had **zero** real-machine testing. Run once on a clean
 Windows box with a **non-author** `@centrepoint.church` Google account.
 
-- [ ] **1. Install plugin → `/mcpbrain-install`** on a clean Windows machine.
-- [ ] **2. uv + wheel install; PATH correct** — `/mcpbrain-install` runs the
+- [ ] **1. Install plugin → paste `plugin/INSTALL.md` prompt** on a clean Windows
+  machine. (Note: `INSTALL.md` is currently macOS-worded — the Windows install
+  commands/PATH still need their own pass; see the gaps note below.)
+- [ ] **2. uv + wheel install; PATH correct** — the prompt runs the
   `uv tool install … --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" …`
   step; `mcpbrain --version` resolves in a fresh shell (validates uv shim + PATH).
 - [ ] **3. `mcpbrain setup` registers daemon + tray via schtasks** — confirm both:
   `schtasks /query /tn mcpbrain` and `schtasks /query /tn mcpbrain-tray` (or
   `schtasks /query | findstr mcpbrain`).
-- [ ] **4. Wizard loads; non-author Google sign-in works** with a *different*
+- [ ] **4. `mcpbrain setup` registered the MCP connector** — `claude mcp get
+  mcpbrain` shows **✔ Connected**, `Command` is the absolute `mcpbrain.exe` path,
+  and there is **no `MCPBRAIN_HOME`** in its environment. This is the
+  cross-platform connector mechanism (registration, not a plugin shim) and is the
+  main thing this Windows gate exists to prove.
+- [ ] **5. Wizard loads; non-author Google sign-in works** with a *different*
   Centrepoint account.
-- [ ] **5. The four Cowork Desktop Scheduled Tasks can be created** via `/schedule`,
-  working folder = the path printed by `mcpbrain setup`
-  ("Your Cowork project working folder is: …"), which binds them to the `My Brain`
-  project.
-- [ ] **6. `/reload-plugins` connects MCP; `brain_search` returns** a result (with a
-  `score` field).
-- [ ] **7. Hourly enrich task drains `enrich_inbox`** — drop a pending batch and
+- [ ] **6. The four Local scheduled tasks can be created** (Sonnet 4.6 + Auto
+  permission mode), per `INSTALL.md`. Do **not** use `/schedule` (that makes a
+  cloud routine that can't reach the local daemon). The working folder doesn't
+  matter — the tasks reach mcpbrain via its MCP tools.
+- [ ] **7. `brain_search` returns** a result (with a `score` field).
+- [ ] **8. Hourly enrich task drains `enrich_inbox`** — drop a pending batch and
   confirm it is consumed (now via `brain_enrich_pull`/`brain_enrich_push`).
-- [ ] **8. `mcpbrain restore` round-trips a snapshot.**
-- [ ] **9. `mcpbrain doctor` runs and its auto-fixes work on Windows** —
+- [ ] **9. `mcpbrain restore` round-trips a snapshot.**
+- [ ] **10. `mcpbrain doctor` runs and its auto-fixes work on Windows** —
   restart/re-register via schtasks (`schtasks /end`+`/run`, `/create /f`).
 
 **Likely gap candidates:** PATH / uv-shim differences, `mcpbrain home` resolution

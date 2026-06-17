@@ -4,6 +4,8 @@ mcpbrain is a local-first personal knowledge daemon. It syncs your Gmail and Dri
 
 Everything stays on your laptop. Nothing is sent anywhere unless you turn on the optional encrypted backup, or you query Claude Desktop (in which case Claude Desktop sends your query to Anthropic, same as any other Claude chat).
 
+> Maintainers: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system overview (daemon, MCP connector, distribution topology), [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) for the update channel, and [`docs/RELEASE-RUNBOOK.md`](docs/RELEASE-RUNBOOK.md) for release steps.
+
 ## Install
 
 Three commands:
