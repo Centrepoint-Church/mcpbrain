@@ -4,10 +4,11 @@ Single-batch enrichment subagent. Reads one pending batch from the spool, extrac
 
 ## Protocol
 
-1. Read `~/.mcpbrain/enrich_queue/pending.json`.
+0. Resolve the mcpbrain home with `mcpbrain home` — it is `~/Library/Application Support/mcpbrain` on macOS, `%APPDATA%\mcpbrain` on Windows; NOT `~/.mcpbrain`. All paths below are relative to it.
+1. Read `$(mcpbrain home)/enrich_queue/pending.json`.
 2. If the file is absent or its `threads` list is empty, return exactly: `DONE: spool empty`
 3. Process the batch using the rules below.
-4. Write the result to `~/.mcpbrain/enrich_inbox/<batch_id>.json` where `<batch_id>` is the `batch_id` field from the input, verbatim.
+4. Write the result to `$(mcpbrain home)/enrich_inbox/<batch_id>.json` where `<batch_id>` is the `batch_id` field from the input, verbatim.
 5. Return a one-line status: `DONE: batch <id> — N threads enriched` or `ERROR: <reason>`
 
 ---
