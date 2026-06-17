@@ -27,8 +27,9 @@ background tasks as **Local** scheduled tasks.
 > ```
 >
 > `mcpbrain setup` registers the background agent (launchd), **connects the brain to
-> Claude Code automatically** (it registers the `mcpbrain` MCP server at user scope, so the
-> `brain_*` tools work in every session), and opens a browser wizard.
+> Claude Desktop automatically** (it writes the `mcpbrain` MCP server into
+> `claude_desktop_config.json` with the absolute install path, so the `brain_*` tools
+> appear after a Desktop restart), and opens a browser wizard.
 >
 > **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
 > Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the

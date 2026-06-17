@@ -2,7 +2,7 @@
 
 Concrete maintainer steps to publish a new mcpbrain version and put it on a
 colleague's computer. Companion to `docs/DISTRIBUTION.md` (the *why*); this is the
-*do*. See `docs/ARCHITECTURE.md` for the system overview. **Current version: 0.7.9.**
+*do*. See `docs/ARCHITECTURE.md` for the system overview. **Current version: 0.7.10.**
 
 ## Distribution topology (all under the Centrepoint-Church org)
 
@@ -38,10 +38,11 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    (Desktop)** session. It installs uv if missing, then:
    `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force`,
    and runs `mcpbrain setup`.
-3. `mcpbrain setup` registers the login agent (launchd/schtasks), **registers the
-   `mcpbrain` MCP server with Claude Code** (`claude mcp add mcpbrain --scope user
-   -- <abs-path> mcp-server`), and opens the browser wizard. Backup/recovery is
-   automatic in the wizard — no manual `restore`/bootstrap step.
+3. `mcpbrain setup` registers the login agent (launchd/schtasks), **connects the
+   brain to Claude Desktop** by writing `mcpbrain` into the Desktop MCP config
+   (`claude_desktop_config.json`, with the absolute install path), and opens the
+   browser wizard. Backup/recovery is automatic in the wizard — no manual
+   `restore`/bootstrap step.
 4. The colleague completes the wizard (Google sign-in + identity + timezone),
    creates the four **Local** scheduled tasks (Sonnet 4.6 + Auto permission mode)
    in the same session, and **sets Claude to open at login**.
@@ -159,9 +160,11 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
 - Install the plugin (org marketplace) → paste the `plugin/INSTALL.md` prompt and
   run it end to end.
 - Confirm: uv + wheel install; `mcpbrain --version` resolves in a fresh shell;
-  daemon starts (menu-bar icon); **`mcpbrain setup` registered the MCP server**
-  (`claude mcp get mcpbrain` → ✔ Connected, no `MCPBRAIN_HOME` in its env); wizard
-  completes with the *different* Google account; backup/recovery runs
+  daemon starts (menu-bar icon); **`mcpbrain setup` wrote the Claude Desktop MCP
+  config** (`~/Library/Application Support/Claude/claude_desktop_config.json` has
+  an `mcpbrain` entry with the absolute path) and Claude Desktop shows the
+  `brain_*` tools after a restart; wizard completes with the *different* Google
+  account; backup/recovery runs
   automatically; the four Local scheduled tasks are created; `brain_search`
   returns a result with a `score` field; the hourly enrich task drains
   `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
@@ -182,11 +185,12 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 - [ ] **3. `mcpbrain setup` registers daemon + tray via schtasks** — confirm both:
   `schtasks /query /tn mcpbrain` and `schtasks /query /tn mcpbrain-tray` (or
   `schtasks /query | findstr mcpbrain`).
-- [ ] **4. `mcpbrain setup` registered the MCP connector** — `claude mcp get
-  mcpbrain` shows **✔ Connected**, `Command` is the absolute `mcpbrain.exe` path,
-  and there is **no `MCPBRAIN_HOME`** in its environment. This is the
-  cross-platform connector mechanism (registration, not a plugin shim) and is the
-  main thing this Windows gate exists to prove.
+- [ ] **4. `mcpbrain setup` wrote the Claude Desktop MCP config** —
+  `%APPDATA%\Claude\claude_desktop_config.json` has an `mcpbrain` entry whose
+  `command` is the absolute `mcpbrain.exe` path (no `MCPBRAIN_HOME`), and Claude
+  Desktop shows the `brain_*` tools after a restart. This is the cross-platform
+  connector mechanism (a config write, not a plugin shim) and is the main thing
+  this Windows gate exists to prove.
 - [ ] **5. Wizard loads; non-author Google sign-in works** with a *different*
   Centrepoint account.
 - [ ] **6. The four Local scheduled tasks can be created** (Sonnet 4.6 + Auto

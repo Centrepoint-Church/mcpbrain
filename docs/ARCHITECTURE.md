@@ -26,34 +26,43 @@ scheduling live in `agents.py`; `setup.py` wires it all up.
 
 ## How Claude connects to the brain (the connector)
 
-The connector is **registered by `mcpbrain setup`**, not by the plugin's
-`.mcp.json`. Setup runs:
+Staff work in **Claude Desktop**, which reads its MCP servers from
+`claude_desktop_config.json` — **not** from Claude Code's `~/.claude.json`, and
+**not** from the plugin's `.mcp.json`. So the connector is **written by
+`mcpbrain setup`** into the Desktop config:
 
-```
-claude mcp add mcpbrain --scope user -- <absolute-path-to-mcpbrain> mcp-server
+| OS | Claude Desktop MCP config |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+Setup merges this entry in (preserving any other servers, idempotent):
+
+```json
+"mcpbrain": { "command": "<absolute-path-to-mcpbrain>", "args": ["mcp-server"] }
 ```
 
 The plugin's `plugin/.mcp.json` deliberately bundles **no** MCP server
-(`"mcpServers": {}`); the `plugin/bin/mcpbrain-mcp` + `mcpbrain-monitor` shims
-remain only as a documented manual fallback.
+(`"mcpServers": {}`); it ships only skills/hooks/monitors. The
+`plugin/bin/mcpbrain-mcp` + `mcpbrain-monitor` shims remain only as a documented
+manual fallback.
 
-**Why registration instead of a bundled plugin server** — a static plugin
-`.mcp.json` can't connect robustly on both macOS and Windows:
+**Why a config write instead of a bundled plugin server or `claude mcp add`:**
 
-- MCP servers are spawned **shell-less on every OS** (confirmed in the Claude Code
-  client), and `.mcp.json` has **no per-OS branching**.
-- The documented macOS flow is **open-at-login**, so launchd hands Claude a
-  minimal PATH that excludes `~/.local/bin` — a bare `mcpbrain` command wouldn't
-  resolve, and an extensionless `#!/bin/sh` shim can't run on Windows at all.
-- An earlier shim also injected `MCPBRAIN_HOME=~/.mcpbrain` (empty) instead of the
-  real macOS home, so the connector attached to an empty store.
+- The plugin's `.mcp.json` and `claude mcp add` target **Claude Code**, not the
+  **Claude Desktop** app where the plugin and staff actually live.
+- MCP servers are spawned **shell-less on every OS** and the config has **no
+  per-OS branching**, so an extensionless `#!/bin/sh` shim can't run on Windows
+  and a bare `mcpbrain` command may not resolve under a minimal GUI PATH.
+- A plain JSON edit with the **resolved absolute** path — which only setup knows —
+  sidesteps all of that and works identically on macOS and Windows. It also points
+  at the daemon's real home (the earlier shim injected `MCPBRAIN_HOME=~/.mcpbrain`,
+  an empty store).
 
-`mcpbrain setup` runs locally on each OS and knows the **resolved absolute** path
-to the installed binary, so a single mechanism works identically on macOS and
-Windows and points at the daemon's real home. User scope makes the `brain_*`
-tools available in every Claude Code session, including scheduled tasks. Verify
-with `claude mcp get mcpbrain` (expect **✔ Connected**, no `MCPBRAIN_HOME` in its
-environment).
+Verify after install: the entry exists in `claude_desktop_config.json` with the
+absolute `mcpbrain` path, and Claude Desktop shows the `brain_*` tools after a
+restart.
 
 ## The plugin
 
@@ -82,8 +91,9 @@ clean-machine validation procedure.
 
 ## Platform status
 
-- **macOS** — supported; connector validated (`claude mcp get` → ✔ Connected).
+- **macOS** — supported; connector (Desktop config write) is the validated path.
 - **Windows** — the daemon/tray schtasks generators are unit-tested and the
-  setup-registered connector is cross-platform by design, but the live desktop
-  flow (and a Windows-worded `INSTALL.md`) has **not** been validated on a real
-  machine. See the Windows hard gate in [`RELEASE-RUNBOOK.md`](RELEASE-RUNBOOK.md).
+  Desktop-config connector is cross-platform by design (same JSON write, absolute
+  path), but the live desktop flow (and a Windows-worded `INSTALL.md`) has **not**
+  been validated on a real machine. See the Windows hard gate in
+  [`RELEASE-RUNBOOK.md`](RELEASE-RUNBOOK.md).

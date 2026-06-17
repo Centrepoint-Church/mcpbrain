@@ -11,6 +11,8 @@ browser.
 """
 
 import argparse
+import json
+import os
 import shutil
 import sys
 import time
@@ -49,48 +51,54 @@ def _mcpbrain_bin() -> str:
     return found
 
 
-def _register_mcp_server(*, dry_run: bool = False) -> None:
-    """Register the mcpbrain MCP server with Claude Code (user scope).
+def _desktop_config_path() -> Path:
+    """Path to the Claude **Desktop** MCP config for this OS.
+
+    Claude Desktop — where the plugin runs and staff do their work — reads its
+    MCP servers from this file, *not* from Claude Code's ``~/.claude.json``.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "Claude" / "claude_desktop_config.json"
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def _register_desktop_mcp(*, dry_run: bool = False) -> None:
+    """Connect the brain to **Claude Desktop** by writing its MCP config.
 
     The brain is served through its stdio MCP server, ``mcpbrain mcp-server``.
-    We register it here, from setup, instead of via the plugin's ``.mcp.json``
-    because only setup knows the *absolute* path to the installed ``mcpbrain``
-    binary. That matters: a plugin ``.mcp.json`` cannot branch per-OS, and the
-    daemon/desktop app is launched at login (launchd on macOS) with a minimal
-    PATH that excludes ``~/.local/bin`` — so a bare ``mcpbrain`` command would
-    not resolve. An absolute path resolves the same on macOS and Windows.
+    Setup writes the entry directly into ``claude_desktop_config.json`` using the
+    *absolute* path to the installed binary — which only setup knows. A plain
+    JSON edit with an absolute command is fully cross-platform (no shell/PATH/
+    extension problem), and targets Claude Desktop rather than Claude Code. The
+    plugin's own ``.mcp.json`` deliberately bundles no server. Best-effort: a
+    write failure must never block onboarding.
 
-    User scope makes the ``brain_*`` tools available in every Claude Code session
-    (including scheduled tasks), which is what we want. Best-effort: a missing
-    ``claude`` CLI must never block onboarding.
+    Merges into any existing config, preserving other servers; idempotent.
     """
-    from mcpbrain import config
-    mcpbrain_bin = _mcpbrain_bin()
-    manual = f"  claude mcp add mcpbrain --scope user -- {mcpbrain_bin} mcp-server"
-    try:
-        claude = config.find_claude()
-    except Exception as exc:  # noqa: BLE001 - registration is best-effort
-        print(f"Skipped connecting the mcpbrain MCP server ({exc}). Once the "
-              f"`claude` CLI is available, run:\n{manual}", file=sys.stderr)
-        return
-
-    add_cmd = [claude, "mcp", "add", "mcpbrain", "--scope", "user", "--",
-               mcpbrain_bin, "mcp-server"]
+    cfg = _desktop_config_path()
+    entry = {"command": _mcpbrain_bin(), "args": ["mcp-server"]}
     if dry_run:
-        print(f"would register MCP server: {' '.join(add_cmd)}")
+        print(f"would connect mcpbrain to Claude Desktop at {cfg}: {json.dumps(entry)}")
         return
-
-    import subprocess
-    # Idempotent: drop any prior registration (ignore if absent), then add.
-    subprocess.run([claude, "mcp", "remove", "mcpbrain", "--scope", "user"],
-                   capture_output=True, text=True)
-    res = subprocess.run(add_cmd, capture_output=True, text=True)
-    if res.returncode == 0:
-        print("Connected the mcpbrain MCP server to Claude Code (user scope) — the "
-              "brain_* tools are now available in every session.")
-    else:
-        print(f"Could not auto-connect the mcpbrain MCP server "
-              f"({(res.stderr or res.stdout).strip()}). Run this yourself:\n{manual}",
+    try:
+        data = json.loads(cfg.read_text()) if cfg.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            servers = {}
+            data["mcpServers"] = servers
+        servers["mcpbrain"] = entry
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps(data, indent=2) + "\n")
+        print(f"Connected mcpbrain to Claude Desktop ({cfg}). "
+              "Restart Claude Desktop to pick up the brain_* tools.")
+    except OSError as exc:
+        print(f"Could not write the Claude Desktop MCP config ({exc}). Add this to "
+              f"{cfg} under \"mcpServers\":\n  \"mcpbrain\": {json.dumps(entry)}",
               file=sys.stderr)
 
 
@@ -195,7 +203,7 @@ def main(argv=None) -> int:
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
 
-    _register_mcp_server(dry_run=args.dry_run)
+    _register_desktop_mcp(dry_run=args.dry_run)
 
     if args.dry_run:
         print(f"would open {url}")
