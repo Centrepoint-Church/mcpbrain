@@ -350,10 +350,34 @@ def make_brain_draft_save(store, home: str):
 # the app-data dir (mirroring brain_ingest); the meeting tools wrap the store +
 # dashboard the control API also uses.
 
+_ENRICH_RULES_CACHE = None
+
+
+def _enrich_rules() -> str:
+    """The canonical extraction rules — the SHARED-EXTRACTION-RULES block of the
+    bundled ``enrich_prompt.md`` (shipped inside the wheel). brain_enrich_pull
+    returns this so the response is self-contained: the enrichment caller needs
+    no plugin/skill file and no source repo to know the extraction protocol.
+    Returns '' if the bundled file is somehow missing (never raises)."""
+    global _ENRICH_RULES_CACHE
+    if _ENRICH_RULES_CACHE is not None:
+        return _ENRICH_RULES_CACHE
+    from pathlib import Path
+    begin, end = "<!-- SHARED-EXTRACTION-RULES:BEGIN -->", "<!-- SHARED-EXTRACTION-RULES:END -->"
+    try:
+        text = (Path(__file__).parent / "enrich_prompt.md").read_text()
+        _ENRICH_RULES_CACHE = text[text.index(begin) + len(begin):text.index(end)].strip()
+    except (OSError, ValueError):
+        _ENRICH_RULES_CACHE = ""
+    return _ENRICH_RULES_CACHE
+
+
 def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull() -> dict:
-        """Return the pending enrichment batch (enrich_queue/pending.json), or
-        {"empty": true} when there is nothing to enrich."""
+        """Return the pending enrichment batch (enrich_queue/pending.json) with the
+        extraction `rules` bundled in, or {"empty": true} when there is nothing to
+        enrich. The `rules` field carries the full extraction protocol so the
+        caller is self-contained — it needs no plugin skill file or source repo."""
         import json as _json
         from pathlib import Path
         p = Path(home) / "enrich_queue" / "pending.json"
@@ -363,6 +387,7 @@ def make_brain_enrich_pull(home: str):
             return {"empty": True}
         if not isinstance(data, dict) or not (data.get("threads") or []):
             return {"empty": True}
+        data["rules"] = _enrich_rules()
         return data
     return brain_enrich_pull
 
@@ -703,7 +728,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             ),
             types.Tool(
                 name="brain_enrich_pull",
-                description="Pull the pending enrichment batch (the spool the daemon prepared). Returns the batch JSON, or {\"empty\": true} when there is nothing to enrich. Use in the hourly enrich task instead of reading files via shell.",
+                description="Pull the pending enrichment batch (the spool the daemon prepared). Returns the batch JSON — including a `rules` field that contains the FULL extraction protocol you must follow (envelope schema, entity/relation/merge rules) — or {\"empty\": true} when there is nothing to enrich. Follow `rules` from this response; do not read skill files or source. Use in the hourly enrich task instead of reading files via shell.",
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
