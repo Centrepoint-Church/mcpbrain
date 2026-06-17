@@ -82,11 +82,14 @@ caught up automatically on the next wake/reopen.
 
 ## ✅ Part 1 done → now switch to Cowork
 
-The brain is installed and your data is in place. **Open a Cowork session and run the
-`mcpbrain-cowork-setup` skill** to create the My Brain project and the four scheduled
-tasks. Do NOT create the scheduled tasks here in Claude Code — Claude Code's `/schedule`
-makes a **cloud routine** that can't reach your local brain. The tasks must be **Cowork
-Desktop Scheduled Tasks** (local), which is what `mcpbrain-cowork-setup` sets up.
+The brain is installed and your data is in place. **Part 2 runs in Cowork.** Open a
+Cowork session and run the **`mcpbrain-cowork-setup`** skill — it sets up the My Brain
+project and the recurring tasks, in the right place.
+
+**Do not create any scheduled task or routine here in Claude Code.** Stop after Step 5
+and hand off to Cowork. (Creating a schedule in Claude Code makes a cloud routine that
+can't reach the local brain — `mcpbrain-cowork-setup` creates the correct local Cowork
+task instead.)
 
 ## Idempotency
 
