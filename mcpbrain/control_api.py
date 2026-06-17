@@ -306,10 +306,13 @@ class ControlServer:
                     creds = _auth.load_credentials()
                     svc = _auth.build_service("drive", "v3", creds)
                     info = _restore.detect_restorable(str(self.home), svc)
-                    store_p = Path(_config.store_path())
-                    store_empty = not (store_p.exists() and store_p.stat().st_size > 0)
-                    if info.get("available") and store_empty:
-                        _restore.run_restore_auto(str(self.home), drive_service=svc)
+                    # The daemon initializes brain.sqlite3 (schema only) before the
+                    # wizard runs, so file size can't distinguish a fresh install
+                    # from a populated brain — check for real content (chunks rows).
+                    # force=True because the file already exists (run_restore_auto's
+                    # own size guard would otherwise block restoring over it).
+                    if info.get("available") and not _restore.store_has_content(_config.store_path()):
+                        _restore.run_restore_auto(str(self.home), drive_service=svc, force=True)
                         # The restored bundle carries the escrow key + backup config,
                         # so backup is already on after a restore.
                         return h_json(h, 200, {"action": "restored",

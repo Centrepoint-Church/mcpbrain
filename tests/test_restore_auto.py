@@ -13,6 +13,29 @@ def _cfg(tmp_path, **extra):
     config.write_config(str(tmp_path), {"owner_email": "j@x.com", **extra})
 
 
+def test_store_has_content_false_for_missing_and_empty_store(tmp_path):
+    # Missing file → empty.
+    assert restore.store_has_content(str(tmp_path / "nope.sqlite3")) is False
+    # Daemon-initialized but unsynced store (schema only, no chunks) → empty.
+    # This is the regression: the file exists and is non-empty (SQLite header +
+    # tables) yet has no real content, so auto-restore MUST be eligible.
+    from mcpbrain.store import Store
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=384)
+    s.init()
+    assert p.stat().st_size > 0                          # file is non-empty…
+    assert restore.store_has_content(str(p)) is False    # …but has no content
+
+
+def test_store_has_content_true_when_chunks_present(tmp_path):
+    from mcpbrain.store import Store
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=384)
+    s.init()
+    s.upsert_chunk(doc_id="d", text="x", content_hash="h", metadata={})
+    assert restore.store_has_content(str(p)) is True
+
+
 def test_detect_restorable_true_when_key_and_snapshot_present(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})

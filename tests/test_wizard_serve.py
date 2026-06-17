@@ -61,6 +61,35 @@ def test_backup_auto_restores_when_available_and_store_empty(tmp_path, monkeypat
     finally: srv.stop()
 
 
+def test_backup_auto_restores_over_schema_only_store(tmp_path, monkeypatch):
+    # Regression (issue #3): the daemon initializes brain.sqlite3 (schema, no
+    # rows) BEFORE the wizard runs, so the store file exists and is non-empty.
+    # The old file-size check then never restored. With the content check, a
+    # schema-only store is still treated as empty and restore runs (force=True
+    # because the file already exists).
+    from mcpbrain import config, restore, auth
+    from mcpbrain.store import Store
+    store_p = tmp_path / "brain.sqlite3"
+    Store(str(store_p), dim=384).init()              # schema only, no chunks
+    assert store_p.stat().st_size > 0                # file exists + non-empty
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(store_p))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable",
+                        lambda home, svc: {"available": True, "snapshot_id": "snap1"})
+    seen = {}
+    monkeypatch.setattr(restore, "run_restore_auto",
+                        lambda home, **k: seen.update(k) or "ok")
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        resp = _authed_post(srv, "/api/backup/auto")
+        body = json.loads(resp.read())
+        assert body.get("action") == "restored"
+        assert seen.get("force") is True             # bypasses run_restore_auto's size guard
+    finally: srv.stop()
+
+
 def test_backup_auto_enables_when_no_backup(tmp_path, monkeypatch):
     # No restorable backup → turn on encrypted backup instead (still no user choice).
     from mcpbrain import config, restore, auth, backup_setup
