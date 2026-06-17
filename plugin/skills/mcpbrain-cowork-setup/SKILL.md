@@ -1,12 +1,12 @@
 ---
 name: mcpbrain-cowork-setup
-description: Set up mcpbrain in Cowork after installing — creates the My Brain project and the four Cowork Desktop Scheduled Tasks, then reloads plugins. Run this in a Cowork session once mcpbrain-install (Part 1) has finished in Claude Code.
+description: Set up mcpbrain in Cowork after installing — creates the My Brain project and the four Cowork Desktop Scheduled Tasks, then reloads plugins. Run this in a Cowork session once the install (Part 1, via the INSTALL.md prompt) has finished in Claude Code.
 ---
 
 # mcpbrain Cowork setup (Part 2 of 2 — runs in Cowork)
 
-**Run this skill in a Cowork session**, after `mcpbrain-install` has finished in Claude
-Code (daemon installed, wizard done, brain restored or bootstrapped). This sets up the
+**Run this skill in a Cowork session**, after Part 1 (the INSTALL.md prompt) has finished
+in Claude Code (daemon installed, wizard done, brain restored or bootstrapped). This sets up the
 two things that live in the Cowork desktop app: the **My Brain project** and the four
 recurring **scheduled tasks**.
 
