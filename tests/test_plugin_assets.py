@@ -1,36 +1,21 @@
 from pathlib import Path
-import re
 _PLUGIN = Path(__file__).parent.parent / "plugin"
 def _read(rel): return (_PLUGIN / rel).read_text()
 
-def test_install_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-install" / "SKILL.md").exists()
+def test_install_prompt_doc_exists():
+    # Install is distributed as a copy-paste PROMPT (INSTALL.md), not a skill —
+    # skill invocation proved unreliable across surfaces; a prompt always works.
+    assert (_PLUGIN / "INSTALL.md").exists()
+    assert not (_PLUGIN / "skills" / "mcpbrain-install").exists()  # skill removed
 
-def test_install_skill_bootstrap_steps():
-    b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "uv tool install" in b and "--python 3.12" in b
-    assert "mcpbrain setup" in b
-
-def test_install_skill_runs_in_claude_code():
-    # Install runs in Claude Code (host-native); Cowork is the usage surface.
-    # No sandbox probe / fallback dance.
-    b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "Claude Code" in b
-    assert "uv tool install" in b                     # the step the Claude Code agent runs
-    assert "Cowork" in b                              # usage surface named
-    assert "HOST_OK" not in b and "SANDBOX" not in b  # sandbox check removed
-
-def test_install_skill_os_detection():
-    b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "launchd" in b.lower() and ("task scheduler" in b.lower() or "schtasks" in b.lower())
-
-def test_install_skill_description_no_angle_brackets():
-    b = _read("skills/mcpbrain-install/SKILL.md")
-    m = re.match(r'^---\n(.*?)\n---', b, re.DOTALL)
-    assert m, "must have YAML frontmatter"
-    for line in m.group(1).splitlines():
-        if line.strip().startswith("description"):
-            assert "<" not in line and ">" not in line
+def test_install_prompt_has_host_install_and_hands_off_to_cowork():
+    b = _read("INSTALL.md")
+    assert "uv tool install" in b and "--python 3.12" in b   # the host install
+    assert "mcpbrain setup" in b                              # wizard
+    assert "restore --auto" in b                              # recovery path
+    assert "Claude Code" in b                                 # Part 1 surface
+    assert "mcpbrain-cowork-setup" in b                       # ends → Part 2 in Cowork
+    assert "Do NOT create any scheduled task or routine here" in b  # no cloud routine
 
 def test_backfill_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-backfill" / "SKILL.md").exists()
@@ -125,17 +110,6 @@ def test_reference_gardener_skill_propose_not_overwrite():
     assert "no changes to propose" in b.lower() or "nothing" in b.lower()
     # skip rule: don't propose for entries that already match
     assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
-
-def test_install_skill_covers_host_setup_and_hands_off():
-    # Part 1 (Claude Code): bootstrap + login + backup, then hand off to Cowork.
-    b = _read("skills/mcpbrain-install/SKILL.md")
-    assert "bootstrap" in b.lower()              # runs the interview
-    assert "login" in b.lower()                  # instruct: open Claude at login
-    assert "backup" in b.lower()                 # Enable backup guidance
-    assert "mcpbrain-cowork-setup" in b          # explicit handoff to Part 2
-    # The task table is NOT here — the enrich task (and friends) move to the Cowork
-    # skill; the install skill only warns not to schedule them in Claude Code.
-    assert "mcpbrain-enrich" not in b
 
 def test_cowork_setup_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-cowork-setup" / "SKILL.md").exists()
