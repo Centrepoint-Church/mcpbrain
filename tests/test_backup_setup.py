@@ -32,6 +32,17 @@ def test_resolve_shared_drive_uses_configured_folder_not_search(tmp_path, monkey
     assert backup_setup._resolve_shared_drive(_Drive(), home=str(tmp_path)) == "ESCROW1"
 
 
+def test_resolve_shared_drive_falls_back_to_org_default(tmp_path, monkeypatch):
+    # Regression: the wizard calls enable_backup (auto) BEFORE it writes the
+    # fleet folder IDs. Without a fallback, _resolve_shared_drive raised and
+    # first-run backup always failed. It must fall back to the org default.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, org_defaults
+    config.write_config(str(tmp_path), {"owner_email": "j@x.com"})  # no fleet block
+    assert backup_setup._resolve_shared_drive(object(), home=str(tmp_path)) \
+        == org_defaults.ESCROW_FOLDER_ID
+
+
 def test_enable_backup_escrows_to_configured_shared_drive(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain import config

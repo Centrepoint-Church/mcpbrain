@@ -117,6 +117,46 @@ def _escrow_folder(home: str) -> str:
     )
 
 
+def store_has_content(store_path: str | None = None) -> bool:
+    """True if the local store holds real synced content (not just empty schema).
+
+    The daemon creates ``brain.sqlite3`` and initializes every table on startup —
+    which `mcpbrain setup` does *before* the wizard runs — so file existence/size
+    can't tell a fresh install from a populated brain (the file always has a
+    SQLite header + empty tables). Instead, check the primary content table
+    (``chunks``) for any row. Read-only connection so it never disturbs the daemon.
+
+    Conservative on ambiguity: if the DB exists but can't be read (locked badly,
+    corrupt), returns True so auto-restore never clobbers a real brain. A missing
+    file or missing ``chunks`` table means a fresh store → False.
+    """
+    from mcpbrain import config as _cfg
+    p = Path(store_path or _cfg.store_path())
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    import sqlite3
+    # Plain (not mode=ro) connection: the store is WAL, so this is a concurrent
+    # reader alongside the daemon's writer and a SELECT writes nothing. mode=ro
+    # has a WAL gotcha (can fail to open a hot WAL) that would wrongly read as
+    # "unreadable". p.exists() above means connect() won't create a new file.
+    try:
+        con = sqlite3.connect(str(p), timeout=5)
+    except sqlite3.Error:
+        return True
+    try:
+        con.execute("PRAGMA busy_timeout=5000")
+        return con.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        # "no such table" → fresh/uninitialized store → empty. Any other
+        # operational error (locked, etc.) is ambiguous → conservatively treat as
+        # populated so auto-restore never clobbers a real brain.
+        return "no such table" not in str(exc).lower()
+    except sqlite3.Error:
+        return True
+    finally:
+        con.close()
+
+
 def detect_restorable(home: str, drive_service) -> dict:
     """Report whether an existing backup can be restored for this account.
 
