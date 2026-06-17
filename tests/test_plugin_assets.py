@@ -10,28 +10,18 @@ def _frontmatter_field(text, field):
     return m.group(1).strip() if m else None
 
 
-_PROTOCOL_COMMANDS = ["meeting-packs", "gardener", "reference-gardener"]
+_RECURRING_ROUTINES = ["enrich", "meeting-packs", "gardener", "reference-gardener"]
 
 
-def test_recurring_task_commands_exist_within_limits():
-    # The four recurring scheduled tasks invoke plugin COMMANDS (/mcpbrain:<name>),
-    # not skills — a command expands its content into the prompt, so there's no
-    # skill-resolution step for the scheduled-task runtime to fail at.
-    cmds = _PLUGIN / "commands"
-    for n in ["enrich", *_PROTOCOL_COMMANDS]:
-        f = cmds / f"{n}.md"
-        assert f.exists(), f"missing command {n}.md"
-        desc = _frontmatter_field(f.read_text(), "description")
-        assert desc and len(desc) <= 200, f"{n}: description {len(desc) if desc else 0} (>200)"
-
-
-def test_recurring_tasks_have_no_duplicate_skill():
-    # The recurring tasks live ONLY as commands now; the old duplicate skills were
-    # removed (commands are the single source). A stray skill would re-create the
-    # name collision that broke task invocation.
-    for n in ["enrich", *_PROTOCOL_COMMANDS]:
+def test_recurring_tasks_have_no_plugin_skill_or_command():
+    # The recurring tasks are served via the brain_routine MCP tool (protocols
+    # bundled in the wheel) — neither plugin skills nor plugin commands resolve
+    # reliably in the scheduled-task runtime. Make sure no stale duplicates linger.
+    for n in _RECURRING_ROUTINES:
         assert not (_PLUGIN / "skills" / f"mcpbrain-{n}").exists(), \
-            f"mcpbrain-{n} skill should be gone — it's a command now"
+            f"mcpbrain-{n} skill should be gone — it's a brain_routine now"
+    assert not (_PLUGIN / "commands").exists(), \
+        "plugin/commands retired — routines are served via the brain_routine MCP tool"
 
 
 def test_skill_frontmatter_within_limits():
@@ -60,10 +50,10 @@ def test_install_prompt_is_single_claude_code_flow():
     assert "mcpbrain setup" in b                              # wizard
     assert "Claude Code" in b                                 # the one surface
     # All four recurring tasks are created in the same Claude Code flow, each
-    # invoking a plugin COMMAND (/mcpbrain:<name>) rather than "run the X skill"
-    # (which the scheduled-task runtime didn't reliably resolve).
-    for t in ("/mcpbrain:enrich", "/mcpbrain:meeting-packs",
-              "/mcpbrain:gardener", "/mcpbrain:reference-gardener"):
+    # fetching instructions from the brain_routine MCP tool (skills/commands don't
+    # resolve reliably in the scheduled-task runtime; MCP tools do).
+    assert "brain_routine" in b
+    for t in ("enrich", "meeting-packs", "gardener", "reference-gardener"):
         assert t in b
     # …as LOCAL tasks, explicitly NOT cloud routines via /schedule.
     assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
@@ -89,24 +79,6 @@ def test_backfill_skill_orchestrates_loop():
     assert "enrich-batch" in b
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
     assert "pending.json" in b or "spool" in b.lower()
-
-def test_gardener_command_resolves_home_and_has_content():
-    b = _read("commands/gardener.md")
-    assert "mcpbrain home" in b
-    assert len(b) > 1500  # full protocol, not a stub
-    assert "MEMORY.md" in b  # key section
-    assert "GARDENER-PROTECTED" in b  # protected sections mentioned
-
-def test_meeting_packs_command_uses_host_native_mcp_tools_and_content():
-    # Routed through MCP (host-native) instead of curl-to-localhost, which the
-    # Cowork VM isolates. No shell/curl dependency on the host.
-    b = _read("commands/meeting-packs.md")
-    assert "brain_meetings_today" in b
-    assert "brain_meeting_pack_get" in b
-    assert "brain_meeting_pack_upsert" in b
-    assert len(b) > 1500            # full protocol, not a stub
-    assert "context_hash" in b      # change detection
-    assert "brain_search" in b      # MCP tool usage
 
 def test_draft_reply_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-draft-reply" / "SKILL.md").exists()
@@ -136,18 +108,6 @@ def test_bootstrap_skill_targets_corpus_files():
               "reference/org-context.md", "context/preferences.md",
               "context/voice.md"):
         assert f in b, f"bootstrap must write to {f!r}"
-
-def test_reference_gardener_command_resolves_home_and_proposes():
-    b = _read("commands/reference-gardener.md")
-    assert "mcpbrain home" in b
-    assert "reference/_proposals/" in b  # writes proposals, not directly
-    assert "brain_note" in b             # surfaces to owner
-    # must not silently overwrite
-    assert "must not" in b.lower() or "do not overwrite" in b.lower() or "propose" in b.lower()
-    # no-changes stop condition
-    assert "no changes to propose" in b.lower() or "nothing" in b.lower()
-    # skip rule: don't propose for entries that already match
-    assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
 
 def test_cowork_setup_skill_removed():
     # Scheduling now happens in the single Claude Code install prompt (creating

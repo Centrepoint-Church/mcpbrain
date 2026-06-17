@@ -20,6 +20,37 @@ def _store(tmp_path):
 
 # --- enrich pull/push -------------------------------------------------------
 
+def test_brain_routine_serves_bundled_protocols():
+    # The recurring routines are served via MCP (brain_routine) from protocols
+    # bundled in the wheel, so a scheduled task needs no plugin skill/command.
+    ri = mcp_server._routine_instructions
+    assert ri("does-not-exist") is None
+    enrich = ri("enrich")
+    assert enrich and "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
+    gardener = ri("gardener")
+    assert gardener and "GARDENER-PROTECTED" in gardener
+    mp = ri("meeting-packs")
+    assert mp and "context_hash" in mp and "brain_meetings_today" in mp
+    rg = ri("reference-gardener")
+    assert rg and "reference/_proposals/" in rg   # proposes for review, never overwrites
+    assert "brain_note" in rg and "propose" in rg.lower()
+
+
+def test_enrich_pull_bounds_response_size(tmp_path):
+    # A full batch can have ~100 threads and blow past the MCP tool-result token
+    # cap. pull must return only as many threads as fit its char budget, flag
+    # `more`, and report the totals.
+    (tmp_path / "enrich_queue").mkdir()
+    big = "x" * 5000
+    threads = [{"thread_id": f"t{i}", "body": big} for i in range(100)]
+    (tmp_path / "enrich_queue" / "pending.json").write_text(
+        json.dumps({"batch_id": "b1", "threads": threads, "context": {}, "merge_review": []}))
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))())
+    assert out["threads_total"] == 100
+    assert out["threads_returned"] < 100 and out["more"] is True
+    assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS + 6000  # ~budget + one thread overshoot
+
+
 def test_enrich_pull_returns_pending_batch(tmp_path):
     (tmp_path / "enrich_queue").mkdir()
     batch = {"batch_id": "b1", "threads": [{"thread_id": "t1"}], "context": {}}

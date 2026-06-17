@@ -45,17 +45,18 @@ background tasks as **Local** scheduled tasks.
 > restart the app (or run `/reload-plugins`). Create **each** task with **Model: Sonnet 4.6**
 > and **Permission mode: Auto** so it runs unattended without stopping to ask for approval.
 >
-> Each task's prompt is a single **plugin command** (`/mcpbrain:<name>`). A command
-> expands its full instructions into the prompt directly — there is nothing for the task
-> to "look up", so this works reliably in a scheduled run (unlike "run the X skill", which
-> depends on skill resolution that the scheduled-task runtime doesn't reliably do):
+> Each task's prompt tells Claude to fetch its instructions from the **`brain_routine`
+> MCP tool** and follow them. The protocol is returned by the tool (served by the daemon
+> and auto-updated with it), so the task depends only on the `brain_*` MCP tools — nothing
+> to "look up" as a skill or command (skill/command resolution is unreliable in a
+> scheduled run; MCP tools are not):
 >
 > | Task name | Schedule | Model | Permission mode | Instructions (the task's prompt) |
 > |---|---|---|---|---|
-> | `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | `/mcpbrain:enrich` |
-> | `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | `/mcpbrain:meeting-packs` |
-> | `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | `/mcpbrain:gardener` |
-> | `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | `/mcpbrain:reference-gardener` |
+> | `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `enrich` and follow the instructions it returns exactly. |
+> | `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `meeting-packs` and follow the instructions it returns exactly. |
+> | `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `gardener` and follow the instructions it returns exactly. |
+> | `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `reference-gardener` and follow the instructions it returns exactly. |
 >
 > (`mcpbrain` is the plugin name, so the commands are namespaced `/mcpbrain:…`. After
 > creating each task, click **Run now** once to confirm it works. The meeting-packs
