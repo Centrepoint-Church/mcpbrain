@@ -39,18 +39,24 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
 
 
 def _resolve_shared_drive(drive_service, *, home: str) -> str:
-    """Return the configured escrow folder ID (Shared Drive subfolder).
+    """Return the escrow folder ID (Shared Drive subfolder).
 
     Previously this searched/created a personal-Drive 'mcpbrain-escrow' folder
     — a bug, because escrow keys then landed on the user's personal Drive
-    instead of the org Shared Drive. The folder ID is now set during
-    `mcpbrain setup` (wizard) as ``fleet.escrow_folder_id`` and read straight
-    from config — no Drive search.
+    instead of the org Shared Drive.
+
+    Resolves via the single source of truth ``restore._escrow_folder``:
+    ``fleet.escrow_folder_id`` if set, else the baked-in org default. The org
+    default matters during the wizard's automatic backup-enable, which runs
+    *before* the wizard writes the fleet folder IDs to config — without the
+    fallback, enable_backup raised and first-run backup always failed.
     """
-    folder_id = (config.read_config(home).get("fleet") or {}).get("escrow_folder_id")
+    from mcpbrain.restore import _escrow_folder
+    folder_id = _escrow_folder(home)
     if not folder_id:
         raise RuntimeError(
-            "fleet.escrow_folder_id not set — run mcpbrain setup to configure backup escrow."
+            "No escrow folder configured (fleet.escrow_folder_id and no org "
+            "default) — run mcpbrain setup to configure backup escrow."
         )
     return folder_id
 
