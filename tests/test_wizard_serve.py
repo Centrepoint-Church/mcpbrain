@@ -27,6 +27,62 @@ def _authed_post(srv, path):
     )
     return urllib.request.urlopen(req)
 
+def test_backup_auto_pending_without_account(tmp_path):
+    # Before Google sign-in there's no owner_email, so the automatic restore-or-backup
+    # route reports "pending" (and the wizard will retry) rather than erroring.
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        resp = _authed_post(srv, "/api/backup/auto")
+        body = json.loads(resp.read())
+        assert resp.status == 200
+        assert body.get("action") == "pending"
+    finally: srv.stop()
+
+
+def test_backup_auto_restores_when_available_and_store_empty(tmp_path, monkeypatch):
+    # With an account signed in, a restorable backup, and an empty local store, the
+    # route restores automatically (no user choice).
+    from mcpbrain import config, restore, auth
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable",
+                        lambda home, svc: {"available": True, "snapshot_id": "snap1"})
+    called = {}
+    monkeypatch.setattr(restore, "run_restore_auto",
+                        lambda home, **k: called.setdefault("restored", True))
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        resp = _authed_post(srv, "/api/backup/auto")
+        body = json.loads(resp.read())
+        assert body.get("action") == "restored"
+        assert called.get("restored") is True
+    finally: srv.stop()
+
+
+def test_backup_auto_enables_when_no_backup(tmp_path, monkeypatch):
+    # No restorable backup → turn on encrypted backup instead (still no user choice).
+    from mcpbrain import config, restore, auth, backup_setup
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(config, "read_config", lambda home: {})  # no escrow_key yet
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable",
+                        lambda home, svc: {"available": False})
+    called = {}
+    monkeypatch.setattr(backup_setup, "enable_backup",
+                        lambda home, **k: called.setdefault("enabled", True) or {})
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        resp = _authed_post(srv, "/api/backup/auto")
+        body = json.loads(resp.read())
+        assert body.get("action") == "backup_enabled"
+        assert called.get("enabled") is True
+    finally: srv.stop()
+
+
 def test_root_serves_wizard_with_token(tmp_path):
     srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
     try:
@@ -40,7 +96,7 @@ def test_home_has_status_center_elements(tmp_path):
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         for el in ("home-status", "conn-cards", "backfill-progress",
-                   "enrich-history-btn", "self-heal-banners", "privacy-note"):
+                   "backup-status", "brain-home", "self-heal-banners", "privacy-note"):
             assert f'id="{el}"' in html, f"missing #{el}"
     finally: srv.stop()
 
@@ -135,19 +191,26 @@ def test_guided_elements_present():
     assert "/img/clickup-apps-token.png" in WIZ
 
 
-def test_workspace_step_is_from_scratch_and_setup_skill():
-    assert "New from scratch" in WIZ
-    assert "proj-instructions" in WIZ            # the pasteable instructions block
+def test_final_step_defers_scheduling_to_claude_code():
+    # Tasks are created in the Claude Code install prompt (Local scheduled tasks),
+    # NOT here — the wizard must not duplicate or conflict with that. The "My Brain"
+    # workspace is now optional (the brain is served via MCP tools).
+    assert "proj-instructions" in WIZ            # still offered, but optional
     assert "copyInstructions" in WIZ
-    assert "/mcpbrain-setup" in WIZ              # the enrichment setup command
-    assert 'id="step-enrich"' not in WIZ         # old redundant step removed
-    assert "Use an existing folder" not in WIZ   # no longer point Cowork at folders
+    assert "run the mcpbrain-cowork-setup skill" not in WIZ  # skill removed
+    assert "/mcpbrain-setup" not in WIZ          # old slash command removed
+    assert 'id="brain-home"' in WIZ              # path shown for the optional project
+    assert "Local" in WIZ                        # tasks are Local scheduled tasks
+    assert "Use an existing folder" not in WIZ
 
 
-def test_prepare_workspace_verifies_scaffold_result():
-    # The button must check the returned scaffolded list, not just HTTP ok,
-    # because the route returns 200 even when scaffolding produced nothing.
-    assert "j.scaffolded" in WIZ
+def test_backup_is_automatic_no_button():
+    # Backup/restore is automatic (no user choice): the wizard calls /api/backup/auto
+    # once Google connects, and there is no "Enable backup" button.
+    assert "/api/backup/auto" in WIZ
+    assert "autoBackup" in WIZ
+    assert "enable-backup-btn" not in WIZ        # the manual button is gone
+    assert "scaffold" in WIZ                     # records still scaffold (now automatic)
 
 
 def test_generic_hidden_css_rule_exists():
