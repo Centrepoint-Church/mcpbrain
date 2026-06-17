@@ -9,7 +9,7 @@ def test_install_skill_exists():
 def test_install_skill_bootstrap_steps():
     b = _read("skills/mcpbrain-install/SKILL.md")
     assert "uv tool install" in b and "--python 3.12" in b
-    assert "mcpbrain setup" in b and "/reload-plugins" in b
+    assert "mcpbrain setup" in b
 
 def test_install_skill_runs_in_claude_code():
     # Install runs in Claude Code (host-native); Cowork is the usage surface.
@@ -126,11 +126,28 @@ def test_reference_gardener_skill_propose_not_overwrite():
     # skip rule: don't propose for entries that already match
     assert any(kw in b.lower() for kw in ("skip", "already", "confirms", "without contradiction"))
 
-def test_install_full_autonomous_setup():
+def test_install_skill_covers_host_setup_and_hands_off():
+    # Part 1 (Claude Code): bootstrap + login + backup, then hand off to Cowork.
     b = _read("skills/mcpbrain-install/SKILL.md")
+    assert "bootstrap" in b.lower()              # runs the interview
+    assert "login" in b.lower()                  # instruct: open Claude at login
+    assert "backup" in b.lower()                 # Enable backup guidance
+    assert "mcpbrain-cowork-setup" in b          # explicit handoff to Part 2
+    # The task table is NOT here — the enrich task (and friends) move to the Cowork
+    # skill; the install skill only warns not to schedule them in Claude Code.
+    assert "mcpbrain-enrich" not in b
+
+def test_cowork_setup_skill_exists():
+    assert (_PLUGIN / "skills" / "mcpbrain-cowork-setup" / "SKILL.md").exists()
+
+def test_cowork_setup_creates_local_tasks_not_cloud_routines():
+    # Part 2 (Cowork): the four scheduled tasks + project + reload, with an
+    # explicit warning that these are LOCAL Cowork tasks, not Claude Code routines.
+    b = _read("skills/mcpbrain-cowork-setup/SKILL.md")
     assert "scheduled task" in b.lower() and "hourly" in b.lower()
     for t in ("mcpbrain-enrich", "gardener", "meeting-packs", "reference-gardener"):
         assert t in b
-    assert "bootstrap" in b.lower()   # runs the interview
-    assert "login" in b.lower()       # instruct: open Claude at login
-    assert "backup" in b.lower()      # offer Enable backup
+    assert "/reload-plugins" in b
+    assert "My Brain" in b                       # creates the project
+    assert "cloud routine" in b.lower()          # warns against Claude Code routines
+    assert "Cowork" in b
