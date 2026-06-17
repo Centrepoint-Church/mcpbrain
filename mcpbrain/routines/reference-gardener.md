@@ -1,7 +1,3 @@
----
-description: Weekly review of the past week's brain evidence; proposes updates to the reference/context corpus for human review (never overwrites those files directly).
----
-
 # mcpbrain-reference-gardener
 
 Weekly scheduled task. Reviews what has changed in the brain this week and proposes updates to the user's reference and context world-model. It must NOT overwrite `reference/` or `context/` files directly — all proposals go to `reference/_proposals/` for human review.

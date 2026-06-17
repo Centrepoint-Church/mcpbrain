@@ -1,7 +1,3 @@
----
-description: Hourly meeting-prep packs for upcoming calendar events; change-detecting, so a pack rebuilds only when its context actually changed. Uses the mcpbrain MCP tools.
----
-
 # Meeting Packs Cowork Session
 
 **Schedule:** Hourly (Cowork Desktop Scheduled Task).

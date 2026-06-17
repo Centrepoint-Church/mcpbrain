@@ -372,12 +372,42 @@ def _enrich_rules() -> str:
     return _ENRICH_RULES_CACHE
 
 
+# An MCP tool result has a hard token cap (~25k); a full prepared batch (up to
+# SPOOL_THREAD_CAP threads) easily exceeds it once serialized. brain_enrich_pull
+# therefore returns only as many threads as fit this char budget and reports how
+# many remain — the caller enriches + pushes them, the daemon drains and re-
+# prepares, and the next pull returns the next slice. (The file-based backfill
+# path reads pending.json directly and is unaffected by this cap.)
+_PULL_MAX_CHARS = 70_000
+
+
+_ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
+
+
+def _routine_instructions(name: str) -> str | None:
+    """The bundled protocol markdown for a recurring routine, served via MCP so a
+    scheduled task is self-contained — no plugin command/skill resolution (which the
+    Cowork/scheduled-task runtime does not reliably do) and no source repo. Returns
+    None for an unknown name. The name is validated against a fixed allowlist, so
+    there is no path traversal."""
+    if name not in _ROUTINES:
+        return None
+    from pathlib import Path
+    try:
+        return (Path(__file__).parent / "routines" / f"{name}.md").read_text()
+    except OSError:
+        return None
+
+
 def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull() -> dict:
-        """Return the pending enrichment batch (enrich_queue/pending.json) with the
-        extraction `rules` bundled in, or {"empty": true} when there is nothing to
-        enrich. The `rules` field carries the full extraction protocol so the
-        caller is self-contained — it needs no plugin skill file or source repo."""
+        """Return a size-bounded slice of the pending enrichment batch
+        (enrich_queue/pending.json) with the extraction `rules` bundled in, or
+        {"empty": true} when there is nothing to enrich. The `rules` field carries
+        the full extraction protocol so the caller is self-contained (no plugin
+        skill file or source repo). Threads are truncated to stay under the MCP
+        tool-result token cap; `threads_total`/`threads_returned` report the slice
+        and `more` flags that further threads remain for the next pull."""
         import json as _json
         from pathlib import Path
         p = Path(home) / "enrich_queue" / "pending.json"
@@ -387,8 +417,22 @@ def make_brain_enrich_pull(home: str):
             return {"empty": True}
         if not isinstance(data, dict) or not (data.get("threads") or []):
             return {"empty": True}
-        data["rules"] = _enrich_rules()
-        return data
+        all_threads = data.get("threads") or []
+        out = {k: v for k, v in data.items() if k != "threads"}
+        out["rules"] = _enrich_rules()
+        size = len(_json.dumps(out))            # fixed overhead: context + rules + merge_review
+        kept = []
+        for t in all_threads:
+            s = len(_json.dumps(t)) + 1
+            if kept and size + s > _PULL_MAX_CHARS:
+                break                            # always return at least one thread
+            kept.append(t)
+            size += s
+        out["threads"] = kept
+        out["threads_total"] = len(all_threads)
+        out["threads_returned"] = len(kept)
+        out["more"] = len(kept) < len(all_threads)
+        return out
     return brain_enrich_pull
 
 
@@ -727,6 +771,14 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 }, "required": ["email_id", "thread_id", "intent", "final_draft"]},
             ),
             types.Tool(
+                name="brain_routine",
+                description="Return the full instructions for a recurring mcpbrain routine, to follow verbatim. Use this as the FIRST step of a scheduled task: call it, then do exactly what it returns. name is one of: enrich, meeting-packs, gardener, reference-gardener. Self-contained — do not look for a skill or command or read files.",
+                inputSchema={"type": "object", "properties": {
+                    "name": {"type": "string", "enum": list(_ROUTINES),
+                             "description": "the routine to run"},
+                }, "required": ["name"]},
+            ),
+            types.Tool(
                 name="brain_enrich_pull",
                 description="Pull the pending enrichment batch (the spool the daemon prepared). Returns the batch JSON — including a `rules` field that contains the FULL extraction protocol you must follow (envelope schema, entity/relation/merge rules) — or {\"empty\": true} when there is nothing to enrich. Follow `rules` from this response; do not read skill files or source. Use in the hourly enrich task instead of reading files via shell.",
                 inputSchema={"type": "object", "properties": {}},
@@ -858,6 +910,12 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 final_draft=arguments.get("final_draft", ""),
                 parent_draft_id=arguments.get("parent_draft_id"),
             )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_routine":
+            rname = (arguments or {}).get("name", "")
+            instructions = _routine_instructions(rname)
+            out = ({"name": rname, "instructions": instructions} if instructions
+                   else {"error": f"unknown routine {rname!r}", "available": list(_ROUTINES)})
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_pull":
             out = await enrich_pull()
