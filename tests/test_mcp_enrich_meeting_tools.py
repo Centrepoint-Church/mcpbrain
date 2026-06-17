@@ -30,6 +30,25 @@ def test_enrich_pull_returns_pending_batch(tmp_path):
     assert out["threads"][0]["thread_id"] == "t1"
 
 
+def test_enrich_pull_bundles_extraction_rules(tmp_path):
+    # The pull response must carry the full extraction protocol in `rules`, so the
+    # enrich caller is self-contained — no plugin skill file or source repo needed
+    # (regression: a scheduled-task stub previously had to read rules from the repo).
+    (tmp_path / "enrich_queue").mkdir()
+    (tmp_path / "enrich_queue" / "pending.json").write_text(
+        json.dumps({"batch_id": "b1", "threads": [{"thread_id": "t1"}], "context": {}}))
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))())
+    assert "rules" in out and isinstance(out["rules"], str) and out["rules"]
+    # The rules are the bundled enrich_prompt.md SHARED block — spot-check content.
+    assert "extraction envelope" in out["rules"].lower()
+    assert "content_type" in out["rules"]
+    # Sourced from the shipped wheel file, not a skill/repo path.
+    from pathlib import Path
+    import mcpbrain
+    canonical = (Path(mcpbrain.__file__).parent / "enrich_prompt.md").read_text()
+    assert out["rules"] in canonical
+
+
 def test_enrich_pull_empty_when_no_spool(tmp_path):
     pull = mcp_server.make_brain_enrich_pull(str(tmp_path))
     assert asyncio.run(pull()) == {"empty": True}
