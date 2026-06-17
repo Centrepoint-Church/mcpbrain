@@ -1,6 +1,28 @@
+import re
 from pathlib import Path
 _PLUGIN = Path(__file__).parent.parent / "plugin"
 def _read(rel): return (_PLUGIN / rel).read_text()
+
+
+def _frontmatter_field(text, field):
+    # Minimal frontmatter scan (no yaml dep): first `field: value` line.
+    m = re.search(rf"^{field}:[ \t]*(.+)$", text, re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def test_skill_frontmatter_within_limits():
+    # Per the custom-skills spec, name <= 64 and description <= 200 chars. A skill
+    # that violates this can be rejected by the loader — and a rejected skill can
+    # take discovery down for the whole plugin (which hid mcpbrain-enrich once).
+    skills = sorted((_PLUGIN / "skills").glob("*/SKILL.md"))
+    assert skills, "no skills found"
+    for sk in skills:
+        text = sk.read_text()
+        name = _frontmatter_field(text, "name")
+        desc = _frontmatter_field(text, "description")
+        assert name and len(name) <= 64, f"{sk.parent.name}: name missing or >64"
+        assert desc and len(desc) <= 200, \
+            f"{sk.parent.name}: description {len(desc) if desc else 0} chars (>200)"
 
 def test_install_prompt_doc_exists():
     # Install is distributed as a copy-paste PROMPT (INSTALL.md), not a skill —
