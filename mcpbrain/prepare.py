@@ -296,13 +296,22 @@ def _merge_pair(a: dict, b: dict) -> dict:
     }
 
 
-def _merge_review_block(store) -> list:
+# Max candidate pairs folded into one spool batch. The fuzzy finder can emit
+# hundreds of thousands of pairs on a large brain; without a cap the merge_review
+# block alone made pending.json >100MB (far too big to load into context). This
+# matches the old LLM tier's max_adjudications. Capping is safe: the remaining
+# pairs surface on later cycles as adjudicated ones leave the candidate pool.
+_MERGE_REVIEW_CAP = 200
+
+
+def _merge_review_block(store, *, cap: int = _MERGE_REVIEW_CAP) -> list:
     """Candidate pairs for LLM adjudication, folded into the spool. Reuses the
-    existing fuzzy candidate finder. The deterministic resolve tier still runs
-    every cycle elsewhere; this block only covers the LLM-adjudication tier.
+    existing fuzzy candidate finder, capped to `cap` pairs per batch. The
+    deterministic resolve tier still runs every cycle elsewhere; this block only
+    covers the LLM-adjudication tier.
     """
     pairs = _candidate_pairs(store.entities_for_resolution())
-    return [_merge_pair(a, b) for a, b in pairs]
+    return [_merge_pair(a, b) for a, b in pairs[:cap]]
 
 
 # --- context assembly ------------------------------------------------------

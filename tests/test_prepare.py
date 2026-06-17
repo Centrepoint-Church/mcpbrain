@@ -537,6 +537,24 @@ def test_build_pending_returns_dict_without_writing(tmp_path, monkeypatch):
     assert not (tmp_path / "enrich_queue" / "pending.json").exists()
 
 
+def test_merge_review_block_caps_pairs(monkeypatch):
+    # Regression: the fuzzy finder can emit hundreds of thousands of pairs; the
+    # block must cap them so pending.json stays small enough to load into context.
+    from mcpbrain import prepare
+    n = prepare._MERGE_REVIEW_CAP + 50
+    fake = [({"id": f"a{i}", "name": "X", "type": "person"},
+             {"id": f"b{i}", "name": "Y", "type": "person"}) for i in range(n)]
+    monkeypatch.setattr(prepare, "_candidate_pairs", lambda ents: fake)
+
+    class _Store:
+        def entities_for_resolution(self):
+            return []
+
+    out = prepare._merge_review_block(_Store())
+    assert len(out) == prepare._MERGE_REVIEW_CAP
+    assert out[0]["a"]["id"] == "a0"  # order preserved, just truncated
+
+
 # --- helpers ---------------------------------------------------------------
 
 def _read_pending(home):
