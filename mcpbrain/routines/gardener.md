@@ -1,7 +1,3 @@
----
-description: Weekly memory hygiene for the records repo — dedupe, expire stale entries, fix drift. Resolves paths via mcpbrain home; writes structured changes through the MCP tools.
----
-
 # Memory Gardener — Weekly Hygiene Task
 
 **Schedule:** weekly, Monday 08:00
