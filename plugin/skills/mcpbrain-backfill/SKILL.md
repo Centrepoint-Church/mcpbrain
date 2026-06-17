@@ -1,6 +1,6 @@
 ---
 name: mcpbrain-backfill
-description: Enrich your email history using Cowork subagents — processes the spool in batches with a fresh context per batch, so very large histories do not hit context limits. Loops until the spool is dry. Each batch is one Cowork subagent call (subscription usage, not pay-per-token).
+description: Backfill enrichment of your full email history. Processes the spool in batches, each in a fresh-context subagent so large histories don't hit context limits. Loops until the spool is dry.
 ---
 
 # Backfill enrichment
