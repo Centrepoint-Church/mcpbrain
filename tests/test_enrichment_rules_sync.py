@@ -2,16 +2,16 @@
 
 The extraction rules are authored once, in mcpbrain/enrich_prompt.md, between
 the SHARED-EXTRACTION-RULES:BEGIN and :END markers. That exact block is mirrored
-byte-for-byte into plugin/agents/enrich-batch.md (the Cowork agent) and
-plugin/skills/mcpbrain-enrich/SKILL.md (the Cowork scheduled-task skill). These tests
-fail loudly if any copy drifts.
+byte-for-byte into plugin/agents/enrich-batch.md (the backfill subagent). These
+tests fail loudly if the copy drifts. (The /mcpbrain:enrich command does NOT embed
+the rules — it gets them at runtime from brain_enrich_pull's `rules` field — so it
+is not a mirror to guard here.)
 """
 from pathlib import Path
 
 _ROOT = Path(__file__).parent.parent
 _CANONICAL = _ROOT / "mcpbrain" / "enrich_prompt.md"
 _MIRROR = _ROOT / "plugin" / "agents" / "enrich-batch.md"
-_ENRICH_SKILL = _ROOT / "plugin" / "skills" / "mcpbrain-enrich" / "SKILL.md"
 
 _BEGIN = "<!-- SHARED-EXTRACTION-RULES:BEGIN -->"
 _END = "<!-- SHARED-EXTRACTION-RULES:END -->"
@@ -35,19 +35,8 @@ def _extract_block(path: Path) -> str:
 
 def test_each_file_has_exactly_one_marker_pair():
     # _extract_block asserts the marker counts; calling it covers all guarded files.
-    for path in (_CANONICAL, _MIRROR, _ENRICH_SKILL):
+    for path in (_CANONICAL, _MIRROR):
         _extract_block(path)
-
-
-def test_enrich_skill_rules_identical_to_canonical():
-    canonical = _extract_block(_CANONICAL)
-    skill = _extract_block(_ENRICH_SKILL)
-    assert canonical == skill, (
-        "The SHARED-EXTRACTION-RULES block has drifted between\n"
-        f"  {_CANONICAL}  (canonical source of truth)\n"
-        f"  {_ENRICH_SKILL}  (mirror, used by the Cowork skill)\n"
-        "Copy the block from enrich_prompt.md over the corresponding block."
-    )
 
 
 def test_shared_rules_block_is_byte_identical():
