@@ -10,6 +10,38 @@ def _frontmatter_field(text, field):
     return m.group(1).strip() if m else None
 
 
+_PROTOCOL_COMMANDS = ["meeting-packs", "gardener", "reference-gardener"]
+
+
+def _nonblank_body(text):
+    m = re.match(r"^---\n.*?\n---\n(.*)$", text, re.DOTALL)
+    body = m.group(1) if m else text
+    return [ln for ln in body.splitlines() if ln.strip()]
+
+
+def test_recurring_task_commands_exist_within_limits():
+    # The four recurring scheduled tasks invoke plugin COMMANDS (/mcpbrain:<name>),
+    # not skills — a command expands its content into the prompt, so there's no
+    # skill-resolution step for the scheduled-task runtime to fail at.
+    cmds = _PLUGIN / "commands"
+    for n in ["enrich", *_PROTOCOL_COMMANDS]:
+        f = cmds / f"{n}.md"
+        assert f.exists(), f"missing command {n}.md"
+        desc = _frontmatter_field(f.read_text(), "description")
+        assert desc and len(desc) <= 200, f"{n}: description {len(desc) if desc else 0} (>200)"
+
+
+def test_protocol_commands_match_their_skills():
+    # The three protocol commands carry the same body as their skill; this guard
+    # fails if they drift (regenerate the command from the skill). enrich is
+    # short/self-contained — its rules come from brain_enrich_pull, not the body.
+    for n in _PROTOCOL_COMMANDS:
+        cmd = (_PLUGIN / "commands" / f"{n}.md").read_text()
+        skill = (_PLUGIN / "skills" / f"mcpbrain-{n}" / "SKILL.md").read_text()
+        assert _nonblank_body(cmd) == _nonblank_body(skill), \
+            f"{n}: command body drifted from skill — regenerate commands/{n}.md"
+
+
 def test_skill_frontmatter_within_limits():
     # Per the custom-skills spec, name <= 64 and description <= 200 chars. A skill
     # that violates this can be rejected by the loader — and a rejected skill can
@@ -35,9 +67,11 @@ def test_install_prompt_is_single_claude_code_flow():
     assert "uv tool install" in b and "--python 3.12" in b   # the host install
     assert "mcpbrain setup" in b                              # wizard
     assert "Claude Code" in b                                 # the one surface
-    # All four recurring tasks are created in the same Claude Code flow…
-    for t in ("mcpbrain-enrich", "mcpbrain-meeting-packs",
-              "mcpbrain-gardener", "mcpbrain-reference-gardener"):
+    # All four recurring tasks are created in the same Claude Code flow, each
+    # invoking a plugin COMMAND (/mcpbrain:<name>) rather than "run the X skill"
+    # (which the scheduled-task runtime didn't reliably resolve).
+    for t in ("/mcpbrain:enrich", "/mcpbrain:meeting-packs",
+              "/mcpbrain:gardener", "/mcpbrain:reference-gardener"):
         assert t in b
     # …as LOCAL tasks, explicitly NOT cloud routines via /schedule.
     assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
