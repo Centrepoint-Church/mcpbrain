@@ -372,12 +372,6 @@ def _enrich_rules() -> str:
     return _ENRICH_RULES_CACHE
 
 
-# An MCP tool result has a hard token cap (~25k); a full prepared batch (up to
-# SPOOL_THREAD_CAP threads) easily exceeds it once serialized. brain_enrich_pull
-# therefore returns only as many threads as fit this char budget and reports how
-# many remain — the caller enriches + pushes them, the daemon drains and re-
-# prepares, and the next pull returns the next slice. (The file-based backfill
-# path reads pending.json directly and is unaffected by this cap.)
 # Bounds the FULL serialized pull response (context + rules + surviving optional
 # blocks + threads). Kept well under Claude Code's two consumer limits, not just
 # the raw MCP token cap: a result above ~50KB is persisted to a file the caller
@@ -599,6 +593,21 @@ def make_brain_enrich_push(home: str):
     return brain_enrich_push
 
 
+def make_brain_enrich_advance(home: str):
+    async def brain_enrich_advance() -> dict:
+        """Nudge the daemon to run an immediate drain + prepare cycle, so the next
+        pending batch is ready in seconds instead of after the normal interval. Use
+        between backfill rounds, then poll brain_enrich_manifest until batch_id
+        changes (or it reports empty). Returns {"woken": true} or {"error": ...}
+        when the daemon isn't reachable."""
+        from mcpbrain.control_client import ControlClient, DaemonUnavailable
+        try:
+            return ControlClient(home).sync_now()
+        except DaemonUnavailable as exc:
+            return {"error": f"daemon not reachable: {exc}"}
+    return brain_enrich_advance
+
+
 def make_brain_meetings_today(store, home: str):
     async def brain_meetings_today() -> list:
         """Today's calendar events, each annotated with has_pack. Same data the
@@ -680,6 +689,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     enrich_manifest = make_brain_enrich_manifest(home)
     enrich_pull = make_brain_enrich_pull(home)
     enrich_push = make_brain_enrich_push(home)
+    enrich_advance = make_brain_enrich_advance(home)
     meetings_today = make_brain_meetings_today(store, home)
     meeting_pack_get = make_brain_meeting_pack_get(store)
     meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
@@ -956,6 +966,11 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 }, "required": ["batch_id", "extractions"]},
             ),
             types.Tool(
+                name="brain_enrich_advance",
+                description="Nudge the daemon to drain pushed results and prepare the next pending batch immediately (instead of waiting for its normal cycle). Use between backfill rounds, then poll brain_enrich_manifest until batch_id changes or it reports empty.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
                 name="brain_meetings_today",
                 description="Today's calendar events, each with has_pack. Use in the meeting-packs task instead of curl /api/dashboard/today.",
                 inputSchema={"type": "object", "properties": {}},
@@ -1095,6 +1110,9 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 shard=arguments.get("shard"),
                 **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
             )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_advance":
+            out = await enrich_advance()
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_meetings_today":
             out = await meetings_today()
