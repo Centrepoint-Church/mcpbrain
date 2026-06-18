@@ -812,6 +812,23 @@ class Daemon:
 
     # -- one cycle ----------------------------------------------------------
 
+    def _graph_cleanup_once(self) -> None:
+        """One-shot graph hygiene on upgrade: drop self-loops + type-invalid
+        relations and fold org-tag drift left by pre-0.7.34 enrichment. Guarded by a
+        meta flag so it runs at most once per install. Best-effort; never raises."""
+        flag = "graph_cleanup_v1"
+        try:
+            with self._store._connect() as db:
+                if db.execute("SELECT 1 FROM meta WHERE k=?", (flag,)).fetchone():
+                    return
+            from mcpbrain.maintenance.graph_cleanup import cleanup_graph
+            counts = cleanup_graph(self._store)
+            with self._store._connect() as db:
+                db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
+            log.info("graph cleanup (one-shot): %s", counts)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("graph cleanup skipped: %s", exc)
+
     def run_one(self) -> dict | None:
         """Run a single cycle, unless paused.
 
@@ -821,6 +838,7 @@ class Daemon:
         """
         if self._pause.is_set() or self._backfill_active.is_set():
             return None
+        self._graph_cleanup_once()
         services = self.ensure_services()
         # Snapshot the enrich client + mode under the config lock so apply_config
         # (HTTP handler thread) can't swap them mid-cycle; use the locals for this
