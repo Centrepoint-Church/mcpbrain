@@ -12,9 +12,10 @@ orchestrator's context stays flat no matter how large the history is.
    `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
 2. Call `brain_enrich_pull` with `batch_id=<batch_id>`,
    `thread_ids=<your shard's thread_ids>`, `with_blocks=<your shard's flag>`, and
-   (for a blocks shard) `block=<your shard's block>`. (Passing `batch_id` reads this
-   run's frozen snapshot, not whatever is latest.) If it returns `{"empty": true}`,
-   return exactly `DONE: spool empty`.
+   (for a blocks shard) `block=<your shard's block>`, `block_start=<your shard's
+   block_start>`, `block_count=<your shard's block_count>`. (Passing `batch_id` reads
+   this run's frozen snapshot, not whatever is latest.) If it returns
+   `{"empty": true}`, return exactly `DONE: spool empty`.
 3. The result carries a **`rules`** field — the FULL extraction protocol (envelope
    schema, entity/relation/merge rules). Follow it EXACTLY: produce one extraction
    object per thread. If this is a blocks shard, answer the one block the pull

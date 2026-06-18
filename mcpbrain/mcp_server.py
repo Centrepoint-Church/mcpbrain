@@ -528,15 +528,27 @@ def make_brain_enrich_manifest(home: str):
         plan = [{"shard": i, "thread_ids": ids, "with_blocks": False}
                 for i, ids in enumerate(shards)]
         blocks = {k: len(data[k]) for k in _ALL_ENRICH_BLOCKS if data.get(k)}
-        # ONE shard per block TYPE — never a single combined blocks shard. The blocks
-        # together (merge_review + synthesis + … + rules + context) routinely exceed
-        # the pull cap, and a combined shard's pull would drop all of them and come
-        # back empty (the whole category silently skipped). One type per shard keeps
-        # each blocks pull under the cap.
+        # Shard each block type's ITEMS by size (exactly like threads), carrying the
+        # FULL context per shard, so each block pull fits the cap WITHOUT trimming
+        # context or dropping items. A single combined blocks shard could never fit
+        # (all blocks + rules + context ≫ cap → the pull dropped everything and came
+        # back empty; the whole category was silently skipped).
+        ctx_size = len(_json.dumps(data.get("context") or {}))
+        block_budget = max(1000, _PULL_MAX_CHARS - len(_enrich_rules()) - ctx_size - 2000)
         for k in _ALL_ENRICH_BLOCKS:
-            if data.get(k):
-                plan.append({"shard": len(plan), "thread_ids": [],
-                             "with_blocks": True, "block": k})
+            items = data.get(k) or []
+            start = csize = count = 0
+            for idx in range(len(items)):
+                s = len(_json.dumps(items[idx])) + 1
+                if count and csize + s > block_budget:   # close this chunk, start next
+                    plan.append({"shard": len(plan), "thread_ids": [], "with_blocks": True,
+                                 "block": k, "block_start": start, "block_count": count})
+                    start, csize, count = idx, 0, 0
+                csize += s
+                count += 1
+            if count:
+                plan.append({"shard": len(plan), "thread_ids": [], "with_blocks": True,
+                             "block": k, "block_start": start, "block_count": count})
         return {"batch_id": data.get("batch_id"), "thread_total": len(threads),
                 "shards": plan, "blocks": blocks}
     return brain_enrich_manifest
@@ -546,7 +558,9 @@ def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull(thread_ids: list | None = None,
                                 with_blocks: bool = False,
                                 batch_id: str | None = None,
-                                block: str | None = None) -> dict:
+                                block: str | None = None,
+                                block_start: int = 0,
+                                block_count: int | None = None) -> dict:
         """Return enrichment work with the extraction `rules` bundled in, or
         {"empty": true} when there is nothing to enrich. The `rules` field carries
         the full extraction protocol so the caller is self-contained (no plugin skill
@@ -602,16 +616,19 @@ def make_brain_enrich_pull(home: str):
         else:
             out["threads"] = []
         if with_blocks and block:
-            # One block type. Trim context to the few fields a block answer needs
-            # (drop the heavy known_people list) so rules+context leave room, then
-            # truncate this block's items to fit the cap — leftover items re-attach
-            # next cycle. Guarantees a non-empty, in-cap pull for any single type.
-            ctx = data.get("context") or {}
-            out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
-                                                   "org_domain_map") if k in ctx}
+            # One block type, the item slice this shard owns, with the FULL context
+            # (the manifest sized the slice to fit). Safety net only: if a slice still
+            # overflows (pathologically large context), trim context to the few fields
+            # a block answer needs, then truncate items as a last resort.
             items = list(data.get(block) or [])
+            if block_count is not None:
+                items = items[block_start:block_start + block_count]
+            if items and len(_json.dumps({**out, block: items})) > _PULL_MAX_CHARS:
+                ctx = out.get("context") or {}
+                out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
+                                                       "org_domain_map") if k in ctx}
             while items and len(_json.dumps({**out, block: items})) > _PULL_MAX_CHARS:
-                items = items[:-1]                   # drop trailing items until it fits
+                items = items[:-1]                   # last resort: drop trailing items
             if items:
                 out[block] = items
         elif with_blocks:
@@ -1016,6 +1033,10 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                                     "description": "fetch the batch-level blocks (merge_review, synthesis, …)"},
                     "block": {"type": "string",
                               "description": "with with_blocks, the single block type this shard handles (from the manifest shard)"},
+                    "block_start": {"type": "integer",
+                                    "description": "block-shard: index of the first block item (from the manifest shard)"},
+                    "block_count": {"type": "integer",
+                                    "description": "block-shard: number of block items this shard handles (from the manifest shard)"},
                     "batch_id": {"type": "string",
                                  "description": "the manifest's batch_id — reads your run's frozen snapshot"},
                 }},
@@ -1179,6 +1200,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 with_blocks=bool(arguments.get("with_blocks", False)),
                 batch_id=arguments.get("batch_id"),
                 block=arguments.get("block"),
+                block_start=int(arguments.get("block_start", 0) or 0),
+                block_count=arguments.get("block_count"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
