@@ -153,9 +153,10 @@ def probe_records(home) -> dict:
 
 
 def probe_enrichment(home) -> dict:
-    """Enrichment runs in Cowork (subscription). Durable signal: the daemon stamps
-    logs/enrich.log whenever it drains an enrichment batch, so 'Running' survives
-    regardless of the transient enrich_inbox files it deletes on apply."""
+    """Durable signal: the daemon stamps logs/enrich.log whenever it drains an
+    enrichment batch (from the hourly enrich task or the backfill loop), so
+    'Running' survives regardless of the transient enrich_inbox files it deletes
+    on apply. Idle = no batch drained in the last 3 days."""
     log = Path(home) / "logs" / "enrich.log"
     try:
         fresh = (_time.time() - log.stat().st_mtime) < 3 * 86400
@@ -163,7 +164,9 @@ def probe_enrichment(home) -> dict:
         fresh = False
     if fresh:
         return _state("ok", "Running", last_verified=_mtime(log))
-    return _state("needs_action", "Idle — run the backfill skill in Cowork to enrich")
+    return _state("needs_action",
+                  "Idle — nothing enriched in 3 days; run the hourly enrich task "
+                  "(or the backfill skill to catch up on history)")
 
 
 def _mtime(p: Path):
