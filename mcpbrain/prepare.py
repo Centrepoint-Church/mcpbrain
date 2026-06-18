@@ -351,9 +351,10 @@ def _build_context(store, thread_ids) -> dict:
 # --- atomic write ----------------------------------------------------------
 
 def _write_pending(data: dict) -> None:
-    """Write pending.json atomically (temp file + os.replace), mirroring the
-    pattern in config.write_config. No stray temp on failure.
-    """
+    """Write pending.json atomically. NOTE: the production daemon no longer uses
+    this — run_cycle calls prepare_units() (the work-queue producer). This + the
+    prepare() wrapper below are retained only as the unit-test harness for
+    build_pending / noise-filtering / merge-review assembly."""
     queue_dir = config.app_dir() / "enrich_queue"
     queue_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write(queue_dir / "pending.json",
@@ -539,23 +540,16 @@ def prepare(store, *, thread_cap: int, char_budget: int,
             resolution_due: bool, now=None,
             synthesis_requests: list | None = None,
             extra_blocks: dict | None = None) -> dict:
-    """Build pending.json from un-enriched threads and return a summary.
-
-    group_unenriched_threads already caps the thread COUNT; thread_cap is a
-    belt-and-braces ceiling applied here too. The long-thread guard splits any
-    thread whose joined bodies exceed char_budget. When there are zero non-noise
-    threads, no file is written and a zero summary is returned.
-    """
+    """Group → noise-filter → build_pending → write pending.json. RETAINED AS A
+    TEST HARNESS ONLY: production enrichment uses prepare_units() (the work-queue
+    producer). This exercises build_pending + noise-filtering + merge-review in one
+    call for the unit tests; nothing in the daemon calls it."""
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
-
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
-    kept = _filter_noise(store, batches)
-    kept = kept[:thread_cap]
-
+    kept = _filter_noise(store, batches)[:thread_cap]
     if not kept:
         return {"batch_id": None, "threads": 0, "merge_pairs": 0}
-
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,
                          synthesis_requests=synthesis_requests,
@@ -563,3 +557,5 @@ def prepare(store, *, thread_cap: int, char_budget: int,
     _write_pending(data)
     return {"batch_id": data["batch_id"], "threads": len(data["threads"]),
             "merge_pairs": len(data["merge_review"])}
+
+

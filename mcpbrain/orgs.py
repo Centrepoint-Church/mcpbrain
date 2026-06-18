@@ -87,6 +87,14 @@ class OrgTaxonomy:
         for known in self.names:
             if lowered == known.lower():
                 return known
+        # Unambiguous word-prefix fold: a bare short form ("Centrepoint") folds to a
+        # known multi-word org ("Centrepoint Church"), and an over-long form
+        # ("Centrepoint Church Inc.") folds back — but only when EXACTLY ONE known
+        # org matches, so "ACC" never collides with "ACCI" (no shared space-prefix).
+        matches = {k for k in self.names
+                   if k.lower().startswith(lowered + " ") or lowered.startswith(k.lower() + " ")}
+        if len(matches) == 1:
+            return next(iter(matches))
         return raw
 
     def from_email(self, email_addr: str) -> str:

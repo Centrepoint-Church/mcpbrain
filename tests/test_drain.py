@@ -532,22 +532,17 @@ def test_drain_handles_apply_returning_none(store, home):
     assert summary["entities"] == 0
 
 
-def test_consumed_pending_json_deleted(store, home):
-    import json as _json
-    queue = home / "enrich_queue"
-    queue.mkdir(parents=True, exist_ok=True)
-    (queue / "pending.json").write_text(_json.dumps({"batch_id": "batch-1"}))
-    _write_inbox(home, "b1.json", _batch("batch-1", [_envelope("t-1")]))
-    app = RecordingApply()
-    drain.drain(store, home=home, apply=app)
-    assert not (queue / "pending.json").exists()
-
-
-def test_unrelated_pending_json_kept(store, home):
-    import json as _json
-    queue = home / "enrich_queue"
-    queue.mkdir(parents=True, exist_ok=True)
-    (queue / "pending.json").write_text(_json.dumps({"batch_id": "batch-OTHER"}))
-    _write_inbox(home, "b1.json", _batch("batch-1", [_envelope("t-1")]))
+def test_consumed_unit_file_deleted(store, home):
+    # Work-queue: draining a unit's result deletes its unit file + lease claim.
+    units = home / "enrich_queue" / "units"
+    claims = home / "enrich_queue" / "claims"
+    units.mkdir(parents=True, exist_ok=True)
+    claims.mkdir(parents=True, exist_ok=True)
+    (units / "u-1.json").write_text("{}")
+    (claims / "u-1").write_text("")
+    inbox_obj = dict(_batch("batch-1", [_envelope("t-1")]))
+    inbox_obj["unit_id"] = "u-1"
+    _write_inbox(home, "u-1.json", inbox_obj)
     drain.drain(store, home=home, apply=RecordingApply())
-    assert (queue / "pending.json").exists()
+    assert not (units / "u-1.json").exists()
+    assert not (claims / "u-1").exists()
