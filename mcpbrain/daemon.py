@@ -533,6 +533,7 @@ class Daemon:
         granted: list[str] = []
         google_connected = False
         google_account: str = ""
+        google_name: str = ""
         try:
             if token_file.exists():
                 creds = Credentials.from_authorized_user_file(str(token_file), auth.SCOPES)
@@ -545,6 +546,12 @@ class Daemon:
                 # so /api/status polls don't hit Google. start_auth removes the
                 # sidecar on re-consent so a different account refreshes it.
                 google_account = self._resolve_google_account(token_file) if google_connected else ""
+                # Display name for the wizard prefill — only when the token was
+                # actually granted the profile scope (older grants weren't), so we
+                # never spam userinfo with 403s on every poll.
+                if google_connected and scopes and \
+                        "https://www.googleapis.com/auth/userinfo.profile" in scopes:
+                    google_name = self._resolve_google_name(creds)
         except Exception as exc:  # noqa: BLE001 — no/invalid token degrades, never crashes
             log.debug("status: Google credentials unavailable: %s", exc)
         # Spool depth for the cowork extractor wizard step. The on-disk layout
@@ -578,6 +585,7 @@ class Daemon:
             "google_connected": google_connected,
             "granted_scopes": granted,
             "google_account": google_account,
+            "google_name": google_name,
             "enrich_enabled": self._enrich_client is not None,
             "spool": {"pending": pending, "inbox": inbox},
             "open_findings": open_findings,
@@ -648,6 +656,24 @@ class Daemon:
         if email:
             self._cache_google_account(sidecar, email)
         return email
+
+    def _resolve_google_name(self, creds) -> str:
+        """The connected Google account's display name, cached to a sidecar
+        (``MCPBRAIN_HOME/google_name``) so /api/status polls stay offline. Calls
+        the userinfo API once on a cache miss; returns "" (and caches nothing) if
+        the token lacks the profile scope. Errors degrade to "".
+        """
+        sidecar = app_dir() / "google_name"
+        try:
+            cached = sidecar.read_text().strip()
+            if cached:
+                return cached
+        except OSError:
+            pass
+        name = auth.fetch_google_name(creds)
+        if name:
+            self._cache_google_account(sidecar, name)   # generic 0600 sidecar writer
+        return name
 
     @staticmethod
     def _cache_google_account(sidecar, email: str) -> None:
