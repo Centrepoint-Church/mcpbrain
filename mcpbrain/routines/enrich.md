@@ -17,8 +17,9 @@ status replies. Self-contained — needs no skill or command file.
    > Automated enrichment of one shard — act autonomously, do not ask questions.
    > 1. Load the tools:
    >    `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
-   > 2. Call `brain_enrich_pull` with `thread_ids=<this shard's thread_ids>` and
-   >    `with_blocks=<this shard's with_blocks>`.
+   > 2. Call `brain_enrich_pull` with `batch_id=<batch_id>`,
+   >    `thread_ids=<this shard's thread_ids>` and `with_blocks=<this shard's
+   >    with_blocks>`. (Passing `batch_id` reads this run's frozen snapshot.)
    > 3. The result has a **`rules`** field — the FULL extraction protocol. Follow it
    >    EXACTLY: produce one extraction object per thread. If `with_blocks` was true,
    >    also answer every block the pull returned (`merge_review` → `merge_answers`,

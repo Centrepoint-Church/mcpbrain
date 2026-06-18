@@ -396,6 +396,38 @@ def test_pending_synthesis_kept_until_drained(tmp_path):
     assert daemon._pending_synthesis == []
 
 
+def test_stamp_enrich_log_is_the_probe_signal(tmp_path, monkeypatch):
+    # Regression: nothing wrote logs/enrich.log, so the enrichment health probe was
+    # stuck on Idle forever. _stamp_enrich_log is now the writer, and it must produce
+    # a file the probe reads as a fresh drain ("Running").
+    from mcpbrain import daemon as _daemon, probes as _probes
+    monkeypatch.setattr(_daemon, "app_dir", lambda: tmp_path)
+    log = tmp_path / "logs" / "enrich.log"
+    assert _probes.probe_enrichment(str(tmp_path))["state"] == "needs_action"  # no stamp yet
+    _daemon._stamp_enrich_log({"applied": 5, "marked": 5, "files": 2, "merges": 0})
+    assert log.exists() and "applied=5" in log.read_text()
+    assert _probes.probe_enrichment(str(tmp_path))["state"] == "ok"            # now Running
+
+
+def test_run_cycle_stamps_enrich_log_on_productive_drain(tmp_path, monkeypatch):
+    # run_cycle must stamp the log when the spool drain actually applied work, and
+    # must NOT stamp on an empty drain (so Idle stays honest).
+    from mcpbrain import daemon as _daemon
+    monkeypatch.setattr(_daemon, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(_daemon, "run_sync_cycle", lambda *a, **k: {})
+    monkeypatch.setattr(_daemon.prepare, "prepare", lambda *a, **k: {"batch_id": None, "threads": 0})
+    monkeypatch.setattr(_daemon.config, "is_configured", lambda home: True)
+    log = tmp_path / "logs" / "enrich.log"
+
+    monkeypatch.setattr(_daemon.drain, "drain", lambda *a, **k: {"files": 0, "applied": 0})
+    _daemon.run_cycle(None, None, enrich_mode="spool")
+    assert not log.exists()                                # empty drain -> no stamp
+
+    monkeypatch.setattr(_daemon.drain, "drain", lambda *a, **k: {"files": 1, "applied": 3})
+    _daemon.run_cycle(None, None, enrich_mode="spool")
+    assert log.exists()                                   # productive drain -> stamped
+
+
 # ---------------------------------------------------------------------------
 # Sub-task 4.3 — maybe_proactive tests
 # ---------------------------------------------------------------------------

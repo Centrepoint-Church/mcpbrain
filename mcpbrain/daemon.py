@@ -267,6 +267,25 @@ def _gated_enrich_mode(mode: str, home: str) -> str:
     return mode if config.is_configured(home) else "off"
 
 
+def _stamp_enrich_log(drained: dict) -> None:
+    """Append a line to logs/enrich.log on a productive drain. This is the ONLY
+    writer of that file — the enrichment health probe (probes.probe_enrichment)
+    reads its mtime to tell 'Running' from 'Idle'. Without this stamp the probe is
+    stuck on Idle no matter how much enrichment lands. Best-effort; never raises."""
+    import datetime as _dt
+    try:
+        logdir = app_dir() / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        line = (f"{ts} drain applied={drained.get('applied', 0)} "
+                f"marked={drained.get('marked', 0)} files={drained.get('files', 0)} "
+                f"merges={drained.get('merges', 0)}\n")
+        with (logdir / "enrich.log").open("a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
 def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               drive_service=None, enrich_client=None,
               enrich_limit: int | None = None,
@@ -326,6 +345,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                                extra_blocks=extra_blocks)
         drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
+        if drained.get("files") or drained.get("applied"):
+            _stamp_enrich_log(drained)
     else:  # "off" (or any unknown value)
         result["enrich"] = {"mode": "off"}
     return result
