@@ -163,6 +163,107 @@ def test_enrich_push_rejects_bad_input(tmp_path):
     assert asyncio.run(push("b1", "notalist"))["written"] is False
 
 
+# --- fan-out: manifest + per-shard pull + sharded push ----------------------
+
+def _write_pending(tmp_path, **extra):
+    (tmp_path / "enrich_queue").mkdir(exist_ok=True)
+    data = {"batch_id": "b1", "context": {"owner_name": "Jo"}, "threads": [], **extra}
+    (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps(data))
+    return data
+
+
+def test_manifest_partitions_threads_and_freezes_snapshot(tmp_path):
+    # The manifest must cover every thread exactly once across shards (disjoint),
+    # carry NO bodies, and freeze a snapshot the subagents pull from.
+    big = "x" * 4000
+    threads = [{"thread_id": f"t{i}", "body": big} for i in range(12)]
+    _write_pending(tmp_path, threads=threads)
+    out = asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    assert out["batch_id"] == "b1" and out["thread_total"] == 12
+    covered = [tid for s in out["shards"] for tid in s["thread_ids"]]
+    assert sorted(covered) == sorted(t["thread_id"] for t in threads)  # disjoint + complete
+    assert len(covered) == len(set(covered))
+    assert len(out["shards"]) > 1                       # 12 * 4KB split across shards
+    assert "body" not in json.dumps(out["shards"])      # ids only, no bodies
+    assert (tmp_path / "enrich_queue" / "active.json").exists()
+
+
+def test_manifest_appends_blocks_shard(tmp_path):
+    _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
+                   merge_review=[{"pair_id": "a|b"}], memory_distil=[{"doc_id": "n1"}])
+    out = asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    block_shards = [s for s in out["shards"] if s["with_blocks"]]
+    assert len(block_shards) == 1 and block_shards[0]["thread_ids"] == []
+    assert out["blocks"] == {"merge_review": 1, "memory_distil": 1}
+
+
+def test_manifest_empty_when_no_spool(tmp_path):
+    assert asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))()) == {"empty": True}
+
+
+def test_pull_by_thread_ids_returns_only_that_shard(tmp_path):
+    threads = [{"thread_id": f"t{i}", "body": "b"} for i in range(6)]
+    _write_pending(tmp_path, threads=threads)
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())  # freezes snapshot
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
+        thread_ids=["t1", "t3"]))
+    assert out["batch_id"] == "b1"
+    assert {t["thread_id"] for t in out["threads"]} == {"t1", "t3"}
+    assert out["rules"]                                  # self-contained
+    assert "threads_total" not in out                    # shard path, not head-slice
+
+
+def test_pull_by_ids_survives_pending_shift(tmp_path):
+    # The daemon re-prepares pending.json every cycle; the frozen snapshot means a
+    # subagent that pulls AFTER pending.json changed still gets its shard's threads.
+    _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "orig"}])
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    _write_pending(tmp_path, batch_id="b2", threads=[{"thread_id": "z9", "body": "new"}])
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(thread_ids=["t1"]))
+    assert out["batch_id"] == "b1" and out["threads"][0]["body"] == "orig"
+
+
+def test_pull_with_blocks_returns_blocks_and_no_threads(tmp_path):
+    _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
+                   merge_review=[{"pair_id": "a|b"}], synthesis=[{"thread_id": "t1"}])
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(with_blocks=True))
+    assert out["threads"] == []
+    assert out["merge_review"] == [{"pair_id": "a|b"}]
+    assert out["synthesis"] == [{"thread_id": "t1"}]
+    assert out["rules"]
+
+
+def test_pull_with_blocks_bounds_oversized(tmp_path):
+    huge = [{"community_id": 1, "members": [f"P{i}" for i in range(6000)]}]
+    _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
+                   community_synthesis=huge, merge_review=[{"pair_id": "a|b"}])
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(with_blocks=True))
+    assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS + 6000
+    assert "community_synthesis" not in out              # oversized block dropped
+    assert out["merge_review"] == [{"pair_id": "a|b"}]    # small block survives
+
+
+def test_push_with_shard_writes_sharded_file(tmp_path):
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    out = asyncio.run(push("b1", [{"thread_id": "t1"}], [], shard=3))
+    assert out["written"] is True
+    target = tmp_path / "enrich_inbox" / "b1.3.json"
+    assert target.exists()                                # <batch>.<shard>.json
+    assert json.loads(target.read_text())["batch_id"] == "b1"
+    # legacy (no shard) still writes <batch>.json — both drain via the *.json glob
+    asyncio.run(push("b1", [{"thread_id": "t2"}], [], shard=0))
+    assert (tmp_path / "enrich_inbox" / "b1.0.json").exists()
+
+
+def test_routine_enrich_describes_fanout(tmp_path):
+    enrich = mcp_server._routine_instructions("enrich")
+    assert "brain_enrich_manifest" in enrich
+    assert "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
+    assert "subagent" in enrich.lower()
+
+
 # --- meeting packs ----------------------------------------------------------
 
 def test_meeting_pack_upsert_and_get_roundtrip_with_context_hash(tmp_path):
