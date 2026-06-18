@@ -45,6 +45,19 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
+# Basic identity scopes — let the wizard prefill the user's name + email from
+# their Google account. Requested at consent time (CONSENT_SCOPES) but NOT part
+# of the REQUIRED set above: load_credentials/status validate against SCOPES, so
+# existing tokens (granted without these) stay valid and are NOT forced to
+# re-consent. New consents include them, enabling the prefill; if a token lacks
+# them, name resolution simply degrades to "". These are non-sensitive scopes
+# (no verification escalation for an Internal Workspace consent screen).
+IDENTITY_SCOPES = [
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+CONSENT_SCOPES = SCOPES + IDENTITY_SCOPES
+
 # Per-service (api, version) keyed by the scope that grants it.
 _SERVICE_SPECS = [
     ("gmail_service", "gmail", "v1", "https://www.googleapis.com/auth/gmail.readonly"),
@@ -153,7 +166,7 @@ def _load_client_config(p: Path) -> dict:
 
 
 def run_consent_flow(
-    scopes: list[str] = SCOPES,
+    scopes: list[str] = CONSENT_SCOPES,
     client_secrets: Path | None = None,
     token_file: Path | None = None,
 ) -> Credentials:
@@ -178,6 +191,12 @@ def run_consent_flow(
     if token_file is None:
         token_file = token_path()
 
+    # Requesting userinfo scopes makes Google also return `openid`, which
+    # oauthlib otherwise rejects as a scope mismatch ("Scope has changed").
+    # Relaxing lets the returned (super)set through.
+    import os as _os
+    _os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
     embedded = embedded_client_config()
     if embedded is not None and client_secrets is None:
         flow = InstalledAppFlow.from_client_config(embedded, scopes)
@@ -197,6 +216,17 @@ def run_consent_flow(
     token_file.write_text(creds.to_json())
     _secure_token_file(token_file)
     return creds
+
+
+def fetch_google_name(creds: Credentials) -> str:
+    """The Google account's display name via the userinfo API, or "" on any
+    error (e.g. the token wasn't granted the userinfo.profile scope). Best-effort:
+    used only to prefill the wizard's name field, so it must never raise."""
+    try:
+        info = build_service("oauth2", "v2", creds).userinfo().get().execute()
+        return (info.get("name") or "").strip()
+    except Exception:  # noqa: BLE001 — prefill nicety; degrade silently
+        return ""
 
 
 def build_service(api: str, version: str, creds: Credentials,

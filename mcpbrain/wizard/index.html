@@ -538,6 +538,14 @@ async function prefillFromConfig(){
   const fleet = c.fleet || {};
   if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;
   if(fleet.escrow_folder_id !== undefined && fleet.escrow_folder_id !== "") $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
+  // Prefill name + email from the connected Google account when the user hasn't
+  // saved their own yet (status carries google_name + google_account). Never
+  // overrides a saved value.
+  try{
+    const s = await (await fetch("/api/status", H)).json();
+    if(!$("owner_name").value && s.google_name) $("owner_name").value = s.google_name;
+    if(!$("owner_email").value && s.google_account) $("owner_email").value = s.google_account;
+  }catch(e){}
   await populateTimezones(c.timezone || "");
 }
 prefillFromConfig();
