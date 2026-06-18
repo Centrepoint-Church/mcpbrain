@@ -528,8 +528,15 @@ def make_brain_enrich_manifest(home: str):
         plan = [{"shard": i, "thread_ids": ids, "with_blocks": False}
                 for i, ids in enumerate(shards)]
         blocks = {k: len(data[k]) for k in _ALL_ENRICH_BLOCKS if data.get(k)}
-        if blocks:  # batch-level blocks get their own subagent (no threads)
-            plan.append({"shard": len(plan), "thread_ids": [], "with_blocks": True})
+        # ONE shard per block TYPE — never a single combined blocks shard. The blocks
+        # together (merge_review + synthesis + … + rules + context) routinely exceed
+        # the pull cap, and a combined shard's pull would drop all of them and come
+        # back empty (the whole category silently skipped). One type per shard keeps
+        # each blocks pull under the cap.
+        for k in _ALL_ENRICH_BLOCKS:
+            if data.get(k):
+                plan.append({"shard": len(plan), "thread_ids": [],
+                             "with_blocks": True, "block": k})
         return {"batch_id": data.get("batch_id"), "thread_total": len(threads),
                 "shards": plan, "blocks": blocks}
     return brain_enrich_manifest
@@ -538,18 +545,21 @@ def make_brain_enrich_manifest(home: str):
 def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull(thread_ids: list | None = None,
                                 with_blocks: bool = False,
-                                batch_id: str | None = None) -> dict:
+                                batch_id: str | None = None,
+                                block: str | None = None) -> dict:
         """Return enrichment work with the extraction `rules` bundled in, or
         {"empty": true} when there is nothing to enrich. The `rules` field carries
         the full extraction protocol so the caller is self-contained (no plugin skill
         file or source repo).
 
-        Three modes:
+        Modes:
         - thread_ids given → return exactly those threads from the run snapshot (the
           fan-out path; one shard per subagent). Pass `batch_id` (from the manifest)
           so you read YOUR run's frozen snapshot, not whatever is latest.
-        - with_blocks=true → return the batch-level blocks (merge_review, synthesis,
-          …), size-bounded; the dedicated blocks subagent answers them.
+        - with_blocks=true + `block` (a type name) → return just that ONE block type,
+          with a trimmed context, bounded to the cap (the manifest emits one shard per
+          block type). with_blocks=true without `block` → all blocks, oversized ones
+          dropped (legacy).
         - no args → a single size-bounded HEAD slice of pending.json with
           threads_total/threads_returned/more (the legacy single-session path)."""
         import json as _json
@@ -591,12 +601,24 @@ def make_brain_enrich_pull(home: str):
                               if t.get("thread_id") in want]
         else:
             out["threads"] = []
-        if with_blocks:
+        if with_blocks and block:
+            # One block type. Trim context to the few fields a block answer needs
+            # (drop the heavy known_people list) so rules+context leave room, then
+            # truncate this block's items to fit the cap — leftover items re-attach
+            # next cycle. Guarantees a non-empty, in-cap pull for any single type.
+            ctx = data.get("context") or {}
+            out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
+                                                   "org_domain_map") if k in ctx}
+            items = list(data.get(block) or [])
+            while items and len(_json.dumps({**out, block: items})) > _PULL_MAX_CHARS:
+                items = items[:-1]                   # drop trailing items until it fits
+            if items:
+                out[block] = items
+        elif with_blocks:
+            # Legacy: all blocks at once, dropping oversized largest-impact first.
             for k in _ALL_ENRICH_BLOCKS:
                 if data.get(k):
                     out[k] = data[k]
-            # Bound: drop oversized blocks largest-impact first so a blocks shard
-            # with thousands of items still fits the cap (re-attached next cycle).
             for _blk in ("community_synthesis", "memory_distil", "synthesis",
                          "profile_synthesis", "profile_audit", "merge_review"):
                 if len(_json.dumps(out)) <= _PULL_MAX_CHARS:
@@ -992,6 +1014,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                                    "description": "fetch exactly these threads (from a manifest shard)"},
                     "with_blocks": {"type": "boolean",
                                     "description": "fetch the batch-level blocks (merge_review, synthesis, …)"},
+                    "block": {"type": "string",
+                              "description": "with with_blocks, the single block type this shard handles (from the manifest shard)"},
                     "batch_id": {"type": "string",
                                  "description": "the manifest's batch_id — reads your run's frozen snapshot"},
                 }},
@@ -1154,6 +1178,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 thread_ids=arguments.get("thread_ids"),
                 with_blocks=bool(arguments.get("with_blocks", False)),
                 batch_id=arguments.get("batch_id"),
+                block=arguments.get("block"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
