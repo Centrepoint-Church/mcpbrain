@@ -207,7 +207,7 @@ def test_large_block_splits_into_chunks_covering_all_items(tmp_path):
     # each shard's pull fits the cap while keeping the FULL context.
     ctx = {"owner_name": "Jo", "valid_orgs": ["a"], "org_domain_map": {"x": "a"},
            "known_people": [{"name": f"P{i}", "role": "r"} for i in range(40)]}
-    items = [{"pair_id": f"a{i}|b{i}", "a": "x" * 300} for i in range(50)]
+    items = [{"pair_id": f"a{i}|b{i}", "a": "x" * 1500} for i in range(50)]
     (tmp_path / "enrich_queue").mkdir(exist_ok=True)
     (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps(
         {"batch_id": "b1", "context": ctx, "threads": [{"thread_id": "t1"}],
@@ -333,9 +333,106 @@ def test_push_with_shard_writes_sharded_file(tmp_path):
 
 def test_routine_enrich_describes_fanout(tmp_path):
     enrich = mcp_server._routine_instructions("enrich")
-    assert "brain_enrich_manifest" in enrich
+    assert "brain_enrich_units" in enrich
     assert "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
     assert "subagent" in enrich.lower()
+
+
+# --- work queue: producer -> units -> pull(unit_id) -> push(unit_id) -> drain ---
+
+def _write_units(tmp_path, **data):
+    from mcpbrain import prepare
+    data.setdefault("batch_id", "b1")
+    data.setdefault("context", {"owner_name": "Jo", "known_people": [{"name": "Ann"}]})
+    return prepare.write_units(data, home=str(tmp_path))
+
+
+def test_producer_writes_sized_units_and_shared_context(tmp_path):
+    # The producer chunks threads + blocks into immutable unit files (sized so a pull
+    # fits the cap) and writes one shared context.json. Unit ids are content hashes.
+    threads = [{"thread_id": f"t{i}", "body": "x" * 6000} for i in range(8)]
+    summary = _write_units(tmp_path, threads=threads,
+                           merge_review=[{"pair_id": "a|b"}],
+                           context={"owner_name": "Jo", "known_people": [{"name": "Ann"}]})
+    units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
+    assert summary["units_written"] == len(units) > 1            # threads split + 1 block unit
+    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    kinds = [json.loads(u.read_text())["kind"] for u in units]
+    assert "thread" in kinds and "block" in kinds
+    # content-addressed: re-running writes the SAME files (idempotent, no dupes)
+    _write_units(tmp_path, threads=threads, merge_review=[{"pair_id": "a|b"}],
+                 context={"owner_name": "Jo", "known_people": [{"name": "Ann"}]})
+    assert len(list((tmp_path / "enrich_queue" / "units").glob("*.json"))) == len(units)
+
+
+def test_units_lists_descriptors_and_claims_lease(tmp_path):
+    _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
+                 memory_distil=[{"doc_id": "n1"}])
+    units_tool = mcp_server.make_brain_enrich_units(str(tmp_path))
+    out = asyncio.run(units_tool())
+    assert {u["kind"] for u in out["units"]} == {"thread", "block"}
+    for u in out["units"]:                                       # descriptors only, no payload
+        assert set(u) == {"unit_id", "kind", "block", "count"}
+    # second call: all are freshly claimed -> nothing handed out again
+    assert asyncio.run(units_tool()) == {"empty": True}
+
+
+def test_units_relists_after_lease_expiry(tmp_path, monkeypatch):
+    _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}], context={})
+    units_tool = mcp_server.make_brain_enrich_units(str(tmp_path))
+    first = asyncio.run(units_tool())["units"]
+    assert first
+    # age the claim past the lease -> reclaimable (covers a crashed subagent)
+    monkeypatch.setattr(mcp_server, "_LEASE_TTL_S", -1)
+    assert asyncio.run(units_tool())["units"]
+
+
+def test_pull_unit_attaches_rules_and_context(tmp_path):
+    _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hello"}],
+                 context={"owner_name": "Jo", "known_people": [{"name": "Ann"}]})
+    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=uid))
+    assert out["unit_id"] == uid and out["kind"] == "thread"
+    assert out["threads"][0]["thread_id"] == "t1"
+    assert out["rules"] and out["context"]["owner_name"] == "Jo"
+    assert "known_people" in out["context"]                     # full context for normal sizes
+
+
+def test_pull_unit_block_returns_items(tmp_path):
+    _write_units(tmp_path, threads=[], merge_review=[{"pair_id": "a|b"}, {"pair_id": "c|d"}])
+    units = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"]
+    bu = next(u for u in units if u["kind"] == "block")
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=bu["unit_id"]))
+    assert out["block"] == "merge_review" and len(out["items"]) == 2
+
+
+def test_push_unit_writes_inbox_and_drain_deletes_unit(tmp_path):
+    from mcpbrain import drain as _drain
+    _write_units(tmp_path, threads=[{"thread_id": "t1",
+                 "messages": [{"message_id": "t1"}]}], context={})
+    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
+    out = asyncio.run(mcp_server.make_brain_enrich_push(str(tmp_path))(
+        unit_id=uid, extractions=[{"thread_id": "t1", "messages": [{"message_id": "t1"}]}]))
+    assert out["written"] is True
+    inbox = json.loads((tmp_path / "enrich_inbox" / f"{uid}.json").read_text())
+    assert inbox["unit_id"] == uid
+    # drain applies + deletes the unit file and its claim
+    (tmp_path / "enrich_queue" / "claims").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "enrich_queue" / "claims" / uid).touch()
+
+    class _Store:
+        def apply_extraction(self, *a, **k): pass
+        def mark_enriched(self, *a, **k): pass
+        def recent_changes(self, *a, **k): return []
+    _drain.drain(_Store(), home=str(tmp_path), apply=lambda *a, **k: {"entities": 0, "relations": 0})
+    assert not (tmp_path / "enrich_queue" / "units" / f"{uid}.json").exists()
+    assert not (tmp_path / "enrich_queue" / "claims" / uid).exists()
+
+
+def test_push_requires_unit_or_batch(tmp_path):
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    assert asyncio.run(push())["written"] is False               # neither id
+    assert asyncio.run(push(unit_id="u1", extractions="notalist"))["written"] is False
 
 
 # --- meeting packs ----------------------------------------------------------

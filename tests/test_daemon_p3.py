@@ -415,7 +415,7 @@ def test_run_cycle_stamps_enrich_log_on_productive_drain(tmp_path, monkeypatch):
     from mcpbrain import daemon as _daemon
     monkeypatch.setattr(_daemon, "app_dir", lambda: tmp_path)
     monkeypatch.setattr(_daemon, "run_sync_cycle", lambda *a, **k: {})
-    monkeypatch.setattr(_daemon.prepare, "prepare", lambda *a, **k: {"batch_id": None, "threads": 0})
+    monkeypatch.setattr(_daemon.prepare, "prepare_units", lambda *a, **k: {"batch_id": None, "threads": 0})
     monkeypatch.setattr(_daemon.config, "is_configured", lambda home: True)
     log = tmp_path / "logs" / "enrich.log"
 

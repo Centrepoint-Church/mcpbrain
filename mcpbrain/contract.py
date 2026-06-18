@@ -155,9 +155,11 @@ def validate_batch_wrapper(d: object) -> list[str]:
     if not isinstance(d, dict):
         return ["batch file must be a JSON object"]
 
-    batch_id = d.get("batch_id")
-    if not isinstance(batch_id, str) or not batch_id.strip():
-        problems.append("batch_id must be a non-empty string")
+    # The file is identified by EITHER a batch_id (legacy fan-out) or a unit_id
+    # (work-queue). Exactly one must be a non-empty string.
+    ident = d.get("unit_id") if d.get("unit_id") is not None else d.get("batch_id")
+    if not isinstance(ident, str) or not ident.strip():
+        problems.append("a non-empty batch_id or unit_id is required")
 
     if not isinstance(d.get("extractions"), list):
         problems.append("extractions must be a list")
