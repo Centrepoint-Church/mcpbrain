@@ -405,52 +405,6 @@ def _routine_instructions(name: str) -> str | None:
         return None
 
 
-def make_brain_enrich_pull(home: str):
-    async def brain_enrich_pull() -> dict:
-        """Return a size-bounded slice of the pending enrichment batch
-        (enrich_queue/pending.json) with the extraction `rules` bundled in, or
-        {"empty": true} when there is nothing to enrich. The `rules` field carries
-        the full extraction protocol so the caller is self-contained (no plugin
-        skill file or source repo). Threads are truncated to stay under the MCP
-        tool-result token cap; `threads_total`/`threads_returned` report the slice
-        and `more` flags that further threads remain for the next pull."""
-        import json as _json
-        from pathlib import Path
-        p = Path(home) / "enrich_queue" / "pending.json"
-        try:
-            data = _json.loads(p.read_text())
-        except (OSError, ValueError):
-            return {"empty": True}
-        if not isinstance(data, dict) or not (data.get("threads") or []):
-            return {"empty": True}
-        all_threads = data.get("threads") or []
-        out = {k: v for k, v in data.items() if k != "threads"}
-        out["rules"] = _enrich_rules()
-        # Optional synthesis blocks can be very large (e.g. a community with
-        # thousands of members). If the fixed overhead alone exceeds the budget,
-        # drop these blocks largest-impact first — they are re-attached on a later
-        # cycle — so the core thread extraction always fits the tool-result cap.
-        for _blk in ("community_synthesis", "memory_distil", "synthesis",
-                     "profile_synthesis", "profile_audit", "merge_review"):
-            if len(_json.dumps(out)) <= _PULL_MAX_CHARS:
-                break
-            out.pop(_blk, None)
-        size = len(_json.dumps(out))            # fixed overhead: context + rules + (surviving) blocks
-        kept = []
-        for t in all_threads:
-            s = len(_json.dumps(t)) + 1
-            if kept and size + s > _PULL_MAX_CHARS:
-                break                            # always return at least one thread
-            kept.append(t)
-            size += s
-        out["threads"] = kept
-        out["threads_total"] = len(all_threads)
-        out["threads_returned"] = len(kept)
-        out["more"] = len(kept) < len(all_threads)
-        return out
-    return brain_enrich_pull
-
-
 # The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
 # merge_answers. Each is drained by the daemon from the inbox object under this
 # exact key (see drain.py BLOCK_DRAINERS + synthesise_threads). Without forwarding
@@ -458,18 +412,170 @@ def make_brain_enrich_pull(home: str):
 # silently dropped on the MCP path.
 _ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis",
                          "memory_distil", "profile_audit")
+# All optional batch-level blocks (answered by the with_blocks shard). merge_review
+# is answered via the `merge_answers` push field; the rest map 1:1 to push fields.
+_ALL_ENRICH_BLOCKS = ("merge_review",) + _ENRICH_ANSWER_BLOCKS
+
+
+def _enrich_snapshot_path(home):
+    """The frozen per-run batch snapshot. brain_enrich_manifest copies the daemon's
+    churning pending.json here once; the fan-out subagents then pull their thread_ids
+    from this stable file, so the daemon re-preparing pending.json mid-run (every
+    cycle) cannot shift the shards out from under them. Re-applying a thread is
+    idempotent (drain apply() upserts), so a stale snapshot only wastes work."""
+    from pathlib import Path
+    return Path(home) / "enrich_queue" / "active.json"
+
+
+def _load_pending(home):
+    """Load the live pending.json, or None if absent/empty/threadless."""
+    import json as _json
+    from pathlib import Path
+    p = Path(home) / "enrich_queue" / "pending.json"
+    try:
+        data = _json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not (data.get("threads") or []):
+        return None
+    return data
+
+
+def make_brain_enrich_manifest(home: str):
+    async def brain_enrich_manifest() -> dict:
+        """Plan a fan-out enrichment run WITHOUT returning any thread bodies, so the
+        orchestrator session stays context-flat regardless of batch size. Freezes the
+        current pending.json to a snapshot, then returns `batch_id`, `thread_total`,
+        and `shards`: a list of {shard, thread_ids, with_blocks}. The caller spawns
+        one subagent per shard; each subagent pulls ONLY its thread_ids
+        (brain_enrich_pull) and pushes its own result (brain_enrich_push with that
+        shard), so no single context ever holds the whole batch. Returns
+        {"empty": true} when there is nothing to enrich."""
+        import json as _json
+        data = _load_pending(home)
+        if data is None:
+            return {"empty": True}
+        snap = _enrich_snapshot_path(home)
+        try:
+            snap.parent.mkdir(parents=True, exist_ok=True)
+            tmp = snap.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(data, ensure_ascii=False))
+            tmp.replace(snap)
+        except OSError as exc:
+            return {"error": f"could not snapshot batch: {exc}"}
+        # Reserve room for rules + context + envelope; pack threads up to the rest so
+        # each subagent's pull stays under the tool-result cap.
+        reserve = len(_enrich_rules()) + 3000
+        budget = max(2000, _PULL_MAX_CHARS - reserve)
+        threads = data.get("threads") or []
+        shards, cur, size = [], [], 0
+        for t in threads:
+            s = len(_json.dumps(t)) + 1
+            if cur and size + s > budget:
+                shards.append(cur)
+                cur, size = [], 0
+            cur.append(t.get("thread_id"))
+            size += s
+        if cur:
+            shards.append(cur)
+        plan = [{"shard": i, "thread_ids": ids, "with_blocks": False}
+                for i, ids in enumerate(shards)]
+        blocks = {k: len(data[k]) for k in _ALL_ENRICH_BLOCKS if data.get(k)}
+        if blocks:  # batch-level blocks get their own subagent (no threads)
+            plan.append({"shard": len(plan), "thread_ids": [], "with_blocks": True})
+        return {"batch_id": data.get("batch_id"), "thread_total": len(threads),
+                "shards": plan, "blocks": blocks}
+    return brain_enrich_manifest
+
+
+def make_brain_enrich_pull(home: str):
+    async def brain_enrich_pull(thread_ids: list | None = None,
+                                with_blocks: bool = False) -> dict:
+        """Return enrichment work with the extraction `rules` bundled in, or
+        {"empty": true} when there is nothing to enrich. The `rules` field carries
+        the full extraction protocol so the caller is self-contained (no plugin skill
+        file or source repo).
+
+        Three modes:
+        - thread_ids given → return exactly those threads from the run snapshot (the
+          fan-out path; one shard per subagent).
+        - with_blocks=true → return the batch-level blocks (merge_review, synthesis,
+          …), size-bounded; the dedicated blocks subagent answers them.
+        - no args → a single size-bounded HEAD slice of pending.json with
+          threads_total/threads_returned/more (the legacy single-session path)."""
+        import json as _json
+        # Legacy single-session path: head slice straight off pending.json.
+        if thread_ids is None and not with_blocks:
+            data = _load_pending(home)
+            if data is None:
+                return {"empty": True}
+            all_threads = data.get("threads") or []
+            out = {k: v for k, v in data.items() if k != "threads"}
+            out["rules"] = _enrich_rules()
+            for _blk in ("community_synthesis", "memory_distil", "synthesis",
+                         "profile_synthesis", "profile_audit", "merge_review"):
+                if len(_json.dumps(out)) <= _PULL_MAX_CHARS:
+                    break
+                out.pop(_blk, None)
+            size = len(_json.dumps(out))
+            kept = []
+            for t in all_threads:
+                s = len(_json.dumps(t)) + 1
+                if kept and size + s > _PULL_MAX_CHARS:
+                    break                        # always return at least one thread
+                kept.append(t)
+                size += s
+            out["threads"] = kept
+            out["threads_total"] = len(all_threads)
+            out["threads_returned"] = len(kept)
+            out["more"] = len(kept) < len(all_threads)
+            return out
+        # Fan-out path: serve from the frozen snapshot (fall back to pending.json).
+        snap = _enrich_snapshot_path(home)
+        try:
+            data = _json.loads(snap.read_text())
+        except (OSError, ValueError):
+            data = _load_pending(home)
+        if not isinstance(data, dict):
+            return {"empty": True}
+        out = {"batch_id": data.get("batch_id"),
+               "context": data.get("context", {}), "rules": _enrich_rules()}
+        if thread_ids:
+            want = set(thread_ids)
+            out["threads"] = [t for t in (data.get("threads") or [])
+                              if t.get("thread_id") in want]
+        else:
+            out["threads"] = []
+        if with_blocks:
+            for k in _ALL_ENRICH_BLOCKS:
+                if data.get(k):
+                    out[k] = data[k]
+            # Bound: drop oversized blocks largest-impact first so a blocks shard
+            # with thousands of items still fits the cap (re-attached next cycle).
+            for _blk in ("community_synthesis", "memory_distil", "synthesis",
+                         "profile_synthesis", "profile_audit", "merge_review"):
+                if len(_json.dumps(out)) <= _PULL_MAX_CHARS:
+                    break
+                out.pop(_blk, None)
+        if not out["threads"] and not any(out.get(k) for k in _ALL_ENRICH_BLOCKS):
+            return {"empty": True}
+        return out
+    return brain_enrich_pull
 
 
 def make_brain_enrich_push(home: str):
     async def brain_enrich_push(batch_id: str, extractions: list,
                                 merge_answers: list | None = None,
+                                shard: int | None = None,
                                 **blocks) -> dict:
-        """Write an enrichment result to enrich_inbox/<batch_id>.json for the
-        daemon to drain on its next cycle. Besides `extractions` and
-        `merge_answers`, accepts the optional answer blocks the pull requested
-        (synthesis, profile_synthesis, community_synthesis, memory_distil,
-        profile_audit) and forwards each so the daemon's drainers apply it.
-        Returns {"written": bool, path|error}."""
+        """Write an enrichment result to enrich_inbox/ for the daemon to drain.
+        With `shard` (the fan-out path) writes enrich_inbox/<batch_id>.<shard>.json
+        so concurrent subagents never clobber one file; without it writes
+        enrich_inbox/<batch_id>.json (legacy single-session path). The daemon drains
+        every *.json regardless. Besides `extractions` and `merge_answers`, accepts
+        the optional answer blocks (synthesis, profile_synthesis, community_synthesis,
+        memory_distil, profile_audit) and forwards each. Returns
+        {"written": bool, path|error}."""
         import json as _json
         from pathlib import Path
         if not batch_id or not isinstance(extractions, list):
@@ -482,12 +588,13 @@ def make_brain_enrich_push(home: str):
             for _k in _ENRICH_ANSWER_BLOCKS:
                 if blocks.get(_k):
                     payload[_k] = blocks[_k]
-            target = inbox / f"{batch_id}.json"
-            tmp = inbox / f".{batch_id}.json.tmp"
+            stem = batch_id if shard is None else f"{batch_id}.{int(shard)}"
+            target = inbox / f"{stem}.json"
+            tmp = inbox / f".{stem}.json.tmp"
             tmp.write_text(_json.dumps(payload, ensure_ascii=False))
             tmp.replace(target)  # atomic; the daemon never sees a half-written file
             return {"written": True, "path": str(target)}
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             return {"written": False, "error": str(exc)}
     return brain_enrich_push
 
@@ -570,6 +677,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     draft_save_fn = make_brain_draft_save(draft_store, home)
     # Autonomous-loop tools (host-native). Reads use the RO store; pack upsert
     # needs the writable handle (same one the draft tools use).
+    enrich_manifest = make_brain_enrich_manifest(home)
     enrich_pull = make_brain_enrich_pull(home)
     enrich_push = make_brain_enrich_push(home)
     meetings_today = make_brain_meetings_today(store, home)
@@ -811,15 +919,26 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 }, "required": ["name"]},
             ),
             types.Tool(
-                name="brain_enrich_pull",
-                description="Pull the pending enrichment batch (the spool the daemon prepared). Returns the batch JSON — including a `rules` field that contains the FULL extraction protocol you must follow (envelope schema, entity/relation/merge rules) — or {\"empty\": true} when there is nothing to enrich. Follow `rules` from this response; do not read skill files or source. Use in the hourly enrich task instead of reading files via shell.",
+                name="brain_enrich_manifest",
+                description="Plan a fan-out enrichment run without loading any thread bodies (keeps the orchestrator context-flat). Freezes the pending batch and returns batch_id, thread_total, and shards[] (each: shard index, thread_ids, with_blocks), or {\"empty\": true}. FIRST step of the hourly enrich task: call this, then spawn one subagent per shard — each subagent pulls only its thread_ids and pushes its own shard.",
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
-                name="brain_enrich_push",
-                description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Pass an answer field for EACH block the pull included: extractions (threads), merge_answers (merge_review), and synthesis / profile_synthesis / community_synthesis / memory_distil / profile_audit when those blocks were present. Use in the hourly enrich task instead of writing files via shell.",
+                name="brain_enrich_pull",
+                description="Pull enrichment work, with a `rules` field carrying the FULL extraction protocol to follow (envelope schema, entity/relation/merge rules). Pass thread_ids to fetch exactly those threads (the per-shard fan-out path); pass with_blocks=true to fetch the batch-level blocks (merge_review/synthesis/…); pass nothing for a single size-bounded head slice (legacy path). Returns {\"empty\": true} when there is nothing to do. Follow `rules` from this response; do not read skill files or source.",
                 inputSchema={"type": "object", "properties": {
-                    "batch_id": {"type": "string", "description": "the batch_id from brain_enrich_pull, verbatim"},
+                    "thread_ids": {"type": "array", "items": {"type": "string"},
+                                   "description": "fetch exactly these threads (from a manifest shard)"},
+                    "with_blocks": {"type": "boolean",
+                                    "description": "fetch the batch-level blocks (merge_review, synthesis, …)"},
+                }},
+            ),
+            types.Tool(
+                name="brain_enrich_push",
+                description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Pass `shard` (from your manifest shard) so parallel subagents don't clobber each other. Pass an answer field for EACH block the pull included: extractions (threads), merge_answers (merge_review), and synthesis / profile_synthesis / community_synthesis / memory_distil / profile_audit when those blocks were present.",
+                inputSchema={"type": "object", "properties": {
+                    "batch_id": {"type": "string", "description": "the batch_id from the manifest/pull, verbatim"},
+                    "shard": {"type": "integer", "description": "this subagent's shard index from the manifest (omit for the legacy single-session path)"},
                     "extractions": {"type": "array", "items": {"type": "object"},
                                     "description": "one extraction object per thread"},
                     "merge_answers": {"type": "array", "items": {"type": "object"},
@@ -959,14 +1078,21 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = ({"name": rname, "instructions": instructions} if instructions
                    else {"error": f"unknown routine {rname!r}", "available": list(_ROUTINES)})
             return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_manifest":
+            out = await enrich_manifest()
+            return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_pull":
-            out = await enrich_pull()
+            out = await enrich_pull(
+                thread_ids=arguments.get("thread_ids"),
+                with_blocks=bool(arguments.get("with_blocks", False)),
+            )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
             out = await enrich_push(
                 batch_id=arguments.get("batch_id", ""),
                 extractions=arguments.get("extractions") or [],
                 merge_answers=arguments.get("merge_answers") or [],
+                shard=arguments.get("shard"),
                 **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
