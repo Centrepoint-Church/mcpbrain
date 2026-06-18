@@ -420,7 +420,16 @@ def make_brain_enrich_pull(home: str):
         all_threads = data.get("threads") or []
         out = {k: v for k, v in data.items() if k != "threads"}
         out["rules"] = _enrich_rules()
-        size = len(_json.dumps(out))            # fixed overhead: context + rules + merge_review
+        # Optional synthesis blocks can be very large (e.g. a community with
+        # thousands of members). If the fixed overhead alone exceeds the budget,
+        # drop these blocks largest-impact first — they are re-attached on a later
+        # cycle — so the core thread extraction always fits the tool-result cap.
+        for _blk in ("community_synthesis", "memory_distil", "synthesis",
+                     "profile_synthesis", "profile_audit", "merge_review"):
+            if len(_json.dumps(out)) <= _PULL_MAX_CHARS:
+                break
+            out.pop(_blk, None)
+        size = len(_json.dumps(out))            # fixed overhead: context + rules + (surviving) blocks
         kept = []
         for t in all_threads:
             s = len(_json.dumps(t)) + 1

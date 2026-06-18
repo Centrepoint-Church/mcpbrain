@@ -1,5 +1,7 @@
 """mcpbrain setup --dry-run prints the resolved brain-folder path."""
 
+import json
+
 from mcpbrain import setup
 
 
@@ -50,3 +52,26 @@ def test_register_desktop_mcp_merges_and_preserves(monkeypatch, tmp_path):
     assert data["mcpServers"]["other"] == {"command": "x"}     # preserved
     assert data["mcpServers"]["mcpbrain"] == {
         "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
+
+
+def test_connect_main_writes_only_the_connector(tmp_path, monkeypatch):
+    # `mcpbrain connect` registers the Desktop connector and nothing else (no
+    # daemon, no wizard) — run with Claude Desktop quit so the entry survives.
+    from mcpbrain import setup
+    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
+    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    assert setup.connect_main([]) == 0
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["mcpbrain"] == {
+        "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
+
+
+def test_connect_main_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    from mcpbrain import setup
+    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
+    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    setup.connect_main(["--dry-run"])
+    assert not cfg.exists()
+    assert "would connect" in capsys.readouterr().out

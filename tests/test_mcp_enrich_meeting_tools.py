@@ -51,6 +51,24 @@ def test_enrich_pull_bounds_response_size(tmp_path):
     assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS + 6000  # ~budget + one thread overshoot
 
 
+def test_enrich_pull_drops_oversized_optional_blocks(tmp_path):
+    # Regression: a huge optional block (e.g. community_synthesis for a community
+    # with thousands of members) must not push the pull past the MCP token cap.
+    # Oversized optional blocks are dropped (re-attached next cycle); the core
+    # thread extraction still comes back.
+    (tmp_path / "enrich_queue").mkdir()
+    huge = [{"community_id": 1, "member_count": 6000,
+             "members": [f"Person {i}" for i in range(6000)]}]  # ~hundreds of KB
+    (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps({
+        "batch_id": "b1", "context": {}, "merge_review": [],
+        "community_synthesis": huge,
+        "threads": [{"thread_id": "t1", "body": "hi"}]}))
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))())
+    assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS + 6000
+    assert "community_synthesis" not in out          # oversized block dropped
+    assert out["threads"][0]["thread_id"] == "t1"     # core extraction survives
+
+
 def test_enrich_pull_returns_pending_batch(tmp_path):
     (tmp_path / "enrich_queue").mkdir()
     batch = {"batch_id": "b1", "threads": [{"thread_id": "t1"}], "context": {}}

@@ -6,6 +6,7 @@ from mcpbrain.auth import main as _auth_main
 def _mcp_main():
     from mcpbrain.mcp_server import main as m; m()
 def _setup_main(argv):    from mcpbrain.setup import main as m; m(argv)
+def _connect_main(argv):  from mcpbrain.setup import connect_main as m; m(argv)
 def _update_main(argv):   from mcpbrain.update import main as m; m(argv)
 def _tray_main(argv):     from mcpbrain.tray import main as m; m(argv)
 def _monitor_main():      from mcpbrain.monitor import main as m; m()
@@ -17,7 +18,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="mcpbrain")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("daemon","mcp-server","auth","setup","update","tray","home",
+    for name in ("daemon","mcp-server","auth","setup","connect","update","tray","home",
                  "records-prune","records-health",
                  "session-start","session-end",
                  "monitor","restore","fleet-report","doctor"):
@@ -29,6 +30,7 @@ def main(argv=None):
     return {
         "daemon": lambda: _daemon_main(rest), "mcp-server": _mcp_main,
         "auth": lambda: _auth_main(rest), "setup": lambda: _setup_main(rest),
+        "connect": lambda: _connect_main(rest),
         "update": lambda: _update_main(rest),
         "tray": lambda: _tray_main(rest),
         "home": _home_main,

@@ -94,8 +94,11 @@ def _register_desktop_mcp(*, dry_run: bool = False) -> None:
         servers["mcpbrain"] = entry
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"Connected mcpbrain to Claude Desktop ({cfg}). "
-              "Restart Claude Desktop to pick up the brain_* tools.")
+        print(f"Wrote the mcpbrain MCP server to Claude Desktop's config:\n  {cfg}\n"
+              "IMPORTANT: fully QUIT and REOPEN Claude Desktop to load the brain_* tools.\n"
+              "Claude Desktop owns this file and overwrites edits made while it's running,\n"
+              "so for a reliable result: quit Claude Desktop, run `mcpbrain connect` in a\n"
+              "terminal, then reopen Claude Desktop.")
     except OSError as exc:
         print(f"Could not write the Claude Desktop MCP config ({exc}). Add this to "
               f"{cfg} under \"mcpServers\":\n  \"mcpbrain\": {json.dumps(entry)}",
@@ -183,6 +186,22 @@ def _ensure_daemon_running(home: str, *, dry_run: bool = False) -> int:
         f"(no {Path(home) / 'control_port'}). Run '{mcpbrain_bin} daemon' in a "
         f"terminal to see why it is not coming up."
     )
+
+
+def connect_main(argv=None) -> int:
+    """``mcpbrain connect``: (re)write ONLY the Claude Desktop MCP connector.
+
+    Claude Desktop owns ``claude_desktop_config.json`` and overwrites entries
+    added while it is running, so the reliable way to register the connector is
+    to run this with **Claude Desktop quit**, then reopen it. Unlike ``setup``,
+    this touches nothing else — no daemon, no wizard.
+    """
+    ap = argparse.ArgumentParser(prog="mcpbrain connect")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print what would be written without writing")
+    args = ap.parse_args(argv)
+    _register_desktop_mcp(dry_run=args.dry_run)
+    return 0
 
 
 def main(argv=None) -> int:
