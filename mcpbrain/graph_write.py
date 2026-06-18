@@ -389,6 +389,10 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
     source_doc_id: the originating document id for provenance. Defaults to
     evidence for backward compatibility when not explicitly supplied.
     """
+    # Self-loops (an entity related to itself) are always noise — drop at the one
+    # chokepoint every relation path flows through, regardless of relation type.
+    if entity_a == entity_b:
+        return None
     if source_doc_id is None:
         source_doc_id = evidence
     if not valid_from:
@@ -462,6 +466,17 @@ SYSTEM_LABELS = {
 # Relation types the structural pass accepts. Mirrors enrich_gmail.py:1542.
 VALID_RELATION_TYPES = {
     "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
+}
+
+# Endpoint-type constraints for the person-centric relations. The LLM over-applies
+# these to topics/projects/meetings ("a topic works_at an org"), which is nonsense
+# and dilutes the graph — so a relation is dropped when an endpoint's resolved
+# entity type isn't allowed. Relations not listed here (mentioned_with, …) accept
+# any endpoint type. (source allowed types, target allowed types):
+_RELATION_ENDPOINT_TYPES = {
+    "works_at":   ({"person"}, {"org"}),
+    "reports_to": ({"person"}, {"person"}),
+    "manages":    ({"person"}, {"person", "org", "project"}),
 }
 
 
@@ -1040,9 +1055,23 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if not target_id:
             continue
 
-        upsert_relation(store, source_id, rel_type, target_id,
-                        valid_from=lead_date_iso or today, evidence=lead_msg_id)
-        relations_created += 1
+        if source_id == target_id:
+            continue                                  # self-loop (also caught downstream)
+
+        # Endpoint-type guard: drop e.g. "topic works_at org" or "meeting works_at"
+        # — the LLM over-applies the person-centric relations to non-person entities.
+        constraint = _RELATION_ENDPOINT_TYPES.get(rel_type)
+        if constraint:
+            src_ok, tgt_ok = constraint
+            s_ent, t_ent = store.get_entity(source_id), store.get_entity(target_id)
+            if not s_ent or not t_ent:
+                continue
+            if (s_ent.get("type") not in src_ok) or (t_ent.get("type") not in tgt_ok):
+                continue
+
+        if upsert_relation(store, source_id, rel_type, target_id,
+                           valid_from=lead_date_iso or today, evidence=lead_msg_id):
+            relations_created += 1
 
     # ── 4. Action lifecycle (Task 3) ────────────────────────────────────────
     # Runs AFTER the structural pass so owner resolution can use name_to_id and
