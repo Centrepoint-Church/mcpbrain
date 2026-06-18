@@ -7,6 +7,28 @@ def test_plugin_json_valid():
     assert d.get("name") == "mcpbrain"
     assert d.get("version") and d.get("description") and d.get("author")
 
+
+def test_plugin_author_is_object_not_string():
+    # The manifest schema requires `author` to be an OBJECT ({name, email?}). A
+    # bare string fails validation and Claude Code rejects the ENTIRE plugin —
+    # no skills/commands/hooks/monitors register at all (this happened: it's why
+    # nothing in the plugin was reachable). Guard both manifests.
+    for rel in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"):
+        d = json.loads((_PLUGIN / rel).read_text())
+        authors = ([p.get("author") for p in d.get("plugins", [])]
+                   if "plugins" in d else [d.get("author")])
+        for a in authors:
+            assert isinstance(a, dict) and a.get("name"), \
+                f"{rel}: author must be an object with a name, got {a!r}"
+
+
+def test_monitors_json_is_a_bare_array():
+    # The monitors manifest must be a top-level ARRAY of monitor objects, not an
+    # object wrapper ({"monitors": [...]}) — the wrapper fails component-load
+    # validation ("expected array, received object").
+    d = json.loads((_PLUGIN / "monitors" / "monitors.json").read_text())
+    assert isinstance(d, list) and d and isinstance(d[0], dict) and d[0].get("command")
+
 def test_marketplace_lists_plugin():
     d = json.loads((_PLUGIN / ".claude-plugin" / "marketplace.json").read_text())
     assert "mcpbrain" in [p.get("name") for p in d["plugins"]]
@@ -88,5 +110,5 @@ def test_hooks_commands_reference_mcpbrain():
 
 def test_monitors_json_points_at_shim():
     d = json.loads((_PLUGIN / "monitors" / "monitors.json").read_text())
-    assert len(d["monitors"]) >= 1
-    assert "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-monitor" in d["monitors"][0]["command"]
+    assert isinstance(d, list) and len(d) >= 1
+    assert "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-monitor" in d[0]["command"]
