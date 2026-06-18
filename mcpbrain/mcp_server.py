@@ -411,14 +411,65 @@ _ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis"
 _ALL_ENRICH_BLOCKS = ("merge_review",) + _ENRICH_ANSWER_BLOCKS
 
 
-def _enrich_snapshot_path(home):
-    """The frozen per-run batch snapshot. brain_enrich_manifest copies the daemon's
-    churning pending.json here once; the fan-out subagents then pull their thread_ids
-    from this stable file, so the daemon re-preparing pending.json mid-run (every
-    cycle) cannot shift the shards out from under them. Re-applying a thread is
-    idempotent (drain apply() upserts), so a stale snapshot only wastes work."""
+_SNAPSHOT_TTL_S = 2 * 3600  # prune frozen snapshots older than this (in-flight runs are minutes)
+
+
+def _safe_batch_token(batch_id: str) -> str:
+    """A filename-safe form of batch_id (defends the snapshot dir from traversal)."""
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]", "_", batch_id or "")[:128]
+
+
+def _enrich_snapshot_dir(home):
     from pathlib import Path
-    return Path(home) / "enrich_queue" / "active.json"
+    return Path(home) / "enrich_queue" / "active"
+
+
+def _enrich_snapshot_path(home, batch_id):
+    """The frozen per-BATCH snapshot. brain_enrich_manifest copies the daemon's
+    churning pending.json to active/<batch_id>.json once; the fan-out subagents then
+    pull their shard from this stable file by batch_id, so neither the daemon
+    re-preparing pending.json mid-run NOR a second/overlapping run's manifest can
+    shift the shards out from under them (the bug that made a blocks shard read an
+    empty snapshot). Re-applying a thread is idempotent (drain apply() upserts), so a
+    stale snapshot only ever wastes work."""
+    return _enrich_snapshot_dir(home) / f"{_safe_batch_token(batch_id)}.json"
+
+
+def _resolve_snapshot(home, batch_id):
+    """Load the snapshot for batch_id; fall back to the most recent snapshot, then to
+    pending.json — so a caller that omits batch_id (or whose snapshot was pruned)
+    still gets sensible data instead of empty."""
+    import json as _json
+    if batch_id:
+        try:
+            return _json.loads(_enrich_snapshot_path(home, batch_id).read_text())
+        except (OSError, ValueError):
+            pass
+    try:
+        snaps = sorted(_enrich_snapshot_dir(home).glob("*.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if snaps:
+            return _json.loads(snaps[0].read_text())
+    except (OSError, ValueError):
+        pass
+    return _load_pending(home)
+
+
+def _prune_snapshots(home):
+    """Drop snapshots older than the TTL so backfill (thousands of batches) doesn't
+    accumulate snapshot files. The TTL is well beyond any in-flight run."""
+    import time as _time
+    try:
+        cutoff = _time.time() - _SNAPSHOT_TTL_S
+        for p in _enrich_snapshot_dir(home).glob("*.json"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _load_pending(home):
@@ -449,12 +500,14 @@ def make_brain_enrich_manifest(home: str):
         data = _load_pending(home)
         if data is None:
             return {"empty": True}
-        snap = _enrich_snapshot_path(home)
+        batch_id = data.get("batch_id")
+        snap = _enrich_snapshot_path(home, batch_id)
         try:
             snap.parent.mkdir(parents=True, exist_ok=True)
             tmp = snap.with_suffix(".json.tmp")
             tmp.write_text(_json.dumps(data, ensure_ascii=False))
             tmp.replace(snap)
+            _prune_snapshots(home)
         except OSError as exc:
             return {"error": f"could not snapshot batch: {exc}"}
         # Reserve room for rules + context + envelope; pack threads up to the rest so
@@ -484,7 +537,8 @@ def make_brain_enrich_manifest(home: str):
 
 def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull(thread_ids: list | None = None,
-                                with_blocks: bool = False) -> dict:
+                                with_blocks: bool = False,
+                                batch_id: str | None = None) -> dict:
         """Return enrichment work with the extraction `rules` bundled in, or
         {"empty": true} when there is nothing to enrich. The `rules` field carries
         the full extraction protocol so the caller is self-contained (no plugin skill
@@ -492,7 +546,8 @@ def make_brain_enrich_pull(home: str):
 
         Three modes:
         - thread_ids given → return exactly those threads from the run snapshot (the
-          fan-out path; one shard per subagent).
+          fan-out path; one shard per subagent). Pass `batch_id` (from the manifest)
+          so you read YOUR run's frozen snapshot, not whatever is latest.
         - with_blocks=true → return the batch-level blocks (merge_review, synthesis,
           …), size-bounded; the dedicated blocks subagent answers them.
         - no args → a single size-bounded HEAD slice of pending.json with
@@ -524,12 +579,8 @@ def make_brain_enrich_pull(home: str):
             out["threads_returned"] = len(kept)
             out["more"] = len(kept) < len(all_threads)
             return out
-        # Fan-out path: serve from the frozen snapshot (fall back to pending.json).
-        snap = _enrich_snapshot_path(home)
-        try:
-            data = _json.loads(snap.read_text())
-        except (OSError, ValueError):
-            data = _load_pending(home)
+        # Fan-out path: serve from this run's frozen snapshot (keyed by batch_id).
+        data = _resolve_snapshot(home, batch_id)
         if not isinstance(data, dict):
             return {"empty": True}
         out = {"batch_id": data.get("batch_id"),
@@ -941,6 +992,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                                    "description": "fetch exactly these threads (from a manifest shard)"},
                     "with_blocks": {"type": "boolean",
                                     "description": "fetch the batch-level blocks (merge_review, synthesis, …)"},
+                    "batch_id": {"type": "string",
+                                 "description": "the manifest's batch_id — reads your run's frozen snapshot"},
                 }},
             ),
             types.Tool(
@@ -1100,6 +1153,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await enrich_pull(
                 thread_ids=arguments.get("thread_ids"),
                 with_blocks=bool(arguments.get("with_blocks", False)),
+                batch_id=arguments.get("batch_id"),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
