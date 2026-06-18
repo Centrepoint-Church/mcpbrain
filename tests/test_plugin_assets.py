@@ -16,12 +16,29 @@ _RECURRING_ROUTINES = ["enrich", "meeting-packs", "gardener", "reference-gardene
 def test_recurring_tasks_have_no_plugin_skill_or_command():
     # The recurring tasks are served via the brain_routine MCP tool (protocols
     # bundled in the wheel) — neither plugin skills nor plugin commands resolve
-    # reliably in the scheduled-task runtime. Make sure no stale duplicates linger.
+    # reliably in the scheduled-task runtime. No stale recurring-task duplicates.
+    # (commands/ itself is allowed — it carries the interactive /mcpbrain:install.)
     for n in _RECURRING_ROUTINES:
         assert not (_PLUGIN / "skills" / f"mcpbrain-{n}").exists(), \
             f"mcpbrain-{n} skill should be gone — it's a brain_routine now"
-    assert not (_PLUGIN / "commands").exists(), \
-        "plugin/commands retired — routines are served via the brain_routine MCP tool"
+        assert not (_PLUGIN / "commands" / f"{n}.md").exists(), \
+            f"{n} command should be gone — it's a brain_routine now"
+
+
+def test_install_is_a_command():
+    # Install is the one flow that must run BEFORE the daemon/MCP exist, so it's a
+    # plugin command (prompt-expansion), not MCP-served. It installs the daemon,
+    # runs setup, and creates the four Local tasks.
+    b = _read("commands/install.md")
+    desc = _frontmatter_field(b, "description")
+    assert desc and len(desc) <= 200
+    assert "uv tool install" in b and "--python 3.12" in b
+    assert "mcpbrain setup" in b
+    assert "brain_routine" in b
+    for t in ("enrich", "meeting-packs", "gardener", "reference-gardener"):
+        assert t in b
+    assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
+    assert "restore --auto" not in b and "restore --check" not in b
 
 
 def test_skill_frontmatter_within_limits():
@@ -38,27 +55,15 @@ def test_skill_frontmatter_within_limits():
         assert desc and len(desc) <= 200, \
             f"{sk.parent.name}: description {len(desc) if desc else 0} chars (>200)"
 
-def test_install_prompt_doc_exists():
-    # Install is distributed as a copy-paste PROMPT (INSTALL.md), not a skill —
-    # skill invocation proved unreliable across surfaces; a prompt always works.
+def test_install_doc_points_at_command():
+    # INSTALL.md is a short pointer to the /mcpbrain:install command, plus a
+    # cold-start path for a machine that doesn't have the plugin yet.
     assert (_PLUGIN / "INSTALL.md").exists()
-    assert not (_PLUGIN / "skills" / "mcpbrain-install").exists()  # skill removed
-
-def test_install_prompt_is_single_claude_code_flow():
+    assert not (_PLUGIN / "skills" / "mcpbrain-install").exists()  # never a skill
     b = _read("INSTALL.md")
-    assert "uv tool install" in b and "--python 3.12" in b   # the host install
-    assert "mcpbrain setup" in b                              # wizard
-    assert "Claude Code" in b                                 # the one surface
-    # All four recurring tasks are created in the same Claude Code flow, each
-    # fetching instructions from the brain_routine MCP tool (skills/commands don't
-    # resolve reliably in the scheduled-task runtime; MCP tools do).
-    assert "brain_routine" in b
-    for t in ("enrich", "meeting-packs", "gardener", "reference-gardener"):
-        assert t in b
-    # …as LOCAL tasks, explicitly NOT cloud routines via /schedule.
-    assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
-    # Backup/restore is automatic — the prompt must NOT tell the user to run it.
-    assert "restore --auto" not in b and "restore --check" not in b
+    assert "/mcpbrain:install" in b                         # primary path = the command
+    assert "claude plugin install" in b                     # cold-start fallback
+    assert "Local" in b and "Cloud routine" in b            # the Local-not-cloud guidance
     # The cowork-setup skill is gone; setup no longer hands off to a Cowork skill.
     assert "mcpbrain-cowork-setup" not in b
     assert not (_PLUGIN / "skills" / "mcpbrain-cowork-setup").exists()
