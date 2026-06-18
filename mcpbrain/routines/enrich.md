@@ -8,7 +8,8 @@ status replies. Self-contained — needs no skill or command file.
 1. Call **`brain_enrich_manifest`**. If it returns `{"empty": true}`, stop and
    report `DONE: spool empty`.
 2. Otherwise it returns `batch_id`, `thread_total`, and `shards` — a list of
-   `{shard, thread_ids, with_blocks}`. Each shard is one unit of work.
+   `{shard, thread_ids, with_blocks}`. Each shard is one unit of work. A shard with
+   `with_blocks: true` also carries a `block` naming the one block type it handles.
 3. For **each shard**, spawn a **subagent** (the Task tool, general-purpose).
    Spawn them in parallel — up to ~5 Task calls in one message, then the next
    batch — so the run finishes fast. Give each subagent EXACTLY this instruction,
@@ -18,13 +19,14 @@ status replies. Self-contained — needs no skill or command file.
    > 1. Load the tools:
    >    `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
    > 2. Call `brain_enrich_pull` with `batch_id=<batch_id>`,
-   >    `thread_ids=<this shard's thread_ids>` and `with_blocks=<this shard's
-   >    with_blocks>`. (Passing `batch_id` reads this run's frozen snapshot.)
+   >    `thread_ids=<this shard's thread_ids>`, `with_blocks=<this shard's
+   >    with_blocks>`, and (for a blocks shard) `block=<this shard's block>`.
+   >    (Passing `batch_id` reads this run's frozen snapshot.)
    > 3. The result has a **`rules`** field — the FULL extraction protocol. Follow it
-   >    EXACTLY: produce one extraction object per thread. If `with_blocks` was true,
-   >    also answer every block the pull returned (`merge_review` → `merge_answers`,
-   >    plus `synthesis`, `profile_synthesis`, `community_synthesis`, `memory_distil`,
-   >    `profile_audit`).
+   >    EXACTLY: produce one extraction object per thread. If this is a blocks shard,
+   >    answer the one block the pull returned (`merge_review` → `merge_answers`, or
+   >    `synthesis` / `profile_synthesis` / `community_synthesis` / `memory_distil` /
+   >    `profile_audit` → the field of the same name).
    > 4. Call `brain_enrich_push` with `batch_id=<batch_id>`, `shard=<this shard's
    >    index>`, `extractions=[…]`, and an answer field for each block present.
    >    Confirm `{"written": true}`.

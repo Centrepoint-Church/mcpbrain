@@ -188,13 +188,45 @@ def test_manifest_partitions_threads_and_freezes_snapshot(tmp_path):
     assert (tmp_path / "enrich_queue" / "active" / "b1.json").exists()  # keyed by batch_id
 
 
-def test_manifest_appends_blocks_shard(tmp_path):
+def test_manifest_emits_one_shard_per_block_type(tmp_path):
+    # Regression: a single combined blocks shard could never fit all blocks under the
+    # cap (they total ~60KB), so the pull dropped them all and the category was
+    # silently skipped. The manifest now emits ONE shard per non-empty block type.
     _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
                    merge_review=[{"pair_id": "a|b"}], memory_distil=[{"doc_id": "n1"}])
     out = asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
     block_shards = [s for s in out["shards"] if s["with_blocks"]]
-    assert len(block_shards) == 1 and block_shards[0]["thread_ids"] == []
+    assert {s["block"] for s in block_shards} == {"merge_review", "memory_distil"}
+    assert all(s["thread_ids"] == [] for s in block_shards)
     assert out["blocks"] == {"merge_review": 1, "memory_distil": 1}
+
+
+def test_per_type_block_pull_fits_when_combined_would_not(tmp_path):
+    # The exact failure from the 16:01 run: blocks together (~62KB) overflow the cap
+    # and a combined with_blocks pull comes back empty. A per-type pull must return
+    # that type, non-empty and under the cap, with a trimmed context.
+    big_ctx = {"owner_name": "Jo", "valid_orgs": ["a"], "org_domain_map": {"x": "a"},
+               "known_people": [{"name": f"P{i}", "bio": "y" * 200} for i in range(80)]}
+    blocks = {
+        "merge_review": [{"pair_id": f"a{i}|b{i}", "a": "x" * 200} for i in range(50)],
+        "community_synthesis": [{"community_id": i, "members": [f"m{j}" for j in range(40)]} for i in range(10)],
+        "memory_distil": [{"doc_id": f"n{i}", "content": "z" * 400} for i in range(20)],
+    }
+    (tmp_path / "enrich_queue").mkdir(exist_ok=True)
+    (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps(
+        {"batch_id": "b1", "context": big_ctx, "threads": [{"thread_id": "t1"}], **blocks}))
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    # combined (legacy) pull drops everything -> empty
+    combined = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
+        with_blocks=True, batch_id="b1"))
+    assert combined == {"empty": True}
+    # per-type pulls each return their block, under the cap, with trimmed context
+    for btype in ("merge_review", "community_synthesis", "memory_distil"):
+        out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
+            with_blocks=True, block=btype, batch_id="b1"))
+        assert out.get(btype), f"{btype} came back empty"
+        assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS
+        assert "known_people" not in json.dumps(out["context"])   # heavy context trimmed
 
 
 def test_manifest_empty_when_no_spool(tmp_path):
