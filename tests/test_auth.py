@@ -15,6 +15,33 @@ from mcpbrain import auth, config
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+
+def test_identity_scopes_requested_but_not_required():
+    # Identity scopes (for name/email prefill) are requested at consent
+    # (CONSENT_SCOPES) but NOT in the required validation set (SCOPES), so
+    # existing tokens stay valid and are not forced to re-consent.
+    for s in auth.IDENTITY_SCOPES:
+        assert s not in auth.SCOPES
+    assert auth.CONSENT_SCOPES == auth.SCOPES + auth.IDENTITY_SCOPES
+    assert any("userinfo.profile" in s for s in auth.IDENTITY_SCOPES)
+
+
+def test_fetch_google_name_degrades_to_empty(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("token lacks userinfo.profile")
+    monkeypatch.setattr(auth, "build_service", _boom)
+    assert auth.fetch_google_name(object()) == ""
+
+
+def test_fetch_google_name_reads_userinfo(monkeypatch):
+    class _UI:
+        def userinfo(self): return self
+        def get(self): return self
+        def execute(self): return {"name": "Josh Kemp", "email": "josh.k@x.com"}
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: _UI())
+    assert auth.fetch_google_name(object()) == "Josh Kemp"
+
+
 # Minimal authorized-user token info that produces a VALID (non-expired) creds
 # object when loaded via from_authorized_user_info.
 def _future_expiry() -> str:
