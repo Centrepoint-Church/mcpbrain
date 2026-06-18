@@ -36,6 +36,23 @@ def test_store_has_content_true_when_chunks_present(tmp_path):
     assert restore.store_has_content(str(p)) is True
 
 
+def test_account_email_uses_google_account_when_profile_not_saved(tmp_path, monkeypatch):
+    # Regression: auto-restore must work right after Google sign-in, before the
+    # user fills the profile step (owner_email blank). The escrow is keyed by the
+    # Google account email — the daemon's `google_account` sidecar — so use it.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "google_account").write_text("josh.k@centrepoint.church\n")
+    config.write_config(str(tmp_path), {})  # profile not saved → no owner_email
+    assert restore.account_email(str(tmp_path)) == "josh.k@centrepoint.church"
+
+
+def test_account_email_prefers_owner_email_over_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "google_account").write_text("google@x.com")
+    config.write_config(str(tmp_path), {"owner_email": "owner@x.com"})
+    assert restore.account_email(str(tmp_path)) == "owner@x.com"
+
+
 def test_detect_restorable_true_when_key_and_snapshot_present(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})

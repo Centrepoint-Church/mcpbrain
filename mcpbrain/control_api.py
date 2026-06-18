@@ -300,7 +300,12 @@ class ControlServer:
                 try:
                     from mcpbrain import (restore as _restore, backup_setup,
                                           auth as _auth, config as _config)
-                    owner = _config.owner_email(str(self.home))
+                    # Resolve the account email as owner_email → connected Google
+                    # account → legacy backup.user_id, so auto-restore fires right
+                    # after Google sign-in instead of waiting for the user to fill
+                    # and save the profile step (the escrow is keyed by the Google
+                    # email, which is already known at sign-in).
+                    owner = _restore.account_email(str(self.home))
                     if not owner:
                         return h_json(h, 200, {"action": "pending", "reason": "no account yet"})
                     creds = _auth.load_credentials()
