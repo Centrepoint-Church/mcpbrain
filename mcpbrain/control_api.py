@@ -187,6 +187,11 @@ class ControlServer:
         try:
             if h.path == "/api/pause":   d.pause();  return h_json(h, 200, {"paused": True})
             if h.path == "/api/resume":  d.resume(); return h_json(h, 200, {"paused": False})
+            if h.path == "/api/sync-now":
+                # Wake the daemon for an immediate sync->drain->prepare cycle. The
+                # backfill fan-out uses this to advance to the next batch in seconds
+                # instead of waiting out the normal interval.
+                d.sync_now(); return h_json(h, 200, {"woken": True})
             # /api/config carries the Gemini key. The control API is loopback-only
             # over plain HTTP by design, so the key travels in cleartext on
             # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed
