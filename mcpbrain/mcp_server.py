@@ -378,7 +378,13 @@ def _enrich_rules() -> str:
 # many remain — the caller enriches + pushes them, the daemon drains and re-
 # prepares, and the next pull returns the next slice. (The file-based backfill
 # path reads pending.json directly and is unaffected by this cap.)
-_PULL_MAX_CHARS = 70_000
+# Bounds the FULL serialized pull response (context + rules + surviving optional
+# blocks + threads). Kept well under Claude Code's two consumer limits, not just
+# the raw MCP token cap: a result above ~50KB is persisted to a file the caller
+# must Read back, and that Read is itself capped at 25k tokens — so a 55KB pull
+# (seen in the wild) got persisted, then truncated on read, and the run stalled
+# before it could push. 25K chars (~6-7k tokens) stays inline and fully readable.
+_PULL_MAX_CHARS = 25_000
 
 
 _ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
