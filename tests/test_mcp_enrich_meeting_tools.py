@@ -188,45 +188,67 @@ def test_manifest_partitions_threads_and_freezes_snapshot(tmp_path):
     assert (tmp_path / "enrich_queue" / "active" / "b1.json").exists()  # keyed by batch_id
 
 
-def test_manifest_emits_one_shard_per_block_type(tmp_path):
-    # Regression: a single combined blocks shard could never fit all blocks under the
-    # cap (they total ~60KB), so the pull dropped them all and the category was
-    # silently skipped. The manifest now emits ONE shard per non-empty block type.
+def test_manifest_emits_block_item_shards(tmp_path):
+    # Blocks are sharded by ITEM (like threads), one block type per shard, each shard
+    # owning a [block_start, block_count) slice. Small blocks -> one shard per type.
     _write_pending(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
                    merge_review=[{"pair_id": "a|b"}], memory_distil=[{"doc_id": "n1"}])
     out = asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
     block_shards = [s for s in out["shards"] if s["with_blocks"]]
     assert {s["block"] for s in block_shards} == {"merge_review", "memory_distil"}
-    assert all(s["thread_ids"] == [] for s in block_shards)
+    for s in block_shards:
+        assert s["thread_ids"] == [] and "block_start" in s and "block_count" in s
     assert out["blocks"] == {"merge_review": 1, "memory_distil": 1}
 
 
-def test_per_type_block_pull_fits_when_combined_would_not(tmp_path):
-    # The exact failure from the 16:01 run: blocks together (~62KB) overflow the cap
-    # and a combined with_blocks pull comes back empty. A per-type pull must return
-    # that type, non-empty and under the cap, with a trimmed context.
-    big_ctx = {"owner_name": "Jo", "valid_orgs": ["a"], "org_domain_map": {"x": "a"},
-               "known_people": [{"name": f"P{i}", "bio": "y" * 200} for i in range(80)]}
-    blocks = {
-        "merge_review": [{"pair_id": f"a{i}|b{i}", "a": "x" * 200} for i in range(50)],
-        "community_synthesis": [{"community_id": i, "members": [f"m{j}" for j in range(40)]} for i in range(10)],
-        "memory_distil": [{"doc_id": f"n{i}", "content": "z" * 400} for i in range(20)],
-    }
+def test_large_block_splits_into_chunks_covering_all_items(tmp_path):
+    # A block type far bigger than the cap must split across several shards whose
+    # [start,count) slices tile ALL items exactly once (no loss, no overlap), and
+    # each shard's pull fits the cap while keeping the FULL context.
+    ctx = {"owner_name": "Jo", "valid_orgs": ["a"], "org_domain_map": {"x": "a"},
+           "known_people": [{"name": f"P{i}", "role": "r"} for i in range(40)]}
+    items = [{"pair_id": f"a{i}|b{i}", "a": "x" * 300} for i in range(50)]
     (tmp_path / "enrich_queue").mkdir(exist_ok=True)
     (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps(
-        {"batch_id": "b1", "context": big_ctx, "threads": [{"thread_id": "t1"}], **blocks}))
-    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
-    # combined (legacy) pull drops everything -> empty
-    combined = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
-        with_blocks=True, batch_id="b1"))
-    assert combined == {"empty": True}
-    # per-type pulls each return their block, under the cap, with trimmed context
-    for btype in ("merge_review", "community_synthesis", "memory_distil"):
-        out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
-            with_blocks=True, block=btype, batch_id="b1"))
-        assert out.get(btype), f"{btype} came back empty"
+        {"batch_id": "b1", "context": ctx, "threads": [{"thread_id": "t1"}],
+         "merge_review": items}))
+    plan = asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    mr = [s for s in plan["shards"] if s.get("block") == "merge_review"]
+    assert len(mr) > 1                                    # split into multiple chunks
+    # slices tile [0,50) exactly
+    covered = []
+    for s in sorted(mr, key=lambda x: x["block_start"]):
+        covered += list(range(s["block_start"], s["block_start"] + s["block_count"]))
+    assert covered == list(range(50))
+    # each chunk's pull fits the cap, returns its items, keeps full context
+    pull = mcp_server.make_brain_enrich_pull(str(tmp_path))
+    seen = 0
+    for s in mr:
+        out = asyncio.run(pull(with_blocks=True, block="merge_review", batch_id="b1",
+                               block_start=s["block_start"], block_count=s["block_count"]))
         assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS
-        assert "known_people" not in json.dumps(out["context"])   # heavy context trimmed
+        assert len(out["merge_review"]) == s["block_count"]
+        assert "known_people" in out["context"]           # FULL context kept (not trimmed)
+        seen += len(out["merge_review"])
+    assert seen == 50                                     # every item served
+
+
+def test_block_pull_trims_context_only_when_oversized(tmp_path):
+    # Safety net: with a pathologically huge context, even one item won't fit with
+    # full context, so the pull trims context (drops known_people) to stay in cap.
+    huge_ctx = {"owner_name": "Jo", "valid_orgs": ["a"], "org_domain_map": {"x": "a"},
+                "known_people": [{"name": f"P{i}", "bio": "y" * 400} for i in range(80)]}
+    (tmp_path / "enrich_queue").mkdir(exist_ok=True)
+    (tmp_path / "enrich_queue" / "pending.json").write_text(json.dumps(
+        {"batch_id": "b1", "context": huge_ctx, "threads": [{"thread_id": "t1"}],
+         "memory_distil": [{"doc_id": "n1", "content": "z" * 400}]}))
+    asyncio.run(mcp_server.make_brain_enrich_manifest(str(tmp_path))())
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(
+        with_blocks=True, block="memory_distil", batch_id="b1",
+        block_start=0, block_count=1))
+    assert out.get("memory_distil")                       # still served, non-empty
+    assert len(json.dumps(out)) <= mcp_server._PULL_MAX_CHARS
+    assert "known_people" not in json.dumps(out["context"])  # trimmed to fit
 
 
 def test_manifest_empty_when_no_spool(tmp_path):
