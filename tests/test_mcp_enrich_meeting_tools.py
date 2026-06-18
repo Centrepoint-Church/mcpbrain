@@ -124,6 +124,39 @@ def test_enrich_push_writes_inbox_file_drain_can_read(tmp_path):
     assert written["merge_answers"] == []
 
 
+def test_enrich_push_forwards_all_answer_blocks(tmp_path):
+    # Regression: the batch requests synthesis/profile/community/memory/audit work
+    # and the rules tell the LLM how to answer, but push used to drop everything
+    # except extractions + merge_answers. Every present block must reach the inbox
+    # (the daemon's drainers read each by key).
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    out = asyncio.run(push(
+        batch_id="b1", extractions=[{"thread_id": "t1"}],
+        merge_answers=[{"pair_id": "a|b", "same": True, "canonical": "X"}],
+        synthesis=[{"thread_id": "t1", "contextual_summary": "..."}],
+        profile_synthesis=[{"entity_id": "e1", "profile": "..."}],
+        community_synthesis=[{"community_id": 1, "title": "Facilities", "summary": "..."}],
+        memory_distil=[{"doc_id": "n1", "verdict": "keep"}],
+        profile_audit=[{"entity_id": "e1", "corrections": []}],
+    ))
+    assert out["written"] is True
+    d = json.loads((tmp_path / "enrich_inbox" / "b1.json").read_text())
+    for k in ("merge_answers", "synthesis", "profile_synthesis",
+              "community_synthesis", "memory_distil", "profile_audit"):
+        assert k in d, f"{k} not forwarded to the inbox"
+    assert d["community_synthesis"][0]["title"] == "Facilities"
+
+
+def test_enrich_push_omits_blocks_not_supplied(tmp_path):
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    asyncio.run(push(batch_id="b2", extractions=[{"thread_id": "t1"}]))
+    d = json.loads((tmp_path / "enrich_inbox" / "b2.json").read_text())
+    assert d["merge_answers"] == []
+    for k in ("synthesis", "community_synthesis", "profile_synthesis",
+              "memory_distil", "profile_audit"):
+        assert k not in d
+
+
 def test_enrich_push_rejects_bad_input(tmp_path):
     push = mcp_server.make_brain_enrich_push(str(tmp_path))
     assert asyncio.run(push("", []))["written"] is False

@@ -445,11 +445,25 @@ def make_brain_enrich_pull(home: str):
     return brain_enrich_pull
 
 
+# The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
+# merge_answers. Each is drained by the daemon from the inbox object under this
+# exact key (see drain.py BLOCK_DRAINERS + synthesise_threads). Without forwarding
+# them, the synthesis/profile/community/memory/audit work the batch requested is
+# silently dropped on the MCP path.
+_ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis",
+                         "memory_distil", "profile_audit")
+
+
 def make_brain_enrich_push(home: str):
     async def brain_enrich_push(batch_id: str, extractions: list,
-                                merge_answers: list | None = None) -> dict:
+                                merge_answers: list | None = None,
+                                **blocks) -> dict:
         """Write an enrichment result to enrich_inbox/<batch_id>.json for the
-        daemon to drain on its next cycle. Returns {"written": bool, path|error}."""
+        daemon to drain on its next cycle. Besides `extractions` and
+        `merge_answers`, accepts the optional answer blocks the pull requested
+        (synthesis, profile_synthesis, community_synthesis, memory_distil,
+        profile_audit) and forwards each so the daemon's drainers apply it.
+        Returns {"written": bool, path|error}."""
         import json as _json
         from pathlib import Path
         if not batch_id or not isinstance(extractions, list):
@@ -459,6 +473,9 @@ def make_brain_enrich_push(home: str):
             inbox.mkdir(parents=True, exist_ok=True)
             payload = {"batch_id": batch_id, "extractions": extractions,
                        "merge_answers": merge_answers or []}
+            for _k in _ENRICH_ANSWER_BLOCKS:
+                if blocks.get(_k):
+                    payload[_k] = blocks[_k]
             target = inbox / f"{batch_id}.json"
             tmp = inbox / f".{batch_id}.json.tmp"
             tmp.write_text(_json.dumps(payload, ensure_ascii=False))
@@ -794,13 +811,23 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             ),
             types.Tool(
                 name="brain_enrich_push",
-                description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Use in the hourly enrich task instead of writing files via shell.",
+                description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Pass an answer field for EACH block the pull included: extractions (threads), merge_answers (merge_review), and synthesis / profile_synthesis / community_synthesis / memory_distil / profile_audit when those blocks were present. Use in the hourly enrich task instead of writing files via shell.",
                 inputSchema={"type": "object", "properties": {
                     "batch_id": {"type": "string", "description": "the batch_id from brain_enrich_pull, verbatim"},
                     "extractions": {"type": "array", "items": {"type": "object"},
                                     "description": "one extraction object per thread"},
                     "merge_answers": {"type": "array", "items": {"type": "object"},
-                                      "description": "optional merge-review answers"},
+                                      "description": "merge-review answers (when the batch had a merge_review block)"},
+                    "synthesis": {"type": "array", "items": {"type": "object"},
+                                  "description": "answers for the synthesis block, if present"},
+                    "profile_synthesis": {"type": "array", "items": {"type": "object"},
+                                          "description": "answers for the profile_synthesis block, if present"},
+                    "community_synthesis": {"type": "array", "items": {"type": "object"},
+                                            "description": "answers for the community_synthesis block, if present"},
+                    "memory_distil": {"type": "array", "items": {"type": "object"},
+                                      "description": "answers for the memory_distil block, if present"},
+                    "profile_audit": {"type": "array", "items": {"type": "object"},
+                                      "description": "answers for the profile_audit block, if present"},
                 }, "required": ["batch_id", "extractions"]},
             ),
             types.Tool(
@@ -934,6 +961,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 batch_id=arguments.get("batch_id", ""),
                 extractions=arguments.get("extractions") or [],
                 merge_answers=arguments.get("merge_answers") or [],
+                **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_meetings_today":
