@@ -74,6 +74,10 @@ class ControlClient:
         """POST /api/auth/start (re-run the OAuth consent flow)."""
         return self._request("/api/auth/start", method="POST")
 
+    def sync_now(self) -> dict:
+        """Wake the daemon for an immediate sync->drain->prepare cycle."""
+        return self._request("/api/sync-now", method="POST")
+
     def start_enrich_backfill(self) -> dict:
         return self._request("/api/enrich-backfill/start", method="POST")
 
