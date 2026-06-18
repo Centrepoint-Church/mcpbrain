@@ -31,6 +31,17 @@ def test_requests_pick_untitled_communities(tmp_path):
     assert "Ann A" in reqs[0]["members"]
 
 
+def test_members_are_sampled_not_dumped(tmp_path):
+    # A community can have thousands of members; dumping all of them blew up the
+    # spool / brain_enrich_pull. Only a bounded SAMPLE is emitted, but member_count
+    # stays the true total.
+    s = _store(tmp_path)
+    _seed_community(s, 1, [f"Person {i:04d}" for i in range(5000)], title="")
+    reqs = community_synth.build_community_requests(s, cap=10, member_sample=40)
+    assert reqs[0]["member_count"] == 5000          # true count preserved
+    assert len(reqs[0]["members"]) == 40            # but only a sample shipped
+
+
 def test_single_member_community_excluded(tmp_path):
     s = _store(tmp_path)
     _seed_community(s, 1, ["Solo Person"], title="")   # 1 member, untitled — excluded

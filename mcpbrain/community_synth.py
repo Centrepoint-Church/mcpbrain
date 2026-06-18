@@ -17,12 +17,18 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def build_community_requests(store, *, cap: int = 10) -> list[dict]:
+def build_community_requests(store, *, cap: int = 10, member_sample: int = 40) -> list[dict]:
     """Return up to `cap` untitled communities with member_count >= 2.
 
     A community is untitled when its title column is NULL, empty string, or
     whitespace-only.  Returns a list of dicts:
         {community_id, member_count, members: [name, ...]}
+
+    `members` is a SAMPLE of at most `member_sample` names, not the full roster:
+    a community can have thousands of members, and dumping all of them made the
+    spool (and the brain_enrich_pull MCP response) explode past the token cap.
+    The LLM only needs a representative sample plus the true `member_count` to
+    title/summarise the cluster.
     """
     with store._connect() as db:
         rows = db.execute(
@@ -49,8 +55,9 @@ def build_community_requests(store, *, cap: int = 10) -> list[dict]:
                 JOIN entities e ON e.id = ec.entity_id
                 WHERE ec.community_id = ?
                 ORDER BY e.name
+                LIMIT ?
                 """,
-                (cid,),
+                (cid, member_sample),
             ).fetchall()
         results.append({
             "community_id": cid,
