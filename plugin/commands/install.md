@@ -45,5 +45,6 @@ MCP tools — nothing to look up as a skill or command):
 After creating each task, click **Run now** once to confirm it works. The meeting-packs
 task is change-detecting, so hourly is cheap.
 
-**4. Open at login.** Remind me to set Claude to open at login (System Settings → General
-→ Login Items → add Claude) so the Local tasks actually fire.
+**4. Run on startup.** Remind me to turn on **Claude → Settings → Desktop App →
+General → "Run on startup"** so Claude launches at login and the Local scheduled
+tasks actually fire.

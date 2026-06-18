@@ -45,7 +45,8 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    `restore`/bootstrap step.
 4. The colleague completes the wizard (Google sign-in + identity + timezone),
    creates the four **Local** scheduled tasks (Sonnet 4.6 + Auto permission mode)
-   in the same session, and **sets Claude to open at login**.
+   in the same session, and turns on **Claude → Settings → Desktop App → General →
+   "Run on startup"** (so Claude launches at login and the Local tasks fire).
 
 The `--python 3.12` pin is **required**: without it the install fails on any
 machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
