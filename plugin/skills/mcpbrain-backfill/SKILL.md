@@ -1,64 +1,57 @@
 ---
 name: mcpbrain-backfill
-description: Backfill enrichment of your full email history. Fans each pending batch out across per-shard subagents (fresh context each) and loops until the spool is dry, so a large history never hits limits.
+description: Backfill enrichment of your full email history. Drains the work-unit queue with one fresh-context subagent per unit, nudging the daemon to refill, until the whole history is enriched.
 ---
 
 # Backfill enrichment
 
-Drains the entire mcpbrain enrichment spool — your full email history — by repeatedly
-fanning each pending batch out across per-shard `enrich-batch` subagents, then nudging
-the daemon to prepare the next batch. Each shard runs in a fresh-context subagent, so
-no context (not even yours, the orchestrator) ever holds more than thread IDs and
-one-line status replies. Loops until the spool is dry.
+Drains the entire mcpbrain enrichment **work queue** — your full email history — by
+repeatedly taking the ready units and handing each to a fresh-context `enrich-batch`
+subagent, then nudging the daemon to refill the queue. No context (not even yours,
+the orchestrator) ever holds more than a unit id and a one-line status. Loops until
+the queue stays empty.
 
-This is MCP-only — it does not read the spool via shell. The tools live on the
-mcpbrain MCP server; load them first if needed:
-`ToolSearch("select:mcp__mcpbrain__brain_enrich_manifest,mcp__mcpbrain__brain_enrich_advance")`.
+MCP-only — it does not read the spool via shell. Load the tools first if needed:
+`ToolSearch("select:mcp__mcpbrain__brain_enrich_units,mcp__mcpbrain__brain_enrich_advance")`.
 
 ## Loop
 
 ```
-rounds = 0; empty = 0; total_threads = 0
-WHILE empty < 2:
-  plan = brain_enrich_manifest()
-  IF plan.empty:
+waves = 0; units_done = 0; empty = 0
+WHILE empty < 3:
+  ready = brain_enrich_units()
+  IF ready.empty:
       empty += 1
-      brain_enrich_advance()        # nudge in case a batch is mid-prepare
+      brain_enrich_advance()          # nudge the daemon to drain + refill the queue
       WAIT ~10s
       CONTINUE
-  empty = 0; rounds += 1
-  prev_batch = plan.batch_id
+  empty = 0; waves += 1
 
-  # Fan out: one enrich-batch subagent per shard, ~5 in parallel at a time.
-  FOR each shard IN plan.shards:
-      dispatch enrich-batch  (Task tool) with:
-          batch_id    = plan.batch_id
-          thread_ids  = shard.thread_ids
-          with_blocks = shard.with_blocks
-          shard       = shard.shard
-  collect each subagent's one-line status; add thread counts to total_threads
+  # Fan out: one enrich-batch subagent per unit, ~5 in parallel at a time.
+  FOR each unit IN ready.units:
+      dispatch enrich-batch (Task tool) with its unit_id
+  collect each subagent's one-line status; add to units_done
 
-  # Advance to the next batch: drain the pushed shards + prepare the next pending.
-  REPEAT up to ~6 times:
-      brain_enrich_advance()        # immediate drain -> prepare cycle
-      WAIT ~10s
-      IF brain_enrich_manifest().batch_id != prev_batch OR .empty: BREAK
+  brain_enrich_advance()              # apply the pushed results + top the queue back up
 
-REPORT: rounds, total_threads enriched, final spool state
+REPORT: waves, units_done, final queue state
 ```
 
 ## Notes
 
-- Each `enrich-batch` subagent is self-contained: it pulls its own `thread_ids`
-  (which carry the extraction `rules`) and pushes its own `shard` —
-  `enrich_inbox/<batch>.<shard>.json` — so parallel shards never clobber each other.
-- `brain_enrich_advance` runs one daemon drain+prepare cycle. Because the daemon
-  prepares *before* it drains, the next batch may take two nudges to appear — that's
-  why the advance step polls the manifest's `batch_id` rather than nudging once.
-- Re-enriching a thread is idempotent (the daemon upserts), so a duplicated shard
-  only wastes work; it never corrupts the graph.
-- Stop early on `/stop`, or after three consecutive rounds where every shard returns
+- Each `enrich-batch` subagent is self-contained: it pulls its own unit
+  (`brain_enrich_pull(unit_id=…)`, which carries the rules + context) and pushes its
+  own result (`brain_enrich_push(unit_id=…)` → `enrich_inbox/<unit_id>.json`). The
+  daemon applies it and deletes the unit.
+- `brain_enrich_units` claims each unit it hands out with a short lease, so a unit in
+  flight is never handed to two subagents — the loop won't double-process.
+- `brain_enrich_advance` runs one daemon drain+prepare cycle: it applies pushed
+  results (freeing those units) and produces the next units from still-un-enriched
+  history. The queue is bounded, so the daemon refills it as units drain.
+- Re-enriching a unit is idempotent (the daemon upserts), so a redelivered unit only
+  wastes work; it never corrupts the graph.
+- Stop early on `/stop`, or after three consecutive waves where every unit returns
   `ERROR:`.
 ```bash
-mcpbrain home   # the store/spool live here, if you need to inspect logs/enrich.log
+mcpbrain home   # the store/queue live here, if you need to inspect logs/enrich.log
 ```

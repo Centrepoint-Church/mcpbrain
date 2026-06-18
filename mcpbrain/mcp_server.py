@@ -372,13 +372,13 @@ def _enrich_rules() -> str:
     return _ENRICH_RULES_CACHE
 
 
-# Bounds the FULL serialized pull response (context + rules + surviving optional
-# blocks + threads). Kept well under Claude Code's two consumer limits, not just
-# the raw MCP token cap: a result above ~50KB is persisted to a file the caller
-# must Read back, and that Read is itself capped at 25k tokens — so a 55KB pull
-# (seen in the wild) got persisted, then truncated on read, and the run stalled
-# before it could push. 25K chars (~6-7k tokens) stays inline and fully readable.
-_PULL_MAX_CHARS = 25_000
+# Bounds the FULL serialized pull/unit response (work + rules + context). Kept under
+# Claude Code's consumer limits: a result above ~50KB is persisted to a file the
+# caller must Read back. 40K (~10k tokens) stays under that and well under the 25k-
+# token Read cap even if persisted, while leaving far less per-unit rules+context
+# overhead than the old 25K (which forced ~2x more subagents). Must stay in lockstep
+# with prepare._UNIT_PULL_CAP (the producer sizes units against this).
+_PULL_MAX_CHARS = 40_000
 
 
 _ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
@@ -486,6 +486,59 @@ def _load_pending(home):
     return data
 
 
+_LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
+
+
+def _units_dir(home):
+    from pathlib import Path
+    return Path(home) / "enrich_queue" / "units"
+
+
+def _claims_dir(home):
+    from pathlib import Path
+    return Path(home) / "enrich_queue" / "claims"
+
+
+def make_brain_enrich_units(home: str):
+    async def brain_enrich_units() -> dict:
+        """List ready work units and CLAIM each with a short lease. Returns
+        descriptors only — `unit_id`, `kind`, `block`, `count` — NO payloads, so the
+        orchestrator stays context-flat. Spawn one subagent per returned `unit_id`;
+        each calls brain_enrich_pull(unit_id), extracts, and brain_enrich_push(
+        unit_id, …). Units claimed within the lease are skipped, so overlapping runs
+        and the backfill loop never re-hand-out in-flight work; a stale claim (crashed
+        subagent) becomes re-listable. Returns {"empty": true} when the queue is dry."""
+        import json as _json
+        import time as _time
+        try:
+            files = sorted(_units_dir(home).glob("*.json"))
+        except OSError:
+            return {"empty": True}
+        claims = _claims_dir(home)
+        ready, now = [], _time.time()
+        for f in files:
+            uid = f.stem
+            claim = claims / uid
+            try:
+                if claim.exists() and now - claim.stat().st_mtime < _LEASE_TTL_S:
+                    continue                          # still leased to another worker
+            except OSError:
+                pass
+            try:
+                d = _json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue                              # skip a half-written/garbage unit
+            try:
+                claims.mkdir(parents=True, exist_ok=True)
+                (claims / uid).touch()                # claim (mtime = now)
+            except OSError:
+                pass
+            ready.append({"unit_id": uid, "kind": d.get("kind"), "block": d.get("block"),
+                          "count": len(d.get("threads") or d.get("items") or [])})
+        return {"units": ready} if ready else {"empty": True}
+    return brain_enrich_units
+
+
 def make_brain_enrich_manifest(home: str):
     async def brain_enrich_manifest() -> dict:
         """Plan a fan-out enrichment run WITHOUT returning any thread bodies, so the
@@ -555,7 +608,8 @@ def make_brain_enrich_manifest(home: str):
 
 
 def make_brain_enrich_pull(home: str):
-    async def brain_enrich_pull(thread_ids: list | None = None,
+    async def brain_enrich_pull(unit_id: str | None = None,
+                                thread_ids: list | None = None,
                                 with_blocks: bool = False,
                                 batch_id: str | None = None,
                                 block: str | None = None,
@@ -575,8 +629,36 @@ def make_brain_enrich_pull(home: str):
           block type). with_blocks=true without `block` → all blocks, oversized ones
           dropped (legacy).
         - no args → a single size-bounded HEAD slice of pending.json with
-          threads_total/threads_returned/more (the legacy single-session path)."""
+          threads_total/threads_returned/more (the legacy single-session path).
+
+        Work-queue path: pass `unit_id` (from brain_enrich_units) to get that one
+        unit's work (a `threads` slice or one `block` + `items`) with the current
+        rules + context attached."""
         import json as _json
+        from pathlib import Path
+        # Work-queue path: serve one immutable unit + the shared current context.
+        if unit_id:
+            try:
+                d = _json.loads((_units_dir(home) / f"{unit_id}.json").read_text())
+            except (OSError, ValueError):
+                return {"empty": True}
+            try:
+                ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
+            except (OSError, ValueError):
+                ctx = {}
+            out = {"unit_id": unit_id, "kind": d.get("kind"),
+                   "context": ctx, "rules": _enrich_rules()}
+            if d.get("kind") == "block":
+                out["block"] = d.get("block")
+                out["items"] = d.get("items") or []
+            else:
+                out["threads"] = d.get("threads") or []
+            # Safety net: the producer sized the unit to fit, but if a since-grown
+            # context tips it over, trim context to the few fields an answer needs.
+            if len(_json.dumps(out)) > _PULL_MAX_CHARS:
+                out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
+                                                       "org_domain_map") if k in ctx}
+            return out
         # Legacy single-session path: head slice straight off pending.json.
         if thread_ids is None and not with_blocks:
             data = _load_pending(home)
@@ -648,31 +730,38 @@ def make_brain_enrich_pull(home: str):
 
 
 def make_brain_enrich_push(home: str):
-    async def brain_enrich_push(batch_id: str, extractions: list,
+    async def brain_enrich_push(batch_id: str = "", extractions: list | None = None,
                                 merge_answers: list | None = None,
                                 shard: int | None = None,
+                                unit_id: str | None = None,
                                 **blocks) -> dict:
         """Write an enrichment result to enrich_inbox/ for the daemon to drain.
-        With `shard` (the fan-out path) writes enrich_inbox/<batch_id>.<shard>.json
-        so concurrent subagents never clobber one file; without it writes
-        enrich_inbox/<batch_id>.json (legacy single-session path). The daemon drains
-        every *.json regardless. Besides `extractions` and `merge_answers`, accepts
-        the optional answer blocks (synthesis, profile_synthesis, community_synthesis,
-        memory_distil, profile_audit) and forwards each. Returns
-        {"written": bool, path|error}."""
+        Work-queue path: pass `unit_id` (from your unit) → enrich_inbox/<unit_id>.json;
+        the daemon applies it and deletes the unit. Legacy fan-out: pass `batch_id`
+        (+ `shard`) → enrich_inbox/<batch_id>[.<shard>].json. Besides `extractions`
+        and `merge_answers`, accepts the optional answer blocks (synthesis,
+        profile_synthesis, community_synthesis, memory_distil, profile_audit) and
+        forwards each. Returns {"written": bool, path|error}."""
         import json as _json
         from pathlib import Path
-        if not batch_id or not isinstance(extractions, list):
-            return {"written": False, "error": "batch_id and extractions[] required"}
+        extractions = extractions or []
+        if not isinstance(extractions, list):
+            return {"written": False, "error": "extractions must be a list"}
+        if not unit_id and not batch_id:
+            return {"written": False, "error": "unit_id or batch_id required"}
         try:
             inbox = Path(home) / "enrich_inbox"
             inbox.mkdir(parents=True, exist_ok=True)
-            payload = {"batch_id": batch_id, "extractions": extractions,
-                       "merge_answers": merge_answers or []}
+            payload = {"extractions": extractions, "merge_answers": merge_answers or []}
+            if unit_id:
+                payload["unit_id"] = unit_id
+                stem = unit_id
+            else:
+                payload["batch_id"] = batch_id
+                stem = batch_id if shard is None else f"{batch_id}.{int(shard)}"
             for _k in _ENRICH_ANSWER_BLOCKS:
                 if blocks.get(_k):
                     payload[_k] = blocks[_k]
-            stem = batch_id if shard is None else f"{batch_id}.{int(shard)}"
             target = inbox / f"{stem}.json"
             tmp = inbox / f".{stem}.json.tmp"
             tmp.write_text(_json.dumps(payload, ensure_ascii=False))
@@ -776,6 +865,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     draft_save_fn = make_brain_draft_save(draft_store, home)
     # Autonomous-loop tools (host-native). Reads use the RO store; pack upsert
     # needs the writable handle (same one the draft tools use).
+    enrich_units = make_brain_enrich_units(home)
     enrich_manifest = make_brain_enrich_manifest(home)
     enrich_pull = make_brain_enrich_pull(home)
     enrich_push = make_brain_enrich_push(home)
@@ -1019,14 +1109,21 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 }, "required": ["name"]},
             ),
             types.Tool(
+                name="brain_enrich_units",
+                description="List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the orchestrator stays context-flat) and claim each with a short lease. FIRST step of the enrich task: call this, then spawn one subagent per unit_id — each calls brain_enrich_pull(unit_id), extracts, and brain_enrich_push(unit_id, …). Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
                 name="brain_enrich_manifest",
-                description="Plan a fan-out enrichment run without loading any thread bodies (keeps the orchestrator context-flat). Freezes the pending batch and returns batch_id, thread_total, and shards[] (each: shard index, thread_ids, with_blocks), or {\"empty\": true}. FIRST step of the hourly enrich task: call this, then spawn one subagent per shard — each subagent pulls only its thread_ids and pushes its own shard.",
+                description="Deprecated (superseded by brain_enrich_units). Plan a fan-out from the legacy pending.json batch, or {\"empty\": true}.",
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
                 name="brain_enrich_pull",
                 description="Pull enrichment work, with a `rules` field carrying the FULL extraction protocol to follow (envelope schema, entity/relation/merge rules). Pass thread_ids to fetch exactly those threads (the per-shard fan-out path); pass with_blocks=true to fetch the batch-level blocks (merge_review/synthesis/…); pass nothing for a single size-bounded head slice (legacy path). Returns {\"empty\": true} when there is nothing to do. Follow `rules` from this response; do not read skill files or source.",
                 inputSchema={"type": "object", "properties": {
+                    "unit_id": {"type": "string",
+                                "description": "work-queue: the unit to fetch (from brain_enrich_units)"},
                     "thread_ids": {"type": "array", "items": {"type": "string"},
                                    "description": "fetch exactly these threads (from a manifest shard)"},
                     "with_blocks": {"type": "boolean",
@@ -1045,8 +1142,9 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 name="brain_enrich_push",
                 description="Submit an enrichment result. Writes it for the daemon to drain on its next cycle. Pass `shard` (from your manifest shard) so parallel subagents don't clobber each other. Pass an answer field for EACH block the pull included: extractions (threads), merge_answers (merge_review), and synthesis / profile_synthesis / community_synthesis / memory_distil / profile_audit when those blocks were present.",
                 inputSchema={"type": "object", "properties": {
-                    "batch_id": {"type": "string", "description": "the batch_id from the manifest/pull, verbatim"},
-                    "shard": {"type": "integer", "description": "this subagent's shard index from the manifest (omit for the legacy single-session path)"},
+                    "unit_id": {"type": "string", "description": "work-queue: the unit you pulled (writes enrich_inbox/<unit_id>.json; the daemon deletes the unit on apply)"},
+                    "batch_id": {"type": "string", "description": "the batch_id from the manifest/pull, verbatim (legacy)"},
+                    "shard": {"type": "integer", "description": "this subagent's shard index from the manifest (legacy)"},
                     "extractions": {"type": "array", "items": {"type": "object"},
                                     "description": "one extraction object per thread"},
                     "merge_answers": {"type": "array", "items": {"type": "object"},
@@ -1191,11 +1289,15 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = ({"name": rname, "instructions": instructions} if instructions
                    else {"error": f"unknown routine {rname!r}", "available": list(_ROUTINES)})
             return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_units":
+            out = await enrich_units()
+            return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_manifest":
             out = await enrich_manifest()
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_pull":
             out = await enrich_pull(
+                unit_id=arguments.get("unit_id"),
                 thread_ids=arguments.get("thread_ids"),
                 with_blocks=bool(arguments.get("with_blocks", False)),
                 batch_id=arguments.get("batch_id"),
@@ -1210,6 +1312,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 extractions=arguments.get("extractions") or [],
                 merge_answers=arguments.get("merge_answers") or [],
                 shard=arguments.get("shard"),
+                unit_id=arguments.get("unit_id"),
                 **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
             )
             return [types.TextContent(type="text", text=json.dumps(out))]

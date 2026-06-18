@@ -338,11 +338,12 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     except Exception as exc:
         log.warning("agent_errs scan failed (cycle continues): %s", exc)
     if enrich_mode == "spool":
-        prep = prepare.prepare(store, thread_cap=SPOOL_THREAD_CAP,
-                               char_budget=SPOOL_CHAR_BUDGET,
-                               resolution_due=resolution_due,
-                               synthesis_requests=synthesis_requests,
-                               extra_blocks=extra_blocks)
+        prep = prepare.prepare_units(store, thread_cap=SPOOL_THREAD_CAP,
+                                     char_budget=SPOOL_CHAR_BUDGET,
+                                     resolution_due=resolution_due,
+                                     synthesis_requests=synthesis_requests,
+                                     extra_blocks=extra_blocks,
+                                     home=str(app_dir()))
         drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
         if drained.get("files") or drained.get("applied"):

@@ -244,6 +244,37 @@ def test_prepare_skips_noise_threads_and_marks_them(tmp_path, monkeypatch):
     assert ["d-n1"] in store.marked
 
 
+def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
+    # The work-queue producer: prepare_units groups + builds + writes immutable unit
+    # files + a shared context.json (no pending.json), skipping noise threads.
+    import json
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    noise = FakeBatch("t-noise", ["d-n1"],
+                      [_msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "x")])
+    good = FakeBatch("t-good", ["d-g1"],
+                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B", "x")])
+    store = FakeStore()
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [noise, good])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
+    assert summary["units_written"] == len(units) >= 1
+    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    # only the non-noise thread is enriched (noise filtered, like prepare())
+    tids = set()
+    for u in units:
+        d = json.loads(u.read_text())
+        if d["kind"] == "thread":
+            tids.update(t["thread_id"] for t in d["threads"])
+    assert tids == {"t-good"}
+    assert not (tmp_path / "enrich_queue" / "pending.json").exists()  # no single spool
+
+
 def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
     # Realistic Phase-1 flow: raw chunks do NOT carry top-level sender/subject;
     # that data lives inside chunk metadata until reassemble_thread builds the
