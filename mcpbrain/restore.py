@@ -157,6 +157,31 @@ def store_has_content(store_path: str | None = None) -> bool:
         con.close()
 
 
+def account_email(home: str) -> str:
+    """The email the escrow backup is keyed by, resolved for the restore path.
+
+    Order: saved ``owner_email`` → the connected **Google account** (the
+    ``google_account`` sidecar the daemon writes on sign-in) → legacy
+    ``backup.user_id``. The Google-account fallback is what makes auto-restore
+    work right after sign-in: on a fresh machine the user hasn't filled the
+    profile step yet (so owner_email is blank), but they ARE signed in — and the
+    escrow is keyed by that Google email. Without this, restore wrongly waited
+    until the user manually entered + saved their email. Returns "" if unknown.
+    """
+    from pathlib import Path
+    from mcpbrain import config as _cfg
+    email = (_cfg.owner_email(home) or "").strip()
+    if email:
+        return email
+    try:
+        sidecar = (Path(home) / "google_account").read_text().strip()
+        if sidecar:
+            return sidecar
+    except OSError:
+        pass
+    return ((_cfg.read_config(home).get("backup") or {}).get("user_id") or "").strip()
+
+
 def detect_restorable(home: str, drive_service) -> dict:
     """Report whether an existing backup can be restored for this account.
 
@@ -165,11 +190,11 @@ def detect_restorable(home: str, drive_service) -> dict:
     Returns {available, snapshot_id, has_key, user_email, escrow_folder_id}.
     Never raises — degrades to available=False.
     """
-    from mcpbrain import backup as _backup, config as _cfg
+    from mcpbrain import backup as _backup
     # The escrow convention is email-keyed (snapshot subfolder <email>/ and
-    # <email>.key). Use the signed-in owner_email, NOT the legacy backup.user_id.
-    user_email = _cfg.owner_email(home) \
-        or (_cfg.read_config(home).get("backup") or {}).get("user_id")
+    # <email>.key). Use the signed-in account email (owner_email → Google account
+    # → legacy backup.user_id) so restore works before the profile step is saved.
+    user_email = account_email(home)
     if not user_email:
         return {"available": False, "reason": "no account signed in yet"}
     folder = _escrow_folder(home)
