@@ -356,11 +356,21 @@ def _write_pending(data: dict) -> None:
     """
     queue_dir = config.app_dir() / "enrich_queue"
     queue_dir.mkdir(parents=True, exist_ok=True)
-    target = queue_dir / "pending.json"
-    fd, tmp = tempfile.mkstemp(dir=str(queue_dir), prefix=".pending.", suffix=".tmp")
+    _atomic_write(queue_dir / "pending.json",
+                  json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _atomic_write(target, text: str) -> None:
+    """Atomic write (temp file + os.replace), creating the parent dir. No stray
+    temp on failure."""
+    from pathlib import Path
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent),
+                               prefix="." + target.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(data, indent=2, ensure_ascii=False))
+            f.write(text)
         os.replace(tmp, target)
     except BaseException:
         try:
@@ -368,6 +378,111 @@ def _write_pending(data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+# --- work-queue producer ---------------------------------------------------
+# The daemon produces a bounded queue of immutable, pre-sized WORK UNITS under
+# enrich_queue/units/, plus a shared enrich_queue/context.json. The enrich session
+# consumes them one subagent per unit (see mcp_server.brain_enrich_units / _pull /
+# _push). This replaces the single churning pending.json + read-time manifest.
+
+# Must stay in lockstep with mcp_server._PULL_MAX_CHARS: a unit is sized so its pull
+# (unit work + rules + context) fits the cap. _UNIT_RULES_RESERVE is the room left
+# for the rules block the pull attaches.
+_UNIT_PULL_CAP = 40_000
+_UNIT_RULES_RESERVE = 11_000
+_UNIT_BLOCKS = ("merge_review", "synthesis", "profile_synthesis",
+                "community_synthesis", "memory_distil", "profile_audit")
+
+
+def _unit_id(kind: str, signature: str) -> str:
+    """Content-addressed unit id, so re-producing the same un-enriched work writes
+    the same file (idempotent dedupe — no double-queueing)."""
+    import hashlib
+    return "u-" + hashlib.sha1(f"{kind}:{signature}".encode("utf-8")).hexdigest()[:12]
+
+
+def _pack_by_size(items, budget, sizer):
+    """Greedily pack items into chunks whose serialized size stays under budget,
+    always keeping at least one item per chunk."""
+    cur, size = [], 0
+    for it in items:
+        s = sizer(it)
+        if cur and size + s > budget:
+            yield cur
+            cur, size = [], 0
+        cur.append(it)
+        size += s
+    if cur:
+        yield cur
+
+
+def write_units(data: dict, *, home=None, pull_cap: int = _UNIT_PULL_CAP,
+                window: int = 200) -> dict:
+    """Turn a prepared batch dict (threads + optional blocks + context) into
+    immutable, pre-sized work-unit files under enrich_queue/units/, plus a shared
+    enrich_queue/context.json the pull attaches. Each unit is sized so its pull
+    (work + rules + context) fits the cap. Unit ids are content hashes, so
+    re-running on the same un-enriched work is idempotent. Honors a window cap
+    (backpressure): when the queue already holds >= window undrained units, the
+    cycle produces no new ones. Returns a summary."""
+    from pathlib import Path
+    queue = (config.app_dir() if home is None else Path(home)) / "enrich_queue"
+    units_dir = queue / "units"
+    units_dir.mkdir(parents=True, exist_ok=True)
+    # Shared standing context, refreshed each cycle. It is reference data
+    # (known_people, valid_orgs, …), not work, so refreshing it under in-flight
+    # units is harmless — a unit's WORK never changes.
+    context = data.get("context") or {}
+    _atomic_write(queue / "context.json", json.dumps(context, ensure_ascii=False))
+    existing = list(units_dir.glob("*.json"))
+    if len(existing) >= window:
+        return {"units_written": 0, "units_pending": len(existing),
+                "skipped": "window_full"}
+    ctx_len = len(json.dumps(context, ensure_ascii=False))
+    budget = max(2000, pull_cap - _UNIT_RULES_RESERVE - ctx_len - 1500)
+    written = 0
+    for chunk in _pack_by_size(data.get("threads") or [], budget,
+                               lambda t: len(json.dumps(t)) + 1):
+        tids = sorted(str(t.get("thread_id")) for t in chunk)
+        uid = _unit_id("thread", ",".join(tids))
+        _atomic_write(units_dir / f"{uid}.json",
+                      json.dumps({"unit_id": uid, "kind": "thread",
+                                  "threads": chunk}, ensure_ascii=False))
+        written += 1
+    for k in _UNIT_BLOCKS:
+        for chunk in _pack_by_size(data.get(k) or [], budget,
+                                   lambda it: len(json.dumps(it)) + 1):
+            sig = k + ":" + json.dumps(chunk, sort_keys=True, ensure_ascii=False)
+            uid = _unit_id("block", sig)
+            _atomic_write(units_dir / f"{uid}.json",
+                          json.dumps({"unit_id": uid, "kind": "block",
+                                      "block": k, "items": chunk}, ensure_ascii=False))
+            written += 1
+    return {"units_written": written, "units_pending": len(existing) + written}
+
+
+def prepare_units(store, *, thread_cap: int, char_budget: int,
+                  resolution_due: bool, now=None,
+                  synthesis_requests: list | None = None,
+                  extra_blocks: dict | None = None, home=None,
+                  window: int = 200) -> dict:
+    """Build the current batch (un-enriched threads + due blocks) and write it as
+    work units. The work-queue replacement for prepare(): no single pending.json —
+    a bounded queue of immutable units the enrich session consumes. Unlike prepare()
+    it still produces block units when there are no threads."""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    batches = _group_unenriched_threads(store, thread_cap=thread_cap)
+    kept = _filter_noise(store, batches)[:thread_cap]
+    data = build_pending(store, kept, char_budget=char_budget, now=now,
+                         resolution_due=resolution_due,
+                         synthesis_requests=synthesis_requests,
+                         extra_blocks=extra_blocks)
+    summary = write_units(data, home=home, window=window)
+    summary["threads"] = len(data.get("threads") or [])
+    summary["batch_id"] = data.get("batch_id")
+    return summary
 
 
 # --- entry point -----------------------------------------------------------

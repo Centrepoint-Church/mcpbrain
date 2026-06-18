@@ -356,7 +356,18 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             except OSError as exc:
                 log.error("drain: could not delete completed file %s: %s", path.name, exc)
 
-            # The batch this file answers is consumed: remove a matching
+            # Work-queue: the unit this result answers is consumed — remove its unit
+            # file and lease claim so it stops being listed.
+            unit_id = data.get("unit_id")
+            if unit_id:
+                for p in (home_dir / "enrich_queue" / "units" / f"{unit_id}.json",
+                          home_dir / "enrich_queue" / "claims" / unit_id):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+
+            # Legacy: the batch this file answers is consumed — remove a matching
             # pending.json so the extractor can't re-run a stale batch.
             pending = home_dir / "enrich_queue" / "pending.json"
             try:

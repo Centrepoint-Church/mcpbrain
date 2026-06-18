@@ -74,21 +74,21 @@ def test_backfill_skill_exists():
 def test_enrich_batch_agent_exists():
     assert (_PLUGIN / "agents" / "enrich-batch.md").exists()
 
-def test_enrich_batch_is_shard_worker():
-    # The agent is the per-shard fan-out worker: it pulls only its thread_ids and
-    # pushes only its shard via MCP, and gets the rules at runtime from the pull
-    # (it no longer embeds the rules or shells into the spool).
+def test_enrich_batch_is_unit_worker():
+    # The agent is the per-unit work-queue worker: it pulls one unit_id and pushes
+    # that unit via MCP, and gets the rules at runtime from the pull (it no longer
+    # embeds the rules or shells into the spool).
     b = _read("agents/enrich-batch.md")
-    for token in ("brain_enrich_pull", "brain_enrich_push", "thread_ids", "shard", "merge_review"):
+    for token in ("brain_enrich_pull", "brain_enrich_push", "unit_id", "merge_review"):
         assert token in b, token
     assert "pending.json" not in b   # no direct spool reads anymore
 
 def test_backfill_skill_orchestrates_loop():
     b = _read("skills/mcpbrain-backfill/SKILL.md")
-    assert "enrich-batch" in b                              # dispatches the shard worker
-    assert "brain_enrich_manifest" in b                     # plans via the fan-out manifest
+    assert "enrich-batch" in b                              # dispatches the unit worker
+    assert "brain_enrich_units" in b                        # drains the work-unit queue
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
-    assert "spool" in b.lower()
+    assert "queue" in b.lower()
 
 def test_draft_reply_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-draft-reply" / "SKILL.md").exists()

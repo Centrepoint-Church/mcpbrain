@@ -42,7 +42,7 @@ def _spy(calls, name):
 def test_run_cycle_spool_drains(monkeypatch):
     """spool: run_cycle calls prepare then drain."""
     calls = []
-    monkeypatch.setattr(daemon_module.prepare, "prepare", _spy(calls, "prepare"))
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
     monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
     stub_apply = object()
     monkeypatch.setattr(daemon_module, "_graph_apply", lambda: stub_apply)
@@ -51,7 +51,7 @@ def test_run_cycle_spool_drains(monkeypatch):
     res = run_cycle(store, FakeEmbedder(), enrich_mode="spool")
 
     names = [c[0] for c in calls]
-    assert names == ["prepare", "drain"]
+    assert names == ["prepare_units", "drain"]
     # drain received the lazily-resolved apply and the embedder.
     drain_call = next(c for c in calls if c[0] == "drain")
     assert drain_call[2]["apply"] is stub_apply
@@ -62,20 +62,20 @@ def test_run_cycle_spool_passes_resolution_due(monkeypatch):
     """spool: resolution_due flows through to prepare so the merge-review block
     is appended exactly when the deterministic resolve tier would also fire."""
     calls = []
-    monkeypatch.setattr(daemon_module.prepare, "prepare", _spy(calls, "prepare"))
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
     monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
     monkeypatch.setattr(daemon_module, "_graph_apply", lambda: object())
 
     run_cycle(FakeStore(), FakeEmbedder(), enrich_mode="spool", resolution_due=True)
 
-    prepare_call = next(c for c in calls if c[0] == "prepare")
+    prepare_call = next(c for c in calls if c[0] == "prepare_units")
     assert prepare_call[2]["resolution_due"] is True
 
 
 def test_run_cycle_off_skips_enrich(monkeypatch):
     """off: neither the spool path runs."""
     calls = []
-    monkeypatch.setattr(daemon_module.prepare, "prepare", _spy(calls, "prepare"))
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
     monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
 
     res = run_cycle(FakeStore(), FakeEmbedder(), enrich_mode="off")
@@ -89,7 +89,7 @@ def test_run_cycle_default_is_off(monkeypatch):
     caller that forgets to pass a mode does NOT silently run any enrichment path.
     The live daemon resolves the real mode from config and passes it in."""
     calls = []
-    monkeypatch.setattr(daemon_module.prepare, "prepare", _spy(calls, "prepare"))
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
     monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
 
     run_cycle(FakeStore(), FakeEmbedder())
@@ -129,7 +129,7 @@ def test_run_one_off_skips_enrich(tmp_path, monkeypatch):
     cannot hide a routing bug).
     """
     calls = []
-    monkeypatch.setattr(daemon_module.prepare, "prepare", _spy(calls, "prepare"))
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
     monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
     monkeypatch.setattr(daemon_module, "_graph_apply", lambda: object())
 
