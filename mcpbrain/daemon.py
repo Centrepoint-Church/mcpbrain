@@ -829,6 +829,23 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.warning("graph cleanup skipped: %s", exc)
 
+    def _graph_recompute_once(self) -> None:
+        """One-shot recency recompute on upgrade: make the newest-dated
+        works_at/reports_to current per entity, correcting facts that backfill
+        applied out of chronological order. Meta-flagged; best-effort."""
+        flag = "singleton_recompute_v1"
+        try:
+            with self._store._connect() as db:
+                if db.execute("SELECT 1 FROM meta WHERE k=?", (flag,)).fetchone():
+                    return
+            from mcpbrain.maintenance.graph_cleanup import recompute_singletons
+            counts = recompute_singletons(self._store)
+            with self._store._connect() as db:
+                db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
+            log.info("singleton recency recompute (one-shot): %s", counts)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("singleton recompute skipped: %s", exc)
+
     def run_one(self) -> dict | None:
         """Run a single cycle, unless paused.
 
@@ -839,6 +856,7 @@ class Daemon:
         if self._pause.is_set() or self._backfill_active.is_set():
             return None
         self._graph_cleanup_once()
+        self._graph_recompute_once()
         services = self.ensure_services()
         # Snapshot the enrich client + mode under the config lock so apply_config
         # (HTTP handler thread) can't swap them mid-cycle; use the locals for this

@@ -220,6 +220,46 @@ def _mk_ent(s, eid, etype="person"):
                    (eid, eid, etype))
 
 
+def test_singleton_older_arriving_late_stays_historical(tmp_path):
+    # Recency: backfill applies a 2021 fact AFTER the 2024 one. The newer (2024)
+    # must stay current; the older must NOT supersede it.
+    s = _store(tmp_path)
+    _mk_ent(s, "a"); _mk_ent(s, "orgnew", "org"); _mk_ent(s, "orgold", "org")
+    gw.upsert_relation(s, "a", "works_at", "orgnew", valid_from="2024-01-01")
+    gw.upsert_relation(s, "a", "works_at", "orgold", valid_from="2021-01-01")  # older, late
+    rows = {r["entity_b"]: r for r in _rels(s)}
+    assert rows["orgnew"]["invalidated_at"] is None         # newer stays current
+    assert rows["orgold"]["invalidated_at"] is not None     # older recorded but historical
+    assert rows["orgold"]["superseded_reason"] == "older_than_current"
+    assert rows["orgold"]["invalidated_by_relation_id"] == rows["orgnew"]["id"]
+
+
+def test_role_fetch_prefers_newest_dated_regardless_of_insert_order(tmp_path):
+    # fetch_role must return the newest-DATED role even when an older role was
+    # inserted later (backfill order).
+    s = _store(tmp_path)
+    eid = _seed_person(s)
+    gw.write_role_observation(s, eid, "Senior Pastor", "llm_extraction", "2024-01-01", "medium")
+    gw.write_role_observation(s, eid, "Intern", "llm_extraction", "2019-01-01", "medium")  # older, late
+    assert gw.fetch_role(s, eid) == "Senior Pastor"
+
+
+def test_entity_org_recency_overwrite(tmp_path):
+    s = _store(tmp_path)
+    # first observation (older) sets org
+    gw.upsert_entity(s, name="Dana Quinn", entity_type="person", org="OldCo",
+                     valid_from="2020-01-01")
+    # newer-dated observation overwrites the stale org
+    gw.upsert_entity(s, name="Dana Quinn", entity_type="person", org="NewCo",
+                     valid_from="2025-01-01")
+    eid = gw.upsert_entity(s, name="Dana Quinn", entity_type="person")
+    assert s.get_entity(eid)["org"] == "NewCo"
+    # an OLDER observation arriving later must NOT clobber the newer org
+    gw.upsert_entity(s, name="Dana Quinn", entity_type="person", org="AncientCo",
+                     valid_from="2018-01-01")
+    assert s.get_entity(eid)["org"] == "NewCo"
+
+
 def test_relation_reobservation_bumps(tmp_path):
     s = _store(tmp_path)
     _mk_ent(s, "a"); _mk_ent(s, "b", "org")
@@ -246,7 +286,7 @@ def test_singleton_relation_supersedes(tmp_path):
     new = [r for r in rows if r["entity_b"] == "orgy"][0]
     assert old["invalidated_at"] is not None
     assert old["valid_to"] == "2026-05-01"
-    assert old["superseded_reason"] == "new_singleton"
+    assert old["superseded_reason"] == "superseded_by_newer"
     assert old["invalidated_by_relation_id"] == new["id"]
     assert new["invalidated_at"] is None
 
