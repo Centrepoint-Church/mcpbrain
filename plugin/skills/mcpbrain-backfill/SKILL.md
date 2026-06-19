@@ -28,11 +28,12 @@ WHILE empty < 3:
   empty = 0; waves += 1
 
   # Fan out: one enrich-batch subagent per unit, ~5 in parallel at a time.
-  # The enrich-batch agent runs on Haiku (its own frontmatter) and carries the
-  # extraction rules in its system prompt, so the rules sit in one cacheable prefix
-  # shared across the fan-out — far cheaper than Sonnet for a large backlog.
+  # Dispatch with model: haiku EXPLICITLY (the agent frontmatter is not always
+  # honored). The agent carries the extraction rules in its system prompt, so the
+  # rules sit in one cacheable prefix shared across the fan-out — and Haiku is far
+  # cheaper than Sonnet for a large backlog.
   FOR each unit IN ready.units:
-      dispatch enrich-batch (Task tool, subagent_type: enrich-batch) with its unit_id
+      dispatch enrich-batch (Task tool, subagent_type: enrich-batch, model: haiku) with its unit_id
 
   # Requeue guard: a unit is done ONLY if its subagent replied with a clean
   # `unit <unit_id>: <n> <kind>` (or `… : gone`) line. Any other reply — narration,
