@@ -255,7 +255,7 @@ def fetch_role(store, entity_id: str, *, current_only: bool = True) -> str:
                  AND  attribute  = 'role'
                  AND  (invalidated_at IS NULL OR invalidated_at = '')
                  {valid_to_clause}
-               ORDER  BY id DESC
+               ORDER  BY valid_from DESC, id DESC
                LIMIT  1""",
             (entity_id,),
         ).fetchone()
@@ -294,16 +294,27 @@ def write_role_observation(store, entity_id: str, title: str, source: str,
         ).fetchone()
         if existing and existing[0] == title:
             return
+        # Recency rule: retire prior same-source roles only if they are older-or-equal
+        # (so an older role arriving late doesn't unseat a newer one). If a NEWER
+        # same-source role is already current, the incoming older one is inserted as
+        # historical (valid_to = that newer role's valid_from).
         conn.execute(
             "UPDATE entity_observations SET valid_to = ? "
-            "WHERE entity_id = ? AND attribute = 'role' AND source = ? AND valid_to IS NULL",
-            (valid_from, entity_id, source),
+            "WHERE entity_id = ? AND attribute = 'role' AND source = ? "
+            "AND valid_to IS NULL AND valid_from <= ?",
+            (valid_from, entity_id, source, valid_from),
         )
+        newer = conn.execute(
+            "SELECT MIN(valid_from) FROM entity_observations "
+            "WHERE entity_id = ? AND attribute = 'role' AND source = ? "
+            "AND valid_to IS NULL AND valid_from > ?",
+            (entity_id, source, valid_from),
+        ).fetchone()[0]
         conn.execute(
             "INSERT INTO entity_observations "
-            "(entity_id, attribute, value, source, valid_from, confidence_source) "
-            "VALUES (?, 'role', ?, ?, ?, ?)",
-            (entity_id, title, source, valid_from, confidence),
+            "(entity_id, attribute, value, source, valid_from, valid_to, confidence_source) "
+            "VALUES (?, 'role', ?, ?, ?, ?, ?)",
+            (entity_id, title, source, valid_from, newer, confidence),
         )
 
 
@@ -408,11 +419,20 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
             _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
             return rid
 
-        # A superseded row for this exact pair blocks INSERT via the legacy
-        # UNIQUE. Revive it: the fact is being observed again, so it becomes
-        # current from the new valid_from. The old validity interval is not
-        # preserved as a separate row (the UNIQUE forbids that); change_log
-        # and the superseding row keep the history.
+        # Recency rule for SINGLETON relations (works_at/reports_to): a person has
+        # one current value, and the CURRENT one is the newest-dated. Under backfill
+        # (arbitrary order) an older fact can arrive after a newer one, so compare
+        # valid_from rather than assuming the incoming write is the latest.
+        singleton = is_singleton_relation(relation)
+        others = [c for c in conflicts if c["entity_b"] != entity_b]
+        newest_other = max(others, key=lambda c: ((c["valid_from"] or ""), c["id"]),
+                           default=None) if singleton else None
+        incoming_is_current = (newest_other is None
+                               or (valid_from or "") >= (newest_other["valid_from"] or ""))
+
+        # A superseded row for this exact pair blocks INSERT via the legacy UNIQUE.
+        # Revive it: the fact is observed again. It becomes current from valid_from
+        # UNLESS a newer rival is already current (then it is revived as historical).
         invalidated = conn.execute(
             "SELECT id FROM entity_relations "
             "WHERE entity_a = ? AND relation = ? AND entity_b = ? "
@@ -439,17 +459,19 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
             ).lastrowid
             _increment_degree(conn, entity_a, entity_b)
 
-        if is_singleton_relation(relation):
-            for c in conflicts:
-                if c["entity_b"] == entity_b:
-                    continue
+        if singleton and incoming_is_current:
+            # Newest fact → it is current; retire the older rivals.
+            for c in others:
                 _mark_superseded(
-                    conn, c["id"],
-                    valid_to=valid_from,
-                    invalidated_at=now,
-                    reason="new_singleton",
-                    invalidated_by_relation_id=new_id,
+                    conn, c["id"], valid_to=valid_from, invalidated_at=now,
+                    reason="superseded_by_newer", invalidated_by_relation_id=new_id,
                 )
+        elif singleton and not incoming_is_current:
+            # An OLDER fact arrived late → record it but keep the newer rival current.
+            _mark_superseded(
+                conn, new_id, valid_to=newest_other["valid_from"], invalidated_at=now,
+                reason="older_than_current", invalidated_by_relation_id=newest_other["id"],
+            )
         return new_id
 
 
@@ -912,8 +934,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     if sender_name and sender_email and not _is_owner(sender_name, owner) \
             and (not identity or identity.lower() not in sender_email.lower()):
         sender_id = upsert_entity(
-            store, name=sender_name, entity_type="person",
-            org=sender_org, email_addr=sender_email, taxonomy=taxonomy) or ""
+            store, name=sender_name, entity_type="person", org=sender_org,
+            email_addr=sender_email, taxonomy=taxonomy, valid_from=lead_date_iso) or ""
 
     # email_context row for the lead message.
     store.upsert_email_context(
@@ -956,7 +978,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             continue
 
         entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg,
-                                  taxonomy=taxonomy)
+                                  taxonomy=taxonomy, valid_from=lead_date_iso)
         if not entity_id:
             continue
 
@@ -1453,15 +1475,35 @@ def _ensure_works_at(conn, entity_id: str, org: str) -> None:
         (entity_id, org_id, today))
 
 
+def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
+    """Write org onto an existing entity, recency-aware. With a valid_from (the
+    email date) it overwrites when org is blank OR the stored org_valid_from is
+    blank/older — so a job change in a newer email propagates and backfill order
+    can't pin a stale org. Without a valid_from it falls back to only-if-blank."""
+    if not org:
+        return
+    if valid_from:
+        conn.execute(
+            "UPDATE entities SET org = ?, org_valid_from = ? "
+            "WHERE id = ? AND (COALESCE(org,'') = '' OR COALESCE(org_valid_from,'') = '' "
+            "OR org_valid_from < ?)",
+            (org, valid_from, entity_id, valid_from))
+    else:
+        conn.execute(
+            "UPDATE entities SET org = ? WHERE id = ? AND (org = '' OR org IS NULL)",
+            (org, entity_id))
+
+
 def upsert_entity(store, *, name, entity_type, org="", email_addr="",
-                  aliases="", notes="", taxonomy=None):
+                  aliases="", notes="", taxonomy=None, valid_from=""):
     """Insert or merge an entity. Returns the surviving entity id, or None.
 
     Ported from memory_db.py:1581-1717, repointed at store._connect(). Dedup
     order: (1) by email_addr, (2) alias / name
     match, (3) plain id upsert. email_count is bumped only on the email-dedup
     hit (matching Nexus). Title honorifics on person names are stripped and
-    recorded as an alias.
+    recorded as an alias. `valid_from` (the email date) makes org recency-aware —
+    a newer-dated observation overwrites a stale org; omit it for only-if-blank.
     """
     if taxonomy is None:
         taxonomy = orgs.taxonomy_from_config()
@@ -1501,9 +1543,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
             if existing_by_email:
                 winner_id = existing_by_email["id"]
                 if org:
-                    conn.execute(
-                        "UPDATE entities SET org = ? WHERE id = ? AND (org = '' OR org IS NULL)",
-                        (org, winner_id))
+                    _set_org_recency(conn, winner_id, org, valid_from)
                     if entity_type == "person":
                         _ensure_works_at(conn, winner_id, org)
                 # email_count is driven by message links in apply(), not by the
@@ -1550,9 +1590,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
             if len(alias_matches) == 1:
                 winner_id = alias_matches[0]
                 if org:
-                    conn.execute(
-                        "UPDATE entities SET org = ? WHERE id = ? AND (org = '' OR org IS NULL)",
-                        (org, winner_id))
+                    _set_org_recency(conn, winner_id, org, valid_from)
                     if entity_type == "person":
                         _ensure_works_at(conn, winner_id, org)
                 conn.execute(
@@ -1562,8 +1600,16 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
 
         if existing:
             updates: dict = {"last_seen": today}
-            if org and not existing["org"]:
-                updates["org"] = org
+            if org:
+                _existing_ovf = (existing["org_valid_from"]
+                                 if "org_valid_from" in existing.keys() else "") or ""
+                if not existing["org"]:
+                    updates["org"] = org                      # blank → fill
+                    if valid_from:
+                        updates["org_valid_from"] = valid_from
+                elif valid_from and (not _existing_ovf or _existing_ovf < valid_from):
+                    updates["org"] = org                      # newer-dated → overwrite stale
+                    updates["org_valid_from"] = valid_from
             if email_addr and not existing["email_addr"]:
                 updates["email_addr"] = email_addr
             if notes:
@@ -1584,9 +1630,10 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 all_aliases = ", ".join(filter(None, [aliases, title_alias]))
             conn.execute(
                 "INSERT INTO entities "
-                "(id, name, type, org, email_addr, aliases, first_seen, last_seen, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (eid, name, entity_type, org, email_addr, all_aliases, today, today, notes))
+                "(id, name, type, org, org_valid_from, email_addr, aliases, first_seen, last_seen, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (eid, name, entity_type, org, (valid_from if org else ""),
+                 email_addr, all_aliases, today, today, notes))
             if org and entity_type == "person":
                 _ensure_works_at(conn, eid, org)
 

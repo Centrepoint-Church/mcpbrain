@@ -2,7 +2,7 @@
 from types import MappingProxyType
 
 from mcpbrain import orgs
-from mcpbrain.maintenance.graph_cleanup import cleanup_graph
+from mcpbrain.maintenance.graph_cleanup import cleanup_graph, recompute_singletons
 from mcpbrain.store import Store
 
 
@@ -60,3 +60,27 @@ def test_cleanup_removes_self_loops_type_invalid_and_folds_orgs(tmp_path):
 
     # idempotent — a second pass changes nothing
     assert cleanup_graph(s, taxonomy=_tax()) == {"self_loops": 0, "type_invalid": 0, "orgs_folded": 0}
+
+
+def test_recompute_singletons_makes_newest_current(tmp_path):
+    # Backfill left an OLDER works_at marked current and the NEWER one superseded.
+    # The recompute must flip them so the newest valid_from is current. Idempotent.
+    s = _store(tmp_path)
+    with s._connect() as db:
+        _ent(db, "p1", "Ann", "person")
+        _ent(db, "old", "OldCo", "org")
+        _ent(db, "new", "NewCo", "org")
+        # WRONG state: old (2020) current, new (2025) superseded
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,valid_from) "
+                   "VALUES('p1','works_at','old','2020-01-01')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,valid_from,"
+                   "invalidated_at,valid_to) VALUES('p1','works_at','new','2025-01-01','x','2020-01-01')")
+    counts = recompute_singletons(s)
+    assert counts["singletons_recomputed"] == 2
+    with s._connect() as db:
+        rows = {r["entity_b"]: r for r in db.execute(
+            "SELECT entity_b,invalidated_at FROM entity_relations WHERE entity_a='p1'").fetchall()}
+    assert rows["new"]["invalidated_at"] is None        # newest is now current
+    assert rows["old"]["invalidated_at"] is not None    # older retired
+    # idempotent
+    assert recompute_singletons(s) == {"singletons_recomputed": 0}

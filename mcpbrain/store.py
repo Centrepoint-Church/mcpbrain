@@ -156,6 +156,10 @@ class Store:
                 db.execute("ALTER TABLE entities ADD COLUMN profile TEXT DEFAULT ''")
             if "profile_updated_at" not in ent_cols:
                 db.execute("ALTER TABLE entities ADD COLUMN profile_updated_at TEXT DEFAULT ''")
+            if "org_valid_from" not in ent_cols:
+                # Date (email valid_from) the current org was asserted, so a
+                # newer-dated observation can overwrite a stale org under backfill.
+                db.execute("ALTER TABLE entities ADD COLUMN org_valid_from TEXT DEFAULT ''")
 
             db.execute("""CREATE TABLE IF NOT EXISTS entity_relations(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
