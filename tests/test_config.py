@@ -44,3 +44,14 @@ def test_spool_home_default_is_app_dir(tmp_path, monkeypatch):
 def test_spool_home_override(tmp_path):
     from mcpbrain.config import spool_home
     assert spool_home(str(tmp_path / "x")) == (tmp_path / "x")
+
+
+def test_reextract_enabled_default_and_pause(tmp_path):
+    import json
+    from mcpbrain.config import reextract_enabled
+    # default True when key absent
+    (tmp_path / "config.json").write_text(json.dumps({"owner_name": "A"}))
+    assert reextract_enabled(str(tmp_path)) is True
+    # explicit pause
+    (tmp_path / "config.json").write_text(json.dumps({"reextract": False}))
+    assert reextract_enabled(str(tmp_path)) is False

@@ -552,3 +552,30 @@ def test_store_dim_from_path_returns_dim_for_existing_store(tmp_path):
     s = Store(tmp_path / "b.sqlite3", dim=4)
     s.init()
     assert store_dim_from_path(tmp_path / "b.sqlite3") == 4
+
+
+def test_mark_enriched_stamps_logic_version(tmp_path):
+    from mcpbrain.store import Store, ENRICH_LOGIC_VERSION
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("d1", "x", "h1", {})
+    s.mark_enriched(["d1"])
+    with s._connect() as db:
+        row = db.execute("SELECT enriched, enriched_version FROM chunks WHERE doc_id='d1'").fetchone()
+    assert row["enriched"] == 1 and row["enriched_version"] == ENRICH_LOGIC_VERSION
+
+
+def test_reflow_outdated_chunks_resets_only_old_versions(tmp_path):
+    from mcpbrain.store import Store, ENRICH_LOGIC_VERSION
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("old", "x", "h1", {}); s.upsert_chunk("cur", "y", "h2", {})
+    s.mark_enriched(["old"], version=0)         # enriched under older logic
+    s.mark_enriched(["cur"])                    # current version
+    with s._connect() as db:                    # pretend both are embedded
+        db.execute("UPDATE chunks SET embedded=1")
+    assert s.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, cap=10) == 1
+    with s._connect() as db:
+        rows = {r["doc_id"]: r for r in
+                db.execute("SELECT doc_id, enriched, embedded FROM chunks").fetchall()}
+    assert rows["old"]["enriched"] == 0 and rows["old"]["embedded"] == 1   # re-flowed, embedding kept
+    assert rows["cur"]["enriched"] == 1                                    # current stays
+    assert s.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, cap=10) == 0     # nothing left outdated
