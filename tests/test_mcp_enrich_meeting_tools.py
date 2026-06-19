@@ -40,6 +40,19 @@ def test_routine_enrich_describes_fanout(tmp_path):
     assert "brain_enrich_units" in enrich
     assert "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
     assert "subagent" in enrich.lower()
+    assert "haiku" in enrich.lower()                 # extraction subagents run on Haiku
+
+
+def test_pull_unit_leads_with_cacheable_prefix(tmp_path):
+    # Cache-friendliness: the unit pull must put the byte-stable rules first, then
+    # context, so the serialized prefix is reusable across units (variable unit_id
+    # trails). Guards against a reorder that would bust prompt caching.
+    _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}], context={"owner_name": "Jo"})
+    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=uid))
+    keys = list(out)
+    assert keys[0] == "rules" and keys[1] == "context"   # stable prefix leads
+    assert keys.index("unit_id") > keys.index("context")  # variable field trails
 
 
 # --- work queue: producer -> units -> pull(unit_id) -> push(unit_id) -> drain ---

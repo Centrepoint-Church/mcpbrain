@@ -480,8 +480,13 @@ def make_brain_enrich_pull(home: str):
             ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
         except (OSError, ValueError):
             ctx = {}
-        out = {"unit_id": unit_id, "kind": d.get("kind"),
-               "context": ctx, "rules": _enrich_rules()}
+        # Order matters for prompt caching: lead with the byte-stable `rules`
+        # (identical across every unit + run) then the per-run `context`, so the
+        # serialized prefix is reusable across units; the variable per-unit fields
+        # (unit_id, work) trail. After a run, verify cache hits by inspecting the
+        # subagent transcripts' usage for cache_read_input_tokens.
+        out = {"rules": _enrich_rules(), "context": ctx,
+               "kind": d.get("kind"), "unit_id": unit_id}
         if d.get("kind") == "block":
             out["block"] = d.get("block")
             out["items"] = d.get("items") or []
