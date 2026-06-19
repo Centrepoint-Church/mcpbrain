@@ -9,9 +9,11 @@ needs no skill or command file.
    `DONE: queue empty`.
 2. Otherwise it returns `units` — a list of `{unit_id, kind, block, count}`. Each is
    one unit of work (a slice of threads, or one block type's items).
-3. For **each unit**, spawn a **subagent** (the Task tool, general-purpose). Spawn
-   them in parallel — up to ~5 Task calls in one message, then the next wave. Give
-   each subagent EXACTLY this instruction, substituting the unit's `unit_id`:
+3. For **each unit**, spawn a **subagent** (the Task tool, general-purpose, **model
+   `haiku`** — extraction follows the bundled rules well on Haiku and is far cheaper
+   than Sonnet). Spawn them in parallel — up to ~5 Task calls in one message, then
+   the next wave. Give each subagent EXACTLY this instruction, substituting the
+   unit's `unit_id`:
 
    > Automated enrichment of one unit — act autonomously, do not ask questions.
    > 1. Load the tools:
