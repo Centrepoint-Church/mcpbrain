@@ -8,6 +8,9 @@
     ],
     "PreCompact": [
       { "hooks": [ { "type": "command", "command": "mcpbrain pre-compact" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "mcpbrain user-prompt-submit" } ] }
     ]
   }
 }
