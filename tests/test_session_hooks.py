@@ -39,6 +39,106 @@ def test_session_end_captures_substantial(tmp_path, monkeypatch):
     assert "migration" in captured["env"]["content"].lower()
 
 
+def test_session_start_silent_on_compact(tmp_path, monkeypatch):
+    # After a compaction the priming block is noise — session_start must emit
+    # nothing so it doesn't re-inject stale continuity/actions mid-session.
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text("# Hot\n- **2026-06-10:** shipped the thing\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out, source="compact")
+    assert out.getvalue() == ""
+
+
+def test_session_start_full_on_clear(tmp_path, monkeypatch):
+    # clear is a fresh boundary (like startup) -> full priming block.
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text("# Hot\n- **2026-06-10:** shipped the thing\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "ok", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out, source="clear")
+    assert "shipped the thing" in out.getvalue()
+
+
+def test_read_hook_source_defaults_to_startup():
+    assert session_hooks._read_hook_source(io.StringIO("")) == "startup"
+    assert session_hooks._read_hook_source(io.StringIO("not json")) == "startup"
+    assert session_hooks._read_hook_source(
+        io.StringIO(json.dumps({"source": "resume"}))) == "resume"
+
+
+def test_session_end_skips_on_resume(tmp_path, monkeypatch):
+    # resume is a continuation, not a real end -> no capture (avoids double-capture).
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "user", "message": {"role": "user", "content": "Plan the migration in detail"}},
+        {"type": "user", "message": {"role": "user", "content": "and do step one now please"}},
+    ]))
+    hook = {"transcript_path": str(transcript), "session_id": "s9",
+            "reason": "resume", "cwd": str(tmp_path)}
+    called = {"n": 0}
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: called.update(n=called["n"] + 1))
+    session_hooks.session_end(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    assert called["n"] == 0
+
+
+def test_session_end_captures_both_sides(tmp_path, monkeypatch):
+    # Decisions live in the assistant's replies; the capture must include them.
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "user", "message": {"role": "user", "content": "Should we adopt the new schema?"}},
+        {"type": "assistant", "message": {"role": "assistant",
+                                          "content": "Yes — decision: migrate to schema v2."}},
+        {"type": "user", "message": {"role": "user", "content": "Great, proceed"}},
+    ]))
+    hook = {"transcript_path": str(transcript), "session_id": "s10", "cwd": str(tmp_path)}
+    captured = {}
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: captured.setdefault("env", env) or Path("x"))
+    session_hooks.session_end(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    content = captured["env"]["content"]
+    assert "schema v2" in content          # assistant decision captured
+    assert "adopt the new schema" in content  # user prompt captured
+    assert captured["env"]["source"] == "session_end_hook"
+
+
+def test_pre_compact_captures_with_tag(tmp_path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "user", "message": {"role": "user", "content": "Investigate the failing migration"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "Root cause: a stale cursor."}},
+        {"type": "user", "message": {"role": "user", "content": "Fix it and re-run the cycle"}},
+    ]))
+    hook = {"transcript_path": str(transcript), "session_id": "s11", "trigger": "auto"}
+    captured = {}
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: captured.setdefault("env", env) or Path("x"))
+    session_hooks.pre_compact(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    assert captured["env"]["kind"] == "ingest"
+    assert captured["env"]["source"] == "pre_compact_hook"
+    assert "pre-compact" in captured["env"]["tags"]
+    assert "stale cursor" in captured["env"]["content"]
+
+
+def test_pre_compact_skips_trivial(tmp_path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps(
+        {"type": "user", "message": {"role": "user", "content": "hi"}}))
+    hook = {"transcript_path": str(transcript), "session_id": "s12", "trigger": "manual"}
+    called = {"n": 0}
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: called.update(n=called["n"] + 1))
+    session_hooks.pre_compact(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    assert called["n"] == 0
+
+
 def test_session_end_skips_trivial(tmp_path, monkeypatch):
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps(
