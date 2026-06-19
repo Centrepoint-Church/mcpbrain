@@ -169,6 +169,23 @@ def prompt_recall_enabled(home) -> bool:
     return bool(read_config(home).get("prompt_recall", True))
 
 
+def recall_max_distance(home) -> float:
+    """Off-topic gate for UserPromptSubmit recall: the max L2 distance the
+    closest brain chunk may be for recall to fire at all (config
+    'recall_max_distance', default 0.80).
+
+    bge-small embeddings are unit-normalised and the vec table uses L2, so
+    distance runs 0 (identical) → ~1.41 (orthogonal) → 2 (opposite). Calibrated
+    on an ~80k-chunk corpus: on-topic queries land ~0.62–0.73, off-topic
+    ~0.84–0.88, so 0.80 sits in the gap. If even the nearest chunk is past this,
+    the query is off-topic and recall injects nothing. Tune per corpus.
+    """
+    try:
+        return float(read_config(home).get("recall_max_distance", 0.80))
+    except (TypeError, ValueError):
+        return 0.80
+
+
 def render_project_instructions(cfg: dict) -> str:
     """Standing instructions for the owner's brain-grounded sessions.
 

@@ -626,18 +626,29 @@ class Daemon:
     def search(self, query: str, limit: int = 5) -> list[dict]:
         """Semantic recall for the UserPromptSubmit hook (via /api/recall).
 
-        Read-only and best-effort: returns compact {doc_id, score, text} dicts,
-        or [] on any failure — recall must never break a prompt. `score` is the
-        hybrid_search intra-query confidence (top hit ~1.0), so it ranks within
-        this result set but is not comparable across queries.
+        Read-only and best-effort: returns compact {doc_id, score, distance,
+        text} dicts, or [] on any failure — recall must never break a prompt.
+
+        Absolute off-topic gate: embed the query once, take the nearest chunk's
+        L2 distance, and if even that is past `recall_max_distance` the query is
+        off-topic relative to the brain — return nothing. Unlike `score` (which
+        is intra-query-normalised, so the top hit is always ~1.0 and can't tell
+        an off-topic query apart), the raw distance is an absolute relevance
+        signal. On-topic queries then get the normal hybrid ranking.
         """
         try:
-            hits = hybrid_search(self._store, self._embedder, query, limit)
+            qv = self._embedder.embed_query(query)
+            knn = self._store.vec_knn(qv, max(limit * 2, 8))
+            if not knn or knn[0][1] > config.recall_max_distance(str(app_dir())):
+                return []  # nothing close enough -> off-topic -> inject nothing
+            dist = {doc: d for doc, d in knn}
+            hits = hybrid_search(self._store, self._embedder, query, limit, query_vec=qv)
         except Exception:  # noqa: BLE001 — recall must never raise into the prompt path
             log.warning("recall search failed for %r", query, exc_info=True)
             return []
         return [{"doc_id": c.get("doc_id"),
                  "score": round(float(c.get("score") or 0.0), 3),
+                 "distance": round(float(dist.get(c.get("doc_id"), knn[0][1])), 3),
                  "text": c.get("text") or ""} for c in hits]
 
     def _resolve_google_account(self, token_file) -> str:
