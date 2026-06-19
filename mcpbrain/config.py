@@ -85,6 +85,13 @@ def enrich_mode(home) -> str:
     return mode
 
 
+def reextract_enabled(home) -> bool:
+    """Whether the daemon gradually re-extracts already-enriched chunks under newer
+    enrichment logic (config['reextract'], default True). Set false to pause the
+    background re-extraction sweep while leaving new-mail enrichment running."""
+    return bool(read_config(home).get("reextract", True))
+
+
 def clickup_api_key(home) -> str:
     """Return the ClickUp personal API token from config, or '' if unset."""
     return read_config(home).get("clickup_api_key", "") or ""
@@ -149,6 +156,44 @@ def owner_email(home) -> str:
     """The Gmail address the daemon syncs, used to detect self-emails.
     Empty until configured."""
     return read_config(home).get("owner_email", "") or ""
+
+
+def render_project_instructions(cfg: dict) -> str:
+    """Standing instructions for the owner's brain-grounded sessions.
+
+    Served as the mcpbrain MCP server's `instructions` (so every connected
+    session reads them) and surfaced in the setup wizard. Work-focused: the
+    brain tools, applying voice, and the capture loop. Classifying
+    people/orgs/relationships is enrichment's job, so the assistant doesn't
+    tag — it just passes an org on a write when it's obviously one of the
+    owner's. Pulls the owner's name, role and orgs from the saved config so
+    the framing is theirs, not a placeholder.
+    """
+    full = (cfg.get("owner_full_name") or cfg.get("owner_name") or "you").strip() or "you"
+    role = (cfg.get("owner_role") or "").strip()
+    orgs = [str(o.get("name") or "").strip() for o in (cfg.get("orgs") or [])
+            if isinstance(o, dict) and str(o.get("name") or "").strip()]
+    org_join = ", ".join(orgs)
+    ident_bits = [b for b in (role, org_join) if b]
+    ident = f" — {', '.join(ident_bits)} —" if ident_bits else ","
+    org_phrase = f" ({org_join})" if org_join else ""
+    return f"""\
+You're {full}'s assistant{ident} working from here on. Memory + tools come from the mcpbrain MCP server:
+- brain_search / brain_context / brain_actions — recall by meaning, profile a person/org, see what's open
+- brain_graph — traverse the relationship graph: "how is X connected to Y?", "who are the key people around <org>?", "everyone within 2 hops of …" — use hops=2 for broader reach; at_time="YYYY-MM-DD" for time-travel
+- brain_context(mode="communities") — list detected clusters/circles; brain_context(mode="communities", community_id=N) — who's in cluster N; use when asked "what are the main groups here?" or "which circle is X in?"
+- brain_draft_context / brain_draft_save — draft email in my voice (use the draft-reply skill for the full pipeline)
+
+Read my identity, voice, preferences, reference and decisions from the mcpbrain @-resources; apply my voice to everything. Run brain_search before answering from memory.
+
+Keep my brain current as we work:
+- A decision that changes how things are done -> brain_decision
+- A "just decided / where we're up to" note -> brain_note
+- A durable learning, preference, or fact worth keeping -> brain_memory_write
+- When a system or project materially changes, propose an edit to the matching reference file and I'll approve it.
+
+Captures are queued (the daemon writes them to my records repo within ~a minute; don't hand-edit those files). If something is clearly tied to one of my orgs{org_phrase} pass that org on a write; otherwise leave it — classifying people, orgs and relationships is automatic background enrichment, you don't tag anything.
+"""
 
 
 def owner_aliases(home) -> frozenset[str]:

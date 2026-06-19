@@ -125,7 +125,7 @@ def test_home_has_status_center_elements(tmp_path):
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         for el in ("home-status", "conn-cards", "backfill-progress",
-                   "backup-status", "brain-home", "self-heal-banners", "privacy-note"):
+                   "backup-status", "self-heal-banners", "privacy-note"):
             assert f'id="{el}"' in html, f"missing #{el}"
     finally: srv.stop()
 
@@ -222,13 +222,14 @@ def test_guided_elements_present():
 
 def test_final_step_defers_scheduling_to_claude_code():
     # Tasks are created in the Claude Code install prompt (Local scheduled tasks),
-    # NOT here — the wizard must not duplicate or conflict with that. The "My Brain"
-    # workspace is now optional (the brain is served via MCP tools).
-    assert "proj-instructions" in WIZ            # still offered, but optional
-    assert "copyInstructions" in WIZ
+    # NOT here — the wizard must not duplicate or conflict with that. The final step
+    # carries no project setup at all: the MCP server hands every session its standing
+    # instructions automatically, so there's nothing to paste or wire up here.
+    assert "proj-instructions" not in WIZ        # no instructions to paste anymore
+    assert "copyInstructions" not in WIZ
+    assert 'id="brain-home"' not in WIZ          # no manual workspace step
     assert "run the mcpbrain-cowork-setup skill" not in WIZ  # skill removed
     assert "/mcpbrain-setup" not in WIZ          # old slash command removed
-    assert 'id="brain-home"' in WIZ              # path shown for the optional project
     assert "Local" in WIZ                        # tasks are Local scheduled tasks
     assert "Use an existing folder" not in WIZ
 

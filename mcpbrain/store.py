@@ -14,6 +14,14 @@ import sqlite_vec
 from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 
 
+# Enrichment-logic version. Bump when extraction rules/guards/model materially
+# improve: chunks enriched under an older version are re-flowed (reflow_outdated_chunks)
+# so the existing corpus re-extracts itself under current logic over time. Chunks
+# enriched before this stamp existed default to 0, so shipping at 1 schedules a
+# one-time gradual re-extraction of the whole already-enriched corpus.
+ENRICH_LOGIC_VERSION = 1
+
+
 def _fts_match_query(query: str) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -393,6 +401,11 @@ class Store:
             cols = {row["name"] for row in db.execute("PRAGMA table_info(chunks)").fetchall()}
             if "enriched" not in cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN enriched INTEGER DEFAULT 0")
+            if "enriched_version" not in cols:
+                # The enrichment-logic version a chunk was last enriched under.
+                # Chunks below ENRICH_LOGIC_VERSION are re-flowed for re-extraction
+                # under current rules/guards. Pre-existing chunks default to 0.
+                db.execute("ALTER TABLE chunks ADD COLUMN enriched_version INTEGER DEFAULT 0")
 
             # --- Phase 3, Task 0.1: entity_communities + community_summaries --
             # Community membership table: one row per (entity, level). PK is
@@ -733,15 +746,37 @@ class Store:
                 for r in cur.fetchall()
             ]
 
-    def mark_enriched(self, doc_ids: list[str]) -> None:
-        """Set enriched=1 for the given doc_ids (single connection, parameterised)."""
+    def mark_enriched(self, doc_ids: list[str], version: int = ENRICH_LOGIC_VERSION) -> None:
+        """Set enriched=1 and stamp the enrichment-logic version for the given
+        doc_ids, so reflow_outdated_chunks can later re-extract anything enriched
+        under older logic."""
         if not doc_ids:
             return
         with self._connect() as db:
             db.executemany(
-                "UPDATE chunks SET enriched=1 WHERE doc_id=?",
-                [(d,) for d in doc_ids],
+                "UPDATE chunks SET enriched=1, enriched_version=? WHERE doc_id=?",
+                [(version, d) for d in doc_ids],
             )
+
+    def reflow_outdated_chunks(self, version: int, cap: int) -> int:
+        """Reset enriched=0 on up to `cap` enriched chunks whose enriched_version
+        is below `version` (oldest first), so they re-flow through enrichment under
+        current logic. The embedding is kept (only enriched is cleared). Returns the
+        number reset. This is the change-driven re-extraction lever: bump
+        ENRICH_LOGIC_VERSION when enrichment improves and the corpus re-extracts
+        itself gradually as the daemon calls this each cycle."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id FROM chunks "
+                "WHERE enriched=1 AND COALESCE(enriched_version,0) < ? "
+                "ORDER BY rowid LIMIT ?",
+                (version, cap),
+            ).fetchall()
+            ids = [r["doc_id"] for r in rows]
+            if ids:
+                qs = ",".join("?" for _ in ids)
+                db.execute(f"UPDATE chunks SET enriched=0 WHERE doc_id IN ({qs})", ids)
+        return len(ids)
 
     def embed_doc(self, doc_id: str, embedder) -> bool:
         """Embed a single chunk by doc_id, in place.
