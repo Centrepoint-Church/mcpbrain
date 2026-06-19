@@ -28,8 +28,10 @@ WHILE empty < 3:
   empty = 0; waves += 1
 
   # Fan out: one enrich-batch subagent per unit, ~5 in parallel at a time.
+  # Dispatch each on model `haiku` — extraction follows the rules well on Haiku and
+  # is far cheaper than Sonnet for a large backlog.
   FOR each unit IN ready.units:
-      dispatch enrich-batch (Task tool) with its unit_id
+      dispatch enrich-batch (Task tool, model haiku) with its unit_id
   collect each subagent's one-line status; add to units_done
 
   brain_enrich_advance()              # apply the pushed results + top the queue back up
