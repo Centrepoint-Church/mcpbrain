@@ -192,6 +192,13 @@ class ControlServer:
                 # backfill fan-out uses this to advance to the next batch in seconds
                 # instead of waiting out the normal interval.
                 d.sync_now(); return h_json(h, 200, {"woken": True})
+            if h.path == "/api/recall":
+                # Semantic recall for the UserPromptSubmit hook. Loopback +
+                # bearer-token gated like every other handler here. Empty query
+                # short-circuits to no results.
+                q = (body.get("query") or "").strip()
+                limit = min(int(body.get("limit") or 5), 10)
+                return h_json(h, 200, {"results": d.search(q, limit) if q else []})
             # /api/config carries the Gemini key. The control API is loopback-only
             # over plain HTTP by design, so the key travels in cleartext on
             # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed

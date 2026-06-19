@@ -26,7 +26,7 @@ def test_brain_routine_serves_bundled_protocols():
     ri = mcp_server._routine_instructions
     assert ri("does-not-exist") is None
     enrich = ri("enrich")
-    assert enrich and "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
+    assert enrich and "brain_enrich_units" in enrich and "enrich-batch" in enrich
     gardener = ri("gardener")
     assert gardener and "GARDENER-PROTECTED" in gardener
     mp = ri("meeting-packs")
@@ -38,9 +38,33 @@ def test_brain_routine_serves_bundled_protocols():
 def test_routine_enrich_describes_fanout(tmp_path):
     enrich = mcp_server._routine_instructions("enrich")
     assert "brain_enrich_units" in enrich
-    assert "brain_enrich_pull" in enrich and "brain_enrich_push" in enrich
+    assert "enrich-batch" in enrich                  # dispatches the cache-anchored agent
     assert "subagent" in enrich.lower()
     assert "haiku" in enrich.lower()                 # extraction subagents run on Haiku
+
+
+def _agent_file():
+    from pathlib import Path
+    return Path(__file__).resolve().parents[1] / "plugin" / "agents" / "enrich-batch.md"
+
+
+def test_enrich_agent_rules_in_sync():
+    # The enrich-batch agent embeds the extraction rules in its SYSTEM PROMPT so every
+    # sibling subagent shares one cacheable prefix. That copy must stay byte-identical
+    # to the canonical rules the daemon/pull use — bin/sync_agents.py regenerates it.
+    text = _agent_file().read_text()
+    b, e = "<!-- SHARED-EXTRACTION-RULES:BEGIN -->", "<!-- SHARED-EXTRACTION-RULES:END -->"
+    embedded = text[text.index(b) + len(b):text.index(e)].strip()
+    assert embedded and embedded == mcp_server._enrich_rules()
+
+
+def test_enrich_agent_is_haiku_and_skips_wire_rules():
+    # Model is set in frontmatter (so the orchestrator need not override it), and the
+    # agent pulls with_rules=false (rules already in its prompt — not re-sent uncached).
+    text = _agent_file().read_text()
+    assert "model: haiku" in text
+    assert "with_rules=false" in text
+    assert "brain_enrich_pull" in text and "brain_enrich_push" in text
 
 
 def test_pull_unit_leads_with_cacheable_prefix(tmp_path):
@@ -113,6 +137,17 @@ def test_pull_unit_attaches_rules_and_context(tmp_path):
     assert out["threads"][0]["thread_id"] == "t1"
     assert out["rules"] and out["context"]["owner_name"] == "Jo"
     assert "known_people" in out["context"]                     # full context for normal sizes
+
+
+def test_pull_unit_omits_rules_when_requested(tmp_path):
+    # enrich-batch passes with_rules=false: the rules live in its system prompt, so
+    # re-sending them in the (uncached) tool result would pay for them twice.
+    _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hi"}],
+                 context={"owner_name": "Jo"})
+    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=uid, with_rules=False))
+    assert "rules" not in out
+    assert out["context"]["owner_name"] == "Jo" and out["threads"][0]["thread_id"] == "t1"
 
 
 def test_pull_unit_block_returns_items(tmp_path):

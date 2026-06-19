@@ -158,6 +158,17 @@ def owner_email(home) -> str:
     return read_config(home).get("owner_email", "") or ""
 
 
+def prompt_recall_enabled(home) -> bool:
+    """Whether the UserPromptSubmit hook injects brain recall (default ON).
+
+    A permanent safety switch, not a rollout stage: when false the hook returns
+    instantly with no I/O and no behaviour change. Defaults to True so a
+    brain-connected session is grounded in memory on every prompt out of the box;
+    set 'prompt_recall': false in config.json to turn it off.
+    """
+    return bool(read_config(home).get("prompt_recall", True))
+
+
 def render_project_instructions(cfg: dict) -> str:
     """Standing instructions for the owner's brain-grounded sessions.
 

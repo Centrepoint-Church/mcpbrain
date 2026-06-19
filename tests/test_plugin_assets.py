@@ -76,12 +76,16 @@ def test_enrich_batch_agent_exists():
 
 def test_enrich_batch_is_unit_worker():
     # The agent is the per-unit work-queue worker: it pulls one unit_id and pushes
-    # that unit via MCP, and gets the rules at runtime from the pull (it no longer
-    # embeds the rules or shells into the spool).
+    # that unit via MCP. It now EMBEDS the extraction rules in its system prompt (so
+    # the rules ride a cacheable prefix shared across the fan-out) and pulls with
+    # with_rules=false. The protocol section (above the embedded rules) must still not
+    # shell into the spool.
     b = _read("agents/enrich-batch.md")
-    for token in ("brain_enrich_pull", "brain_enrich_push", "unit_id", "merge_review"):
+    for token in ("brain_enrich_pull", "brain_enrich_push", "unit_id", "merge_review",
+                  "model: haiku", "with_rules=false"):
         assert token in b, token
-    assert "pending.json" not in b   # no direct spool reads anymore
+    protocol = b[:b.index("<!-- SHARED-EXTRACTION-RULES:BEGIN -->")]
+    assert "pending.json" not in protocol   # no direct spool reads in the protocol
 
 def test_backfill_skill_orchestrates_loop():
     b = _read("skills/mcpbrain-backfill/SKILL.md")
