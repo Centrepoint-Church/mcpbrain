@@ -45,6 +45,7 @@ from pathlib import Path
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.config import app_dir
+from mcpbrain.retrieval import hybrid_search
 from mcpbrain.sync import run_sync_cycle
 
 # Import block modules at startup so their BLOCK_DRAINERS entries are registered
@@ -621,6 +622,23 @@ class Daemon:
             "records_dir": config.records_dir(str(app_dir())),
             "project_instructions": config.render_project_instructions(cfg),
         }
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """Semantic recall for the UserPromptSubmit hook (via /api/recall).
+
+        Read-only and best-effort: returns compact {doc_id, score, text} dicts,
+        or [] on any failure — recall must never break a prompt. `score` is the
+        hybrid_search intra-query confidence (top hit ~1.0), so it ranks within
+        this result set but is not comparable across queries.
+        """
+        try:
+            hits = hybrid_search(self._store, self._embedder, query, limit)
+        except Exception:  # noqa: BLE001 — recall must never raise into the prompt path
+            log.warning("recall search failed for %r", query, exc_info=True)
+            return []
+        return [{"doc_id": c.get("doc_id"),
+                 "score": round(float(c.get("score") or 0.0), 3),
+                 "text": c.get("text") or ""} for c in hits]
 
     def _resolve_google_account(self, token_file) -> str:
         """Return the connected Google account email, resolving lazily.

@@ -36,6 +36,10 @@ class FakeDaemon:
     def start_auth(self):
         self.auth = True
 
+    def search(self, query, limit=5):
+        return ([{"doc_id": "d1", "score": 1.0, "text": f"hit for {query}"}]
+                if query else [])
+
 
 def _post(url, token, body):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST")
@@ -70,6 +74,42 @@ def test_post_endpoints(tmp_path):
             import time
             time.sleep(0.01)
         assert d.auth
+    finally:
+        srv.stop()
+
+
+def test_recall_endpoint(tmp_path):
+    """POST /api/recall returns the daemon's hits for a query and [] for empty."""
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        r = _post(base + "/api/recall", srv.token, {"query": "launch team"})
+        data = json.loads(r.read())
+        assert data["results"][0]["doc_id"] == "d1"
+        assert "launch team" in data["results"][0]["text"]
+        r2 = _post(base + "/api/recall", srv.token, {"query": "  "})
+        assert json.loads(r2.read())["results"] == []
+    finally:
+        srv.stop()
+
+
+def test_recall_endpoint_requires_token(tmp_path):
+    """Without the bearer token /api/recall is rejected (loopback auth gate)."""
+    import urllib.error
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        req = urllib.request.Request(
+            base + "/api/recall", data=json.dumps({"query": "x"}).encode(), method="POST")
+        try:
+            urllib.request.urlopen(req)
+            assert False, "expected auth rejection without a token"
+        except urllib.error.HTTPError as e:
+            assert e.code in (401, 403)
     finally:
         srv.stop()
 

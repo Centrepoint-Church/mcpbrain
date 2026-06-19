@@ -462,12 +462,18 @@ def make_brain_enrich_units(home: str):
 
 
 def make_brain_enrich_pull(home: str):
-    async def brain_enrich_pull(unit_id: str) -> dict:
+    async def brain_enrich_pull(unit_id: str, with_rules: bool = True) -> dict:
         """Return one work unit's payload (from brain_enrich_units) with the current
-        rules + context attached, or {"empty": true} if the unit is gone. `rules`
-        carries the FULL extraction protocol so the caller is self-contained (no
-        plugin skill file or source repo). A `kind` "thread" unit returns `threads`;
-        a `kind` "block" unit returns `block` + `items`."""
+        context attached, or {"empty": true} if the unit is gone. A `kind` "thread"
+        unit returns `threads`; a `kind` "block" unit returns `block` + `items`.
+
+        `with_rules` (default True) attaches the FULL extraction protocol so a
+        general-purpose caller is self-contained (no plugin/skill file or source
+        repo). The `enrich-batch` subagent passes ``with_rules=False``: it already
+        carries the rules in its SYSTEM PROMPT (kept byte-identical to `_enrich_rules`
+        by test_enrich_agent_rules_in_sync), so every sibling subagent shares one
+        cacheable prefix — re-sending the rules here, in the uncached tool result,
+        would pay for them a second time and defeat the caching."""
         import json as _json
         from pathlib import Path
         if not unit_id:
@@ -480,13 +486,16 @@ def make_brain_enrich_pull(home: str):
             ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
         except (OSError, ValueError):
             ctx = {}
-        # Order matters for prompt caching: lead with the byte-stable `rules`
-        # (identical across every unit + run) then the per-run `context`, so the
-        # serialized prefix is reusable across units; the variable per-unit fields
-        # (unit_id, work) trail. After a run, verify cache hits by inspecting the
-        # subagent transcripts' usage for cache_read_input_tokens.
-        out = {"rules": _enrich_rules(), "context": ctx,
-               "kind": d.get("kind"), "unit_id": unit_id}
+        # When rules are sent, they lead (byte-stable across units) then context, so a
+        # general-purpose caller's serialized prefix is reusable; the variable per-unit
+        # fields (unit_id, work) trail. The enrich-batch agent omits them entirely —
+        # its rules live in the cacheable system-prompt prefix instead.
+        out = {}
+        if with_rules:
+            out["rules"] = _enrich_rules()
+        out["context"] = ctx
+        out["kind"] = d.get("kind")
+        out["unit_id"] = unit_id
         if d.get("kind") == "block":
             out["block"] = d.get("block")
             out["items"] = d.get("items") or []
