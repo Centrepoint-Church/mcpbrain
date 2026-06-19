@@ -50,7 +50,13 @@ def test_dispatch_table_pass_refires_after_interval(tmp_path, monkeypatch):
     d, clock = _configured_daemon(tmp_path, communities_interval_s=100.0)
     fired = []
     monkeypatch.setattr("mcpbrain.communities.run", lambda store: fired.append(1) or {"communities": 1})
-    d._run_periodic_passes(); clock.t = 101.0; d._run_periodic_passes()
+    d._run_periodic_passes()
+    # Community detection is change-gated now; grow the graph so the second pass
+    # (after the interval) is also change-due.
+    with d._store._connect() as db:
+        for i in range(30):
+            db.execute("INSERT INTO entities(id,name,type) VALUES(?,?,'person')", (f"e{i}", f"E{i}"))
+    clock.t = 101.0; d._run_periodic_passes()
     assert len(fired) == 2
 
 

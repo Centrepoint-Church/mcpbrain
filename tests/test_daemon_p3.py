@@ -101,7 +101,7 @@ def test_maybe_communities_not_due_before_interval(tmp_path):
 
 
 def test_maybe_communities_runs_again_after_interval(tmp_path):
-    """After the interval elapses, maybe_communities runs again."""
+    """After the interval elapses AND the graph has grown materially, it runs."""
     clock = _Clock()
     store, daemon = _daemon(tmp_path, communities_interval_s=100.0, clock=clock)
 
@@ -109,13 +109,29 @@ def test_maybe_communities_runs_again_after_interval(tmp_path):
     with patch("mcpbrain.communities.run", return_value=fake_summary):
         daemon.maybe_communities()
 
-    # Advance past the interval.
+    # Grow the graph past the change threshold, then advance past the interval.
+    with store._connect() as db:
+        for i in range(30):
+            db.execute("INSERT INTO entities(id,name,type) VALUES(?,?,'person')", (f"e{i}", f"E{i}"))
     clock.advance(110.0)
     with patch("mcpbrain.communities.run", return_value=fake_summary) as mock_run:
         result = daemon.maybe_communities()
 
     assert result is not None
     mock_run.assert_called_once()
+
+
+def test_maybe_communities_skipped_when_graph_idle(tmp_path):
+    """Change-driven: after the interval, an UNCHANGED graph is not re-clustered."""
+    clock = _Clock()
+    store, daemon = _daemon(tmp_path, communities_interval_s=100.0, clock=clock)
+    with patch("mcpbrain.communities.run", return_value={"communities": 1}):
+        daemon.maybe_communities()                       # first run clusters + marks
+    clock.advance(110.0)                                 # interval elapsed, but no graph change
+    with patch("mcpbrain.communities.run") as mock_run:
+        result = daemon.maybe_communities()
+    assert result == {"communities": "skipped_no_change"}
+    mock_run.assert_not_called()
 
 
 def test_maybe_communities_swallows_errors(tmp_path):

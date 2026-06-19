@@ -402,6 +402,20 @@ def test_store_threads_needing_summary(tmp_path):
     assert "t-small" not in thread_ids  # below min_emails
 
 
+def test_thread_resummarised_after_new_message(tmp_path):
+    # Change-driven: a thread summarised, then gaining a message, must reappear
+    # for re-synthesis (not freeze at its first summary).
+    s = _store(tmp_path)
+    s.upsert_thread_context("t-1", email_count=5, contextual_summary="v1")
+    assert "t-1" not in {r["thread_id"] for r in s.threads_needing_summary(5)}  # fresh
+    # backdate the summary stamp, then a later message bumps last_updated past it
+    with s._connect() as db:
+        db.execute("UPDATE thread_context SET contextual_summary_at='2000-01-01T00:00:00Z' "
+                   "WHERE thread_id='t-1'")
+    s.upsert_thread_context("t-1", email_count=6, summary="a new reply landed")
+    assert "t-1" in {r["thread_id"] for r in s.threads_needing_summary(5)}  # re-summarise
+
+
 def test_store_thread_messages(tmp_path):
     s = _store(tmp_path)
     # Insert email_context rows belonging to thread t-99.
