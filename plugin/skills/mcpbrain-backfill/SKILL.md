@@ -33,7 +33,15 @@ WHILE empty < 3:
   # shared across the fan-out — far cheaper than Sonnet for a large backlog.
   FOR each unit IN ready.units:
       dispatch enrich-batch (Task tool, subagent_type: enrich-batch) with its unit_id
-  collect each subagent's one-line status; add to units_done
+
+  # Requeue guard: a unit is done ONLY if its subagent replied with a clean
+  # `unit <unit_id>: <n> <kind>` (or `… : gone`) line. Any other reply — narration,
+  # raw JSON, "saved to …", ERROR:, or silence — means it derailed and did NOT push.
+  # Re-dispatch that same unit_id to a fresh subagent (pull-by-id still works); retry
+  # a derailed unit at most twice, then leave it for a later run. Count only clean
+  # replies toward units_done.
+  FOR each derailed unit (reply not a clean status line), up to 2 retries:
+      dispatch enrich-batch (Task tool, subagent_type: enrich-batch) with its unit_id
 
   brain_enrich_advance()              # apply the pushed results + top the queue back up
 
@@ -42,10 +50,12 @@ REPORT: waves, units_done, final queue state
 
 ## Notes
 
-- Each `enrich-batch` subagent is self-contained: it pulls its own unit
-  (`brain_enrich_pull(unit_id=…)`, which carries the rules + context) and pushes its
-  own result (`brain_enrich_push(unit_id=…)` → `enrich_inbox/<unit_id>.json`). The
-  daemon applies it and deletes the unit.
+- Each `enrich-batch` subagent is self-contained: it carries the extraction rules in
+  its own system prompt, pulls its unit (`brain_enrich_pull(unit_id=…, with_rules=false)`
+  → context + work), and pushes its result (`brain_enrich_push(unit_id=…)` →
+  `enrich_inbox/<unit_id>.json`). The daemon applies it and deletes the unit. A unit
+  with no successful push is never deleted, so the requeue guard above can safely
+  re-dispatch it.
 - `brain_enrich_units` claims each unit it hands out with a short lease, so a unit in
   flight is never handed to two subagents — the loop won't double-process.
 - `brain_enrich_advance` runs one daemon drain+prepare cycle: it applies pushed

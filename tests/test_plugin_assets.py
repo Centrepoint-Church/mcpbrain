@@ -93,6 +93,8 @@ def test_backfill_skill_orchestrates_loop():
     assert "brain_enrich_units" in b                        # drains the work-unit queue
     assert any(w in b.lower() for w in ("loop", "while", "repeat"))
     assert "queue" in b.lower()
+    # requeue guard: derailed units (no clean status line) get re-dispatched
+    assert "requeue" in b.lower() and "derailed" in b.lower()
 
 def test_draft_reply_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-draft-reply" / "SKILL.md").exists()
