@@ -153,8 +153,11 @@ def _rrf(rankings: list[list[str]], k: int = _RRF_K,
 
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
-                  kw_weight: float = _KW_WEIGHT) -> list[dict]:
-    qv = embedder.embed_query(query)
+                  kw_weight: float = _KW_WEIGHT, query_vec: list | None = None) -> list[dict]:
+    # query_vec lets a caller that already embedded the query (e.g. the recall
+    # distance gate in daemon.search) reuse it, avoiding a second embed_query —
+    # the slow part of a search. Identical results either way.
+    qv = query_vec if query_vec is not None else embedder.embed_query(query)
     sem = [d for d, _ in store.vec_knn(qv, limit * 2)]
     kw = [d for d, _ in store.fts_search(query, limit * 2)]
     fused = _rrf([sem, kw], k=rrf_k, vec_weight=vec_weight, kw_weight=kw_weight)

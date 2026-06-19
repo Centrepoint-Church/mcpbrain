@@ -5,12 +5,17 @@
 
 > Implemented in one session. Deviation from the spec: the `prompt_recall` flag
 > ships **default-ON** (a brain-connected session is grounded out of the box;
-> set `prompt_recall: false` to disable). Because hybrid_search's score is
-> intra-query (top hit ~1.0, not cross-query comparable), an absolute relevance
-> floor can't suppress off-topic prompts — so the implemented safeguards are a
-> *relative* tail-trim (`_REL_FLOOR`), tight caps, per-session de-dup, and the
-> "ignore if off-topic" framing header. First follow-up: an absolute
-> vector-distance gate for true off-topic suppression.
+> set `prompt_recall: false` to disable).
+>
+> **Off-topic suppression (the follow-up, now done too).** hybrid_search's score
+> is intra-query (top hit ~1.0), so it can't tell an off-topic query apart. The
+> implemented gate uses the *absolute* L2 distance of the nearest chunk
+> (`daemon.search` embeds once, checks `vec_knn[0].distance` against
+> `config.recall_max_distance`, default **0.80**): if even the closest chunk is
+> farther, recall returns nothing. Calibrated on an ~80k-chunk corpus —
+> on-topic queries land ~0.62–0.73, off-topic ~0.84–0.88, so 0.80 is in the gap.
+> Layered safeguards remain on top: relative tail-trim (`_REL_FLOOR`), count/
+> snippet/total caps, per-session de-dup, and the "ignore if off-topic" header.
 **Spec:** [2026-06-19-userpromptsubmit-auto-rag.md](./2026-06-19-userpromptsubmit-auto-rag.md)
 
 One phase, one sitting. Ship the whole feature end-to-end — endpoint, hook, flag,
