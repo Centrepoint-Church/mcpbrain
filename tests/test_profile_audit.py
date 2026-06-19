@@ -34,6 +34,21 @@ def test_requests_carry_profile_role_relations(tmp_path):
     assert reqs and {"entity_id", "name", "org", "profile", "role"} <= set(reqs[0])
 
 
+def test_audit_not_rerequested_until_changed(tmp_path):
+    # Change-driven + rotation: once audited, a profile isn't re-audited until it
+    # changes (re-synthesised) or the person is re-observed — not every cycle.
+    s = _store(tmp_path)
+    eid = _person_with_profile(s, "Taryn Hamilton")
+    assert profile_audit.build_audit_requests(s, cap=10)             # never audited → requested
+    # auditing stamps profile_audited_at even with no corrections
+    profile_audit.drain_audit(s, {"profile_audit": [{"entity_id": eid, "corrections": []}]})
+    assert profile_audit.build_audit_requests(s, cap=10) == []       # audited + unchanged → skip
+    # profile re-synthesised later → audit-worthy again
+    with s._connect() as db:
+        db.execute("UPDATE entities SET profile_updated_at='2099-01-01T00:00:00Z' WHERE id=?", (eid,))
+    assert [r["entity_id"] for r in profile_audit.build_audit_requests(s, cap=10)] == [eid]
+
+
 def test_role_correction_applies_via_observation(tmp_path):
     s = _store(tmp_path)
     eid = _person_with_profile(s, "Taryn Hamilton", role="Volunteer")

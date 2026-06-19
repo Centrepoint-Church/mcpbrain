@@ -160,6 +160,11 @@ class Store:
                 # Date (email valid_from) the current org was asserted, so a
                 # newer-dated observation can overwrite a stale org under backfill.
                 db.execute("ALTER TABLE entities ADD COLUMN org_valid_from TEXT DEFAULT ''")
+            if "profile_audited_at" not in ent_cols:
+                # When profile_audit last reviewed this profile, so audit re-runs
+                # only after a change (and rotates) rather than re-doing the same
+                # most-active profiles every cycle.
+                db.execute("ALTER TABLE entities ADD COLUMN profile_audited_at TEXT DEFAULT ''")
 
             db.execute("""CREATE TABLE IF NOT EXISTS entity_relations(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,8 +434,16 @@ class Store:
                 participant_ids     TEXT DEFAULT '',
                 summary             TEXT DEFAULT '',
                 last_updated        TEXT DEFAULT '',
-                contextual_summary  TEXT DEFAULT ''
+                contextual_summary  TEXT DEFAULT '',
+                contextual_summary_at TEXT DEFAULT ''
             )""")
+            # Existing DBs: add contextual_summary_at (stamp of when the
+            # contextual_summary was written) so a thread re-summarises when it
+            # gains messages after being summarised, not just when it has none.
+            _tc_cols = {row["name"] for row in
+                        db.execute("PRAGMA table_info(thread_context)").fetchall()}
+            if "contextual_summary_at" not in _tc_cols:
+                db.execute("ALTER TABLE thread_context ADD COLUMN contextual_summary_at TEXT DEFAULT ''")
 
             # --- Phase 3, Task 0.3: proactive_findings ------------------------
             # Surface for pipeline-generated signals (overdue actions, missing
@@ -1555,8 +1568,8 @@ class Store:
             db.execute(
                 "INSERT INTO thread_context"
                 "(thread_id, subject, org, email_count, participant_ids, "
-                "summary, last_updated, contextual_summary) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "summary, last_updated, contextual_summary, contextual_summary_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(thread_id) DO UPDATE SET "
                 "    subject            = CASE WHEN excluded.subject != '' THEN excluded.subject ELSE subject END, "
                 "    org                = CASE WHEN excluded.org != '' THEN excluded.org ELSE org END, "
@@ -1564,7 +1577,11 @@ class Store:
                 "    participant_ids    = CASE WHEN excluded.participant_ids != '' THEN excluded.participant_ids ELSE participant_ids END, "
                 "    summary            = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE summary END, "
                 "    last_updated       = CASE WHEN excluded.last_updated != '' THEN excluded.last_updated ELSE last_updated END, "
-                "    contextual_summary = CASE WHEN excluded.contextual_summary != '' THEN excluded.contextual_summary ELSE contextual_summary END",
+                "    contextual_summary = CASE WHEN excluded.contextual_summary != '' THEN excluded.contextual_summary ELSE contextual_summary END, "
+                # Stamp the summary's write-time only when a contextual_summary is
+                # actually being written, so threads_needing_summary can tell that a
+                # later message (which bumps last_updated) post-dates the summary.
+                "    contextual_summary_at = CASE WHEN excluded.contextual_summary != '' THEN excluded.last_updated ELSE contextual_summary_at END",
                 (
                     thread_id,
                     subject,
@@ -1574,15 +1591,15 @@ class Store:
                     summary,
                     now,
                     contextual_summary,
+                    now if contextual_summary else "",
                 ),
             )
 
     def threads_needing_summary(self, min_emails: int = 5) -> list[dict]:
-        """Threads with email_count >= min_emails that lack a contextual_summary.
-
-        apply() sets the one-line `summary` on every enriched thread, so the
-        synthesis pass's job is the deeper `contextual_summary`: a thread "needs
-        synthesis" when it has enough activity and no contextual_summary yet.
+        """Threads with email_count >= min_emails that need a contextual_summary —
+        either they have none yet, OR they have gained messages SINCE the summary
+        was written (last_updated > contextual_summary_at), so a long thread's
+        narrative refreshes as it grows instead of freezing at first summary.
         """
         with self._connect() as db:
             return [
@@ -1590,7 +1607,9 @@ class Store:
                 for r in db.execute(
                     "SELECT * FROM thread_context "
                     "WHERE email_count >= ? "
-                    "  AND (contextual_summary IS NULL OR contextual_summary = '') "
+                    "  AND (contextual_summary IS NULL OR contextual_summary = '' "
+                    "       OR (COALESCE(contextual_summary_at,'') != '' "
+                    "           AND last_updated > contextual_summary_at)) "
                     "ORDER BY thread_id",
                     (min_emails,),
                 ).fetchall()
