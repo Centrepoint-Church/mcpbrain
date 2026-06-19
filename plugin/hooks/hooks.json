@@ -5,6 +5,9 @@
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "mcpbrain session-end" } ] }
+    ],
+    "PreCompact": [
+      { "hooks": [ { "type": "command", "command": "mcpbrain pre-compact" } ] }
     ]
   }
 }
