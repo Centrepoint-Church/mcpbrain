@@ -31,8 +31,11 @@ _ALLOWED_FIELDS = {"role", "org"}
 def build_audit_requests(store, *, cap: int = 10) -> list[dict]:
     """Select profiled person entities suitable for correction review.
 
-    Filters to type='person', email_count >= _EMAIL_FLOOR, and non-empty
-    profile. Sorted by last_seen DESC. Returns up to `cap` dicts including:
+    Filters to type='person', email_count >= _EMAIL_FLOOR, non-empty profile, AND
+    audit-worthy: never audited, OR the profile changed since the last audit, OR the
+    person was re-observed since then. Ordered never-audited + stalest-audited first,
+    so the per-cycle cap rotates through everyone instead of re-auditing the same
+    most-active profiles every cycle. Returns up to `cap` dicts including:
     entity_id, name, org, profile, role.
     """
     sql = """
@@ -42,7 +45,15 @@ def build_audit_requests(store, *, cap: int = 10) -> list[dict]:
           AND  email_count >= ?
           AND  profile IS NOT NULL
           AND  profile != ''
-        ORDER  BY last_seen DESC
+          AND  (
+                 profile_audited_at IS NULL
+              OR profile_audited_at = ''
+              OR (profile_updated_at IS NOT NULL AND profile_updated_at > profile_audited_at)
+              OR (last_seen != '' AND last_seen > date(profile_audited_at))
+               )
+        ORDER  BY (profile_audited_at IS NULL OR profile_audited_at = '') DESC,
+                  profile_audited_at ASC,
+                  last_seen DESC
         LIMIT  ?
     """
     with store._connect() as db:
@@ -87,6 +98,7 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
 
     applied = 0
     today = datetime.now(timezone.utc).date().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     for item in items:
         if applied >= max_corrections:
@@ -105,6 +117,10 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
         if not row:
             log.debug("profile_audit: entity_id %r not found; skipping", eid)
             continue
+        # Mark audited (even when corrections is empty) so it rotates out and only
+        # re-audits after a later change — not the same active profiles every cycle.
+        with store._connect() as db:
+            db.execute("UPDATE entities SET profile_audited_at=? WHERE id=?", (now_iso, eid))
 
         for correction in corrections:
             if applied >= max_corrections:

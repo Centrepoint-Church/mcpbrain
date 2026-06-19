@@ -1050,12 +1050,53 @@ class Daemon:
 
     # -- periodic community detection ---------------------------------------
 
+    # Re-cluster only after the graph grows by at least this much since the last
+    # clustering (change-driven: backfill keeps clusters fresh, an idle graph is
+    # not re-clustered every interval for nothing). Either threshold triggers.
+    _CLUSTER_DELTA_ENTITIES = 25
+    _CLUSTER_DELTA_RELATIONS = 100
+
+    def _graph_counts(self) -> tuple[int, int]:
+        with self._store._connect() as db:
+            e = db.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+            r = db.execute("SELECT COUNT(*) FROM entity_relations "
+                           "WHERE invalidated_at IS NULL").fetchone()[0]
+        return e, r
+
+    def _communities_change_due(self) -> bool:
+        """True if the graph grew materially since the last clustering (or never
+        clustered with a marker). Cheap count check; defaults to True on error."""
+        try:
+            with self._store._connect() as db:
+                le = db.execute("SELECT v FROM meta WHERE k='communities_clustered_entities'").fetchone()
+                lr = db.execute("SELECT v FROM meta WHERE k='communities_clustered_relations'").fetchone()
+            if le is None or lr is None:
+                return True
+            cur_e, cur_r = self._graph_counts()
+            return ((cur_e - int(le[0])) >= self._CLUSTER_DELTA_ENTITIES
+                    or (cur_r - int(lr[0])) >= self._CLUSTER_DELTA_RELATIONS)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _mark_communities_clustered(self) -> None:
+        try:
+            cur_e, cur_r = self._graph_counts()
+            with self._store._connect() as db:
+                db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('communities_clustered_entities',?)", (str(cur_e),))
+                db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('communities_clustered_relations',?)", (str(cur_r),))
+        except Exception:  # noqa: BLE001
+            pass
+
     def _run_communities(self) -> dict | None:
         """Cadence-gated community detection. Called by the dispatch table
-        and directly by maybe_communities."""
+        and directly by maybe_communities. The interval is the floor; within it,
+        re-clustering only happens when the graph changed materially."""
         if not self._is_due("_communities_interval_s", "_last_communities"):
             return None
         now = self._clock()
+        if not self._communities_change_due():
+            self._last_communities = now            # checked; graph idle → skip
+            return {"communities": "skipped_no_change"}
         try:
             from mcpbrain.communities import run
             summary = run(self._store)
@@ -1065,6 +1106,7 @@ class Daemon:
                 exc_info=True,
             )
             return {"communities": False, "error": str(exc)}
+        self._mark_communities_clustered()
         self._last_communities = now
         return summary
 
