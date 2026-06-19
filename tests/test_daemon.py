@@ -27,6 +27,22 @@ from mcpbrain.backup import generate_escrow_key
 from tests.test_backup import FakeFiles, FakeService
 
 
+@pytest.fixture(autouse=True)
+def _isolate_app_home(tmp_path, monkeypatch):
+    """Point MCPBRAIN_HOME at a per-test temp dir so no daemon test touches the
+    developer's real ~/Library/Application Support/mcpbrain.
+
+    Without this, daemon.run() startup (maybe_restore_on_first_run ->
+    _backup_from_config) reads the real config; on a machine with a configured
+    backup it restores the real 384-dim snapshot OVER the dim=4 test store, and
+    the next embed pass fails with a vec dimension mismatch (384 vs 4). A clean
+    CI box has no backup configured, so the leak is invisible there. Tests that
+    set their own MCPBRAIN_HOME still win — their monkeypatch runs after this.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Tiny fakes
 # ---------------------------------------------------------------------------
