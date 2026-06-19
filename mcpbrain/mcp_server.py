@@ -630,7 +630,14 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     meetings_today = make_brain_meetings_today(store, home)
     meeting_pack_get = make_brain_meeting_pack_get(store)
     meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
-    server = Server("mcpbrain")
+    # Standing instructions read by every session that connects this server —
+    # the owner's identity/role/orgs + the brain tools + the capture loop. Rendered
+    # from saved config at connect time (so it's never a stale paste), then captured
+    # for the life of the connection; a config change is picked up on reconnect.
+    server = Server(
+        "mcpbrain",
+        instructions=config.render_project_instructions(config.read_config(home)),
+    )
 
     @server.list_resources()
     async def _list_resources():

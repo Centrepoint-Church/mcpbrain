@@ -162,21 +162,6 @@
   <section id="step-projects" class="card">
     <h2><span class="num">4</span>You're set up</h2>
     <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created back in the Claude Code session that installed mcpbrain — as <b>Local</b> scheduled tasks. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
-    <details class="howto">
-      <summary>Optional: a dedicated "My Brain" workspace</summary>
-      <p class="desc">Want a project that's always grounded in your brain? Create one in Cowork or Claude Code, point its working folder at the folder below, and paste the instructions. Optional — the <code>brain_*</code> tools work in any session.</p>
-      <div class="field">
-        <div class="field-head"><span>Your brain folder</span>
-          <button class="copy" type="button" onclick="copyText('brain-home')">Copy</button></div>
-        <pre id="brain-home" class="spec">…</pre>
-      </div>
-      <ol>
-        <li>Create a project named <code id="proj-name">My Brain</code> <button class="copybtn" type="button" onclick="copyText('proj-name')">Copy</button> (New from scratch).</li>
-        <li>Set its <b>working folder</b> to the brain folder above.</li>
-        <li>Paste these <b>project instructions</b> <button class="copybtn" type="button" onclick="copyInstructions()">Copy instructions</button>
-          <pre id="proj-instructions" class="spec" style="white-space:pre-wrap"></pre></li>
-      </ol>
-    </details>
   </section>
 
   <section id="step-backup" class="card">
@@ -305,14 +290,6 @@ async function saveProfile(){
   }
 }
 
-function copyText(id){
-  const t = $(id).textContent;
-  navigator.clipboard.writeText(t).catch(()=>{});
-}
-function copyInstructions(){
-  const t = $("proj-instructions").textContent;
-  navigator.clipboard.writeText(t).catch(()=>{});
-}
 function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
   const el = $(id);
   el.textContent = text;                   // server-derived text always via textContent
@@ -533,8 +510,6 @@ async function prefillFromConfig(){
   if(c.clickup_api_key_set){
     $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
-  if(c.project_instructions) $("proj-instructions").textContent = c.project_instructions;
-  if(c.home_dir) $("brain-home").textContent = c.home_dir;
   const fleet = c.fleet || {};
   if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;
   if(fleet.escrow_folder_id !== undefined && fleet.escrow_folder_id !== "") $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;

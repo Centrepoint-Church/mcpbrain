@@ -66,32 +66,10 @@ _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 SPOOL_THREAD_CAP = 100
 SPOOL_CHAR_BUDGET = 24000
 
-
-def _render_project_instructions(name: str, orgs: list[str]) -> str:
-    """The copy-paste instructions for the user's 'My Brain' Cowork project.
-
-    Work-focused: the brain tools, applying voice, and the capture loop. Classifying
-    people/orgs/relationships is enrichment's job, so the project doesn't tag — it
-    just passes an org on a write when it's obviously one of the user's.
-    """
-    org_phrase = f" ({', '.join(orgs)})" if orgs else ""
-    return f"""\
-You're {name}'s assistant, working from here on. Memory + tools come from the mcpbrain MCP server:
-- brain_search / brain_context / brain_actions — recall by meaning, profile a person/org, see what's open
-- brain_graph — traverse the relationship graph: "how is X connected to Y?", "who are the key people around <org>?", "everyone within 2 hops of …" — use hops=2 for broader reach; at_time="YYYY-MM-DD" for time-travel
-- brain_context(mode="communities") — list detected clusters/circles; brain_context(mode="communities", community_id=N) — who's in cluster N; use when asked "what are the main groups here?" or "which circle is X in?"
-- brain_draft_context / brain_draft_save — draft email in my voice (use the draft-reply skill for the full pipeline)
-
-Read my identity, voice, preferences, reference and decisions from the mcpbrain @-resources; apply my voice to everything. Run brain_search before answering from memory.
-
-Keep my brain current as we work:
-- A decision that changes how things are done -> brain_decision
-- A "just decided / where we're up to" note -> brain_note
-- A durable learning, preference, or fact worth keeping -> brain_memory_write
-- When a system or project materially changes, propose an edit to the matching reference file and I'll approve it.
-
-Captures are queued (the daemon writes them to my records repo within ~a minute; don't hand-edit those files). If something is clearly tied to one of my orgs{org_phrase} pass that org on a write; otherwise leave it — classifying people, orgs and relationships is automatic background enrichment, you don't tag anything.
-"""
+# Per-cycle ceiling on how many already-enriched chunks are re-flowed for
+# re-extraction under newer enrichment logic. A trickle so the existing corpus
+# re-extracts in the background without swamping new-mail enrichment or token cost.
+REEXTRACT_CAP = 50
 
 
 def _graph_apply():
@@ -338,6 +316,16 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     except Exception as exc:
         log.warning("agent_errs scan failed (cycle continues): %s", exc)
     if enrich_mode == "spool":
+        # Change-driven re-extraction: trickle already-enriched chunks that predate
+        # the current enrichment logic back through the queue, unless paused.
+        if config.reextract_enabled(str(app_dir())):
+            from mcpbrain.store import ENRICH_LOGIC_VERSION
+            try:
+                reflowed = store.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, REEXTRACT_CAP)
+                if reflowed:
+                    log.info("re-extraction: re-flowed %d outdated chunk(s)", reflowed)
+            except Exception as exc:  # noqa: BLE001 — never crash the cycle
+                log.warning("re-extraction sweep skipped: %s", exc)
         prep = prepare.prepare_units(store, thread_cap=SPOOL_THREAD_CAP,
                                      char_budget=SPOOL_CHAR_BUDGET,
                                      resolution_due=resolution_due,
@@ -620,9 +608,6 @@ class Daemon:
     def config_profile(self) -> dict:
         """Saved profile for the settings form — never includes the ClickUp secret."""
         cfg = config.read_config(str(app_dir()))
-        name = (cfg.get("owner_name") or cfg.get("owner_full_name") or "you").strip() or "you"
-        orgs = [str(o.get("name") or "").strip() for o in (cfg.get("orgs") or [])
-                if isinstance(o, dict) and str(o.get("name") or "").strip()]
         return {
             "owner_full_name": cfg.get("owner_full_name", "") or "",
             "owner_name": cfg.get("owner_name", "") or "",
@@ -634,7 +619,7 @@ class Daemon:
             "timezone": cfg.get("timezone", "") or "",
             "home_dir": str(app_dir()),
             "records_dir": config.records_dir(str(app_dir())),
-            "project_instructions": _render_project_instructions(name, orgs),
+            "project_instructions": config.render_project_instructions(cfg),
         }
 
     def _resolve_google_account(self, token_file) -> str:

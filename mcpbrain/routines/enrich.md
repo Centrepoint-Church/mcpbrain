@@ -30,8 +30,10 @@ needs no skill or command file.
    > 5. Reply with ONE line only: `unit <unit_id>: <n> <kind>`. Nothing else.
 
 4. When the wave's subagents have replied, call **`brain_enrich_units`** again for the
-   next wave. Repeat until it returns `{"empty": true}`.
-5. Report: `DONE: <N> units across <W> waves`.
+   next wave. Repeat until it returns `{"empty": true}` **or you have run 10 waves**,
+   whichever comes first — stop at 10 even if units remain; the next hourly run (or
+   the backfill skill) continues the rest. This caps a single run's time and cost.
+5. Report: `DONE: <N> units across <W> waves` (note if you stopped at the 10-wave cap).
 
 Never pull unit payloads into your own context — each subagent pulls its own unit.
 Use the MCP tools only; do not read skill/command files or shell into the spool.
