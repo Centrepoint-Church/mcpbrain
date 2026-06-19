@@ -33,13 +33,16 @@ def build_profile_requests(store, *, cap: int = 6) -> list[dict]:
 
     Filters to type='person', email_count >= _EMAIL_FLOOR, and either:
     - profile is empty/null, OR
-    - profile_updated_at is older than _STALE_DAYS days.
+    - profile_updated_at is older than _STALE_DAYS days (wall-clock backstop), OR
+    - the entity has been re-observed (last_seen) SINCE its profile was written —
+      change-driven staleness, so a profile written early in a backfill refreshes
+      as more of that person's history lands instead of sticking for 30 days.
 
-    Returns up to `cap` dicts sorted by email_count DESC. Each dict
-    includes: entity_id, name, org, role, relations.
+    Returns up to `cap` dicts, never-profiled and stalest-profiled first (so the
+    refresh rotates rather than re-doing the same high-volume people each cycle).
+    Each dict includes: entity_id, name, org, role, relations.
     """
     now_iso = datetime.now(timezone.utc).date().isoformat()
-    # SQLite date arithmetic: date(profile_updated_at, '+30 days') < date('now')
     sql = """
         SELECT id, name, org, email_count
         FROM   entities
@@ -53,8 +56,17 @@ def build_profile_requests(store, *, cap: int = 6) -> list[dict]:
                    AND profile_updated_at != ''
                    AND date(profile_updated_at, '+' || ? || ' days') < date(?)
                  )
+              OR (
+                   profile_updated_at IS NOT NULL
+                   AND profile_updated_at != ''
+                   AND last_seen IS NOT NULL
+                   AND last_seen != ''
+                   AND last_seen > date(profile_updated_at)
+                 )
               )
-        ORDER  BY email_count DESC
+        ORDER  BY (profile_updated_at IS NULL OR profile_updated_at = '') DESC,
+                  profile_updated_at ASC,
+                  email_count DESC
         LIMIT  ?
     """
     with store._connect() as db:
@@ -83,7 +95,7 @@ def _fetch_relations(store, entity_id: str) -> list[str]:
                FROM   entity_relations
                WHERE  (entity_a = ? OR entity_b = ?)
                  AND  (invalidated_at IS NULL OR invalidated_at = '')
-               ORDER  BY id DESC
+               ORDER  BY last_seen DESC, id DESC
                LIMIT  10""",
             (entity_id, entity_id),
         ).fetchall()

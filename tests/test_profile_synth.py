@@ -56,6 +56,22 @@ def test_profiled_entity_not_rerequested(tmp_path):
     assert profile_synth.build_profile_requests(s, cap=6) == []
 
 
+def test_profile_rerequested_when_re_observed_since_profiled(tmp_path):
+    # Change-driven staleness: a profiled person who is re-observed AFTER their
+    # profile was written must be re-requested (so backfill-discovered facts land),
+    # without waiting out the 30-day wall-clock window.
+    s = _store(tmp_path)
+    eid = _person(s, "Taryn Hamilton")
+    profile_synth.drain_profiles(s, {"profile_synthesis": [
+        {"entity_id": eid, "profile": "A profile."}]})
+    assert profile_synth.build_profile_requests(s, cap=6) == []      # fresh, same day
+    # re-observed on a later day → last_seen advances past profile_updated_at
+    with s._connect() as db:
+        db.execute("UPDATE entities SET last_seen='2099-01-01' WHERE id=?", (eid,))
+    reqs = profile_synth.build_profile_requests(s, cap=6)
+    assert [r["entity_id"] for r in reqs] == [eid]                   # re-requested
+
+
 def test_drainer_registered_and_callable(tmp_path):
     from mcpbrain import profile_synth as _ps  # noqa: F401 — import registers the drainer
     from mcpbrain.drain import BLOCK_DRAINERS
