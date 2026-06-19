@@ -10,12 +10,14 @@ needs no skill or command file.
 2. Otherwise it returns `units` — a list of `{unit_id, kind, block, count}`. Each is
    one unit of work (a slice of threads, or one block type's items).
 3. For **each unit**, spawn the **`enrich-batch`** subagent (the Task tool,
-   `subagent_type: enrich-batch`). That agent runs on Haiku (set in its own
-   frontmatter) and carries the FULL extraction protocol in its system prompt — so
-   the rules sit in one cacheable prefix shared across the whole fan-out, never in
-   your context. Spawn them in parallel — up to ~5 Task calls in one message, then
-   the next wave. Give each subagent EXACTLY this one-line instruction, substituting
-   the unit's `unit_id` (the agent already knows the protocol — do not repeat it):
+   `subagent_type: enrich-batch`, **`model: haiku`**). Set the model **explicitly in
+   the dispatch** — extraction follows the rules well on Haiku and is far cheaper than
+   Sonnet; do not rely on the agent's frontmatter alone, which is not always honored.
+   That agent carries the FULL extraction protocol in its system prompt — so the rules
+   sit in one cacheable prefix shared across the whole fan-out, never in your context.
+   Spawn them in parallel — up to ~5 Task calls in one message, then the next wave.
+   Give each subagent EXACTLY this one-line instruction, substituting the unit's
+   `unit_id` (the agent already knows the protocol — do not repeat it):
 
    > Enrich unit `<unit_id>`. Act autonomously; do not ask questions.
 
