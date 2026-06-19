@@ -41,6 +41,10 @@ def test_routine_enrich_describes_fanout(tmp_path):
     assert "enrich-batch" in enrich                  # dispatches the cache-anchored agent
     assert "subagent" in enrich.lower()
     assert "haiku" in enrich.lower()                 # extraction subagents run on Haiku
+    # requeue guard: a non-conforming reply means the unit derailed (no push) and must
+    # be re-dispatched, not counted done.
+    assert "requeue" in enrich.lower()
+    assert "re-dispatch" in enrich.lower() and "derail" in enrich.lower()
 
 
 def _agent_file():
