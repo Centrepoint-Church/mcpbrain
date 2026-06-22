@@ -117,6 +117,21 @@ def salience_require_drive_mention(home) -> bool:
     return bool(read_config(home).get("salience_require_drive_mention", False))
 
 
+def write_time_dedup_enabled(home) -> bool:
+    """Whether write-time entity dedup runs the cascade matcher before inserting.
+
+    When True, apply() checks each new entity against an in-memory index of
+    existing same-type entities using a two-step cascade: exact canonical-key
+    match → high-confidence token-similarity (≥ 0.8). A match redirects the
+    write to the existing entity rather than creating a duplicate.
+
+    Default: False — safe rollout. Enable via config 'write_time_dedup': true.
+    Note: embedding-based blocking (cosine on entity vectors) is deferred until
+    entity vectors exist.
+    """
+    return bool(read_config(home).get("write_time_dedup", False))
+
+
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
     units (config 'spool_thread_cap', default 500).
