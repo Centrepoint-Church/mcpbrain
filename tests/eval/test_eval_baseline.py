@@ -56,6 +56,45 @@ def test_recall_and_mrr_above_floor(fixture_store):
         f"MRR {m['mrr']:.3f} below floor {MRR_FLOOR}")
 
 
+# Floor for gold-set evaluation against the real corpus. The gold set was
+# curated for the ops-brain Qdrant/Voyage corpus; many expected chunk IDs
+# (gmail-*, gdrive-*) overlap with mcpbrain but corpus coverage is partial.
+# Baseline 2026-06-22: recall@10=0.033, MRR=0.033 on the live store.
+# Floor is set low (0.01) to catch gross regressions (broken indexing, wrong
+# embedder, store disconnected) without gating on corpus coverage gaps.
+# Raise once the store has full corpus coverage and IDs are verified present.
+GOLD_RECALL_FLOOR = 0.015   # calibrated 2026-06-22: baseline recall@10=0.033
+GOLD_MRR_FLOOR = 0.003      # calibrated 2026-06-22: baseline MRR=0.008
+
+
+def test_gold_recall_floor():
+    """Gold set: recall@10 and MRR must be >= floor when the real store is available.
+
+    Skips in CI (no real store) and on a fresh install (empty store). Runs in
+    production to catch regressions in real retrieval quality.
+    """
+    from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
+
+    if not load_gold_cases():
+        pytest.skip("golden_retrieval_set.yaml not found")
+
+    result = try_open_real_store()
+    if result is None:
+        pytest.skip("real brain store unavailable or empty")
+
+    store, emb = result
+    m = gold_eval(store, emb, k=10)
+    if m["n"] == 0:
+        pytest.skip("gold set has no evaluable cases")
+
+    print(f"\ngold set: recall@10={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
+          f"(n={m['n']} cases)")
+    assert m["recall_at_k"] >= GOLD_RECALL_FLOOR, (
+        f"gold recall@10 {m['recall_at_k']:.3f} below floor {GOLD_RECALL_FLOOR}")
+    assert m["mrr"] >= GOLD_MRR_FLOOR, (
+        f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
+
+
 def test_eval_detects_broken_retrieval(fixture_store, monkeypatch):
     """Proves the floor is load-bearing: when retrieval returns nothing, the
     eval must report 0.0 (well below the floor), not silently pass."""
