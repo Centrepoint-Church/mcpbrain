@@ -18,6 +18,17 @@ def test_store_path_under_app_dir(tmp_path, monkeypatch):
     assert config.store_path().name == "brain.sqlite3"
 
 
+def test_spool_thread_cap_default_and_override(tmp_path):
+    home = str(tmp_path)
+    assert config.spool_thread_cap(home) == 500            # default when unset
+    write_config(home, {"spool_thread_cap": 800})
+    assert config.spool_thread_cap(home) == 800            # explicit override
+    write_config(home, {"spool_thread_cap": "garbage"})
+    assert config.spool_thread_cap(home) == 500            # invalid -> default
+    write_config(home, {"spool_thread_cap": 0})
+    assert config.spool_thread_cap(home) == 1              # floored at 1
+
+
 def test_write_is_0600_and_roundtrips(tmp_path):
     write_config(str(tmp_path), {"gemini_key": "k", "backup": {"shared_drive_id": "d"}})
     p = tmp_path / "config.json"

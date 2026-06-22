@@ -92,6 +92,22 @@ def reextract_enabled(home) -> bool:
     return bool(read_config(home).get("reextract", True))
 
 
+def spool_thread_cap(home) -> int:
+    """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
+    units (config 'spool_thread_cap', default 500).
+
+    group_unenriched_threads returns the first N un-enriched threads each cycle, so
+    the work queue is bounded at roughly this many threads. Raising it deepens the
+    pool so parallel backfill sessions pull more before starving between daemon
+    refills (the lever for new-unit throughput); lower it to throttle token/cost
+    during steady-state new-mail enrichment. Read every cycle, so a config edit
+    takes effect on the next drain — no daemon restart needed."""
+    try:
+        return max(1, int(read_config(home).get("spool_thread_cap", 500)))
+    except (TypeError, ValueError):
+        return 500
+
+
 def clickup_api_key(home) -> str:
     """Return the ClickUp personal API token from config, or '' if unset."""
     return read_config(home).get("clickup_api_key", "") or ""
