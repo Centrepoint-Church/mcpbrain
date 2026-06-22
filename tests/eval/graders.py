@@ -3,12 +3,13 @@
 Ported from ops-brain evals/graders.py with adaptations:
 - Logger: mcpbrain.evals
 - CodeGrader._get_tool: falls back to mcpbrain.mcp_server (not src/mcp_server)
-- ModelJudgeGrader: skips cleanly when ANTHROPIC_API_KEY unset (no CLI subprocess)
-- Default judge model: claude-haiku-4-5-20251001
+- ModelJudgeGrader: calls the subscription `claude` CLI (headless `-p`), NOT the
+  Anthropic SDK / ANTHROPIC_API_KEY — mcpbrain runs on a Claude subscription.
+  Skips cleanly when the CLI is unavailable.
 
 Two grader types:
   CodeGrader       — deterministic assertion-based grading (verbatim from ops-brain)
-  ModelJudgeGrader — LLM scores output against a rubric (pass@k); skips on no key
+  ModelJudgeGrader — LLM scores output against a rubric (pass@k); skips with no CLI
 """
 
 from __future__ import annotations
@@ -131,10 +132,18 @@ class CodeGrader:
         )
 
 
-try:
-    import anthropic as _anthropic
-except ImportError:
-    _anthropic = None  # type: ignore
+def _claude_cli() -> str | None:
+    """Locate the subscription `claude` CLI, or None if unavailable.
+
+    mcpbrain runs on a Claude subscription (no ANTHROPIC_API_KEY) — LLM calls go
+    through the `claude` CLI in headless `-p` mode, the same path the enrichment
+    cadences use. Returns None (→ grader skips) when the CLI is absent.
+    """
+    try:
+        from mcpbrain.config import find_claude
+        return find_claude()
+    except Exception:
+        return None
 
 
 _JUDGE_PROMPT = """\
@@ -160,8 +169,8 @@ class ModelJudgeGrader:
     Passes if >= pass_threshold fraction of k judge runs return PASS.
     Default model is claude-haiku-4-5-20251001 for cost efficiency.
 
-    Skips cleanly when ANTHROPIC_API_KEY is unset — returns a SKIP result
-    rather than raising or falling back to a subprocess.
+    Calls the subscription `claude` CLI (headless `-p`). Skips cleanly (SKIP
+    result, passed=True) when the CLI is unavailable, rather than raising.
     """
 
     def __init__(self, model: str = "claude-haiku-4-5-20251001",
@@ -181,18 +190,14 @@ class ModelJudgeGrader:
             raise ValueError(f"Tool '{name}' not found in mcpbrain.mcp_server")
         return fn
 
-    @staticmethod
-    def _api_key() -> str | None:
-        import os
-        return os.environ.get("ANTHROPIC_API_KEY") or None
-
     def _judge(self, case: dict, output: str) -> tuple[str, str]:
-        """Call the judge model once. Returns ('PASS'|'FAIL'|'SKIP', reason)."""
+        """Call the judge model once via the claude CLI. Returns (verdict, reason)."""
         import json
+        import subprocess
 
-        api_key = self._api_key()
-        if not api_key or _anthropic is None:
-            return "SKIP", "ANTHROPIC_API_KEY not set — LLM judge skipped"
+        cli = _claude_cli()
+        if not cli:
+            return "SKIP", "claude CLI not found — LLM judge skipped"
 
         prompt = _JUDGE_PROMPT.format(
             tool=case.get("tool", ""),
@@ -200,14 +205,19 @@ class ModelJudgeGrader:
             output=output[:3000],
             rubric=case.get("rubric", ""),
         )
+        try:
+            # Headless print mode; prompt on stdin to avoid arg-length/escaping.
+            # --model selects Haiku for cost; no tools needed for a text judge.
+            proc = subprocess.run(
+                [cli, "-p", "--model", self.model],
+                input=prompt, capture_output=True, text=True, timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001 — CLI missing/slow → skip, don't crash the suite
+            return "SKIP", f"claude CLI invocation failed: {exc}"
+        if proc.returncode != 0:
+            return "SKIP", f"claude CLI exit {proc.returncode}: {(proc.stderr or '')[:200]}"
 
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text.strip()
+        text = (proc.stdout or "").strip()
         lines = text.splitlines()
         verdict = lines[0].strip().upper() if lines else "FAIL"
         reason = lines[1].strip() if len(lines) > 1 else text
@@ -216,14 +226,14 @@ class ModelJudgeGrader:
         return verdict, reason
 
     def run(self, case: dict) -> EvalResult:
-        if not self._api_key() or _anthropic is None:
-            log.info("ModelJudgeGrader: ANTHROPIC_API_KEY unset — skipping %s", case.get("id"))
+        if not _claude_cli():
+            log.info("ModelJudgeGrader: claude CLI unavailable — skipping %s", case.get("id"))
             return EvalResult(
                 id=case.get("id", "unknown"),
                 passed=True,
                 failures=[],
                 output_sample="",
-                judge_reasons=["SKIP: ANTHROPIC_API_KEY not set"],
+                judge_reasons=["SKIP: claude CLI not found"],
                 skipped=True,
             )
 

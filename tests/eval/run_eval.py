@@ -164,41 +164,55 @@ def try_open_real_store():
 
 
 def gold_eval(store, embedder, *, k: int = 10) -> dict:
-    """Run recall@k and MRR over the hand-curated gold set.
+    """Run recall@k and MRR over the hand-curated gold set — coverage-aware.
 
-    Returns {"recall_at_k", "mrr", "k", "n"} where n is the number of cases
-    that had at least one expected_chunk_id. Cases where all expected IDs are
-    missing from the store still count (recall=0 for that case).
+    The gold set is shared with ops-brain and references its full corpus. mcpbrain
+    may hold only a subset (e.g. mid-backfill), so a case is only *coverable* when
+    at least one of its expected_chunk_ids actually exists in this store. We score
+    recall/MRR over COVERED cases only — a missing chunk is a corpus-coverage gap,
+    NOT a retrieval failure, and must not be averaged in as a 0 (that masks real
+    quality and lets a near-zero floor pass trivially).
+
+    Returns {recall_at_k, mrr, k, covered, total, missing} where:
+      covered = cases with >=1 expected id present in the store (the scored set)
+      total   = cases with any expected_chunk_ids
+      missing = total - covered (coverage gap; grows the eval as backfill fills in)
     """
     from mcpbrain.retrieval import hybrid_search
 
     cases = load_gold_cases()
-    if not cases:
-        return {"recall_at_k": 0.0, "mrr": 0.0, "k": k, "n": 0}
-
+    total = covered = 0
     recalls: list[float] = []
     rrs: list[float] = []
     for case in cases:
         expected = set(case.get("expected_chunk_ids") or [])
         if not expected:
             continue
+        total += 1
+        present = {d for d in expected if store.get_chunk(d) is not None}
+        if not present:
+            continue  # not coverable against this corpus yet — skip, don't score 0
+        covered += 1
         results = hybrid_search(store, embedder, case.get("query", ""), limit=k)
         retrieved = [r["doc_id"] for r in results]
-        hits = set(retrieved[:k]) & expected
-        recalls.append(len(hits) / len(expected))
+        # Score against the PRESENT expected ids only (can't retrieve what isn't indexed).
+        hits = set(retrieved[:k]) & present
+        recalls.append(len(hits) / len(present))
         rr = 0.0
         for i, doc_id in enumerate(retrieved):
-            if doc_id in expected:
+            if doc_id in present:
                 rr = 1.0 / (i + 1)
                 break
         rrs.append(rr)
 
-    n = len(recalls) or 1
+    n = covered or 1
     return {
         "recall_at_k": sum(recalls) / n,
         "mrr": sum(rrs) / n,
         "k": k,
-        "n": len(recalls),
+        "covered": covered,
+        "total": total,
+        "missing": total - covered,
     }
 
 
@@ -221,11 +235,14 @@ def main() -> None:
             return
         store, emb = result
         m = gold_eval(store, emb, k=args.k)
-        if m["n"] == 0:
+        if m["total"] == 0:
             print("Gold set eval: no cases loaded (golden_retrieval_set.yaml missing?)")
+        elif m["covered"] == 0:
+            print(f"Gold set eval: 0/{m['total']} cases coverable against this corpus "
+                  f"(expected chunks not yet indexed — re-run after backfill).")
         else:
             print(f"Gold set: recall@{m['k']}={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
-                  f"(n={m['n']} cases)")
+                  f"(covered {m['covered']}/{m['total']} cases; {m['missing']} not yet in corpus)")
         return
 
     with tempfile.TemporaryDirectory() as td:

@@ -190,10 +190,13 @@ _COLD_DRIVE_MIMES = frozenset({
     "application/vnd.ms-excel",
 })
 
-# Gmail label fragments that indicate promotional / bulk mail.
+# Gmail category labels that indicate bulk / non-correspondence mail and are safe
+# to skip from graph-extraction. CATEGORY_UPDATES is deliberately NOT here: Gmail
+# files plenty of legitimate transactional/human threads under Updates, so skipping
+# it wholesale loses real signal. Deprioritising (not skipping) Updates belongs to
+# the importance-scoring work (B3), not this binary gate.
 _PROMOTIONAL_LABELS = frozenset({
     "CATEGORY_PROMOTIONS",
-    "CATEGORY_UPDATES",
     "CATEGORY_SOCIAL",
     "CATEGORY_FORUMS",
 })
@@ -227,7 +230,9 @@ def should_enrich(chunk: dict) -> bool:
         except Exception:
             meta = {}
 
-    source = str(meta.get("source") or "").lower()
+    # The chunk metadata field is `source_type` (not `source`); fall back to the
+    # legacy key and to structural hints (thread_id ⇒ email, file_id/mime ⇒ Drive).
+    source = str(meta.get("source_type") or meta.get("source") or "").lower()
 
     if source == "gmail" or meta.get("thread_id"):
         # Email: check Gmail category labels.
@@ -254,12 +259,32 @@ def should_enrich(chunk: dict) -> bool:
     return True
 
 
-def _apply_salience_gate(store, batches: list) -> tuple[list, dict]:
+def _is_drive_chunk(meta: dict) -> bool:
+    src = str(meta.get("source_type") or meta.get("source") or "").lower()
+    return src in ("gdrive", "drive") or bool(meta.get("file_id"))
+
+
+def _drive_mentioned_in_email(store, meta: dict) -> bool:
+    """True if this Drive doc's file_id or file_name appears in any email.
+
+    The ops-brain salience rule: a Drive doc is worth graph-extraction when it is
+    referenced in correspondence (a shared link / named attachment). Used only as
+    a stricter gate when `salience_require_drive_mention` is enabled.
+    """
+    return store.email_mentions(meta.get("file_id") or "", meta.get("file_name") or "")
+
+
+def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = False) -> tuple[list, dict]:
     """Run should_enrich() over all chunks in each batch.
 
     Chunks that do not enrich are marked 'cold' in the store (reversible) and
     removed from the batch. Empty batches are discarded. Returns (kept_batches,
     summary) where summary has 'gated' (cold-marked) and 'kept' counts.
+
+    When require_drive_mention is True, a Drive chunk that passes should_enrich is
+    ADDITIONALLY required to be referenced in email (ops-brain's mention gate) —
+    off by default because mcpbrain holds valuable un-emailed docs (minutes,
+    profiles) that a blanket mention requirement would wrongly cold-gate.
     """
     gated = kept = 0
     result = []
@@ -267,7 +292,17 @@ def _apply_salience_gate(store, batches: list) -> tuple[list, dict]:
         cold_ids = []
         kept_chunks = []
         for chunk in batch.chunks:
-            if should_enrich(chunk):
+            meta = chunk.get("metadata") or {}
+            if isinstance(meta, str):
+                import json as _json
+                try:
+                    meta = _json.loads(meta)
+                except Exception:
+                    meta = {}
+            keep = should_enrich(chunk)
+            if keep and require_drive_mention and _is_drive_chunk(meta):
+                keep = _drive_mentioned_in_email(store, meta)
+            if keep:
                 kept_chunks.append(chunk)
                 kept += 1
             else:
@@ -587,8 +622,11 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     # Q1 salience gate: run before noise filter so cold-marked chunks are excluded
     # from the thread_cap count. Gate is behind a config flag (default OFF).
     salience_summary = {}
-    if config.salience_gate_enabled(str(config.app_dir())):
-        batches, salience_summary = _apply_salience_gate(store, batches)
+    _home = str(config.app_dir())
+    if config.salience_gate_enabled(_home):
+        batches, salience_summary = _apply_salience_gate(
+            store, batches,
+            require_drive_mention=config.salience_require_drive_mention(_home))
     kept = _filter_noise(store, batches)[:thread_cap]
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,

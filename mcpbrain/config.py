@@ -106,6 +106,17 @@ def salience_gate_enabled(home) -> bool:
     return bool(read_config(home).get("salience_gate", False))
 
 
+def salience_require_drive_mention(home) -> bool:
+    """Stricter Drive gate: only graph-extract a Drive doc if it's referenced in
+    email (ops-brain's mention rule). Config 'salience_require_drive_mention'.
+
+    Default: False. mcpbrain holds valuable un-emailed docs (board minutes, role
+    profiles) that a blanket mention requirement would wrongly cold-gate, so this
+    aggressive pollution-cut is opt-in and only applies when the salience gate is on.
+    """
+    return bool(read_config(home).get("salience_require_drive_mention", False))
+
+
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
     units (config 'spool_thread_cap', default 500).

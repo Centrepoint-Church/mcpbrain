@@ -3,17 +3,27 @@
 Ported from ops-brain feedback.py + feedback_aggregator.py (adapted for sqlite).
 
 Signals:
-  exposure  — chunk was injected into a UserPromptSubmit context block
-  (used / edited / ignored are not yet capturable via hooks; tracked as future work)
+  exposure  — chunk was injected into a UserPromptSubmit context block (the only
+              signal currently capturable from the auto-recall hook)
+  used / edited / ignored — NOT yet captured anywhere. There is no reliable
+              automatic "the recall was useful" signal from the UserPromptSubmit
+              path, so a positive signal is deferred (depends on S1/S4 work). The
+              event API and aggregation below already handle these the moment a
+              capture mechanism exists — see record_feedback.
 
 Aggregation (nightly, via daemon cadence):
-  Bayesian CTR with a 90-day half-life decay.  With only exposure data and no
-  click signals, the smoothed CTR stays at the uninformative prior (1.0 neutral).
-  The multiplier hook is wired but identity until click data accrues.
+  A BOOST-ONLY quality multiplier centred on 1.0. A chunk with no positive
+  ('used'/'edited') signal stays at exactly 1.0 (neutral) — exposure alone NEVER
+  lowers a chunk's quality (exposure ~= relevance, so penalising it would be
+  backwards). A chunk that accrues positive signal rises above 1.0 (up to
+  1 + _USE_BOOST). Down-weighting would require an explicit negative ('ignored')
+  signal and is intentionally not done until that signal exists.
 
 Storage:
-  recall_feedback  — raw event log (one row per exposure)
-  chunk_quality    — per-chunk quality float (default 1.0 = neutral)
+  recall_feedback  — raw event log (one row per event)
+  chunk_quality    — per-chunk quality float; ONLY written for chunks with a
+                     positive signal. Absent row → get_chunk_quality returns the
+                     1.0 neutral default, so exposure-only chunks are untouched.
 
 Configuration:
   feedback_enabled (config.json, default True) — master switch to disable all
@@ -28,10 +38,11 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("mcpbrain.feedback")
 
-# Bayesian prior: α + β = total prior weight; α/total = prior mean (0.5).
-# With no click data the posterior stays at ~prior = 1.0 (neutral).
-_ALPHA = 1.0   # pseudo-successes (used)
-_BETA = 1.0    # pseudo-failures (not used)
+# Boost-only model: positive signal raises quality above the 1.0 neutral baseline;
+# nothing lowers it. _USE_BOOST is the max multiplier gain; _PRIOR smooths so a
+# single 'used' event doesn't jump a chunk straight to the cap.
+_USE_BOOST = 0.5    # a heavily-used chunk reaches up to 1.5x
+_PRIOR = 3.0        # decay-weighted uses needed to reach ~half the boost
 
 _HALF_LIFE_DAYS = 90.0   # exponential decay half-life for age-weighting
 
@@ -62,9 +73,19 @@ def record_feedback(store, doc_id: str, session_id: str, event_type: str) -> Non
 
 
 def record_exposures(store, doc_ids: list[str], session_id: str) -> None:
-    """Log exposure events for a batch of doc_ids injected in one recall pass."""
-    for doc_id in (doc_ids or []):
-        record_feedback(store, doc_id, session_id, "exposure")
+    """Log exposure events for a batch of doc_ids injected in one recall pass.
+
+    Single batched write (one transaction), not one connection per doc — keeps the
+    recall hot path cheap. Errors are swallowed so feedback never disrupts a recall.
+    """
+    if not doc_ids:
+        return
+    try:
+        ts = _now_iso()
+        store.record_recall_feedback_batch(
+            [(doc_id, session_id, "exposure", ts) for doc_id in doc_ids])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("feedback.record_exposures error (swallowed): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -72,27 +93,31 @@ def record_exposures(store, doc_ids: list[str], session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def aggregate_feedback(store, *, now: datetime | None = None) -> dict:
-    """Compute Bayesian-smoothed CTR per chunk and write chunk_quality.
+    """Compute a boost-only quality multiplier per chunk and write chunk_quality.
 
-    Returns {"updated": int, "skipped": int} summary.
+    Returns {"updated": int, "skipped": int, "neutral": int} where `neutral` is
+    the number of chunks that had only exposure (no positive signal) and were
+    therefore left at the 1.0 default (no row written).
 
-    With only exposure data (no click signals yet), quality remains close to 1.0
-    (the uninformative prior). This wires the plumbing so quality updates
-    automatically once 'used' / 'edited' signals are added.
+    Quality for a chunk with decay-weighted positive uses `u`:
+        quality = 1 + _USE_BOOST * u / (u + _PRIOR)   (in [1.0, 1+_USE_BOOST))
+    A chunk with u == 0 stays at exactly 1.0 — exposure never lowers quality.
+    Today no 'used'/'edited' events are captured, so every chunk is neutral and
+    nothing is written; the plumbing activates automatically once a positive
+    signal is recorded.
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
     rows = store.all_feedback_rows()  # [{doc_id, event_type, ts}]
     if not rows:
-        return {"updated": 0, "skipped": 0}
+        return {"updated": 0, "skipped": 0, "neutral": 0}
 
-    # Group by doc_id, accumulate decay-weighted exposures and uses.
+    # Group by doc_id, accumulate decay-weighted exposures and positive uses.
     stats: dict[str, dict] = {}
     for row in rows:
         doc_id = row["doc_id"]
-        if doc_id not in stats:
-            stats[doc_id] = {"exposures": 0.0, "uses": 0.0}
+        s = stats.setdefault(doc_id, {"exposures": 0.0, "uses": 0.0})
         try:
             ts = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
             age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
@@ -100,24 +125,26 @@ def aggregate_feedback(store, *, now: datetime | None = None) -> dict:
             age_days = 0.0
         w = _decay(age_days)
         if row["event_type"] == "exposure":
-            stats[doc_id]["exposures"] += w
+            s["exposures"] += w
         elif row["event_type"] in ("used", "edited"):
-            stats[doc_id]["uses"] += w
+            s["uses"] += w
 
-    updated = skipped = 0
+    updated = skipped = neutral = 0
     for doc_id, s in stats.items():
-        exp = s["exposures"]
-        uses = s["uses"]
-        # Bayesian posterior mean: (α + uses) / (α + β + exposures)
-        quality = (_ALPHA + uses) / (_ALPHA + _BETA + exp)
+        u = s["uses"]
+        if u <= 0.0:
+            neutral += 1   # exposure-only → leave at 1.0 default, write nothing
+            continue
+        quality = 1.0 + _USE_BOOST * (u / (u + _PRIOR))
         try:
-            store.update_chunk_quality(doc_id, round(quality, 4), int(exp), int(uses))
+            store.update_chunk_quality(
+                doc_id, round(quality, 4), round(s["exposures"], 2), round(u, 2))
             updated += 1
         except Exception as exc:  # noqa: BLE001
             log.debug("aggregate_feedback: update_chunk_quality failed for %s: %s", doc_id, exc)
             skipped += 1
 
-    return {"updated": updated, "skipped": skipped}
+    return {"updated": updated, "skipped": skipped, "neutral": neutral}
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +153,15 @@ def aggregate_feedback(store, *, now: datetime | None = None) -> dict:
 
 def apply_quality_multiplier(results: list[dict], store,
                              *, weight: float = 0.0) -> list[dict]:
-    """Multiply each result's score by chunk_quality, weighted by `weight`.
+    """Boost results by chunk_quality, scaled by `weight`. Boost-only: quality is
+    in [1.0, 1+_USE_BOOST], so this never lowers a score.
 
     weight=0.0 (default) means identity: score unchanged regardless of quality.
-    weight=1.0 means full quality weighting: score *= quality.
+    weight=1.0 applies the full boost: score *= quality.
 
-    The multiplier is neutral until data accrues (chunk_quality defaults to
-    1.0 for all chunks, so identity even at weight=1.0 early on).
-    This hook is the insertion point; the daemon wires it once weight is tuned.
+    Neutral until positive signal accrues (chunk_quality defaults to 1.0 for every
+    chunk and is only written above 1.0 for chunks with 'used'/'edited' events).
+    This hook is the insertion point; the ranker wires it once weight is tuned (S4).
     """
     if weight == 0.0 or not results:
         return results
