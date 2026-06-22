@@ -83,6 +83,20 @@ def _model_cache_dir() -> str:
     return os.environ.get("FASTEMBED_CACHE_PATH") or str(app_dir() / "models")
 
 
+def model_weights_cached() -> bool:
+    """True when the local embedding model weights are present on disk.
+
+    Cheap and offline — globs the persistent cache dir (see ``_model_cache_dir``)
+    for the ``.onnx`` weights without loading onnxruntime. ``mcpbrain doctor``
+    uses this to catch a wiped/missing cache before it surfaces to the user as a
+    server-startup crash (``onnxruntime ... NO_SUCHFILE`` → "unable to connect to
+    the MCP server").
+    """
+    from pathlib import Path
+    d = Path(_model_cache_dir())
+    return d.is_dir() and any(d.rglob("*.onnx"))
+
+
 class _LocalEmbedder:
     def __init__(self, model_name: str, dim: int, query_prefix: str):
         from fastembed import TextEmbedding          # lazy: keep import-time light

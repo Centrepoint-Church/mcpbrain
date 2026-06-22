@@ -37,7 +37,7 @@ class _Recorder:
 
 def test_all_ok_exit_zero_no_repairs():
     repairs = {"daemon": _Recorder(), "agent": _Recorder(), "records": _Recorder()}
-    code, msg = doctor.run_doctor("/tmp/home", conns=_conns(), repairs=repairs)
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=_conns(), repairs=repairs)
     assert code == 0
     assert all(r.calls == 0 for r in repairs.values())
     assert "mcpbrain doctor" in msg
@@ -47,7 +47,7 @@ def test_not_started_optional_renders_distinct_glyph_not_green_check():
     # clickup/backup not configured = deliberately optional, not a fault and not
     # "healthy". Must render with the ➖ glyph, NOT a green ✅, and not be counted.
     conns = _conns(clickup="not_started", backup="not_started")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns,
                                   repairs={"daemon": _Recorder(), "agent": _Recorder(),
                                            "records": _Recorder()})
     assert code == 0  # optional unconfigured features are not actionable
@@ -67,7 +67,7 @@ def test_daemon_down_repair_called_reprobe_fixed():
     def fake_reprobe(home, key, fallback):
         return reprobed.get(key, fallback)
 
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=fake_reprobe,
                                   agent_installed=lambda h, p: True)
     assert daemon.calls == 1
@@ -82,7 +82,7 @@ def test_agent_missing_install_called():
     repairs = {"daemon": _Recorder(), "agent": agent, "records": _Recorder()}
     # claude needs_action AND the OS agent is reported missing → install, not restart.
     conns = _conns(claude="needs_action")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: {"state": "ok", "detail": "ok",
                                                            "last_verified": None},
                                   agent_installed=lambda h, p: False)
@@ -95,7 +95,7 @@ def test_records_missing_bootstrap_called():
     records = _Recorder()
     repairs = {"daemon": _Recorder(), "agent": _Recorder(), "records": records}
     conns = _conns(records="not_started")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: {"state": "ok", "detail": "Ready",
                                                            "last_verified": None})
     assert records.calls == 1
@@ -106,7 +106,7 @@ def test_records_missing_bootstrap_called():
 def test_google_expired_guided_no_repair_exit1():
     repairs = {"daemon": _Recorder(), "agent": _Recorder(), "records": _Recorder()}
     conns = _conns(google="needs_action")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: f)
     assert all(r.calls == 0 for r in repairs.values())
     assert "mcpbrain auth" in msg
@@ -117,7 +117,7 @@ def test_repair_failure_reported_exit1():
     repairs = {"daemon": _Recorder(ok=False), "agent": _Recorder(),
                "records": _Recorder()}
     conns = _conns(claude="needs_action")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: f,
                                   agent_installed=lambda h, p: True)  # → daemon repair
     assert "repair failed" in msg
@@ -128,7 +128,7 @@ def test_scheduled_tasks_inferred_from_enrichment():
     repairs = {"daemon": _Recorder(), "agent": _Recorder(), "records": _Recorder()}
     # enrichment needs_action → scheduled-tasks line is guided, but NOT double-counted.
     conns = _conns(enrichment="needs_action")
-    code, msg = doctor.run_doctor("/tmp/home", conns=conns, repairs=repairs,
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: f)
     assert "Scheduled tasks" in msg
     assert "/mcpbrain-fix" in msg
@@ -139,9 +139,51 @@ def test_scheduled_tasks_inferred_from_enrichment():
 
 
 def test_output_is_never_empty():
-    code, msg = doctor.run_doctor("/tmp/home", conns=_conns(), repairs={})
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=_conns(), repairs={})
     assert msg.strip(), "doctor must always print a report, even on the all-ok path"
     assert "mcpbrain doctor" in msg
+
+
+def test_embedder_weights_present_reports_ok():
+    # Weights cached → silent green line, no repair, no need_action.
+    embedder = _Recorder()
+    repairs = {"daemon": _Recorder(), "agent": _Recorder(),
+               "records": _Recorder(), "embedder": embedder}
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True,
+                                  conns=_conns(), repairs=repairs)
+    assert "✅ Embedder" in msg and "model weights cached" in msg
+    assert embedder.calls == 0
+    assert code == 0
+
+
+def test_embedder_weights_missing_auto_repair_heals():
+    # First check says missing → warm/download → second check says present → fixed.
+    seen = {"n": 0}
+
+    def present(_home):
+        seen["n"] += 1
+        return seen["n"] > 1  # missing on first call, present after the repair
+
+    embedder = _Recorder()
+    repairs = {"daemon": _Recorder(), "agent": _Recorder(),
+               "records": _Recorder(), "embedder": embedder}
+    code, msg = doctor.run_doctor("/tmp/home", model_present=present,
+                                  conns=_conns(), repairs=repairs)
+    assert embedder.calls == 1
+    assert "Embedder" in msg and "downloading... ✅ fixed" in msg
+    assert code == 0  # the only problem was the embedder, and it healed
+
+
+def test_embedder_repair_failure_needs_action():
+    # Warm raises (e.g. offline) → reported as needing action, exit 1.
+    embedder = _Recorder(ok=False)
+    repairs = {"daemon": _Recorder(), "agent": _Recorder(),
+               "records": _Recorder(), "embedder": embedder}
+    code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: False,
+                                  conns=_conns(), repairs=repairs)
+    assert embedder.calls == 1
+    assert "re-download failed" in msg and "needs network" in msg
+    assert code == 1
 
 
 def test_cli_dispatches_doctor(monkeypatch):
@@ -178,7 +220,7 @@ def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_pa
                             "records", {"repo_dir": repo_dir, **kw}) or repo_dir)
 
     repairs = doctor._default_repairs(str(tmp_path), "darwin", "/usr/local/bin/mcpbrain")
-    assert set(repairs) == {"daemon", "agent", "records"}
+    assert set(repairs) == {"daemon", "agent", "records", "embedder"}
 
     # Invoking each closure must dispatch to the real function with valid kwargs
     # (a TypeError here is exactly the production-only failure we're guarding).
