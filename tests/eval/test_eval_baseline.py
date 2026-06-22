@@ -56,22 +56,30 @@ def test_recall_and_mrr_above_floor(fixture_store):
         f"MRR {m['mrr']:.3f} below floor {MRR_FLOOR}")
 
 
-# Floor for gold-set evaluation against the real corpus. The gold set was
-# curated for the ops-brain Qdrant/Voyage corpus; many expected chunk IDs
-# (gmail-*, gdrive-*) overlap with mcpbrain but corpus coverage is partial.
-# Baseline 2026-06-22: recall@10=0.033, MRR=0.033 on the live store.
-# Floor is set low (0.01) to catch gross regressions (broken indexing, wrong
-# embedder, store disconnected) without gating on corpus coverage gaps.
-# Raise once the store has full corpus coverage and IDs are verified present.
-GOLD_RECALL_FLOOR = 0.015   # calibrated 2026-06-22: baseline recall@10=0.033
-GOLD_MRR_FLOOR = 0.003      # calibrated 2026-06-22: baseline MRR=0.008
+# Floor for gold-set evaluation, applied ONLY over coverable cases (those whose
+# expected chunks are present in this store). The gold set is shared with ops-brain
+# and references its full corpus; mcpbrain may hold a subset mid-backfill, so we
+# never average missing-chunk cases in as 0 (that would mask real quality).
+#
+# These are REGRESSION floors against the measured baseline, NOT an aspirational
+# target. Measured 2026-06-22 over 10 coverable cases: recall@10=0.150, MRR=0.025.
+# The absolute numbers are low partly because the gold ground-truth is ops-brain's
+# *specific* chunk for each query — a different-but-equally-valid mcpbrain chunk
+# counts as a miss — so this gates against retrieval REGRESSIONS, not absolute
+# quality, until the gold set's expected_chunk_ids are re-verified against the
+# mcpbrain corpus (tracked on #6). Raise the floors as coverage + quality improve.
+GOLD_RECALL_FLOOR = 0.10   # measured baseline 0.150 (10 coverable cases, 2026-06-22)
+GOLD_MRR_FLOOR = 0.01      # measured baseline 0.025
+MIN_COVERED = 5            # need at least this many coverable cases to gate meaningfully
 
 
 def test_gold_recall_floor():
-    """Gold set: recall@10 and MRR must be >= floor when the real store is available.
+    """Gold set: recall@10 / MRR over COVERABLE cases must clear the floor.
 
-    Skips in CI (no real store) and on a fresh install (empty store). Runs in
-    production to catch regressions in real retrieval quality.
+    Skips honestly when there is no real store (CI / fresh install) or when too few
+    gold cases are coverable against the current corpus (mid-backfill) — rather than
+    passing a near-zero floor on uncoverable cases. As backfill fills the corpus,
+    `covered` rises and this test starts gating real retrieval quality.
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
@@ -84,13 +92,17 @@ def test_gold_recall_floor():
 
     store, emb = result
     m = gold_eval(store, emb, k=10)
-    if m["n"] == 0:
-        pytest.skip("gold set has no evaluable cases")
+    print(f"\ngold set: covered {m['covered']}/{m['total']} cases "
+          f"({m['missing']} not yet in corpus)")
+    if m["covered"] < MIN_COVERED:
+        pytest.skip(
+            f"only {m['covered']}/{m['total']} gold cases coverable against this "
+            f"corpus (need >= {MIN_COVERED}); re-run after backfill")
 
-    print(f"\ngold set: recall@10={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
-          f"(n={m['n']} cases)")
+    print(f"gold set (covered): recall@10={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}")
     assert m["recall_at_k"] >= GOLD_RECALL_FLOOR, (
-        f"gold recall@10 {m['recall_at_k']:.3f} below floor {GOLD_RECALL_FLOOR}")
+        f"gold recall@10 {m['recall_at_k']:.3f} below floor {GOLD_RECALL_FLOOR} "
+        f"(over {m['covered']} coverable cases)")
     assert m["mrr"] >= GOLD_MRR_FLOOR, (
         f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
 

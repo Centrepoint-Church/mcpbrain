@@ -35,22 +35,37 @@ def test_record_exposures_batch(store):
     assert {r["doc_id"] for r in rows} == {"doc-a", "doc-b"}
 
 
-def test_aggregate_feedback_end_to_end(store):
-    """exposure → aggregate → chunk_quality is persisted and readable."""
+def test_exposure_only_stays_neutral(store):
+    """Boost-only model: exposure WITHOUT a positive signal must NOT lower quality.
+
+    This guards the original bug where quality = 1/(2+exposures) penalised every
+    exposed chunk. With no 'used'/'edited' events, aggregate writes no row and
+    quality stays at the 1.0 neutral default.
+    """
     from mcpbrain.feedback import record_exposures, aggregate_feedback
 
     record_exposures(store, ["doc-a", "doc-a", "doc-b"], "sess-1")
     summary = aggregate_feedback(store)
 
-    assert summary["updated"] >= 1
-    assert summary["skipped"] == 0
+    assert summary["updated"] == 0      # nothing written — all exposure-only
+    assert summary["neutral"] >= 1
+    assert store.get_chunk_quality("doc-a") == 1.0
+    assert store.get_chunk_quality("doc-b") == 1.0
 
+
+def test_positive_signal_boosts_above_neutral(store):
+    """A 'used' event lifts quality above 1.0 (boost-only), never below."""
+    from mcpbrain.feedback import record_feedback, record_exposures, aggregate_feedback
+
+    record_exposures(store, ["doc-a", "doc-b"], "sess-1")
+    record_feedback(store, "doc-a", "sess-1", "used")
+    summary = aggregate_feedback(store)
+
+    assert summary["updated"] == 1      # only doc-a got a positive signal
     q_a = store.get_chunk_quality("doc-a")
     q_b = store.get_chunk_quality("doc-b")
-    # With only exposures (no clicks), quality should be < 1.0 (Bayesian decay).
-    # It must be positive and finite.
-    assert 0.0 < q_a < 1.5
-    assert 0.0 < q_b < 1.5
+    assert q_a > 1.0                    # boosted
+    assert q_b == 1.0                   # exposure-only → neutral
 
 
 def test_chunk_quality_defaults_to_neutral(store):
@@ -61,10 +76,10 @@ def test_chunk_quality_defaults_to_neutral(store):
 
 
 def test_aggregate_empty_store(store):
-    """Aggregation on an empty feedback table returns 0/0 without error."""
+    """Aggregation on an empty feedback table returns zeros without error."""
     from mcpbrain.feedback import aggregate_feedback
     result = aggregate_feedback(store)
-    assert result == {"updated": 0, "skipped": 0}
+    assert result == {"updated": 0, "skipped": 0, "neutral": 0}
 
 
 def test_apply_quality_multiplier_neutral(store):
@@ -76,12 +91,11 @@ def test_apply_quality_multiplier_neutral(store):
     assert out[1]["score"] == pytest.approx(0.5)
 
 
-def test_apply_quality_multiplier_scales(store):
-    """weight=1.0 adjusts score proportionally to chunk_quality."""
+def test_apply_quality_multiplier_boosts(store):
+    """weight=1.0 boosts a result by its (>=1.0) chunk_quality."""
     from mcpbrain.feedback import apply_quality_multiplier
-    # Manually set a quality value.
-    store.update_chunk_quality("doc-a", 0.8, 5, 0)
+    store.update_chunk_quality("doc-a", 1.2, 5, 3)   # boosted chunk
     results = [{"doc_id": "doc-a", "score": 1.0}]
     out = apply_quality_multiplier(results, store, weight=1.0)
-    # score * (1 + 1.0 * (0.8 - 1.0)) = 1.0 * 0.8 = 0.8
-    assert out[0]["score"] == pytest.approx(0.8, abs=0.01)
+    # score * (1 + 1.0 * (1.2 - 1.0)) = 1.0 * 1.2 = 1.2
+    assert out[0]["score"] == pytest.approx(1.2, abs=0.01)
