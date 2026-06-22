@@ -614,6 +614,43 @@ class Store:
             # content-empty doc stops re-queuing+re-extracting forever.
             if "enrich_attempts" not in ch_cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN enrich_attempts INTEGER DEFAULT 0")
+            # --- B3 salience (Phase 2, 2026-06-23) ----------------------------
+            if "salience" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN salience REAL DEFAULT 0.0")
+            # --- B2 memory tier + type (Phase 2, 2026-06-23) ------------------
+            # tier: core/hot/warm/cold/''.  type: episodic/semantic/procedural
+            if "memory_tier" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN memory_tier TEXT DEFAULT ''")
+            if "memory_type" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN memory_type TEXT DEFAULT 'episodic'")
+
+            # --- B5 decay: strength + last_accessed on chunk_quality (Phase 2) -
+            cq_cols = {row["name"] for row in
+                       db.execute("PRAGMA table_info(chunk_quality)").fetchall()}
+            if "memory_strength" not in cq_cols:
+                db.execute("ALTER TABLE chunk_quality ADD COLUMN memory_strength REAL DEFAULT 5.0")
+            if "last_accessed" not in cq_cols:
+                db.execute("ALTER TABLE chunk_quality ADD COLUMN last_accessed TEXT DEFAULT ''")
+
+            # --- B6 voice suggestions table (Phase 2, 2026-06-23) -------------
+            db.execute("""CREATE TABLE IF NOT EXISTS voice_suggestions(
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind         TEXT NOT NULL,
+                rule         TEXT NOT NULL,
+                confidence   REAL DEFAULT 0.0,
+                explanation  TEXT DEFAULT '',
+                evidence_ids TEXT DEFAULT '[]',
+                status       TEXT DEFAULT 'pending',
+                created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+                applied_at   TEXT DEFAULT '')""")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vs_status ON voice_suggestions(status)")
+
+            # --- B6 voice state table (Phase 2, 2026-06-23) ------------------
+            db.execute("""CREATE TABLE IF NOT EXISTS voice_analyser_state(
+                key        TEXT PRIMARY KEY,
+                value      TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '')""")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 
@@ -1030,8 +1067,17 @@ class Store:
 
     def get_chunk(self, doc_id: str) -> dict | None:
         with self._connect() as db:
-            r = db.execute("SELECT doc_id,text,metadata FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
-            return {"doc_id": r["doc_id"], "text": r["text"], "metadata": json.loads(r["metadata"])} if r else None
+            r = db.execute(
+                "SELECT doc_id,text,metadata,memory_tier FROM chunks WHERE doc_id=?", (doc_id,)
+            ).fetchone()
+            if not r:
+                return None
+            return {
+                "doc_id": r["doc_id"],
+                "text": r["text"],
+                "metadata": json.loads(r["metadata"]),
+                "memory_tier": r["memory_tier"] or "",
+            }
 
     def patch_chunk_metadata(self, doc_id: str, **patch) -> bool:
         """Merge kwargs into a chunk's metadata JSON without touching content_hash or embedded.
@@ -2091,3 +2137,262 @@ class Store:
                 "metadata": meta,
             })
         return results
+
+    # --- B3 salience methods (Phase 2, 2026-06-23) ----------------------------
+
+    def chunks_needing_salience(self, limit: int = 500) -> list[dict]:
+        """Return chunks whose salience is 0.0 (never scored) and are embedded.
+
+        Only embedded chunks are scored so the embedding exists as context.
+        Returns {rowid, doc_id, text, metadata} dicts.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT rowid, doc_id, text, metadata FROM chunks "
+                "WHERE embedded=1 AND COALESCE(salience, 0.0) = 0.0 "
+                "ORDER BY rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"])
+            except Exception:
+                meta = {}
+            result.append({"rowid": r["rowid"], "doc_id": r["doc_id"],
+                           "text": r["text"], "metadata": meta})
+        return result
+
+    def set_chunk_salience(self, doc_id: str, salience: float) -> None:
+        """Write the salience score for one chunk."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE chunks SET salience=? WHERE doc_id=?",
+                (round(float(salience), 3), doc_id))
+
+    def set_chunk_salience_batch(self, pairs: list[tuple]) -> None:
+        """Write salience for many chunks. pairs = [(doc_id, salience), ...]."""
+        if not pairs:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "UPDATE chunks SET salience=? WHERE doc_id=?",
+                [(round(float(s), 3), d) for d, s in pairs])
+
+    def get_chunk_salience(self, doc_id: str) -> float:
+        """Return the stored salience for a chunk (0.0 if unscored)."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT salience FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+            return float(row["salience"] or 0.0) if row else 0.0
+
+    # --- B2 memory tier/type methods (Phase 2, 2026-06-23) -------------------
+
+    def set_chunk_tier(self, doc_id: str, tier: str) -> None:
+        """Set memory_tier for one chunk. tier: core/hot/warm/cold/''."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE chunks SET memory_tier=? WHERE doc_id=?", (tier, doc_id))
+
+    def set_chunk_type(self, doc_id: str, memory_type: str) -> None:
+        """Set memory_type for one chunk. type: episodic/semantic/procedural."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE chunks SET memory_type=? WHERE doc_id=?", (memory_type, doc_id))
+
+    def core_chunks(self, max_chars: int = 800) -> list[dict]:
+        """Return chunks in the 'core' tier, newest first, up to max_chars total."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id, text, metadata FROM chunks "
+                "WHERE memory_tier='core' AND COALESCE(enrich_state,'')!='cold' "
+                "ORDER BY rowid DESC",
+            ).fetchall()
+        result = []
+        total = 0
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"])
+            except Exception:
+                meta = {}
+            snippet = (r["text"] or "").strip()
+            if not snippet:
+                continue
+            if total + len(snippet) > max_chars:
+                break
+            result.append({"doc_id": r["doc_id"], "text": snippet, "metadata": meta})
+            total += len(snippet)
+        return result
+
+    def promote_chunk_tier(self, doc_id: str, from_tier: str, to_tier: str) -> bool:
+        """Promote a chunk from from_tier to to_tier. Returns True if updated."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE chunks SET memory_tier=? "
+                "WHERE doc_id=? AND memory_tier=?",
+                (to_tier, doc_id, from_tier))
+            return cur.rowcount > 0
+
+    def chunks_by_tier(self, tier: str, limit: int = 200) -> list[dict]:
+        """Return {doc_id, text, metadata} for chunks in the given tier."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id, text, metadata FROM chunks "
+                "WHERE memory_tier=? ORDER BY rowid DESC LIMIT ?",
+                (tier, limit),
+            ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"])
+            except Exception:
+                meta = {}
+            result.append({"doc_id": r["doc_id"], "text": r["text"], "metadata": meta})
+        return result
+
+    # --- B4 thread context reader (Phase 2, 2026-06-23) ----------------------
+
+    def thread_context(self, thread_id: str) -> str:
+        """Return the contextual_summary for a thread (empty string if none).
+
+        The summary is written by the thread synthesis cadence and piped into
+        extraction context by prepare._thread_block. Returns '' so the caller
+        can use `or ''` safely.
+        """
+        if not thread_id:
+            return ""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT contextual_summary FROM thread_context WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone()
+        if not row:
+            return ""
+        return (row["contextual_summary"] or "").strip()
+
+    # --- B5 decay / memory strength methods (Phase 2, 2026-06-23) -----------
+
+    def get_memory_strength(self, doc_id: str) -> tuple:
+        """Return (strength, last_accessed_iso) for a chunk.
+
+        Strength defaults to 5.0 (mid-range) and last_accessed to '' if the
+        chunk_quality row doesn't exist yet.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT memory_strength, last_accessed FROM chunk_quality WHERE doc_id=?",
+                (doc_id,),
+            ).fetchone()
+        if not row:
+            return (5.0, "")
+        return (float(row["memory_strength"] or 5.0), row["last_accessed"] or "")
+
+    def update_memory_strength(self, doc_id: str, strength: float, last_accessed: str) -> None:
+        """Upsert memory_strength + last_accessed in chunk_quality."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
+                "VALUES(?, 1.0, ?, ?) "
+                "ON CONFLICT(doc_id) DO UPDATE SET "
+                "  memory_strength=excluded.memory_strength, "
+                "  last_accessed=excluded.last_accessed",
+                (doc_id, round(float(strength), 3), last_accessed),
+            )
+
+    def update_memory_strength_batch(self, rows: list[tuple]) -> None:
+        """Update many rows. rows = [(doc_id, strength, last_accessed), ...]."""
+        if not rows:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
+                "VALUES(?, 1.0, ?, ?) "
+                "ON CONFLICT(doc_id) DO UPDATE SET "
+                "  memory_strength=excluded.memory_strength, "
+                "  last_accessed=excluded.last_accessed",
+                [(d, round(float(s), 3), la) for d, s, la in rows],
+            )
+
+    def chunks_for_decay_pass(self, limit: int = 2000) -> list[dict]:
+        """Chunks eligible for decay evaluation: embedded, not core tier.
+
+        Returns {doc_id, salience, memory_tier, memory_strength, last_accessed}.
+        Joins chunks → chunk_quality (LEFT JOIN so unscored chunks still appear).
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT c.doc_id, COALESCE(c.salience,0.0) AS salience, "
+                "       COALESCE(c.memory_tier,'') AS memory_tier, "
+                "       COALESCE(cq.memory_strength, 5.0) AS memory_strength, "
+                "       COALESCE(cq.last_accessed, '') AS last_accessed "
+                "FROM chunks c "
+                "LEFT JOIN chunk_quality cq ON cq.doc_id = c.doc_id "
+                "WHERE c.embedded=1 AND COALESCE(c.memory_tier,'') != 'core' "
+                "ORDER BY c.rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def demote_chunks_to_cold(self, doc_ids: list[str]) -> int:
+        """Set memory_tier='cold' for the given doc_ids. Returns count changed."""
+        if not doc_ids:
+            return 0
+        with self._connect() as db:
+            qs = ",".join("?" for _ in doc_ids)
+            cur = db.execute(
+                f"UPDATE chunks SET memory_tier='cold' "
+                f"WHERE doc_id IN ({qs}) AND memory_tier != 'core'",
+                doc_ids,
+            )
+            return cur.rowcount
+
+    # --- B6 voice suggestion methods (Phase 2, 2026-06-23) ------------------
+
+    def insert_voice_suggestion(self, kind: str, rule: str, confidence: float,
+                                evidence_ids: list, explanation: str) -> int:
+        """Insert one voice suggestion. Returns the new row id."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            cur = db.execute(
+                "INSERT INTO voice_suggestions(kind, rule, confidence, explanation, "
+                "evidence_ids, status, created_at) VALUES(?,?,?,?,?,?,?)",
+                (kind, rule, round(float(confidence), 3), explanation,
+                 json.dumps(evidence_ids), "pending", ts),
+            )
+            return cur.lastrowid
+
+    def pending_voice_suggestions(self) -> list[dict]:
+        """Return all pending voice suggestions."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM voice_suggestions WHERE status='pending' ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_voice_suggestion_applied(self, suggestion_id: int) -> None:
+        """Mark one suggestion as applied."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            db.execute(
+                "UPDATE voice_suggestions SET status='applied', applied_at=? WHERE id=?",
+                (ts, suggestion_id),
+            )
+
+    def get_voice_analyser_state(self, key: str, default: str = "") -> str:
+        """Read a key from voice_analyser_state."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM voice_analyser_state WHERE key=?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+
+    def set_voice_analyser_state(self, key: str, value: str) -> None:
+        """Upsert a key in voice_analyser_state."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO voice_analyser_state(key, value, updated_at) "
+                "VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, ts),
+            )
