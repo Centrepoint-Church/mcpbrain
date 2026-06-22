@@ -134,6 +134,84 @@ def schema_grounding_enabled(home) -> bool:
     return bool(read_config(home).get("schema_grounding", False))
 
 
+def importance_recall_enabled(home) -> bool:
+    """Whether B3 three-axis recall (recency + importance) is active.
+
+    When True, hybrid_search incorporates salience and recency into ranking.
+    Default: False — safe rollout. Enable via config 'importance_recall': true.
+    """
+    return bool(read_config(home).get("importance_recall", False))
+
+
+def importance_weights(home) -> dict:
+    """Weights for the three-axis ranker (B3).
+
+    Returns dict with keys:
+      recency_weight   (float, default 0.15) — additive recency boost
+      importance_weight (float, default 0.10) — additive salience boost
+      decay_weight     (float, default 0.10) — additive decay factor
+      recency_alpha    (float, default 0.01) — recency exp-decay rate
+    """
+    cfg = read_config(home).get("importance_weights") or {}
+    return {
+        "recency_weight":    float(cfg.get("recency_weight", 0.15)),
+        "importance_weight": float(cfg.get("importance_weight", 0.10)),
+        "decay_weight":      float(cfg.get("decay_weight", 0.10)),
+        "recency_alpha":     float(cfg.get("recency_alpha", 0.01)),
+    }
+
+
+def tiered_memory_enabled(home) -> bool:
+    """Whether B2 tiered memory + always-injected core block is active.
+
+    When True, core-tier chunks are prepended to every /api/recall response
+    and cold-tier chunks are excluded from default recall.
+    Default: False — safe rollout. Enable via config 'tiered_memory': true.
+    """
+    return bool(read_config(home).get("tiered_memory", False))
+
+
+def decay_enabled(home) -> bool:
+    """Whether B5 memory-strength decay is active.
+
+    When True, the nightly decay pass demotes unaccessed low-salience chunks
+    to the cold tier. On recall, strength is incremented and last_accessed stamped.
+    Default: False — safe rollout. Enable via config 'decay': true.
+    """
+    return bool(read_config(home).get("decay", False))
+
+
+def consolidation_enabled(home) -> bool:
+    """Whether B4 RAPTOR-style consolidation pass is active.
+
+    When True, the nightly pass clusters high-salience episodic chunks and
+    LLM-summarises them into durable semantic notes (via claude CLI).
+    Default: False — safe rollout. Enable via config 'consolidation': true.
+    """
+    return bool(read_config(home).get("consolidation", False))
+
+
+def procedural_memory_enabled(home) -> bool:
+    """Whether B6 procedural/voice memory analysis is active.
+
+    When True, a weekly voice_analyser pass reads recent draft_records and
+    proposes voice.md updates (analysis-only; apply is user-triggered).
+    Default: False — safe rollout. Enable via config 'procedural_memory': true.
+    """
+    return bool(read_config(home).get("procedural_memory", False))
+
+
+def incremental_communities_enabled(home) -> bool:
+    """Whether B6 incremental community extension is used instead of full recompute.
+
+    When True, the community cadence calls extend_communities() which only
+    processes new entities (heuristic assignment) unless >15% of nodes are new,
+    in which case it falls back to a full Leiden recompute.
+    Default: False — safe rollout. Enable via config 'incremental_communities': true.
+    """
+    return bool(read_config(home).get("incremental_communities", False))
+
+
 def write_time_dedup_enabled(home) -> bool:
     """Whether write-time entity dedup runs the cascade matcher before inserting.
 

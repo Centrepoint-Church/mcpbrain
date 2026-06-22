@@ -36,6 +36,7 @@ _REL_FLOOR = 0.55      # keep hits scoring >= this fraction of the top hit
 _SEEN_TTL_S = 86400    # prune per-session seen-files older than a day
 
 _HEADER = "## From your brain (possibly relevant — ignore if off-topic)"
+_CORE_HEADER = "## Core context (always)"
 
 
 def _worth_recalling(prompt: str) -> bool:
@@ -152,6 +153,30 @@ def _format_context(results: list[dict], seen: set) -> tuple[str, list]:
     return _HEADER + "\n" + "\n".join(lines), used_ids
 
 
+def _get_core_block(home: str) -> str:
+    """Return the always-injected core block from the daemon via /api/core.
+
+    Calls a dedicated lightweight endpoint that reads core-tier chunks from the
+    store. Returns '' on any failure (daemon down, not yet configured, etc.).
+    """
+    try:
+        from pathlib import Path as _Path
+        import json as _json
+        import urllib.request as _ur
+        port = (_Path(home) / "control_port").read_text().strip()
+        token = (_Path(home) / "control_token").read_text().strip()
+        req = _ur.Request(
+            f"http://127.0.0.1:{port}/api/core",
+            method="GET",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with _ur.urlopen(req, timeout=0.5) as r:  # noqa: S310 loopback only
+            data = _json.loads(r.read() or b"{}")
+        return (data or {}).get("core_block") or ""
+    except Exception:  # noqa: BLE001 — core block failure must be invisible
+        return ""
+
+
 def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
     stdin = stdin or sys.stdin
     out = out or sys.stdout
@@ -165,17 +190,23 @@ def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
     if not _worth_recalling(prompt):
         return
     results = _recall(home, prompt)
-    if not results:
-        return
     now = now if now is not None else time.time()
     seen, seen_path = _load_seen(home, hook.get("session_id") or "x", now=now)
+
+    # B2: prepend always-injected core block (tiered_memory flag guards internally)
+    core_block = _get_core_block(home)
+
     block, used_ids = _format_context(results, seen)
-    if not block:
+
+    # Build final context: core block first (always fresh), then recall hits
+    parts = [p for p in (core_block, block) if p]
+    if not parts:
         return
+
     _save_seen(seen_path, seen | set(used_ids))
     out.write(json.dumps({"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": block}}))
+        "additionalContext": "\n\n".join(parts)}}))
 
 
 def user_prompt_submit_main(argv=None) -> int:

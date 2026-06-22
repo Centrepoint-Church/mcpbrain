@@ -155,6 +155,21 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # Q4 org backfill: deterministic org_from_email over org-less entities.
     CadencePass("org_backfill", "_org_backfill_interval_s",
                 "_last_org_backfill", "_run_org_backfill"),
+    # B3 salience scoring: structural importance per chunk.
+    # needs_configured=False: salience is identity-agnostic.
+    CadencePass("salience_score", "_salience_score_interval_s",
+                "_last_salience_score", "_run_salience_score",
+                needs_configured=False),
+    # B5 decay pass: demote unaccessed low-salience chunks to cold tier.
+    CadencePass("decay_pass", "_decay_pass_interval_s",
+                "_last_decay_pass", "_run_decay_pass",
+                needs_configured=False),
+    # B4 consolidation: RAPTOR-style cluster+summarise episodic chunks.
+    CadencePass("consolidation", "_consolidation_interval_s",
+                "_last_consolidation", "_run_consolidation"),
+    # B6 voice analyser: weekly analysis-only procedural memory pass.
+    CadencePass("voice_analyse", "_voice_analyse_interval_s",
+                "_last_voice_analyse", "_run_voice_analyse"),
 )
 
 
@@ -473,6 +488,18 @@ class Daemon:
         # OFF by default; enabled via cadences config.
         self._org_backfill_interval_s: float | None = None
         self._last_org_backfill = None
+        # B3 salience scoring: structural importance per chunk (daily).
+        self._salience_score_interval_s: float | None = None
+        self._last_salience_score = None
+        # B5 decay pass: nightly demotion of unaccessed low-salience chunks.
+        self._decay_pass_interval_s: float | None = None
+        self._last_decay_pass = None
+        # B4 consolidation: RAPTOR-style nightly cluster+summarise.
+        self._consolidation_interval_s: float | None = None
+        self._last_consolidation = None
+        # B6 voice analyser: weekly analysis-only procedural memory pass.
+        self._voice_analyse_interval_s: float | None = None
+        self._last_voice_analyse = None
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
@@ -658,10 +685,33 @@ class Daemon:
             if not knn or knn[0][1] > config.recall_max_distance(str(app_dir())):
                 return []  # nothing close enough -> off-topic -> inject nothing
             dist = {doc: d for doc, d in knn}
-            hits = hybrid_search(self._store, self._embedder, query, limit, query_vec=qv)
+            home = str(app_dir())
+            # B3: three-axis weights (safe no-op when importance_recall is off)
+            search_kwargs: dict = {"query_vec": qv}
+            if config.importance_recall_enabled(home):
+                w = config.importance_weights(home)
+                search_kwargs.update({
+                    "recency_weight":    w["recency_weight"],
+                    "importance_weight": w["importance_weight"],
+                    "decay_weight":      w["decay_weight"],
+                    "recency_alpha":     w["recency_alpha"],
+                })
+            # B2: exclude cold chunks from default recall when tiered_memory is on
+            if config.tiered_memory_enabled(home):
+                search_kwargs["exclude_cold"] = True
+            hits = hybrid_search(self._store, self._embedder, query, limit,
+                                 **search_kwargs)
         except Exception:  # noqa: BLE001 — recall must never raise into the prompt path
             log.warning("recall search failed for %r", query, exc_info=True)
             return []
+        # B5: strengthen recalled chunks (update memory_strength + last_accessed)
+        recalled_ids = [c.get("doc_id") for c in hits if c.get("doc_id")]
+        if recalled_ids and config.decay_enabled(str(app_dir())):
+            try:
+                from mcpbrain.decay import update_on_recall
+                update_on_recall(self._store, recalled_ids)
+            except Exception:  # noqa: BLE001
+                pass
         return [{"doc_id": c.get("doc_id"),
                  "score": round(float(c.get("score") or 0.0), 3),
                  "distance": round(float(dist.get(c.get("doc_id"), knn[0][1])), 3),
@@ -769,6 +819,10 @@ class Daemon:
             self._verify_interval_s = cadences["verify_interval_s"]
             self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
             self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
+            self._salience_score_interval_s = cadences["salience_score_interval_s"]
+            self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
+            self._consolidation_interval_s = cadences["consolidation_interval_s"]
+            self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -1130,8 +1184,14 @@ class Daemon:
             self._last_communities = now            # checked; graph idle → skip
             return {"communities": "skipped_no_change"}
         try:
-            from mcpbrain.communities import run
-            summary = run(self._store)
+            home = str(app_dir())
+            # B6: use incremental extension when enabled; fall back to full run
+            if config.incremental_communities_enabled(home):
+                from mcpbrain.communities import extend_communities
+                summary = extend_communities(self._store, home)
+            else:
+                from mcpbrain.communities import run
+                summary = run(self._store)
         except Exception as exc:  # noqa: BLE001 — communities must never crash the loop
             log.warning(
                 "community detection failed (will retry next due): %s", exc,
@@ -1229,6 +1289,78 @@ class Daemon:
             log.warning("feedback_aggregate failed: %s", exc, exc_info=True)
             return {"feedback_aggregate": False, "error": str(exc)}
         self._last_feedback_aggregate = now
+        return summary
+
+    # -- B3 salience scoring (daily) ------------------------------------------
+
+    def _run_salience_score(self) -> dict | None:
+        """Score up to 500 unscored chunks with structural salience (B3)."""
+        if not self._is_due("_salience_score_interval_s", "_last_salience_score"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.importance import run_salience_pass
+            summary = run_salience_pass(self._store, str(app_dir()))
+            log.info("salience_score: scored=%d", summary.get("scored", 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("salience_score failed: %s", exc, exc_info=True)
+            return {"salience_score": False, "error": str(exc)}
+        self._last_salience_score = now
+        return summary
+
+    # -- B5 decay pass (nightly) -----------------------------------------------
+
+    def _run_decay_pass(self) -> dict | None:
+        """Evaluate decay for embedded chunks; demote stale low-salience to cold (B5)."""
+        if not self._is_due("_decay_pass_interval_s", "_last_decay_pass"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.decay import apply_decay_pass
+            summary = apply_decay_pass(self._store, str(app_dir()))
+            log.info("decay_pass: evaluated=%d demoted=%d exempt=%d",
+                     summary.get("evaluated", 0), summary.get("demoted", 0),
+                     summary.get("exempt", 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("decay_pass failed: %s", exc, exc_info=True)
+            return {"decay_pass": False, "error": str(exc)}
+        self._last_decay_pass = now
+        return summary
+
+    # -- B4 consolidation pass (nightly) ---------------------------------------
+
+    def _run_consolidation(self) -> dict | None:
+        """RAPTOR-style cluster+summarise of episodic chunks into semantic notes (B4)."""
+        if not self._is_due("_consolidation_interval_s", "_last_consolidation"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.consolidation import consolidate
+            summary = consolidate(self._store, str(app_dir()))
+            log.info("consolidation: notes_written=%d clusters=%d",
+                     summary.get("notes_written", 0), summary.get("clusters_found", 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("consolidation failed: %s", exc, exc_info=True)
+            return {"consolidation": False, "error": str(exc)}
+        self._last_consolidation = now
+        return summary
+
+    # -- B6 voice analyser (weekly) --------------------------------------------
+
+    def _run_voice_analyse(self) -> dict | None:
+        """Weekly Phase A voice analysis: analyse drafts → propose voice.md updates (B6)."""
+        if not self._is_due("_voice_analyse_interval_s", "_last_voice_analyse"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.voice_analyser import maybe_run_analysis
+            suggestions = maybe_run_analysis(self._store, str(app_dir()))
+            log.info("voice_analyse: queued %d suggestions", len(suggestions))
+            summary = {"suggestions": len(suggestions)}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("voice_analyse failed: %s", exc, exc_info=True)
+            return {"voice_analyse": False, "error": str(exc)}
+        self._last_voice_analyse = now
         return summary
 
     # -- Q4 org backfill (deterministic) --------------------------------------
@@ -1713,6 +1845,10 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "stale_reextract_interval_s":     86400.0,
     "feedback_aggregate_interval_s":  86400.0,   # S2: nightly aggregate
     "org_backfill_interval_s":        86400.0,   # Q4: daily deterministic backfill
+    "salience_score_interval_s":      86400.0,   # B3: daily structural salience
+    "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
+    "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
+    "voice_analyse_interval_s":       604800.0,  # B6: weekly voice analysis
     "synthesise_interval_s":          604800.0,
     "audit_interval_s":               604800.0,
     "verify_interval_s":              3600.0,
@@ -1732,6 +1868,10 @@ _CADENCE_KEYS = (
     "verify_interval_s",
     "feedback_aggregate_interval_s",
     "org_backfill_interval_s",
+    "salience_score_interval_s",
+    "decay_pass_interval_s",
+    "consolidation_interval_s",
+    "voice_analyse_interval_s",
 )
 
 
@@ -1814,9 +1954,13 @@ def main(argv=None) -> None:
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
                     auto_update_interval_s=cadences["auto_update_interval_s"],
                     verify_interval_s=cadences["verify_interval_s"])
-    # S2/Q4 cadences: not constructor params (added post-init); wire after construction.
+    # S2/Q4/B3/B5/B4/B6 cadences: not constructor params; wire after construction.
     daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
+    daemon._salience_score_interval_s = cadences["salience_score_interval_s"]
+    daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]
+    daemon._consolidation_interval_s = cadences["consolidation_interval_s"]
+    daemon._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
