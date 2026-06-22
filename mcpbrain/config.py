@@ -117,6 +117,20 @@ def salience_require_drive_mention(home) -> bool:
     return bool(read_config(home).get("salience_require_drive_mention", False))
 
 
+def schema_grounding_enabled(home) -> bool:
+    """Whether extraction grounding check runs after sanitize (Q2).
+
+    When True, drain checks each entity name against the assembled message text
+    for that extraction. An entity whose name (or any token ≥ 4 chars) does not
+    appear in the source text is dropped as ungrounded. Deterministic string
+    presence only — no LLM call. Relation types are already constrained by
+    RELATION_TYPES in contract.py regardless of this flag.
+
+    Default: False — safe rollout. Enable via config 'schema_grounding': true.
+    """
+    return bool(read_config(home).get("schema_grounding", False))
+
+
 def write_time_dedup_enabled(home) -> bool:
     """Whether write-time entity dedup runs the cascade matcher before inserting.
 
