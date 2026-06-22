@@ -106,3 +106,78 @@ def test_extractors_return_empty_on_garbage():
     assert extract_text_from_pdf(garbage) == ""
     assert extract_text_from_docx(garbage) == ""
     assert extract_text_from_xlsx(garbage) == ""
+
+
+# ---------------------------------------------------------------------------
+# Scanned-PDF detection + tesseract OCR (Q5)
+# ---------------------------------------------------------------------------
+
+def _make_pdf_long_text_bytes() -> bytes:
+    import fitz
+    doc = fitz.open(); page = doc.new_page()
+    page.insert_text((72, 72),
+                     "This is a budget report with plenty of real text on the page, "
+                     "well above the scanned-PDF character threshold per page.")
+    data = doc.tobytes(); doc.close()
+    return data
+
+
+def test_is_scanned_pdf_true_for_blank():
+    from mcpbrain.sync.extractors import is_scanned_pdf
+    assert is_scanned_pdf(_make_pdf_no_text_bytes()) is True
+
+
+def test_is_scanned_pdf_false_for_text_pdf():
+    from mcpbrain.sync.extractors import is_scanned_pdf
+    assert is_scanned_pdf(_make_pdf_long_text_bytes()) is False
+
+
+def test_digital_pdf_returns_text_layer():
+    from mcpbrain.sync.extractors import extract_text_from_pdf
+    out = extract_text_from_pdf(_make_pdf_long_text_bytes())
+    assert "budget report" in out.lower()
+
+
+def test_scanned_pdf_degrades_to_empty_without_tesseract(monkeypatch):
+    """No tesseract resolvable → a scanned PDF yields '' (graceful), never raises."""
+    import mcpbrain.sync.extractors as ex
+    monkeypatch.setattr(ex, "_tesseract_bin", lambda: "")
+    out = ex.extract_text_from_pdf(_make_pdf_no_text_bytes())
+    assert out.strip() == ""
+
+
+def test_scanned_pdf_uses_ocr_output_when_available(monkeypatch):
+    """Control-flow: a no-text page routes through _ocr_page and its text is used."""
+    import mcpbrain.sync.extractors as ex
+    monkeypatch.setattr(ex, "_tesseract_cache", True)          # pretend tesseract present
+    monkeypatch.setattr(ex, "_ocr_page", lambda page: "OCR RECOVERED BUDGET")
+    out = ex.extract_text_from_pdf(_make_pdf_no_text_bytes())
+    assert "OCR RECOVERED BUDGET" in out
+
+
+def test_ocr_roundtrip_with_real_tesseract():
+    """End-to-end OCR of an image-only PDF — runs only where tesseract is installed."""
+    import shutil
+    import pytest
+    if not shutil.which("tesseract"):
+        pytest.skip("tesseract not installed")
+    from PIL import Image, ImageDraw, ImageFont
+    import fitz
+    from mcpbrain.sync.extractors import extract_text_from_pdf, is_scanned_pdf
+
+    img = Image.new("RGB", (900, 240), "white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 96)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((30, 60), "CENTREPOINT", fill="black", font=font)
+    pbuf = io.BytesIO(); img.save(pbuf, format="PNG")
+
+    doc = fitz.open(); page = doc.new_page(width=900, height=240)
+    page.insert_image(fitz.Rect(0, 0, 900, 240), stream=pbuf.getvalue())
+    pdf = doc.tobytes(); doc.close()
+
+    assert is_scanned_pdf(pdf) is True
+    out = extract_text_from_pdf(pdf)
+    assert "centrepoint" in out.lower()

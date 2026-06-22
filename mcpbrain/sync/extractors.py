@@ -4,24 +4,59 @@ Handles: PDF (text layer + optional OCR), DOCX (paragraphs + tables), XLSX
 (first 200 rows per sheet). All imports are lazy so the module loads even if
 a dependency is missing — failed extractions return "".
 
-tesseract is an optional external binary for scanned-PDF OCR. It is NOT a pip
-dependency. If tesseract is absent, image-only PDFs degrade gracefully to "".
+Scanned/image-only PDFs are OCR'd page-by-page via the standalone `tesseract`
+CLI (render page → PNG → `tesseract … stdout`). This deliberately does NOT use
+pymupdf's built-in get_textpage_ocr, which needs MuPDF compiled with Tesseract
+integration + TESSDATA_PREFIX — the pip wheel usually isn't, so it fails on a
+plain `brew install tesseract`. The CLI path works with any tesseract install.
+tesseract is an optional external binary (NOT a pip dependency); if it is absent,
+image-only PDFs degrade gracefully to whatever text layer exists ('' when none).
 """
 
 import io
+import os
 import shutil
+import subprocess
+import tempfile
+
+_OCR_MIN_PAGE_CHARS = 20   # a page with fewer real chars is treated as image-only
+_OCR_DPI = 200             # render resolution for OCR (quality vs speed)
 
 
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
-def extract_text_from_pdf(content_bytes: bytes) -> str:
-    """PDF text via pymupdf; OCR fallback (tesseract) for image/scanned pages.
+def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50) -> bool:
+    """True when a PDF looks scanned/image-only (avg text-layer chars/page is low).
 
-    OCR only runs when tesseract is on PATH; otherwise degrades to the text
-    layer (empty for scanned PDFs). tesseract is an optional external
-    dependency.
+    Mirrors ops-brain's pdf_scanned_check. Used to decide whether OCR is worth
+    attempting; returns False on any open error (caller falls back to text layer).
+    """
+    try:
+        import fitz  # pymupdf
+        doc = fitz.open(stream=content_bytes, filetype="pdf")
+    except Exception:
+        return False
+    try:
+        n = doc.page_count
+        if n == 0:
+            return False
+        total = sum(len(page.get_text() or "") for page in doc)
+        return (total / n) < chars_per_page_threshold
+    except Exception:
+        return False
+    finally:
+        doc.close()
+
+
+def extract_text_from_pdf(content_bytes: bytes) -> str:
+    """PDF text via pymupdf; per-page OCR fallback (tesseract CLI) for scanned pages.
+
+    Digital PDFs return their text layer directly. For a low-text (scanned) PDF,
+    each page with no usable text layer is rendered and OCR'd via the tesseract
+    CLI. OCR only runs when tesseract is on PATH; otherwise the text layer is
+    returned as-is ('' for a fully-scanned PDF).
     """
     try:
         import fitz  # pymupdf
@@ -31,35 +66,92 @@ def extract_text_from_pdf(content_bytes: bytes) -> str:
     try:
         pages = [page.get_text() for page in doc]
         text = "\n\n".join(pages)
-        if len(text.strip()) >= max(20, 20 * len(pages)):
+        # Digital PDF with a real text layer → done, no OCR needed.
+        if len(text.strip()) >= max(_OCR_MIN_PAGE_CHARS, _OCR_MIN_PAGE_CHARS * len(pages)):
             return text
-        ocr_available = _tesseract_available()
-        ocr_pages = []
-        for page in doc:
-            page_text = page.get_text().strip()
-            if len(page_text) >= 20 or not ocr_available:
-                ocr_pages.append(page_text)
+        if not _tesseract_available():
+            return text  # degrade to the (possibly empty) text layer
+        out = []
+        for i, page in enumerate(doc):
+            page_text = (pages[i] if i < len(pages) else page.get_text()).strip()
+            if len(page_text) >= _OCR_MIN_PAGE_CHARS:
+                out.append(page_text)
             else:
-                try:
-                    tp = page.get_textpage_ocr(language="eng", dpi=200)
-                    ocr_pages.append(page.get_text(textpage=tp).strip() or page_text)
-                except Exception:
-                    ocr_pages.append(page_text)
-        return "\n\n".join(ocr_pages)
+                out.append(_ocr_page(page) or page_text)
+        return "\n\n".join(out)
     except Exception:
         return ""
     finally:
         doc.close()  # guaranteed close on every path once the doc is open
 
 
-_tesseract_cache = None
+def _ocr_page(page) -> str:
+    """Render one pymupdf page to PNG and OCR it via the tesseract CLI.
+
+    Returns the recognised text, or '' on any failure (missing binary, render
+    error, non-zero exit, timeout). Never raises — OCR is best-effort.
+    """
+    tess = _tesseract_bin()
+    if not tess:
+        return ""
+    try:
+        png = page.get_pixmap(dpi=_OCR_DPI).tobytes("png")
+    except Exception:
+        return ""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            tmp = f.name
+        proc = subprocess.run(
+            [tess, tmp, "stdout", "-l", "eng"],
+            capture_output=True, text=True, timeout=120,
+        )
+        return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+    except Exception:
+        return ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+# Common absolute locations checked in addition to PATH. The daemon runs under
+# launchd/systemd with a MINIMAL PATH that usually excludes Homebrew, so
+# shutil.which("tesseract") alone would miss a `brew install`ed binary.
+_TESSERACT_FALLBACK_PATHS = (
+    "/opt/homebrew/bin/tesseract",   # Apple Silicon Homebrew
+    "/usr/local/bin/tesseract",      # Intel Homebrew
+    "/usr/bin/tesseract",            # Linux distro packages
+)
+
+_tesseract_cache = None  # cached resolved path (str) or "" when absent
+
+
+def _tesseract_bin() -> str:
+    """Resolve the tesseract binary: PATH first, then known install locations.
+
+    Returns the path, or '' if not found. Cached. The fallback paths matter
+    because the daemon's launchd/systemd PATH typically omits Homebrew dirs.
+    Set TESSERACT_BIN to override explicitly.
+    """
+    global _tesseract_cache
+    if _tesseract_cache is None:
+        env = os.environ.get("TESSERACT_BIN", "")
+        found = env or shutil.which("tesseract") or ""
+        if not found:
+            for p in _TESSERACT_FALLBACK_PATHS:
+                if os.path.exists(p):
+                    found = p
+                    break
+        _tesseract_cache = found
+    return _tesseract_cache
 
 
 def _tesseract_available() -> bool:
-    global _tesseract_cache
-    if _tesseract_cache is None:
-        _tesseract_cache = shutil.which("tesseract") is not None
-    return _tesseract_cache
+    return bool(_tesseract_bin())
 
 
 # ---------------------------------------------------------------------------
