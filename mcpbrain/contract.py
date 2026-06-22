@@ -130,6 +130,18 @@ def validate_extraction(d: object) -> list[str]:
                 if not isinstance(rid, int) or isinstance(rid, bool):
                     problems.append(f"resolved_action_ids[{i}] must be an integer")
 
+    # Empty extraction guard (Q8): an extraction where entities, relations,
+    # actions, and topics are all empty AND summary is blank/trivial gives the
+    # graph nothing. Treat it as invalid so drain skips it without calling
+    # mark_enriched — the unit stays re-queueable for a better extraction.
+    if isinstance(d.get("entities"), list) and isinstance(d.get("relations"), list) \
+            and isinstance(d.get("actions"), list) and isinstance(d.get("topics"), list):
+        all_empty = (not d["entities"] and not d["relations"]
+                     and not d["actions"] and not d["topics"])
+        trivial_summary = not (d.get("summary") or "").strip()
+        if all_empty and trivial_summary:
+            problems.append("extraction has no content (all lists empty and summary blank)")
+
     # Optional fields (contextual_summary, updated_actions, reply_*) are intentionally not deep-validated -- lenient on optionality.
     return problems
 
