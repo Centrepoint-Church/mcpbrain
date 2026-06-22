@@ -578,6 +578,123 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_dr_email  ON draft_records(email_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_dr_thread ON draft_records(thread_id)")
 
+            # --- S2 recall-acceptance feedback (Phase 0, 2026-06-22) ----------
+            # recall_feedback: raw event log (one row per recall event).
+            # chunk_quality:   per-chunk quality float updated by nightly aggregate.
+            db.execute("""CREATE TABLE IF NOT EXISTS recall_feedback(
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id     TEXT NOT NULL,
+                session_id TEXT DEFAULT '',
+                event_type TEXT NOT NULL,
+                ts         TEXT DEFAULT '')""")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rf_doc_id "
+                "ON recall_feedback(doc_id)")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rf_ts "
+                "ON recall_feedback(ts)")
+
+            db.execute("""CREATE TABLE IF NOT EXISTS chunk_quality(
+                doc_id     TEXT PRIMARY KEY,
+                quality    REAL DEFAULT 1.0,
+                exposures  INTEGER DEFAULT 0,
+                uses       INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT '')""")
+
+            # --- Q1 salience gate: enrich_state on chunks (Phase 0, 2026-06-22)
+            # 'cold' = embedded/searchable but skip graph-extraction.
+            # unenriched_chunks() excludes cold chunks so they don't re-queue.
+            ch_cols = {row["name"] for row in
+                       db.execute("PRAGMA table_info(chunks)").fetchall()}
+            if "enrich_state" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN enrich_state TEXT DEFAULT ''")
+
+    # --- S2 recall-acceptance feedback methods --------------------------------
+
+    def record_recall_feedback(self, doc_id: str, session_id: str,
+                               event_type: str, ts: str) -> None:
+        """Append one recall feedback event row."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO recall_feedback(doc_id,session_id,event_type,ts) VALUES(?,?,?,?)",
+                (doc_id, session_id, event_type, ts))
+
+    def all_feedback_rows(self) -> list[dict]:
+        """Return every recall_feedback row as {doc_id, event_type, ts}."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id,event_type,ts FROM recall_feedback ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+
+    def get_chunk_quality(self, doc_id: str) -> float:
+        """Return the chunk's quality score (1.0 = neutral if not yet computed)."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT quality FROM chunk_quality WHERE doc_id=?", (doc_id,)).fetchone()
+            return float(row["quality"]) if row else 1.0
+
+    def update_chunk_quality(self, doc_id: str, quality: float,
+                             exposures: int, uses: int) -> None:
+        """Upsert the quality row for one chunk."""
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO chunk_quality(doc_id,quality,exposures,uses,updated_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(doc_id) DO UPDATE SET
+                       quality=excluded.quality,
+                       exposures=excluded.exposures,
+                       uses=excluded.uses,
+                       updated_at=excluded.updated_at""",
+                (doc_id, quality, exposures, uses, ts))
+
+    # --- Q1 salience gate methods ----------------------------------------------
+
+    def set_enrich_state(self, doc_ids: list[str], state: str) -> None:
+        """Set enrich_state on the given chunks.
+
+        state='cold'  → chunk stays embedded/searchable but skips graph-extraction.
+        state=''      → reset to normal; chunk re-enters the extraction backlog.
+        """
+        if not doc_ids:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "UPDATE chunks SET enrich_state=? WHERE doc_id=?",
+                [(state, d) for d in doc_ids])
+
+    def cold_chunk_count(self) -> int:
+        """Number of chunks currently in the cold (gated) state."""
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE enrich_state='cold'").fetchone()[0]
+
+    # --- Q4 org-backfill helper -----------------------------------------------
+
+    def entities_without_org(self, limit: int | None = None) -> list[dict]:
+        """Entities where org is empty (candidates for org_from_email backfill).
+
+        Returns {id, name, type, email_addr} dicts, ordered by id.
+        Only returns entities with a non-empty email_addr (needed for domain lookup).
+        limit caps how many rows are returned; None = all.
+        """
+        sql = ("SELECT id,name,type,email_addr FROM entities "
+               "WHERE (org='' OR org IS NULL) AND email_addr!='' "
+               "ORDER BY id")
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        with self._connect() as db:
+            rows = db.execute(sql).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> None:
+        """Set the org (and optionally org_valid_from) on one entity."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
+                (org, org_valid_from, entity_id))
+
     def upsert_meeting_pack(self, event_id: str, event_title: str,
                             event_date: str, pack_text: str,
                             attendees: list | None = None,
@@ -729,7 +846,11 @@ class Store:
         not fully loaded then sliced). limit=None returns every unenriched
         chunk — the no-arg behaviour existing callers/tests rely on.
         """
-        sql = "SELECT rowid,doc_id,text,metadata FROM chunks WHERE enriched=0 ORDER BY rowid DESC"
+        # Exclude 'cold' chunks: they are deliberately gated by the salience gate
+        # and must not re-queue for extraction while in cold state.
+        sql = ("SELECT rowid,doc_id,text,metadata FROM chunks "
+               "WHERE enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
+               "ORDER BY rowid DESC")
         params: tuple = ()
         if limit is not None:
             sql += " LIMIT ?"
