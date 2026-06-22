@@ -619,6 +619,19 @@ class Store:
                 "INSERT INTO recall_feedback(doc_id,session_id,event_type,ts) VALUES(?,?,?,?)",
                 (doc_id, session_id, event_type, ts))
 
+    def record_recall_feedback_batch(self, rows: list[tuple]) -> None:
+        """Append many recall feedback events in one transaction.
+
+        rows: list of (doc_id, session_id, event_type, ts). One executemany so the
+        recall hot path pays a single write, not one connection per chunk.
+        """
+        if not rows:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "INSERT INTO recall_feedback(doc_id,session_id,event_type,ts) VALUES(?,?,?,?)",
+                rows)
+
     def all_feedback_rows(self) -> list[dict]:
         """Return every recall_feedback row as {doc_id, event_type, ts}."""
         with self._connect() as db:
@@ -669,6 +682,28 @@ class Store:
         with self._connect() as db:
             return db.execute(
                 "SELECT COUNT(*) FROM chunks WHERE enrich_state='cold'").fetchone()[0]
+
+    def email_mentions(self, *needles: str) -> bool:
+        """True if any email chunk's text references one of the given strings.
+
+        Used by the salience gate's optional Drive mention-check (a Drive doc is
+        "worth enriching" when its file_id or file_name appears in an email). Scans
+        gmail-source chunks with a LIKE for each non-empty needle; cheap at our
+        email volume. Returns False on any error (fail-open is the caller's choice).
+        """
+        terms = [n.strip() for n in needles if n and n.strip() and len(n.strip()) >= 4]
+        if not terms:
+            return False
+        clause = " OR ".join("text LIKE ?" for _ in terms)
+        params = [f"%{t}%" for t in terms]
+        sql = ("SELECT 1 FROM chunks "
+               "WHERE json_extract(metadata,'$.source_type')='gmail' "
+               f"AND ({clause}) LIMIT 1")
+        try:
+            with self._connect() as db:
+                return db.execute(sql, params).fetchone() is not None
+        except Exception:  # noqa: BLE001
+            return False
 
     # --- Q4 org-backfill helper -----------------------------------------------
 

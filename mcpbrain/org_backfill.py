@@ -37,11 +37,13 @@ def run_backfill(store, *, limit: int | None = None) -> dict:
 
     updated = 0
     skipped_external = 0
+    skipped_no_email = 0
     unknown_domains: set[str] = set()
 
     for ent in candidates:
         email_addr = (ent.get("email_addr") or "").strip()
         if not email_addr:
+            skipped_no_email += 1
             continue
 
         org = org_from_email(email_addr, taxonomy)
@@ -69,5 +71,6 @@ def run_backfill(store, *, limit: int | None = None) -> dict:
     return {
         "updated": updated,
         "skipped_external": skipped_external,
+        "skipped_no_email": skipped_no_email,
         "unknown_domains": sorted(unknown_domains),
     }
