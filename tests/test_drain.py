@@ -202,7 +202,7 @@ def test_drain_sanitizes_empty_relations_keeps_extraction(store, home):
     # (empty fields) — the LLM noise that used to fail the whole batch. The stub
     # is dropped; the extraction applies with its good relation intact.
     env = _envelope("t-rel", relations=[
-        {"source_name": "Joel", "type": "works_with", "target_name": "Sam"},
+        {"source_name": "Joel", "type": "works_at", "target_name": "Sam"},
         {"source_name": "", "type": "", "target_name": ""},
     ])
     _write_inbox(home, "rel.json", _batch("batch-rel", [env]))
