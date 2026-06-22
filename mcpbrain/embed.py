@@ -67,10 +67,26 @@ def contextual_prefix(metadata: dict) -> str:
     return "[Context: " + ", ".join(parts) + "] "
 
 
+def _model_cache_dir() -> str:
+    """Persistent cache dir for fastembed model weights.
+
+    fastembed otherwise defaults to ``tempfile.gettempdir()/fastembed_cache``
+    (``/tmp`` or ``/var/folders/.../T`` on macOS), which the OS purges on reboot
+    and periodically. When the cached ``model_optimized.onnx`` is wiped the
+    embedder fails to load and ``mcpbrain mcp-server`` dies at startup. Cache the
+    weights under the persistent app dir (beside ``brain.sqlite3``) instead.
+
+    Honors ``FASTEMBED_CACHE_PATH`` as an explicit override when set.
+    """
+    import os
+    from mcpbrain.config import app_dir
+    return os.environ.get("FASTEMBED_CACHE_PATH") or str(app_dir() / "models")
+
+
 class _LocalEmbedder:
     def __init__(self, model_name: str, dim: int, query_prefix: str):
         from fastembed import TextEmbedding          # lazy: keep import-time light
-        self._model = TextEmbedding(model_name=model_name)
+        self._model = TextEmbedding(model_name=model_name, cache_dir=_model_cache_dir())
         self.dim = dim
         self._qp = query_prefix
 
