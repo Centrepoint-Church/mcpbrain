@@ -137,6 +137,23 @@ Entities and relations are the part most worth getting right.
   it for venues, tools, or places. Emit only relations the text supports, and
   skip the rest rather than guessing.
 
+## Drive document mode
+
+When a "thread" is actually a Google Drive document (its messages carry no
+sender email address and a `file_name` subject), apply document-shaped
+extraction instead of the email-thread rules above:
+
+- **Focus on topics, decisions, and key entities.** Extract the document's
+  main themes as `topics`, any decisions or commitments stated in the text as
+  `actions`, and named people/orgs/projects as `entities`.
+- **No actions from informational docs.** Skip `actions` for reference
+  documents (meeting agendas, policy docs, resource lists) that make no
+  explicit commitment. Only extract actions when the doc contains clear
+  directives or to-dos.
+- **summary**: one sentence saying what the document is about and its purpose.
+- **messages**: include one entry using the file_id as `message_id`, the
+  owner as `sender`, and the `modifiedTime` as `date`. Do NOT echo the body.
+
 ## Thread-mode rules
 
 Each thread carries `open_actions`: actions already on record for that thread,

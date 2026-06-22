@@ -43,6 +43,26 @@ _DOWNLOAD_BINARY = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": extract_text_from_xlsx,
 }
 
+# Per-MIME extraction metadata: (extraction_method, content_subtype, confidence).
+# Stored on each chunk so the enrich pipeline and recall layer know what kind of
+# content they are dealing with (table vs prose vs slides) and how reliable the
+# text extraction is (PDFs may miss layout; scanned PDFs degrade further but
+# tesseract is not tracked here — it stays at pdf_layout confidence for now).
+_MIME_EXTRACTION_META: dict[str, tuple[str, str, float]] = {
+    "application/pdf": ("pdf_layout", "prose", 0.95),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ("docx", "prose", 1.0),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ("spreadsheet", "table", 1.0),
+    "application/vnd.google-apps.spreadsheet": ("spreadsheet", "table", 1.0),
+    "application/vnd.google-apps.document": ("gdocs", "prose", 1.0),
+    "application/vnd.google-apps.presentation": ("slides", "slides", 1.0),
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ("slides", "slides", 1.0),
+    "text/csv": ("text", "table", 1.0),
+    "application/csv": ("text", "table", 1.0),
+    "text/tab-separated-values": ("text", "table", 1.0),
+    "text/plain": ("text", "prose", 1.0),
+    "text/markdown": ("text", "prose", 1.0),
+}
+
 _CHANGES_FIELDS = (
     "nextPageToken,newStartPageToken,"
     "changes(fileId,removed,file(id,name,mimeType,modifiedTime,owners))"
@@ -86,6 +106,10 @@ def normalise_drive(file_meta: dict, text: str) -> list[Chunk]:
 
     doc_id format: gdrive-<file_id>-<chunk_index>.
     Empty or whitespace-only text returns [].
+
+    Each chunk carries extraction_method, content_subtype, and confidence so
+    the enrichment pipeline can apply per-type logic (e.g. skip entity
+    extraction on table chunks) and the recall layer can surface the origin.
     """
     if not text or not text.strip():
         return []
@@ -97,13 +121,21 @@ def normalise_drive(file_meta: dict, text: str) -> list[Chunk]:
     if owners:
         owner = owners[0].get("displayName", "")
 
+    mime = file_meta.get("mimeType", "")
+    extraction_method, content_subtype, confidence = _MIME_EXTRACTION_META.get(
+        mime, ("text", "prose", 1.0)
+    )
+
     base_meta = {
         "source_type": "gdrive",
         "file_id": fid,
         "file_name": file_meta.get("name", "")[:200],
-        "mime_type": file_meta.get("mimeType", "")[:100],
+        "mime_type": mime[:100],
         "modified": file_meta.get("modifiedTime", ""),
         "owner": owner[:100],
+        "extraction_method": extraction_method,
+        "content_subtype": content_subtype,
+        "confidence": confidence,
     }
 
     out = []
