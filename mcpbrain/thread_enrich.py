@@ -81,29 +81,33 @@ def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:
 def reassemble_thread(chunks: list[dict]) -> list[dict]:
     """Reassemble a thread's chunks into ordered message dicts.
 
-    Chunks are grouped by message_id; within a message the body chunks are
-    sorted by chunk_index and joined with the chunking separator. One message
-    dict is emitted per message_id, ordered by date (string sort — matches
-    prepare's min(..., key=lambda m: m.get("date","")) ordering). Provenance
-    fields are read off any chunk of the message (they share base_metadata).
+    Chunks are grouped by a stable key:
+    - Drive docs (chunks with ``file_id`` in metadata): grouped by ``file_id``
+      so all chunks of the same document join into one body instead of
+      appearing as N one-line stubs.
+    - Email messages: grouped by ``message_id``.
+    - Fallback: ``doc_id`` for chunks with neither.
+
+    Within each group, body chunks are sorted by chunk_index and joined with
+    the chunking separator. One message dict is emitted per group, ordered by
+    date (string sort). Provenance fields are read from any chunk of the group
+    (they share base_metadata).
 
     Splitting an over-long thread is prepare's job, not this function's; this
     always returns the full ordered message list.
-
-    Known limitation: a multi-chunk document with no message_id is not
-    concatenated into a single message. Each chunk of such a document carries a
-    distinct doc_id (the "...-{i}" suffix), so the message_id-or-doc_id key below
-    produces one single-chunk message per chunk rather than one joined message.
-    This is dormant under Phase 1: enrichment is Gmail-only and Gmail chunks
-    always carry a message_id. Correct multi-chunk Drive-doc support would need a
-    stable per-document key (e.g. the doc_id with its chunk suffix stripped), and
-    that is out of Phase 1 scope.
     """
     by_message: dict[str, list[dict]] = {}
     order: list[str] = []
     for chunk in chunks:
         meta = chunk.get("metadata") or {}
-        mid = meta.get("message_id") or chunk["doc_id"]
+        # Drive documents carry a file_id but no message_id. Group all chunks
+        # of the same document under the file_id so a multi-chunk doc assembles
+        # into one "message" instead of N one-line stubs.
+        file_id = meta.get("file_id")
+        if file_id:
+            mid = file_id
+        else:
+            mid = meta.get("message_id") or chunk["doc_id"]
         if mid not in by_message:
             by_message[mid] = []
             order.append(mid)
@@ -117,16 +121,18 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         text = _CHUNK_JOIN.join(p.get("text", "") for p in parts)
         messages.append({
             "message_id": mid,
-            "sender": meta.get("sender", ""),
-            # Three sources, three metadata names: gmail puts the message date
-            # in `date`; calendar puts the event start in `start`; drive puts
-            # the file's modifiedTime in `modified`. The extractor contract
-            # requires a non-empty date string, so fall through all three.
+            # Drive chunks store the file owner in "owner"; email chunks use
+            # "sender". Fall through both so the assembled message always has
+            # the best available attribution.
+            "sender": meta.get("sender") or meta.get("owner", ""),
+            # Four date sources: gmail → "date", calendar → "start",
+            # drive → "modified", fallback → "".
             "date": (
                 meta.get("date") or meta.get("start") or meta.get("modified") or ""
             ),
             "labels": meta.get("labels", ""),
-            "subject": meta.get("subject", ""),
+            # Drive docs use "file_name" as the subject equivalent.
+            "subject": meta.get("subject") or meta.get("file_name", ""),
             "text": text,
         })
 
