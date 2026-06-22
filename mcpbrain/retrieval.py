@@ -151,12 +151,68 @@ def _rrf(rankings: list[list[str]], k: int = _RRF_K,
     return scores
 
 
+def _three_axis_boost(chunk: dict, *,
+                      recency_weight: float = 0.0,
+                      importance_weight: float = 0.0,
+                      decay_weight: float = 0.0,
+                      recency_alpha: float = 0.01) -> float:
+    """Additive boost from recency + importance + decay for the three-axis ranker.
+
+    recency_weight and importance_weight default 0.0 so existing callers that
+    don't pass them get identical scores (safe no-op). Both must be set > 0
+    (via config flags) for the axes to affect ranking.
+
+    The boost is ADDITIVE to the normalised RRF score (0–1) so it can push a
+    highly-important recent hit above a relevance-only top hit, but cannot
+    swamp the relevance signal at default weights.
+    """
+    boost = 0.0
+
+    if recency_weight > 0.0 or decay_weight > 0.0:
+        from mcpbrain.importance import recency_decay as _rd
+        meta = chunk.get("metadata") or {}
+        rd = _rd(meta, alpha=recency_alpha)
+        boost += recency_weight * rd
+        # decay_weight uses the same recency curve when no decay factor is supplied
+        # by the caller; the caller can override by passing pre-computed decay via
+        # chunk["_decay_factor"] (set by decay.update_on_recall path).
+        df = chunk.get("_decay_factor")
+        if df is not None:
+            boost += decay_weight * float(df)
+        elif decay_weight > 0.0:
+            boost += decay_weight * rd
+
+    if importance_weight > 0.0:
+        # salience is stored on the chunk dict by _enrich_with_salience below;
+        # fall back to the structural scorer when absent.
+        salience = chunk.get("salience")
+        if salience is None:
+            from mcpbrain.importance import score_structural as _ss
+            salience = _ss(chunk.get("metadata") or {})
+        boost += importance_weight * (float(salience) / 10.0)
+
+    return boost
+
+
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
-                  kw_weight: float = _KW_WEIGHT, query_vec: list | None = None) -> list[dict]:
-    # query_vec lets a caller that already embedded the query (e.g. the recall
-    # distance gate in daemon.search) reuse it, avoiding a second embed_query —
-    # the slow part of a search. Identical results either way.
+                  kw_weight: float = _KW_WEIGHT, query_vec: list | None = None,
+                  recency_weight: float = 0.0, importance_weight: float = 0.0,
+                  decay_weight: float = 0.0, recency_alpha: float = 0.01,
+                  exclude_cold: bool = False) -> list[dict]:
+    """Hybrid RRF search with optional three-axis reranking.
+
+    New keyword-only params (all default to off so existing callers are unaffected):
+      recency_weight  — additive recency boost weight (B3)
+      importance_weight — additive importance/salience boost weight (B3)
+      decay_weight    — additive decay-factor boost weight (B5)
+      recency_alpha   — exp decay rate for the recency term (0.01 → ~69d half-life)
+      exclude_cold    — when True, skip memory_tier='cold' chunks (B2)
+
+    query_vec lets a caller that already embedded the query (e.g. the recall
+    distance gate in daemon.search) reuse it, avoiding a second embed_query —
+    the slow part of a search. Identical results either way.
+    """
     qv = query_vec if query_vec is not None else embedder.embed_query(query)
     sem = [d for d, _ in store.vec_knn(qv, limit * 2)]
     kw = [d for d, _ in store.fts_search(query, limit * 2)]
@@ -172,7 +228,10 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # set (before expiry filtering) so dropping an expired top hit does not
     # silently rescale the survivors.
     top = fused[ordered[0]] if ordered else 0.0
-    results = []
+    use_three_axis = (recency_weight > 0.0 or importance_weight > 0.0
+                      or decay_weight > 0.0)
+
+    candidates = []
     for d in ordered:
         c = store.get_chunk(d)
         if not c:
@@ -185,7 +244,34 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                 meta = {}
         if meta.get("expired"):
             continue
-        c["score"] = (fused[d] / top) if top > 0 else 0.0
+        if exclude_cold and c.get("memory_tier") == "cold":
+            continue
+        rrf_score = (fused[d] / top) if top > 0 else 0.0
+        c["score"] = rrf_score
+        # Attach salience so _three_axis_boost can read it without a second DB call.
+        c["salience"] = store.get_chunk_salience(d) if use_three_axis else 0.0
+        candidates.append(c)
+
+    if use_three_axis and candidates:
+        for c in candidates:
+            boost = _three_axis_boost(
+                c,
+                recency_weight=recency_weight,
+                importance_weight=importance_weight,
+                decay_weight=decay_weight,
+                recency_alpha=recency_alpha,
+            )
+            c["score"] = c["score"] + boost
+        # Re-sort by the boosted score.
+        candidates.sort(key=lambda x: -x["score"])
+        # Re-normalise so the top hit is still ~1.0.
+        new_top = candidates[0]["score"] if candidates else 1.0
+        if new_top > 0:
+            for c in candidates:
+                c["score"] = round(c["score"] / new_top, 4)
+
+    results = []
+    for c in candidates:
         results.append(c)
         if len(results) == limit:
             break

@@ -97,6 +97,16 @@ class ControlServer:
                     return server._serve_image(self, m.group(1) if m else "")
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
+                if self.path == "/api/core":
+                    # B2: return the always-injected core block for prompt_recall.py
+                    if server.store is None:
+                        return h_json(self, 200, {"core_block": ""})
+                    try:
+                        from mcpbrain.memory_tier import get_core_block
+                        block = get_core_block(server.store, str(server.home))
+                        return h_json(self, 200, {"core_block": block})
+                    except Exception:
+                        return h_json(self, 200, {"core_block": ""})
                 if self.path == "/api/config":
                     return h_json(self, 200, server.daemon.config_profile())
                 if self.path == "/api/timezones":
