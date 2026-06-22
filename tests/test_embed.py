@@ -143,6 +143,28 @@ def test_cache_dir_honors_explicit_env_override(tmp_path, monkeypatch):
     assert _model_cache_dir() == str(tmp_path / "custom")
 
 
+def test_weights_cached_false_when_dir_missing_or_empty(tmp_path, monkeypatch):
+    monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain.embed import model_weights_cached
+    # models/ does not exist yet
+    assert model_weights_cached() is False
+    # ...nor when it exists but holds no .onnx weights
+    (tmp_path / "models").mkdir()
+    assert model_weights_cached() is False
+
+
+def test_weights_cached_true_when_onnx_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain.embed import model_weights_cached
+    # Mirror fastembed's layout: models--<org>--<name>/.../model_optimized.onnx
+    nested = tmp_path / "models" / "models--qdrant--bge-small-en-v1.5-onnx-q"
+    nested.mkdir(parents=True)
+    (nested / "model_optimized.onnx").write_bytes(b"")
+    assert model_weights_cached() is True
+
+
 # ---------------------------------------------------------------------------
 # Embedder tests (require model download)
 # ---------------------------------------------------------------------------

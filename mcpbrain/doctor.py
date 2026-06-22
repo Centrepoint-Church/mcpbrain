@@ -88,7 +88,15 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
             profile=config.read_config(home),
         )
 
-    return {"daemon": _repair_daemon, "agent": _repair_agent, "records": _repair_records}
+    def _repair_embedder():
+        # Warming the embedder forces fastembed to (re-)download the weights into
+        # the persistent cache dir and verifies onnxruntime can actually load them.
+        # Idempotent: a no-op when the weights are already present. Needs network.
+        from mcpbrain.embed import get_embedder
+        get_embedder().embed_query("warm")
+
+    return {"daemon": _repair_daemon, "agent": _repair_agent,
+            "records": _repair_records, "embedder": _repair_embedder}
 
 
 def _is_problem(key: str, state: str) -> bool:
@@ -105,7 +113,7 @@ def _reprobe(home, key: str, fallback: dict) -> dict:
 
 
 def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
-               mcpbrain_bin=None, agent_installed=None) -> tuple[int, str]:
+               mcpbrain_bin=None, agent_installed=None, model_present=None) -> tuple[int, str]:
     """Diagnose, auto-fix the idempotent local failures, report, return (code, msg).
 
     Pure-ish: probes and repairs are injectable. With nothing injected it reads
@@ -120,6 +128,9 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         reprobe = _reprobe
     if agent_installed is None:
         agent_installed = _agent_installed
+    if model_present is None:
+        from mcpbrain.embed import model_weights_cached
+        model_present = lambda _home: model_weights_cached()  # noqa: E731
     if conns is None:
         conns = probes.all_connections(home)
     if repairs is None:
@@ -201,6 +212,32 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         remedy = disp.get("guided", "see the mcpbrain wizard")
         lines.append(f"⚠️  {label:<16} {probe.get('detail')} → {remedy}")
         need_action += 1
+
+    # Embedder weights: the local bge-small model must be cached on disk or
+    # `mcpbrain mcp-server` dies at startup with onnxruntime NO_SUCHFILE — which
+    # the user only ever sees as "unable to connect to the MCP server". Cheap
+    # offline presence check; auto-repair warms the embedder (re-downloads +
+    # verifies it loads). Needs network only when the weights are actually gone.
+    if model_present(home):
+        lines.append(f"✅ {'Embedder':<16} model weights cached")
+    else:
+        repair = repairs.get("embedder")
+        try:
+            if repair is not None:
+                repair()
+            healed = model_present(home)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"❌ {'Embedder':<16} weights missing → re-download failed: "
+                         f"{exc} (needs network; rerun mcpbrain doctor when online)")
+            need_action += 1
+        else:
+            if healed:
+                lines.append(f"❌ {'Embedder':<16} weights missing → downloading... ✅ fixed")
+                fixed += 1
+            else:
+                lines.append(f"❌ {'Embedder':<16} weights missing → re-download did not "
+                             f"land (needs network; rerun mcpbrain doctor when online)")
+                need_action += 1
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
