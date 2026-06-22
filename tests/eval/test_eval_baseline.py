@@ -62,14 +62,19 @@ def test_recall_and_mrr_above_floor(fixture_store):
 # never average missing-chunk cases in as 0 (that would mask real quality).
 #
 # These are REGRESSION floors against the measured baseline, NOT an aspirational
-# target. Measured 2026-06-22 over 10 coverable cases: recall@10=0.150, MRR=0.025.
-# The absolute numbers are low partly because the gold ground-truth is ops-brain's
-# *specific* chunk for each query — a different-but-equally-valid mcpbrain chunk
-# counts as a miss — so this gates against retrieval REGRESSIONS, not absolute
-# quality, until the gold set's expected_chunk_ids are re-verified against the
-# mcpbrain corpus (tracked on #6). Raise the floors as coverage + quality improve.
-GOLD_RECALL_FLOOR = 0.10   # measured baseline 0.150 (10 coverable cases, 2026-06-22)
-GOLD_MRR_FLOOR = 0.01      # measured baseline 0.025
+# target. Recall is measured DOCUMENT-level (any chunk of the expected doc counts —
+# see gold_eval._doc_key) because mcpbrain re-chunks independently of ops-brain.
+# Measured 2026-06-22 over 10 coverable cases: recall@10=0.40, MRR=0.16.
+#
+# A manual spot-check of the misses (2026-06-22) confirmed retrieval is HEALTHY:
+# for ~8/10 queries it returns topically-correct content, but the gold ground truth
+# is ops-brain's *specific* document and the corpus has duplicates/siblings (e.g.
+# three copies of the risk-register template, different board-minutes files), so a
+# different-but-equally-valid doc scores as a miss. So this gates against retrieval
+# REGRESSIONS, not absolute quality, until expected_chunk_ids are re-verified /
+# multiple acceptable docs are allowed per case (tracked on #6).
+GOLD_RECALL_FLOOR = 0.30   # measured doc-level baseline 0.40 (10 coverable cases)
+GOLD_MRR_FLOOR = 0.10      # measured baseline 0.16
 MIN_COVERED = 5            # need at least this many coverable cases to gate meaningfully
 
 

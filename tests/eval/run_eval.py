@@ -178,7 +178,17 @@ def gold_eval(store, embedder, *, k: int = 10) -> dict:
       total   = cases with any expected_chunk_ids
       missing = total - covered (coverage gap; grows the eval as backfill fills in)
     """
+    import re
     from mcpbrain.retrieval import hybrid_search
+
+    def _doc_key(chunk_id: str) -> str:
+        # Group a chunk back to its document by stripping the trailing -<n> chunk
+        # index (gdrive-<fileid>-3 → gdrive-<fileid>; gmail-<id>-body-0 →
+        # gmail-<id>-body). Recall is measured DOCUMENT-level: retrieving any chunk
+        # of the expected document is a hit. Chunk-level is too brittle here — the
+        # gold ground truth is ops-brain's specific chunk, but mcpbrain re-chunks
+        # independently, so "right doc, different chunk index" is a correct retrieval.
+        return re.sub(r"-\d+$", "", chunk_id)
 
     cases = load_gold_cases()
     total = covered = 0
@@ -193,14 +203,14 @@ def gold_eval(store, embedder, *, k: int = 10) -> dict:
         if not present:
             continue  # not coverable against this corpus yet — skip, don't score 0
         covered += 1
+        want_docs = {_doc_key(d) for d in present}
         results = hybrid_search(store, embedder, case.get("query", ""), limit=k)
-        retrieved = [r["doc_id"] for r in results]
-        # Score against the PRESENT expected ids only (can't retrieve what isn't indexed).
-        hits = set(retrieved[:k]) & present
-        recalls.append(len(hits) / len(present))
+        retrieved_docs = [_doc_key(r["doc_id"]) for r in results]
+        # Document-level recall: did we surface the expected document at all?
+        recalls.append(1.0 if (set(retrieved_docs[:k]) & want_docs) else 0.0)
         rr = 0.0
-        for i, doc_id in enumerate(retrieved):
-            if doc_id in present:
+        for i, dk in enumerate(retrieved_docs):
+            if dk in want_docs:
                 rr = 1.0 / (i + 1)
                 break
         rrs.append(rr)
