@@ -126,6 +126,24 @@ def test_prefix_calendar_empty_location_omitted():
 
 
 # ---------------------------------------------------------------------------
+# Model cache dir resolution (no model download needed)
+# ---------------------------------------------------------------------------
+
+def test_cache_dir_defaults_to_persistent_app_dir(tmp_path, monkeypatch):
+    # No FASTEMBED_CACHE_PATH set -> persistent app_dir/models, NOT a temp dir.
+    monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain.embed import _model_cache_dir
+    assert _model_cache_dir() == str(tmp_path / "models")
+
+
+def test_cache_dir_honors_explicit_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path / "custom"))
+    from mcpbrain.embed import _model_cache_dir
+    assert _model_cache_dir() == str(tmp_path / "custom")
+
+
+# ---------------------------------------------------------------------------
 # Embedder tests (require model download)
 # ---------------------------------------------------------------------------
 
