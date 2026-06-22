@@ -57,7 +57,8 @@ Each extraction uses this schema verbatim. Match the field names exactly.
   "summary": "One plain sentence.",
   "contextual_summary": "Optional longer situational summary, or omit it.",
   "entities": [{"name": "Person Name", "type": "person|org|project",
-                "org": "<org tag>", "role": "Job title"}],
+                "org": "<org tag>", "role": "Job title",
+                "source_span": "exact short phrase from the text"}],
   "topics": ["facilities", "worship"],
   "actions": [{"description": "...", "owner_name": "Person Name",
                "owner_fallback": "sender", "due_date": "YYYY-MM-DD",
@@ -67,7 +68,7 @@ Each extraction uses this schema verbatim. Match the field names exactly.
   "reply_reason": "Direct question: 'can you confirm Hall B?'",
   "resolved_action_ids": [42],
   "updated_actions": [{"id": 42, "new_text": "..."}],
-  "relations": [{"source_name": "Person Name", "type": "works_at",
+  "relations": [{"source_name": "Person Name", "type": "works_at|reports_to|manages|coordinates_with|mentioned_with",
                  "target_name": "Org Name"}],
   "messages": [{"message_id": "m-1",
                 "sender": "Person Name <addr@example.com>",
@@ -128,10 +129,12 @@ Entities and relations are the part most worth getting right.
   "from <org>", "at <org>", or role phrasing, if present. The sender
   "Franz from The Church Co <franz@thechurchco.com>" yields the name `Franz`,
   not "Franz from The Church Co".
-- **Type.** `person` is a named individual. `org` is any company, church,
+- **Type.** Exactly three valid types — `person`, `org`, `project`. Do not
+  invent others. `person` is a named individual. `org` is any company, church,
   store, venue, team, school, or agency. `project` is a named initiative
   or body of work, not a thing or a place. When torn between `org` and
   `person`, a name that could sign a contract or own a building is an `org`.
+  Any entity with a type outside these three will be silently dropped.
 - **Per-entity org.** An entity's `org` is where THAT entity belongs, not the
   thread's org. It is fixed by THAT entity's own email domain (via
   `org_domain_map`) or a stated affiliation, NOT by what the email is about. A
@@ -145,10 +148,19 @@ Entities and relations are the part most worth getting right.
 - **Relations.** A relation joins two real, named entities that you have also
   listed in `entities`. Both `source_name` and `target_name` must be entity
   names, never an org tag (the `valid_orgs` values, `external`, and `unknown`
-  are tags, not entities). `works_at` links a person to the org they belong
-  to; do not assert
-  it for venues, tools, or places. Emit only relations the text supports, and
-  skip the rest rather than guessing.
+  are tags, not entities). Exactly five valid relation types:
+    - `works_at` — person belongs to an org (use org entity, not org tag)
+    - `reports_to` — person reports to another person
+    - `manages` — person manages a person, org, or project
+    - `coordinates_with` — person collaborates with another person/org/project
+    - `mentioned_with` — two entities co-mentioned without a stronger relation
+  Any other relation type will be silently dropped. Emit only relations the
+  text explicitly supports; skip rather than guess.
+- **Grounding.** Every entity name and every relation endpoint name must appear
+  in the source text (the email/document you are extracting from). Do not
+  fabricate names that are not present in the messages. Add a short
+  `source_span` to each entity (the exact phrase from the text where the name
+  appears) — this is how grounding is verified.
 
 ## Drive document mode
 

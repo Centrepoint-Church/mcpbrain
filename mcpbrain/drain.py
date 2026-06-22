@@ -44,6 +44,55 @@ from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
 
+
+def _grounding_filter(extraction: dict) -> tuple[dict, int]:
+    """Remove entities and relations not grounded in the source text (Q2).
+
+    Deterministic string-presence check only — no LLM. An entity is considered
+    grounded if its name (case-insensitive) appears anywhere in the concatenated
+    message text. A relation is grounded if both endpoint names appear.
+
+    Returns (filtered_extraction, dropped_count). Input is not mutated.
+    """
+    source = " ".join(
+        (m.get("text") or m.get("body") or "")
+        for m in (extraction.get("messages") or [])
+    ).lower()
+
+    if not source:
+        return extraction, 0
+
+    out = dict(extraction)
+    dropped = 0
+
+    ents = out.get("entities")
+    if isinstance(ents, list):
+        kept = []
+        for e in ents:
+            name = (e.get("name") or "").strip().lower() if isinstance(e, dict) else ""
+            if name and name in source:
+                kept.append(e)
+            else:
+                dropped += 1
+        out["entities"] = kept
+
+    rels = out.get("relations")
+    if isinstance(rels, list):
+        kept = []
+        for r in rels:
+            if not isinstance(r, dict):
+                kept.append(r)
+                continue
+            src = (r.get("source_name") or "").strip().lower()
+            tgt = (r.get("target_name") or "").strip().lower()
+            if src and tgt and src in source and tgt in source:
+                kept.append(r)
+            else:
+                dropped += 1
+        out["relations"] = kept
+
+    return out, dropped
+
 # Per-key drainers for optional inbox blocks. Each drainer(store, inbox_obj) called
 # when the key is present; failures are isolated (log + continue). Registered by
 # block modules at import time.
@@ -283,6 +332,14 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                            f"'unknown'. If this is a real organisation, add it "
                            f"to the orgs list in config.json.",
                     severity="info")
+            # Q2 grounding check: drop entities/relations not found in source text.
+            if config.schema_grounding_enabled(str(home_dir)):
+                extraction, grounding_dropped = _grounding_filter(extraction)
+                if grounding_dropped:
+                    log.debug("drain: grounding filter dropped %d item(s) on thread %s",
+                              grounding_dropped, thread_id)
+                    summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
+
             # Recover the chunks this extraction covers by message id, NOT by a
             # thread-wide query. Marking only the messages that were actually
             # extracted means a late-arriving message (synced after prepare) or a
