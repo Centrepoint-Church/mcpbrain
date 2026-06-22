@@ -177,6 +177,115 @@ def _valid_org_tags():
     return list(tax.names) + list(orgs.RESERVED_TAGS)
 
 
+# --- salience gate (Q1) ---------------------------------------------------
+
+# Drive mime types that are tabular/raw data — skip prose-extraction.
+# These files have no meaningful entity/relation content but inflate the graph.
+_COLD_DRIVE_MIMES = frozenset({
+    "application/vnd.google-apps.spreadsheet",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+    "text/csv",
+    "application/csv",
+    "text/tab-separated-values",
+    "application/vnd.ms-excel",
+})
+
+# Gmail label fragments that indicate promotional / bulk mail.
+_PROMOTIONAL_LABELS = frozenset({
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_UPDATES",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_FORUMS",
+})
+
+# Minimum text length (chars) for a Drive document to be worth extraction.
+# Docs below this are likely near-empty stubs or auto-generated covers.
+_MIN_DRIVE_TEXT = 200
+
+
+def should_enrich(chunk: dict) -> bool:
+    """Return True when a chunk is worth LLM graph-extraction.
+
+    Source-aware gate:
+    - Email: skip CATEGORY_PROMOTIONS/UPDATES Gmail labels (in addition to the
+      existing _filter_noise sender/subject checks). The label check works on the
+      already-retrieved label metadata stored in the chunk.
+    - Drive: skip tabular mime types (spreadsheets, CSV) and docs with very short
+      text (< _MIN_DRIVE_TEXT chars). Real prose documents pass through.
+
+    Skipped chunks are NOT lost — they stay embedded/searchable (embedded=1).
+    The caller marks them 'cold' via store.set_enrich_state; they never enter
+    the extraction queue while cold.
+
+    Returns True for any unrecognised source (fail-open, no false negatives).
+    """
+    meta = chunk.get("metadata") or {}
+    if isinstance(meta, str):
+        import json as _json
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+
+    source = str(meta.get("source") or "").lower()
+
+    if source == "gmail" or meta.get("thread_id"):
+        # Email: check Gmail category labels.
+        labels_raw = meta.get("labels") or ""
+        if isinstance(labels_raw, list):
+            labels = {str(lb).upper() for lb in labels_raw}
+        else:
+            labels = {lb.strip().upper() for lb in str(labels_raw).split(",")}
+        if labels & _PROMOTIONAL_LABELS:
+            return False  # bulk/promotional email
+        return True
+
+    if source in ("gdrive", "drive") or meta.get("file_id") or meta.get("mime_type"):
+        # Drive: gate on mime type + min text length.
+        mime = str(meta.get("mime_type") or "").lower()
+        if mime in _COLD_DRIVE_MIMES:
+            return False
+        text_len = len(chunk.get("text") or "")
+        if text_len < _MIN_DRIVE_TEXT:
+            return False
+        return True
+
+    # Unknown source: pass through (fail-open).
+    return True
+
+
+def _apply_salience_gate(store, batches: list) -> tuple[list, dict]:
+    """Run should_enrich() over all chunks in each batch.
+
+    Chunks that do not enrich are marked 'cold' in the store (reversible) and
+    removed from the batch. Empty batches are discarded. Returns (kept_batches,
+    summary) where summary has 'gated' (cold-marked) and 'kept' counts.
+    """
+    gated = kept = 0
+    result = []
+    for batch in batches:
+        cold_ids = []
+        kept_chunks = []
+        for chunk in batch.chunks:
+            if should_enrich(chunk):
+                kept_chunks.append(chunk)
+                kept += 1
+            else:
+                cold_ids.append(chunk["doc_id"])
+                gated += 1
+        if cold_ids:
+            store.set_enrich_state(cold_ids, "cold")
+        if kept_chunks:
+            import copy
+            new_batch = copy.copy(batch)
+            new_batch.doc_ids = [c["doc_id"] for c in kept_chunks]
+            new_batch.chunks = kept_chunks
+            result.append(new_batch)
+    if gated or kept:
+        log.info("salience gate: gated=%d cold, kept=%d for extraction", gated, kept)
+    return result, {"gated": gated, "kept": kept}
+
+
 # --- noise marking ---------------------------------------------------------
 
 def _filter_noise(store, batches) -> list:
@@ -475,6 +584,11 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
+    # Q1 salience gate: run before noise filter so cold-marked chunks are excluded
+    # from the thread_cap count. Gate is behind a config flag (default OFF).
+    salience_summary = {}
+    if config.salience_gate_enabled(str(config.app_dir())):
+        batches, salience_summary = _apply_salience_gate(store, batches)
     kept = _filter_noise(store, batches)[:thread_cap]
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,
@@ -483,6 +597,8 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     summary = write_units(data, home=home, window=window)
     summary["threads"] = len(data.get("threads") or [])
     summary["batch_id"] = data.get("batch_id")
+    if salience_summary:
+        summary["salience_gate"] = salience_summary
     return summary
 
 

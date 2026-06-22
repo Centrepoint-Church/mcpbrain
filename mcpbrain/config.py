@@ -92,6 +92,20 @@ def reextract_enabled(home) -> bool:
     return bool(read_config(home).get("reextract", True))
 
 
+def salience_gate_enabled(home) -> bool:
+    """Whether the source-aware salience gate runs before graph-extraction (Q1).
+
+    When True, should_enrich() classifies each chunk before it enters the
+    extraction queue; low-salience chunks (tabular Drive files, promotional email)
+    are marked 'cold' (embedded/searchable, not graph-extracted).
+
+    Default: False — safe rollout. Enable by setting 'salience_gate': true in
+    config.json. Cold-tier marking is REVERSIBLE: set the flag back to false and
+    reset enrich_state='' on cold chunks to re-queue them.
+    """
+    return bool(read_config(home).get("salience_gate", False))
+
+
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
     units (config 'spool_thread_cap', default 500).
