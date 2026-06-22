@@ -23,6 +23,7 @@ from email.utils import parsedate_to_datetime
 from nameparser import HumanName
 
 from mcpbrain import config, orgs
+from mcpbrain.resolve import build_entity_index, write_time_dedup_check
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
     _normalise_title_for_dedup,
@@ -833,7 +834,7 @@ def _find_near_duplicate_action(conn, text, owner, *, window_days=7,
 # ---------------------------------------------------------------------------
 
 def apply(store, extraction, *, doc_ids, identity=None,
-          clock=None, embedder=None, owner=None) -> dict:
+          clock=None, embedder=None, owner=None, home=None) -> dict:
     """Write one thread's extraction to the graph (structural pass).
 
     Adapts the Nexus write_to_graph_v2 sequence to mcpbrain: derives the thread
@@ -962,6 +963,19 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
     entities_created = 0
 
+    # Write-time dedup index: built once per apply() call when the flag is on.
+    # Populated from the store's entity list so near-duplicates in this batch
+    # redirect to the already-existing entity rather than fragmenting the graph.
+    _dedup_home = str(home) if home is not None else str(config.app_dir())
+    _dedup_enabled = config.write_time_dedup_enabled(_dedup_home)
+    _entity_index: dict = {}
+    if _dedup_enabled:
+        try:
+            _entity_index = build_entity_index(store.entities_for_resolution())
+        except Exception:
+            log.warning("write_time_dedup: failed to build entity index; skipping dedup this apply()")
+            _dedup_enabled = False
+
     # ── 1. Entities ────────────────────────────────────────────────────────
     for ent in entities_list:
         ename = (ent.get("name") or "").strip()
@@ -976,6 +990,22 @@ def apply(store, extraction, *, doc_ids, identity=None,
             continue
         if etype == "person" and is_junk_entity(ename, "person"):
             continue
+
+        # Q3 write-time dedup: redirect near-duplicates to the existing entity.
+        if _dedup_enabled:
+            existing_id = write_time_dedup_check(ename, etype, _entity_index)
+            if existing_id:
+                log.debug("write_time_dedup: %r → %s (existing)", ename, existing_id)
+                entity_id = existing_id
+                name_to_id[ename] = entity_id
+                if entity_id not in linked:
+                    if store.link_email_entity(lead_msg_id, entity_id, role="mentioned"):
+                        _bump_email_count(store, entity_id)
+                    linked.add(entity_id)
+                if erole and etype == "person":
+                    write_role_observation(store, entity_id, erole, "llm_extraction",
+                                           lead_date_iso or "2026-01-01", "medium")
+                continue
 
         entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg,
                                   taxonomy=taxonomy, valid_from=lead_date_iso)

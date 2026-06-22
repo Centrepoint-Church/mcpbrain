@@ -1,9 +1,24 @@
-"""Entity resolution: deterministic auto-merge + fuzzy candidate generation.
+"""Entity resolution: deterministic auto-merge + fuzzy candidate generation
++ write-time dedup cascade.
 
 Step 1 (deterministic) merges same-type entities whose canonical keys match —
 honorific-stripped, accent-folded, slugified. It is LLM-free and always safe to
 run. Step 2 (blocking + scoring) surfaces near-duplicate candidate pairs for the
 spool merge_review block in prepare; nothing is merged here.
+
+Step 3 (write-time dedup, Q3): before inserting a new entity, check the
+current in-memory index for a same-type near-duplicate above the high-confidence
+threshold (_WRITE_TIME_MERGE_THRESHOLD). If found, redirect to the existing
+entity instead of creating a duplicate. Behind config flag
+`write_time_dedup_enabled` (default False). The cascade:
+  exact canonical key → high-confidence token similarity → create new.
+  Ambiguous band [_CANDIDATE_GATE, _WRITE_TIME_MERGE_THRESHOLD): still queued
+  for LLM review via the existing spool merge_review mechanism.
+
+Note: embedding-based semantic blocking (cosine similarity on entity vectors)
+would give better recall for non-overlapping names (e.g. "Joel" vs "J. Chelliah")
+but requires entity-specific vector indices that don't yet exist. The token-
+similarity cascade handles the common fragmentation patterns. Deferred.
 
 The LLM-adjudication tier (_adjudicate / _pick_winner) has been removed in §9A.
 Fuzzy candidate generation (_candidate_pairs) is preserved for
@@ -113,6 +128,62 @@ def _pick_winner(a, b):
     winner = max((a, b), key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
     loser = b if winner is a else a
     return winner, loser
+
+
+# --- Q3: write-time dedup cascade -----------------------------------------
+
+# Token-set similarity above this threshold → auto-merge at write time without
+# LLM review. Conservative: 0.8 means ≥4 out of 5 tokens must overlap (or a
+# 2-token name where both match). Lower values risk false positives.
+_WRITE_TIME_MERGE_THRESHOLD = 0.8
+
+
+def build_entity_index(entities: list[dict]) -> dict:
+    """Build a {id: {name, type, key, toks}} index for write-time lookups.
+
+    Precomputes canonical key and token set for each entity so the cascade can
+    run in O(n) per lookup rather than rescanning the full list.
+    """
+    idx = {}
+    for e in entities:
+        idx[e["id"]] = {
+            "name": e["name"],
+            "type": e["type"],
+            "key": canonical_key(e["name"]),
+            "toks": _tokens(e["name"]),
+        }
+    return idx
+
+
+def write_time_dedup_check(name: str, entity_type: str,
+                           index: dict) -> str | None:
+    """Return the id of an existing entity to redirect this write to, or None.
+
+    Cascade (same type only):
+    1. Exact canonical key → certain duplicate → redirect.
+    2. Token-set ratio >= _WRITE_TIME_MERGE_THRESHOLD → high-confidence
+       duplicate → redirect without LLM review.
+    3. Below threshold → caller creates a new entity.
+
+    The ambiguous band [_CANDIDATE_GATE, threshold) is NOT acted on here;
+    those pairs are handled by the spool merge_review mechanism in prepare.
+
+    index: {id: {name, type, key, toks}} — from build_entity_index().
+    """
+    if not name:
+        return None
+    key = canonical_key(name)
+    toks = _tokens(name)
+    for eid, ent in index.items():
+        if ent["type"] != entity_type:
+            continue
+        if key and ent["key"] == key:
+            return eid
+        if toks and ent["toks"]:
+            ratio = _token_set_ratio(toks, ent["toks"])
+            if ratio >= _WRITE_TIME_MERGE_THRESHOLD:
+                return eid
+    return None
 
 
 def resolve_entities(store, client=None, *, max_adjudications: int = 200) -> dict:
