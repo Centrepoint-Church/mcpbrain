@@ -11,6 +11,19 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+def _log_recall_exposures(store, results: list[dict], session_id: str) -> None:
+    """Fire-and-forget: log exposure events for recalled chunks (S2 signal).
+
+    Silently swallows all errors so recall is never disrupted by feedback I/O.
+    """
+    try:
+        from mcpbrain.feedback import record_exposures
+        doc_ids = [r["doc_id"] for r in results if r.get("doc_id")]
+        record_exposures(store, doc_ids, session_id)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("_log_recall_exposures error (swallowed): %s", exc)
+
+
 def _write_private(path, text):
     """Write text to path at mode 0600 with no world-readable window.
 
@@ -198,7 +211,12 @@ class ControlServer:
                 # short-circuits to no results.
                 q = (body.get("query") or "").strip()
                 limit = min(int(body.get("limit") or 5), 10)
-                return h_json(h, 200, {"results": d.search(q, limit) if q else []})
+                results = d.search(q, limit) if q else []
+                # Log exposure events for injected chunks (S2 feedback signal).
+                if results and self.store is not None:
+                    session_id = (body.get("session_id") or "").strip()
+                    _log_recall_exposures(self.store, results, session_id)
+                return h_json(h, 200, {"results": results})
             # /api/config carries the Gemini key. The control API is loopback-only
             # over plain HTTP by design, so the key travels in cleartext on
             # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed

@@ -147,6 +147,14 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     CadencePass("audit", "_audit_interval_s", "_last_audit", "_run_audit"),
     CadencePass("stale_reextract", "_stale_reextract_interval_s",
                 "_last_stale_reextract", "_run_stale_reextract"),
+    # S2 feedback aggregation: nightly Bayesian-smoothed CTR → chunk_quality.
+    # needs_configured=False: feedback aggregation is identity-agnostic.
+    CadencePass("feedback_aggregate", "_feedback_aggregate_interval_s",
+                "_last_feedback_aggregate", "_run_feedback_aggregate",
+                needs_configured=False),
+    # Q4 org backfill: deterministic org_from_email over org-less entities.
+    CadencePass("org_backfill", "_org_backfill_interval_s",
+                "_last_org_backfill", "_run_org_backfill"),
 )
 
 
@@ -457,6 +465,14 @@ class Daemon:
         # stale_reextract_interval_s is set. Same three-shape cadence contract.
         self._stale_reextract_interval_s: float | None = stale_reextract_interval_s
         self._last_stale_reextract = None
+        # S2 feedback aggregation: nightly Bayesian-smoothed CTR → chunk_quality.
+        # OFF by default; the daemon sets it from config/cadences on start.
+        self._feedback_aggregate_interval_s: float | None = None
+        self._last_feedback_aggregate = None
+        # Q4 org backfill: deterministic pass over org-less entities.
+        # OFF by default; enabled via cadences config.
+        self._org_backfill_interval_s: float | None = None
+        self._last_org_backfill = None
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
@@ -751,6 +767,8 @@ class Daemon:
             self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
             self._auto_update_interval_s = cadences["auto_update_interval_s"]
             self._verify_interval_s = cadences["verify_interval_s"]
+            self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
+            self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -1193,6 +1211,43 @@ class Daemon:
         if self._backfill_active.is_set():
             return None
         return self._run_stale_reextract()
+
+    # -- S2 feedback aggregation (nightly) ------------------------------------
+
+    def _run_feedback_aggregate(self) -> dict | None:
+        """Nightly Bayesian-smoothed CTR → chunk_quality update."""
+        if not self._is_due("_feedback_aggregate_interval_s",
+                            "_last_feedback_aggregate"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.feedback import aggregate_feedback
+            summary = aggregate_feedback(self._store)
+            log.info("feedback_aggregate: updated=%d skipped=%d",
+                     summary.get("updated", 0), summary.get("skipped", 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("feedback_aggregate failed: %s", exc, exc_info=True)
+            return {"feedback_aggregate": False, "error": str(exc)}
+        self._last_feedback_aggregate = now
+        return summary
+
+    # -- Q4 org backfill (deterministic) --------------------------------------
+
+    def _run_org_backfill(self) -> dict | None:
+        """Run org_from_email over org-less entities (deterministic, no LLM)."""
+        if not self._is_due("_org_backfill_interval_s", "_last_org_backfill"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain import org_backfill
+            summary = org_backfill.run_backfill(self._store)
+            log.info("org_backfill: updated=%d unknown_domains=%d",
+                     summary.get("updated", 0), len(summary.get("unknown_domains", [])))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("org_backfill failed: %s", exc, exc_info=True)
+            return {"org_backfill": False, "error": str(exc)}
+        self._last_org_backfill = now
+        return summary
 
     # -- periodic graph lint ------------------------------------------------
 
@@ -1650,16 +1705,18 @@ def _maybe_merge_org_config(home) -> None:
 
 
 _CADENCE_DEFAULTS: dict[str, float] = {
-    "communities_interval_s":    86400.0,
-    "blocks_interval_s":         86400.0,
-    "proactive_interval_s":      86400.0,
-    "waiting_on_interval_s":     86400.0,
-    "lint_interval_s":           86400.0,
-    "stale_reextract_interval_s":86400.0,
-    "synthesise_interval_s":     604800.0,
-    "audit_interval_s":          604800.0,
-    "verify_interval_s":         3600.0,
-    "auto_update_interval_s":    86400.0,
+    "communities_interval_s":         86400.0,
+    "blocks_interval_s":              86400.0,
+    "proactive_interval_s":           86400.0,
+    "waiting_on_interval_s":          86400.0,
+    "lint_interval_s":                86400.0,
+    "stale_reextract_interval_s":     86400.0,
+    "feedback_aggregate_interval_s":  86400.0,   # S2: nightly aggregate
+    "org_backfill_interval_s":        86400.0,   # Q4: daily deterministic backfill
+    "synthesise_interval_s":          604800.0,
+    "audit_interval_s":               604800.0,
+    "verify_interval_s":              3600.0,
+    "auto_update_interval_s":         86400.0,
 }
 
 _CADENCE_KEYS = (
@@ -1673,6 +1730,8 @@ _CADENCE_KEYS = (
     "stale_reextract_interval_s",
     "auto_update_interval_s",
     "verify_interval_s",
+    "feedback_aggregate_interval_s",
+    "org_backfill_interval_s",
 )
 
 
@@ -1754,7 +1813,10 @@ def main(argv=None) -> None:
                     audit_interval_s=cadences["audit_interval_s"],
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
                     auto_update_interval_s=cadences["auto_update_interval_s"],
-                    verify_interval_s=cadences["verify_interval_s"])  # services=None -> auto-build from token
+                    verify_interval_s=cadences["verify_interval_s"])
+    # S2/Q4 cadences: not constructor params (added post-init); wire after construction.
+    daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
+    daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
