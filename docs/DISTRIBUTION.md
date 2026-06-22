@@ -28,15 +28,10 @@ checks the same index daily to self-update.
        mcpbrain-<ver>-py3-none-any.whl
    ```
 
-4. **Set the index URL** in the three places that default to the placeholder
-   `https://CHANGE-ME.github.io/mcpbrain-dist/simple/`:
-
-   | File | Variable |
-   |------|----------|
-   | `mcpbrain/update.py` | `DEFAULT_INDEX_URL` |
-   | `install/setup.sh` | `INDEX_URL=` default |
-   | `install/setup.command` | `INDEX_URL=` default |
-   | `install/setup.ps1` | `$IndexUrl` default |
+4. **Set the index URL.** The compile-time default lives in one place:
+   `mcpbrain/update.py` → `DEFAULT_INDEX_URL` (replace the placeholder
+   `https://CHANGE-ME.github.io/mcpbrain-dist/simple/`). The `plugin/INSTALL.md`
+   prompt passes the same URL to `uv tool install --index`.
 
    **Or** set the environment variable `MCPBRAIN_INDEX_URL` / config key
    `update_index_url` to override without editing the source.
@@ -53,9 +48,17 @@ checks the same index daily to self-update.
 
 ## Cutting a release
 
-1. Bump the version in **both** places:
+> **`docs/RELEASE-RUNBOOK.md` is the authoritative step-by-step procedure** (version
+> bump → tests → push source → publish wheel → sync plugin → verify, plus the
+> clean-machine validation gates). This section covers only the wheel-index mechanics
+> (`bin/release.py`); follow the runbook for the full release.
+
+1. Bump the version in **all four** sources of truth (keep them equal) — bumping only
+   the first two ships a wrong **plugin/marketplace** version:
    - `mcpbrain/__init__.py` (the `__version__` string)
    - `pyproject.toml` (`version = "..."`)
+   - `plugin/.claude-plugin/plugin.json` (`version`)
+   - `plugin/.claude-plugin/marketplace.json` (`plugins[0].version`)
 
 2. Check out (or clone) your `mcpbrain-dist` repo alongside the source repo.
 
@@ -90,16 +93,20 @@ checks the same index daily to self-update.
 
 ## How installers consume the index
 
-All three installer scripts (`install/setup.sh`, `install/setup.command`,
-`install/setup.ps1`) run:
+> **Install path:** a single Claude Code session driven by the `plugin/INSTALL.md`
+> prompt (it runs the `uv tool install` below, then `mcpbrain setup`). There is no
+> `curl | sh` one-liner and **no `install/setup.*` scripts** — those were removed; the
+> prompt is the only path. See `docs/RELEASE-RUNBOOK.md` → "How a colleague installs".
+
+The `INSTALL.md` prompt runs uv's per-package "explicit" index mode:
 
 ```bash
-uv tool install --index "mcpbrain=<INDEX_URL>" mcpbrain --force
+uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" mcpbrain --force
 ```
 
 The `mcpbrain=<url>` syntax tells uv to use the Pages index **only** for the
-`mcpbrain` package; all dependencies are still resolved from PyPI.  This is
-uv's "explicit" / per-package index mode.
+`mcpbrain` package; all dependencies are still resolved from PyPI. The `--python 3.12`
+pin is required (the package needs ≥3.12; uv provisions it when pinned).
 
 ---
 

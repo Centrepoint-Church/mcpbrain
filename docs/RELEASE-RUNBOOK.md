@@ -2,7 +2,8 @@
 
 Concrete maintainer steps to publish a new mcpbrain version and put it on a
 colleague's computer. Companion to `docs/DISTRIBUTION.md` (the *why*); this is the
-*do*. See `docs/ARCHITECTURE.md` for the system overview. **Current version: 0.7.10.**
+*do*. See `docs/ARCHITECTURE.md` for the system overview. The current version is
+whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goes stale).
 
 ## Distribution topology (all under the Centrepoint-Church org)
 
