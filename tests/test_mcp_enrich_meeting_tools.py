@@ -134,6 +134,35 @@ def test_units_relists_after_lease_expiry(tmp_path, monkeypatch):
     assert asyncio.run(units_tool())["units"]
 
 
+def test_units_batch_caps_handout_and_leaves_rest(tmp_path, monkeypatch):
+    # More units than the cap: one call returns exactly the cap and claims ONLY
+    # those, leaving the rest unclaimed so the next call / an overlapping caller
+    # picks them up wave-by-wave instead of waiting out the lease on the whole queue.
+    monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_BATCH", "5")
+    units_dir = tmp_path / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+    for i in range(13):
+        (units_dir / f"u-{i:02d}.json").write_text(json.dumps(
+            {"unit_id": f"u-{i:02d}", "kind": "thread", "threads": [{"thread_id": f"t{i}"}]}))
+    tool = mcp_server.make_brain_enrich_units(str(tmp_path))
+
+    first = asyncio.run(tool())["units"]
+    assert len(first) == 5                                        # capped to the batch
+    assert len(list((tmp_path / "enrich_queue" / "claims").glob("*"))) == 5  # only those claimed
+    second = asyncio.run(tool())["units"]
+    assert len(second) == 5                                       # next wave, disjoint from first
+    assert not ({u["unit_id"] for u in first} & {u["unit_id"] for u in second})
+    assert len(asyncio.run(tool())["units"]) == 3                 # remainder
+    assert asyncio.run(tool()) == {"empty": True}                 # all leased now
+
+
+def test_units_batch_defaults_to_twelve(monkeypatch):
+    monkeypatch.delenv("MCPBRAIN_ENRICH_UNITS_BATCH", raising=False)
+    assert mcp_server._units_batch() == 12
+    monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_BATCH", "garbage")
+    assert mcp_server._units_batch() == 12                        # invalid override -> default
+
+
 def test_pull_unit_attaches_rules_and_context(tmp_path):
     _write_units(tmp_path, threads=[{"thread_id": "t1", "body": "hello"}],
                  context={"owner_name": "Jo", "known_people": [{"name": "Ann"}]})

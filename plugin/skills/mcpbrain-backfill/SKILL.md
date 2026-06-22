@@ -11,6 +11,20 @@ subagent, then nudging the daemon to refill the queue. No context (not even your
 the orchestrator) ever holds more than a unit id and a one-line status. Loops until
 the queue stays empty.
 
+## Models (same split as the hourly enrichment cycle)
+
+- **Coordinator (you): Sonnet.** Run this loop on Sonnet — it does the wave
+  orchestration, the requeue-guard judgement, and the daemon nudging. If you are not
+  already on Sonnet, switch before starting (`/model sonnet`).
+- **Subagents: Haiku.** Dispatch every `enrich-batch` subagent — first try AND retries
+  — with **`model: haiku` set EXPLICITLY in the Task call**. The agent frontmatter is
+  not always honored, and extraction follows the rules well on Haiku at a fraction of
+  Sonnet's cost over a large backlog.
+
+`brain_enrich_units` hands out at most a wave's worth of units per call (capped, and it
+claims only those), so this loop and the hourly cycle can both pull from the queue at
+once without one starving the other — keep calling it for the next wave.
+
 MCP-only — it does not read the spool via shell. Load the tools first if needed:
 `ToolSearch("select:mcp__mcpbrain__brain_enrich_units,mcp__mcpbrain__brain_enrich_advance")`.
 
@@ -42,7 +56,7 @@ WHILE empty < 3:
   # a derailed unit at most twice, then leave it for a later run. Count only clean
   # replies toward units_done.
   FOR each derailed unit (reply not a clean status line), up to 2 retries:
-      dispatch enrich-batch (Task tool, subagent_type: enrich-batch) with its unit_id
+      dispatch enrich-batch (Task tool, subagent_type: enrich-batch, model: haiku) with its unit_id
 
   brain_enrich_advance()              # apply the pushed results + top the queue back up
 
@@ -57,8 +71,9 @@ REPORT: waves, units_done, final queue state
   `enrich_inbox/<unit_id>.json`). The daemon applies it and deletes the unit. A unit
   with no successful push is never deleted, so the requeue guard above can safely
   re-dispatch it.
-- `brain_enrich_units` claims each unit it hands out with a short lease, so a unit in
-  flight is never handed to two subagents — the loop won't double-process.
+- `brain_enrich_units` returns at most a capped wave of units and claims each one it
+  hands out with a short lease, so a unit in flight is never handed to two subagents —
+  the loop won't double-process, and call it again for the next wave.
 - `brain_enrich_advance` runs one daemon drain+prepare cycle: it applies pushed
   results (freeing those units) and produces the next units from still-un-enriched
   history. The queue is bounded, so the daemon refills it as units drain.
