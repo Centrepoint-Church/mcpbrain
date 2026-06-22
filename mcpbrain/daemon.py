@@ -61,10 +61,10 @@ EMBED_BACKEND = "fastembed:bge-small:v1"
 DEFAULT_BACKUP_INTERVAL_S = 3600
 _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
-# Spool prepare bounds. thread_cap is a belt-and-braces ceiling on top of the
-# cap group_unenriched_threads already applies; char_budget splits an over-long
-# thread before the extractor sees it. Conservative starting points; tune later.
-SPOOL_THREAD_CAP = 100
+# Spool prepare bounds. The per-cycle thread ceiling now lives in config
+# (config.spool_thread_cap, default 500) so it can be tuned live for backfill
+# without a daemon restart. char_budget splits an over-long thread before the
+# extractor sees it.
 SPOOL_CHAR_BUDGET = 24000
 
 # Per-cycle ceiling on how many already-enriched chunks are re-flowed for
@@ -327,7 +327,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                     log.info("re-extraction: re-flowed %d outdated chunk(s)", reflowed)
             except Exception as exc:  # noqa: BLE001 — never crash the cycle
                 log.warning("re-extraction sweep skipped: %s", exc)
-        prep = prepare.prepare_units(store, thread_cap=SPOOL_THREAD_CAP,
+        prep = prepare.prepare_units(store, thread_cap=config.spool_thread_cap(str(app_dir())),
                                      char_budget=SPOOL_CHAR_BUDGET,
                                      resolution_due=resolution_due,
                                      synthesis_requests=synthesis_requests,
