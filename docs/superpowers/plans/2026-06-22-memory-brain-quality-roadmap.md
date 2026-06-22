@@ -122,16 +122,41 @@ Legend: `[ ]` todo · `[~]` partial/scaffold exists · priority `P0–P3`.
   Structural safeguard (already true — keep it): enrichments are **additive over preserved
   real source**, never overwriting emails/notes.
 
-## Bring-over from ops-brain/Nexus (gaps the port simplified)
+## Bring-over from ops-brain (`itsjoshuakemp/ops-brain`)
 
-- **Thread context reading** (`store.thread_context()`) — designed (Phase 3); `prepare._build_context`
-  currently degrades to ''. Adds prior-thread narrative to extraction context.
-- **Memory consolidation/synthesis** — Nexus consolidates related memories into summary notes;
-  mcpbrain's distillation only expires/promotes. → folds into **B4**.
-- **LLM entity-adjudication tier** (dropped §9A) — optional; merge-review block covers most. → **Q3**.
-- Caveat: the ops-brain repo lives on the Nexus server (`/home/josh/ops-brain/src`), not on this
-  machine or GitHub — these are inferred from in-repo design docs + "Nexus port" code comments,
-  not a direct read. Direct access needed to confirm anything beyond the above.
+Investigated directly against a clone on 2026-06-22. ops-brain is a 140-module system that
+contains **production implementations of nearly every gap above** — most roadmap items become
+*port + adapt* rather than *build from scratch*. Module names and the `evals/` gold set are
+verified present; exact internals (line numbers, model choices, dep versions) should be
+confirmed at port time. Portability constraint: ops-brain uses Qdrant + (in places) Voyage/Gemini;
+mcpbrain is local-only (sqlite-vec + bge-small + Anthropic) — adapt the storage/model layer.
+
+### Highest-value ports (map directly to the gaps)
+
+| Gap | ops-brain module(s) | What it gives | Port |
+|-----|---------------------|---------------|------|
+| **S3 gold set** | `evals/golden_retrieval_set.yaml` (~30 hand-curated cases: `query` + `expected_chunk_ids` + `notes`), `evals/canary_queries.yaml` (regression thresholds from real usage), `evals/graders.py` (deterministic `CodeGrader` + LLM-judge `ModelJudgeGrader` pass@k + shell), `evals/run_evals.py` (baseline gating + email alert), `evals/cases/*.yaml` | A **real** gold set + grader harness (vs our synthetic, saturated 25-query fixture) | **Adapt** — swap Qdrant chunk-id lookup for our store; keep CodeGrader verbatim |
+| **S2 acceptance signal** | `feedback.py` (record exposure/read/refinement, fire-and-forget) + `feedback_aggregator.py` (Bayesian-smoothed CTR, 90-day half-life) → `chunk_quality` multiplier in `scoring.py` | The exact recall-acceptance loop we need, already designed | **Adapt** — sqlite (we have it); wire into `retrieval.py` + `/api/recall` |
+| **Q5 Drive extraction** | `multimodal_extract.py` (MIME router) + `spreadsheet_extractor.py` (sheet→markdown table), `pdf_layout_extractor.py`, `pdf_scanned_check.py` (avg <50 chars/page → scanned), `vision_extractor.py`, `slide_extractor.py`, `table_parser.py` | Per-type structural extraction instead of the email prompt over everything; `content_subtype`/`confidence`/`extraction_method` on chunks | **Adapt** — we already have pymupdf/openpyxl/python-docx; vision optional |
+| **Q1 salience gate** | `ingest_gdrive.py::_is_mentioned_in_email()` — a Drive file becomes a graph entity **only if referenced in email**; everything stays searchable | A concrete, proven salience rule that cuts orphan-doc pollution at the source | **Adapt** — one mention-check before entity creation |
+| **"better context"** | `contextual_summary.py` (Anthropic-style per-chunk context prefix before embedding) + `late_chunker.py`/`late_chunk_cutover.py` (token-pooled late chunking) | Each chunk vector carries document context — the user's "better context" ask | **Adapt** — Phase-1 contextual prefixes via Haiku is cheap; late chunking is heavier |
+| **Q6 rerank + routing** | `colbert_indexer.py` (ColBERT late-interaction rerank), `router.py`/`long_form_router.py` (intent routing + graph seeding + compound decomposition), `crag_synonym_builder.py` + `query_signal_expansion.py` (corrective-RAG rewrite on low confidence), `scoring.py` (authority×quality×feedback weights) | Rerank, query routing, CRAG self-correction over our existing RRF fusion | **Adapt/inspiration** — ColBERT dep is heavier; routing + CRAG are portable |
+| **S4/S5 self-improvement** | `evolution_db.py` (observability: query_log, retrieval_signals, gaps, experiments, eval_baselines, changelog) + `evolution_notify.py`; `query_signal_{calibration,gaps,runner}.py` (advisory tuning); `embedding_rot_monitor.py`+`rot_baseline.py` (drift alert with noise floor) | Outcome-grounded learning substrate + advisory tuning + drift detection — all **external-signal anchored** (safe per the research) | **Adapt** |
+| **B3/B4 action lifecycle** | `cluster_actions.py` (deterministic), `tag_and_dedup_actions.py`, `triage_actions.py` (KEEP / CLOSE_EVENT / CLOSE_DUPLICATE / CLOSE_STALE), `action_reconciler.py` (pair open actions ↔ sent replies → mark done), `archive_stale_actions.py` (120-day TTL), `waiting_on_reconciler.py`, `triage_gates.py` | A full action lifecycle vs our 783 flat actions | **Adapt** — swap subprocess `claude` for our enrich harness |
+| **B5 decay / B2 tiers** | `prune_hot.py` (age-based hot-tier decay), `hierarchy.py` (org/area/project tiers), `cache_warm.py`/`cache_invalidate.py` | Tiered memory + decay primitives | **Port** (`prune_hot` is tiny/deterministic) |
+| **B6 procedural / voice** | `voice_analyser.py` (weekly, analysis-only) + `voice_samples.py` (multi-source authored samples) + `voice_apply.py` (guarded two-phase commit, cooldown, diff caps) | Procedural memory: learns how Josh writes from sent mail + edits + rejections | **Adapt** |
+| **S5 safe self-refine** | `draft_planner.py → draft_classifier.py → draft_critic.py → draft_pretrial.py → draft_reviser.py` — one-pass, fallback-safe; **critic grounded in `voice.md` patterns + grounding checks** (external signal, not self-grading) | The exemplar of *safe* self-improvement: critic flags voice/coverage/grounding violations against a user-defined seed, reviser fixes only flagged issues | **Adapt** |
+| **B4 thread context** | `contextual_summary.py` + `thread_context` reading (we degrade to '') | Prior-thread narrative into extraction context | **Adapt** |
+
+### Notes
+
+- **S3 + S2 + Q5 are the standout immediate wins** — ops-brain hands us a real gold set, the
+  feedback loop, and proper document extractors, all of which we currently lack and would
+  otherwise build from zero.
+- The **draft critic** (`draft_critic.py`) is the template for every self-improvement loop we add:
+  it grades against an external, user-authored signal (voice.md + grounding), never its own opinion.
+- ops-brain confirms the **already-built** items too (bitemporal, org-from-email, synthesis,
+  hybrid retrieval) — those were faithful ports, so no further bring-over needed there.
 
 ## If you do only three things
 
