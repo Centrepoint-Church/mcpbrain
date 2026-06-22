@@ -1,11 +1,23 @@
-"""Retrieval eval harness: recall@k + MRR over tests/eval/retrieval_eval.jsonl.
+"""Retrieval eval harness: recall@k + MRR.
 
-Builds a small deterministic fixture store (real bge-small embeddings), runs
-hybrid_search per query, and reports recall@k and MRR. Importable for the
-regression test (run_eval) and runnable as a script to sweep fusion params:
+Two eval modes:
+
+1. **Synthetic fixture** (default / always runs): builds a small deterministic
+   in-process store from FIXTURE_DOCS, runs hybrid_search, and reports recall@k
+   and MRR. Fast structural floor — saturates at 1.0/1.0, gates against
+   regressions in fusion/scoring logic. Not a quality signal.
+
+2. **Gold set** (optional / skips when real store unavailable): loads
+   golden_retrieval_set.yaml (30+ hand-curated query→chunk cases from Josh's
+   real brain), runs hybrid_search against the live brain.sqlite3, and reports
+   recall@k and MRR. The quality signal — measures real retrieval performance.
+   Skips cleanly when the real store is empty or absent (e.g., in CI).
+
+Runnable as a script to sweep fusion params:
 
     uv run python tests/eval/run_eval.py
-    uv run python tests/eval/run_eval.py --rrf-k 30 --vec-weight 1.5 --kw-weight 1.0
+    uv run python tests/eval/run_eval.py --rrf-k 30 --vec-weight 1.5
+    uv run python tests/eval/run_eval.py --gold          # gold set against real store
 """
 from __future__ import annotations
 
@@ -110,6 +122,86 @@ def run_eval(store, embedder, *, k: int = 5, rrf_k: int = 60,
     return {"recall_at_k": sum(recalls) / n, "mrr": sum(rrs) / n, "k": k}
 
 
+def load_gold_cases() -> list[dict]:
+    """Load hand-curated gold cases from golden_retrieval_set.yaml.
+
+    Returns [] when the file is absent or yaml is not installed.
+    """
+    path = HERE / "golden_retrieval_set.yaml"
+    if not path.exists():
+        return []
+    try:
+        import yaml  # pyyaml — dev dependency
+        return yaml.safe_load(path.read_text()) or []
+    except Exception:
+        return []
+
+
+def try_open_real_store():
+    """Try to open the live brain store in read-only mode.
+
+    Returns (store, embedder) if the store exists and has data, else None.
+    This is the gate for gold-set eval: skips gracefully in CI.
+    """
+    try:
+        from mcpbrain import config
+        from mcpbrain.embed import get_embedder
+        from mcpbrain.store import Store, store_dim_from_path
+
+        path = config.store_path()
+        if not path.exists():
+            return None
+        dim = store_dim_from_path(path)
+        if not dim:
+            return None
+        store = Store(path, dim=dim, read_only=True)
+        if store.chunk_count() == 0:
+            return None
+        emb = get_embedder("bge-small")
+        return store, emb
+    except Exception:
+        return None
+
+
+def gold_eval(store, embedder, *, k: int = 10) -> dict:
+    """Run recall@k and MRR over the hand-curated gold set.
+
+    Returns {"recall_at_k", "mrr", "k", "n"} where n is the number of cases
+    that had at least one expected_chunk_id. Cases where all expected IDs are
+    missing from the store still count (recall=0 for that case).
+    """
+    from mcpbrain.retrieval import hybrid_search
+
+    cases = load_gold_cases()
+    if not cases:
+        return {"recall_at_k": 0.0, "mrr": 0.0, "k": k, "n": 0}
+
+    recalls: list[float] = []
+    rrs: list[float] = []
+    for case in cases:
+        expected = set(case.get("expected_chunk_ids") or [])
+        if not expected:
+            continue
+        results = hybrid_search(store, embedder, case.get("query", ""), limit=k)
+        retrieved = [r["doc_id"] for r in results]
+        hits = set(retrieved[:k]) & expected
+        recalls.append(len(hits) / len(expected))
+        rr = 0.0
+        for i, doc_id in enumerate(retrieved):
+            if doc_id in expected:
+                rr = 1.0 / (i + 1)
+                break
+        rrs.append(rr)
+
+    n = len(recalls) or 1
+    return {
+        "recall_at_k": sum(recalls) / n,
+        "mrr": sum(rrs) / n,
+        "k": k,
+        "n": len(recalls),
+    }
+
+
 def main() -> None:
     import tempfile
 
@@ -118,7 +210,24 @@ def main() -> None:
     ap.add_argument("--rrf-k", type=int, default=60)
     ap.add_argument("--vec-weight", type=float, default=1.0)
     ap.add_argument("--kw-weight", type=float, default=1.0)
+    ap.add_argument("--gold", action="store_true",
+                    help="Run gold set eval against the real brain store (requires populated store)")
     args = ap.parse_args()
+
+    if args.gold:
+        result = try_open_real_store()
+        if result is None:
+            print("Gold set eval: real store unavailable or empty — skipped")
+            return
+        store, emb = result
+        m = gold_eval(store, emb, k=args.k)
+        if m["n"] == 0:
+            print("Gold set eval: no cases loaded (golden_retrieval_set.yaml missing?)")
+        else:
+            print(f"Gold set: recall@{m['k']}={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
+                  f"(n={m['n']} cases)")
+        return
+
     with tempfile.TemporaryDirectory() as td:
         store, emb = build_fixture_store(Path(td))
         m = run_eval(store, emb, k=args.k, rrf_k=args.rrf_k,

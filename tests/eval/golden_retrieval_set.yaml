@@ -1,0 +1,237 @@
+# Embedding rot monitor golden set (Spec 6).
+# Seed: 10 cases. Originally seeded 2026-04-26; refreshed 2026-04-30.
+# Target: 30-50.
+#
+# Refresh notes (2026-04-30):
+#   - All enriched-gmail-* and thread-summary-* IDs from the original seed are gone
+#     from the Qdrant index (enrichment schema changed). Replaced with verified
+#     plain gmail, gdrive, and file IDs confirmed present in the live index.
+#   - IDs were chosen by BM25 keyword search + Qdrant payload verification, not
+#     by trusting current hybrid retrieval rankings (recency bias inflates late-Apr
+#     emails for all queries; those are not quality signals for these cases).
+#   - Cases where both original IDs still exist (cams_dues, ohs_continuous_improvement,
+#     multi_campus_facilities) are unchanged.
+#
+# Ramp-up: every fortnight Josh adds 2-5 cases pulled from the gaps table
+# (run: select query_text, top_score from gaps where top_score < 0.4
+# order by ts desc limit 20). Mark expected_chunk_ids only when a manual
+# brain_search confirms the right chunk exists.
+#
+# Each case captures the current top-2 chunk IDs so a single-ID drift does
+# not immediately fire a noise alert. The rot monitor measures recall@10
+# and alerts when the rolling mean drops more than max(5%, 2*stddev).
+
+- id: taryn_role
+  query: Taryn Hamilton role at Centrepoint
+  expected_chunk_ids:
+    - gmail-19c6a992e0898511-body-0
+    - gdrive-1FH1zO4M7rHKTZBogeiK-hQol6HxlgxqV-0
+  notes: Method-confirmed 2026-05-30 (kept). Employment agreement (Taryn Hamilton, Childrens Pastor) plus direct correspondence; scored 1.0/1.0, regeneration found nothing better.
+
+- id: joel_chelliah
+  query: Joel Chelliah Centrepoint senior pastor
+  expected_chunk_ids:
+    - "gdrive-1eRxKC76OHV0PfKhxZ4Rd3Rt7IWBznFjqzCbTdoaqpCE-1"
+    - "gdrive-1mGp0gj000YCDrAghBwGZyxo24LRy-2qz-0"
+  notes: Regenerated 2026-05-30 (BM25+semantic). 2018 EOY review (Position Senior Pastor, Joel Chelliah) and his employment agreement. Original was an email from Joel, not about his role.
+
+- id: narrogin_building
+  query: Narrogin building proposal
+  expected_chunk_ids:
+    - "gdrive-1vFbUA11cw9IaH-t5kZetg8Rf0eHzs0Lp-0"
+    - "gmail-195d9e9b10e67da1-body-0"
+  notes: Regenerated 2026-05-30. Re-scoped from "Narrogin stage 1 budget approval" which had no clean ground truth (0/0 for all models). Narrogin building proposal PDF + building-report email.
+
+- id: cams_dues
+  query: CAMS dues integration
+  expected_chunk_ids:
+    - file-05ee18bd8632-3
+    - file-71f100b1e803-7
+  notes: Method-confirmed 2026-05-30 (kept). Local files about CAMS dues integration; regeneration surfaced no clearer dues-specific chunk.
+
+- id: college_launch
+  query: Centrepoint College launch 2026
+  expected_chunk_ids:
+    - "gmail-19aa0db72c673330-body-0"
+    - "gmail-19bb5d4c1c6fcf8f-body-0"
+  notes: Regenerated 2026-05-30. "Centrepoint College 2026!" and "Welcome to Centrepoint College – Next Steps for 2026" launch emails. Direct launch comms vs the prior program-description doc.
+
+- id: safer_church_audit
+  query: Safer Church audit 2026
+  expected_chunk_ids:
+    - "gmail-196ed00332e2c25d-body-0"
+    - "gmail-19c9a5a07d36b580-body-2"
+  notes: Regenerated 2026-05-30. "WWCC and Safer Churches" email and Safer Churches training-status update. Direct Safer Church comms vs the prior WWCC-tracking doc.
+
+- id: acc_strategic_projects
+  query: ACC strategic projects
+  expected_chunk_ids:
+    - gdrive-1kGhHgkHJMmW_X84UFjvXBVeUyrzxVsiL-1
+    - gmail-19c8d42aca96cfdd-att-0-CAMS Review - To print.pdf-1
+  notes: Method-confirmed 2026-05-30 (kept). ACC Kick Start Executive Summary and CAMS Review attachment. Regeneration only surfaced an off-topic succession-research thread, so kept the flagship CAMS work.
+
+- id: whs_volunteer_compliance
+  query: WHS volunteer compliance
+  expected_chunk_ids:
+    - "gdrive-1zxrNFJPxoQdjAo8Rl-2ZJvQF8HmpJK_2-3"
+    - "file-ad68895601f5-0"
+  notes: Regenerated 2026-05-30 (fix). Prior expected chunk (gdrive-13cI9CC7...-3) was actually about cybersecurity protocols, not volunteer compliance. Now a JD chunk on volunteer WWCC/OHS/Childsafe training plus a note to ensure all volunteers complete the code of conduct.
+
+- id: ohs_continuous_improvement
+  query: OHS continuous improvement
+  expected_chunk_ids:
+    - "gdrive-1jvJLtMPNWI68XnQ1yvPGxL7O5a_wQAk1-8"
+    - "gdrive-1WhgQMZz1Hn5O-a8YNzm673Fmxgkpk_uj-3"
+  notes: Regenerated 2026-05-30. The actual OH&S Improvement Plan review doc plus a policy-effectiveness review chunk, vs the prior generic JD attachments.
+
+- id: multi_campus_facilities
+  query: multi-campus facilities coordination
+  expected_chunk_ids:
+    - gdrive-1MYq4bpRdUzDfHjr5-wpaPLsFkhJwpzZ_-1
+    - gmail-19d0593b3646303f-body-5
+  notes: WEAK CASE (flagged 2026-05-30). Regeneration only surfaced Josh's identity.md profile chunk, which is circular ground truth. Kept for now; revisit if a real multi-campus facilities doc lands in the index.
+
+# ── Expansion 2026-05-30: +20 cases (seed 10 → 30) ───────────────────────────
+# Sourced by independent BM25 + semantic candidate pooling, then labelled by
+# reading chunk text (not by trusting ranks). All IDs verified present in the
+# gmail/gdrive/files collections on 2026-05-30. Dropped Defend-IT, AGNZ, and a
+# standalone WWCC case for lack of clean ground truth; "ACC quarterly reporting"
+# relabelled to the Courageous Church management reports it actually surfaced.
+
+- id: byford_grant_application
+  query: Byford building grant application
+  expected_chunk_ids:
+    - "gdrive-1nbHTd5pQ8DOu-sotnvHWyiD4jD0ocM3tyJYRn12vtG8-0"
+    - "gdrive-18nU2a9Rxv7tm9hVdcNUVCRC_Y-73K2br-0"
+  notes: Grant Application Authorisation Letter and Community Investment grant proposal (Byford buildings).
+
+- id: byford_funding_scenarios
+  query: Byford Lotterywest funding scenarios
+  expected_chunk_ids:
+    - "gdrive-1cUOtAuqt2nWP-f1yePjYHNKdBGiKO-hS-0"
+    - "gdrive-1-2CDHaJJRNaR-WbjOcdEN-7GVjxWDxLA-1"
+  notes: Byford Funding Scenarios PDFs (Dec 2025, prepared by Regina Sun) referencing Lotterywest + bank debt.
+
+- id: miracle_offering_2026
+  query: Miracle Offering 2026
+  expected_chunk_ids:
+    - "gdrive-1bTvXBJQvDwGohk8H-7eRRhjA76ofz3bB-0"
+    - "gdrive-1Gem9HWBuNb0n7gMZdeZWl6IGBZvM-gFFiCxkcN2nXPI-0"
+  notes: Miracle Offering 2026 finance workbook header and "The Next Twenty" Miracle Offering doc.
+
+- id: sccc_suncity_transfer
+  query: SCCC Suncity transfer
+  expected_chunk_ids:
+    - "gdrive-18atkCjtRWaelXtPsnAc9nPbA7-Q-5qd2-0"
+    - "gmail-19db42dff639135b-att-4-(20269785) Centrepoint Church -142"
+  notes: SCCC Certificate of Title and Suncity Transfer Timeline (recommended timeline page).
+
+- id: bibra_lake_intern
+  query: Bibra Lake campus intern role
+  expected_chunk_ids:
+    - "gdrive-1oy-6gRb_Wvhaa-32xieloB0OARmKhf_Owna-L8JYu8Y-0"
+    - "gdrive-1oy-6gRb_Wvhaa-32xieloB0OARmKhf_Owna-L8JYu8Y-1"
+  notes: Bibra Lake Campus Intern position summary (job description).
+
+- id: maddington_community_use
+  query: Maddington campus community use
+  expected_chunk_ids:
+    - "gdrive-1egRzM4coFVFletg02SGxuiGcNbncKmiUREx6nWEqzYE-0"
+  notes: Centrepoint Maddington Community Use document. Single verified chunk.
+
+- id: cams_salesforce_review
+  query: CAMS Salesforce review feedback
+  expected_chunk_ids:
+    - "file-bef0214ff935-0"
+    - "file-71f100b1e803-13"
+  notes: Salesforce Feedback note and CAMS long-term affordability/efficiency review chunk. Distinct from cams_dues chunks.
+
+- id: xero_figures
+  query: getting financial figures from Xero
+  expected_chunk_ids:
+    - "gmail-19394711be405fe1-body-2"
+    - "gmail-193946c51774d792-body-1"
+  notes: Email thread about pulling CP figures from Xero.
+
+- id: looker_dashboard
+  query: Looker Studio churchwide dashboard
+  expected_chunk_ids:
+    - "gmail-19d4cdaf074245a4-body-0"
+    - "gmail-19ce0a5b60cb685f-body-0"
+  notes: Recurring Churchwide Dashboard emails sent via Looker Studio.
+
+- id: board_governance_rules
+  query: board meeting governance rules
+  expected_chunk_ids:
+    - "gdrive-1ETrqY5PzVvYvh2tr9tnGDSWEw4bGjcwm-18"
+    - "gmail-19c78ae810988be0-att-0-UPDATED The Gathering Rules.do-13"
+  notes: Constitution/rules chunks on board meeting conduct and presence requirements.
+
+- id: risk_register_template
+  query: church risk assessment register template
+  expected_chunk_ids:
+    - "gdrive-1m_k1jx1k-9DR01_-265ayzSo56rrcgztrPkdpzpo74U-0"
+    - "gdrive-15uBkwcGD6rcFgA4EgaB-q9B3hkeTHuC--1"
+  notes: 2018 Risk Assessment Template and Church Risk Register / Risk Treatment Form.
+
+- id: annual_report
+  query: Centrepoint church annual report
+  expected_chunk_ids:
+    - "gmail-19db51cb4edaedb3-att-0-CPChurch Annual Report 2024.pd-0"
+    - "gdrive-19iCiNl76JMXTRwQwyhLYam8MEs-9lPyC-0"
+  notes: CPChurch Annual Report 2024 attachment and an earlier annual report doc.
+
+- id: courageous_mgmt_report
+  query: Courageous Church monthly management report
+  expected_chunk_ids:
+    - "gmail-19c448c7d8a5e506-att-3-Courageous_Church_-_Management-0"
+    - "gmail-19d89d1a0b809d09-att-3-Courageous_Church_-_Management-0"
+  notes: Courageous Church monthly management report attachments (Jan, March 2026). Courageous Church org.
+
+- id: acc_grievance
+  query: ACC grievance procedure
+  expected_chunk_ids:
+    - "gdrive-1Sm2JrCNlkvo7gRY4vgDHvL7gorGqxwA9-0"
+    - "gdrive-1Sm2JrCNlkvo7gRY4vgDHvL7gorGqxwA9-2"
+  notes: ACC Grievance Procedure Nov 2017 (header + confidentiality section).
+
+- id: alphacrucis_mou
+  query: Alphacrucis Centrepoint College MOU
+  expected_chunk_ids:
+    - "gdrive-1dHl5NyFATx1Kj2QzwggCeViJFirMnOby-1"
+    - "gmail-19d8f4a2f557eb30-att-9-MOU Centrepoint College AC 202-1"
+  notes: Memorandum of Understanding between Alphacrucis College and Centrepoint College (2026).
+
+- id: college_internship
+  query: Centrepoint College internship students
+  expected_chunk_ids:
+    - "gdrive-11r2L6quxb5ehgWZQC5cYwWbhVnt7AJqw-6"
+    - "gmail-19c31a5a7dcf69d7-body-1"
+  notes: College internship attendance note and email about hosting College students in placements.
+
+- id: carpark_catching
+  query: conference carpark and catching team
+  expected_chunk_ids:
+    - "gmail-19e0cf81650c2f9b-body-0"
+    - "gmail-19c271fd03a714ba-body-0"
+  notes: Conference Carpark and Catching Team thread (Josh is point person). Strong semantic+BM25 agreement.
+
+- id: building_facilities_projects
+  query: building manager facilities projects
+  expected_chunk_ids:
+    - "gmail-19c7a08d88e86365-body-1"
+    - "gdrive-18hUndubU-cMcbfYp-t3WYQJz-ENQuaS7-1"
+  notes: Email re Mitch in Building Manager role and the Facility & OHS Projects tracking sheet.
+
+- id: volunteer_onboarding
+  query: volunteer onboarding playbook
+  expected_chunk_ids:
+    - "gdrive-1kkeYc7kDRHre-ztW3_xx1TFeMhnlTY_g-1"
+  notes: Kids Coordinator Playbook, onboarding a new volunteer section. Single verified chunk.
+
+- id: singleton_tithes
+  query: Singleton campus tithes and offerings
+  expected_chunk_ids:
+    - "gdrive-14LKqw57kK-JDiumEIAQ7Fv1rcyIo9_LxIWgifh3W6iQ-21"
+    - "gdrive-14LKqw57kK-JDiumEIAQ7Fv1rcyIo9_LxIWgifh3W6iQ-22"
+  notes: Finance transactions sheet showing Singleton operating tithes & offerings.
