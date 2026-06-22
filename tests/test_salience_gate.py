@@ -193,3 +193,12 @@ def test_require_drive_mention_gates_unmentioned_prose(store):
     store.set_enrich_state(["gdrive-fileAAA-0", "gdrive-fileBBB-0"], "")
     kept2, summary2 = _apply_salience_gate(store, [_batch("t2", [mentioned, orphan])])
     assert summary2["kept"] == 2
+
+
+def test_content_subtype_table_is_gated():
+    """A chunk tagged content_subtype='table' is cold-gated regardless of mime —
+    the per-type extraction tag is consumed by the gate (no longer dead metadata)."""
+    c = _chunk("some prose text " * 30, meta={
+        "source_type": "gdrive", "mime_type": "application/pdf",  # prose mime
+        "content_subtype": "table"})  # but tagged tabular → skip
+    assert should_enrich(c) is False

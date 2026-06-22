@@ -34,6 +34,7 @@ one.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from mcpbrain import config, orgs
@@ -44,21 +45,45 @@ from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
 
+# Q8: max times an extraction covering a chunk may come back empty/invalid before
+# we consume the chunk (mark_enriched) instead of re-queuing it forever. Bounds the
+# re-extract loop for genuinely content-empty docs without losing transient retries.
+_EMPTY_ATTEMPT_CAP = 3
+
+
+def _name_grounded(name: str, source_lower: str) -> bool:
+    """True if an extracted name is plausibly grounded in the source text.
+
+    Anti-hallucination heuristic, deterministic (no LLM). Grounded if the full
+    name appears as a substring OR any distinctive token (alphabetic, len >= 4)
+    of the name appears. The token path is deliberate: extraction NORMALISES
+    names ('Joel Chelliah' from an email that says 'Ps Joel' / 'Pastor Chelliah'),
+    so requiring the full normalised string as a substring (the old behaviour)
+    wrongly dropped correctly-extracted entities. Matching a distinctive token
+    keeps those while still rejecting names with no lexical anchor in the text.
+    """
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    if name in source_lower:
+        return True
+    toks = [t for t in re.split(r"[^a-z0-9]+", name) if len(t) >= 4]
+    return any(t in source_lower for t in toks)
+
 
 def _grounding_filter(extraction: dict) -> tuple[dict, int]:
-    """Remove entities and relations not grounded in the source text (Q2).
+    """Remove entities/relations with no lexical anchor in the source text (Q2).
 
-    Deterministic string-presence check only — no LLM. An entity is considered
-    grounded if its name (case-insensitive) appears anywhere in the concatenated
-    message text. A relation is grounded if both endpoint names appear.
-
-    Returns (filtered_extraction, dropped_count). Input is not mutated.
+    Deterministic, no LLM (mcpbrain is subscription-only; a per-triple LLM check
+    would be the stronger but far costlier option — see #9). An entity is kept if
+    its name is grounded (see _name_grounded); a relation is kept if BOTH endpoint
+    names are grounded. Returns (filtered_extraction, dropped_count); input is not
+    mutated.
     """
     source = " ".join(
         (m.get("text") or m.get("body") or "")
         for m in (extraction.get("messages") or [])
     ).lower()
-
     if not source:
         return extraction, 0
 
@@ -67,13 +92,9 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
 
     ents = out.get("entities")
     if isinstance(ents, list):
-        kept = []
-        for e in ents:
-            name = (e.get("name") or "").strip().lower() if isinstance(e, dict) else ""
-            if name and name in source:
-                kept.append(e)
-            else:
-                dropped += 1
+        kept = [e for e in ents
+                if isinstance(e, dict) and _name_grounded(e.get("name") or "", source)]
+        dropped += len(ents) - len(kept)
         out["entities"] = kept
 
     rels = out.get("relations")
@@ -83,9 +104,8 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
             if not isinstance(r, dict):
                 kept.append(r)
                 continue
-            src = (r.get("source_name") or "").strip().lower()
-            tgt = (r.get("target_name") or "").strip().lower()
-            if src and tgt and src in source and tgt in source:
+            if (_name_grounded(r.get("source_name") or "", source)
+                    and _name_grounded(r.get("target_name") or "", source)):
                 kept.append(r)
             else:
                 dropped += 1
@@ -262,6 +282,19 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                "quarantined": 0, "entities": 0, "relations": 0,
                "skipped": 0, "dropped_items": 0}
 
+    # Q3: build the write-time dedup index ONCE per drain run (not per apply) when
+    # the flag is on, and reuse it across every extraction — avoids rebuilding the
+    # 25k-entity index on each apply() and lets dedup see entities created earlier
+    # in this same run. None when the flag is off (apply skips dedup entirely).
+    _entity_index = None
+    if config.write_time_dedup_enabled(str(home_dir)):
+        try:
+            from mcpbrain.resolve import build_entity_index
+            _entity_index = build_entity_index(store.entities_for_resolution())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("drain: failed to build write-time dedup index: %s", exc)
+            _entity_index = None
+
     for path in _iter_inbox(home_dir):
         try:
             data = json.loads(path.read_text())
@@ -314,6 +347,25 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                             extraction.get("thread_id", "?"), path.name,
                             "; ".join(ext_problems[:3]))
                 summary["skipped"] = summary.get("skipped", 0) + 1
+                # Q8: bound the re-queue loop. Skipped chunks normally stay
+                # enriched=0 to re-queue, but a genuinely content-empty doc would
+                # then re-extract every cycle forever. After _EMPTY_ATTEMPT_CAP
+                # tries, consume the chunks so the loop terminates (transient
+                # extractor failures still get their retries first).
+                try:
+                    _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
+                             if m.get("message_id")]
+                    _dids = store.doc_ids_for_messages(_mids) if _mids else []
+                    if _dids:
+                        attempts = store.bump_enrich_attempts(_dids)
+                        if attempts >= _EMPTY_ATTEMPT_CAP:
+                            store.mark_enriched(_dids)
+                            summary["gave_up"] = summary.get("gave_up", 0) + 1
+                            log.info("drain: giving up on thread %s after %d empty "
+                                     "attempts; consuming %d chunk(s)",
+                                     extraction.get("thread_id", "?"), attempts, len(_dids))
+                except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
+                    log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
                 continue
             thread_id = extraction["thread_id"]
             # Org drift gate: canonicalise; coerce an unconfigured org to
@@ -352,7 +404,10 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 log.warning("drain: no chunks matched the messages of thread %s "
                             "in %s; applying but marking nothing", thread_id, path.name)
             try:
-                res = apply(store, extraction, doc_ids=doc_ids)
+                # Pass the run-scoped dedup index only when built (flag on) so an
+                # injected/legacy apply that doesn't accept the kwarg is unaffected.
+                _apply_kw = {"entity_index": _entity_index} if _entity_index is not None else {}
+                res = apply(store, extraction, doc_ids=doc_ids, **_apply_kw)
             except Exception as exc:
                 log.error("drain: apply failed for thread %s in %s: %s",
                           thread_id, path.name, exc)
