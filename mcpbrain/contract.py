@@ -26,6 +26,18 @@ enum has a single owner and the gate can't diverge from it.
 from mcpbrain import orgs
 from mcpbrain.chunking import _VALID_CONTENT_TYPES
 
+# Closed entity type set. Extractors must return one of these; sanitize_extraction
+# drops any entity whose type is not in this set. Kept as a frozenset so callers
+# can use 'in' without a function call.
+ENTITY_TYPES: frozenset[str] = frozenset({"person", "org", "project"})
+
+# Closed relation type set. Matches VALID_RELATION_TYPES in graph_write.py; defined
+# here so contract.py can sanitize off-schema relation types before apply() ever
+# sees them — earlier rejection than the apply-time filter.
+RELATION_TYPES: frozenset[str] = frozenset({
+    "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
+})
+
 
 def validate_extraction(d: object) -> list[str]:
     """Validate one extraction envelope. Returns a list of human-readable problems.
@@ -218,11 +230,14 @@ def validate_batch_file(d: object) -> list[str]:
 def sanitize_extraction(d: object) -> tuple[object, int]:
     """Drop droppable LLM noise from one extraction; return (cleaned, dropped).
 
-    Removes relations missing a non-empty source_name/type/target_name and
-    actions missing a non-empty description — the common case where the model
-    emits a stub with empty fields. These are list items the contract treats as
-    individually invalid; dropping them lets the rest of an otherwise-good
-    extraction apply instead of failing the whole batch. Non-dict input and
+    Removes:
+    - relations missing a non-empty source_name/type/target_name
+    - relations whose type is not in RELATION_TYPES (off-schema)
+    - actions missing a non-empty description
+    - entities whose type is not in ENTITY_TYPES (off-schema)
+
+    These are list items the contract treats as individually invalid; dropping
+    them lets the rest of an otherwise-good extraction apply. Non-dict input and
     structural fields (thread_id, messages, org…) are left untouched. Returns a
     shallow copy; the input is not mutated.
     """
@@ -231,11 +246,19 @@ def sanitize_extraction(d: object) -> tuple[object, int]:
     out = dict(d)
     dropped = 0
 
+    ents = out.get("entities")
+    if isinstance(ents, list):
+        kept = [e for e in ents if not (isinstance(e, dict) and
+                e.get("type") and e["type"] not in ENTITY_TYPES)]
+        dropped += len(ents) - len(kept)
+        out["entities"] = kept
+
     rels = out.get("relations")
     if isinstance(rels, list):
         kept = [r for r in rels if isinstance(r, dict) and all(
             isinstance(r.get(f), str) and r.get(f).strip()
-            for f in ("source_name", "type", "target_name"))]
+            for f in ("source_name", "type", "target_name"))
+            and r.get("type") in RELATION_TYPES]
         dropped += len(rels) - len(kept)
         out["relations"] = kept
 
