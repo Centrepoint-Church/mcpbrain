@@ -409,6 +409,23 @@ _ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis"
 
 
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
+_UNITS_BATCH_DEFAULT = 12  # max units handed out (and claimed) per brain_enrich_units call
+
+
+def _units_batch() -> int:
+    """Max ready units returned — and claimed — per brain_enrich_units call.
+
+    Without a cap, one call globs and leases the WHOLE queue, so any overlapping
+    caller (the hourly cycle running alongside the backfill loop, or the next
+    wave within a run) gets {"empty": true} until the 15-min lease expires. Cap
+    each call to a wave's worth so callers share the queue wave-by-wave instead.
+    Override with MCPBRAIN_ENRICH_UNITS_BATCH.
+    """
+    import os
+    try:
+        return max(1, int(os.environ.get("MCPBRAIN_ENRICH_UNITS_BATCH", _UNITS_BATCH_DEFAULT)))
+    except (TypeError, ValueError):
+        return _UNITS_BATCH_DEFAULT
 
 
 def _units_dir(home):
@@ -423,13 +440,16 @@ def _claims_dir(home):
 
 def make_brain_enrich_units(home: str):
     async def brain_enrich_units() -> dict:
-        """List ready work units and CLAIM each with a short lease. Returns
-        descriptors only — `unit_id`, `kind`, `block`, `count` — NO payloads, so the
-        orchestrator stays context-flat. Spawn one subagent per returned `unit_id`;
-        each calls brain_enrich_pull(unit_id), extracts, and brain_enrich_push(
-        unit_id, …). Units claimed within the lease are skipped, so overlapping runs
-        and the backfill loop never re-hand-out in-flight work; a stale claim (crashed
-        subagent) becomes re-listable. Returns {"empty": true} when the queue is dry."""
+        """List up to a wave's worth of ready work units and CLAIM each with a short
+        lease. Returns descriptors only — `unit_id`, `kind`, `block`, `count` — NO
+        payloads, so the orchestrator stays context-flat. Spawn one subagent per
+        returned `unit_id`; each calls brain_enrich_pull(unit_id), extracts, and
+        brain_enrich_push(unit_id, …). At most `_units_batch()` units are returned per
+        call (the rest stay unclaimed for the next call / an overlapping caller), so no
+        single call leases the whole queue. Units claimed within the lease are skipped,
+        so overlapping runs and the backfill loop never re-hand-out in-flight work; a
+        stale claim (crashed subagent) becomes re-listable. Call again for the next
+        wave; returns {"empty": true} when no unclaimed units remain."""
         import json as _json
         import time as _time
         try:
@@ -437,6 +457,7 @@ def make_brain_enrich_units(home: str):
         except OSError:
             return {"empty": True}
         claims = _claims_dir(home)
+        batch = _units_batch()
         ready, now = [], _time.time()
         for f in files:
             uid = f.stem
@@ -457,6 +478,8 @@ def make_brain_enrich_units(home: str):
                 pass
             ready.append({"unit_id": uid, "kind": d.get("kind"), "block": d.get("block"),
                           "count": len(d.get("threads") or d.get("items") or [])})
+            if len(ready) >= batch:
+                break                                 # cap one call to a wave; leave the rest unclaimed
         return {"units": ready} if ready else {"empty": True}
     return brain_enrich_units
 
