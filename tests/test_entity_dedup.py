@@ -36,15 +36,26 @@ def _ent(eid, name, typ="person"):
 def test_build_entity_index_contains_all_entities():
     entities = [_ent("e1", "Joel Chelliah"), _ent("e2", "Sarah Jones")]
     idx = build_entity_index(entities)
-    assert set(idx.keys()) == {"e1", "e2"}
-    assert idx["e1"]["name"] == "Joel Chelliah"
-    assert idx["e1"]["type"] == "person"
-    assert isinstance(idx["e1"]["toks"], set)
-    assert isinstance(idx["e1"]["key"], str)
+    assert set(idx["ids"].keys()) == {"e1", "e2"}
+    assert idx["ids"]["e1"]["name"] == "Joel Chelliah"
+    assert idx["ids"]["e1"]["type"] == "person"
+    assert isinstance(idx["ids"]["e1"]["toks"], set)
+    # blocking maps are populated
+    assert ("person", "joel") in idx["by_tok"]
+    assert "e1" in idx["by_tok"][("person", "joel")]
 
 
 def test_build_entity_index_empty():
-    assert build_entity_index([]) == {}
+    assert build_entity_index([]) == {"ids": {}, "by_key": {}, "by_tok": {}}
+
+
+def test_add_to_index_enables_intra_batch_dedup():
+    from mcpbrain.resolve import add_to_index, write_time_dedup_check
+    idx = build_entity_index([])
+    assert write_time_dedup_check("Joel Chelliah", "person", idx) is None
+    add_to_index(idx, "new1", "Joel Chelliah", "person")
+    # a second near-dup in the same batch now resolves to the just-added entity
+    assert write_time_dedup_check("Ps Joel Chelliah", "person", idx) == "new1"
 
 
 def test_write_time_dedup_exact_canonical_key_match():
@@ -248,3 +259,16 @@ def test_apply_dedup_redirected_entity_linked_to_message(tmp_path):
             (existing_id,)
         ).fetchone()
     assert link is not None, "redirected entity must be linked to message m1"
+
+
+def test_update_entity_org_if_empty(tmp_path):
+    """Redirect-merge primitive: fills org only when the entity has none."""
+    from mcpbrain.store import Store
+    from mcpbrain.graph_write import upsert_entity
+    import mcpbrain.orgs as orgs_mod
+    s = Store(tmp_path / "e.sqlite3", dim=4); s.init()
+    eid = upsert_entity(s, name="Joel Chelliah", entity_type="person", org="",
+                        taxonomy=orgs_mod.taxonomy_from_config())
+    assert eid
+    assert s.update_entity_org_if_empty(eid, "Centrepoint") is True
+    assert s.update_entity_org_if_empty(eid, "Other") is False  # already set, not clobbered

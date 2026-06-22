@@ -246,7 +246,13 @@ def should_enrich(chunk: dict) -> bool:
         return True
 
     if source in ("gdrive", "drive") or meta.get("file_id") or meta.get("mime_type"):
-        # Drive: gate on mime type + min text length.
+        # Drive: gate on the extractor's content_subtype tag, then mime + length.
+        # content_subtype is set per-MIME at ingest (normalise_drive); a 'table'
+        # chunk (spreadsheet/CSV) is tabular data, not prose worth entity
+        # extraction — skip it source-agnostically so a tag set on any future
+        # tabular source is honoured without re-listing mimes here.
+        if str(meta.get("content_subtype") or "").lower() == "table":
+            return False
         mime = str(meta.get("mime_type") or "").lower()
         if mime in _COLD_DRIVE_MIMES:
             return False

@@ -141,3 +141,35 @@ def test_drain_skips_mark_enriched_for_empty_extraction(tmp_path):
 
     # drain should report the extraction as skipped
     assert result.get("skipped", 0) >= 1, f"expected skipped >= 1, got {result}"
+
+
+def test_drain_consumes_chunk_after_attempt_cap(tmp_path):
+    """Q8 cap: a persistently-empty doc is consumed after _EMPTY_ATTEMPT_CAP tries
+    so it stops re-queuing+re-extracting forever."""
+    from mcpbrain.store import Store
+    from mcpbrain.drain import drain as drain_fn, _EMPTY_ATTEMPT_CAP
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4); store.init()
+    (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Josh"}))
+    store.upsert_chunk("doc1", "body", "h", {"message_id": "m1",
+                       "source_type": "gmail", "thread_id": "t1"})
+    inbox = tmp_path / "enrich_inbox"; inbox.mkdir()
+    batch = {"unit_id": "u1", "extractions": [{
+        "thread_id": "t1", "content_type": "fyi", "summary": "",
+        "entities": [], "relations": [], "actions": [], "topics": [],
+        "messages": [{"message_id": "m1", "date": "2026-01-01", "sender": "a@x.com"}]}]}
+
+    def noop_apply(s, extraction, **kw):
+        return {"entities": 0, "relations": 0}
+
+    enriched = []
+    for i in range(_EMPTY_ATTEMPT_CAP):
+        (inbox / "b1.json").write_text(json.dumps(batch))  # recreate; drain consumes the file
+        drain_fn(store, home=str(tmp_path), apply=noop_apply)
+        with store._connect() as conn:
+            enriched.append(conn.execute(
+                "SELECT enriched FROM chunks WHERE doc_id='doc1'").fetchone()["enriched"])
+
+    # Not consumed on the early attempts; consumed exactly at the cap.
+    assert enriched[0] == 0
+    assert enriched[-1] == 1, f"chunk should be consumed at attempt {_EMPTY_ATTEMPT_CAP}; got {enriched}"

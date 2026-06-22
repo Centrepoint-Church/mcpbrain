@@ -120,10 +120,13 @@ def salience_require_drive_mention(home) -> bool:
 def schema_grounding_enabled(home) -> bool:
     """Whether extraction grounding check runs after sanitize (Q2).
 
-    When True, drain checks each entity name against the assembled message text
-    for that extraction. An entity whose name (or any token ≥ 4 chars) does not
-    appear in the source text is dropped as ungrounded. Deterministic string
-    presence only — no LLM call. Relation types are already constrained by
+    When True, drain drops each extracted entity whose name has NO lexical anchor
+    in the source text — neither the full name as a substring NOR any distinctive
+    token (alphabetic, length >= 4). A relation is dropped unless both endpoint
+    names are grounded. The token path keeps correctly-NORMALISED names (e.g.
+    'Joel Chelliah' extracted from 'Ps Joel') while rejecting names invented out
+    of nowhere. Deterministic — no LLM call (a per-triple LLM check would be
+    stronger but is deferred; see #9). Relation TYPES are constrained by
     RELATION_TYPES in contract.py regardless of this flag.
 
     Default: False — safe rollout. Enable via config 'schema_grounding': true.

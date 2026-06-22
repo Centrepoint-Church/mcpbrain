@@ -139,50 +139,68 @@ _WRITE_TIME_MERGE_THRESHOLD = 0.8
 
 
 def build_entity_index(entities: list[dict]) -> dict:
-    """Build a {id: {name, type, key, toks}} index for write-time lookups.
+    """Build a BLOCKED index for write-time dedup lookups.
 
-    Precomputes canonical key and token set for each entity so the cascade can
-    run in O(n) per lookup rather than rescanning the full list.
+    Returns {"ids": {id: {name,type,key,toks}}, "by_key": {(type,key): id},
+    "by_tok": {(type,tok): set(ids)}}. by_key gives O(1) exact-canonical matches;
+    by_tok lets write_time_dedup_check scan only entities that SHARE A TOKEN with
+    the candidate (blocking) instead of all N — important on a 25k+ entity graph.
+    add_to_index keeps it current for intra-batch dedup within one apply() run.
     """
-    idx = {}
+    index: dict = {"ids": {}, "by_key": {}, "by_tok": {}}
     for e in entities:
-        idx[e["id"]] = {
-            "name": e["name"],
-            "type": e["type"],
-            "key": canonical_key(e["name"]),
-            "toks": _tokens(e["name"]),
-        }
-    return idx
+        add_to_index(index, e["id"], e["name"], e["type"])
+    return index
+
+
+def add_to_index(index: dict, eid: str, name: str, entity_type: str) -> None:
+    """Insert one entity into a build_entity_index() structure.
+
+    Called as new entities are created during an apply() run so later entities in
+    the same batch dedup against them, not only against the store snapshot.
+    """
+    key = canonical_key(name)
+    toks = _tokens(name)
+    index["ids"][eid] = {"name": name, "type": entity_type, "key": key, "toks": toks}
+    if key:
+        index["by_key"].setdefault((entity_type, key), eid)
+    for t in toks:
+        index["by_tok"].setdefault((entity_type, t), set()).add(eid)
 
 
 def write_time_dedup_check(name: str, entity_type: str,
                            index: dict) -> str | None:
     """Return the id of an existing entity to redirect this write to, or None.
 
-    Cascade (same type only):
+    Cascade (same type only), using the blocked index:
     1. Exact canonical key → certain duplicate → redirect.
-    2. Token-set ratio >= _WRITE_TIME_MERGE_THRESHOLD → high-confidence
-       duplicate → redirect without LLM review.
-    3. Below threshold → caller creates a new entity.
+    2. Among candidates SHARING A TOKEN, token-set ratio >=
+       _WRITE_TIME_MERGE_THRESHOLD → high-confidence duplicate → redirect.
+    3. Otherwise → None (caller creates a new entity).
 
-    The ambiguous band [_CANDIDATE_GATE, threshold) is NOT acted on here;
-    those pairs are handled by the spool merge_review mechanism in prepare.
-
-    index: {id: {name, type, key, toks}} — from build_entity_index().
+    The ambiguous band [_CANDIDATE_GATE, threshold) is NOT acted on here; those
+    pairs go to the spool merge_review mechanism in prepare. Embedding-based
+    blocking (cosine on entity vectors) would additionally catch non-overlapping
+    aliases ('Joel' vs 'J. Chelliah') but needs entity vectors that don't exist
+    yet — deferred (tracked on #10).
     """
-    if not name:
+    if not name or not index:
         return None
     key = canonical_key(name)
+    if key:
+        hit = index["by_key"].get((entity_type, key))
+        if hit:
+            return hit
     toks = _tokens(name)
-    for eid, ent in index.items():
-        if ent["type"] != entity_type:
-            continue
-        if key and ent["key"] == key:
+    if not toks:
+        return None
+    candidates: set = set()
+    for t in toks:
+        candidates |= index["by_tok"].get((entity_type, t), set())
+    for eid in candidates:
+        ent = index["ids"].get(eid)
+        if ent and _token_set_ratio(toks, ent["toks"]) >= _WRITE_TIME_MERGE_THRESHOLD:
             return eid
-        if toks and ent["toks"]:
-            ratio = _token_set_ratio(toks, ent["toks"])
-            if ratio >= _WRITE_TIME_MERGE_THRESHOLD:
-                return eid
     return None
 
 

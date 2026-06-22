@@ -608,6 +608,12 @@ class Store:
                        db.execute("PRAGMA table_info(chunks)").fetchall()}
             if "enrich_state" not in ch_cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN enrich_state TEXT DEFAULT ''")
+            # --- Q8: per-chunk extraction attempt counter (2026-06-23) ---------
+            # Bumped each time an extraction covering this chunk yields nothing.
+            # After a cap the chunk is consumed (mark_enriched) so a genuinely
+            # content-empty doc stops re-queuing+re-extracting forever.
+            if "enrich_attempts" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN enrich_attempts INTEGER DEFAULT 0")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 
@@ -683,6 +689,24 @@ class Store:
             return db.execute(
                 "SELECT COUNT(*) FROM chunks WHERE enrich_state='cold'").fetchone()[0]
 
+    def bump_enrich_attempts(self, doc_ids: list[str]) -> int:
+        """Increment the extraction-attempt counter for the given chunks (Q8).
+
+        Returns the MAX attempt count across them after the bump, so the caller
+        can decide whether the cap is reached. No-op (returns 0) for an empty list.
+        """
+        if not doc_ids:
+            return 0
+        with self._connect() as db:
+            qmarks = ",".join("?" for _ in doc_ids)
+            db.execute(
+                f"UPDATE chunks SET enrich_attempts = COALESCE(enrich_attempts,0) + 1 "
+                f"WHERE doc_id IN ({qmarks})", list(doc_ids))
+            row = db.execute(
+                f"SELECT MAX(COALESCE(enrich_attempts,0)) FROM chunks "
+                f"WHERE doc_id IN ({qmarks})", list(doc_ids)).fetchone()
+            return int(row[0] or 0)
+
     def email_mentions(self, *needles: str) -> bool:
         """True if any email chunk's text references one of the given strings.
 
@@ -729,6 +753,20 @@ class Store:
             db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
                 (org, org_valid_from, entity_id))
+
+    def update_entity_org_if_empty(self, entity_id: str, org: str) -> bool:
+        """Set org on an entity only if it currently has none. Returns True if set.
+
+        Used by write-time dedup: when a new mention with a real org redirects to
+        an existing entity that lacks one, fill it without clobbering a known org.
+        """
+        if not org:
+            return False
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE entities SET org=? WHERE id=? AND (org='' OR org IS NULL)",
+                (org, entity_id))
+            return cur.rowcount > 0
 
     def upsert_meeting_pack(self, event_id: str, event_title: str,
                             event_date: str, pack_text: str,

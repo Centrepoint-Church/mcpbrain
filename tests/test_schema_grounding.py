@@ -320,3 +320,32 @@ def test_drain_grounding_flag_on_removes_fabricated_entity(tmp_path):
     names = [e.get("name") for e in entities]
     assert "Fabricated Person" not in names, "fabricated entity must be filtered"
     assert "Alice" in names, "grounded entity must survive"
+
+
+# --- Q2 grounding fix: token-overlap keeps normalised names, drops hallucinations ---
+
+def test_grounding_keeps_normalised_name_via_token():
+    """A correctly-extracted entity whose FULL name isn't a substring (it was
+    normalised) is kept when a distinctive token appears in the source."""
+    from mcpbrain.drain import _grounding_filter
+    ext = {
+        "messages": [{"text": "Spoke with Ps Joel today about the budget."}],
+        "entities": [{"name": "Joel Chelliah", "type": "person"}],  # full name not in text
+        "relations": [],
+    }
+    out, dropped = _grounding_filter(ext)
+    assert dropped == 0
+    assert out["entities"] == [{"name": "Joel Chelliah", "type": "person"}]
+
+
+def test_grounding_drops_hallucinated_entity():
+    """An entity with no lexical anchor in the source is dropped."""
+    from mcpbrain.drain import _grounding_filter
+    ext = {
+        "messages": [{"text": "Spoke with Ps Joel today about the budget."}],
+        "entities": [{"name": "Acme Corporation", "type": "org"}],  # nothing matches
+        "relations": [],
+    }
+    out, dropped = _grounding_filter(ext)
+    assert dropped == 1
+    assert out["entities"] == []
