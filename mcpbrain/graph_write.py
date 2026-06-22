@@ -23,7 +23,7 @@ from email.utils import parsedate_to_datetime
 from nameparser import HumanName
 
 from mcpbrain import config, orgs
-from mcpbrain.resolve import build_entity_index, write_time_dedup_check
+from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
     _normalise_title_for_dedup,
@@ -834,7 +834,7 @@ def _find_near_duplicate_action(conn, text, owner, *, window_days=7,
 # ---------------------------------------------------------------------------
 
 def apply(store, extraction, *, doc_ids, identity=None,
-          clock=None, embedder=None, owner=None, home=None) -> dict:
+          clock=None, embedder=None, owner=None, home=None, entity_index=None) -> dict:
     """Write one thread's extraction to the graph (structural pass).
 
     Adapts the Nexus write_to_graph_v2 sequence to mcpbrain: derives the thread
@@ -963,13 +963,14 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
     entities_created = 0
 
-    # Write-time dedup index: built once per apply() call when the flag is on.
-    # Populated from the store's entity list so near-duplicates in this batch
-    # redirect to the already-existing entity rather than fragmenting the graph.
+    # Write-time dedup index. Prefer a caller-supplied index (drain builds ONE per
+    # run and reuses it — avoids rebuilding the 25k-entity index on every apply);
+    # fall back to building it here for direct callers. Near-duplicates redirect to
+    # the existing entity rather than fragmenting the graph.
     _dedup_home = str(home) if home is not None else str(config.app_dir())
     _dedup_enabled = config.write_time_dedup_enabled(_dedup_home)
-    _entity_index: dict = {}
-    if _dedup_enabled:
+    _entity_index = entity_index
+    if _dedup_enabled and _entity_index is None:
         try:
             _entity_index = build_entity_index(store.entities_for_resolution())
         except Exception:
@@ -998,6 +999,13 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 log.debug("write_time_dedup: %r → %s (existing)", ename, existing_id)
                 entity_id = existing_id
                 name_to_id[ename] = entity_id
+                # Merge: if this mention carries a real org and the existing entity
+                # has none, fill it (a redirect shouldn't lose new attribution).
+                if eorg and eorg not in orgs.RESERVED_TAGS:
+                    try:
+                        store.update_entity_org_if_empty(entity_id, eorg)
+                    except Exception:  # noqa: BLE001
+                        pass
                 if entity_id not in linked:
                     if store.link_email_entity(lead_msg_id, entity_id, role="mentioned"):
                         _bump_email_count(store, entity_id)
@@ -1011,6 +1019,10 @@ def apply(store, extraction, *, doc_ids, identity=None,
                                   taxonomy=taxonomy, valid_from=lead_date_iso)
         if not entity_id:
             continue
+        # Keep the index current so a later entity in THIS batch dedups against
+        # the one just created (not just against the store snapshot).
+        if _dedup_enabled and _entity_index is not None:
+            add_to_index(_entity_index, entity_id, ename, etype)
 
         name_to_id[ename] = entity_id
 

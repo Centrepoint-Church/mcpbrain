@@ -86,25 +86,53 @@ def extract_text_from_docx(content_bytes: bytes) -> str:
 # XLSX
 # ---------------------------------------------------------------------------
 
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    """Render rows as a GitHub-flavored markdown table.
+
+    First non-empty row is the header; a separator row follows. Ragged rows are
+    padded to the table width and pipes are escaped so the table stays well-formed.
+    Preserves column→value structure for embedding/recall instead of collapsing it
+    to ' | '-joined prose.
+    """
+    rows = [r for r in rows if any((c or "").strip() for c in r)]
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+
+    def _cell(c: str) -> str:
+        return (c or "").replace("|", "\\|").replace("\n", " ").strip()
+
+    def _line(r: list[str]) -> str:
+        cells = [_cell(c) for c in r] + [""] * (width - len(r))
+        return "| " + " | ".join(cells[:width]) + " |"
+
+    sep = "| " + " | ".join(["---"] * width) + " |"
+    return "\n".join([_line(rows[0]), sep, *(_line(r) for r in rows[1:])])
+
+
 def extract_text_from_xlsx(content_bytes: bytes) -> str:
-    """Extract text from XLSX bytes — headers + first 200 rows per sheet."""
+    """Extract XLSX bytes as one markdown table per sheet (headers + first 200 rows).
+
+    Per-type structural extraction (Q5): preserves table shape as markdown rather
+    than flat ' | '-joined lines, so column structure survives into the embedding/
+    recall layer. Each sheet is labelled and rendered independently.
+    """
     try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(content_bytes), read_only=True, data_only=True)
         parts = []
         for name in wb.sheetnames:
             ws = wb[name]
-            parts.append(f"Sheet: {name}")
-            n = 0
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) if c is not None else "" for c in row]
-                if any(cells):
-                    parts.append(" | ".join(cells))
-                n += 1
-                if n > 200:
-                    parts.append(f"... ({name} truncated at 200 rows)")
+            rows: list[list[str]] = []
+            for n, row in enumerate(ws.iter_rows(values_only=True)):
+                if n >= 200:
+                    rows.append([f"... ({name} truncated at 200 rows)"])
                     break
+                rows.append([str(c) if c is not None else "" for c in row])
+            table = _rows_to_markdown(rows)
+            if table:
+                parts.append(f"### Sheet: {name}\n{table}")
         wb.close()
-        return "\n".join(parts)
+        return "\n\n".join(parts)
     except Exception:
         return ""

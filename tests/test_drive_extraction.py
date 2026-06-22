@@ -224,3 +224,17 @@ def test_normalise_drive_all_chunks_carry_metadata():
         assert chunk.metadata["content_subtype"] == "prose"
         assert chunk.metadata["extraction_method"] == "text"
         assert "confidence" in chunk.metadata
+
+
+def test_xlsx_extracts_as_markdown_table():
+    """Q5: spreadsheets render as a markdown table (header + separator), not flat lines."""
+    import io, openpyxl
+    from mcpbrain.sync.extractors import extract_text_from_xlsx
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Budget"
+    ws.append(["Item", "Cost"]); ws.append(["Camp", "500"]); ws.append(["Bus", "200"])
+    buf = io.BytesIO(); wb.save(buf)
+    out = extract_text_from_xlsx(buf.getvalue())
+    assert "### Sheet: Budget" in out
+    assert "| Item | Cost |" in out
+    assert "| --- | --- |" in out
+    assert "| Camp | 500 |" in out
