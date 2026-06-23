@@ -223,6 +223,61 @@ def incremental_communities_enabled(home) -> bool:
     return bool(read_config(home).get("incremental_communities", False))
 
 
+def retrieval_routing_enabled(home) -> bool:
+    """Whether Q6 query routing is active (entity graph-seed + community augmentation).
+
+    When True, intent is classified before search:
+      entity   → graph-seed expansion (append known neighbours to query)
+      thematic → community-summary augmentation appended to results
+    Default: False — safe rollout. Enable via config 'retrieval_routing': true.
+    """
+    return bool(read_config(home).get("retrieval_routing", False))
+
+
+def retrieval_crag_enabled(home) -> bool:
+    """Whether Q6 CRAG low-confidence rewrite is active.
+
+    When True, queries whose top hit score is below crag_min_score are rewritten
+    by the claude CLI and re-searched; results are merged.
+    Default: False — safe rollout. Enable via config 'retrieval_crag': true.
+    """
+    return bool(read_config(home).get("retrieval_crag", False))
+
+
+def crag_min_score(home) -> float:
+    """Minimum top-hit score before CRAG rewrite fires (config 'crag_min_score', default 0.30).
+
+    Below this threshold the query is considered low-confidence and a rewrite
+    is attempted.  Set higher to trigger rewriting more aggressively; lower to
+    be more conservative.
+    """
+    try:
+        return float(read_config(home).get("crag_min_score", 0.30))
+    except (TypeError, ValueError):
+        return 0.30
+
+
+def retrieval_rerank_enabled(home) -> bool:
+    """Whether Q6 BM25-token-overlap rerank is active.
+
+    When True, fused top-k results are re-ranked by token overlap between query
+    and chunk text.  Pure Python, no new model required.
+    Default: False — safe rollout. Enable via config 'retrieval_rerank': true.
+    """
+    return bool(read_config(home).get("retrieval_rerank", False))
+
+
+def contextual_retrieval_enabled(home) -> bool:
+    """Whether Q6 contextual retrieval prefix is prepended at embed time.
+
+    When True, a context descriptor (source type, date, sender, subject) is
+    prepended to each chunk's text before embedding.  Affects only newly indexed
+    chunks; existing chunks need a re-index pass to benefit.
+    Default: False — safe rollout. Enable via config 'contextual_retrieval': true.
+    """
+    return bool(read_config(home).get("contextual_retrieval", False))
+
+
 def sufficiency_gate_enabled(home) -> bool:
     """Whether the LLM sufficiency/NLI gate runs before recall injection (S1).
 
