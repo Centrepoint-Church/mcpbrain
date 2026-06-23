@@ -128,7 +128,7 @@ def test_run_salience_pass_scores_chunks(store):
 
     result = run_salience_pass(store, "/tmp/test-home")
     assert result["scored"] == 2
-    assert result["skipped"] == 0
+    assert result["llm_scored"] == 0   # importance_llm flag off → structural only
 
     s1 = store.get_chunk_salience("doc-1")
     s2 = store.get_chunk_salience("doc-2")
@@ -236,3 +236,30 @@ def test_exclude_cold_filters_cold_chunks(tmp_path):
     doc_ids = [r["doc_id"] for r in results]
     assert "doc-cold" not in doc_ids
     assert "doc-warm" in doc_ids
+
+
+# --- B3 fix: LLM poignancy (claude CLI) ---
+
+def test_score_llm_returns_none_without_claude(monkeypatch):
+    import mcpbrain.importance as imp
+    from mcpbrain import config
+    monkeypatch.setattr(config, "find_claude", lambda: (_ for _ in ()).throw(RuntimeError("no cli")))
+    assert imp.score_llm("some text") is None
+
+
+def test_salience_pass_blends_llm_when_enabled(monkeypatch, tmp_path):
+    """With importance_llm on, the top structural item gets an LLM-blended score."""
+    import json
+    import mcpbrain.importance as imp
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("d1", "Major budget decision by the board", "h", {"sender": "josh@x.com"})
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1")
+    home = tmp_path / "home"; home.mkdir()
+    (home / "config.json").write_text(json.dumps({"importance_llm": True}))
+    monkeypatch.setattr(imp, "score_llm", lambda text, **k: 10.0)   # stub the CLI call
+    result = imp.run_salience_pass(s, str(home))
+    assert result["llm_scored"] >= 1
+    # blended = 0.6*structural + 0.4*10 → strictly above pure structural baseline
+    assert s.get_chunk_salience("d1") > 3.0

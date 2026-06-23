@@ -22,6 +22,10 @@ import networkx as nx
 
 log = logging.getLogger("mcpbrain.communities")
 
+# After this many incremental (heuristic) extends, force a full Leiden recompute
+# so existing community assignments are re-optimised, not just appended to.
+_FULL_RECOMPUTE_EVERY = 10
+
 
 def build_graph(store) -> nx.Graph:
     """Load entity_relations into a weighted NetworkX graph.
@@ -189,6 +193,21 @@ def extend_communities(store, home: str | None = None) -> dict:
     if home and not _cfg.incremental_communities_enabled(home):
         return run(store)
 
+    # Periodic full recompute: the neighbour-label heuristic only places NEW nodes
+    # and never re-optimises existing assignments, so quality drifts. Every
+    # _FULL_RECOMPUTE_EVERY incremental passes, do a real Leiden run from scratch.
+    try:
+        n_inc = int(store.get_meta("communities_incremental_count") or "0")
+    except (TypeError, ValueError):
+        n_inc = 0
+    if n_inc >= _FULL_RECOMPUTE_EVERY:
+        store.set_meta("communities_incremental_count", "0")
+        result = run(store)
+        result["full_recompute"] = True
+        log.info("extend_communities: periodic full recompute (every %d passes)",
+                 _FULL_RECOMPUTE_EVERY)
+        return result
+
     G = build_graph(store)
     if G.number_of_edges() == 0:
         return {"new_entities": 0, "full_recompute": False, "communities_updated": 0}
@@ -269,6 +288,12 @@ def extend_communities(store, home: str | None = None) -> dict:
                     "  member_count=excluded.member_count, updated=excluded.updated",
                     (cid, cnt, today),
                 )
+
+    # Count this incremental pass toward the next periodic full recompute.
+    try:
+        store.set_meta("communities_incremental_count", str(n_inc + 1))
+    except Exception:  # noqa: BLE001
+        pass
 
     log.info("extend_communities: added %d new entities (heuristic)", updated)
     return {

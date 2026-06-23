@@ -112,6 +112,41 @@ def test_gold_recall_floor():
         f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
 
 
+def test_gold_three_axis_does_not_regress_recall():
+    """B3/B5 validation (the measurement the Phase-2 prompt required): the
+    three-axis ranker (recency+importance+decay) must NOT regress doc-level
+    recall@10 vs the relevance-only baseline on the live gold set.
+
+    Skips when the real store / enough coverage is unavailable. Read-only: it does
+    not mutate the store — importance uses whatever salience exists, recency/decay
+    are computed from chunk metadata.
+    """
+    from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
+
+    if not load_gold_cases():
+        pytest.skip("golden_retrieval_set.yaml not found")
+    result = try_open_real_store()
+    if result is None:
+        pytest.skip("real brain store unavailable or empty")
+    store, emb = result
+
+    base = gold_eval(store, emb, k=10)
+    if base["covered"] < MIN_COVERED:
+        pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
+
+    on = gold_eval(store, emb, k=10, search_kwargs={
+        "recency_weight": 0.15, "importance_weight": 0.10,
+        "decay_weight": 0.10, "recency_alpha": 0.01})
+
+    print(f"\n3-axis: baseline recall@10={base['recall_at_k']:.3f} → "
+          f"on={on['recall_at_k']:.3f}  (MRR {base['mrr']:.3f} → {on['mrr']:.3f}, "
+          f"{base['covered']} covered cases)")
+    # Allow a tiny epsilon for re-normalisation jitter; a real regression fails.
+    assert on["recall_at_k"] >= base["recall_at_k"] - 0.001, (
+        f"three-axis ranker REGRESSED recall@10: {base['recall_at_k']:.3f} → "
+        f"{on['recall_at_k']:.3f}")
+
+
 def test_eval_detects_broken_retrieval(fixture_store, monkeypatch):
     """Proves the floor is load-bearing: when retrieval returns nothing, the
     eval must report 0.0 (well below the floor), not silently pass."""

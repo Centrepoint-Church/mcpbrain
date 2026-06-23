@@ -163,8 +163,12 @@ def try_open_real_store():
         return None
 
 
-def gold_eval(store, embedder, *, k: int = 10) -> dict:
+def gold_eval(store, embedder, *, k: int = 10, search_kwargs: dict | None = None) -> dict:
     """Run recall@k and MRR over the hand-curated gold set — coverage-aware.
+
+    search_kwargs (optional): extra kwargs forwarded to hybrid_search — used to
+    measure the B3/B5 three-axis ranker (recency_weight/importance_weight/
+    decay_weight) against the relevance-only baseline (all weights 0).
 
     The gold set is shared with ops-brain and references its full corpus. mcpbrain
     may hold only a subset (e.g. mid-backfill), so a case is only *coverable* when
@@ -204,7 +208,8 @@ def gold_eval(store, embedder, *, k: int = 10) -> dict:
             continue  # not coverable against this corpus yet — skip, don't score 0
         covered += 1
         want_docs = {_doc_key(d) for d in present}
-        results = hybrid_search(store, embedder, case.get("query", ""), limit=k)
+        results = hybrid_search(store, embedder, case.get("query", ""), limit=k,
+                                **(search_kwargs or {}))
         retrieved_docs = [_doc_key(r["doc_id"]) for r in results]
         # Document-level recall: did we surface the expected document at all?
         recalls.append(1.0 if (set(retrieved_docs[:k]) & want_docs) else 0.0)

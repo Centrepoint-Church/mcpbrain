@@ -143,6 +143,17 @@ def importance_recall_enabled(home) -> bool:
     return bool(read_config(home).get("importance_recall", False))
 
 
+def importance_llm_enabled(home) -> bool:
+    """Whether the salience pass blends an LLM poignancy score (claude CLI) into
+    the top-K most structurally-salient chunks each run (B3).
+
+    Default: False — the structural scorer is the always-on default; the LLM
+    blend is opt-in (it costs a bounded number of claude calls per pass) and adds
+    judgement where it matters most. Enable via config 'importance_llm': true.
+    """
+    return bool(read_config(home).get("importance_llm", False))
+
+
 def importance_weights(home) -> dict:
     """Weights for the three-axis ranker (B3).
 

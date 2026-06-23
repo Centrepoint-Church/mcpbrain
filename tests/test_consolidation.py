@@ -189,3 +189,48 @@ def test_consolidate_noop_when_disabled(store, tmp_path, monkeypatch):
     result = consolidation.consolidate(store, home_off, threshold=0.0)
     assert result["notes_written"] == 0
     assert result["clusters_found"] == 0
+
+
+# --- B4 fix: embedding-based clustering (reuses bge vectors) ---
+
+class _FakeEmbedder:
+    """Deterministic unit-norm vectors: 'budget' texts → axis 0, 'roster' → axis 1."""
+    def embed_passages(self, texts):
+        out = []
+        for t in texts:
+            tl = (t or "").lower()
+            if "budget" in tl:
+                out.append([1.0, 0.0, 0.0])
+            elif "roster" in tl:
+                out.append([0.0, 1.0, 0.0])
+            else:
+                out.append([0.0, 0.0, 1.0])
+        return out
+
+
+def test_cluster_uses_embeddings_when_embedder_given():
+    from mcpbrain.consolidation import _cluster
+    chunks = [
+        {"doc_id": "a", "text": "the budget review for 2026"},
+        {"doc_id": "b", "text": "annual budget planning meeting"},
+        {"doc_id": "c", "text": "budget approval next steps"},
+        {"doc_id": "d", "text": "sunday roster volunteers"},
+        {"doc_id": "e", "text": "roster for the worship team"},
+        {"doc_id": "f", "text": "roster sign-up sheet"},
+    ]
+    clusters = _cluster(chunks, _FakeEmbedder())
+    # two semantic clusters (budget vs roster), each >= _MIN_CLUSTER_SIZE (3)
+    sizes = sorted(len(c) for c in clusters)
+    assert sizes == [3, 3]
+    texts = [" ".join(x["text"] for x in cl).lower() for cl in clusters]
+    assert any("budget" in t and "roster" not in t for t in texts)
+
+
+def test_cluster_falls_back_to_lexical_when_embedder_fails():
+    from mcpbrain.consolidation import _cluster
+    class _Broken:
+        def embed_passages(self, texts):
+            raise RuntimeError("no embedder")
+    chunks = [{"doc_id": str(i), "text": "budget review meeting agenda"} for i in range(3)]
+    clusters = _cluster(chunks, _Broken())   # falls back to Jaccard, no raise
+    assert len(clusters) == 1 and len(clusters[0]) == 3

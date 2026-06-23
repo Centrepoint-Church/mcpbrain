@@ -138,27 +138,79 @@ def recency_decay(metadata: dict, *, alpha: float = 0.01) -> float:
     return math.exp(-alpha * age)
 
 
-def run_salience_pass(store, home: str, *, cap: int = 500) -> dict:
-    """Score up to `cap` unscored embedded chunks with structural salience.
+_LLM_POIGNANCY_PROMPT = (
+    "On a scale of 1 to 10, rate the long-term poignancy / importance of the "
+    "following email or note for the recipient's personal memory — 1 = purely "
+    "mundane/transactional, 10 = a major decision, commitment, or relationship "
+    "event worth remembering for years. Reply with ONLY the integer.\n\n{text}"
+)
 
-    Writes scores back via store.set_chunk_salience_batch(). Returns
-    {"scored": N, "skipped": 0} — skipped is always 0 for the structural scorer
-    (no LLM call to fail). Safe to call repeatedly; only 0.0-salience chunks
-    are touched.
+_LLM_BLEND_TOPK = 20   # only the top-K structurally-salient chunks per pass get an LLM score
+
+
+def score_llm(text: str, *, timeout: int = 20) -> float | None:
+    """LLM poignancy score in [1,10] via the claude CLI, or None on failure.
+
+    Subscription-only (no API key). Deliberately NOT called per-chunk over the
+    whole corpus — run_salience_pass applies it only to the few highest-value
+    items, where an LLM judgement adds the most over the structural heuristic.
     """
+    text = (text or "").strip()
+    if not text:
+        return None
+    import subprocess
+    from mcpbrain import config
+    try:
+        claude = config.find_claude()
+    except Exception:
+        return None
+    try:
+        proc = subprocess.run(
+            [claude, "-p", _LLM_POIGNANCY_PROMPT.format(text=text[:2000]),
+             "--output-format", "text"],
+            capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            return None
+        m = re.search(r"\b(10|[1-9])\b", proc.stdout or "")
+        return float(m.group(1)) if m else None
+    except Exception:  # noqa: BLE001 — CLI missing/slow/timeout → no LLM score
+        return None
+
+
+def run_salience_pass(store, home: str, *, cap: int = 500) -> dict:
+    """Score up to `cap` unscored embedded chunks with structural salience, and —
+    when config 'importance_llm' is on — blend an LLM poignancy score into the
+    top few highest-salience items.
+
+    Writes scores via store.set_chunk_salience_batch(). Returns
+    {"scored": N, "llm_scored": K}. Safe to call repeatedly; only 0.0-salience
+    chunks are touched.
+    """
+    from mcpbrain import config
     chunks = store.chunks_needing_salience(cap)
     if not chunks:
-        return {"scored": 0, "skipped": 0}
+        return {"scored": 0, "llm_scored": 0}
 
-    pairs = []
+    scored = []   # (chunk, structural_score)
     for c in chunks:
         try:
             s = score_structural(c.get("metadata") or {})
         except Exception as exc:
             log.debug("salience scoring failed for %s: %s", c.get("doc_id"), exc)
             s = _BASELINE
-        pairs.append((c["doc_id"], s))
+        scored.append((c, s))
 
+    llm_scored = 0
+    if config.importance_llm_enabled(home):
+        # Blend an LLM poignancy score into only the top-K structural items —
+        # bounded cost, maximal signal where it matters most.
+        for c, s in sorted(scored, key=lambda x: -x[1])[:_LLM_BLEND_TOPK]:
+            llm = score_llm(c.get("text") or "")
+            if llm is not None:
+                c["_blended"] = max(_MIN, min(_MAX, round(0.6 * s + 0.4 * llm, 2)))
+                llm_scored += 1
+
+    pairs = [(c["doc_id"], c.get("_blended", s)) for c, s in scored]
     store.set_chunk_salience_batch(pairs)
-    log.info("importance: scored %d chunks", len(pairs))
-    return {"scored": len(pairs), "skipped": 0}
+    log.info("importance: scored %d chunks (%d LLM-blended)", len(pairs), llm_scored)
+    return {"scored": len(pairs), "llm_scored": llm_scored}
