@@ -1067,16 +1067,26 @@ class Store:
 
     def get_chunk(self, doc_id: str) -> dict | None:
         with self._connect() as db:
-            r = db.execute(
-                "SELECT doc_id,text,metadata,memory_tier FROM chunks WHERE doc_id=?", (doc_id,)
-            ).fetchone()
+            try:
+                r = db.execute(
+                    "SELECT doc_id,text,metadata,memory_tier FROM chunks WHERE doc_id=?",
+                    (doc_id,)).fetchone()
+                tier = (r["memory_tier"] or "") if r else ""
+            except sqlite3.OperationalError:
+                # Pre-Phase-2 schema (memory_tier not yet ALTERed in): a read-only
+                # handle can hit this in the window between a wheel upgrade and the
+                # daemon's init() migration. Degrade gracefully — recall must not crash.
+                r = db.execute(
+                    "SELECT doc_id,text,metadata FROM chunks WHERE doc_id=?",
+                    (doc_id,)).fetchone()
+                tier = ""
             if not r:
                 return None
             return {
                 "doc_id": r["doc_id"],
                 "text": r["text"],
                 "metadata": json.loads(r["metadata"]),
-                "memory_tier": r["memory_tier"] or "",
+                "memory_tier": tier,
             }
 
     def patch_chunk_metadata(self, doc_id: str, **patch) -> bool:
@@ -2180,10 +2190,18 @@ class Store:
                 [(round(float(s), 3), d) for d, s in pairs])
 
     def get_chunk_salience(self, doc_id: str) -> float:
-        """Return the stored salience for a chunk (0.0 if unscored)."""
+        """Return the stored salience for a chunk (0.0 if unscored).
+
+        Defensive against a pre-Phase-2 schema (no `salience` column) that a
+        read-only handle can see in the upgrade→migration window — recall must
+        not crash; an unscored chunk is simply 0.0.
+        """
         with self._connect() as db:
-            row = db.execute(
-                "SELECT salience FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+            try:
+                row = db.execute(
+                    "SELECT salience FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+            except sqlite3.OperationalError:
+                return 0.0
             return float(row["salience"] or 0.0) if row else 0.0
 
     # --- B2 memory tier/type methods (Phase 2, 2026-06-23) -------------------
@@ -2249,6 +2267,37 @@ class Store:
                 meta = {}
             result.append({"doc_id": r["doc_id"], "text": r["text"], "metadata": meta})
         return result
+
+    def top_core_candidates(self, limit: int = 12) -> list[dict]:
+        """Top durable notes for the 'core' tier: highest-salience semantic/
+        procedural chunks (consolidated knowledge + voice model), excluding cold.
+
+        Returns [{doc_id}]. Episodic email is intentionally excluded — core is for
+        durable distilled facts, not raw correspondence.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id FROM chunks "
+                "WHERE memory_type IN ('semantic','procedural') "
+                "  AND COALESCE(enrich_state,'') != 'cold' "
+                "ORDER BY COALESCE(salience,0.0) DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{"doc_id": r["doc_id"]} for r in rows]
+
+    def warm_chunks_above_strength(self, min_strength: float, limit: int = 2000) -> list[dict]:
+        """Warm/untiered chunks whose memory_strength (built by recall) is at or
+        above min_strength — candidates for promotion to 'hot'. Returns [{doc_id}]."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT c.doc_id FROM chunks c "
+                "JOIN chunk_quality cq ON cq.doc_id = c.doc_id "
+                "WHERE COALESCE(c.memory_tier,'') IN ('', 'warm') "
+                "  AND COALESCE(cq.memory_strength, 5.0) >= ? "
+                "ORDER BY cq.memory_strength DESC LIMIT ?",
+                (float(min_strength), limit),
+            ).fetchall()
+        return [{"doc_id": r["doc_id"]} for r in rows]
 
     # --- B4 thread context reader (Phase 2, 2026-06-23) ----------------------
 

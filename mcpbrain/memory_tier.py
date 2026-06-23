@@ -89,22 +89,53 @@ def demote_to_cold(store, doc_ids: list[str]) -> int:
     return count
 
 
-def run_tier_pass(store, home: str, *,
-                  salience_floor: float = 3.5,
-                  hot_access_threshold: int = 3) -> dict:
-    """Periodic tier maintenance: promote high-access, demote low-salience.
+_MAX_CORE_ITEMS = 12
 
-    Returns {"promoted": N, "demoted": M}.
-    This pass is cheap (no LLM) and safe to run nightly.
+
+def recompute_core(store, home: str, *, max_items: int = _MAX_CORE_ITEMS) -> int:
+    """Recompute the 'core' tier — the always-injected durable facts.
+
+    Core = the top `max_items` highest-salience DURABLE notes (memory_type
+    semantic/procedural — consolidated knowledge + the voice/procedural model, NOT
+    raw episodic email). Chunks that fall out revert to 'hot' (reversible; nothing
+    deleted). THIS is the promoter that was missing — without it the core tier is
+    never populated and the always-injected block is empty. Returns the core size.
+
+    Bounded and deterministic (no LLM); safe on the tier-maintenance cadence.
     """
     from mcpbrain import config
     if not config.tiered_memory_enabled(home):
-        return {"promoted": 0, "demoted": 0}
+        return 0
+    keep = {c["doc_id"] for c in store.top_core_candidates(max_items)}
+    for c in store.chunks_by_tier("core", limit=500):
+        if c["doc_id"] not in keep:
+            store.set_chunk_tier(c["doc_id"], "hot")   # demote, not delete
+    for doc_id in keep:
+        store.set_chunk_tier(doc_id, "core")
+    if keep:
+        log.info("memory_tier: core tier now %d durable notes", len(keep))
+    return len(keep)
 
-    promoted_count = 0
-    demoted_count = 0
 
-    # Demote: chunks with salience below floor that aren't core/hot
+def run_tier_pass(store, home: str, *,
+                  salience_floor: float = 3.5,
+                  hot_strength_threshold: float = 7.0) -> dict:
+    """Periodic tier maintenance: promote high-strength warm→hot, demote
+    low-salience→cold, and recompute the core tier.
+
+    Returns {"promoted": N, "demoted": M, "core": K}. Cheap (no LLM), nightly-safe.
+    """
+    from mcpbrain import config
+    if not config.tiered_memory_enabled(home):
+        return {"promoted": 0, "demoted": 0, "core": 0}
+
+    # Promote: warm/untiered chunks recalled enough to build strength (B5 bumps
+    # memory_strength on each recall) become hot.
+    to_hot = [c["doc_id"] for c in
+              store.warm_chunks_above_strength(hot_strength_threshold, limit=2000)]
+    promoted_count = promote_to_hot(store, to_hot) if to_hot else 0
+
+    # Demote: chunks with salience below the floor that aren't core/hot.
     candidates = store.chunks_for_decay_pass(limit=2000)
     to_cold = [
         c["doc_id"]
@@ -112,7 +143,7 @@ def run_tier_pass(store, home: str, *,
         if (float(c.get("salience") or 0.0) < salience_floor
             and c.get("memory_tier", "") not in ("core", "hot"))
     ]
-    if to_cold:
-        demoted_count = demote_to_cold(store, to_cold)
+    demoted_count = demote_to_cold(store, to_cold) if to_cold else 0
 
-    return {"promoted": promoted_count, "demoted": demoted_count}
+    core_count = recompute_core(store, home)
+    return {"promoted": promoted_count, "demoted": demoted_count, "core": core_count}
