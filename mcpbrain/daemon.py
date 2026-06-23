@@ -712,10 +712,17 @@ class Daemon:
                 update_on_recall(self._store, recalled_ids)
             except Exception:  # noqa: BLE001
                 pass
-        return [{"doc_id": c.get("doc_id"),
-                 "score": round(float(c.get("score") or 0.0), 3),
-                 "distance": round(float(dist.get(c.get("doc_id"), knn[0][1])), 3),
-                 "text": c.get("text") or ""} for c in hits]
+        # S1: sufficiency gate — filter hits that don't help answer the query
+        result_hits = [{"doc_id": c.get("doc_id"),
+                        "score": round(float(c.get("score") or 0.0), 3),
+                        "distance": round(float(dist.get(c.get("doc_id"), knn[0][1])), 3),
+                        "text": c.get("text") or ""} for c in hits]
+        try:
+            from mcpbrain.sufficiency import filter_by_sufficiency
+            result_hits = filter_by_sufficiency(query, result_hits, home=str(app_dir()))
+        except Exception:  # noqa: BLE001 — gate must never break recall
+            pass
+        return result_hits
 
     def _resolve_google_account(self, token_file) -> str:
         """Return the connected Google account email, resolving lazily.
