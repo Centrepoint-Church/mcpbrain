@@ -66,18 +66,29 @@ def _get_samples(store, thread_id: str, n: int = 3) -> str:
 def draft_context(store, home: str, email_id: str, intent: str = "") -> dict:
     """Assemble context for drafting a reply. Returns a dict for brain_draft_context MCP tool.
     Returns {"error": "email not found"} if email_id is unknown.
+
+    When draft_critic_enabled=true in config, also runs the voice/coverage/grounding
+    critic and appends a "critique" key to the returned dict.
     """
     ec = _get_email_context(store, email_id)
     if not ec:
         return {"error": "email not found"}
-    return {
+    body = ec.get("contextual_summary") or ec.get("summary", "")
+    result = {
         "subject": ec.get("subject", ""),
         # email_context stores no raw body; use contextual_summary when available
         # (richer situational narrative), falling back to the one-line summary.
-        "body": ec.get("contextual_summary") or ec.get("summary", ""),
+        "body": body,
         "sender": ec.get("sender", ""),
         "thread_id": ec.get("thread_id", ""),
         "voice_rules": _load_voice_rules(home),
         "samples": _get_samples(store, ec.get("thread_id", "")),
         "intent": intent,
     }
+    if config.draft_critic_enabled(home):
+        try:
+            from mcpbrain.draft_critic import critique as _critique
+            result["critique"] = _critique(intent or body, result, home=home)
+        except Exception as exc:
+            log.debug("draft_context: critic failed (non-fatal): %s", exc)
+    return result
