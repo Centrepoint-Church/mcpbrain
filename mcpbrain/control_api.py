@@ -227,6 +227,22 @@ class ControlServer:
                     session_id = (body.get("session_id") or "").strip()
                     _log_recall_exposures(self.store, results, session_id)
                 return h_json(h, 200, {"results": results})
+            if h.path == "/api/recall-feedback":
+                # The accept signal (S2/S4/S5 keystone): the hook reports doc_ids
+                # that stayed relevant across the session (recalled again) as 'used'.
+                # Fire-and-forget; never fails the caller.
+                if self.store is not None:
+                    ev = (body.get("event") or "used").strip() or "used"
+                    sid = (body.get("session_id") or "").strip()
+                    ids = [str(d_) for d_ in (body.get("doc_ids") or []) if d_]
+                    if ids:
+                        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        try:
+                            self.store.record_recall_feedback_batch(
+                                [(d_, sid, ev, ts) for d_ in ids])
+                        except Exception:  # noqa: BLE001
+                            pass
+                return h_json(h, 200, {"recorded": True})
             # /api/config carries the Gemini key. The control API is loopback-only
             # over plain HTTP by design, so the key travels in cleartext on
             # localhost. HTTPS-on-loopback is deliberately avoided: the self-signed

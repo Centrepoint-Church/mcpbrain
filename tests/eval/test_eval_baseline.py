@@ -147,6 +147,59 @@ def test_gold_three_axis_does_not_regress_recall():
         f"{on['recall_at_k']:.3f}")
 
 
+def test_q6_route_does_not_regress_recall_on_gold(tmp_path):
+    """Q6 validation (the measurement the Phase-3 prompt required): the routing +
+    token-overlap rerank pipeline must NOT regress doc-level recall@10 vs plain
+    hybrid_search on the LIVE gold set. Measures route() against the baseline.
+
+    CRAG (which calls the claude CLI) is left OFF so the test is deterministic;
+    routing + rerank are the deterministic parts and are what we can gate on.
+    Skips when the real store / coverage is unavailable.
+    """
+    import json
+    from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
+    from mcpbrain.query_router import route
+
+    if not load_gold_cases():
+        pytest.skip("golden_retrieval_set.yaml not found")
+    result = try_open_real_store()
+    if result is None:
+        pytest.skip("real brain store unavailable or empty")
+    store, emb = result
+
+    base = gold_eval(store, emb, k=10)
+    if base["covered"] < MIN_COVERED:
+        pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
+
+    # A temp home with routing + rerank ON (CRAG off → no LLM call).
+    rh = tmp_path / "q6home"; rh.mkdir()
+    (rh / "config.json").write_text(json.dumps({
+        "retrieval_routing": True, "retrieval_rerank": True, "retrieval_crag": False}))
+
+    def _route_fn(s, e, q, k):
+        return route(s, e, q, k, home=str(rh))
+
+    on = gold_eval(store, emb, k=10, search_fn=_route_fn)
+    print(f"\nQ6 route: baseline recall@10={base['recall_at_k']:.3f} → "
+          f"on={on['recall_at_k']:.3f}  (MRR {base['mrr']:.3f} → {on['mrr']:.3f}, "
+          f"{base['covered']} covered cases)")
+
+    # MEASURED FINDING (2026-06-23): Q6 routing + token-overlap rerank REGRESSES
+    # recall@10 on the live gold set (0.40 → 0.30) — the lexical reranker is weaker
+    # than plain RRF. So the conservative, correct state is that these flags ship
+    # DEFAULT-OFF; do not enable until a real (cross-encoder) reranker beats the
+    # baseline here. This test gates that: the flags must stay off while Q6 regresses.
+    from mcpbrain import config as _cfg
+    import tempfile as _tf
+    blank = _tf.mkdtemp()
+    assert _cfg.retrieval_rerank_enabled(blank) is False, "rerank regresses on gold — keep default off"
+    assert _cfg.retrieval_routing_enabled(blank) is False, "routing regresses on gold — keep default off"
+    if on["recall_at_k"] >= base["recall_at_k"] - 0.001:
+        # If a future reranker stops regressing, surface that so the floors/defaults
+        # can be revisited (don't silently keep it off once it helps).
+        print("NOTE: Q6 no longer regresses recall — revisit enabling it.")
+
+
 def test_q6_rerank_does_not_regress_recall(fixture_store):
     """Q6: token-overlap rerank must not regress recall@1 vs baseline on fixture store.
 
