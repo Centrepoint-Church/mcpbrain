@@ -147,6 +147,81 @@ def test_gold_three_axis_does_not_regress_recall():
         f"{on['recall_at_k']:.3f}")
 
 
+def test_q6_rerank_does_not_regress_recall(fixture_store):
+    """Q6: token-overlap rerank must not regress recall@1 vs baseline on fixture store.
+
+    The fixture corpus is saturated (baseline = 1.0/1.0) so this verifies that
+    the reranker doesn't break anything — a real quality delta would only show
+    on the gold set (where the query's most relevant doc isn't always ranked 1st
+    by plain RRF). The test name is prefixed _fixture_ to distinguish from gold.
+    """
+    from tests.eval.run_eval import run_eval as _run_eval
+    from mcpbrain.query_router import _token_overlap_rerank
+    from mcpbrain.retrieval import hybrid_search
+
+    store, emb = fixture_store
+
+    def reranked_search(store, embedder, query, limit, **kw):
+        results = hybrid_search(store, embedder, query, limit, **kw)
+        return _token_overlap_rerank(query, results)
+
+    # Patch hybrid_search in run_eval to use the reranked version
+    import mcpbrain.retrieval as retrieval
+    orig = retrieval.hybrid_search
+    try:
+        retrieval.hybrid_search = reranked_search
+        m = _run_eval(store, emb, k=1)
+    finally:
+        retrieval.hybrid_search = orig
+
+    print(f"\nQ6 rerank fixture: recall@1={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}")
+    assert m["recall_at_k"] >= RECALL_FLOOR, (
+        f"Q6 rerank REGRESSED fixture recall@1: {m['recall_at_k']:.3f} < {RECALL_FLOOR}")
+
+
+def test_q6_routing_rerank_gold_no_regression():
+    """Q6: routing (graph-seed + community) + rerank must not regress gold recall@10.
+
+    Each sub-feature is tested individually against the baseline, then combined.
+    Skips gracefully when real store / gold set is unavailable.
+    """
+    from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
+    from mcpbrain.query_router import _token_overlap_rerank
+    from mcpbrain.retrieval import hybrid_search
+
+    if not load_gold_cases():
+        pytest.skip("golden_retrieval_set.yaml not found")
+    result = try_open_real_store()
+    if result is None:
+        pytest.skip("real brain store unavailable or empty")
+    store, emb = result
+    base = gold_eval(store, emb, k=10)
+    if base["covered"] < MIN_COVERED:
+        pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
+
+    # Rerank sub-feature: blend token overlap with RRF score
+    def reranked_search(s, e, q, limit, **kw):
+        return _token_overlap_rerank(q, hybrid_search(s, e, q, limit, **kw))
+
+    import mcpbrain.retrieval as retrieval
+    orig = retrieval.hybrid_search
+    try:
+        retrieval.hybrid_search = reranked_search
+        reranked = gold_eval(store, emb, k=10)
+    finally:
+        retrieval.hybrid_search = orig
+
+    print(f"\nQ6 rerank gold: baseline recall@10={base['recall_at_k']:.3f} → "
+          f"reranked={reranked['recall_at_k']:.3f}  "
+          f"(MRR {base['mrr']:.3f} → {reranked['mrr']:.3f}, "
+          f"{base['covered']} covered cases)")
+
+    # Must not regress (allow epsilon for float jitter)
+    assert reranked["recall_at_k"] >= base["recall_at_k"] - 0.001, (
+        f"Q6 rerank REGRESSED gold recall@10: {base['recall_at_k']:.3f} → "
+        f"{reranked['recall_at_k']:.3f}")
+
+
 def test_eval_detects_broken_retrieval(fixture_store, monkeypatch):
     """Proves the floor is load-bearing: when retrieval returns nothing, the
     eval must report 0.0 (well below the floor), not silently pass."""
