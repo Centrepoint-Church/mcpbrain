@@ -153,6 +153,24 @@ def _format_context(results: list[dict], seen: set) -> tuple[str, list]:
     return _HEADER + "\n" + "\n".join(lines), used_ids
 
 
+def _record_used(home: str, doc_ids: list, session_id: str) -> None:
+    """Fire-and-forget POST of a 'used' accept signal to the daemon. Best-effort."""
+    try:
+        port = (Path(home) / "control_port").read_text().strip()
+        token = (Path(home) / "control_token").read_text().strip()
+        payload = json.dumps({"doc_ids": doc_ids, "event": "used",
+                              "session_id": session_id}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/recall-feedback",
+            data=payload, method="POST",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_S):  # noqa: S310 loopback only
+            pass
+    except Exception:  # noqa: BLE001 — feedback must never disrupt a prompt
+        pass
+
+
 def _get_core_block(home: str) -> str:
     """Return the always-injected core block from the daemon via /api/core.
 
@@ -191,7 +209,16 @@ def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
         return
     results = _recall(home, prompt)
     now = now if now is not None else time.time()
-    seen, seen_path = _load_seen(home, hook.get("session_id") or "x", now=now)
+    session_id = hook.get("session_id") or "x"
+    seen, seen_path = _load_seen(home, session_id, now=now)
+
+    # Accept signal (S2/S4/S5 keystone): a doc recalled AGAIN this session (it was
+    # injected on an earlier prompt and is relevant once more) is being engaged
+    # with — record it 'used'. This is the real, observable positive signal the
+    # bandit (S4) and lessons (S5) consume; without it they have no reward.
+    reused = [r.get("doc_id") for r in results if r.get("doc_id") in seen]
+    if reused and config.feedback_enabled(home):
+        _record_used(home, reused, session_id)
 
     # B2: prepend always-injected core block (tiered_memory flag guards internally)
     core_block = _get_core_block(home)

@@ -163,12 +163,15 @@ def try_open_real_store():
         return None
 
 
-def gold_eval(store, embedder, *, k: int = 10, search_kwargs: dict | None = None) -> dict:
+def gold_eval(store, embedder, *, k: int = 10, search_kwargs: dict | None = None,
+              search_fn=None) -> dict:
     """Run recall@k and MRR over the hand-curated gold set — coverage-aware.
 
     search_kwargs (optional): extra kwargs forwarded to hybrid_search — used to
     measure the B3/B5 three-axis ranker (recency_weight/importance_weight/
     decay_weight) against the relevance-only baseline (all weights 0).
+    search_fn (optional): a callable(store, embedder, query, k) -> [hits] used
+    instead of hybrid_search — used to measure the Q6 router/rerank pipeline.
 
     The gold set is shared with ops-brain and references its full corpus. mcpbrain
     may hold only a subset (e.g. mid-backfill), so a case is only *coverable* when
@@ -208,8 +211,11 @@ def gold_eval(store, embedder, *, k: int = 10, search_kwargs: dict | None = None
             continue  # not coverable against this corpus yet — skip, don't score 0
         covered += 1
         want_docs = {_doc_key(d) for d in present}
-        results = hybrid_search(store, embedder, case.get("query", ""), limit=k,
-                                **(search_kwargs or {}))
+        if search_fn is not None:
+            results = search_fn(store, embedder, case.get("query", ""), k)
+        else:
+            results = hybrid_search(store, embedder, case.get("query", ""), limit=k,
+                                    **(search_kwargs or {}))
         retrieved_docs = [_doc_key(r["doc_id"]) for r in results]
         # Document-level recall: did we surface the expected document at all?
         recalls.append(1.0 if (set(retrieved_docs[:k]) & want_docs) else 0.0)
