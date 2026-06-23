@@ -223,6 +223,18 @@ def incremental_communities_enabled(home) -> bool:
     return bool(read_config(home).get("incremental_communities", False))
 
 
+def sufficiency_gate_enabled(home) -> bool:
+    """Whether the LLM sufficiency/NLI gate runs before recall injection (S1).
+
+    When True, each batch of recall hits is checked: does this chunk actually
+    help answer the query? Hits classified IRRELEVANT are withheld.
+
+    Default: False — safe rollout. Enable via config 'sufficiency_gate': true.
+    The gate fails open (all hits pass) on CLI absence, timeout, or parse error.
+    """
+    return bool(read_config(home).get("sufficiency_gate", False))
+
+
 def write_time_dedup_enabled(home) -> bool:
     """Whether write-time entity dedup runs the cascade matcher before inserting.
 
