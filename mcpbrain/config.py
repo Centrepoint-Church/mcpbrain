@@ -298,6 +298,32 @@ def contextual_retrieval_enabled(home) -> bool:
     return bool(read_config(home).get("contextual_retrieval", False))
 
 
+def draft_critic_enabled(home) -> bool:
+    """Whether the LLM draft critic runs on email drafts (S5).
+
+    When True, draft_context() appends a CritiqueReport checking voice,
+    coverage, and grounding violations against mcpbrain's inline voice rules.
+
+    Default: False — safe rollout. Enable via config 'draft_critic': true.
+    The critic fails open (empty-violations report) on CLI absence or timeout.
+    """
+    return bool(read_config(home).get("draft_critic", False))
+
+
+def lessons_enabled(home) -> bool:
+    """Whether the outcome-grounded lessons writer runs (S5).
+
+    When True, write_lessons() extracts patterns from observed recall usage
+    events ('used'/'edited') and writes them to recall_lessons after an
+    independent verification pass.
+
+    Default: False — safe rollout. Enable via config 'lessons': true.
+    Write only happens when real 'used'/'edited' signals exist — never on
+    the model's own opinion.
+    """
+    return bool(read_config(home).get("lessons", False))
+
+
 def sufficiency_gate_enabled(home) -> bool:
     """Whether the LLM sufficiency/NLI gate runs before recall injection (S1).
 
