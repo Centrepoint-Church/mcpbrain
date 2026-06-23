@@ -218,9 +218,53 @@ def _episodic_chunks_for_consolidation(store, cap: int) -> list[dict]:
     return result
 
 
+def _cluster_by_embedding(chunks: list[dict], embedder, *,
+                          threshold: float = 0.55) -> list[list[dict]] | None:
+    """Cluster chunks by cosine similarity on their bge embeddings (single-link).
+
+    Reuses the same local embedder the store uses, so clusters reflect semantic
+    similarity — far better than word-overlap for paraphrases / short notes. bge
+    vectors are unit-normalised, so dot product == cosine. Returns None on any
+    embedding failure so the caller falls back to the lexical clusterer.
+    """
+    texts = [c.get("text") or "" for c in chunks]
+    try:
+        vecs = embedder.embed_passages(texts)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("consolidation: embedding clustering failed (%s); falling back", exc)
+        return None
+    n = len(chunks)
+    labels = list(range(n))
+    for i in range(n):
+        vi = vecs[i]
+        for j in range(i + 1, n):
+            if sum(a * b for a, b in zip(vi, vecs[j])) >= threshold:
+                ri, rj = labels[i], labels[j]
+                if ri != rj:
+                    old, new = max(ri, rj), min(ri, rj)
+                    labels = [new if lb == old else lb for lb in labels]
+    by_label: dict[int, list] = {}
+    for i, lb in enumerate(labels):
+        by_label.setdefault(lb, []).append(chunks[i])
+    clusters = sorted(by_label.values(), key=len, reverse=True)
+    return [c for c in clusters if len(c) >= _MIN_CLUSTER_SIZE]
+
+
+def _cluster(chunks: list[dict], embedder=None) -> list[list[dict]]:
+    """Cluster by embeddings when an embedder is available, else lexical Jaccard."""
+    if embedder is not None:
+        clusters = _cluster_by_embedding(chunks, embedder)
+        if clusters is not None:
+            return clusters
+    return _cluster_chunks(chunks)
+
+
 def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
-                threshold: float = CONSOLIDATION_THRESHOLD) -> dict:
+                threshold: float = CONSOLIDATION_THRESHOLD, embedder=None) -> dict:
     """Run one consolidation pass.
+
+    embedder (optional): the local bge embedder; when supplied, clustering is
+    embedding-based (semantic) rather than lexical word-overlap.
 
     Returns {"clusters_found": N, "notes_written": M, "skipped": K}.
     """
@@ -237,8 +281,9 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
     if not chunks:
         return {"clusters_found": 0, "notes_written": 0, "skipped": 0}
 
-    clusters = _cluster_chunks(chunks)
-    log.info("consolidation: %d chunks → %d clusters", len(chunks), len(clusters))
+    clusters = _cluster(chunks, embedder)
+    log.info("consolidation: %d chunks → %d clusters (%s)", len(chunks), len(clusters),
+             "embedding" if embedder is not None else "lexical")
 
     written = 0
     for cluster in clusters[:cap]:

@@ -1324,6 +1324,18 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.warning("decay_pass failed: %s", exc, exc_info=True)
             return {"decay_pass": False, "error": str(exc)}
+        # Tier maintenance (B2): promote warm→hot on strength, demote low-salience,
+        # and RECOMPUTE THE CORE TIER. Self-gates on tiered_memory; without this the
+        # core tier is never populated and the always-injected block stays empty.
+        try:
+            from mcpbrain.memory_tier import run_tier_pass
+            tier = run_tier_pass(self._store, str(app_dir()))
+            if any(tier.values()):
+                log.info("tier_pass: promoted=%d demoted=%d core=%d",
+                         tier.get("promoted", 0), tier.get("demoted", 0), tier.get("core", 0))
+                summary["tier"] = tier
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tier_pass failed (decay still applied): %s", exc, exc_info=True)
         self._last_decay_pass = now
         return summary
 
@@ -1336,7 +1348,8 @@ class Daemon:
         now = self._clock()
         try:
             from mcpbrain.consolidation import consolidate
-            summary = consolidate(self._store, str(app_dir()))
+            # Pass the embedder so clustering is semantic (embedding-based), not lexical.
+            summary = consolidate(self._store, str(app_dir()), embedder=self._embedder)
             log.info("consolidation: notes_written=%d clusters=%d",
                      summary.get("notes_written", 0), summary.get("clusters_found", 0))
         except Exception as exc:  # noqa: BLE001
