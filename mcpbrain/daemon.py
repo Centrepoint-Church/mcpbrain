@@ -699,8 +699,16 @@ class Daemon:
             # B2: exclude cold chunks from default recall when tiered_memory is on
             if config.tiered_memory_enabled(home):
                 search_kwargs["exclude_cold"] = True
-            hits = hybrid_search(self._store, self._embedder, query, limit,
-                                 **search_kwargs)
+            # Q6: route() wraps hybrid_search with routing/CRAG/rerank when flags on
+            if any([config.retrieval_routing_enabled(home),
+                    config.retrieval_crag_enabled(home),
+                    config.retrieval_rerank_enabled(home)]):
+                from mcpbrain.query_router import route as _route
+                hits = _route(self._store, self._embedder, query, limit,
+                              home=home, **search_kwargs)
+            else:
+                hits = hybrid_search(self._store, self._embedder, query, limit,
+                                     **search_kwargs)
         except Exception:  # noqa: BLE001 — recall must never raise into the prompt path
             log.warning("recall search failed for %r", query, exc_info=True)
             return []
@@ -713,9 +721,13 @@ class Daemon:
             except Exception:  # noqa: BLE001
                 pass
         # S1: sufficiency gate — filter hits that don't help answer the query
+        # Use existing distance field (set by router for synthetic results like
+        # community summaries) when present; otherwise look up from KNN.
         result_hits = [{"doc_id": c.get("doc_id"),
                         "score": round(float(c.get("score") or 0.0), 3),
-                        "distance": round(float(dist.get(c.get("doc_id"), knn[0][1])), 3),
+                        "distance": round(
+                            float(c["distance"]) if c.get("distance") is not None
+                            else float(dist.get(c.get("doc_id"), knn[0][1])), 3),
                         "text": c.get("text") or ""} for c in hits]
         try:
             from mcpbrain.sufficiency import filter_by_sufficiency
