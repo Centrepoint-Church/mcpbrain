@@ -794,6 +794,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "decay_pass_interval_s": None,
              "consolidation_interval_s": None,
              "voice_analyse_interval_s": None,
+             "self_improve_interval_s": None,
          }):
         daemon.apply_config(new_config)
 

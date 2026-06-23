@@ -170,6 +170,9 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # B6 voice analyser: weekly analysis-only procedural memory pass.
     CadencePass("voice_analyse", "_voice_analyse_interval_s",
                 "_last_voice_analyse", "_run_voice_analyse"),
+    # S4/S5 self-improvement: weekly drift check + bandit advisory + lessons.
+    CadencePass("self_improve", "_self_improve_interval_s",
+                "_last_self_improve", "_run_self_improve"),
 )
 
 
@@ -500,6 +503,9 @@ class Daemon:
         # B6 voice analyser: weekly analysis-only procedural memory pass.
         self._voice_analyse_interval_s: float | None = None
         self._last_voice_analyse = None
+        # S4/S5 self-improvement: weekly drift check + bandit advisory + lessons.
+        self._self_improve_interval_s: float | None = None
+        self._last_self_improve = None
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
@@ -842,6 +848,7 @@ class Daemon:
             self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
             self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
+            self._self_improve_interval_s = cadences["self_improve_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -1395,6 +1402,63 @@ class Daemon:
         self._last_voice_analyse = now
         return summary
 
+    # -- S4/S5 self-improvement (weekly) ---------------------------------------
+
+    def _run_self_improve(self) -> dict | None:
+        """Weekly self-improvement: embedding-drift check (S4), bandit reward
+        update + advisory (S4), and outcome-grounded lessons (S5).
+
+        Each step self-gates on its own flag and is isolated, so one failing does
+        not abort the others. These modules were previously library-only with no
+        caller — this is the cadence that actually runs them. Auto-apply stays off
+        unless bandit_auto_apply is set; learning + lessons are fed by the real
+        'used' accept signal recorded by the prompt-recall hook.
+        """
+        if not self._is_due("_self_improve_interval_s", "_last_self_improve"):
+            return None
+        now = self._clock()
+        home = str(app_dir())
+        summary: dict = {}
+
+        # S4a: embedding-drift monitor vs the gold set.
+        if config.drift_monitor_enabled(home):
+            try:
+                from mcpbrain.drift_monitor import init_drift_table, run_drift_check
+                init_drift_table(self._store)
+                summary["drift"] = run_drift_check(self._store, self._embedder, home)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("drift_monitor failed: %s", exc, exc_info=True)
+
+        # S4b: feed the bandit real reward from recent accept signals, then advise.
+        try:
+            from mcpbrain import threshold_bandit as tb
+            tb.init_bandit_table(self._store)
+            # Attribute recent feedback to the threshold arm currently in effect.
+            from mcpbrain.lessons import read_recent_outcomes
+            used = len(read_recent_outcomes(self._store, days=7))
+            if used:
+                arm = min(tb.ARMS, key=lambda a: abs(a - config.recall_max_distance(home)))
+                for _ in range(used):
+                    tb.step(self._store, arm, outcome="used")
+            summary["bandit"] = tb.advisory_report(self._store, home)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("bandit advisory failed: %s", exc, exc_info=True)
+
+        # S5: outcome-grounded lessons (only writes when 'used'/'edited' exist).
+        if config.lessons_enabled(home):
+            try:
+                from mcpbrain.lessons import init_lessons_table, write_lessons
+                init_lessons_table(self._store)
+                summary["lessons"] = write_lessons(self._store, home)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("lessons failed: %s", exc, exc_info=True)
+
+        if summary:
+            log.info("self_improve: %s", {k: (v if not isinstance(v, dict) else "ok")
+                                          for k, v in summary.items()})
+        self._last_self_improve = now
+        return summary or None
+
     # -- Q4 org backfill (deterministic) --------------------------------------
 
     def _run_org_backfill(self) -> dict | None:
@@ -1881,6 +1945,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
     "voice_analyse_interval_s":       604800.0,  # B6: weekly voice analysis
+    "self_improve_interval_s":        604800.0,  # S4/S5: weekly drift+bandit+lessons
     "synthesise_interval_s":          604800.0,
     "audit_interval_s":               604800.0,
     "verify_interval_s":              3600.0,
@@ -1904,6 +1969,7 @@ _CADENCE_KEYS = (
     "decay_pass_interval_s",
     "consolidation_interval_s",
     "voice_analyse_interval_s",
+    "self_improve_interval_s",
 )
 
 
@@ -1993,6 +2059,7 @@ def main(argv=None) -> None:
     daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]
     daemon._consolidation_interval_s = cadences["consolidation_interval_s"]
     daemon._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
+    daemon._self_improve_interval_s = cadences["self_improve_interval_s"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle

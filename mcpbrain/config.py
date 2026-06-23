@@ -278,10 +278,14 @@ def crag_min_score(home) -> float:
 
 
 def retrieval_rerank_enabled(home) -> bool:
-    """Whether Q6 BM25-token-overlap rerank is active.
+    """Whether Q6 lexical (token-overlap) rerank is active.
 
-    When True, fused top-k results are re-ranked by token overlap between query
-    and chunk text.  Pure Python, no new model required.
+    NOTE: this is a lightweight LEXICAL reranker (query↔chunk token overlap),
+    NOT a cross-encoder — it adds little over the RRF keyword arm and may not
+    beat plain hybrid_search. A true cross-encoder is the deferred upgrade (needs
+    a model dep we don't bundle). Gate it on the gold-set measurement
+    (test_q6_route_does_not_regress_recall_on_gold): only enable if it helps on
+    real data; keep off otherwise.
     Default: False — safe rollout. Enable via config 'retrieval_rerank': true.
     """
     return bool(read_config(home).get("retrieval_rerank", False))
@@ -322,6 +326,15 @@ def lessons_enabled(home) -> bool:
     the model's own opinion.
     """
     return bool(read_config(home).get("lessons", False))
+
+
+def feedback_enabled(home) -> bool:
+    """Master switch for recall-feedback I/O (S2 exposure + the 'used' accept
+    signal recorded by the prompt-recall hook). Default True — feedback is cheap
+    and is the keystone the bandit (S4) and lessons (S5) consume. Set
+    'feedback': false in config.json to disable all feedback writes.
+    """
+    return bool(read_config(home).get("feedback", True))
 
 
 def sufficiency_gate_enabled(home) -> bool:
