@@ -223,6 +223,26 @@ def incremental_communities_enabled(home) -> bool:
     return bool(read_config(home).get("incremental_communities", False))
 
 
+def bandit_auto_apply_enabled(home) -> bool:
+    """Whether the Thompson-sampling bandit auto-applies its recommendation (S4).
+
+    REQUIRES a real 'used'/'edited' feedback signal to activate — no signal
+    means the bandit stays advisory regardless of this flag.
+    Default: False — advisory mode only.
+    """
+    return bool(read_config(home).get("bandit_auto_apply", False))
+
+
+def drift_monitor_enabled(home) -> bool:
+    """Whether the nightly embedding-drift monitor runs (S4).
+
+    When True, runs the gold set through hybrid_search, logs recall@10 per
+    case, and fires an advisory alert on significant regression.
+    Default: False — safe rollout. Enable via config 'drift_monitor': true.
+    """
+    return bool(read_config(home).get("drift_monitor", False))
+
+
 def retrieval_routing_enabled(home) -> bool:
     """Whether Q6 query routing is active (entity graph-seed + community augmentation).
 
