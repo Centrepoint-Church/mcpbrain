@@ -1,0 +1,166 @@
+# mcpbrain-NATIVE gold retrieval set — CURATED 2026-06-24, session 1.
+# Generated from documents verified present in the live store. Queries written by
+# the claude CLI (subscription) from each doc's subject+content, instructed not to
+# quote titles verbatim so the eval tests semantic retrieval. All 20 chunk IDs
+# verified present in the live store (~/Library/Application Support/mcpbrain/
+# brain.sqlite3, 80,656 chunks) on 2026-06-24.
+#
+# CURATION NOTES:
+# - CP College Semester Two cluster (gmail_4/5/6/10): four near-identical teaching-
+#   invitation emails (Mitch, Lisa, Joe) + Derek's confirmation reply are all valid
+#   answers for any query about CP College Semester Two teaching arrangements. Cross-
+#   linked: invitation queries accept all three invite docs; Derek query accepts all
+#   four.
+# - Capes financial cluster (gdrive_3/4/5): Capes budget (Jan-Sept 2026), Profit &
+#   Loss (May 2026), and Balance Sheet (May 2026) are all valid for any query about
+#   Capes Community Church 2026 finances. Cross-linked all three.
+# - Evaluation uses document-level recall (_doc_key strips trailing -N chunk index),
+#   so listing chunk-0 is sufficient per doc.
+# - 20/20 cases coverable. Baseline (2026-06-23, pre-curation): recall@10=0.75,
+#   MRR=0.32.
+
+- id: gmail_1_re_som_2027_promo
+  query: "Centrepoint SOM 2027 promo — can I submit through CMS to start?"
+  expected_chunk_ids:
+    - "gmail-19ef27274d8a2a72-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=Re: SOM 2027 Promo"
+
+- id: gmail_2_re_aaron_close_housing
+  query: "Justine update on Aaron Close housing ministry approval for next two years"
+  expected_chunk_ids:
+    - "gmail-19ef17f68a502825-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=Re: Aaron Close Housing"
+
+- id: gmail_3_cpkids_volunteer_onboard
+  query: "Centrepoint church kids ministry volunteer application Brisa Rojas Bibra Lake"
+  expected_chunk_ids:
+    - "gmail-19eef4a7cae24fee-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=CPKIDS Volunteer Onboarding  Bibra Lake_2026-06-22T12:24:53.000Z"
+
+# CP College Semester Two teaching cluster (gmail_4 / gmail_5 / gmail_6 / gmail_10).
+# Four related emails: Mitch/Lisa/Joe invite emails are structurally identical; Derek
+# case is Josh's reply confirming Derek's arrangement. All four are valid retrieval
+# answers for any query about CP College Semester Two teaching invitations —
+# cross-linked so returning any of these counts as a hit.
+
+- id: gmail_4_cp_college_semester_two
+  query: "Centrepoint College semester two teaching invite for Mitch"
+  expected_chunk_ids:
+    - "gmail-19eedc313f4006ae-body-0"   # primary: Mitch invite
+    - "gmail-19eedbdbf6fedfa7-body-0"   # cross-acceptable: Lisa invite (same template)
+    - "gmail-19eedbd676a806c8-body-0"   # cross-acceptable: Joe invite (same template)
+  notes: "curated: cross-linked CP College Semester Two invite cluster; machine-seeded gmail sal=6.5 subj=CP College - Semester Two"
+
+- id: gmail_5_cp_college_semester_two_lisa
+  query: "CP College Semester Two teaching nights invitation for Lisa"
+  expected_chunk_ids:
+    - "gmail-19eedbdbf6fedfa7-body-0"   # primary: Lisa invite
+    - "gmail-19eedc313f4006ae-body-0"   # cross-acceptable: Mitch invite (same template)
+    - "gmail-19eedbd676a806c8-body-0"   # cross-acceptable: Joe invite (same template)
+  notes: "curated: cross-linked CP College Semester Two invite cluster; machine-seeded gmail sal=6.5"
+
+- id: gmail_6_cp_college_semester_two_joe
+  query: "Centrepoint College Semester Two teaching invitation for Joe — which nights to teach"
+  expected_chunk_ids:
+    - "gmail-19eedbd676a806c8-body-0"   # primary: Joe invite
+    - "gmail-19eedc313f4006ae-body-0"   # cross-acceptable: Mitch invite (same template)
+    - "gmail-19eedbdbf6fedfa7-body-0"   # cross-acceptable: Lisa invite (same template)
+  notes: "curated: cross-linked CP College Semester Two invite cluster; machine-seeded gmail sal=6.5"
+
+- id: gmail_7_re_elanto_sms
+  query: "Centrepoint Elanto SMS change impact when does it take effect July 1"
+  expected_chunk_ids:
+    - "gmail-19eed9cf654fa3d9-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=Re: Elanto SMS"
+
+- id: gmail_8_re_courageous_admin_shar
+  query: "When do we vote Marelize on as secretary at the board meeting?"
+  expected_chunk_ids:
+    - "gmail-19eed99d920ddc87-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=Re: Courageous  Admin shared the folder \"June 2026\" with you"
+
+- id: gmail_9_re_action_needed_your_do
+  query: "Pete domain guard renewal — decision to cancel and let it expire"
+  expected_chunk_ids:
+    - "gmail-19eed8d2bbd09b55-body-0"
+  notes: "machine-seeded gmail sal=6.5 subj=Re: Action Needed: Your Domain Guard is Due for Renewal. Renew Now to Ensure Uni"
+
+- id: gmail_10_re_centrepoint_college_s
+  query: "Derek confirmation about Centrepoint College semester two teaching arrangements"
+  expected_chunk_ids:
+    - "gmail-19edee6d24db6a3c-body-0"   # primary: Derek confirmation reply
+    - "gmail-19eedc313f4006ae-body-0"   # cross-acceptable: Mitch invite (contains teaching arrangements)
+    - "gmail-19eedbdbf6fedfa7-body-0"   # cross-acceptable: Lisa invite (contains teaching arrangements)
+    - "gmail-19eedbd676a806c8-body-0"   # cross-acceptable: Joe invite (contains teaching arrangements)
+  notes: "curated: cross-linked to CP College Semester Two invite cluster for teaching-arrangements content; machine-seeded gmail sal=6.5 subj=Re: Centrepoint College - Semester Two Teaching"
+
+- id: gdrive_1_harvest_net_2025_reports
+  query: "Harvest Net 2025 special purpose financial statement accounting policies"
+  expected_chunk_ids:
+    - "gdrive-1iWQqbxIq_JA38agzteRm0QorE56vCPWf-0"
+  notes: "machine-seeded gdrive sal=5.5 subj=Harvest Net 2025 reports.docx"
+
+- id: gdrive_2_2026_07_02_capes_church
+  query: "Capes Community Church board AGM agenda action list Stenhouse Moffat grant funding"
+  expected_chunk_ids:
+    - "gdrive-1e8_Th1nRn84zFb3VCo2wv6Tz3C0xubWg-0"
+  notes: "machine-seeded gdrive sal=5.5 subj=2026.07.02 - Capes Church - Board Pack.docx.pdf.pdf; AGM agenda is distinct from financial statements — not cross-linked to Capes financial cluster"
+
+# Capes Community Church financial cluster (gdrive_3 / gdrive_4 / gdrive_5).
+# Three related 2026 financial documents: budget (Jan-Sept), Profit & Loss (May YTD),
+# and Balance Sheet (May). All three are valid retrieval answers for any query about
+# Capes Community Church 2026 finances — cross-linked.
+
+- id: gdrive_3_capes_budget_jan_to_sept
+  query: "Capes Community Church 2026 budget income and expenses breakdown"
+  expected_chunk_ids:
+    - "gdrive-1VrfjECXkVD61WwNgCDFwaDU0CR7HDlw7-0"   # primary: budget doc
+    - "gdrive-1IfsM_VJGu81hOY_8DeEvJ6_-g0ib8FZ0-0"   # cross-acceptable: P&L (income/expenses)
+    - "gdrive-17G9gaCpOwS5Nx6FZ4mEHHaE06XzflJj6-0"   # cross-acceptable: balance sheet
+  notes: "curated: cross-linked Capes financial cluster; machine-seeded gdrive sal=5.5 subj=Capes Budget Jan to Sept 2026 (1).pdf"
+
+- id: gdrive_4_capes_community_church_pl
+  query: "Crisis at Capes Community Church finances — May 2026 monthly profit and loss tithes vs expenses"
+  expected_chunk_ids:
+    - "gdrive-1IfsM_VJGu81hOY_8DeEvJ6_-g0ib8FZ0-0"   # primary: P&L
+    - "gdrive-1VrfjECXkVD61WwNgCDFwaDU0CR7HDlw7-0"   # cross-acceptable: budget (income/expenses)
+    - "gdrive-17G9gaCpOwS5Nx6FZ4mEHHaE06XzflJj6-0"   # cross-acceptable: balance sheet
+  notes: "curated: cross-linked Capes financial cluster; machine-seeded gdrive sal=5.5 subj=CAPES_COMMUNITY_CHURCH_INC_-_Profit_and_Loss_YTD_and_Monthly May 2026.pdf"
+
+- id: gdrive_5_capes_community_church_bs
+  query: "Capes Community Church balance sheet net assets as at May 2026"
+  expected_chunk_ids:
+    - "gdrive-17G9gaCpOwS5Nx6FZ4mEHHaE06XzflJj6-0"   # primary: balance sheet
+    - "gdrive-1IfsM_VJGu81hOY_8DeEvJ6_-g0ib8FZ0-0"   # cross-acceptable: P&L (May 2026)
+    - "gdrive-1VrfjECXkVD61WwNgCDFwaDU0CR7HDlw7-0"   # cross-acceptable: budget
+  notes: "curated: cross-linked Capes financial cluster; machine-seeded gdrive sal=5.5 subj=CAPES_COMMUNITY_CHURCH_INC_-_Balance_Sheet.pdf"
+
+- id: gdrive_6_change_legal_name_and_go
+  query: "Centrepoint Church ACNC constitution update removing subscriptions rules June 2026"
+  expected_chunk_ids:
+    - "gdrive-1OcOllgRd-g37JXH-hToCD69Cw9nFvVs--0"
+  notes: "machine-seeded gdrive sal=5.5 subj=Change legal name and governing document.pdf"
+
+- id: gdrive_7_centrepoint_church_const
+  query: "Centrepoint Church constitution June 2026 changes to member subscriptions and termination of membership rules"
+  expected_chunk_ids:
+    - "gdrive-1Z_X_qx2xvnuhHuxdlvBaDzDGENXvZLg--0"
+  notes: "machine-seeded gdrive sal=4.5 subj=Centrepoint Church Constitution Changes June2026.docx"
+
+- id: gdrive_8_2026_06_25_harvestnet_bo
+  query: "Centrepoint Church Harvest Net board meeting agenda action items June 2026"
+  expected_chunk_ids:
+    - "gdrive-1W0Akc15g7U50k7fs2iSgecaL7jLNheTB-0"
+  notes: "machine-seeded gdrive sal=4.5 subj=2026.06.25 _ Harvestnet Board - AGENDA  (2).pdf"
+
+- id: gdrive_9_working_board_meeting_mi
+  query: "Church board meeting June 2026 Matt King rejoining as observer, mid year stats"
+  expected_chunk_ids:
+    - "gdrive-19EY12wcpOU2PcR4Ts617jXFQkKKG7ye_-0"
+  notes: "machine-seeded gdrive sal=4.5 subj=Working Board Meeting Minutes 2026-06-11.docx"
+
+- id: gdrive_10_copy_of_harvestnet_churc
+  query: "Church plant policy suite templates Harvestnet board charter governance"
+  expected_chunk_ids:
+    - "gdrive-1kavhGpRZUb8n-czEXgQUXwOiuOEF7aCK-0"
+  notes: "machine-seeded gdrive sal=4.5 subj=Copy of Harvestnet Church Plant Policy Suite Template.docx"

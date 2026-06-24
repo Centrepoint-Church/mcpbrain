@@ -2365,13 +2365,16 @@ class Store:
     def chunks_for_decay_pass(self, limit: int = 2000) -> list[dict]:
         """Chunks eligible for decay evaluation: embedded, not core tier.
 
-        Returns {doc_id, salience, memory_tier, memory_strength, last_accessed}.
+        Returns {doc_id, salience, memory_tier, memory_strength, last_accessed,
+        metadata}. metadata lets decay anchor never-accessed chunks on their
+        source date (email/file/event time) instead of exempting them forever.
         Joins chunks → chunk_quality (LEFT JOIN so unscored chunks still appear).
         """
         with self._connect() as db:
             rows = db.execute(
                 "SELECT c.doc_id, COALESCE(c.salience,0.0) AS salience, "
                 "       COALESCE(c.memory_tier,'') AS memory_tier, "
+                "       COALESCE(c.metadata,'') AS metadata, "
                 "       COALESCE(cq.memory_strength, 5.0) AS memory_strength, "
                 "       COALESCE(cq.last_accessed, '') AS last_accessed "
                 "FROM chunks c "

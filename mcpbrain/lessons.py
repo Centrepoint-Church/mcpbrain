@@ -1,9 +1,14 @@
 """Outcome-grounded lessons-learned writer — S5.
 
 Governing rule: lessons are written ONLY when the correction signal comes from
-OUTSIDE the loop.  The only valid signal here is observed recall_feedback rows
-with event_type IN ('used', 'edited') — i.e. a user actually used or edited a
-recalled document.  Never tuning against the model's opinion of its own output.
+OUTSIDE the loop.  The signal here is observed recall_feedback rows with
+event_type IN ('used', 'edited').  Today 'used' is the quote-back behavioural
+proxy (an injected snippet's distinctive words reappearing in the assistant's
+response — see prompt_recall._detect_quoteback), NOT a confirmed human judgement;
+it is heuristic and, on a quiet store, sparse, so lessons may be thin until a
+stronger user-confirmed signal exists.  What matters for the governing rule:
+the trigger is observed behaviour on the transcript, never the model's opinion
+of its own output.
 
 Design:
   - read_recent_outcomes() queries recall_feedback for 'used'/'edited' events.

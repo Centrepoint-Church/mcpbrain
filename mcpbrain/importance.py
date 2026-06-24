@@ -11,7 +11,8 @@ Structural scorer (deterministic, no LLM) converts chunk metadata into a
   - known entity count (entities in metadata): +0.3 per entity, cap +1.5
   - Gmail category IMPORTANT: +0.5; PROMOTIONS/UPDATES: -1.5
   - Recency bonus: 0–2.0 based on age (< 7 days: +2, <30d: +1, <90d: +0.5, else 0)
-  - Drive/calendar items with subject matter: +0.5
+    (age read from date/date_iso/start/modified/modifiedTime)
+  - Drive/calendar items with subject matter: +0.5 (source_type gdrive/drive/calendar)
   - no-reply / auto-send: -2.0
 
 Public API:
@@ -40,31 +41,60 @@ _MIN = 1.0
 
 def _parse_age_days(metadata: dict) -> float | None:
     """Days since the chunk's date. Returns None if unparseable."""
-    date_str = metadata.get("date") or metadata.get("date_iso") or metadata.get("start") or ""
+    date_str = (metadata.get("date") or metadata.get("date_iso")
+                or metadata.get("start") or metadata.get("modified")
+                or metadata.get("modifiedTime") or "")
     if not date_str:
         return None
     now = datetime.now(timezone.utc)
+    # ISO-8601 first (calendar `start`, Drive `modified` incl. millis+Z, dates).
     try:
-        # RFC2822 (Gmail)
+        iso = date_str.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - dt).total_seconds() / 86400.0)
+    except ValueError:
+        pass
+    # RFC2822 (Gmail `date`, e.g. "Tue, 02 Jun 2026 16:30:01 +0800")
+    try:
         dt = email.utils.parsedate_to_datetime(date_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return max(0.0, (now - dt).total_seconds() / 86400.0)
-    except Exception:
+    except (ValueError, TypeError):
         pass
-    # ISO-8601 (calendar, Drive)
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S+00:00", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(date_str[:19], fmt[:len(date_str[:19])])
-            dt = dt.replace(tzinfo=timezone.utc)
-            return max(0.0, (now - dt).total_seconds() / 86400.0)
-        except Exception:
-            continue
+    # Bare date (YYYY-MM-DD) already handled by fromisoformat.
     return None
 
 
-def score_structural(metadata: dict) -> float:
-    """Structural salience in [1.0, 10.0]. No LLM, no I/O."""
+def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
+    """True when the chunk was authored by the install owner.
+
+    Prefers explicit metadata flags; otherwise derives from the sender address
+    matching owner_email, or a Gmail 'SENT' label. Live ingest doesn't set the
+    sender_is_owner flag, so this derivation is what actually lights up the
+    high-salience band for the owner's own words."""
+    if metadata.get("sender_is_owner") or metadata.get("from_owner"):
+        return True
+    oe = (owner_email or "").strip().lower()
+    if oe:
+        sender = str(metadata.get("sender") or metadata.get("from") or "").lower()
+        if oe in sender:
+            return True
+    labels = metadata.get("labels") or []
+    if isinstance(labels, str):
+        labels = labels.lower()
+        return "sent" in [p.strip() for p in labels.split(",")]
+    return any(str(lb).strip().lower() == "sent" for lb in labels)
+
+
+def score_structural(metadata: dict, *, owner_email: str = "") -> float:
+    """Structural salience in [1.0, 10.0]. No LLM, no I/O.
+
+    owner_email (optional) lets the scorer recognise owner-authored content from
+    the sender address / 'SENT' label when the metadata lacks an explicit
+    sender_is_owner flag (the live case)."""
     score = _BASELINE
 
     # Reply depth signal
@@ -75,7 +105,7 @@ def score_structural(metadata: dict) -> float:
         score += 0.5
 
     # Owner sent/replied
-    if metadata.get("sender_is_owner") or metadata.get("from_owner"):
+    if _is_owner_authored(metadata, owner_email):
         score += 1.5
 
     # Explicit user signals
@@ -105,7 +135,7 @@ def score_structural(metadata: dict) -> float:
 
     # Source-type bonus for structured content
     src = metadata.get("source_type", "")
-    if src in ("calendar", "google_drive", "drive"):
+    if src in ("calendar", "google_drive", "drive", "gdrive"):
         score += 0.5
 
     # No-reply / automated sender penalty
@@ -191,10 +221,11 @@ def run_salience_pass(store, home: str, *, cap: int = 500) -> dict:
     if not chunks:
         return {"scored": 0, "llm_scored": 0}
 
+    owner_email = config.owner_email(home)
     scored = []   # (chunk, structural_score)
     for c in chunks:
         try:
-            s = score_structural(c.get("metadata") or {})
+            s = score_structural(c.get("metadata") or {}, owner_email=owner_email)
         except Exception as exc:
             log.debug("salience scoring failed for %s: %s", c.get("doc_id"), exc)
             s = _BASELINE

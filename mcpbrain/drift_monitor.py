@@ -149,17 +149,24 @@ def run_drift_check(store, embedder, home: str) -> dict:
         # gold_eval returns recall_at_k (generic key); alias as recall_at_10 for this context
         mean_recall = metrics.get("recall_at_10") or metrics.get("recall_at_k") or 0.0
 
-        # Log one row per gold case (using the aggregate as a proxy for all queries)
-        for case in cases[:metrics.get("covered", 0)]:
-            _log_metric(
-                store,
-                run_date=run_date,
-                query_id=case.get("id") or case.get("query", "")[:64],
-                recall_at_10=mean_recall,
-                top_score=0.0,
-                expected_count=len(case.get("expected_chunk_ids") or []),
-                found_count=round(mean_recall * len(case.get("expected_chunk_ids") or [1])),
-            )
+        # Log ONE aggregate row per run. (Previously this fabricated one row per
+        # gold case all carrying the same aggregate mean_recall — which both
+        # misrepresented per-case recall and corrupted the baseline window, since
+        # _get_30day_baseline takes the last 30 *rows*: N rows/run let a single
+        # run dominate the baseline. One row/run = one run per baseline slot.)
+        covered = metrics.get("covered", 0)
+        expected_total = sum(
+            len(c.get("expected_chunk_ids") or []) for c in cases[:covered]
+        )
+        _log_metric(
+            store,
+            run_date=run_date,
+            query_id="__aggregate__",
+            recall_at_10=mean_recall,
+            top_score=0.0,
+            expected_count=expected_total,
+            found_count=round(mean_recall * expected_total),
+        )
 
         # Compare to baseline
         baseline = _get_30day_baseline(store, run_date)

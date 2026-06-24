@@ -19,6 +19,7 @@ vector-distance gate). See the design + plan docs in docs/superpowers/specs/.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -34,6 +35,17 @@ _TIMEOUT_S = 1.2       # fail-open latency budget for the loopback call
 _MIN_PROMPT = 12       # skip trivially short prompts
 _REL_FLOOR = 0.55      # keep hits scoring >= this fraction of the top hit
 _SEEN_TTL_S = 86400    # prune per-session seen-files older than a day
+
+# Quote-back accept signal (S2/S4/S5): a recall counts as 'used' when the
+# distinctive words of an injected snippet later reappear in the assistant's
+# response — i.e. the recalled content actually flowed into the answer. This is
+# a deterministic behavioural check on the transcript, not the model grading
+# itself, and it only ever evaluates snippets we actually injected.
+_QB_MIN_TOKENS = 5         # snippet needs this many distinctive tokens to score
+_QB_THRESHOLD = 0.6        # fraction of snippet tokens that must reappear
+_QB_ASSISTANT_TURNS = 2    # most-recent assistant turns to scan
+_QB_MAX_CHARS = 8000       # cap on assistant text scanned per fire
+_WORD_RE = re.compile(r"[a-z0-9]{4,}")
 
 _HEADER = "## From your brain (possibly relevant — ignore if off-topic)"
 _CORE_HEADER = "## Core context (always)"
@@ -77,19 +89,23 @@ def _seen_path(home: str, session_id: str) -> Path:
     return Path(home) / "recall_seen" / f"{safe}.json"
 
 
-def _load_seen(home: str, session_id: str, *, now: float) -> tuple[set, Path]:
-    """Return (doc_ids already injected this session, this session's seen-file).
+def _load_seen(home: str, session_id: str, *, now: float) -> tuple[dict, Path]:
+    """Return (session recall state, this session's seen-file).
 
-    Prunes sibling seen-files older than _SEEN_TTL_S on the way through, so the
-    directory is self-cleaning and needs no SessionEnd coupling.
+    State = {"injected": {doc_id: snippet_text}, "used": [doc_ids credited]}.
+    `injected` records what was actually shown (so quote-back only ever scores
+    real injections) and doubles as the dedup set; `used` is the idempotency
+    guard so a quoted doc is credited once. Legacy files (a bare list of ids)
+    are upgraded in place. Prunes sibling seen-files older than _SEEN_TTL_S so
+    the directory is self-cleaning and needs no SessionEnd coupling.
     """
     d = Path(home) / "recall_seen"
     path = _seen_path(home, session_id)
-    seen: set = set()
+    state: dict = {"injected": {}, "used": []}
     try:
         files = list(d.glob("*.json"))
     except OSError:
-        return seen, path
+        return state, path
     for f in files:
         try:
             stale = now - f.stat().st_mtime > _SEEN_TTL_S
@@ -103,34 +119,116 @@ def _load_seen(home: str, session_id: str, *, now: float) -> tuple[set, Path]:
             continue
         if f == path:
             try:
-                seen = set(json.loads(f.read_text()) or [])
+                raw = json.loads(f.read_text())
             except (OSError, ValueError):
-                seen = set()
-    return seen, path
+                raw = None
+            if isinstance(raw, dict):
+                inj = raw.get("injected") or {}
+                state["injected"] = inj if isinstance(inj, dict) else {}
+                used = raw.get("used") or []
+                state["used"] = list(used) if isinstance(used, list) else []
+            elif isinstance(raw, list):  # legacy: bare id list, no snippet text
+                state["injected"] = {i: "" for i in raw if i}
+    return state, path
 
 
-def _save_seen(path: Path, ids) -> None:
+def _save_seen(path: Path, state: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(sorted(i for i in ids if i)))
+        path.write_text(json.dumps({
+            "injected": {k: v for k, v in (state.get("injected") or {}).items() if k},
+            "used": sorted(set(state.get("used") or [])),
+        }))
     except OSError:
         pass
 
 
-def _format_context(results: list[dict], seen: set) -> tuple[str, list]:
+def _tokens(text: str) -> set:
+    """Distinctive lowercase word tokens (len>=4) used for overlap scoring."""
+    return set(_WORD_RE.findall((text or "").lower()))
+
+
+def _overlap(snippet: str, response_tokens: set) -> float:
+    """Containment of a snippet's distinctive tokens in the response token set.
+
+    Returns 0.0 for snippets with too few distinctive tokens to judge reliably.
+    """
+    st = _tokens(snippet)
+    if len(st) < _QB_MIN_TOKENS:
+        return 0.0
+    return len(st & response_tokens) / len(st)
+
+
+def _recent_assistant_text(transcript_path: str) -> str:
+    """Concatenate the last _QB_ASSISTANT_TURNS assistant text turns from the
+    Claude Code transcript JSONL. Returns '' on any failure (fail-open)."""
+    if not transcript_path:
+        return ""
+    try:
+        lines = Path(transcript_path).read_text(errors="ignore").splitlines()
+    except OSError:
+        return ""
+    texts: list[str] = []
+    for line in reversed(lines):
+        if len(texts) >= _QB_ASSISTANT_TURNS:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") != "assistant":
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if isinstance(content, list):
+            parts = [b.get("text", "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text"]
+            joined = " ".join(p for p in parts if p)
+        elif isinstance(content, str):
+            joined = content
+        else:
+            joined = ""
+        if joined.strip():
+            texts.append(joined)
+    return " ".join(texts)[:_QB_MAX_CHARS]
+
+
+def _detect_quoteback(home: str, transcript_path: str, state: dict,
+                      session_id: str) -> list:
+    """Credit injected docs whose content reappears in the assistant's recent
+    response. Mutates state['used']; returns the doc_ids newly credited."""
+    injected = state.get("injected") or {}
+    already = set(state.get("used") or [])
+    candidates = {d: t for d, t in injected.items() if d not in already and t}
+    if not candidates:
+        return []
+    response_tokens = _tokens(_recent_assistant_text(transcript_path))
+    if not response_tokens:
+        return []
+    newly = [d for d, text in candidates.items()
+             if _overlap(text, response_tokens) >= _QB_THRESHOLD]
+    if newly:
+        state["used"] = sorted(already | set(newly))
+    return newly
+
+
+def _format_context(results: list[dict], seen: set) -> tuple[str, dict]:
     """Filter, de-dup and cap recall hits into an injectable block.
 
     Keeps hits within _REL_FLOOR of the top score (intra-query, so the top is
     ~1.0 — this trims the weak tail, it does NOT suppress off-topic prompts),
     drops doc_ids already injected this session, caps count/snippet/total chars.
-    Returns ("", []) when nothing survives.
+    Returns ("", {}) when nothing survives, else (block, {doc_id: snippet}).
+    The snippet map is persisted so quote-back can later score what was shown.
     """
     if not results:
-        return "", []
+        return "", {}
     top = max((float(r.get("score") or 0.0) for r in results), default=0.0)
     floor = top * _REL_FLOOR
     lines: list[str] = []
-    used_ids: list = []
+    injected: dict = {}
     total = 0
     for r in results:
         if len(lines) >= _KEEP:
@@ -146,11 +244,11 @@ def _format_context(results: list[dict], seen: set) -> tuple[str, list]:
         if total + len(snippet) > _MAX_TOTAL:
             break
         lines.append(f"- {snippet}")
-        used_ids.append(doc_id)
+        injected[doc_id] = snippet
         total += len(snippet)
     if not lines:
-        return "", []
-    return _HEADER + "\n" + "\n".join(lines), used_ids
+        return "", {}
+    return _HEADER + "\n" + "\n".join(lines), injected
 
 
 def _record_used(home: str, doc_ids: list, session_id: str) -> None:
@@ -207,30 +305,39 @@ def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
     prompt = (hook.get("prompt") or "").strip()
     if not _worth_recalling(prompt):
         return
-    results = _recall(home, prompt)
     now = now if now is not None else time.time()
     session_id = hook.get("session_id") or "x"
-    seen, seen_path = _load_seen(home, session_id, now=now)
+    state, seen_path = _load_seen(home, session_id, now=now)
 
-    # Accept signal (S2/S4/S5 keystone): a doc recalled AGAIN this session (it was
-    # injected on an earlier prompt and is relevant once more) is being engaged
-    # with — record it 'used'. This is the real, observable positive signal the
-    # bandit (S4) and lessons (S5) consume; without it they have no reward.
-    reused = [r.get("doc_id") for r in results if r.get("doc_id") in seen]
-    if reused and config.feedback_enabled(home):
-        _record_used(home, reused, session_id)
+    # Accept signal (S2/S4/S5 keystone): credit any earlier-injected snippet whose
+    # distinctive words have since reappeared in the assistant's response — the
+    # recall actually flowed into the answer. A deterministic behavioural check on
+    # the transcript (not the model grading itself); only scores docs we injected.
+    # This is the real positive signal the bandit (S4) and lessons (S5) consume.
+    if config.feedback_enabled(home):
+        newly_used = _detect_quoteback(
+            home, hook.get("transcript_path") or "", state, session_id)
+        if newly_used:
+            _record_used(home, newly_used, session_id)
+
+    results = _recall(home, prompt)
+    seen = set(state.get("injected") or {})
 
     # B2: prepend always-injected core block (tiered_memory flag guards internally)
     core_block = _get_core_block(home)
 
-    block, used_ids = _format_context(results, seen)
+    block, injected = _format_context(results, seen)
 
     # Build final context: core block first (always fresh), then recall hits
     parts = [p for p in (core_block, block) if p]
     if not parts:
+        # Still persist any quote-back credit recorded above.
+        if injected or state.get("used"):
+            _save_seen(seen_path, state)
         return
 
-    _save_seen(seen_path, seen | set(used_ids))
+    state.setdefault("injected", {}).update(injected)
+    _save_seen(seen_path, state)
     out.write(json.dumps({"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": "\n\n".join(parts)}}))
