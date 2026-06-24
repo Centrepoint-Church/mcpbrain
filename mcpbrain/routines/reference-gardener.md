@@ -74,25 +74,42 @@ If nothing has changed that warrants an update, stop here and do not write a pro
 
 ### If `auto_apply = true`
 
-**Drift lane** — for each reference file with changes, apply and commit:
+Apply every change through the **`brain_gardener_apply`** tool — never by editing the
+files and running `git` yourself. The tool routes the write through the role-attribution
+guard, the per-run change cap, and the correct commit tag, and returns the result so you
+get immediate enforcement feedback. Pass the **full new content** of the file each call.
 
-```bash
-cd "$records"
-# edit the file content, then:
-git add "reference/<filename>"
-git commit -m "gardener: apply drift (reference/<filename>)"
+**Drift lane** — for each reference file with changes:
+
+```
+brain_gardener_apply(
+  lane="reference",
+  filename="<projects.md | systems.md | org-context.md>",
+  content="<full new file content>",
+)
 ```
 
-Cap: no more than 20 lines changed in any single reference file per run. If a change would exceed this, add only the highest-confidence entries and leave the rest for the next run.
+The tool enforces a per-run change cap (default 20 changed lines/file). If it returns
+`{"applied": false, "error": "change cap exceeded ..."}`, apply only the highest-confidence
+entries this run and leave the rest for the next.
 
 **Constitution lane** — for each context file with changes:
 
-```bash
-cd "$records"
-# edit the file content, then:
-git add "context/<filename>"
-git commit -m "gardener: update identity/preferences"
 ```
+brain_gardener_apply(
+  lane="context",
+  filename="<identity.md | preferences.md>",
+  content="<full new file content>",
+  # Set these ONLY when the update assigns a role/title to a PERSON:
+  asserts_person_role=true,
+  attribution_source="owner_statement | signature | owner_confirmation",
+)
+```
+
+Leave `asserts_person_role` unset (false) for preferences, your own responsibilities, or
+any update that makes no person-role claim — those need no attribution source. If a write
+*does* assert someone's role and you cannot cite an approved source, the tool will reject
+it with a ValueError — that is the rule working; leave the role out.
 
 **Write a changelog** (what was applied, not what to approve):
 
