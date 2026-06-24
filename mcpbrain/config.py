@@ -142,9 +142,9 @@ def importance_recall_enabled(home) -> bool:
     When True, hybrid_search incorporates salience and recency into ranking.
     Default: TRUE (shipped on in 0.7.65 — validated on the production recall path
     (exclude_cold=True): MRR 0.483→0.571, recall@10 held). Set 'importance_recall':
-    false in config.json to disable. Needs salience populated to matter; the daemon
-    salience cadence backfills it (catch-up cap), so the importance axis ramps in
-    on a fresh store rather than helping day-one.
+    false in config.json to disable. Needs salience populated to matter; the daily
+    salience cadence drains the whole backlog each run (0.7.66), so the importance
+    axis is fully effective within ~a day of upgrade, not weeks.
     """
     return bool(read_config(home).get("importance_recall", True))
 
@@ -233,6 +233,36 @@ def incremental_communities_enabled(home) -> bool:
     Default: False — safe rollout. Enable via config 'incremental_communities': true.
     """
     return bool(read_config(home).get("incremental_communities", False))
+
+
+def graduation_min_sources(home) -> int:
+    """Minimum source-chunk count for a consolidated note to graduate to memory/*.md.
+
+    Acts as a recurrence proxy: a cluster built from this many episodic sources
+    suggests a theme that has appeared repeatedly. Default 4 (one above
+    _MIN_CLUSTER_SIZE=3). Enable graduation refinement via config
+    'graduation_min_sources': N.
+    """
+    return int(read_config(home).get("graduation_min_sources", 4))
+
+
+def graduation_min_salience(home) -> float:
+    """Minimum mean-source salience for a consolidated note to graduate.
+
+    Default 3.5, matching the salience_floor used in run_tier_pass. Enable
+    refinement via config 'graduation_min_salience': X.
+    """
+    return float(read_config(home).get("graduation_min_salience", 3.5))
+
+
+def voice_auto_apply_enabled(home) -> bool:
+    """Whether voice suggestions are auto-applied immediately after analysis (1d).
+
+    Existing guards in voice_apply (3-day cooldown, 20-line diff cap) remain
+    fully in effect regardless of this flag. Default: False — manual apply.
+    Enable via config 'voice_auto_apply': true.
+    """
+    return bool(read_config(home).get("voice_auto_apply", False))
 
 
 def bandit_auto_apply_enabled(home) -> bool:
