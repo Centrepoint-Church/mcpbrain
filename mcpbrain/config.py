@@ -292,14 +292,19 @@ def retrieval_rerank_enabled(home) -> bool:
 
 
 def contextual_retrieval_enabled(home) -> bool:
-    """Whether Q6 contextual retrieval prefix is prepended at embed time.
+    """Whether the Q6 contextual-retrieval prefix is prepended at embed time.
 
-    When True, a context descriptor (source type, date, sender, subject) is
-    prepended to each chunk's text before embedding.  Affects only newly indexed
-    chunks; existing chunks need a re-index pass to benefit.
-    Default: False — safe rollout. Enable via config 'contextual_retrieval': true.
+    When True, a provenance descriptor (source type, sender/file, date, subject)
+    is prepended to each passage before embedding (embed.contextual_prefix) so the
+    vector carries source context. PASSAGE-ONLY — never applied to the query side.
+
+    Default: TRUE — validated on the live gold set (A/B 2026-06-24, vector channel,
+    4k-chunk sample): recall@10 0.850→0.950 (+0.10), MRR 0.566→0.741 (+0.175). The
+    flag exists as a rollback switch: set 'contextual_retrieval': false in
+    config.json to disable. Affects newly indexed chunks; existing chunks keep the
+    prefix they were embedded with until a re-index pass.
     """
-    return bool(read_config(home).get("contextual_retrieval", False))
+    return bool(read_config(home).get("contextual_retrieval", True))
 
 
 def draft_critic_enabled(home) -> bool:
