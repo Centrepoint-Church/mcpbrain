@@ -123,11 +123,18 @@ def run_eval(store, embedder, *, k: int = 5, rrf_k: int = 60,
 
 
 def load_gold_cases() -> list[dict]:
-    """Load hand-curated gold cases from golden_retrieval_set.yaml.
+    """Load hand-curated gold cases for this store's corpus.
 
-    Returns [] when the file is absent or yaml is not installed.
+    Prefers the mcpbrain-native curated set (golden_retrieval_set_mcpbrain_candidate.yaml)
+    over the ops-brain remap (golden_retrieval_set.yaml). The native set has 20/20
+    coverable cases and verified IDs against the live store; the ops-brain remap has
+    10/30 coverable cases and is not re-seedable from this corpus.
+
+    Returns [] when neither file exists or yaml is not installed.
     """
-    path = HERE / "golden_retrieval_set.yaml"
+    native = HERE / "golden_retrieval_set_mcpbrain_candidate.yaml"
+    fallback = HERE / "golden_retrieval_set.yaml"
+    path = native if native.exists() else fallback
     if not path.exists():
         return []
     try:

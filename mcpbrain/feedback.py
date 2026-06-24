@@ -3,13 +3,18 @@
 Ported from ops-brain feedback.py + feedback_aggregator.py (adapted for sqlite).
 
 Signals:
-  exposure  — chunk was injected into a UserPromptSubmit context block (the only
-              signal currently capturable from the auto-recall hook)
-  used / edited / ignored — NOT yet captured anywhere. There is no reliable
-              automatic "the recall was useful" signal from the UserPromptSubmit
-              path, so a positive signal is deferred (depends on S1/S4 work). The
-              event API and aggregation below already handle these the moment a
-              capture mechanism exists — see record_feedback.
+  exposure  — chunk was injected into a UserPromptSubmit context block.
+  used      — quote-back: the distinctive words of an injected snippet later
+              reappeared in the assistant's response (a deterministic overlap
+              check on the transcript in prompt_recall._detect_quoteback). This
+              is a *behavioural* proxy — it shows the recall flowed into the
+              answer, not that a human judged it useful — and only ever scores
+              snippets that were actually injected. It is heuristic and, on a
+              quiet store, sparse: do not over-read a low 'used' count.
+  edited / ignored — NOT yet captured. A user-confirmed signal (an explicit
+              "was this useful?" affordance, or edit-distance against a user
+              artifact) is still future work; the event API + aggregation below
+              already handle these the moment such a capture exists.
 
 Aggregation (nightly, via daemon cadence):
   A BOOST-ONLY quality multiplier centred on 1.0. A chunk with no positive

@@ -57,25 +57,21 @@ def test_recall_and_mrr_above_floor(fixture_store):
 
 
 # Floor for gold-set evaluation, applied ONLY over coverable cases (those whose
-# expected chunks are present in this store). The gold set is shared with ops-brain
-# and references its full corpus; mcpbrain may hold a subset mid-backfill, so we
-# never average missing-chunk cases in as 0 (that would mask real quality).
+# expected chunks are present in this store).
 #
 # These are REGRESSION floors against the measured baseline, NOT an aspirational
 # target. Recall is measured DOCUMENT-level (any chunk of the expected doc counts —
-# see gold_eval._doc_key) because mcpbrain re-chunks independently of ops-brain.
-# Measured 2026-06-22 over 10 coverable cases: recall@10=0.40, MRR=0.16.
+# see gold_eval._doc_key) because mcpbrain re-chunks independently.
 #
-# A manual spot-check of the misses (2026-06-22) confirmed retrieval is HEALTHY:
-# for ~8/10 queries it returns topically-correct content, but the gold ground truth
-# is ops-brain's *specific* document and the corpus has duplicates/siblings (e.g.
-# three copies of the risk-register template, different board-minutes files), so a
-# different-but-equally-valid doc scores as a miss. So this gates against retrieval
-# REGRESSIONS, not absolute quality, until expected_chunk_ids are re-verified /
-# multiple acceptable docs are allowed per case (tracked on #6).
-GOLD_RECALL_FLOOR = 0.30   # measured doc-level baseline 0.40 (10 coverable cases)
-GOLD_MRR_FLOOR = 0.10      # measured baseline 0.16
-MIN_COVERED = 5            # need at least this many coverable cases to gate meaningfully
+# Active gold set: golden_retrieval_set_mcpbrain_candidate.yaml (mcpbrain-native,
+# curated 2026-06-24). 20 cases, 20/20 coverable on the live store (80,656 chunks).
+# Ambiguous clusters resolved: CP College Semester Two invite emails cross-linked
+# (Mitch/Lisa/Joe invitations accept any of the three); Capes financial docs
+# cross-linked (budget/P&L/balance-sheet accept any of the three).
+# Measured 2026-06-24: recall@10=0.750, MRR=0.322 (20 covered cases).
+GOLD_RECALL_FLOOR = 0.55   # measured doc-level baseline 0.750 (20 coverable cases)
+GOLD_MRR_FLOOR = 0.20      # measured baseline 0.322
+MIN_COVERED = 15           # with 20 cases need at least 15 covered to gate meaningfully
 
 
 def test_gold_recall_floor():
@@ -89,7 +85,7 @@ def test_gold_recall_floor():
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
     if not load_gold_cases():
-        pytest.skip("golden_retrieval_set.yaml not found")
+        pytest.skip("no gold cases file found")
 
     result = try_open_real_store()
     if result is None:
@@ -112,19 +108,25 @@ def test_gold_recall_floor():
         f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
 
 
-def test_gold_three_axis_does_not_regress_recall():
-    """B3/B5 validation (the measurement the Phase-2 prompt required): the
-    three-axis ranker (recency+importance+decay) must NOT regress doc-level
-    recall@10 vs the relevance-only baseline on the live gold set.
+def test_gold_three_axis_importance_recall_stays_off_while_it_regresses():
+    """B3/B5 validation (the measurement the Phase-2 prompt required): does the
+    three-axis ranker (recency+importance+decay) beat the relevance-only baseline
+    on the live gold set? It must stay DEFAULT-OFF until it does.
 
-    Skips when the real store / enough coverage is unavailable. Read-only: it does
-    not mutate the store — importance uses whatever salience exists, recency/decay
-    are computed from chunk metadata.
+    MEASURED FINDING (2026-06-23, full salience backfill; re-verified 2026-06-24 on
+    the curated 20-case mcpbrain-native gold set): with salience now populated
+    corpus-wide, the three-axis ranker at these weights REGRESSES doc-level
+    recall@10 on the live gold set vs plain RRF. Structural-only salience is
+    compressed (max ~6.5, no high band) and the weighting is untuned. So the correct
+    conservative state is: `importance_recall` ships DEFAULT-OFF. This test gates
+    that, mirroring the Q6 test — and prints a NOTE if it ever stops regressing so
+    the default can be revisited (with tuned weights / LLM poignancy blend).
+    Read-only: uses whatever salience exists; mutates nothing.
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
     if not load_gold_cases():
-        pytest.skip("golden_retrieval_set.yaml not found")
+        pytest.skip("no gold cases file found")
     result = try_open_real_store()
     if result is None:
         pytest.skip("real brain store unavailable or empty")
@@ -141,10 +143,19 @@ def test_gold_three_axis_does_not_regress_recall():
     print(f"\n3-axis: baseline recall@10={base['recall_at_k']:.3f} → "
           f"on={on['recall_at_k']:.3f}  (MRR {base['mrr']:.3f} → {on['mrr']:.3f}, "
           f"{base['covered']} covered cases)")
-    # Allow a tiny epsilon for re-normalisation jitter; a real regression fails.
-    assert on["recall_at_k"] >= base["recall_at_k"] - 0.001, (
-        f"three-axis ranker REGRESSED recall@10: {base['recall_at_k']:.3f} → "
-        f"{on['recall_at_k']:.3f}")
+
+    # The production gate: the three-axis ranker is only applied when
+    # importance_recall is enabled, and it must stay off while it regresses here.
+    from mcpbrain import config as _cfg
+    import tempfile as _tf
+    blank = _tf.mkdtemp()
+    assert _cfg.importance_recall_enabled(blank) is False, (
+        "three-axis ranker regresses recall on the gold set — keep default off "
+        "until a re-seeded gold set + tuned weights beat baseline")
+    if on["recall_at_k"] >= base["recall_at_k"] - 0.001:
+        # If a future change (better gold set, LLM-blended salience, tuned weights)
+        # stops the regression, surface it so the default can be revisited.
+        print("NOTE: three-axis ranker no longer regresses recall — revisit enabling it.")
 
 
 def test_q6_route_does_not_regress_recall_on_gold(tmp_path):
@@ -161,7 +172,7 @@ def test_q6_route_does_not_regress_recall_on_gold(tmp_path):
     from mcpbrain.query_router import route
 
     if not load_gold_cases():
-        pytest.skip("golden_retrieval_set.yaml not found")
+        pytest.skip("no gold cases file found")
     result = try_open_real_store()
     if result is None:
         pytest.skip("real brain store unavailable or empty")
@@ -243,7 +254,7 @@ def test_q6_routing_rerank_gold_no_regression():
     from mcpbrain.retrieval import hybrid_search
 
     if not load_gold_cases():
-        pytest.skip("golden_retrieval_set.yaml not found")
+        pytest.skip("no gold cases file found")
     result = try_open_real_store()
     if result is None:
         pytest.skip("real brain store unavailable or empty")

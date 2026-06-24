@@ -108,6 +108,48 @@ def test_recency_decay_monotone():
     assert recent > old
 
 
+def test_gdrive_recency_and_source_bonus():
+    """Live Drive metadata (source_type='gdrive', date in 'modified' incl. millis+Z)
+    must score above an undated/unknown chunk — regression for the literal-mismatch
+    bugs that pinned all 64k Drive chunks at baseline 3.0."""
+    from datetime import datetime, timezone
+    from mcpbrain.importance import score_structural, _parse_age_days
+    recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    meta = {"source_type": "gdrive", "modified": recent, "file_name": "Plan"}
+    # age parses from `modified`
+    assert _parse_age_days(meta) is not None
+    # source bonus (+0.5) + recency (<7d → +2.0) lift it above baseline 3.0
+    assert score_structural(meta) >= 5.0
+    assert score_structural({}) == 3.0  # undated/unknown stays at baseline
+
+
+def test_owner_authored_derived_from_sender_and_label():
+    """Owner-authored content is derivable from sender==owner_email or a SENT
+    label even when metadata has no explicit sender_is_owner flag (live case)."""
+    from mcpbrain.importance import score_structural
+    base = score_structural({"sender": "someone.else@example.com"})
+    by_addr = score_structural({"sender": "Joshua Kemp <josh.k@centrepoint.church>"},
+                               owner_email="josh.k@centrepoint.church")
+    by_label = score_structural({"sender": "x@y.com", "labels": "SENT,INBOX"},
+                                owner_email="josh.k@centrepoint.church")
+    assert by_addr >= base + 1.5
+    assert by_label >= base + 1.5
+    # owner-authored + recent crosses the core/decay-exempt band (>=7)
+    from datetime import datetime, timezone
+    recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hot = score_structural(
+        {"sender": "josh.k@centrepoint.church", "date_iso": recent,
+         "labels": "IMPORTANT"}, owner_email="josh.k@centrepoint.church")
+    assert hot >= 7.0
+
+
+def test_calendar_start_iso_with_offset_parses():
+    """Calendar `start` carries a tz offset (…+08:00) — must parse, not fall through."""
+    from mcpbrain.importance import _parse_age_days
+    assert _parse_age_days({"source_type": "calendar",
+                            "start": "2026-06-11T09:00:00+08:00"}) is not None
+
+
 # ---------------------------------------------------------------------------
 # run_salience_pass
 # ---------------------------------------------------------------------------
