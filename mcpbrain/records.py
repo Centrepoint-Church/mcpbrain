@@ -27,6 +27,7 @@ _TEMPLATE_FILES = {
     "context/preferences.md": "context_preferences.md",
     "reference/systems.md": "reference_systems.md",
     "reference/projects.md": "reference_projects.md",
+    "reference/org-context.md": "reference_org_context.md",
 }
 
 
