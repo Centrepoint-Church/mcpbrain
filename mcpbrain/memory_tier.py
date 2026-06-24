@@ -231,5 +231,7 @@ def run_tier_pass(store, home: str, *,
     ]
     demoted_count = demote_to_cold(store, to_cold) if to_cold else 0
 
+    # Ensure identity seed is in the store before recomputing core rankings.
+    seed_core_identity(store, home)
     core_count = recompute_core(store, home)
     return {"promoted": promoted_count, "demoted": demoted_count, "core": core_count}
