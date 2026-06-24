@@ -79,6 +79,64 @@ def append_continuity(repo: str, *, text: str, today: str | None = None) -> bool
         p.write_text(original[:insert] + entry + original[insert:])
     return _commit_file(repo, "state/hot.md", f"continuity: {text[:60]}")
 
+_APPROVED_ATTRIBUTION_SOURCES = frozenset({
+    "owner_statement", "signature", "owner_confirmation"
+})
+
+
+def write_gardener_reference(repo: str, filename: str, new_content: str) -> bool:
+    """Write reference/<filename> for the drift lane.
+
+    Commits with tag 'gardener: apply drift (reference/<filename>)'.
+    filename must be a plain basename — no path separators.
+    The file must already exist (drift lane updates existing entries; it does not
+    create new reference files). Returns True if a commit was made, False on no-op.
+    """
+    if "/" in filename or "\\" in filename:
+        raise ValueError(f"filename must be a basename, not a path: {filename!r}")
+    p = Path(repo) / "reference" / filename
+    if not p.exists():
+        raise FileNotFoundError(f"reference file not found: {p}")
+    if not new_content.endswith("\n"):
+        new_content += "\n"
+    p.write_text(new_content)
+    return _commit_file(repo, f"reference/{filename}",
+                        f"gardener: apply drift (reference/{filename})")
+
+
+def write_gardener_context(repo: str, filename: str, new_content: str, *,
+                           attribution_source: str) -> bool:
+    """Write context/<filename> for the constitution lane.
+
+    Enforces the role-attribution rule: attribution_source must be one of
+    _APPROVED_ATTRIBUTION_SOURCES ("owner_statement", "signature",
+    "owner_confirmation"). Raises ValueError for any other source — never
+    attribute a role or title to a person from text you wrote or inferred from
+    context; only from their own statement, signature, or owner confirmation.
+
+    filename must be a plain basename. The file must already exist.
+    Commits with tag 'gardener: update identity/preferences'.
+    Returns True if a commit was made, False on no-op.
+    """
+    if attribution_source not in _APPROVED_ATTRIBUTION_SOURCES:
+        raise ValueError(
+            f"Role attribution source {attribution_source!r} is not permitted. "
+            f"Approved sources: {sorted(_APPROVED_ATTRIBUTION_SOURCES)}. "
+            "Never attribute a role or title to a person from text you wrote; "
+            "only from their own statement, signature, or owner confirmation."
+        )
+    if "/" in filename or "\\" in filename:
+        raise ValueError(f"filename must be a basename, not a path: {filename!r}")
+    p = Path(repo) / "context" / filename
+    if not p.exists():
+        raise FileNotFoundError(f"context file not found: {p}")
+    if not new_content.endswith("\n"):
+        new_content += "\n"
+    p.write_text(new_content)
+    return _commit_file(repo, f"context/{filename}",
+                        "gardener: update identity/preferences")
+
+
 def write_memory(repo: str, *, slug: str, description: str, body: str,
                  memory_type: str = "project") -> bool:
     """Write memory/<slug>.md and a MEMORY.md pointer, committing both by name.

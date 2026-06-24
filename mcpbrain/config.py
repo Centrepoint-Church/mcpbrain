@@ -265,6 +265,19 @@ def voice_auto_apply_enabled(home) -> bool:
     return bool(read_config(home).get("voice_auto_apply", False))
 
 
+def gardener_auto_apply_enabled(home) -> bool:
+    """Whether the reference-gardener auto-applies changes to reference/ and context/ files.
+
+    When True, the weekly gardener writes directly in two lanes:
+    - Drift lane: reference/projects.md, reference/systems.md, reference/org-context.md
+    - Constitution lane: context/identity.md, context/preferences.md
+    Each write is its own git commit tagged gardener: so it is independently revertible.
+    When False (default), proposals are written to reference/_proposals/ for human review.
+    Enable via config 'gardener_auto_apply': true.
+    """
+    return bool(read_config(home).get("gardener_auto_apply", False))
+
+
 def bandit_auto_apply_enabled(home) -> bool:
     """Whether the Thompson-sampling bandit auto-applies its recommendation (S4).
 

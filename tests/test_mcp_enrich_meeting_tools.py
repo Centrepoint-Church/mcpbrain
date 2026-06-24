@@ -28,11 +28,15 @@ def test_brain_routine_serves_bundled_protocols():
     enrich = ri("enrich")
     assert enrich and "brain_enrich_units" in enrich and "enrich-batch" in enrich
     gardener = ri("gardener")
-    assert gardener and "GARDENER-PROTECTED" in gardener
+    # Phase 2: GARDENER-PROTECTED block removed; gardener is now hygiene-only with
+    # explicit constraints on what it cannot touch and a weekly digest step.
+    assert gardener and "HYGIENE" in gardener         # still a hygiene-only task
+    assert "context/voice.md" in gardener             # voice.md still off-limits to gardener
+    assert "weekly digest" in gardener.lower()        # Phase 2c: digest step wired in
     mp = ri("meeting-packs")
     assert mp and "context_hash" in mp and "brain_meetings_today" in mp
     rg = ri("reference-gardener")
-    assert rg and "reference/_proposals/" in rg   # proposes for review, never overwrites
+    assert rg and "reference/_proposals/" in rg       # proposals/changelog path still present
     assert "brain_note" in rg and "propose" in rg.lower()
 
 def test_routine_enrich_describes_fanout(tmp_path):
