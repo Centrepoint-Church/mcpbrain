@@ -8,12 +8,17 @@ Both operate on config.records_dir(home); no shell, no records-repo scripts.
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import re
+import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from mcpbrain import config, records_write
+
+log = logging.getLogger(__name__)
 
 _PRUNE_DAYS = 14
 _WARN_MEMORY_LINES = 180
@@ -208,10 +213,81 @@ def context_health(repo: str, mcpbrain_home: str) -> list[str]:
     return warnings
 
 
+# Commit message prefixes that belong to autonomous records writes.
+_DIGEST_PREFIXES = ("core:", "voice:", "consolidate:", "gardener:")
+
+
+def _git_log(repo: str, *args: str) -> str:
+    """Run git log and return stdout, or '' on error. Locale-stable."""
+    env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
+    result = subprocess.run(
+        ["git", "-C", repo, "log", *args],
+        capture_output=True, text=True, env=env,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def build_weekly_digest(repo: str, *, since_days: int = 7) -> str:
+    """Return a Markdown digest of autonomous records commits from the last N days.
+
+    Includes only commits whose message starts with one of _DIGEST_PREFIXES.
+    Each entry includes a short hash and a revert hint. Returns '' when there
+    are no matching commits.
+    """
+    raw = _git_log(repo, f"--since={since_days} days ago", "--format=%H %s")
+    if not raw.strip():
+        return ""
+    lines = []
+    for line in raw.strip().splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        sha, msg = parts
+        if any(msg.startswith(p) for p in _DIGEST_PREFIXES):
+            short = sha[:7]
+            lines.append(f"- {short} {msg} (`git revert {short}` to undo)")
+    if not lines:
+        return ""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    header = (
+        f"## Weekly brain digest — {today}\n\n"
+        f"Autonomous changes in the past {since_days} days "
+        "(review below; `git revert <hash>` in the records repo to undo any):\n\n"
+    )
+    return header + "\n".join(lines) + "\n"
+
+
+def prepend_digest_to_hot(repo: str, *, since_days: int = 7) -> bool:
+    """Build the weekly digest and prepend it to state/hot.md under '## Just decided'.
+
+    Returns True if a commit was made, False when there are no autonomous commits
+    to report (no-op).
+    """
+    digest = build_weekly_digest(repo, since_days=since_days)
+    if not digest:
+        return False
+    p = Path(repo) / "state" / "hot.md"
+    if not p.exists():
+        return False
+    original = p.read_text()
+    anchor = "## Just decided"
+    idx = original.find(anchor)
+    if idx == -1:
+        log.warning("prepend_digest_to_hot: anchor %r not found in hot.md; "
+                    "prepending at top of file", anchor)
+        insert = 0
+    else:
+        insert = original.find("\n", idx) + 1
+        while insert < len(original) and original[insert] == "\n":
+            insert += 1
+    p.write_text(original[:insert] + digest + "\n" + original[insert:])
+    return records_write._commit_file(repo, "state/hot.md", "gardener: weekly digest")
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(prog="mcpbrain records-cadence")
-    ap.add_argument("cmd", choices=["records-prune", "records-health"])
+    ap.add_argument("cmd", choices=["records-prune", "records-health", "records-digest"])
     ap.add_argument("--days", type=int, default=_PRUNE_DAYS)
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what would be pruned without writing")
@@ -223,6 +299,10 @@ def main(argv=None) -> int:
         if n and not ns.dry_run:
             records_write._commit_file(repo, "state/hot.md", "prune: hot.md")
         print(f"pruned {n} entries")
+        return 0
+    if ns.cmd == "records-digest":
+        committed = prepend_digest_to_hot(repo, since_days=ns.days)
+        print("digest committed" if committed else "no autonomous commits to digest")
         return 0
     warnings = context_health(repo, home)
     for w in warnings:
