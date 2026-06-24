@@ -278,6 +278,16 @@ def gardener_auto_apply_enabled(home) -> bool:
     return bool(read_config(home).get("gardener_auto_apply", False))
 
 
+def gardener_max_changed_lines(home) -> int:
+    """Per-run change cap for a single gardener auto-apply write (added+removed lines).
+
+    Deterministic backstop so one auto-apply can never silently rewrite a whole
+    reference/context file. Default 20 (matches the routine's stated cap). Set
+    'gardener_max_changed_lines' in config to tune; a large value effectively disables.
+    """
+    return int(read_config(home).get("gardener_max_changed_lines", 20))
+
+
 def bandit_auto_apply_enabled(home) -> bool:
     """Whether the Thompson-sampling bandit auto-applies its recommendation (S4).
 

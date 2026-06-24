@@ -84,13 +84,47 @@ _APPROVED_ATTRIBUTION_SOURCES = frozenset({
 })
 
 
-def write_gardener_reference(repo: str, filename: str, new_content: str) -> bool:
+def _changed_line_count(old: str, new: str) -> int:
+    """Number of added + removed lines between old and new content.
+
+    Used as a deterministic backstop for the gardener's per-run change cap so a
+    single auto-apply can never silently rewrite a whole file.
+    """
+    import difflib
+    n = 0
+    for line in difflib.unified_diff(old.splitlines(), new.splitlines(), n=0):
+        if line[:2] in ("++", "--") or line.startswith("@@"):
+            continue  # diff headers, not content lines
+        if line[:1] in ("+", "-"):
+            n += 1
+    return n
+
+
+def _enforce_change_cap(p: Path, new_content: str, max_changed_lines: int | None) -> None:
+    """Raise ValueError if applying new_content to p would change > the cap.
+
+    No-op when max_changed_lines is None (cap disabled) or the file is absent.
+    """
+    if max_changed_lines is None or not p.exists():
+        return
+    changed = _changed_line_count(p.read_text(), new_content)
+    if changed > max_changed_lines:
+        raise ValueError(
+            f"change cap exceeded for {p.name}: {changed} lines changed > "
+            f"limit {max_changed_lines}. Apply fewer entries this run and leave "
+            "the rest for the next."
+        )
+
+
+def write_gardener_reference(repo: str, filename: str, new_content: str, *,
+                             max_changed_lines: int | None = None) -> bool:
     """Write reference/<filename> for the drift lane.
 
     Commits with tag 'gardener: apply drift (reference/<filename>)'.
     filename must be a plain basename — no path separators.
     The file must already exist (drift lane updates existing entries; it does not
-    create new reference files). Returns True if a commit was made, False on no-op.
+    create new reference files). max_changed_lines caps the per-run change size
+    (ValueError if exceeded). Returns True if a commit was made, False on no-op.
     """
     if "/" in filename or "\\" in filename:
         raise ValueError(f"filename must be a basename, not a path: {filename!r}")
@@ -99,29 +133,34 @@ def write_gardener_reference(repo: str, filename: str, new_content: str) -> bool
         raise FileNotFoundError(f"reference file not found: {p}")
     if not new_content.endswith("\n"):
         new_content += "\n"
+    _enforce_change_cap(p, new_content, max_changed_lines)
     p.write_text(new_content)
     return _commit_file(repo, f"reference/{filename}",
                         f"gardener: apply drift (reference/{filename})")
 
 
 def write_gardener_context(repo: str, filename: str, new_content: str, *,
-                           attribution_source: str) -> bool:
+                           asserts_person_role: bool = False,
+                           attribution_source: str | None = None,
+                           max_changed_lines: int | None = None) -> bool:
     """Write context/<filename> for the constitution lane.
 
-    Enforces the role-attribution rule: attribution_source must be one of
-    _APPROVED_ATTRIBUTION_SOURCES ("owner_statement", "signature",
-    "owner_confirmation"). Raises ValueError for any other source — never
-    attribute a role or title to a person from text you wrote or inferred from
-    context; only from their own statement, signature, or owner confirmation.
+    Role-attribution rule (scoped to actual role claims): when asserts_person_role
+    is True — i.e. this update assigns a role/title to a *person* — attribution_source
+    must be one of _APPROVED_ATTRIBUTION_SOURCES ("owner_statement", "signature",
+    "owner_confirmation"); any other value raises ValueError. Never attribute a role
+    from text you wrote or inferred from context; only from their own statement,
+    signature, or owner confirmation. Updates that assert no person role (e.g. a
+    preferences or own-responsibilities change) need no attribution_source.
 
-    filename must be a plain basename. The file must already exist.
-    Commits with tag 'gardener: update identity/preferences'.
-    Returns True if a commit was made, False on no-op.
+    filename must be a plain basename. The file must already exist. max_changed_lines
+    caps the per-run change size. Commits with tag 'gardener: update
+    identity/preferences'. Returns True if a commit was made, False on no-op.
     """
-    if attribution_source not in _APPROVED_ATTRIBUTION_SOURCES:
+    if asserts_person_role and attribution_source not in _APPROVED_ATTRIBUTION_SOURCES:
         raise ValueError(
-            f"Role attribution source {attribution_source!r} is not permitted. "
-            f"Approved sources: {sorted(_APPROVED_ATTRIBUTION_SOURCES)}. "
+            f"Role attribution source {attribution_source!r} is not permitted for a "
+            f"person-role claim. Approved sources: {sorted(_APPROVED_ATTRIBUTION_SOURCES)}. "
             "Never attribute a role or title to a person from text you wrote; "
             "only from their own statement, signature, or owner confirmation."
         )
@@ -132,6 +171,7 @@ def write_gardener_context(repo: str, filename: str, new_content: str, *,
         raise FileNotFoundError(f"context file not found: {p}")
     if not new_content.endswith("\n"):
         new_content += "\n"
+    _enforce_change_cap(p, new_content, max_changed_lines)
     p.write_text(new_content)
     return _commit_file(repo, f"context/{filename}",
                         "gardener: update identity/preferences")

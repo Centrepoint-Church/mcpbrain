@@ -307,6 +307,49 @@ def make_brain_memory_write():
     return brain_memory_write
 
 
+def make_brain_gardener_apply():
+    async def brain_gardener_apply(lane: str, filename: str, content: str,
+                                   asserts_person_role: bool = False,
+                                   attribution_source: str = "") -> dict:
+        """Apply a reference-gardener change directly to the records repo, through the
+        deterministic guard. NOT queued — the write + commit happen synchronously so the
+        gardener gets immediate enforcement feedback.
+
+        lane: 'reference' (drift) or 'context' (constitution). filename: basename of an
+        existing file in that dir. content: full new file content. asserts_person_role:
+        set True only when the update assigns a role/title to a person — then
+        attribution_source must be 'owner_statement' | 'signature' | 'owner_confirmation'.
+        Returns {"applied": bool, "committed": bool} or {"applied": False, "error": ...}.
+        """
+        import subprocess
+        from mcpbrain import records_write, config as _cfg
+        home = str(config.app_dir())
+        repo = _cfg.records_dir(home)
+        cap = _cfg.gardener_max_changed_lines(home)
+        try:
+            if lane == "reference":
+                committed = records_write.write_gardener_reference(
+                    repo, filename, content, max_changed_lines=cap)
+            elif lane == "context":
+                committed = records_write.write_gardener_context(
+                    repo, filename, content,
+                    asserts_person_role=asserts_person_role,
+                    attribution_source=(attribution_source or None),
+                    max_changed_lines=cap)
+            else:
+                return {"applied": False, "error": f"unknown lane {lane!r} "
+                        "(expected 'reference' or 'context')"}
+            return {"applied": True, "committed": committed}
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            return {"applied": False, "error": str(exc)}
+        except subprocess.CalledProcessError as exc:
+            # The daemon is the usual records-repo writer; a concurrent commit can
+            # hold .git/index.lock. Surface it cleanly so the gardener retries next
+            # run rather than crashing the tool call.
+            return {"applied": False, "error": f"git busy (retry next run): {exc}"}
+    return brain_gardener_apply
+
+
 def make_brain_draft_context(store, home: str):
     async def brain_draft_context(email_id: str, intent: str = "") -> dict:
         """Return context for drafting a reply (subject, body, sender, voice_rules, samples).
@@ -650,6 +693,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     decision = make_brain_decision()
     note = make_brain_note()
     memory_write = make_brain_memory_write()
+    gardener_apply = make_brain_gardener_apply()
     # Draft tools write to draft_records, so they need a writable store handle.
     # the read-only store cannot INSERT; this writable handle is scoped to draft_records
     # writes by the MCP server (serialised via WAL + busy_timeout).
@@ -883,6 +927,30 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 },
             ),
             types.Tool(
+                name="brain_gardener_apply",
+                description=(
+                    "Apply a reference-gardener change directly to the records repo through "
+                    "the role-attribution guard and per-run change cap. Synchronous (not "
+                    "queued): commits immediately and returns the result so the gardener gets "
+                    "enforcement feedback. Use only from the reference-gardener routine in "
+                    "auto-apply mode."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "lane": {"type": "string", "enum": ["reference", "context"],
+                                 "description": "'reference' (drift) or 'context' (constitution)"},
+                        "filename": {"type": "string", "description": "basename of an existing file in that dir"},
+                        "content": {"type": "string", "description": "full new file content"},
+                        "asserts_person_role": {"type": "boolean", "default": False,
+                                                "description": "True only if assigning a role/title to a person"},
+                        "attribution_source": {"type": "string",
+                                               "description": "required when asserts_person_role: owner_statement|signature|owner_confirmation"},
+                    },
+                    "required": ["lane", "filename", "content"],
+                },
+            ),
+            types.Tool(
                 name="brain_draft_context",
                 description="Get email context for drafting a reply (subject, body, sender, voice rules, thread samples). Returns context dict to use in the draft-reply skill.",
                 inputSchema={"type": "object", "properties": {
@@ -1048,6 +1116,15 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 description=arguments.get("description", ""),
                 body=arguments.get("body", ""),
                 memory_type=arguments.get("memory_type", "project"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_gardener_apply":
+            out = await gardener_apply(
+                lane=arguments.get("lane", ""),
+                filename=arguments.get("filename", ""),
+                content=arguments.get("content", ""),
+                asserts_person_role=bool(arguments.get("asserts_person_role", False)),
+                attribution_source=arguments.get("attribution_source", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_draft_context":
