@@ -249,6 +249,10 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     # files + a shared context.json (no pending.json), skipping noise threads.
     import json
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    # This test exercises unit-writing mechanics with stub batches; the salience
+    # gate (default ON as of 0.7.65) is covered separately in test_salience_gate.py
+    # and needs real chunk dicts. Pin it off here to isolate prepare_units.
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
     noise = FakeBatch("t-noise", ["d-n1"],
                       [_msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "x")])
     good = FakeBatch("t-good", ["d-g1"],

@@ -209,6 +209,7 @@ def test_recompute_core_demotes_dropouts_to_hot(store, home):
 
 def test_recompute_core_noop_when_flag_off(store, tmp_path):
     from mcpbrain.memory_tier import recompute_core
-    h = tmp_path / "off"; h.mkdir(); (h / "config.json").write_text("{}")
+    # tiered_memory defaults ON (0.7.65) — set it explicitly false to test the off path.
+    h = tmp_path / "off"; h.mkdir(); (h / "config.json").write_text('{"tiered_memory": false}')
     store.upsert_chunk("s1", "x", "h", {}); store.set_chunk_type("s1", "semantic")
     assert recompute_core(store, str(h)) == 0

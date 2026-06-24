@@ -165,12 +165,13 @@ def test_gold_three_axis_does_not_regress_on_production_path():
         f"three-axis ranker REGRESSED MRR {base['mrr']:.3f}→{on['mrr']:.3f} "
         f"on the production path")
 
-    # The CODE default stays OFF so new installs don't inherit weights tuned to this
-    # corpus — the live config opts in. Guard the default independently.
+    # importance_recall ships ON by default as of 0.7.65 (validated above): the
+    # brain layer is the product. Guard that the default stays ON so a future edit
+    # doesn't silently revert the shipped behaviour.
     from mcpbrain import config as _cfg
     import tempfile as _tf
-    assert _cfg.importance_recall_enabled(_tf.mkdtemp()) is False, (
-        "code default for importance_recall must stay OFF for new installs")
+    assert _cfg.importance_recall_enabled(_tf.mkdtemp()) is True, (
+        "importance_recall is the shipped default (0.7.65) — must stay ON")
 
 
 def test_q6_route_does_not_regress_recall_on_gold(tmp_path):
