@@ -623,3 +623,24 @@ bandit_auto_apply: OFF    (no real signal)
 lessons:           OFF    (no real signal)
 write_time_dedup:  OFF    (not validated)
 ```
+
+**Session 3 — REVIEW (2026-06-24, Opus).** Approved. Independently reproduced the headline:
+on the production path (`exclude_cold=True`) the three-axis ranker holds recall@10=0.750 and
+improves MRR 0.483→0.571 (+0.088) — the B3 enable is justified. Verified the enabled flags in the
+live config (`importance_recall`, `salience_gate`, `sufficiency_gate`, `consolidation`,
+`tiered_memory`). B5 decay correctly HELD (would cold-tier ~85% incl. 4 gold docs with no
+last_accessed data). Two findings:
+1. *S1 over-abstention check (the report omitted it):* measured `filter_by_sufficiency` on 10 gold
+   queries → **0/10 withheld** any hit, so S1 is not suppressing answerable recall (fails-open +
+   permissive, as designed). Enable confirmed safe. (Note: `gold_eval` doesn't route through S1, so
+   its number doesn't reflect the gate — acceptable since S1 doesn't drop answerable hits.)
+2. *Drifted gate FIXED:* the three-axis test only asserted the code default stays OFF — it no longer
+   guarded the now-ENABLED ranker's quality, so a future regression would pass silently. Rewrote it
+   to `test_gold_three_axis_does_not_regress_on_production_path`: asserts the enabled ranker does not
+   regress recall@10 OR MRR on the production path (+ still guards the new-install default OFF).
+
+**All three sessions complete.** Brain layer is live and measured: salience-ranked recall with an
+always-injected durable identity core, cold-tier forgetting, source-grounded consolidation, and a
+salience extraction gate — every enable gold-set-validated; decay + the self-improvement loop
+(S4/S5) held until real accept-signal volume accrues. Branch `session1-gold-set-foundation` is
+unpushed (awaiting explicit ship instruction).
