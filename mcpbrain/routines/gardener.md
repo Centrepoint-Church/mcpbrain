@@ -4,7 +4,7 @@
 
 ## Setup (run first)
 
-Resolve the working directories:
+Resolve the working directories and emit the weekly digest:
 
 ```bash
 home=$(mcpbrain home)
@@ -13,6 +13,20 @@ records="$home/records"
 
 `$records` is the records repo — the working directory for all git operations.
 The app data folder is `$home`.
+
+**Emit the weekly digest first** (before hygiene), so the owner sees what changed
+autonomously this week before you tidy anything:
+
+```bash
+python3 -c "
+from mcpbrain import config, records_cadences
+records_cadences.prepend_digest_to_hot(config.records_dir('$home'))
+" 2>/dev/null || true
+```
+
+This prepends a `## Weekly brain digest` block to `state/hot.md` listing every
+`core:` / `voice:` / `consolidate:` / `gardener:` commit from the past 7 days with
+`git revert <hash>` hints. It is a no-op when there are no autonomous commits.
 
 ---
 
@@ -48,10 +62,11 @@ If nothing needs tidying, log that instead — don't make cosmetic edits. If you
 
 ## What you cannot modify
 
-- Anything between `<!-- GARDENER-PROTECTED-START -->` and `<!-- GARDENER-PROTECTED-END -->` in `CLAUDE.md`
-- `context/identity.md`, `context/voice.md`, `context/preferences.md`
+- `context/voice.md` (owned by the voice cadence — not the gardener)
 - `state/decisions.md`, `state/hot.md`, `state/retired.md`, `state/compliance.md` (daemon-owned via the MCP write tools — never hand-edit)
-- `CLAUDE.md` itself (outside the non-protected routing sections — those sections require manual review before changes)
+- `CLAUDE.md` itself (routing sections require manual review before changes)
+
+Note: `context/identity.md` and `context/preferences.md` are developed autonomously by the reference-gardener's constitution lane when `gardener_auto_apply` is enabled. The gardener (this skill) does not write them directly — that is the reference-gardener's responsibility.
 
 ## What you must NOT do (primary writing belongs to the MCP tools + daemon)
 
