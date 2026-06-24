@@ -1320,25 +1320,35 @@ class Daemon:
     # -- B3 salience scoring (daily) ------------------------------------------
 
     def _run_salience_score(self) -> dict | None:
-        """Score unscored chunks with structural salience (B3).
+        """Score ALL unscored chunks with structural salience (B3).
 
-        Catch-up cap of 5000/run: structural scoring is deterministic and cheap
-        (no LLM, ~sub-second for thousands), so a fresh store populates in a
-        handful of runs rather than ~160 at the old 500 cap. importance_recall is
-        on by default, so the importance axis is only meaningful once this has run.
+        Structural scoring is deterministic and cheap (no LLM; ~sub-second per few
+        thousand), so each run DRAINS the backlog (loop in 5000-chunk batches until
+        none remain) rather than throttling. importance_recall is on by default and
+        is only meaningful once salience is populated, so a fresh/upgraded store is
+        fully scored on the first salience pass instead of ramping for weeks. The
+        round bound is a runaway backstop, not an expected limit.
         """
         if not self._is_due("_salience_score_interval_s", "_last_salience_score"):
             return None
         now = self._clock()
+        total = rounds = llm = 0
         try:
             from mcpbrain.importance import run_salience_pass
-            summary = run_salience_pass(self._store, str(app_dir()), cap=5000)
-            log.info("salience_score: scored=%d", summary.get("scored", 0))
+            while rounds < 500:   # backstop: 500 × 5000 = 2.5M chunks
+                summary = run_salience_pass(self._store, str(app_dir()), cap=5000)
+                n = summary.get("scored", 0)
+                total += n
+                llm += summary.get("llm_scored", 0)
+                rounds += 1
+                if n == 0:
+                    break
+            log.info("salience_score: scored=%d over %d round(s)", total, rounds)
         except Exception as exc:  # noqa: BLE001
             log.warning("salience_score failed: %s", exc, exc_info=True)
-            return {"salience_score": False, "error": str(exc)}
+            return {"salience_score": False, "error": str(exc), "scored": total}
         self._last_salience_score = now
-        return summary
+        return {"scored": total, "llm_scored": llm, "rounds": rounds}
 
     # -- B5 decay pass (nightly) -----------------------------------------------
 
@@ -1397,14 +1407,26 @@ class Daemon:
         if not self._is_due("_voice_analyse_interval_s", "_last_voice_analyse"):
             return None
         now = self._clock()
+        home = str(app_dir())
         try:
             from mcpbrain.voice_analyser import maybe_run_analysis
-            suggestions = maybe_run_analysis(self._store, str(app_dir()))
+            suggestions = maybe_run_analysis(self._store, home)
             log.info("voice_analyse: queued %d suggestions", len(suggestions))
             summary = {"suggestions": len(suggestions)}
         except Exception as exc:  # noqa: BLE001
             log.warning("voice_analyse failed: %s", exc, exc_info=True)
             return {"voice_analyse": False, "error": str(exc)}
+
+        if config.voice_auto_apply_enabled(home):
+            try:
+                from mcpbrain.voice_apply import apply_suggestions
+                apply_result = apply_suggestions(self._store, home)
+                log.info("voice_auto_apply: applied=%d blocked=%s",
+                         apply_result.get("applied", 0), apply_result.get("blocked"))
+                summary["auto_applied"] = apply_result.get("applied", 0)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("voice_auto_apply failed: %s", exc, exc_info=True)
+
         self._last_voice_analyse = now
         return summary
 
