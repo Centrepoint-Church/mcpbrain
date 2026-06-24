@@ -194,6 +194,38 @@ def _make_slug(summary: str) -> str:
     return slug[:50] or "consolidated-note"
 
 
+def _infer_memory_type(cluster: list[dict], summary: str) -> str:
+    """Pick a records memory_type from the documented vocabulary.
+
+    The records store recognises {project, system, preference} (see the
+    "Where Things Go" table in records CLAUDE.md). Hardcoding everything to
+    "project" mistypes system facts and preferences, which changes how the
+    memory tier recalls/filters them. We infer from the summary plus any tags
+    on the source chunks, and default to "project" when the signal is weak.
+    """
+    text = summary.lower()
+    for c in cluster:
+        tags = (c.get("metadata") or {}).get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        text += " " + " ".join(str(t).lower() for t in tags)
+
+    # Preference: explicit standing-rule / style language (checked first so a
+    # preference about a tool isn't misread as a system fact).
+    if any(kw in text for kw in (
+        "preference", "prefer ", "style guide", "tone of voice", "format default",
+        "convention", "always ", "never ", "i like ", "house style",
+    )):
+        return "preference"
+    # System: tools, automations, integrations, infrastructure.
+    if any(kw in text for kw in (
+        "system", "tool", "automation", "integration", "workflow", "pipeline",
+        "script", "daemon", "platform", "software",
+    )):
+        return "system"
+    return "project"
+
+
 def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
     """Promote a high-confidence consolidated note to a durable memory/*.md file.
 
@@ -216,8 +248,8 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
                   len(cluster), min_sources)
         return False
 
-    salinces = [float(c.get("salience") or 0.0) for c in cluster]
-    mean_salience = sum(salinces) / len(salinces) if salinces else 0.0
+    saliences = [float(c.get("salience") or 0.0) for c in cluster]
+    mean_salience = sum(saliences) / len(saliences) if saliences else 0.0
     if mean_salience < min_salience:
         log.debug("consolidation: graduation skipped — mean salience %.2f < min %.2f",
                   mean_salience, min_salience)
@@ -225,6 +257,7 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
 
     slug = _make_slug(summary)
     first_sent = (summary.split(". ")[0] + ".").strip()[:120]
+    memory_type = _infer_memory_type(cluster, summary)
     records_repo = config.records_dir(home)
 
     try:
@@ -233,13 +266,13 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
             slug=slug,
             description=first_sent,
             body=summary,
-            memory_type="project",
+            memory_type=memory_type,
         )
         if written:
             log.info(
                 "consolidation: graduated note → memory/%s.md "
-                "(sources=%d, mean_salience=%.2f)",
-                slug, len(cluster), mean_salience,
+                "(type=%s, sources=%d, mean_salience=%.2f)",
+                slug, memory_type, len(cluster), mean_salience,
             )
         return bool(written)
     except Exception as exc:  # noqa: BLE001

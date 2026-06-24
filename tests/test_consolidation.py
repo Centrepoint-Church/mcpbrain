@@ -244,6 +244,22 @@ def _make_cluster(n: int = 5, salience: float = 5.0) -> list[dict]:
     return [{"doc_id": f"ep-{i}", "text": f"chunk {i}", "salience": salience} for i in range(n)]
 
 
+def test_infer_memory_type_vocabulary():
+    """_infer_memory_type maps to {project, system, preference} and defaults to project."""
+    from mcpbrain.consolidation import _infer_memory_type
+
+    # System: tool/automation language
+    assert _infer_memory_type([], "We rely on the ClickUp tool and a nightly automation pipeline.") == "system"
+    # Preference: standing-rule / style language (checked before system)
+    assert _infer_memory_type([], "House style: always use Australian English.") == "preference"
+    assert _infer_memory_type([], "Preference for the deck-builder tool's output format.") == "preference"
+    # Default: ordinary project note
+    assert _infer_memory_type([], "Budget review Q3: finance committed to cost reduction.") == "project"
+    # Tags on source chunks also feed inference
+    cluster = [{"metadata": {"tags": ["automation", "integration"]}}]
+    assert _infer_memory_type(cluster, "Notes from the sync.") == "system"
+
+
 def test_graduate_note_calls_write_memory_above_threshold(home_consolidation, monkeypatch):
     """_graduate_note calls write_memory when source count and salience are above thresholds."""
     from mcpbrain.consolidation import _graduate_note
