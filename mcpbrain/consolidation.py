@@ -186,6 +186,68 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
     return doc_id
 
 
+def _make_slug(summary: str) -> str:
+    """Filesystem-safe slug from the first words of a summary (max 50 chars)."""
+    import re
+    first_line = summary.split("\n")[0][:60]
+    slug = re.sub(r"[^a-z0-9]+", "-", first_line.lower()).strip("-")
+    return slug[:50] or "consolidated-note"
+
+
+def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
+    """Promote a high-confidence consolidated note to a durable memory/*.md file.
+
+    Graduation criteria (both must pass):
+      - Source count >= graduation_min_sources (recurrence proxy)
+      - Mean source salience >= graduation_min_salience
+
+    Calls records_write.write_memory() which is no-clobber and commits. Wrapped in
+    try/except so a missing records repo (no git) never breaks the consolidation run.
+    Returns True if a memory file was written.
+    """
+    from mcpbrain import config
+    from mcpbrain import records_write
+
+    min_sources = config.graduation_min_sources(home)
+    min_salience = config.graduation_min_salience(home)
+
+    if len(cluster) < min_sources:
+        log.debug("consolidation: graduation skipped — %d sources < min %d",
+                  len(cluster), min_sources)
+        return False
+
+    salinces = [float(c.get("salience") or 0.0) for c in cluster]
+    mean_salience = sum(salinces) / len(salinces) if salinces else 0.0
+    if mean_salience < min_salience:
+        log.debug("consolidation: graduation skipped — mean salience %.2f < min %.2f",
+                  mean_salience, min_salience)
+        return False
+
+    slug = _make_slug(summary)
+    first_sent = (summary.split(". ")[0] + ".").strip()[:120]
+    records_repo = config.records_dir(home)
+
+    try:
+        written = records_write.write_memory(
+            records_repo,
+            slug=slug,
+            description=first_sent,
+            body=summary,
+            memory_type="project",
+        )
+        if written:
+            log.info(
+                "consolidation: graduated note → memory/%s.md "
+                "(sources=%d, mean_salience=%.2f)",
+                slug, len(cluster), mean_salience,
+            )
+        return bool(written)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("consolidation: graduation failed (records repo may not be "
+                    "initialized): %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Main pass
 # ---------------------------------------------------------------------------
@@ -321,6 +383,7 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
                 store.set_chunk_tier(c["doc_id"], "hot")
             log.info("consolidation: wrote semantic note %s from %d sources",
                      doc_id, len(cluster))
+            _graduate_note(store, home, cluster, summary)
 
     store.record_change(
         "consolidation_pass",
