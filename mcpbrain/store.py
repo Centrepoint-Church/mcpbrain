@@ -2219,7 +2219,13 @@ class Store:
                 "UPDATE chunks SET memory_type=? WHERE doc_id=?", (memory_type, doc_id))
 
     def core_chunks(self, max_chars: int = 800) -> list[dict]:
-        """Return chunks in the 'core' tier, newest first, up to max_chars total."""
+        """Return chunks in the 'core' tier, newest first, up to max_chars total.
+
+        The budget is calculated on snippet[:200] (same cap get_core_block uses),
+        so a 1200-char consolidated note contributes at most 200 chars to the budget
+        rather than exceeding it and being silently dropped.
+        """
+        _SNIPPET_CAP = 200
         with self._connect() as db:
             rows = db.execute(
                 "SELECT doc_id, text, metadata FROM chunks "
@@ -2236,10 +2242,11 @@ class Store:
             snippet = (r["text"] or "").strip()
             if not snippet:
                 continue
-            if total + len(snippet) > max_chars:
+            contribution = min(len(snippet), _SNIPPET_CAP)
+            if total + contribution > max_chars:
                 break
             result.append({"doc_id": r["doc_id"], "text": snippet, "metadata": meta})
-            total += len(snippet)
+            total += contribution
         return result
 
     def promote_chunk_tier(self, doc_id: str, from_tier: str, to_tier: str) -> bool:

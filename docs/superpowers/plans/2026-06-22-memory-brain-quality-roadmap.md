@@ -444,3 +444,42 @@ GOLD_MRR_FLOOR 0.20 / MIN_COVERED 15). **Finding: curation did NOT move recall (
 MRR 0.322 over 20/20 coverable)** — so the 5 misses are *genuine retrieval gaps* (the cross-linked
 siblings also fail to rank in top-10), confirming the set is a valid, non-saturated gate rather
 than a ground-truth artifact. Sessions 2-3 build on this branch.
+
+**Session 2 — DONE (2026-06-24, branch `session1-gold-set-foundation`).**
+
+B4 consolidation + B2 core tier bootstrapped on the live store; gold-set recall **unchanged at
+0.750 / MRR 0.322 over 20/20** — no regression from either change.
+
+*B4 — One consolidation pass:* ran directly (bypass config flag for validate-before-enable).
+Embedding-based clustering (cosine ≥ 0.55) over the 50 highest-salience episodic chunks →
+1 cluster → 1 semantic note (`note-consolidated-7c4a9559bbd28d9e`, 1226 chars, 50 source chunks
+promoted to hot). Hand validation of 4 cited claims against their source chunks — all accurate
+and grounded:
+  - "bulk-entering Dance Inclusion's classes… asked colleagues to disregard notification emails
+    [gmail-19eceff4d859c3dd-body-0]" → source confirms verbatim.
+  - "coordinated a 20-ticket allocation with Lisa… Lisa Rossi having sent the remaining names
+    [gmail-19ecf176567b27d4-body-0]" → source confirms Lisa Rossi and chasing names.
+  - "managed risk assessments (Pilbara… Annual Playgroup)… distribute responsibility across the
+    team [gmail-19ecf2e4b5817328-body-0][gmail-19ecf7b8f8340c5a-body-0][…0ea6a948b-body-0]"
+    → all three sources confirm verbatim.
+  - "offered Lauren a discounted School of Ministry place… gap year, via Ps Edward, Ps Taryn
+    [gmail-19ecf634558d110d-body-0]" → source confirms Lauren, gap year, Ps Taryn/Edward.
+  Citation integrity: pass. No hallucinations detected in verified claims.
+  Flag: `consolidation: true` set in config.json.
+
+*B2 — Core tier:* `recompute_core()` ran → 1 durable semantic note → core tier. `run_tier_pass()`
+ran (promoted=0, demoted=1309 to cold, core=1). Bug fixed: `store.core_chunks()` was counting
+raw text length (1200+ chars) against the 700-char budget before `get_core_block`'s 200-char
+snippet truncation, so the only semantic note was silently dropped; fix uses
+`min(len(snippet), 200)` as the budget contribution. `/api/core` verified to return real content
+after daemon restart. `prompt_recall.py` prepends the core block to every recall response.
+Flag: `tiered_memory: true` set in config.json.
+
+*Cold-tier demotion:* 1309 chunks (salience < 3.5) demoted to cold in first tier pass — gold-set
+recall unchanged, confirming cold-exclude is not cutting relevant chunks.
+
+*Known limitation:* Only 1 semantic note exists (one bootstrap pass). The daily `consolidation`
+cadence will create more on subsequent passes. The core block content is currently operational
+notes from Josh's recent email cluster — useful but narrow. More passes → broader coverage.
+
+Session 3 to follow (B3/B5 + Q1/S1).
