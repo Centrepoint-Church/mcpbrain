@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger("mcpbrain.voice_apply")
@@ -88,7 +88,6 @@ def apply_suggestions(store, home: str,
 
     voice_path = _voice_path(home)
     existing = voice_path.read_text() if voice_path.exists() else ""
-    existing_lines = existing.splitlines()
 
     additions: list[str] = []
     for s in pending:

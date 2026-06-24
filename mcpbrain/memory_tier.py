@@ -111,7 +111,6 @@ def seed_core_identity(store, home: str) -> int:
     Returns 1 if the seed was written, 0 if there was no content to write.
     """
     import hashlib
-    import json as _json
     from pathlib import Path
 
     from mcpbrain import config

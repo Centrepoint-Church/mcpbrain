@@ -35,7 +35,6 @@ Public API
 from __future__ import annotations
 
 import logging
-import math
 import random
 from datetime import datetime, timezone
 
