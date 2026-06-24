@@ -213,3 +213,74 @@ def test_recompute_core_noop_when_flag_off(store, tmp_path):
     h = tmp_path / "off"; h.mkdir(); (h / "config.json").write_text('{"tiered_memory": false}')
     store.upsert_chunk("s1", "x", "h", {}); store.set_chunk_type("s1", "semantic")
     assert recompute_core(store, str(h)) == 0
+
+
+# ---------------------------------------------------------------------------
+# seed_core_identity wiring in run_tier_pass (1b)
+# ---------------------------------------------------------------------------
+
+def test_run_tier_pass_seeds_core_identity(store, tmp_path):
+    """run_tier_pass writes the identity seed chunk when tiered_memory is on and config has owner."""
+    from mcpbrain.memory_tier import run_tier_pass, _IDENTITY_SEED_DOC_ID
+
+    h = tmp_path / "seed-home"
+    h.mkdir()
+    (h / "config.json").write_text(json.dumps({
+        "tiered_memory": True,
+        "owner_full_name": "Josh Kemp",
+        "owner_role": "Lead Pastor",
+        "orgs": [{"name": "Centrepoint"}],
+    }))
+
+    run_tier_pass(store, str(h))
+
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT memory_tier, memory_type FROM chunks WHERE doc_id=?",
+            (_IDENTITY_SEED_DOC_ID,),
+        ).fetchone()
+    assert row is not None, "Identity seed chunk not written by run_tier_pass"
+    assert row["memory_tier"] == "core"
+    assert row["memory_type"] == "semantic"
+
+
+def test_run_tier_pass_seed_idempotent(store, tmp_path):
+    """Calling run_tier_pass twice writes exactly one identity seed chunk, not two."""
+    from mcpbrain.memory_tier import run_tier_pass, _IDENTITY_SEED_DOC_ID
+
+    h = tmp_path / "seed-idem"
+    h.mkdir()
+    (h / "config.json").write_text(json.dumps({
+        "tiered_memory": True,
+        "owner_full_name": "Josh Kemp",
+    }))
+
+    run_tier_pass(store, str(h))
+    run_tier_pass(store, str(h))
+
+    with store._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE doc_id=?",
+            (_IDENTITY_SEED_DOC_ID,),
+        ).fetchone()[0]
+    assert count == 1, "Seed was duplicated — upsert is not idempotent"
+
+
+def test_run_tier_pass_no_seed_when_flag_off(store, tmp_path):
+    """run_tier_pass does NOT write identity seed when tiered_memory is off."""
+    from mcpbrain.memory_tier import run_tier_pass, _IDENTITY_SEED_DOC_ID
+
+    h = tmp_path / "seed-off"
+    h.mkdir()
+    (h / "config.json").write_text(json.dumps({
+        "tiered_memory": False,
+        "owner_full_name": "Josh Kemp",
+    }))
+
+    run_tier_pass(store, str(h))
+
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT doc_id FROM chunks WHERE doc_id=?", (_IDENTITY_SEED_DOC_ID,)
+        ).fetchone()
+    assert row is None, "Seed should not be written when tiered_memory is off"
