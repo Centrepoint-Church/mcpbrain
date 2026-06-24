@@ -185,6 +185,13 @@ def recompute_core(store, home: str, *, max_items: int = _MAX_CORE_ITEMS) -> int
     from mcpbrain import config
     if not config.tiered_memory_enabled(home):
         return 0
+    # Seed the durable identity note first (idempotent) so the always-injected
+    # core block is useful day-one — independent of whether consolidation has yet
+    # produced any semantic notes. Without this, a fresh install's core is empty.
+    try:
+        seed_core_identity(store, home)
+    except Exception as exc:  # noqa: BLE001 — core seeding must never break the tier pass
+        log.debug("memory_tier: seed_core_identity failed (non-fatal): %s", exc)
     keep = {c["doc_id"] for c in store.top_core_candidates(max_items)}
     for c in store.chunks_by_tier("core", limit=500):
         if c["doc_id"] not in keep:

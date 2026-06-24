@@ -19,7 +19,7 @@ etc. is an isolated, attributed, revertible commit. So the design rule is:
 > (`gardener:`, `voice:`, `core:`, `consolidate:`) so any one can be reverted without losing the rest.
 
 The existing `GARDENER-PROTECTED` block in `records/CLAUDE.md` was the old guard rail. Going
-full-auto means **relaxing it** (Phase 4) — replaced by the git-revert safety net + a weekly digest.
+full-auto means **relaxing it** (Phase 2) — replaced by the git-revert safety net + a weekly digest.
 
 ---
 
@@ -30,21 +30,25 @@ full-auto means **relaxing it** (Phase 4) — replaced by the git-revert safety 
 | `state/decisions.md` | 🟢 alive (`brain_decision`) | unchanged | — |
 | `state/hot.md` | 🟢 alive (`brain_note` + prune) | unchanged | — |
 | `context/voice.md` | 🔴 frozen (machinery OFF) | weekly analyse **+ auto-apply** from real drafts | 1 |
-| `MEMORY.md` + `memory/*.md` | 🔴 empty | nightly consolidation **graduates** distilled notes → `memory/` | 2 |
-| core identity tier | ⚫ never seeded | `seed_core_identity()` wired into nightly pass | 2 |
-| `context/identity.md` | 🔴 frozen stub | gardener auto-edits from graph/identity evidence | 3 |
-| `context/preferences.md` | 🔴 frozen stub | gardener auto-edits from observed feedback/lessons | 3 |
-| `reference/projects.md` | 🟡 propose-only | gardener **auto-applies** drift + proposals | 3 |
-| `reference/systems.md` | 🟡 propose-only | gardener auto-applies | 3 |
-| `reference/org-context.md` (was `Ministry-context.md`) | ⚫ absent | scaffold + gardener-developed org/ministry reference | 5 |
-| protected block in `records/CLAUDE.md` | guard rail | relaxed → weekly digest replaces approval gate | 4 |
+| `MEMORY.md` + `memory/*.md` | 🔴 empty | nightly consolidation **graduates** distilled notes → `memory/` | 1 |
+| core identity tier | ⚫ never seeded | `seed_core_identity()` wired into nightly pass | 1 |
+| `context/identity.md` | 🔴 frozen stub | gardener auto-edits from graph/identity evidence | 2 |
+| `context/preferences.md` | 🔴 frozen stub | gardener auto-edits from observed feedback/lessons | 2 |
+| `reference/projects.md` | 🟡 propose-only | gardener **auto-applies** drift + proposals | 2 |
+| `reference/systems.md` | 🟡 propose-only | gardener auto-applies | 2 |
+| `reference/org-context.md` (was `Ministry-context.md`) | ⚫ absent | scaffold + gardener-developed org/ministry reference | 2 |
+| protected block in `records/CLAUDE.md` | guard rail | relaxed → weekly digest replaces approval gate | 2 |
 
 ---
 
-## Phase 0 — turn on the dormant loops (config only, no code)
+## Phase 1 — turn on what's built; fill the empty files (low risk)
 
-These subsystems are fully built and self-gating; they're just flagged off. Add to the runtime
-config (`~/.mcpbrain/config.json` — confirm exact path in `config.py:read_config`):
+Everything here uses machinery that **already exists** — it's flags + a few missing wiring calls.
+Self-gated and reversible. No change to the gardener's human-approval model yet.
+
+### 1a. Flip the dormant loops on (config only)
+
+Add to the runtime config (`~/.mcpbrain/config.json` — confirm path via `config.py:read_config`):
 
 ```jsonc
 {
@@ -55,125 +59,92 @@ config (`~/.mcpbrain/config.json` — confirm exact path in `config.py:read_conf
 }
 ```
 
-**Effect immediately:** `_run_decay_pass` (daemon.py:1339) starts calling `run_tier_pass` →
-`recompute_core`, consolidation starts writing semantic notes, voice analysis starts queuing
-suggestions. Nothing applies to the `context/`/`memory/` *files* yet — that's Phases 1–2.
+Effect: `_run_decay_pass` (daemon.py:1339) starts calling `run_tier_pass` → `recompute_core`;
+consolidation starts writing semantic notes; voice analysis starts queuing suggestions. No
+`context/`/`memory/` *file* writes yet — that's 1b–1d.
 
-**Validate (1 week):** check daemon logs for `tier_pass`, `consolidation: notes_written`,
-`voice_analyse: queued N suggestions`. Confirm core block appears in `/api/recall`. No file
-churn expected yet.
+### 1b. Seed the core identity tier (one missing call)
 
----
+`seed_core_identity()` (memory_tier.py:98) is implemented but **never invoked**. Call it from
+`run_tier_pass` (or once at daemon start when `tiered_memory` is on) so identity/org facts from
+`config.json` + `identity.md` become an always-injected `core` chunk that then grows via
+`recompute_core`. Commit tag `core:`.
 
-## Phase 1 — voice.md auto-applies
+### 1c. Graduate distilled notes into durable `memory/*.md`
 
-Today `_run_voice_analyse` (daemon.py:1389) only *queues* suggestions; `voice_apply.apply_suggestions()`
-is manual. Going full-auto:
+Consolidation (consolidation.py:285) writes `note-consolidated-*` chunks into the *search store*
+as `hot` tier, but never into the `memory/` *files* — why `MEMORY.md` is still 15 bytes. Add a
+graduation step: when a consolidated/distilled note crosses a confidence + recurrence bar
+(e.g. seen ≥N times, salience ≥X), call `records_write.write_memory(slug, description, body,
+memory_type)` (records_write.py:82) → real `memory/<slug>.md` + `MEMORY.md` pointer. Gardener
+(gardener.md, weekly) dedupes/expires as designed. Commit tag `consolidate:`.
 
-1. After `maybe_run_analysis` in `_run_voice_analyse`, call `apply_suggestions()` automatically,
-   gated on a new `voice_auto_apply` flag (mirror `procedural_memory_enabled` in config.py).
-2. Keep the existing safety rails already in `voice_apply.py`: **3-day cooldown + 20-line diff cap
-   per apply** — those make auto-apply safe by construction.
-3. Commit as `voice: weekly auto-update (N lines)`.
+### 1d. voice.md auto-applies
 
-**Validate:** after 1–2 weekly cycles, `git log -- context/voice.md` shows dated voice commits;
-diff each one for sanity; revert any that drift.
+`_run_voice_analyse` (daemon.py:1389) only *queues* suggestions; `voice_apply.apply_suggestions()`
+is manual. Add an auto-apply call after `maybe_run_analysis`, gated on a new `voice_auto_apply`
+flag (mirror `procedural_memory_enabled`). Keep the built-in **3-day cooldown + 20-line diff cap**
+— they make auto-apply safe by construction. Commit tag `voice:`.
 
----
-
-## Phase 2 — MEMORY.md / memory/ actually fill
-
-Two wiring fixes:
-
-**2a. Seed core identity (one missing call).** `seed_core_identity()` (memory_tier.py:98) is
-implemented but never invoked. Call it from `run_tier_pass` (or once at daemon start when
-`tiered_memory` is on) so identity/org facts from `config.json` + `identity.md` become an
-always-injected `core` chunk that then *grows* via `recompute_core`.
-
-**2b. Graduate distilled notes into durable `memory/*.md`.** Consolidation (consolidation.py:285)
-writes `note-consolidated-*` chunks into the *search store* as `hot` tier, but never into the
-`memory/` *files* — which is why `MEMORY.md` is still 15 bytes. Add a graduation step: when a
-consolidated/distilled note crosses a confidence + recurrence bar (e.g. seen ≥N times, salience ≥X),
-call `records_write.write_memory(slug, description, body, memory_type)` (records_write.py:82) so it
-becomes a real `memory/<slug>.md` + a `MEMORY.md` pointer. The gardener (gardener.md, weekly) then
-dedupes/expires as designed.
-
-**Validate:** within a week of real usage, `memory/` is non-empty and `MEMORY.md` lists pointers;
-gardener log shows tidy passes; no duplicate slugs.
+**Validate Phase 1 (≈1 week of real use):** daemon logs show `tier_pass`, `consolidation:
+notes_written`, `voice_analyse: queued N`; core block appears in `/api/recall`; `memory/` is
+non-empty and `MEMORY.md` lists pointers; `git log -- context/voice.md` shows dated voice commits.
+Spot-check + `git revert` anything off.
 
 ---
 
-## Phase 3 — gardener auto-applies (reference + identity + preferences)
+## Phase 2 — full gardener autonomy + relax guard rails (broad)
+
+Do after 1–2 weeks of trust in Phase 1. This removes the human-approval gate and brings the
+constitution + reference + org-context files under autonomous development.
+
+### 2a. Gardener auto-applies (reference + identity + preferences)
 
 Today reference-gardener (reference-gardener.md) writes proposals to `reference/_proposals/` and
-**waits for a human** — that's why projects/systems only moved when proposals were applied by hand,
-and identity/preferences never moved at all.
+waits for a human. Going full-auto, two lanes, both auto-applied:
+- **Drift lane** (status updates, well-evidenced new projects/systems): apply directly to
+  `reference/*.md`, commit `gardener: apply drift (file)`.
+- **Constitution lane** (`identity.md`, `preferences.md`): derive from `brain_context`/`brain_graph`
+  + observed feedback/lessons, write directly, commit `gardener: update identity/preferences`.
+- Still write the human-readable proposal file, now as a **changelog/digest**, not a gate.
+- **Hard constraint:** enforce the existing role-attribution rule *inside* the identity writer
+  ("never attribute a role from text you wrote") or it will assert wrong titles.
 
-Going full-auto, split by risk but auto-apply both lanes:
+### 2b. Create reference/org-context.md (the "Ministry-context")
 
-- **Low-risk drift** (status updates, new projects/systems with strong evidence): gardener applies
-  directly to `reference/*.md`, commits `gardener: apply drift (file)`.
-- **Constitution files** (`identity.md`, `preferences.md`): extend the gardener to derive updates
-  from the graph (`brain_context`/`brain_graph`) and observed feedback/lessons, and **write them
-  directly**, commit `gardener: update identity/preferences`.
-- Keep writing the human-readable proposal file too (now as a *changelog/digest*, not a gate).
+Scaffold `reference/org-context.md` in `records.py:ensure_records_repo` (TEMPLATE_FILES ~line 24–30)
++ `records_templates/reference_org_context.md` with sections for Centrepoint / Courageous / ACC
+structure, governance, key people, org rules. reference-gardener already *reads* this file — extend
+it to *develop* it from org evidence in the graph. Fold the org-tagging rules currently in the
+protected `CLAUDE.md` block here as living content.
 
-**Validate:** `git log` shows gardener commits to all four files weekly; spot-check identity/prefs
-edits for accuracy (bad role attribution is the main risk — see Risks).
+### 2c. Relax the protected block + weekly digest
 
----
+Replace the `GARDENER-PROTECTED-START/END` block in `records_templates/CLAUDE.md` (and live
+`records/CLAUDE.md`) with a note that these files are now auto-developed and git-revert is the
+control. Add a weekly **"what changed in your brain" digest** prepended to `state/hot.md`: every
+autonomous commit since last digest, one-line summaries + revert hints. This is the replacement for
+the approval gate — review after, revert in one command.
 
-## Phase 4 — relax the protected block, add a weekly digest
-
-1. In `records_templates/CLAUDE.md` (and the live `records/CLAUDE.md`), replace the
-   `GARDENER-PROTECTED-START/END` block with a note that these files are now auto-developed and
-   git-reverting is the control.
-2. Add a **weekly "what changed in your brain" digest** prepended to `state/hot.md` (or emailed):
-   lists every autonomous commit since last digest with one-line summaries + revert hints. This is
-   the replacement for the approval gate — you review *after*, not *before*, and revert is one
-   command.
-
-**Validate:** digest appears weekly and accurately lists the week's auto-commits.
-
----
-
-## Phase 5 — create reference/org-context.md (the "Ministry-context")
-
-1. Scaffold `reference/org-context.md` in `records.py:ensure_records_repo` (TEMPLATE_FILES around
-   line 24–30) + a matching `records_templates/reference_org_context.md` with sections for
-   Centrepoint / Courageous / ACC structure, governance, key people, org-specific rules.
-2. reference-gardener already *reads* `reference/org-context.md` — extend it to *develop* it from
-   org evidence in the graph (people→org affiliations, governance decisions, recurring entities),
-   under the same auto-apply rule as Phase 3.
-3. Fold the org-tagging rules currently in the protected `CLAUDE.md` block here as living content.
-
-**Validate:** file scaffolds on next `ensure_records_repo`; gardener populates it; org tags in
-recall reference it.
+**Validate Phase 2:** `git log` shows gardener commits to all four files weekly; `org-context.md`
+populates; digest appears weekly and accurately lists the week's auto-commits; spot-check
+identity/prefs edits for accuracy.
 
 ---
 
-## Risks & honest caveats
+## Risks & caveats
 
-- **Full-auto on identity/preferences can encode mistakes.** The existing role-attribution rule
-  ("never attribute a role from text you wrote") must be enforced *inside* the gardener's identity
-  writer, or it will assert wrong titles. Mitigation: keep that rule as a hard constraint in the
-  gardener prompt; rely on git-revert + weekly digest.
-- **Voice auto-apply can drift your tone** if drafts in a given week are atypical. Mitigation: the
-  20-line cap + 3-day cooldown already limit blast radius; digest surfaces it.
-- **Cost / LLM calls:** consolidation + voice + gardener all shell out to the `claude` CLI. Nightly
-  + weekly cadence is modest, but watch the daemon logs the first fortnight.
-- **These flags default OFF in `config.py` by design** — this plan is *config + local code*, it does
-  **not** ship to other plugin users. Per `CLAUDE.md`, shipping is a separate, explicit 3-repo
-  release (mcpbrain → mcpbrain-dist → mcpbrain-plugin) and is out of scope here.
+- **Full-auto on identity/preferences can encode mistakes** — the role-attribution rule must live
+  inside the gardener writer (Phase 2a). Backstop: git-revert + weekly digest.
+- **Voice auto-apply can drift tone** on an atypical week — 20-line cap + 3-day cooldown limit blast
+  radius; digest surfaces it.
+- **Cost:** consolidation + voice + gardener shell out to the `claude` CLI; nightly/weekly cadence is
+  modest but watch daemon logs the first fortnight.
+- **These flags default OFF in `config.py` by design** — this is config + local code, it does **not**
+  ship to other plugin users. Shipping is the separate explicit 3-repo release (mcpbrain →
+  mcpbrain-dist → mcpbrain-plugin) and is out of scope here.
 
----
+## Rollback
 
-## Sequencing & rollback
-
-1. **Phase 0** (config flags) — observe a week, zero file churn, fully reversible by removing flags.
-2. **Phase 1 + 2** (voice apply + memory graduation + core seed) — the highest-value file-filling.
-3. **Phase 3** (gardener auto-apply) — the broadest autonomy step; do after 1–2 weeks of trust.
-4. **Phase 4 + 5** (relax guard, digest, org-context) — finalize.
-
-Every phase is independently revertible (config flag off, or `git revert` in the records repo).
-Nothing here is shipped until a separate explicit release.
+Every step is independently reversible: remove a config flag, or `git revert` in the records repo.
+Nothing is shipped until a separate explicit release.
