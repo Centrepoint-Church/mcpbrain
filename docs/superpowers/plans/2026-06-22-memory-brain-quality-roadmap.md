@@ -685,3 +685,12 @@ HELD OFF (unchanged): `decay` (would cold-tier ~85% without access data), `bandi
 Caveat to watch: `consolidation` ON means every install's daemon calls its local Claude CLI on a
 schedule (bounded/self-gating, but consumes the subscription). And other corpora weren't gold-set
 validated — the defaults reflect the product owner's decision that the brain layer is the product.
+
+## Salience backfill made instant (0.7.66, 2026-06-24)
+
+Correction to the 0.7.65 note: raising the salience cadence cap to 5000 did NOT make it populate
+in "hours" — the cadence runs once daily, so 5000/run meant ~16 days for an 80k store. Fixed
+properly: `_run_salience_score` now LOOPS (5000-chunk batches) until the backlog is drained, so the
+first daily salience pass scores the whole store (~1.6s for 80k, deterministic, no LLM). The
+importance axis is therefore fully effective within ~a day of upgrade, not weeks. Round-bounded
+(500 rounds) as a runaway backstop only.
