@@ -434,3 +434,13 @@ behaviour flag-gated default-OFF, commit per session but **never push without ex
   missing #16 audit, then enable `decay`; measure + enable Q1 `salience_gate` and S1
   `sufficiency_gate`. Keep Q6/S4/S5 OFF. *Deliverable:* gold-set before/after, new floor value,
   flag states → append an "Enablement log" section here + comment on epic #22.
+
+**Session 1 — DONE (2026-06-24, branch `session1-gold-set-foundation`, commit `2c04317`).**
+Prior remediation committed (+ a robust fix to a time-bomb in `test_probes.py`); the 20-case
+mcpbrain-native gold set curated (ambiguous CP-College and Capes-finance clusters cross-linked to
+multiple acceptable docs, all 20 ids verified present) and wired in as the gating set
+(`load_gold_cases()` prefers it; floors set to regression levels GOLD_RECALL_FLOOR 0.55 /
+GOLD_MRR_FLOOR 0.20 / MIN_COVERED 15). **Finding: curation did NOT move recall (still 0.750 /
+MRR 0.322 over 20/20 coverable)** — so the 5 misses are *genuine retrieval gaps* (the cross-linked
+siblings also fail to rank in top-10), confirming the set is a valid, non-saturated gate rather
+than a ground-truth artifact. Sessions 2-3 build on this branch.
