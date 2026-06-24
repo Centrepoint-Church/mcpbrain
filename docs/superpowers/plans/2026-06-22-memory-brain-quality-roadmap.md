@@ -428,12 +428,16 @@ behaviour flag-gated default-OFF, commit per session but **never push without ex
   `consolidation`; then form + enable the **B2 core tier** (now non-empty) and verify the
   always-injected /api/core block. *Deliverable:* # semantic notes + citation-integrity check,
   core-tier size + sample core block. Riskiest (live LLM on real data) → its own session.
-- **Session 3 — B3/B5 + Q1/S1 (ranker + gates; measure-then-enable).** Re-measure the three-axis
-  ranker on the curated gold set (enable `importance_recall` only if it beats baseline, else keep
-  off + document); recalibrate B5 `_FLOOR_SALIENCE` to the real distribution (max ≈6.5) + do the
-  missing #16 audit, then enable `decay`; measure + enable Q1 `salience_gate` and S1
-  `sufficiency_gate`. Keep Q6/S4/S5 OFF. *Deliverable:* gold-set before/after, new floor value,
-  flag states → append an "Enablement log" section here + comment on epic #22.
+- **Session 3 — B4/B2 quality prereqs, then B3/B5 + Q1/S1 (measure-then-enable).** FIRST: (a) make
+  the gold eval/gating use the production `exclude_cold=True` path; (b) tighten B4 clustering so
+  consolidation notes are topically coherent (not one mega-cluster) + seed the core tier from
+  durable identity/standing-commitment notes so the always-injected block is useful. THEN:
+  re-measure the three-axis ranker on the curated gold set (enable `importance_recall` only if it
+  beats baseline, else keep off + document); recalibrate B5 `_FLOOR_SALIENCE` to the real
+  distribution (max ≈6.5) + do the missing #16 audit, then enable `decay`; measure + enable Q1
+  `salience_gate` and S1 `sufficiency_gate`. Keep Q6/S4/S5 OFF. *Deliverable:* gold-set
+  before/after, new floor value, flag states → append an "Enablement log" section here + comment
+  on epic #22.
 
 **Session 1 — DONE (2026-06-24, branch `session1-gold-set-foundation`, commit `2c04317`).**
 Prior remediation committed (+ a robust fix to a time-bomb in `test_probes.py`); the 20-case
@@ -482,4 +486,20 @@ recall unchanged, confirming cold-exclude is not cutting relevant chunks.
 cadence will create more on subsequent passes. The core block content is currently operational
 notes from Josh's recent email cluster — useful but narrow. More passes → broader coverage.
 
-Session 3 to follow (B3/B5 + Q1/S1).
+**Session 2 — REVIEW (2026-06-24, Opus).** Approved, with two findings carried into Session 3:
+1. *Validation path corrected (result positive).* The gold eval ran with the default
+   `exclude_cold=False`, but the production recall path sets `exclude_cold=True` when
+   `tiered_memory` is on (`daemon.search`). Re-run on the production path: recall holds at **0.750**
+   and **MRR improves 0.322 → 0.483** — cold exclusion is net-positive (pushes low-salience noise
+   out of top ranks, drops no gold doc). ACTION: the gating test + all Session-3 measurements must
+   use the `exclude_cold=True` path so they reflect what users actually get.
+2. *Consolidation quality — the always-injected core block is a grab-bag.* Clustering produced
+   **one cluster of all 50 chunks** (cosine ≥ 0.55 over top-50-salience, which are all recent owner
+   ops-email → everything merges), so the one note crams four unrelated topics into a paragraph.
+   Accurate, but it is a *digest of one week's email*, not a durable fact — and more passes will
+   just make more grab-bag notes. ACTION (Session 3 prereq): tighten/finer-grain B4 clustering so
+   notes are topically coherent (raise threshold and/or cap cluster size), and **seed the core tier
+   from durable identity/standing-commitment notes** (e.g. the voice/profile model) so the
+   always-on block is useful, not transient.
+
+Session 3 to follow (B3/B5 + Q1/S1, preceded by the two fixes above).
