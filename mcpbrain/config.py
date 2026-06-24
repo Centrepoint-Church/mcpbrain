@@ -196,9 +196,9 @@ def decay_enabled(home) -> bool:
 
     When True, the nightly decay pass demotes unaccessed low-salience chunks
     to the cold tier. On recall, strength is incremented and last_accessed stamped.
-    Default: False — safe rollout. Enable via config 'decay': true.
+    Default: TRUE. Set 'decay': false in config.json to disable.
     """
-    return bool(read_config(home).get("decay", False))
+    return bool(read_config(home).get("decay", True))
 
 
 def consolidation_enabled(home) -> bool:
@@ -218,10 +218,11 @@ def procedural_memory_enabled(home) -> bool:
     """Whether B6 procedural/voice memory analysis is active.
 
     When True, a weekly voice_analyser pass reads recent draft_records and
-    proposes voice.md updates (analysis-only; apply is user-triggered).
-    Default: False — safe rollout. Enable via config 'procedural_memory': true.
+    proposes voice.md updates (analysis-only; apply is gated by voice_auto_apply).
+    Default: TRUE. NOTE: calls the user's claude CLI weekly. Set
+    'procedural_memory': false in config.json to disable.
     """
-    return bool(read_config(home).get("procedural_memory", False))
+    return bool(read_config(home).get("procedural_memory", True))
 
 
 def incremental_communities_enabled(home) -> bool:
@@ -259,10 +260,11 @@ def voice_auto_apply_enabled(home) -> bool:
     """Whether voice suggestions are auto-applied immediately after analysis (1d).
 
     Existing guards in voice_apply (3-day cooldown, 20-line diff cap) remain
-    fully in effect regardless of this flag. Default: False — manual apply.
-    Enable via config 'voice_auto_apply': true.
+    fully in effect regardless of this flag. Default: TRUE — voice.md
+    self-updates from your real writing; every apply is a git commit, so set
+    'voice_auto_apply': false in config.json to revert to manual apply.
     """
-    return bool(read_config(home).get("voice_auto_apply", False))
+    return bool(read_config(home).get("voice_auto_apply", True))
 
 
 def gardener_auto_apply_enabled(home) -> bool:
@@ -272,10 +274,11 @@ def gardener_auto_apply_enabled(home) -> bool:
     - Drift lane: reference/projects.md, reference/systems.md, reference/org-context.md
     - Constitution lane: context/identity.md, context/preferences.md
     Each write is its own git commit tagged gardener: so it is independently revertible.
-    When False (default), proposals are written to reference/_proposals/ for human review.
-    Enable via config 'gardener_auto_apply': true.
+    Default: TRUE — the gardener applies directly (role claims are verified against
+    cited sources). Set 'gardener_auto_apply': false in config.json to revert to
+    propose-only (proposals written to reference/_proposals/ for human review).
     """
-    return bool(read_config(home).get("gardener_auto_apply", False))
+    return bool(read_config(home).get("gardener_auto_apply", True))
 
 
 def gardener_max_changed_lines(home) -> int:
@@ -418,6 +421,18 @@ def sufficiency_gate_enabled(home) -> bool:
     fails open (all hits pass) on CLI absence, timeout, or parse error.
     """
     return bool(read_config(home).get("sufficiency_gate", True))
+
+
+def auto_enable_enabled(home) -> bool:
+    """Whether the auto-graduation pass may flip data-gated flags ON once ready.
+
+    When True (default), the daemon auto_enable cadence enables bandit_auto_apply,
+    lessons, and decay once each flag's readiness condition is genuinely met (real
+    accept-signal volume; for decay also a safety dry-run). It ONLY flips flags
+    absent from config.json — an explicit user true/false is never overridden. Set
+    'auto_enable': false to freeze flags at their current/default state.
+    """
+    return bool(read_config(home).get("auto_enable", True))
 
 
 def write_time_dedup_enabled(home) -> bool:
