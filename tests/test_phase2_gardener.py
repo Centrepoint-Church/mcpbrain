@@ -207,6 +207,45 @@ def test_gardener_max_changed_lines_default(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 2a: attribution-quote verification + commit-message provenance
+# ---------------------------------------------------------------------------
+
+def test_verify_attribution_quote_matches_whitespace_insensitive():
+    src = "Hi all,\n  I'm   the OPERATIONS lead\nfor Centrepoint."
+    assert rw.verify_attribution_quote("I'm the operations lead for Centrepoint", src) is None
+
+
+def test_verify_attribution_quote_rejects_absent():
+    err = rw.verify_attribution_quote("Sam is the CEO", "see you Monday")
+    assert err and "not found in the cited source" in err
+
+
+def test_verify_attribution_quote_rejects_empty():
+    assert "required" in rw.verify_attribution_quote("   ", "anything")
+
+
+def test_context_commit_records_role_provenance(tmp_path):
+    repo = _fake_records_full(tmp_path)
+    rw.write_gardener_context(
+        repo, "identity.md", "# Identity\n\nSam — ops lead\n",
+        asserts_person_role=True, attribution_source="signature",
+        attribution_doc_id="msg-1",
+    )
+    log = subprocess.run(["git", "-C", repo, "log", "--oneline", "-1"],
+                         capture_output=True, text=True).stdout
+    assert "[role via signature @msg-1]" in log
+
+
+def test_context_commit_no_provenance_when_no_role(tmp_path):
+    repo = _fake_records_full(tmp_path)
+    rw.write_gardener_context(repo, "preferences.md", "# Preferences\n\n- terse\n")
+    log = subprocess.run(["git", "-C", repo, "log", "--oneline", "-1"],
+                         capture_output=True, text=True).stdout
+    assert "gardener: update identity/preferences" in log
+    assert "role via" not in log
+
+
+# ---------------------------------------------------------------------------
 # 2b: org-context.md scaffolded by ensure_records_repo
 # ---------------------------------------------------------------------------
 
@@ -244,12 +283,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _tool_with_home(tmp_path, monkeypatch):
+class _FakeStore:
+    """Minimal store stub: only get_chunk is needed by brain_gardener_apply."""
+    def __init__(self, chunks=None):
+        self._chunks = chunks or {}
+
+    def get_chunk(self, doc_id):
+        text = self._chunks.get(doc_id)
+        return {"doc_id": doc_id, "text": text} if text is not None else None
+
+
+def _tool_with_home(tmp_path, monkeypatch, store=None):
     """Make the gardener_apply tool resolve to a fresh fake records repo."""
     from mcpbrain import mcp_server, config as _cfg
     _fake_records_full(tmp_path)  # creates <tmp_path>/records (== records_dir(tmp_path))
     monkeypatch.setattr(_cfg, "app_dir", lambda: tmp_path)
-    return mcp_server.make_brain_gardener_apply()
+    return mcp_server.make_brain_gardener_apply(store or _FakeStore())
 
 
 def test_tool_reference_lane_applies(tmp_path, monkeypatch):
@@ -259,19 +308,68 @@ def test_tool_reference_lane_applies(tmp_path, monkeypatch):
     assert out == {"applied": True, "committed": True}
 
 
-def test_tool_context_role_with_valid_source_applies(tmp_path, monkeypatch):
-    tool = _tool_with_home(tmp_path, monkeypatch)
+def test_tool_context_role_verified_quote_applies(tmp_path, monkeypatch):
+    """A role claim whose quote is genuinely in the cited stored chunk is applied."""
+    store = _FakeStore({"msg-1": "Hi all, I'm the operations lead for Centrepoint. — Sam"})
+    tool = _tool_with_home(tmp_path, monkeypatch, store=store)
     out = _run(tool(lane="context", filename="identity.md",
-                    content="# Identity\n\n**Role:** confirmed\n",
-                    asserts_person_role=True, attribution_source="signature"))
+                    content="# Identity\n\nSam — operations lead, Centrepoint\n",
+                    asserts_person_role=True, attribution_source="signature",
+                    attribution_quote="I'm the operations lead for Centrepoint",
+                    attribution_doc_id="msg-1"))
     assert out["applied"] is True
+
+
+def test_tool_context_role_unverifiable_quote_rejected(tmp_path, monkeypatch):
+    """A quote not present in the cited chunk is rejected — no fabricated roles."""
+    store = _FakeStore({"msg-1": "Hi all, see you at the meeting. — Sam"})
+    tool = _tool_with_home(tmp_path, monkeypatch, store=store)
+    out = _run(tool(lane="context", filename="identity.md",
+                    content="# Identity\n\nSam — CEO\n",
+                    asserts_person_role=True, attribution_source="signature",
+                    attribution_quote="Sam is the CEO", attribution_doc_id="msg-1"))
+    assert out["applied"] is False
+    assert "not found in the cited source" in out["error"]
+
+
+def test_tool_context_role_store_backed_requires_doc_id(tmp_path, monkeypatch):
+    tool = _tool_with_home(tmp_path, monkeypatch, store=_FakeStore())
+    out = _run(tool(lane="context", filename="identity.md", content="x",
+                    asserts_person_role=True, attribution_source="owner_statement",
+                    attribution_quote="some quote"))
+    assert out["applied"] is False
+    assert "attribution_doc_id is required" in out["error"]
+
+
+def test_tool_context_role_missing_doc_rejected(tmp_path, monkeypatch):
+    tool = _tool_with_home(tmp_path, monkeypatch, store=_FakeStore())
+    out = _run(tool(lane="context", filename="identity.md", content="x",
+                    asserts_person_role=True, attribution_source="owner_statement",
+                    attribution_quote="q", attribution_doc_id="missing"))
+    assert out["applied"] is False
+    assert "not found in the store" in out["error"]
+
+
+def test_tool_context_owner_confirmation_needs_quote_only(tmp_path, monkeypatch):
+    """owner_confirmation is the live human-in-loop path: quote required, no doc_id."""
+    tool = _tool_with_home(tmp_path, monkeypatch, store=_FakeStore())
+    ok = _run(tool(lane="context", filename="identity.md",
+                   content="# Identity\n\nJo — board chair\n",
+                   asserts_person_role=True, attribution_source="owner_confirmation",
+                   attribution_quote="Jo is the board chair"))
+    assert ok["applied"] is True
+    bad = _run(tool(lane="context", filename="preferences.md", content="x",
+                    asserts_person_role=True, attribution_source="owner_confirmation"))
+    assert bad["applied"] is False
+    assert "required for owner_confirmation" in bad["error"]
 
 
 def test_tool_context_role_bad_source_surfaces_error(tmp_path, monkeypatch):
     """Guard rejection comes back as a clean error dict, not an exception."""
     tool = _tool_with_home(tmp_path, monkeypatch)
     out = _run(tool(lane="context", filename="identity.md", content="x",
-                    asserts_person_role=True, attribution_source="self_written"))
+                    asserts_person_role=True, attribution_source="self_written",
+                    attribution_quote="q", attribution_doc_id="d"))
     assert out["applied"] is False
     assert "not permitted" in out["error"]
 
