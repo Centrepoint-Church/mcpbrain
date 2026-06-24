@@ -644,3 +644,22 @@ always-injected durable identity core, cold-tier forgetting, source-grounded con
 salience extraction gate — every enable gold-set-validated; decay + the self-improvement loop
 (S4/S5) held until real accept-signal volume accrues. Branch `session1-gold-set-foundation` is
 unpushed (awaiting explicit ship instruction).
+
+## Contextual retrieval (Q6) — validated + flag made honest (2026-06-24, post-sessions)
+
+Found during a flag audit: `contextual_retrieval` was a **dead, misleading knob** — its
+docstring said "Default: False — enable via config", but `index.py::index_pending` applied the
+provenance prefix (`embed.contextual_prefix`) to **every** chunk *unconditionally* and never read
+the flag. So the whole live corpus was already contextual-embedded, with zero measurement.
+
+**Validated it (controlled A/B, vector channel, 4,018-chunk sample incl. all 20 gold docs, same
+docs embedded both ways):**
+- WITHOUT prefix: recall@10 **0.850**, MRR **0.566**
+- WITH prefix:    recall@10 **0.950**, MRR **0.741**  → **+0.10 recall, +0.175 MRR**
+
+A clear, large win — the always-on behaviour was correct. **Fix:** made the flag real and
+**default TRUE** (preserves current behaviour, adds a rollback switch), gated `index_pending` on
+it (`home` selects the config), and corrected the docstring with the A/B numbers. Behaviour is
+unchanged for every existing test; the only new capability is the ability to disable + re-index.
+Added `test_index_pending_prepends_contextual_prefix_by_default` and
+`test_index_pending_respects_disable_flag`.

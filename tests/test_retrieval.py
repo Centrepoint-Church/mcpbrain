@@ -244,3 +244,47 @@ def test_rrf_weighting_is_tunable(tmp_path):
     assert weighted["a"] > weighted["b"]
     # Base (equal weights) ties a and b (each appears once at rank 0 and once at rank 1).
     assert base["a"] == base["b"]
+
+
+# --- Q6 contextual retrieval: prefix wiring + rollback flag --------------------
+
+class _RecordingEmbedder:
+    """Captures the exact passage texts handed to embed_passages."""
+    dim = 4
+
+    def __init__(self):
+        self.seen = []
+
+    def embed_passages(self, texts):
+        self.seen.extend(texts)
+        return [[1.0, 0, 0, 0] for _ in texts]
+
+    def embed_query(self, text):
+        return [1.0, 0, 0, 0]
+
+
+def test_index_pending_prepends_contextual_prefix_by_default(tmp_path):
+    """Q6 contextual retrieval is ON by default — index_pending prepends the
+    provenance prefix to the passage before embedding (validated +recall/+MRR)."""
+    from mcpbrain.index import index_pending
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gmail-x-body-0", "the quarterly numbers", "h1",
+                   {"source_type": "gmail", "sender": "alice@x.com",
+                    "subject": "Q3 budget", "date": "2026-06-01"})
+    emb = _RecordingEmbedder()
+    index_pending(s, emb, home=str(tmp_path))   # no config.json → default True
+    assert emb.seen and emb.seen[0].startswith("[Context: Email from alice@x.com")
+    assert "the quarterly numbers" in emb.seen[0]
+
+
+def test_index_pending_respects_disable_flag(tmp_path):
+    """Setting contextual_retrieval=false embeds the raw text (rollback switch)."""
+    import json
+    from mcpbrain.index import index_pending
+    (tmp_path / "config.json").write_text(json.dumps({"contextual_retrieval": False}))
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gmail-x-body-0", "the quarterly numbers", "h1",
+                   {"source_type": "gmail", "sender": "alice@x.com", "subject": "Q3"})
+    emb = _RecordingEmbedder()
+    index_pending(s, emb, home=str(tmp_path))
+    assert emb.seen == ["the quarterly numbers"]   # no prefix when disabled
