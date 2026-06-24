@@ -114,27 +114,23 @@ def test_gold_recall_floor():
         f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
 
 
-def test_gold_three_axis_importance_recall_stays_off_while_it_regresses():
-    """B3/B5 validation (the measurement the Phase-2 prompt required): does the
-    three-axis ranker (recency+importance+decay) beat the relevance-only baseline
-    on the live gold set? It must stay DEFAULT-OFF until it does.
+def test_gold_three_axis_does_not_regress_on_production_path():
+    """B3 PRODUCTION QUALITY GATE: the three-axis ranker (recency+importance+decay)
+    is ENABLED in live config (`importance_recall`), so this guards the property that
+    justified enabling it — it must NOT regress recall@10 or MRR vs relevance-only on
+    the production path. A future change that regresses the enabled ranker fails here.
 
-    Both baseline and three-axis use the PRODUCTION PATH (exclude_cold=True) —
-    the same path daemon.search() uses when tiered_memory is on.
+    Both baseline and three-axis use the PRODUCTION PATH (exclude_cold=True) — the same
+    path daemon.search() uses when tiered_memory is on.
 
-    MEASURED FINDING (2026-06-23, exclude_cold=False path — SUPERSEDED): on the
-    non-production path the three-axis ranker regressed. This was because cold chunks
-    were included and the salience weights were untuned relative to that mix.
+    HISTORY:
+    - 2026-06-23 (exclude_cold=False path — SUPERSEDED): the ranker regressed, because
+      cold chunks were included and weights were untuned relative to that mix. Kept OFF.
+    - 2026-06-24 (PRODUCTION PATH, exclude_cold=True): with cold chunks excluded (the
+      user-facing path), it does NOT regress — MRR 0.483→0.571 (+0.088), recall@10 holds
+      at 0.750 over 20 cases. `importance_recall` ENABLED in live config.json.
 
-    UPDATED FINDING (2026-06-24, PRODUCTION PATH, exclude_cold=True): with cold
-    chunks excluded (the actual user-facing path), the three-axis ranker does NOT
-    regress and improves MRR 0.483→0.571 (+0.088) on the 20-case gold set while
-    recall@10 holds at 0.750. `importance_recall` ENABLED in live config.json.
-
-    The default remains OFF so new installs don't get untuned weights until their
-    corpus has been validated — the assertion guards the default, not the live config.
-    When the NOTE fires (no regression), the live config should have importance_recall
-    enabled. Read-only: uses whatever salience exists; mutates nothing.
+    Read-only: uses whatever salience exists; mutates nothing.
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
@@ -158,18 +154,23 @@ def test_gold_three_axis_importance_recall_stays_off_while_it_regresses():
           f"on={on['recall_at_k']:.3f}  (MRR {base['mrr']:.3f} → {on['mrr']:.3f}, "
           f"{base['covered']} covered cases)")
 
-    # The production gate: the three-axis ranker is only applied when
-    # importance_recall is enabled, and it must stay off while it regresses here.
+    # Quality gate: the ENABLED ranker must not regress recall or MRR on the path users
+    # actually get. If this trips, the three-axis weights or salience have degraded —
+    # investigate before shipping (do NOT loosen the epsilon to make it pass).
+    eps = 0.001
+    assert on["recall_at_k"] >= base["recall_at_k"] - eps, (
+        f"three-axis ranker REGRESSED recall@10 {base['recall_at_k']:.3f}→"
+        f"{on['recall_at_k']:.3f} on the production path")
+    assert on["mrr"] >= base["mrr"] - eps, (
+        f"three-axis ranker REGRESSED MRR {base['mrr']:.3f}→{on['mrr']:.3f} "
+        f"on the production path")
+
+    # The CODE default stays OFF so new installs don't inherit weights tuned to this
+    # corpus — the live config opts in. Guard the default independently.
     from mcpbrain import config as _cfg
     import tempfile as _tf
-    blank = _tf.mkdtemp()
-    assert _cfg.importance_recall_enabled(blank) is False, (
-        "three-axis ranker regresses recall on the gold set — keep default off "
-        "until a re-seeded gold set + tuned weights beat baseline")
-    if on["recall_at_k"] >= base["recall_at_k"] - 0.001:
-        # If a future change (better gold set, LLM-blended salience, tuned weights)
-        # stops the regression, surface it so the default can be revisited.
-        print("NOTE: three-axis ranker no longer regresses recall — revisit enabling it.")
+    assert _cfg.importance_recall_enabled(_tf.mkdtemp()) is False, (
+        "code default for importance_recall must stay OFF for new installs")
 
 
 def test_q6_route_does_not_regress_recall_on_gold(tmp_path):
