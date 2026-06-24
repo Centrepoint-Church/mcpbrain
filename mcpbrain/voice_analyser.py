@@ -42,8 +42,9 @@ def is_disabled(store) -> bool:
 
 
 def _voice_md_path(home: str) -> Path:
-    """Return path to voice.md in the mcpbrain home dir."""
-    return Path(home) / _VOICE_FILENAME
+    """Return path to context/voice.md inside the records repo."""
+    from mcpbrain import config as _cfg
+    return Path(_cfg.records_dir(home)) / "context" / _VOICE_FILENAME
 
 
 def _read_voice_md(home: str) -> str:
