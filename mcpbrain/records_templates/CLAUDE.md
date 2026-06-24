@@ -4,16 +4,17 @@
 
 ---
 
-<!-- GARDENER-PROTECTED-START: identity — gardener cannot modify this block -->
-
 ## Identity
 
-Your identity, voice and preferences are set in `context/` (imported above) — read
-them, apply the voice to everything, and don't rewrite them. Classifying people,
-orgs and relationships across the mail is handled automatically by background
-enrichment; this is the workspace, not the classifier.
+`context/identity.md`, `context/voice.md`, and `context/preferences.md` are developed
+autonomously by the weekly gardener cadences (voice cadence for `voice.md`; reference-gardener
+for `identity.md` and `preferences.md` when `gardener_auto_apply` is enabled). Each autonomous
+write is its own git commit — `git revert <hash>` in the records repo is the rollback. Review
+the weekly digest in `state/hot.md` to see what changed.
 
-<!-- GARDENER-PROTECTED-END -->
+Read the context files, apply the voice to everything you produce, and do not rewrite them
+directly. Classifying people, orgs and relationships across the mail is handled automatically
+by background enrichment.
 
 ---
 
@@ -43,7 +44,8 @@ Writes are **routed through MCP tools, not hand-edits.** Each write tool is **QU
 | Durable memory (project/system/preference) | `brain_memory_write(slug, description, body, memory_type)` | Writes `memory/<slug>.md` + a `MEMORY.md` pointer + commits |
 | Observational / entity fact, meeting outcome | `brain_ingest(title, content, tags, observation_type, org)` | Into the graph + memory index; searchable after the next sync (~5 min) |
 | Rule that should always apply | Edit `CLAUDE.md` directly (or `reference/*` if conditional) | Hand-edit — this file is not daemon-owned |
-| Project/system reference change | Edit `reference/projects.md` or `reference/systems.md` | Hand-edit |
+| Project/system reference change | `reference/projects.md`, `reference/systems.md`, `reference/org-context.md` | Auto-developed weekly by gardener (`gardener: apply drift`); hand-edit also works |
+| Identity, voice, preferences | `context/identity.md`, `context/preferences.md`, `context/voice.md` | Auto-developed weekly by gardener/voice cadence; `git revert <hash>` to undo |
 
 **hot.md discipline:** entries are 2-4 lines max with a `**YYYY-MM-DD:**` prefix; anything older than 14 days is auto-pruned.
 
@@ -89,7 +91,7 @@ At natural capture points, call the matching write tool (capture is QUEUED — a
 
 ## Self-Evolution Protocol
 
-Capture things when they occur — don't defer to end of session. Use the "Where Things Go" routes (a write tool for daemon-owned files, a direct edit for `CLAUDE.md` / `reference/*`). Propose; the owner approves.
+Capture things when they occur — don't defer to end of session. Use the "Where Things Go" routes (a write tool for daemon-owned files, a direct edit for `CLAUDE.md`). Reference and context files (`reference/*`, `context/identity.md`, `context/preferences.md`) are auto-developed by the weekly gardener — review the weekly digest in `state/hot.md` and `git revert <hash>` in the records repo to undo anything that looks wrong.
 
 ---
 
