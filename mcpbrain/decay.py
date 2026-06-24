@@ -21,9 +21,11 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 log = logging.getLogger("mcpbrain.decay")
 
@@ -39,6 +41,47 @@ def compute_decay(strength: float, days_since: float) -> float:
     if days_since <= 0:
         return 1.0
     return math.exp(-days_since / max(strength, 0.1))
+
+
+_SOURCE_DATE_KEYS = ("modified", "modifiedTime", "date", "start", "created", "timestamp")
+
+
+def _source_date(metadata) -> datetime | None:
+    """Best-effort source timestamp (UTC) from a chunk's metadata.
+
+    Used as the decay age-anchor for chunks that have never been recalled
+    (no last_accessed) — otherwise such chunks would never decay. Handles the
+    ISO-8601 forms (gdrive `modified`, calendar `start`) and gmail's RFC-2822
+    `date`. Returns None when no parseable date is present (enriched/unknown
+    sources), in which case the caller stays conservative and skips the chunk.
+    """
+    if not metadata:
+        return None
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    for key in _SOURCE_DATE_KEYS:
+        raw = metadata.get(key)
+        if not raw or not isinstance(raw, str):
+            continue
+        dt = None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(raw)
+            except (ValueError, TypeError):
+                dt = None
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return None
 
 
 def _now_iso() -> str:
@@ -82,6 +125,8 @@ def apply_decay_pass(store, home: str, *,
 
     ts = now or _now_iso()
     now_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
 
     chunks = store.chunks_for_decay_pass(limit=5000)
     to_demote = []
@@ -93,16 +138,23 @@ def apply_decay_pass(store, home: str, *,
         last_accessed = c.get("last_accessed") or ""
         salience = float(c.get("salience") or 0.0)
 
-        if not last_accessed:
-            # Never accessed → treat as accessed at embedded time (we don't have
-            # that timestamp; use strength-only heuristic: R = 1.0 for new items)
-            continue
+        if last_accessed:
+            try:
+                anchor = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        else:
+            # Never recalled: anchor age on the source date (email/file/event
+            # time) so old, never-touched memories still decay. If no source
+            # date is parseable, stay conservative and skip (don't cold-tier
+            # a chunk whose age we can't establish).
+            anchor = _source_date(c.get("metadata"))
+            if anchor is None:
+                continue
 
-        try:
-            la_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
-            days = max(0.0, (now_dt - la_dt).total_seconds() / 86400.0)
-        except Exception:
-            continue
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+        days = max(0.0, (now_dt - anchor).total_seconds() / 86400.0)
 
         r = compute_decay(strength, days)
 

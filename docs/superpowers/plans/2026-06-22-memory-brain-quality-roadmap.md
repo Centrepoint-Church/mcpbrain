@@ -167,3 +167,270 @@ mcpbrain is local-only (sqlite-vec + bge-small + Anthropic) — adapt the storag
 
 Most of the "stop surfacing stale facts" work (bitemporal) is **already done** — that frees Phase 0
 to focus on the genuinely missing primitives above.
+
+---
+
+## Post-implementation review — 2026-06-23 (capstone, all 4 phases, v0.7.63)
+
+Adversarial end-to-end re-verification against the **live code** and the **live store**
+(`~/Library/Application Support/mcpbrain/brain.sqlite3`, 595 MB, 80,584 chunks). Prior
+per-phase "fixed" claims were treated as claims and re-checked. Tests: `pytest -m "not slow
+and not e2e"` → **1 failed, 1647 passed, 1 skipped**; the single failure is the known
+`test_restore_first_run::test_run_restores_before_migrate` daemon-lock flake (a live daemon
+holds `daemon.lock`), not a code regression.
+
+### Headline verdict
+
+**The roadmap is impressively *wired* but operationally *dormant*.** Every one of the 17
+features ships **default-OFF**, and `config.json` on the live install sets **none** of the
+flags — so the live system runs plain RRF hybrid recall + the always-on salience/feedback
+cadences and nothing else. More importantly, even the items that *do* run are starved of
+substrate: the live store shows the brain layer has produced almost nothing.
+
+**Live-store substrate (the decisive evidence):**
+
+| Signal | Live state | Implication |
+|---|---|---|
+| `chunks.salience` | ~1,000 / 80,584 scored (**1.2%**); 79,584 still 0.0 | B3/B2/B5 all key off salience → ~99% blind |
+| `chunks.memory_tier` | **all `''`** (0 core/hot/warm/cold) | B2 core block permanently empty |
+| `chunks.memory_type` | **all `episodic`** (0 semantic) | B4 consolidation has produced nothing |
+| `recall_feedback` | 108 rows, **all `exposure`; 0 `used`/`edited`** | the S2 "accept signal" has **never once fired** |
+| `chunk_quality` | **0 rows** | S2 quality multiplier dormant (and not wired into ranking anyway) |
+| `bandit_arms` | table exists, **0 rows** | S4 bandit has no reward → stuck at uniform prior |
+| `recall_lessons`, drift tables | **do not exist** | S5 lessons + S4 drift have never run on this store |
+| `community_summaries` | 35 detected, **0 titled, 0 summarised** | Q6 thematic routing has nothing to match |
+| `draft_records` / `voice_suggestions` | 2 / 0 | B6 voice has no data to learn from |
+
+So "shipped at v0.7.63" means **the scaffolding is built and tested; the engine has not been
+started.** Maturity ≈ *code-complete, operationally cold-start.*
+
+### Status table (17 items × 4 dimensions)
+
+Legend — STATUS: ✅ shipped-and-wired · 🟡 wired-but-flag-off · 🟠 partial · 💤 inert-on-live · ⏸ deferred.
+Issue map: Q1#5 Q2#9 Q3#10 Q4#8 Q5#11 Q8#12 / B2#14 B3#13 B4#15 B5#16 B6#17 / S1#18 S2#7 S3#6 S4#20 S5#21 Q6#19.
+
+| Item | Status | Real vs wrapper (trade-down) | Activates on live store today? | Validated? |
+|---|---|---|---|---|
+| **Q1** salience gate | 🟡 flag off | Real after `source_type` re-key fix; Drive-mention rule opt-in. | No — `enrich_state` all `''`, 0 cold. | ❌ never run on live corpus; issue left open |
+| **Q2** schema grounding | 🟡 flag off (RELATION_TYPES constraint **always-on**) | Deterministic token-overlap anchor; per-triple **LLM grounding deferred**. | Type-constraint yes; grounding filter no. | ❌ no live precision delta (ODKE #s are external) |
+| **Q3** entity resolution / write-time dedup | 🟡 flag off | Cascade exact→token≥0.8; **embedding semantic blocking deferred** (no entity vectors). | No write-time dedup. | 🟠 problem measured (5,579 dup pairs) but fix-effect unmeasured |
+| **Q4** org backfill | ✅ wired (daily) | Deterministic `org_from_email` — best-available deterministic. | Yes, runs daily. | ✅ audit-closed; cleanest item |
+| **Q5** Drive extraction | ✅ wired | Real per-type (xlsx→markdown consumed by gate; OCR shipped); **slide-notes deferred**; OCR needs `tesseract` + Drive re-sync. | Yes, in extraction path. | 🟠 functional tests only, no recall metric |
+| **Q8** stricter validate | ✅ wired (always-on) | Real; `enrich_attempts` cap stops re-queue loop. | Yes. | ✅ audit-closed |
+| **B2** tiers + core block | 🟡 flag off → 💤 | Deterministic threshold tiers; core = top-N salience durable notes. | **No — 0 tiered chunks.** Even if flipped: needs salience (1.2%) + durable notes (0) → core stays ~empty. | ❌ |
+| **B3** importance + 3-axis | 🟠 salience pass ✅ runs (not flag-gated); ranker 🟡 flag off (weights 0.0) | Structural-only default; LLM poignancy opt-in (`importance_llm` off). | Salience pass runs but **1.2% scored**; ranker off. | 🟠 gold 0.40→0.40 (no-regression only); importance axis never validated on real scores |
+| **B4** consolidation | 🟡 flag off → 💤 | Single-level embedding-cosine cluster + claude-CLI summary; **not recursive RAPTOR**; lexical fallback. | **No — 0 semantic notes.** Trigger needs salience≥50 accumulated. | ❌ |
+| **B5** decay | 🟡 flag off → 💤; **no audit on record (#16)** | Ebbinghaus `R=e^(−Δt/S)`, legit; **never-accessed chunks never decay** (no-op gap). | No demotion. | ❌ + unaudited |
+| **B6** voice + incremental communities | 🟡 flag off → 💤 | Voice two-phase guarded (real); incremental community = 1-neighbour heuristic + full-Leiden-every-10. | Voice: 2 drafts/0 suggestions. Communities: full Leiden runs (35), 0 titled. | ❌ |
+| **S1** sufficiency gate | 🟡 flag off — **audit-clean** | Real LLM relevance gate, but permissive ("prefer true"), fails-open, never returns empty; claude-CLI dependent. | No-op (off; also no-op without CLI). | 🟠 acceptance test proves withhold; no live sufficiency metric |
+| **S2** acceptance signal | ✅ exposure wired (feedback ON) — but accept signal 💤 | **`used`/`edited` = within-session 24h re-recall proxy**, recorded *before* injection filter (can fire for never-shown docs). `chunk_quality` boost-only and **not wired into ranking** (weight 0.0). | 108 exposure, **0 used/edited, 0 quality**. | ❌ it *is* the signal others tune on — and it's empty/weak |
+| **S3** gold set | 🟠 shipped, coverage-limited | ops-brain's set re-mapped; **10/30 coverable**; doc-level recall baseline **0.40 / MRR 0.16**; ground-truth mismatch from independent re-chunking. | Used by drift + Q6 gating tests. | 🟠 trustworthy enough for regression floors, **not** for absolute claims |
+| **S4** bandit + drift | 🟡 flag off / advisory; **was dead-code, now has caller** (weekly `self_improve`) | Textbook Thompson TS (sound); drift logs **aggregate-as-per-case** (smell). Reward = the S2 re-recall proxy. | bandit_arms 0 rows; drift tables absent → **no reward ever produced**. | ❌ |
+| **S5** lessons + draft critic | 🟡 flag off; lessons **was dead-code, now has caller** | draft_critic real but **LLM-judges-LLM**, fails-open-to-approve, voice rules hardcoded (not synced from voice.md). lessons = extract+verify (principled) but fed by the weak proxy; verifier is the **same model**. | recall_lessons table **doesn't exist** → 0 lessons; proxy never fired. | ❌ |
+| **Q6** retrieval polish | 🟡 flag off — **measured to REGRESS** | regex routing; **token-overlap "rerank" ≠ cross-encoder**; keyword community augment; graph-seed concat; CRAG LLM rewrite. | Off; test gates them off until a cross-encoder beats baseline. | ✅ measured: routing+rerank **0.40→0.30** regression; correctly stays off |
+
+### Cross-cutting assessment (the system as a whole, not 17 silos)
+
+1. **Memory pipeline coherence — broken at the first link.** The chain
+   salience(B3) → tiers(B2) → decay(B5) → consolidation(B4) → core-block is correctly *coded*
+   end-to-end, but it is **starved at the source**: salience is 1.2% populated, so every
+   downstream stage sees near-zero signal. With all of B2/B4/B5 flag-off as well, the pipeline
+   is cold on both counts (no fuel *and* valves closed). Flipping the flags today would still
+   yield an empty core tier and no consolidation (thresholds never met).
+2. **Recall path — composes cleanly, mostly dormant.** `daemon.search()` layers distance-gate →
+   (optional routing) → hybrid → 3-axis reweight → cold-exclude → decay-strengthen → sufficiency.
+   The composition is correct and each layer self-gates/fails-open, so they don't fight. But with
+   every layer off, the live path is **plain RRF** (`retrieval.py` weights default 0.0). The one
+   measured composite (Q6) *regressed*, which is why it's gated off — a point in favour of the
+   eval discipline.
+3. **Self-improvement loop — fed by a proxy that has produced 0 events.** The "used" signal is
+   within-session, 24-h-TTL re-recall (`prompt_recall.py:219`), recorded over raw results *before*
+   the injection filter — so it is **not** evidence a human used anything. On the live store it
+   has fired **zero** times in 108 exposures. The bandit (S4) and lessons (S5) are statistically
+   and architecturally sound, but their input is both **weak** (a re-surfacing heuristic dressed
+   as "outcome-grounded") and **empty**. `feedback.py` / `lessons.py` docstrings overclaim this
+   signal. **Until a real accept signal exists, S4/S5 cannot produce useful tuning** — they are
+   correct machines with no fuel.
+4. **Gold set — trustworthy for regression floors, not for gating enablement.** 10/30 coverable,
+   document-level baseline 0.40 after the re-chunking-mismatch fix. Good enough to catch a
+   regression (it caught Q6's 0.40→0.30); **not** good enough to *prove* a feature helps. Any
+   "enable because it improved recall" decision needs a re-seeded, mcpbrain-native gold set first.
+
+### Adversarial sweep — confirmations & residual smells
+
+- **Prior remediations that hold up in code:** Q1 `source_type` re-key (real), Q2 token-overlap
+  grounding (real), Q3 once-per-drain index + org-merge-on-redirect (real), B2 `recompute_core`/
+  `run_tier_pass` now live (real *code*, but inert on store), B4 `_cluster_by_embedding` (real),
+  B6 full-Leiden-every-10 (real), S4/S5 now have a real caller (`self_improve` cadence — real,
+  closes the dead-code finding). **None of these were found re-regressed.**
+- **But "fixed" ≠ "working on live data" for 4 ex-inert items:** B2 core tier, S4 bandit/drift,
+  S5 lessons, Q5 per-type tags were all *dead/inert* at audit; the remediations made the **code**
+  live, and the live store confirms they **still produce nothing** (0 tiered, 0 lessons, 0 reward,
+  0 semantic notes) — because the flags are off and/or the substrate is empty. The dead-code was
+  fixed; the *inertness on real data* was not, and could not be by code alone.
+- **Self-grading present but bounded:** draft_critic is LLM-judging-LLM (same claude CLI),
+  fails-open-to-approve without the CLI. Lessons' "independent verifier" is an independent *call*,
+  not an independent *model*. Neither is wired live, so low current risk — but both must stay
+  anchored to an external signal before enabling.
+- **claude-CLI dependence (fails-open/no-op when absent), not API-key:** S1, B3-LLM, B4 summary,
+  S5 (both calls), Q6-CRAG. Plus **tesseract** host binary for Q5 OCR. On a CLI-less machine the
+  "intelligent" layers silently degrade to nothing.
+- **Schema fragility (uniform but real):** every LLM JSON parse is `find("{")`/`rfind("}")` +
+  `json.loads` (sufficiency, voice, lessons×2, draft_critic) — defensively wrapped (failure →
+  safe default) but brittle to braces-in-prose.
+- **drift_monitor logs aggregate-mean as the per-case value** (`drift_monitor.py`) — the per-query
+  table is fabricated from the aggregate; a correctness smell, not a crash.
+
+### Enablement + validation plan (prioritised; what to turn on, in what order)
+
+**Gate everything on a real substrate + a real signal first — do not flip brain-layer flags blind.**
+
+**Tier 0 — prerequisites (no flags; do these before anything else):**
+1. **Backfill salience over the whole corpus.** At 500/day the corpus needs ~160 days. Run a
+   one-shot full `run_salience_pass` (or raise the cap) so salience is ~100% populated. *Nothing
+   in B2/B3/B4/B5 is meaningful until this is done.* Measure the salience distribution after.
+2. **Re-seed an mcpbrain-native gold set** from the actual corpus (not ops-brain's 10/30 remap).
+   Target 50–100 query→doc cases with multiple acceptable docs. This is the prerequisite for
+   *any* "it helps" claim.
+3. **Build a real accept signal** (see Residual Risks #1). Until then S2's `used`/`edited` stays
+   a proxy and S4/S5 stay advisory-only.
+
+**Tier 1 — safe, cheap, validate-then-enable (after Tier 0):**
+- **B3 importance ranker** (`importance_recall`): enable *after* salience backfill; A/B on the new
+  gold set (expect recency to help, importance axis to be the real test). Keep `importance_llm` off
+  until the structural axis is proven.
+- **Q1 salience gate** (`salience_gate`): enable after measuring gated-vs-kept counts on the live
+  corpus (the issue explicitly left this open). Start without `salience_require_drive_mention`.
+- **S1 sufficiency gate** (`sufficiency_gate`): audit-clean and fail-open; lowest-risk LLM layer.
+  Enable once claude-CLI availability on the daemon host is confirmed; watch withhold-rate.
+
+**Tier 2 — only after Tier 1 shows gains:**
+- **B2 tiers + core block** — needs salience backfill *and* some durable/semantic notes to exist
+  (so core isn't empty). Enable B4 first to create semantic notes, then B2.
+- **B4 consolidation** — needs salience populated (trigger is salience≥50 accumulated) and a
+  claude-CLI host. Validate the cited-summary quality by hand on the first batch.
+- **B5 decay** — fix the never-accessed-never-decays gap first; **commission the missing audit
+  (#16)**; enable only after access data accumulates and B2 is on (so "forget" = demote-to-cold).
+
+**Do NOT enable yet (and why):**
+- **Q6 routing / rerank** — *measured to regress* (0.40→0.30). Off until a real cross-encoder is
+  added and beats baseline. CRAG/contextual-prefix can be evaluated separately.
+- **S4 bandit auto-apply** (`bandit_auto_apply`) and **S5 lessons** (`lessons`) — both consume the
+  re-recall proxy; with 0 real accept events they would tune/learn from noise. Off until Residual
+  Risk #1 is solved.
+- **Q3 write-time dedup** (`write_time_dedup`) — measure recall/merge correctness on a sample
+  before trusting it to redirect writes silently.
+
+### Residual risks + top 5 highest-leverage next pieces of work
+
+1. **Build a genuine recall accept signal** (the single highest-leverage item). The current
+   within-session re-recall proxy has produced 0 events and doesn't mean "useful." Options:
+   an explicit "was this recall useful?" affordance, edit-distance between injected recall and the
+   user's eventual output, or a citation/quote-back detector. Everything in S2/S4/S5 is blocked on
+   this. **Correct the `feedback.py`/`lessons.py` docstrings** that currently overclaim it.
+2. **Full salience backfill + a one-shot tier/consolidation bootstrap.** The brain layer is cold
+   because salience is 1.2% populated and 0 durable notes exist. A single backfill run + one
+   consolidation pass would turn B2/B3/B4 from "wired-to-nothing" into "has substrate to evaluate."
+3. **Re-seed the gold set from the mcpbrain corpus** (10/30 coverable, ground-truth-mismatched is
+   too thin to gate enablement). Allow multiple acceptable docs; verify expected ids against the
+   live chunking.
+4. **A real cross-encoder reranker** to replace the token-overlap stand-in — the only path that
+   makes Q6 rerank net-positive (it currently regresses). Weigh the optional model dep against the
+   local-only constraint.
+5. **Core-tier seeding + the B5 never-accessed gap + the missing B5 audit.** Seed core from
+   known identity/standing-commitment notes so the always-injected block is useful on day one;
+   fix decay's no-op on never-accessed chunks; commission the audit #16 never received.
+
+## Post-review remediation — 2026-06-23 (acting on the capstone review)
+
+Acted on the review's Tier-0 + safe fixes. All code below is flag-gated as before
+(production behaviour unchanged); the substrate work ran on the live store. Suite:
+`-m "not slow and not e2e"` → 1655 passed, 1 skipped, 1 known daemon-lock flake.
+
+**Safe correctness/honesty fixes (shipped):**
+- **Accept signal upgraded to quote-back** (residual risk #1). Replaced the within-session
+  re-recall proxy (recorded over raw results *before* the injection filter; fired 0×) with a
+  deterministic transcript check: an injected snippet is credited `used` only when its distinctive
+  words later reappear in the assistant's response (`prompt_recall._detect_quoteback`, ≥60% token
+  containment, only ever scoring snippets actually injected). It is a *behavioural* proxy, not a
+  human judgement — `feedback.py`/`lessons.py` docstrings rewritten to say exactly that (one had
+  *under*-claimed "not captured", the other *over*-claimed "a user actually used"). S4/S5 still
+  shouldn't be enabled until this accrues real volume, but the signal is now honest and non-spurious.
+- **B5 decay never-accessed gap fixed.** `apply_decay_pass` no longer exempts never-recalled chunks
+  forever; it anchors their age on the source date (`modified`/`date`/`start`) parsed from metadata,
+  staying conservative (skip) only when no date is parseable. (B5 audit #16 still owed.)
+- **drift_monitor per-case fabrication fixed.** Was writing one row per gold case all carrying the
+  aggregate mean — which also corrupted the 30-*row* baseline window (N rows/run). Now one honest
+  aggregate row per run.
+
+**Salience backfill (substrate, ran on live store) + a calibration finding:**
+- Backfilled structural salience over **100%** of the 80,585 embedded chunks (was 1.2%), purely
+  deterministic, 3s, no LLM. **In doing so, found the scorer was mis-calibrated for the live
+  metadata** and fixed it: (a) the structured-content bonus checked `source_type in
+  (calendar/google_drive/drive)` but live Drive is `gdrive` → all 64k Drive chunks missed it;
+  (b) `_parse_age_days` read `date`/`start` but Drive carries its date in `modified` → all 64k got
+  no recency; (c) added owner-authored detection from `sender`==owner_email / `SENT` label (live
+  ingest never set `sender_is_owner`). Distribution went from 95.7% pinned at 3.0 → spread 1.0–6.5,
+  avg 3.47.
+- **Open finding: the high band is still empty — max salience ≈ 6.5, 0 chunks ≥ 7.0.** Reaching ≥7
+  structurally needs owner-authored content from the *last 7 days* (sparse), and the 9.7k enriched
+  chunks carry no date/sender at all. Consequences: B5's `_FLOOR_SALIENCE=7` exemption protects
+  nothing on this corpus (recalibrate to ~the top percentile, or make it a percentile); and the
+  **core tier cannot form from salience** — `top_core_candidates` requires `memory_type IN
+  (semantic,procedural)` and the store is 100% `episodic`. So **core is blocked on B4 consolidation
+  (which creates semantic notes), NOT on salience.** That is the real next domino.
+- **Measured consequence on the gold set:** with salience now populated, the B3 three-axis ranker
+  (recency+importance+decay) **regresses recall@10 0.40→0.30** on the (thin) gold set — previously
+  this test passed only because salience was empty and the importance axis was inert. The test was
+  restructured (mirroring the Q6 test) to assert `importance_recall` stays **default-OFF** until a
+  better gold set + tuned weights beat baseline.
+
+**Gold set re-seed — the review's assumption was wrong, in an informative way:**
+- The 10/30 coverage is **not** repairable id-drift. The live gmail doc_id format is *identical*
+  to the gold set's, yet the referenced messages/files simply aren't here — the gold set is
+  **ops-brain-native** and mcpbrain holds a different (overlapping) corpus. Deterministic re-anchoring
+  is impossible; a real set must be **authored from live documents**.
+- Seeded a **20-case mcpbrain-native candidate** (`tests/eval/golden_retrieval_set_mcpbrain_candidate.yaml`,
+  generator `tests/eval/seed_gold_candidate.py`): distinct verified-present docs, spreadsheets
+  skipped, near-dups collapsed, queries written by the claude CLI from each doc's subject+content
+  and instructed not to echo the title (so it tests *semantic* retrieval). **20/20 coverable,
+  baseline recall@10=0.75 / MRR=0.32 — not saturated**, so it can actually detect quality changes.
+  Left **pending human review** and NOT wired into the harness (the misses expose ambiguous
+  ground-truth clusters — e.g. four "CP College Semester Two" emails — that a human should resolve
+  with multiple acceptable docs). This is the prerequisite for any "it helps" enablement claim.
+
+**Revised enablement order (substrate now exists):**
+1. Curate the mcpbrain-native gold set candidate → trust it for gating.
+2. **B4 consolidation** next (not B2): it is the domino that creates the semantic notes B2's core
+   tier needs. Validate cited-summary quality by hand on the first batch.
+3. Then **B2 core** (now non-empty) and re-test **B3 importance ranker** on the curated gold set
+   (off until it beats baseline). Recalibrate B5 `_FLOOR_SALIENCE` to the real distribution before
+   enabling decay. Keep Q6 rerank / S4 auto-apply / S5 lessons off per the review.
+
+### Execution plan — 3 review-gated sessions (2026-06-24)
+
+The enablement order above is executed as **three sessions, each in a fresh Claude Code
+context, with a review checkpoint back in the originating session between each**. A session
+STOPS at its boundary and reports measured numbers; the next session does not start until its
+predecessor's output is reviewed. Ordering is load-bearing (each session consumes the prior's
+substrate). Standing constraints apply throughout: subscription-only (claude CLI), measure on
+the gold set before/after, no test-floor loosening, no self-grading, schema-safe reads, all new
+behaviour flag-gated default-OFF, commit per session but **never push without explicit instruction**.
+
+- **Session 1 — Commit + gold set (foundation & measurement).** Commit the prior session's
+  remediation (quote-back signal, scorer calibration, decay/drift fixes, docstrings, candidate
+  gold set, doc addendum) on a branch; curate the 20-case mcpbrain-native candidate (resolve the
+  ambiguous ground-truth clusters → multiple acceptable docs, verify ids against the live store);
+  wire it in as the gating set; re-baseline the drift monitor. *Deliverable:* final case count,
+  ~100% coverage, baseline recall@10/MRR. Low-risk; produces the eval everything else gates on.
+- **Session 2 — B4 → B2 (consolidation + core tier).** Bootstrap one consolidation pass on the
+  live store to create cited `semantic` notes; HAND-VALIDATE the first batch before enabling
+  `consolidation`; then form + enable the **B2 core tier** (now non-empty) and verify the
+  always-injected /api/core block. *Deliverable:* # semantic notes + citation-integrity check,
+  core-tier size + sample core block. Riskiest (live LLM on real data) → its own session.
+- **Session 3 — B3/B5 + Q1/S1 (ranker + gates; measure-then-enable).** Re-measure the three-axis
+  ranker on the curated gold set (enable `importance_recall` only if it beats baseline, else keep
+  off + document); recalibrate B5 `_FLOOR_SALIENCE` to the real distribution (max ≈6.5) + do the
+  missing #16 audit, then enable `decay`; measure + enable Q1 `salience_gate` and S1
+  `sufficiency_gate`. Keep Q6/S4/S5 OFF. *Deliverable:* gold-set before/after, new floor value,
+  flag states → append an "Enablement log" section here + comment on epic #22.
