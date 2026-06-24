@@ -18,10 +18,8 @@ Public API:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import subprocess
-import sys
 from datetime import datetime, timezone
 
 log = logging.getLogger("mcpbrain.consolidation")
