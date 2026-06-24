@@ -663,3 +663,25 @@ it (`home` selects the config), and corrected the docstring with the A/B numbers
 unchanged for every existing test; the only new capability is the ability to disable + re-index.
 Added `test_index_pending_prepends_contextual_prefix_by_default` and
 `test_index_pending_respects_disable_flag`.
+
+## Default flags flipped ON for all installs (0.7.65, 2026-06-24)
+
+Product decision: the validated brain layer ships ON by default (not per-install opt-in). Flipped
+`config.py` defaults to TRUE: `importance_recall`, `tiered_memory`, `consolidation`,
+`salience_gate`, `sufficiency_gate` (`contextual_retrieval` already on). Each ships with the
+measurement that justified it in its docstring.
+
+To make "default on" actually WORK on a cold-start install (not just flip inert flags):
+- **Wired `seed_core_identity` into `recompute_core`** (it was dead code) — every install now gets
+  a durable identity core block from config day-one, independent of consolidation.
+- **Raised the salience cadence cap 500→5000/run** so a fresh store populates salience in a few
+  runs (~hours) instead of ~160 (the importance axis is only meaningful once salience exists).
+
+HELD OFF (unchanged): `decay` (would cold-tier ~85% without access data), `bandit_auto_apply`,
+`lessons`, `draft_critic`, `retrieval_routing`/`retrieval_rerank`/`retrieval_crag` (regress),
+`schema_grounding`, `write_time_dedup`, `procedural_memory`, `incremental_communities`,
+`drift_monitor`, `importance_llm`.
+
+Caveat to watch: `consolidation` ON means every install's daemon calls its local Claude CLI on a
+schedule (bounded/self-gating, but consumes the subscription). And other corpora weren't gold-set
+validated — the defaults reflect the product owner's decision that the brain layer is the product.

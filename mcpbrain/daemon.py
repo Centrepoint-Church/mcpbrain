@@ -1320,13 +1320,19 @@ class Daemon:
     # -- B3 salience scoring (daily) ------------------------------------------
 
     def _run_salience_score(self) -> dict | None:
-        """Score up to 500 unscored chunks with structural salience (B3)."""
+        """Score unscored chunks with structural salience (B3).
+
+        Catch-up cap of 5000/run: structural scoring is deterministic and cheap
+        (no LLM, ~sub-second for thousands), so a fresh store populates in a
+        handful of runs rather than ~160 at the old 500 cap. importance_recall is
+        on by default, so the importance axis is only meaningful once this has run.
+        """
         if not self._is_due("_salience_score_interval_s", "_last_salience_score"):
             return None
         now = self._clock()
         try:
             from mcpbrain.importance import run_salience_pass
-            summary = run_salience_pass(self._store, str(app_dir()))
+            summary = run_salience_pass(self._store, str(app_dir()), cap=5000)
             log.info("salience_score: scored=%d", summary.get("scored", 0))
         except Exception as exc:  # noqa: BLE001
             log.warning("salience_score failed: %s", exc, exc_info=True)

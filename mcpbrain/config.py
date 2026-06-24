@@ -99,11 +99,13 @@ def salience_gate_enabled(home) -> bool:
     extraction queue; low-salience chunks (tabular Drive files, promotional email)
     are marked 'cold' (embedded/searchable, not graph-extracted).
 
-    Default: False — safe rollout. Enable by setting 'salience_gate': true in
-    config.json. Cold-tier marking is REVERSIBLE: set the flag back to false and
-    reset enrich_state='' on cold chunks to re-queue them.
+    Default: TRUE (shipped on in 0.7.65 — validated on the live store: ~40% of
+    the corpus gated as tabular/low-signal with no recall impact). Set
+    'salience_gate': false in config.json to disable. Cold-tier marking is
+    REVERSIBLE: set the flag back to false and reset enrich_state='' on cold
+    chunks to re-queue them.
     """
-    return bool(read_config(home).get("salience_gate", False))
+    return bool(read_config(home).get("salience_gate", True))
 
 
 def salience_require_drive_mention(home) -> bool:
@@ -138,9 +140,13 @@ def importance_recall_enabled(home) -> bool:
     """Whether B3 three-axis recall (recency + importance) is active.
 
     When True, hybrid_search incorporates salience and recency into ranking.
-    Default: False — safe rollout. Enable via config 'importance_recall': true.
+    Default: TRUE (shipped on in 0.7.65 — validated on the production recall path
+    (exclude_cold=True): MRR 0.483→0.571, recall@10 held). Set 'importance_recall':
+    false in config.json to disable. Needs salience populated to matter; the daemon
+    salience cadence backfills it (catch-up cap), so the importance axis ramps in
+    on a fresh store rather than helping day-one.
     """
-    return bool(read_config(home).get("importance_recall", False))
+    return bool(read_config(home).get("importance_recall", True))
 
 
 def importance_llm_enabled(home) -> bool:
@@ -176,10 +182,13 @@ def tiered_memory_enabled(home) -> bool:
     """Whether B2 tiered memory + always-injected core block is active.
 
     When True, core-tier chunks are prepended to every /api/recall response
-    and cold-tier chunks are excluded from default recall.
-    Default: False — safe rollout. Enable via config 'tiered_memory': true.
+    and cold-tier chunks are excluded from default recall. The tier pass seeds a
+    durable identity core block (seed_core_identity) so the always-injected block
+    is useful day-one, independent of consolidation.
+    Default: TRUE (shipped on in 0.7.65 — cold-exclusion validated net-positive on
+    the production path: MRR 0.322→0.483). Set 'tiered_memory': false to disable.
     """
-    return bool(read_config(home).get("tiered_memory", False))
+    return bool(read_config(home).get("tiered_memory", True))
 
 
 def decay_enabled(home) -> bool:
@@ -197,9 +206,12 @@ def consolidation_enabled(home) -> bool:
 
     When True, the nightly pass clusters high-salience episodic chunks and
     LLM-summarises them into durable semantic notes (via claude CLI).
-    Default: False — safe rollout. Enable via config 'consolidation': true.
+    Default: TRUE (shipped on in 0.7.65). NOTE: this makes the daemon call the
+    user's claude CLI on a schedule — bounded (self-gates on accumulated salience),
+    but it does consume the local Claude subscription. Set 'consolidation': false
+    in config.json to disable.
     """
-    return bool(read_config(home).get("consolidation", False))
+    return bool(read_config(home).get("consolidation", True))
 
 
 def procedural_memory_enabled(home) -> bool:
@@ -348,10 +360,11 @@ def sufficiency_gate_enabled(home) -> bool:
     When True, each batch of recall hits is checked: does this chunk actually
     help answer the query? Hits classified IRRELEVANT are withheld.
 
-    Default: False — safe rollout. Enable via config 'sufficiency_gate': true.
-    The gate fails open (all hits pass) on CLI absence, timeout, or parse error.
+    Default: TRUE (shipped on in 0.7.65 — validated: 0/10 over-abstention on gold
+    queries). Set 'sufficiency_gate': false in config.json to disable. The gate
+    fails open (all hits pass) on CLI absence, timeout, or parse error.
     """
-    return bool(read_config(home).get("sufficiency_gate", False))
+    return bool(read_config(home).get("sufficiency_gate", True))
 
 
 def write_time_dedup_enabled(home) -> bool:
