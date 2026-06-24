@@ -207,12 +207,21 @@ def test_extend_communities_no_data(store, tmp_path, monkeypatch):
 # voice_auto_apply config flag (1d)
 # ---------------------------------------------------------------------------
 
-def test_voice_auto_apply_disabled_by_default(tmp_path):
-    """voice_auto_apply_enabled returns False when not in config."""
+def test_voice_auto_apply_on_by_default(tmp_path):
+    """voice_auto_apply_enabled defaults True when not in config."""
+    from mcpbrain.config import voice_auto_apply_enabled
+    h = str(tmp_path / "home-vdef")
+    os.makedirs(h)
+    (Path(h) / "config.json").write_text(json.dumps({"procedural_memory": True}))
+    assert voice_auto_apply_enabled(h) is True
+
+
+def test_voice_auto_apply_can_be_disabled(tmp_path):
+    """voice_auto_apply_enabled returns False when explicitly disabled."""
     from mcpbrain.config import voice_auto_apply_enabled
     h = str(tmp_path / "home-voff")
     os.makedirs(h)
-    (Path(h) / "config.json").write_text(json.dumps({"procedural_memory": True}))
+    (Path(h) / "config.json").write_text(json.dumps({"voice_auto_apply": False}))
     assert voice_auto_apply_enabled(h) is False
 
 
@@ -261,11 +270,13 @@ def test_daemon_run_voice_analyse_auto_applies_when_flag_set(store, home_proc, m
 
 
 def test_daemon_run_voice_analyse_skips_apply_when_flag_off(store, home_proc, monkeypatch):
-    """_run_voice_analyse does NOT call apply_suggestions when voice_auto_apply is off (default)."""
+    """_run_voice_analyse does NOT call apply_suggestions when voice_auto_apply is off."""
     from mcpbrain import voice_analyser, voice_apply
     import mcpbrain.daemon as daemon_mod
 
-    # home_proc has procedural_memory=True but voice_auto_apply is NOT set → defaults False
+    # voice_auto_apply now defaults ON, so disable it explicitly to test the skip path.
+    (Path(home_proc) / "config.json").write_text(json.dumps(
+        {"procedural_memory": True, "voice_auto_apply": False}))
     monkeypatch.setattr(daemon_mod, "app_dir", lambda: Path(home_proc))
     monkeypatch.setattr(voice_analyser, "maybe_run_analysis", lambda s, h: [{"id": 1}])
 
