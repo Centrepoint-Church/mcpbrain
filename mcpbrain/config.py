@@ -196,9 +196,10 @@ def decay_enabled(home) -> bool:
 
     When True, the nightly decay pass demotes unaccessed low-salience chunks
     to the cold tier. On recall, strength is incremented and last_accessed stamped.
-    Default: TRUE. Set 'decay': false in config.json to disable.
+    Default: False — governed by the auto_enable safety gate, which turns it on
+    only once a dry-run shows it won't gut recall. Enable via config 'decay': true.
     """
-    return bool(read_config(home).get("decay", True))
+    return bool(read_config(home).get("decay", False))
 
 
 def consolidation_enabled(home) -> bool:
