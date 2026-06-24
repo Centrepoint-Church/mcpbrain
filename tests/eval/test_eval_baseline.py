@@ -63,24 +63,30 @@ def test_recall_and_mrr_above_floor(fixture_store):
 # target. Recall is measured DOCUMENT-level (any chunk of the expected doc counts —
 # see gold_eval._doc_key) because mcpbrain re-chunks independently.
 #
+# PRODUCTION PATH: eval uses exclude_cold=True — identical to daemon.search() when
+# tiered_memory is on. Session-2 review found the non-production path (exclude_cold=False)
+# was being used, masking the real user-facing quality. Production path confirmed
+# net-positive: cold-exclusion pushes low-salience noise out of top ranks.
+#
 # Active gold set: golden_retrieval_set_mcpbrain_candidate.yaml (mcpbrain-native,
-# curated 2026-06-24). 20 cases, 20/20 coverable on the live store (80,656 chunks).
+# curated 2026-06-24). 20 cases, 20/20 coverable on the live store (80,705 chunks).
 # Ambiguous clusters resolved: CP College Semester Two invite emails cross-linked
 # (Mitch/Lisa/Joe invitations accept any of the three); Capes financial docs
 # cross-linked (budget/P&L/balance-sheet accept any of the three).
-# Measured 2026-06-24: recall@10=0.750, MRR=0.322 (20 covered cases).
-GOLD_RECALL_FLOOR = 0.55   # measured doc-level baseline 0.750 (20 coverable cases)
-GOLD_MRR_FLOOR = 0.20      # measured baseline 0.322
+# Measured 2026-06-24 (production path, exclude_cold=True): recall@10=0.750, MRR=0.483.
+GOLD_RECALL_FLOOR = 0.55   # measured doc-level baseline 0.750 (production path)
+GOLD_MRR_FLOOR = 0.35      # measured baseline 0.483 (production path); raised from 0.20
 MIN_COVERED = 15           # with 20 cases need at least 15 covered to gate meaningfully
 
 
 def test_gold_recall_floor():
     """Gold set: recall@10 / MRR over COVERABLE cases must clear the floor.
 
-    Skips honestly when there is no real store (CI / fresh install) or when too few
-    gold cases are coverable against the current corpus (mid-backfill) — rather than
-    passing a near-zero floor on uncoverable cases. As backfill fills the corpus,
-    `covered` rises and this test starts gating real retrieval quality.
+    Uses exclude_cold=True — the production path (daemon.search sets this when
+    tiered_memory is on). Skips honestly when there is no real store (CI / fresh
+    install) or when too few gold cases are coverable against the current corpus
+    (mid-backfill). As backfill fills the corpus, `covered` rises and this test
+    starts gating real retrieval quality.
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
@@ -92,7 +98,7 @@ def test_gold_recall_floor():
         pytest.skip("real brain store unavailable or empty")
 
     store, emb = result
-    m = gold_eval(store, emb, k=10)
+    m = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": True})
     print(f"\ngold set: covered {m['covered']}/{m['total']} cases "
           f"({m['missing']} not yet in corpus)")
     if m["covered"] < MIN_COVERED:
@@ -100,7 +106,7 @@ def test_gold_recall_floor():
             f"only {m['covered']}/{m['total']} gold cases coverable against this "
             f"corpus (need >= {MIN_COVERED}); re-run after backfill")
 
-    print(f"gold set (covered): recall@10={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}")
+    print(f"gold set (covered, production path): recall@10={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}")
     assert m["recall_at_k"] >= GOLD_RECALL_FLOOR, (
         f"gold recall@10 {m['recall_at_k']:.3f} below floor {GOLD_RECALL_FLOOR} "
         f"(over {m['covered']} coverable cases)")
@@ -113,15 +119,22 @@ def test_gold_three_axis_importance_recall_stays_off_while_it_regresses():
     three-axis ranker (recency+importance+decay) beat the relevance-only baseline
     on the live gold set? It must stay DEFAULT-OFF until it does.
 
-    MEASURED FINDING (2026-06-23, full salience backfill; re-verified 2026-06-24 on
-    the curated 20-case mcpbrain-native gold set): with salience now populated
-    corpus-wide, the three-axis ranker at these weights REGRESSES doc-level
-    recall@10 on the live gold set vs plain RRF. Structural-only salience is
-    compressed (max ~6.5, no high band) and the weighting is untuned. So the correct
-    conservative state is: `importance_recall` ships DEFAULT-OFF. This test gates
-    that, mirroring the Q6 test — and prints a NOTE if it ever stops regressing so
-    the default can be revisited (with tuned weights / LLM poignancy blend).
-    Read-only: uses whatever salience exists; mutates nothing.
+    Both baseline and three-axis use the PRODUCTION PATH (exclude_cold=True) —
+    the same path daemon.search() uses when tiered_memory is on.
+
+    MEASURED FINDING (2026-06-23, exclude_cold=False path — SUPERSEDED): on the
+    non-production path the three-axis ranker regressed. This was because cold chunks
+    were included and the salience weights were untuned relative to that mix.
+
+    UPDATED FINDING (2026-06-24, PRODUCTION PATH, exclude_cold=True): with cold
+    chunks excluded (the actual user-facing path), the three-axis ranker does NOT
+    regress and improves MRR 0.483→0.571 (+0.088) on the 20-case gold set while
+    recall@10 holds at 0.750. `importance_recall` ENABLED in live config.json.
+
+    The default remains OFF so new installs don't get untuned weights until their
+    corpus has been validated — the assertion guards the default, not the live config.
+    When the NOTE fires (no regression), the live config should have importance_recall
+    enabled. Read-only: uses whatever salience exists; mutates nothing.
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
@@ -132,11 +145,12 @@ def test_gold_three_axis_importance_recall_stays_off_while_it_regresses():
         pytest.skip("real brain store unavailable or empty")
     store, emb = result
 
-    base = gold_eval(store, emb, k=10)
+    base = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": True})
     if base["covered"] < MIN_COVERED:
         pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
 
     on = gold_eval(store, emb, k=10, search_kwargs={
+        "exclude_cold": True,
         "recency_weight": 0.15, "importance_weight": 0.10,
         "decay_weight": 0.10, "recency_alpha": 0.01})
 

@@ -2230,7 +2230,7 @@ class Store:
             rows = db.execute(
                 "SELECT doc_id, text, metadata FROM chunks "
                 "WHERE memory_tier='core' AND COALESCE(enrich_state,'')!='cold' "
-                "ORDER BY rowid DESC",
+                "ORDER BY COALESCE(salience,0.0) DESC, rowid DESC",
             ).fetchall()
         result = []
         total = 0

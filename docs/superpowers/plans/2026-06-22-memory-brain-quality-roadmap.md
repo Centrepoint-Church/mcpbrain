@@ -503,3 +503,123 @@ notes from Josh's recent email cluster — useful but narrow. More passes → br
    always-on block is useful, not transient.
 
 Session 3 to follow (B3/B5 + Q1/S1, preceded by the two fixes above).
+
+---
+
+## Enablement log — 2026-06-24 (Session 3)
+
+Branch `session1-gold-set-foundation`. All measurements on the **production path
+(`exclude_cold=True`)** — the path `daemon.search()` uses when `tiered_memory` is on.
+Gold set: 20-case mcpbrain-native set, 20/20 coverable.
+
+### Prereq 0a — Production eval path corrected ✅
+
+`test_gold_recall_floor` and the B3 gating test now pass `exclude_cold=True` to
+`gold_eval`. GOLD_MRR_FLOOR raised 0.20 → 0.35 to reflect the production-path
+baseline (MRR=0.483 vs prior 0.322 on the cold-inclusive path). Recall floor
+unchanged at 0.55 (production-path recall=0.750, same as non-production).
+
+### Prereq 0b — B4 clustering quality + core seeding ✅
+
+**Clustering fix:** `_cluster_by_embedding` threshold raised 0.55 → 0.75; cluster
+size capped at 10 (`_MAX_CLUSTER_SIZE`). One consolidation pass over the 50 highest-
+salience episodic chunks → **6 clusters → 5 topically coherent notes written**
+(all about Centrepoint College recurring schedule, different time windows; 5th cluster
+had < `_MIN_CLUSTER_SIZE` chunks after capping). Citation check on 3 notes: all cited
+source IDs are present and content is grounded — PASS. No grab-bag merge.
+
+**Core seeding:** `seed_core_identity(store, home)` added to `memory_tier.py`.
+Synthesises durable identity note from `config.json` owner fields + `records/context/identity.md`,
+writes as `note-core-identity-seed` (stable doc_id, idempotent), `memory_type='semantic'`,
+`salience=6.5`. `core_chunks` ordering changed to `salience DESC` so the identity seed
+always appears first in the always-injected block.
+
+`/api/core` block now leads with:
+```
+- Joshua Kemp — Operations Manager at Centrepoint Church, Courageous Church, ACC
+  Email: josh.k@centrepoint.church
+```
+followed by the Session-2 grab-bag note (salience=3.0) and one college-schedule note.
+Core tier size: 8 (identity seed + 7 semantic notes). **No recall regression.**
+
+**Gold eval after prereqs:** recall@10=0.750 / MRR=0.483 (production path) — unchanged.
+
+### B3 — Three-axis ranker (importance_recall) ✅ ENABLED
+
+| Path | recall@10 | MRR | covered |
+|---|---|---|---|
+| Baseline (production, `exclude_cold=True`) | 0.750 | 0.483 | 20 |
+| + three-axis weights | 0.750 | **0.571** | 20 |
+| Delta | +0.000 | **+0.088** | — |
+
+On the production path the three-axis ranker does **not regress recall and lifts MRR
+by +0.088** (+18%). Prior finding (Session 2 review) that it regressed was on the
+non-production path (`exclude_cold=False`). Flag: **`importance_recall: true`** set in
+`config.json`. `importance_llm` stays OFF (structural salience sufficient for this win).
+
+### B5 — Decay floor recalibrated ✅ / Decay flag HELD
+
+**Floor recalibrated:** `_FLOOR_SALIENCE` 7.0 → **6.0** in `decay.py`.
+B5 audit (2026-06-24): corpus 80,705 chunks, max salience=7.0 (1 chunk), 48 chunks
+at ≥6.0 (0.06%). At 7.0 the floor exempted only 1 chunk; at 6.0 it protects the
+genuine high-salience band (consolidated semantic notes + identity seed + recent
+owner-authored content with engagement signals).
+
+**Decay flag HELD (not enabled):** Dry-run shows 85% of corpus (≈67,855 / 80,000)
+would decay to cold in one pass. Root cause: 0 chunks have `last_accessed` data
+(the quote-back accept signal has not yet accumulated real events), so all aging is
+anchored on source-date. With strength=5.0 (initial) any chunk older than ~7 days
+would decay (R < 0.25). Additionally, 4 of 35 gold-set expected chunks would decay,
+risking recall regression that cannot be measured without running the pass. Decision:
+enable decay after the quote-back signal accumulates meaningful `last_accessed` data
+and the impact on the gold set can be validated. The never-accessed fix (source-date
+anchor) and the floor recalibration are shipped; only the flag is held.
+Flag: **`decay`: OFF** (unchanged).
+
+### Q1 — Salience gate ✅ ENABLED
+
+Measured gated-vs-kept on a 10,000-chunk random sample of the live corpus:
+- Kept: 6,006 (60.1%) — prose email + Drive documents
+- Gated: 3,994 (39.9%) — almost entirely `gdrive` tabular/short-text files
+- Extrapolated to corpus: ≈32,233 / 80,705 chunks would be gated from re-extraction
+
+The cut is sane: the gate prevents re-LLM-extraction of spreadsheets, CSVs, and
+near-empty Drive stubs. Gated chunks stay embedded and searchable (`enrich_state='cold'`
+≠ `memory_tier='cold'`; does not affect recall at query time). `salience_require_drive_mention`
+stays OFF (mcpbrain holds valuable un-emailed docs that would be wrongly excluded).
+Gold eval unchanged (gate affects extraction queue only, not recall).
+Flag: **`salience_gate: true`** set in `config.json`.
+
+### S1 — Sufficiency gate ✅ ENABLED
+
+Claude CLI confirmed available: `/Users/joshkemp/.local/bin/claude` v2.1.187.
+Gate design: NLI-style batch call, permissive (defaults `relevant=true` on uncertainty),
+fails-open on CLI absence / timeout / parse failure, never returns empty.
+Withhold-rate: to be monitored from daemon logs (`sufficiency gate: kept N/M hits`).
+Flag: **`sufficiency_gate: true`** set in `config.json`.
+
+### HELD (do not enable)
+
+| Feature | Flag | Reason held |
+|---|---|---|
+| Q6 routing/rerank | `retrieval_routing`, `retrieval_rerank` | Measured regression 0.750→? (token-overlap reranker weaker than plain RRF); needs real cross-encoder |
+| S4 bandit auto-apply | `bandit_auto_apply` | 0 real accept events; would tune from noise |
+| S5 lessons | `lessons` | 0 real accept events; verifier is same model (not independent) |
+| B5 decay | `decay` | 0 `last_accessed` data; 85% corpus would decay immediately; 4 gold expected docs affected |
+
+### Final live config.json flag states
+
+```
+consolidation:     true   (Session 2)
+tiered_memory:     true   (Session 2)
+importance_recall: true   (Session 3, measured +0.088 MRR on production path)
+salience_gate:     true   (Session 3, 40% cut — sane)
+sufficiency_gate:  true   (Session 3, CLI confirmed, fails-open)
+decay:             OFF    (floor recalibrated; flag held pending access data)
+importance_llm:    OFF    (structural salience sufficient)
+retrieval_routing: OFF    (regresses)
+retrieval_rerank:  OFF    (regresses)
+bandit_auto_apply: OFF    (no real signal)
+lessons:           OFF    (no real signal)
+write_time_dedup:  OFF    (not validated)
+```
