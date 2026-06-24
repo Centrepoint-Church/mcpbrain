@@ -91,6 +91,86 @@ def demote_to_cold(store, doc_ids: list[str]) -> int:
 
 _MAX_CORE_ITEMS = 12
 
+_IDENTITY_SEED_DOC_ID = "note-core-identity-seed"
+_IDENTITY_SEED_SALIENCE = 6.5  # high band — durable identity is the most stable fact we hold
+
+
+def seed_core_identity(store, home: str) -> int:
+    """Write a stable identity/standing-commitment chunk as a core-tier semantic note.
+
+    Sources: config.json owner fields + records/context/identity.md. The chunk
+    has a fixed doc_id so it is idempotent (upsert overwrites on re-run). Salience
+    is set explicitly to _IDENTITY_SEED_SALIENCE (high band) so recompute_core
+    always picks it up as a top core candidate.
+
+    This is the B4/B2 fix from Session 3: the original core note was a grab-bag
+    of transient ops-email. Durable identity content (who Josh is, what org, contact)
+    should always be in the always-injected block, independent of what the
+    consolidation cadence happens to have summarised most recently.
+
+    Returns 1 if the seed was written, 0 if there was no content to write.
+    """
+    import hashlib
+    import json as _json
+    from pathlib import Path
+
+    from mcpbrain import config
+
+    cfg = config.read_config(home)
+    lines = []
+
+    # Owner identity from config
+    name = cfg.get("owner_full_name") or cfg.get("owner_name") or ""
+    role = cfg.get("owner_role") or ""
+    email = cfg.get("owner_email") or ""
+    orgs = [o.get("name", "") for o in (cfg.get("orgs") or []) if o.get("name")]
+
+    if name:
+        line = name
+        if role:
+            line += f" — {role}"
+        if orgs:
+            line += f" at {', '.join(orgs)}"
+        lines.append(line)
+    if email:
+        lines.append(f"Email: {email}")
+
+    # Standing content from identity.md (skip headers, HTML comments, placeholders)
+    identity_path = Path(home) / "records" / "context" / "identity.md"
+    if identity_path.exists():
+        raw = identity_path.read_text()
+        in_comment = False
+        for ln in raw.splitlines():
+            stripped = ln.strip()
+            # Track multi-line HTML comments
+            if "<!--" in stripped:
+                in_comment = True
+            if in_comment:
+                if "-->" in stripped:
+                    in_comment = False
+                continue
+            if (not stripped or stripped.startswith("#")
+                    or stripped.startswith("(") or stripped.startswith("*")):
+                continue
+            lines.append(stripped)
+
+    if not lines:
+        return 0
+
+    text = "\n".join(lines)
+    content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+    metadata = {
+        "observation_type": "identity_seed",
+        "source": "config+identity.md",
+    }
+    store.upsert_chunk(_IDENTITY_SEED_DOC_ID, text, content_hash, metadata)
+    store.set_chunk_type(_IDENTITY_SEED_DOC_ID, "semantic")
+    store.set_chunk_tier(_IDENTITY_SEED_DOC_ID, "core")
+    store.set_chunk_salience(_IDENTITY_SEED_DOC_ID, _IDENTITY_SEED_SALIENCE)
+    log.info("memory_tier: identity seed written (%d chars, salience=%.1f)",
+             len(text), _IDENTITY_SEED_SALIENCE)
+    return 1
+
 
 def recompute_core(store, home: str, *, max_items: int = _MAX_CORE_ITEMS) -> int:
     """Recompute the 'core' tier — the always-injected durable facts.

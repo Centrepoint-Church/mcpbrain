@@ -29,6 +29,9 @@ log = logging.getLogger("mcpbrain.consolidation")
 CONSOLIDATION_THRESHOLD = 50.0   # accumulated salience to trigger a pass
 _MAX_CLUSTER_CHARS = 3000        # max text per cluster fed to the LLM
 _MIN_CLUSTER_SIZE = 3            # skip tiny clusters (likely noise)
+_MAX_CLUSTER_SIZE = 10           # cap per cluster — prevents grab-bag merges when a
+                                 # large cohort of similar-source chunks (e.g. one week
+                                 # of ops-email) would otherwise collapse into one note
 _CONSOLIDATION_CAP = 5           # max clusters per nightly pass
 
 
@@ -219,13 +222,19 @@ def _episodic_chunks_for_consolidation(store, cap: int) -> list[dict]:
 
 
 def _cluster_by_embedding(chunks: list[dict], embedder, *,
-                          threshold: float = 0.55) -> list[list[dict]] | None:
+                          threshold: float = 0.75) -> list[list[dict]] | None:
     """Cluster chunks by cosine similarity on their bge embeddings (single-link).
 
     Reuses the same local embedder the store uses, so clusters reflect semantic
     similarity — far better than word-overlap for paraphrases / short notes. bge
     vectors are unit-normalised, so dot product == cosine. Returns None on any
     embedding failure so the caller falls back to the lexical clusterer.
+
+    Threshold raised from 0.55 → 0.75 (Session 3, 2026-06-24): at 0.55 a cohort of
+    ops-emails from the same week all merged into a single grab-bag cluster. 0.75
+    requires tight topical similarity — loose thematic affinity alone won't merge.
+    Clusters exceeding _MAX_CLUSTER_SIZE are split in salience-rank order so each
+    note covers a coherent sub-topic rather than a digest of many unrelated events.
     """
     texts = [c.get("text") or "" for c in chunks]
     try:
@@ -246,8 +255,22 @@ def _cluster_by_embedding(chunks: list[dict], embedder, *,
     by_label: dict[int, list] = {}
     for i, lb in enumerate(labels):
         by_label.setdefault(lb, []).append(chunks[i])
-    clusters = sorted(by_label.values(), key=len, reverse=True)
-    return [c for c in clusters if len(c) >= _MIN_CLUSTER_SIZE]
+    raw_clusters = sorted(by_label.values(), key=len, reverse=True)
+
+    # Cap cluster size: split oversized clusters into sub-clusters of _MAX_CLUSTER_SIZE.
+    # Chunks within a cluster are already ordered by salience (from the source query),
+    # so slicing preserves the highest-salience members in each sub-cluster.
+    result = []
+    for cluster in raw_clusters:
+        if len(cluster) <= _MAX_CLUSTER_SIZE:
+            if len(cluster) >= _MIN_CLUSTER_SIZE:
+                result.append(cluster)
+        else:
+            for start in range(0, len(cluster), _MAX_CLUSTER_SIZE):
+                sub = cluster[start: start + _MAX_CLUSTER_SIZE]
+                if len(sub) >= _MIN_CLUSTER_SIZE:
+                    result.append(sub)
+    return result
 
 
 def _cluster(chunks: list[dict], embedder=None) -> list[list[dict]]:

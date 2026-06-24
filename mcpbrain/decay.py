@@ -30,7 +30,14 @@ from email.utils import parsedate_to_datetime
 log = logging.getLogger("mcpbrain.decay")
 
 _COLD_THRESHOLD = 0.25   # R below this → cold (demote from default recall)
-_FLOOR_SALIENCE = 7.0    # chunks with salience >= this are exempt from demotion
+_FLOOR_SALIENCE = 6.0    # chunks with salience >= this are exempt from demotion.
+                         # B5 audit (2026-06-24): live corpus max salience = 7.0 but
+                         # only 1 chunk reaches it (the first consolidated note); 48
+                         # chunks are >= 6.0 (0.06% of 80,705). The original 7.0
+                         # floor effectively exempted nothing. 6.0 protects the true
+                         # high-salience band (consolidated semantic notes + the
+                         # freshest, highest-engagement owner-authored content) while
+                         # letting lower-ranked chunks decay normally.
 _INITIAL_STRENGTH = 5.0  # strength for a never-recalled chunk
 
 
