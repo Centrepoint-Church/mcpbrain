@@ -83,6 +83,31 @@ _APPROVED_ATTRIBUTION_SOURCES = frozenset({
     "owner_statement", "signature", "owner_confirmation"
 })
 
+# Sources that must be backed by a stored chunk the quote can be checked against.
+# owner_confirmation is the live human-in-the-loop escape — no stored doc to verify.
+_STORE_BACKED_SOURCES = frozenset({"owner_statement", "signature"})
+
+
+def _normalise_for_match(s: str) -> str:
+    """Lowercase + collapse all whitespace, for tolerant substring matching."""
+    return " ".join(s.lower().split())
+
+
+def verify_attribution_quote(quote: str, source_text: str) -> str | None:
+    """Check a role-attribution quote is genuinely present in its cited source.
+
+    Pure (no store) so it is trivially testable: the caller fetches source_text by
+    doc_id and passes it in. Matching is whitespace/case-insensitive substring —
+    forgiving of reflow, strict about content. Returns None when the quote checks
+    out, else a human-readable error explaining the rejection.
+    """
+    if not quote.strip():
+        return "attribution_quote is required to back a person-role claim"
+    if _normalise_for_match(quote) not in _normalise_for_match(source_text):
+        return ("attribution_quote not found in the cited source — do not attribute "
+                "a role unless the source text actually contains it")
+    return None
+
 
 def _changed_line_count(old: str, new: str) -> int:
     """Number of added + removed lines between old and new content.
@@ -142,6 +167,7 @@ def write_gardener_reference(repo: str, filename: str, new_content: str, *,
 def write_gardener_context(repo: str, filename: str, new_content: str, *,
                            asserts_person_role: bool = False,
                            attribution_source: str | None = None,
+                           attribution_doc_id: str | None = None,
                            max_changed_lines: int | None = None) -> bool:
     """Write context/<filename> for the constitution lane.
 
@@ -152,6 +178,10 @@ def write_gardener_context(repo: str, filename: str, new_content: str, *,
     from text you wrote or inferred from context; only from their own statement,
     signature, or owner confirmation. Updates that assert no person role (e.g. a
     preferences or own-responsibilities change) need no attribution_source.
+
+    The *quote* behind a role claim is verified against the cited source one layer
+    up (brain_gardener_apply, which has the store); this writer records the cited
+    source in the commit message so every attribution is auditable in git log.
 
     filename must be a plain basename. The file must already exist. max_changed_lines
     caps the per-run change size. Commits with tag 'gardener: update
@@ -173,8 +203,13 @@ def write_gardener_context(repo: str, filename: str, new_content: str, *,
         new_content += "\n"
     _enforce_change_cap(p, new_content, max_changed_lines)
     p.write_text(new_content)
-    return _commit_file(repo, f"context/{filename}",
-                        "gardener: update identity/preferences")
+    message = "gardener: update identity/preferences"
+    if asserts_person_role:
+        prov = f"role via {attribution_source}"
+        if attribution_doc_id:
+            prov += f" @{attribution_doc_id}"
+        message += f" [{prov}]"
+    return _commit_file(repo, f"context/{filename}", message)
 
 
 def write_memory(repo: str, *, slug: str, description: str, body: str,

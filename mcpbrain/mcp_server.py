@@ -307,18 +307,25 @@ def make_brain_memory_write():
     return brain_memory_write
 
 
-def make_brain_gardener_apply():
+def make_brain_gardener_apply(store):
     async def brain_gardener_apply(lane: str, filename: str, content: str,
                                    asserts_person_role: bool = False,
-                                   attribution_source: str = "") -> dict:
+                                   attribution_source: str = "",
+                                   attribution_quote: str = "",
+                                   attribution_doc_id: str = "") -> dict:
         """Apply a reference-gardener change directly to the records repo, through the
         deterministic guard. NOT queued — the write + commit happen synchronously so the
         gardener gets immediate enforcement feedback.
 
         lane: 'reference' (drift) or 'context' (constitution). filename: basename of an
-        existing file in that dir. content: full new file content. asserts_person_role:
-        set True only when the update assigns a role/title to a person — then
-        attribution_source must be 'owner_statement' | 'signature' | 'owner_confirmation'.
+        existing file in that dir. content: full new file content.
+
+        Person-role claims are VERIFIED, not just labelled. When asserts_person_role is
+        True: attribution_source must be 'owner_statement' | 'signature' |
+        'owner_confirmation', and attribution_quote (verbatim supporting text) is
+        required. For owner_statement/signature, attribution_doc_id must point at a stored
+        chunk and the quote is checked to actually appear in it — a fabricated or inferred
+        attribution is rejected. owner_confirmation needs only the confirmed quote.
         Returns {"applied": bool, "committed": bool} or {"applied": False, "error": ...}.
         """
         import subprocess
@@ -331,10 +338,16 @@ def make_brain_gardener_apply():
                 committed = records_write.write_gardener_reference(
                     repo, filename, content, max_changed_lines=cap)
             elif lane == "context":
+                if asserts_person_role:
+                    err = _verify_role_attribution(
+                        store, attribution_source, attribution_quote, attribution_doc_id)
+                    if err:
+                        return {"applied": False, "error": err}
                 committed = records_write.write_gardener_context(
                     repo, filename, content,
                     asserts_person_role=asserts_person_role,
                     attribution_source=(attribution_source or None),
+                    attribution_doc_id=(attribution_doc_id or None),
                     max_changed_lines=cap)
             else:
                 return {"applied": False, "error": f"unknown lane {lane!r} "
@@ -348,6 +361,28 @@ def make_brain_gardener_apply():
             # run rather than crashing the tool call.
             return {"applied": False, "error": f"git busy (retry next run): {exc}"}
     return brain_gardener_apply
+
+
+def _verify_role_attribution(store, source: str, quote: str, doc_id: str) -> str | None:
+    """Verify a person-role attribution before it is written. Returns an error string
+    to reject, or None to allow. Enforces the enum (defence-in-depth — the writer
+    checks too) and verifies the quote against the cited stored source."""
+    from mcpbrain import records_write
+    if source not in records_write._APPROVED_ATTRIBUTION_SOURCES:
+        return (f"Role attribution source {source!r} is not permitted. Approved: "
+                f"{sorted(records_write._APPROVED_ATTRIBUTION_SOURCES)}.")
+    if source in records_write._STORE_BACKED_SOURCES:
+        if not doc_id:
+            return (f"attribution_doc_id is required for a {source} role claim — cite the "
+                    "stored chunk that contains the supporting text")
+        chunk = store.get_chunk(doc_id)
+        if not chunk:
+            return f"attribution_doc_id {doc_id!r} not found in the store"
+        return records_write.verify_attribution_quote(quote, chunk.get("text", ""))
+    # owner_confirmation: live human-in-the-loop; require the confirmed text, no store doc.
+    if not quote.strip():
+        return "attribution_quote (the confirmed statement) is required for owner_confirmation"
+    return None
 
 
 def make_brain_draft_context(store, home: str):
@@ -693,7 +728,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     decision = make_brain_decision()
     note = make_brain_note()
     memory_write = make_brain_memory_write()
-    gardener_apply = make_brain_gardener_apply()
+    gardener_apply = make_brain_gardener_apply(store)
     # Draft tools write to draft_records, so they need a writable store handle.
     # the read-only store cannot INSERT; this writable handle is scoped to draft_records
     # writes by the MCP server (serialised via WAL + busy_timeout).
@@ -945,7 +980,12 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                         "asserts_person_role": {"type": "boolean", "default": False,
                                                 "description": "True only if assigning a role/title to a person"},
                         "attribution_source": {"type": "string",
-                                               "description": "required when asserts_person_role: owner_statement|signature|owner_confirmation"},
+                                               "enum": ["owner_statement", "signature", "owner_confirmation"],
+                                               "description": "required when asserts_person_role"},
+                        "attribution_quote": {"type": "string",
+                                              "description": "verbatim supporting text; required for a role claim and verified against the cited source"},
+                        "attribution_doc_id": {"type": "string",
+                                               "description": "stored chunk id the quote lives in; required for owner_statement/signature"},
                     },
                     "required": ["lane", "filename", "content"],
                 },
@@ -1125,6 +1165,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 content=arguments.get("content", ""),
                 asserts_person_role=bool(arguments.get("asserts_person_role", False)),
                 attribution_source=arguments.get("attribution_source", ""),
+                attribution_quote=arguments.get("attribution_quote", ""),
+                attribution_doc_id=arguments.get("attribution_doc_id", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_draft_context":

@@ -103,13 +103,21 @@ brain_gardener_apply(
   # Set these ONLY when the update assigns a role/title to a PERSON:
   asserts_person_role=true,
   attribution_source="owner_statement | signature | owner_confirmation",
+  attribution_quote="<verbatim text from the source that states the role>",
+  attribution_doc_id="<doc_id of the chunk that quote lives in>",  # owner_statement/signature
 )
 ```
 
 Leave `asserts_person_role` unset (false) for preferences, your own responsibilities, or
-any update that makes no person-role claim — those need no attribution source. If a write
-*does* assert someone's role and you cannot cite an approved source, the tool will reject
-it with a ValueError — that is the rule working; leave the role out.
+any update that makes no person-role claim — those need no attribution.
+
+When you *do* assert someone's role, the claim is **verified, not trusted**: pass the
+verbatim `attribution_quote` and, for `owner_statement`/`signature`, the `attribution_doc_id`
+of the stored chunk it came from (use the doc_ids from your `brain_search`/`brain_graph`
+evidence). The tool fetches that chunk and rejects the write if the quote is not actually in
+it. `owner_confirmation` is only for a role the owner confirmed to you directly this session —
+pass the confirmed wording as the quote. If you cannot cite a real source, **leave the role
+out** — a missing role is better than a wrong one.
 
 **Write a changelog** (what was applied, not what to approve):
 
