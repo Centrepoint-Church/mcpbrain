@@ -203,6 +203,89 @@ def test_extend_communities_no_data(store, tmp_path, monkeypatch):
     assert result is None or isinstance(result, dict)
 
 
+# ---------------------------------------------------------------------------
+# voice_auto_apply config flag (1d)
+# ---------------------------------------------------------------------------
+
+def test_voice_auto_apply_disabled_by_default(tmp_path):
+    """voice_auto_apply_enabled returns False when not in config."""
+    from mcpbrain.config import voice_auto_apply_enabled
+    h = str(tmp_path / "home-voff")
+    os.makedirs(h)
+    (Path(h) / "config.json").write_text(json.dumps({"procedural_memory": True}))
+    assert voice_auto_apply_enabled(h) is False
+
+
+def test_voice_auto_apply_enabled_with_flag(tmp_path):
+    """voice_auto_apply_enabled returns True when config flag is set."""
+    from mcpbrain.config import voice_auto_apply_enabled
+    h = str(tmp_path / "home-von")
+    os.makedirs(h)
+    (Path(h) / "config.json").write_text(json.dumps({
+        "procedural_memory": True,
+        "voice_auto_apply": True,
+    }))
+    assert voice_auto_apply_enabled(h) is True
+
+
+def test_daemon_run_voice_analyse_auto_applies_when_flag_set(store, home_proc, monkeypatch):
+    """_run_voice_analyse calls apply_suggestions when voice_auto_apply is on."""
+    import json as _json
+    from mcpbrain import voice_analyser, voice_apply
+    import mcpbrain.daemon as daemon_mod
+
+    cfg = _json.loads((Path(home_proc) / "config.json").read_text())
+    cfg["voice_auto_apply"] = True
+    (Path(home_proc) / "config.json").write_text(_json.dumps(cfg))
+
+    monkeypatch.setattr(daemon_mod, "app_dir", lambda: Path(home_proc))
+    monkeypatch.setattr(voice_analyser, "maybe_run_analysis", lambda s, h: [{"id": 1}])
+
+    apply_called = []
+    monkeypatch.setattr(
+        voice_apply, "apply_suggestions",
+        lambda s, h, **kw: apply_called.append(True) or {
+            "applied": 0, "skipped": 0, "blocked": "cooldown active — 3.0d remaining"
+        },
+    )
+
+    class _FakeDaemon:
+        _store = store
+        _last_voice_analyse = None
+        _voice_analyse_interval_s = 1.0
+        _clock = staticmethod(lambda: 99999.0)
+        def _is_due(self, *_): return True
+
+    daemon_mod.Daemon._run_voice_analyse(_FakeDaemon())
+    assert apply_called, "apply_suggestions not triggered with voice_auto_apply=True"
+
+
+def test_daemon_run_voice_analyse_skips_apply_when_flag_off(store, home_proc, monkeypatch):
+    """_run_voice_analyse does NOT call apply_suggestions when voice_auto_apply is off (default)."""
+    from mcpbrain import voice_analyser, voice_apply
+    import mcpbrain.daemon as daemon_mod
+
+    # home_proc has procedural_memory=True but voice_auto_apply is NOT set → defaults False
+    monkeypatch.setattr(daemon_mod, "app_dir", lambda: Path(home_proc))
+    monkeypatch.setattr(voice_analyser, "maybe_run_analysis", lambda s, h: [{"id": 1}])
+
+    apply_called = []
+    monkeypatch.setattr(
+        voice_apply, "apply_suggestions",
+        lambda s, h, **kw: apply_called.append(True) or {},
+    )
+
+    class _FakeDaemon:
+        _store = store
+        _last_voice_analyse = None
+        _voice_analyse_interval_s = 1.0
+        _clock = staticmethod(lambda: 99999.0)
+        def _is_due(self, *_): return True
+
+    daemon_mod.Daemon._run_voice_analyse(_FakeDaemon())
+    assert not apply_called, "apply_suggestions called despite voice_auto_apply being off"
+
+
 def test_extend_communities_delegates_to_full_run_on_empty_graph(store, tmp_path, monkeypatch):
     """extend_communities falls back to full run() when there are no prior communities."""
     from mcpbrain import communities

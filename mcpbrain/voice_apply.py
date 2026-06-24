@@ -36,7 +36,8 @@ def _now_iso() -> str:
 
 
 def _voice_path(home: str) -> Path:
-    return Path(home) / _VOICE_FILENAME
+    from mcpbrain import config as _cfg
+    return Path(_cfg.records_dir(home)) / "context" / _VOICE_FILENAME
 
 
 def can_apply(store, home: str) -> tuple[bool, str]:
@@ -128,5 +129,16 @@ def apply_suggestions(store, home: str,
         summary=f"Applied {len(pending)} voice suggestions to voice.md",
         source="voice_apply",
     )
+
+    # Commit voice.md to the records git repo (git is the safety net for auto-apply).
+    try:
+        from mcpbrain import config as _cfg
+        from mcpbrain.records_write import _commit_file
+        records = _cfg.records_dir(home)
+        _commit_file(records, "context/voice.md",
+                     f"voice: applied {len(pending)} voice suggestions")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("voice_apply: git commit failed (suggestions still applied): %s", exc)
+
     log.info("voice_apply: applied %d suggestions", len(pending))
     return {"applied": len(pending), "skipped": 0, "blocked": None}
