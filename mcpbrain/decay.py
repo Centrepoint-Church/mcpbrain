@@ -116,7 +116,7 @@ def update_on_recall(store, doc_ids: list[str],
 
 
 def apply_decay_pass(store, home: str, *,
-                     now: str | None = None) -> dict:
+                     now: str | None = None, dry_run: bool = False) -> dict:
     """Evaluate decay for all eligible chunks; demote those below threshold.
 
     Eligible = embedded + not 'core' tier.
@@ -125,9 +125,15 @@ def apply_decay_pass(store, home: str, *,
     in memory_strength for future auditing).
 
     Returns {"evaluated": N, "demoted": M, "exempt": K}.
+
+    dry_run=True: a PROJECTION — bypasses the decay_enabled gate (so the
+    auto-enabler can ask "what would decay do here?" while the flag is still off),
+    evaluates the whole corpus, writes NOTHING, and returns
+    {"evaluated": N, "would_demote": M, "exempt": K, "fraction": M/N}. This is the
+    safety check that prevents auto-enabling decay when it would gut recall.
     """
     from mcpbrain import config
-    if not config.decay_enabled(home):
+    if not dry_run and not config.decay_enabled(home):
         return {"evaluated": 0, "demoted": 0, "exempt": 0}
 
     ts = now or _now_iso()
@@ -135,7 +141,8 @@ def apply_decay_pass(store, home: str, *,
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=timezone.utc)
 
-    chunks = store.chunks_for_decay_pass(limit=5000)
+    # Projection evaluates the whole corpus; the live pass is bounded per run.
+    chunks = store.chunks_for_decay_pass(limit=500000 if dry_run else 5000)
     to_demote = []
     exempt = 0
 
@@ -171,6 +178,12 @@ def apply_decay_pass(store, home: str, *,
 
         if r < _COLD_THRESHOLD:
             to_demote.append(doc_id)
+
+    if dry_run:
+        evaluated = len(chunks)
+        return {"evaluated": evaluated, "would_demote": len(to_demote),
+                "exempt": exempt,
+                "fraction": (len(to_demote) / evaluated) if evaluated else 0.0}
 
     demoted = 0
     if to_demote:

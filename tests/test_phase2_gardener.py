@@ -22,13 +22,13 @@ def _fake_records_full(tmp_path):
 # 2a: config flag
 # ---------------------------------------------------------------------------
 
-def test_gardener_auto_apply_disabled_default(tmp_path):
-    assert config.gardener_auto_apply_enabled(str(tmp_path)) is False
-
-
-def test_gardener_auto_apply_enabled_via_config(tmp_path):
-    config.write_config(str(tmp_path), {"gardener_auto_apply": True})
+def test_gardener_auto_apply_on_by_default(tmp_path):
     assert config.gardener_auto_apply_enabled(str(tmp_path)) is True
+
+
+def test_gardener_auto_apply_can_be_disabled(tmp_path):
+    config.write_config(str(tmp_path), {"gardener_auto_apply": False})
+    assert config.gardener_auto_apply_enabled(str(tmp_path)) is False
 
 
 # ---------------------------------------------------------------------------

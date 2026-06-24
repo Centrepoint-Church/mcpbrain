@@ -173,6 +173,9 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # S4/S5 self-improvement: weekly drift check + bandit advisory + lessons.
     CadencePass("self_improve", "_self_improve_interval_s",
                 "_last_self_improve", "_run_self_improve"),
+    # Auto-graduation: flip data-gated flags (bandit/lessons/decay) ON when ready.
+    CadencePass("auto_enable", "_auto_enable_interval_s",
+                "_last_auto_enable", "_run_auto_enable"),
 )
 
 
@@ -506,6 +509,9 @@ class Daemon:
         # S4/S5 self-improvement: weekly drift check + bandit advisory + lessons.
         self._self_improve_interval_s: float | None = None
         self._last_self_improve = None
+        # Auto-graduation cadence: flip data-gated brain flags ON when ready.
+        self._auto_enable_interval_s: float | None = None
+        self._last_auto_enable = None
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
@@ -849,6 +855,7 @@ class Daemon:
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
             self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
             self._self_improve_interval_s = cadences["self_improve_interval_s"]
+            self._auto_enable_interval_s = cadences["auto_enable_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -1487,6 +1494,26 @@ class Daemon:
         self._last_self_improve = now
         return summary or None
 
+    # -- Auto-graduation (flip data-gated flags ON when ready) ----------------
+
+    def _run_auto_enable(self) -> dict | None:
+        """Graduate data-gated flags (bandit/lessons/decay) once their readiness
+        condition is genuinely met. Deterministic gates + a decay safety dry-run;
+        only flips flags absent from config.json (never overrides the user)."""
+        if not self._is_due("_auto_enable_interval_s", "_last_auto_enable"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain.auto_enable import auto_enable_pass
+            summary = auto_enable_pass(self._store, str(app_dir()))
+            if summary.get("enabled"):
+                log.info("auto_enable: graduated %s", summary["enabled"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto_enable failed: %s", exc, exc_info=True)
+            return {"auto_enable": False, "error": str(exc)}
+        self._last_auto_enable = now
+        return summary
+
     # -- Q4 org backfill (deterministic) --------------------------------------
 
     def _run_org_backfill(self) -> dict | None:
@@ -1974,6 +2001,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
     "voice_analyse_interval_s":       604800.0,  # B6: weekly voice analysis
     "self_improve_interval_s":        604800.0,  # S4/S5: weekly drift+bandit+lessons
+    "auto_enable_interval_s":         86400.0,    # auto-graduation: daily readiness check
     "synthesise_interval_s":          604800.0,
     "audit_interval_s":               604800.0,
     "verify_interval_s":              3600.0,
@@ -1998,6 +2026,7 @@ _CADENCE_KEYS = (
     "consolidation_interval_s",
     "voice_analyse_interval_s",
     "self_improve_interval_s",
+    "auto_enable_interval_s",
 )
 
 
@@ -2088,6 +2117,7 @@ def main(argv=None) -> None:
     daemon._consolidation_interval_s = cadences["consolidation_interval_s"]
     daemon._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
     daemon._self_improve_interval_s = cadences["self_improve_interval_s"]
+    daemon._auto_enable_interval_s = cadences["auto_enable_interval_s"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle

@@ -694,3 +694,24 @@ properly: `_run_salience_score` now LOOPS (5000-chunk batches) until the backlog
 first daily salience pass scores the whole store (~1.6s for 80k, deterministic, no LLM). The
 importance axis is therefore fully effective within ~a day of upgrade, not weeks. Round-bounded
 (500 rounds) as a runaway backstop only.
+
+## Auto-graduation of data-gated flags (0.7.67, 2026-06-24)
+
+The held flags fall into "blocked on data" vs "blocked on algorithm/review/validation". For the
+DATA-blocked ones, added a daily `auto_enable` daemon cadence (`mcpbrain/auto_enable.py`) that
+flips them ON once their readiness is *genuinely* met — not just elapsed time:
+- **bandit_auto_apply, lessons** → ≥50 real accept events (used/edited) spanning ≥7 days (real
+  reward to tune/learn from).
+- **decay** → ≥1000 access-stamped chunks over ≥14 days AND a **dry-run** (new `apply_decay_pass(
+  dry_run=True)`) projecting ≤40% cold-tiered — the safety gate that stops decay gutting recall.
+
+Properties: deterministic gates on external signal + a safety projection (governing rule intact —
+no self-grading); only flips flags ABSENT from config.json (an explicit user true/false is never
+overridden); persists the flip via `write_config` + records a change (observable, reversible).
+Thresholds overridable via `auto_enable_thresholds`; whole mechanism off via `auto_enable:false`.
+Ships ON by default for all installs. Live readiness at ship: 12/50 accept, 62/1000 access — all
+three correctly waiting; they graduate automatically as usage accrues.
+
+NOT auto-gated (blocker isn't data): Q6 rerank/routing/crag (needs a cross-encoder),
+procedural_memory (needs human review), schema_grounding/write_time_dedup/importance_llm (need a
+one-off validation A/B).
