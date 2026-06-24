@@ -38,6 +38,9 @@ def test_brain_routine_serves_bundled_protocols():
     rg = ri("reference-gardener")
     assert rg and "reference/_proposals/" in rg       # proposals/changelog path still present
     assert "brain_note" in rg and "propose" in rg.lower()
+    # Phase 2 option 1: auto-apply routes through the guarded MCP tool, not raw git.
+    assert "brain_gardener_apply" in rg
+    assert "asserts_person_role" in rg
 
 def test_routine_enrich_describes_fanout(tmp_path):
     enrich = mcp_server._routine_instructions("enrich")
