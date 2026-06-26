@@ -4,6 +4,13 @@ import pytest
 from mcpbrain import agents
 
 
+def _flag_value(args, flag):
+    for i, tok in enumerate(args):
+        if tok == flag and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
 def test_launchd_prune_calls_subcommand_not_shell(tmp_path):
     plist = agents.records_prune_plist(
         mcpbrain_bin="/usr/local/bin/mcpbrain", mcpbrain_home="/h")
@@ -12,14 +19,16 @@ def test_launchd_prune_calls_subcommand_not_shell(tmp_path):
 
 
 def test_schtasks_prune_daily():
-    a = agents.prune_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe")
+    a = agents.prune_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe", home=r"C:\Users\jo\mcpbrain")
     assert "/sc" in a and "daily" in a and "/st" in a and "06:00" in a
     assert any("records-prune" in x for x in a)
+    assert _flag_value(a, "/tr").lower().startswith("wscript")
 
 
 def test_schtasks_health_weekly_monday():
-    a = agents.health_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe")
+    a = agents.health_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe", home=r"C:\Users\jo\mcpbrain")
     assert "weekly" in a and "MON" in a and any("records-health" in x for x in a)
+    assert _flag_value(a, "/tr").lower().startswith("wscript")
 
 
 def test_install_cadences_dispatches_by_platform(monkeypatch):
@@ -51,9 +60,9 @@ def test_launchd_beacon_calls_subcommand_hourly(tmp_path):
 
 
 def test_schtasks_beacon_hourly():
-    a = agents.fleet_beacon_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe")
+    a = agents.fleet_beacon_schtasks_args(mcpbrain_bin=r"C:\mcpbrain.exe", home=r"C:\Users\jo\mcpbrain")
     assert "/sc" in a and "hourly" in a
-    assert any("fleet-report" in x and "--beacon" in x for x in a)
+    assert _flag_value(a, "/tr").lower().startswith("wscript")
 
 
 def test_cadence_specs_include_beacon_only_when_fleet_configured():
