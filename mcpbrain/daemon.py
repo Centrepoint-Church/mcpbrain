@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - POSIX
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -56,6 +57,27 @@ import mcpbrain.memory_distil    # noqa: F401 — registers BLOCK_DRAINERS["memo
 import mcpbrain.profile_audit    # noqa: F401 — registers BLOCK_DRAINERS["profile_audit"]
 
 log = logging.getLogger(__name__)
+
+
+def _configure_logging(root=None):
+    """Configure logging format/level and, on Windows, a rotating log file.
+
+    macOS launchd captures stdout/stderr to the plist's StandardOutPath; a
+    hidden-console schtasks launch captures nothing, so Windows additionally
+    attaches a RotatingFileHandler so daemon crashes are visible.
+    """
+    tgt = root if root is not None else logging.getLogger()
+    tgt.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    stream_h = logging.StreamHandler()
+    stream_h.setFormatter(fmt)
+    tgt.addHandler(stream_h)
+    if sys.platform == "win32":
+        import logging.handlers as _lh
+        log_path = config.app_dir() / "com.mcpbrain.log"
+        rfh = _lh.RotatingFileHandler(str(log_path), maxBytes=1_000_000, backupCount=3)
+        rfh.setFormatter(fmt)
+        tgt.addHandler(rfh)
 
 EMBED_BACKEND = "fastembed:bge-small:v1"
 DEFAULT_BACKUP_INTERVAL_S = 3600
@@ -2079,15 +2101,7 @@ def main(argv=None) -> None:
     ap.add_argument("--interval", type=float, default=300.0, help="sync interval seconds")
     args = ap.parse_args(argv)
 
-    # Configure root logging so warnings/errors reach stdout/stderr. Under
-    # launchd these are routed to the plist's StandardOutPath/StandardErrorPath;
-    # in a terminal they appear inline. Without this, every `log.info/warning`
-    # in the daemon is silently dropped, which is why a healthy daemon looks
-    # "hung" in the foreground and a crashing launchd job leaves no trace.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    _configure_logging()
 
     emb = get_embedder("bge-small")
     store = Store(config.store_path(), dim=emb.dim)
