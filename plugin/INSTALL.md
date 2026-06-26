@@ -1,9 +1,9 @@
 # Installing mcpbrain
 
-mcpbrain installs a background daemon on your **Mac** and runs entirely on your machine.
-Setup is the **`/mcpbrain:install`** command — run it in a **Claude Code (Desktop)**
-session and follow along. It installs the daemon, connects the brain to Claude Desktop,
-opens the sign-in wizard, and creates the recurring background tasks as **Local**
+mcpbrain installs a background daemon on your **Mac or Windows PC** and runs entirely on
+your machine. Setup is the **`/mcpbrain:install`** command — run it in a **Claude Code
+(Desktop)** session and follow along. It installs the daemon, connects the brain to Claude
+Desktop, opens the sign-in wizard, and creates the recurring background tasks as **Local**
 scheduled tasks.
 
 > **The one thing that matters:** the recurring tasks must be **Local** scheduled tasks
@@ -37,6 +37,29 @@ claude plugin install mcpbrain@centrepoint-church
 # then, in a Claude Code session:
 # /mcpbrain:install
 ```
+
+---
+
+## macOS
+
+The daemon registers as a launchd login agent (`~/Library/LaunchAgents/com.mcpbrain.plist`)
+and logs to `$MCPBRAIN_HOME/com.mcpbrain.log` and `com.mcpbrain.err`. `mcpbrain setup`
+handles registration; `launchctl list | grep mcpbrain` confirms the agent is loaded.
+
+## Windows
+
+The daemon registers as a **Windows Scheduled Task** (Task Scheduler → `mcpbrain`) that
+fires at logon. It launches via a hidden-console VBScript shim
+(`%APPDATA%\mcpbrain\agents\mcpbrain.vbs`), so **no console window appears at logon** —
+that is expected behaviour, not a failure.
+
+Verify the task is registered and started:
+```powershell
+schtasks /query | findstr mcpbrain
+```
+
+Logs are written to `%APPDATA%\mcpbrain\com.mcpbrain.log` (rotating, max 1 MB × 3 files).
+If something goes wrong after logon, check that file first.
 
 ---
 
