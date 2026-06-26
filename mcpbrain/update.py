@@ -6,10 +6,12 @@ explicit, so deps still come from PyPI), then restarts the daemon + tray.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
 from importlib.metadata import version, PackageNotFoundError
+from pathlib import Path
 
 from packaging.version import Version, InvalidVersion
 
@@ -68,8 +70,23 @@ def _should_update(installed: str, latest: str | None) -> bool:
     return bool(latest) and _parse(latest) > _parse(installed)
 
 
+def _resolve_uv() -> str:
+    """Return the uv binary to use: PATH → ~/.local/bin/uv[.exe] → bare 'uv'."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    suffix = ".exe" if os.name == "nt" else ""
+    candidate = Path.home() / ".local" / "bin" / f"uv{suffix}"
+    if candidate.exists():
+        return str(candidate)
+    return "uv"
+
+
 def _run(cmd: list) -> tuple[str, int]:
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    kwargs: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run(cmd, **kwargs)
     return result.stdout or "", result.returncode
 
 
@@ -81,7 +98,7 @@ def _restart_agent() -> None:
 def update_from_index(index_url: str) -> int:
     """Reinstall mcpbrain from the index via uv, then restart. Returns 0 on success."""
     out, rc = _run([
-        "uv", "tool", "install",
+        _resolve_uv(), "tool", "install",
         # Pin the interpreter: mcpbrain requires Python >=3.12 and uv otherwise
         # resolves the tool env against the machine's default Python (often 3.9
         # on macOS / 3.11 on Windows), which fails the requires-python solve.
