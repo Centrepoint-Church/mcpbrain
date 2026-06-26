@@ -12,14 +12,18 @@ def test_launchd_plist_runs_daemon():
 
 def test_schtasks_args_at_logon():
     a = schtasks_args(mcpbrain_bin=r"C:\Users\j\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
-    assert "/sc" in a and "onlogon" in a and any("mcpbrain.exe daemon" in x for x in a)
+    assert "/sc" in a and "onlogon" in a
+    # /tr now points at a hidden-console .vbs shim (not an inline cmd /c action).
+    tr = a[a.index("/tr") + 1]
+    assert tr.lower().startswith("wscript") and tr.endswith('.vbs"')
 
 
 def test_schtasks_args_quotes_path_with_spaces():
     a = schtasks_args(mcpbrain_bin=r"C:\Program Files\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
-    # The /tr action embeds MCPBRAIN_HOME and wraps the spaced path in double-quotes.
-    action = a[a.index("/tr") + 1]
-    assert r'"C:\Program Files\mcpbrain.exe" daemon' in action
+    # Spaced home appears inside the shim path (which is the /tr argument).
+    tr = a[a.index("/tr") + 1]
+    assert r"C:\Users\j\.mcpbrain" in tr
+    # Binary quoting lives in the shim content, tested separately in test_agents_windows_xplat.py.
 
 
 def test_launchd_tray_plist_runs_tray_and_does_not_respawn():
@@ -44,7 +48,9 @@ def test_daemon_launchd_plist_keeps_alive():
 
 def test_schtasks_tray_args_at_logon():
     a = schtasks_tray_args(mcpbrain_bin=r"C:\Users\j\mcpbrain.exe", home=r"C:\Users\j\.mcpbrain")
-    assert "mcpbrain-tray" in a and "onlogon" in a and any("mcpbrain.exe tray" in x for x in a)
+    assert "mcpbrain-tray" in a and "onlogon" in a
+    tr = a[a.index("/tr") + 1]
+    assert tr.lower().startswith("wscript") and "tray" in tr
 
 
 def test_restart_agent_restarts_daemon_and_tray_darwin(monkeypatch, tmp_path):
