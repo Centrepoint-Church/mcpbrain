@@ -31,6 +31,7 @@ _LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LABEL}.plist"
 _TRAY_LAUNCHD_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_TRAY_LABEL}.plist"
 _TASK_NAME = "mcpbrain"
 _TRAY_TASK_NAME = "mcpbrain-tray"
+_WIN_SHIM_DIR = "agents"  # app_dir()/agents/<task>.vbs
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +101,37 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
                           home=home, keep_alive="crashonly")
 
 
+def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str) -> str:
+    """A .vbs that runs `mcpbrain <subcommand>` with a hidden console.
+
+    Window style 0 hides the console; the daemon's child git/uv processes inherit
+    that hidden console, so nothing flashes. MCPBRAIN_HOME is set in-process so a
+    custom/spaced home works without touching the registry. VBScript escapes a
+    double-quote by doubling it.
+    """
+    bin_q = '""' + mcpbrain_bin + '""'       # ""C:\path\mcpbrain.exe""
+    home_esc = home.replace('"', '""')
+    return (
+        'Set sh = CreateObject("WScript.Shell")\r\n'
+        f'sh.Environment("PROCESS")("MCPBRAIN_HOME") = "{home_esc}"\r\n'
+        f'sh.Run "{bin_q} {subcommand}", 0, False\r\n'
+    )
+
+
+def _win_shim_path(home: str, task_name: str) -> Path:
+    return Path(home) / _WIN_SHIM_DIR / f"{task_name}.vbs"
+
+
+def _schtasks_tr_for_shim(shim_path: Path) -> str:
+    return f'wscript "{shim_path}"'
+
+
 def _schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str, home: str) -> list[str]:
-    """schtasks args registering an on-logon task whose action embeds MCPBRAIN_HOME
-    so the daemon starts correctly even if the env var is cleared."""
-    quoted_bin = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
-    quoted_home = f'"{home}"' if any(c.isspace() for c in home) else home
-    action = f'cmd /c "set MCPBRAIN_HOME={quoted_home} && {quoted_bin} {subcommand}"'
-    return ["schtasks", "/create", "/tn", task_name, "/sc", "onlogon", "/tr", action, "/f"]
+    """schtasks args registering an on-logon task that launches via a hidden-console
+    .vbs shim — no visible window, no child-process console flashes."""
+    shim_path = _win_shim_path(home, task_name)
+    tr = _schtasks_tr_for_shim(shim_path)
+    return ["schtasks", "/create", "/tn", task_name, "/sc", "onlogon", "/tr", tr, "/f"]
 
 
 def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
@@ -138,12 +163,12 @@ def install_agent(
         raise ValueError(f"Unsupported platform: {platform!r}")
 
 
-def uninstall_agent(platform: str) -> None:
+def uninstall_agent(platform: str, *, home: str | None = None) -> None:
     """Remove the agent definition and deregister it from the OS loader."""
     if platform == "darwin":
         _uninstall_launchd()
     elif platform == "win32":
-        _uninstall_schtasks()
+        _uninstall_schtasks(home=home)
     else:
         raise ValueError(f"Unsupported platform: {platform!r}")
 
@@ -204,29 +229,24 @@ def _restart_launchd() -> None:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
-    # MCPBRAIN_HOME is now embedded directly in the task action via
-    # `cmd /c "set MCPBRAIN_HOME=... && mcpbrain daemon"`, so no separate setx is needed.
-    args = schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)
-    subprocess.run(args, check=True)
+    shim_path = _win_shim_path(home, _TASK_NAME)
+    shim_path.parent.mkdir(parents=True, exist_ok=True)
+    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home, subcommand="daemon"))
+    log.info("wrote Windows shim %s", shim_path)
+    subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
     log.info("Windows scheduled task '%s' created", _TASK_NAME)
 
 
-def _uninstall_schtasks() -> None:  # pragma: no cover
-    subprocess.run(
-        ["schtasks", "/delete", "/tn", _TASK_NAME, "/f"],
-        check=False,
-    )
+def _uninstall_schtasks(home: str | None = None) -> None:  # pragma: no cover
+    subprocess.run(["schtasks", "/delete", "/tn", _TASK_NAME, "/f"], check=False)
     log.info("Windows scheduled task '%s' deleted", _TASK_NAME)
-    # Remove the persistent user environment variable set during install.
-    # check=False so a missing variable (clean uninstall) does not raise.
-    subprocess.run(
-        ["reg", "delete", r"HKCU\Environment", "/v", "MCPBRAIN_HOME", "/f"],
-        check=False,
-    )
+    if home is not None:
+        _win_shim_path(home, _TASK_NAME).unlink(missing_ok=True)
 
 
 def _restart_schtasks() -> None:  # pragma: no cover
-    subprocess.run(["schtasks", "/end", "/tn", _TASK_NAME], check=False)
+    # schtasks /end cannot reach a detached hidden-console process; taskkill the exe first.
+    subprocess.run(["taskkill", "/F", "/IM", "mcpbrain.exe"], check=False)
     subprocess.run(["schtasks", "/run", "/tn", _TASK_NAME], check=True)
     log.info("Windows scheduled task '%s' restarted", _TASK_NAME)
 
@@ -271,6 +291,9 @@ def _uninstall_launchd_tray() -> None:  # pragma: no cover
 
 
 def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    shim_path = _win_shim_path(home, _TRAY_TASK_NAME)
+    shim_path.parent.mkdir(parents=True, exist_ok=True)
+    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home, subcommand="tray"))
     subprocess.run(schtasks_tray_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
     log.info("Windows scheduled task '%s' created", _TRAY_TASK_NAME)
 
@@ -291,7 +314,7 @@ def _restart_launchd_tray() -> None:  # pragma: no cover
 
 
 def _restart_schtasks_tray() -> None:  # pragma: no cover
-    subprocess.run(["schtasks", "/end", "/tn", _TRAY_TASK_NAME], check=False)
+    subprocess.run(["taskkill", "/F", "/IM", "mcpbrain.exe"], check=False)
     subprocess.run(["schtasks", "/run", "/tn", _TRAY_TASK_NAME], check=False)
     log.info("Windows scheduled task '%s' restarted", _TRAY_TASK_NAME)
 
@@ -437,32 +460,32 @@ def fleet_beacon_plist(*, mcpbrain_bin: str, mcpbrain_home: str) -> str:
 """
 
 
-def _cadence_schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str,
+def _cadence_schtasks_args(*, task_name: str, subcommand: str, mcpbrain_bin: str, home: str,
                            schedule: list[str]) -> list[str]:
-    quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
-    return ["schtasks", "/create", "/tn", task_name, *schedule,
-            "/tr", f"{quoted} {subcommand}", "/f"]
+    shim_path = _win_shim_path(home, task_name)
+    tr = _schtasks_tr_for_shim(shim_path)
+    return ["schtasks", "/create", "/tn", task_name, *schedule, "/tr", tr, "/f"]
 
 
-def prune_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+def prune_schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return schtasks args to schedule `mcpbrain records-prune` daily at 06:00."""
     return _cadence_schtasks_args(task_name="mcpbrain-records-prune", subcommand="records-prune",
-                                  mcpbrain_bin=mcpbrain_bin,
+                                  mcpbrain_bin=mcpbrain_bin, home=home,
                                   schedule=["/sc", "daily", "/st", "06:00"])
 
 
-def health_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+def health_schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return schtasks args to schedule `mcpbrain records-health` weekly Monday at 07:00."""
     return _cadence_schtasks_args(task_name="mcpbrain-records-health", subcommand="records-health",
-                                  mcpbrain_bin=mcpbrain_bin,
+                                  mcpbrain_bin=mcpbrain_bin, home=home,
                                   schedule=["/sc", "weekly", "/d", "MON", "/st", "07:00"])
 
 
-def fleet_beacon_schtasks_args(*, mcpbrain_bin: str) -> list[str]:
+def fleet_beacon_schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return schtasks args to run `mcpbrain fleet-report --beacon` hourly."""
-    quoted = f'"{mcpbrain_bin}"' if any(c.isspace() for c in mcpbrain_bin) else mcpbrain_bin
-    return ["schtasks", "/create", "/tn", "mcpbrain-fleet-beacon",
-            "/sc", "hourly", "/tr", f"{quoted} fleet-report --beacon", "/f"]
+    shim_path = _win_shim_path(home, "mcpbrain-fleet-beacon")
+    tr = _schtasks_tr_for_shim(shim_path)
+    return ["schtasks", "/create", "/tn", "mcpbrain-fleet-beacon", "/sc", "hourly", "/tr", tr, "/f"]
 
 
 # ---------------------------------------------------------------------------
@@ -518,11 +541,18 @@ def _install_cadences_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragm
 
 def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     import subprocess
-    args_fns = [
-        lambda: prune_schtasks_args(mcpbrain_bin=mcpbrain_bin),
-        lambda: health_schtasks_args(mcpbrain_bin=mcpbrain_bin),
+    cadences = [
+        ("mcpbrain-records-prune", "records-prune",
+         lambda: prune_schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)),
+        ("mcpbrain-records-health", "records-health",
+         lambda: health_schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)),
     ]
     if _fleet_configured(home):
-        args_fns.append(lambda: fleet_beacon_schtasks_args(mcpbrain_bin=mcpbrain_bin))
-    for args_fn in args_fns:
+        cadences.append(("mcpbrain-fleet-beacon", "fleet-report --beacon",
+                         lambda: fleet_beacon_schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)))
+    for task_name, subcommand, args_fn in cadences:
+        shim_path = _win_shim_path(home, task_name)
+        shim_path.parent.mkdir(parents=True, exist_ok=True)
+        shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
+                                               subcommand=subcommand))
         subprocess.run(args_fn(), check=True)
