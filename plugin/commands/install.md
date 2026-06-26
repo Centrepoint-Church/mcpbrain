@@ -1,12 +1,12 @@
 ---
-description: Install and set up mcpbrain on this Mac — install the daemon, connect it to Claude Desktop, complete the wizard, and create the recurring Local tasks.
+description: Install and set up mcpbrain — install the daemon, connect it to Claude Desktop, complete the wizard, and create the recurring Local tasks. Works on macOS and Windows.
 ---
 
-Install and set up mcpbrain on my Mac. Run this in **Claude Code** (it needs to run
-shell commands).
+Install and set up mcpbrain. Run this in **Claude Code** (it needs to run shell commands).
 
-**1. Install.** Run these with the Bash tool:
+**1. Install.**
 
+*macOS:*
 ```bash
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -14,18 +14,28 @@ uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.githu
 mcpbrain setup
 ```
 
-`mcpbrain setup` registers the background agent (launchd), writes the `mcpbrain` MCP
-server into Claude Desktop's `claude_desktop_config.json`, and opens a browser wizard.
+*Windows (PowerShell):*
+```powershell
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+}
+uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force
+mcpbrain setup
+```
+
+`mcpbrain setup` registers the background agent (launchd on macOS, schtasks on Windows),
+writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
 
 **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
 Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the
 wizard restores my brain if a backup already exists for my account, or turns on encrypted
 backup if it's a fresh start. Do not run any restore or bootstrap command yourself.
 
-**3. Connect to Claude Desktop (do this before the tasks).** Run these with the Bash tool
-to register the `brain_*` tools. This quits and reopens Claude, so this session ends — start
-a new Claude Code session afterward to finish:
+**3. Connect to Claude Desktop (do this before the tasks).** Run these to register the
+`brain_*` tools. This quits and reopens Claude, so this session ends — start a new Claude
+Code session afterward to finish:
 
+*macOS:*
 ```bash
 osascript -e 'tell application "Claude" to quit'
 sleep 3
@@ -33,8 +43,22 @@ mcpbrain connect
 open -a Claude
 ```
 
+*Windows (PowerShell):*
+```powershell
+taskkill /IM Claude.exe /F 2>$null; Start-Sleep 3
+mcpbrain connect
+Start-Process "$env:LOCALAPPDATA\Programs\Claude\Claude.exe"
+```
+
 After Claude reopens, the `brain_*` tools (including `brain_routine`) are connected. If a
 tool call still says the daemon isn't connected, repeat this step.
+
+**Note for Windows:** the daemon runs with a **hidden console** — no visible window at
+logon is expected, not a failure. Verify it is running with:
+```powershell
+schtasks /query /tn mcpbrain
+```
+Check logs at `%APPDATA%\mcpbrain\com.mcpbrain.log` if something seems wrong.
 
 **4. Create four scheduled tasks.** Once I confirm the wizard is done, create these four
 recurring **Local** tasks — do **not** use `/schedule` (that makes a cloud routine that
