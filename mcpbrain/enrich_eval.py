@@ -60,7 +60,8 @@ def main(argv=None) -> None:
         with open(args.baseline, "w") as f:
             json.dump(m, f, indent=2)
     if args.compare:
-        base = json.load(open(args.compare))
+        with open(args.compare) as f:
+            base = json.load(f)
         for k in ("relations_with_doc_id_pct", "relations_semantic_pct",
                   "person_email_pct", "relations_total"):
             print(f"{k}: {base.get(k)} -> {m.get(k)}")
