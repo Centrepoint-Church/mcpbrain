@@ -450,14 +450,20 @@ def _enrich_rules() -> str:
     return _ENRICH_RULES_CACHE
 
 
-# Bounds the FULL serialized pull/unit response (work + rules + context). Kept under
-# Claude Code's consumer limits: a result above ~50KB is persisted to a file the
-# caller must Read back. Sourced from config.unit_pull_cap() (default 60_000 as of
-# Task 5.1 — raised from 40_000 to pack more threads per Haiku call). Must stay in
-# lockstep with prepare._UNIT_PULL_CAP (the producer sizes units against this).
-# FROZEN AT IMPORT TIME — a config change to unit_pull_cap is not visible until the
-# daemon process restarts.
+# The producer's PACKING budget: how big a unit's work may be. Sourced from
+# config.unit_pull_cap() (default 60_000 as of Task 5.1 — raised from 40_000 to pack
+# more threads per Haiku call). Must stay in lockstep with prepare._UNIT_PULL_CAP (the
+# producer sizes units against this). FROZEN AT IMPORT TIME — a config change to
+# unit_pull_cap is not visible until the daemon process restarts.
 _PULL_MAX_CHARS = config.unit_pull_cap()
+
+# The RESPONSE consumer limit, SEPARATE from the packing budget above. A pull result
+# above ~50KB is persisted by Claude Code to a file the caller must Read back, which
+# defeats the flat-context fan-out. The packing budget (60k) lets the agent path
+# (with_rules=False ≈ work+context) sit safely under this, but a with_rules=True pull
+# adds the ~11.5KB rules block and can land in the (50KB, 60KB) gap — so the assembled
+# response trims context to essentials when it crosses this limit, regardless of cap.
+_PULL_SOFT_LIMIT = 50_000
 
 
 _ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
@@ -603,9 +609,11 @@ def make_brain_enrich_pull(home: str):
             out["items"] = d.get("items") or []
         else:
             out["threads"] = d.get("threads") or []
-        # Safety net: the producer sized the unit to fit, but if a since-grown context
-        # tips it over, trim context to the few fields an answer needs.
-        if len(_json.dumps(out)) > _PULL_MAX_CHARS:
+        # Trim to stay under the RESPONSE consumer limit (not the packing budget):
+        # a with_rules=True pull adds the rules block and can cross ~50KB even when the
+        # unit itself fit the 60k packing cap. Trim context to the few fields an answer
+        # needs so the response never spills to a file the caller must Read back.
+        if len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
             out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
                                                   "org_domain_map") if k in ctx}
         return out

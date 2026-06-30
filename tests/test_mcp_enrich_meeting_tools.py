@@ -192,6 +192,28 @@ def test_pull_unit_omits_rules_when_requested(tmp_path):
     assert out["context"]["owner_name"] == "Jo" and out["threads"][0]["thread_id"] == "t1"
 
 
+def test_pull_response_stays_under_consumer_limit(tmp_path):
+    # Task 5.1 raised the packing cap (unit_pull_cap) to 60k to batch more threads
+    # per unit. But the assembled pull RESPONSE must still stay under Claude Code's
+    # ~50KB consumer limit, or it spills to a file the caller must Read back. A
+    # with_rules=True pull (the default) on a big unit + big context must trim context
+    # to essentials rather than emit a 58KB+ blob.
+    # Size the response into the (50KB, 60KB) gap: rules ~11.5KB + context ~27KB +
+    # thread ~18KB ~= 57KB — OVER the ~50KB consumer limit but UNDER the 60k packing
+    # cap, so the old cap-based trim would NOT fire and the blob would spill to a file.
+    big_people = [{"name": f"Person {i}", "blurb": "x" * 175} for i in range(125)]
+    _write_units(tmp_path,
+                 threads=[{"thread_id": "t1", "body": "y" * 18000}],
+                 context={"owner_name": "Jo", "valid_orgs": ["A"],
+                          "org_domain_map": ["a.org"], "known_people": big_people})
+    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=uid))  # with_rules=True default
+    assert len(json.dumps(out)) <= 51200, "pull response must stay under the ~50KB consumer limit"
+    assert out["rules"]                                  # still self-contained (rules kept)
+    assert "known_people" not in out["context"]          # bulky context trimmed to essentials
+    assert out["context"]["owner_name"] == "Jo"
+
+
 def test_pull_unit_block_returns_items(tmp_path):
     _write_units(tmp_path, threads=[], merge_review=[{"pair_id": "a|b"}, {"pair_id": "c|d"}])
     units = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"]
