@@ -55,3 +55,13 @@ def test_enrichment_skill_body_names_contract():
                   "relations", "resolved_action_ids", "merge_answers"):
         assert field in body, f"enrichment.md must name the contract field {field!r}"
     assert "pending.json" in body and "enrich_inbox" in body
+
+
+def test_coordinator_runs_on_haiku():
+    for p in ("mcpbrain/routines/enrich.md",
+              "plugin/skills/mcpbrain-backfill/SKILL.md"):
+        text = Path(p).read_text().lower()
+        # The orchestrator must not be pinned to Sonnet anymore.
+        assert "you (the coordinator) run on **sonnet**" not in text
+        assert "run this loop on sonnet" not in text
+        assert "coordinator" in text and "haiku" in text
