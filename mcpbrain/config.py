@@ -451,6 +451,24 @@ def write_time_dedup_enabled(home) -> bool:
     return bool(read_config(home).get("write_time_dedup", False))
 
 
+def unit_pull_cap(home=None) -> int:
+    """Maximum serialized size (chars) of a single brain_enrich_pull response
+    (work + rules + context). Raised from the old 40_000 to 60_000 to pack more
+    threads per Haiku call and amortise per-call overhead without hitting Claude
+    Code's ~50KB result-persist threshold.
+
+    Config key: 'unit_pull_cap' (int). Default 60_000. Must stay in lockstep with
+    both prepare._UNIT_PULL_CAP (producer side) and mcp_server._PULL_MAX_CHARS
+    (consumer side) — all three are sourced from this accessor so a single config
+    edit propagates to both sides.
+    """
+    _home = str(app_dir() if home is None else home)
+    try:
+        return max(10_000, int(read_config(_home).get("unit_pull_cap", 60_000)))
+    except (TypeError, ValueError):
+        return 60_000
+
+
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
     units (config 'spool_thread_cap', default 500).

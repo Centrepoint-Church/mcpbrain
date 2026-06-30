@@ -452,11 +452,10 @@ def _enrich_rules() -> str:
 
 # Bounds the FULL serialized pull/unit response (work + rules + context). Kept under
 # Claude Code's consumer limits: a result above ~50KB is persisted to a file the
-# caller must Read back. 40K (~10k tokens) stays under that and well under the 25k-
-# token Read cap even if persisted, while leaving far less per-unit rules+context
-# overhead than the old 25K (which forced ~2x more subagents). Must stay in lockstep
-# with prepare._UNIT_PULL_CAP (the producer sizes units against this).
-_PULL_MAX_CHARS = 40_000
+# caller must Read back. Sourced from config.unit_pull_cap() (default 60_000 as of
+# Task 5.1 — raised from 40_000 to pack more threads per Haiku call). Must stay in
+# lockstep with prepare._UNIT_PULL_CAP (the producer sizes units against this).
+_PULL_MAX_CHARS = config.unit_pull_cap()
 
 
 _ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
