@@ -546,3 +546,65 @@ def test_consumed_unit_file_deleted(store, home):
     drain.drain(store, home=home, apply=RecordingApply())
     assert not (units / "u-1.json").exists()
     assert not (claims / "u-1").exists()
+
+
+def test_drain_attaches_unit_messages_before_apply(tmp_path, monkeypatch):
+    # When the model omits messages[] (as allowed by Task 2.3), drain reads the
+    # unit file from enrich_queue/units/ and injects the unit's original messages
+    # into the extraction before apply() so graph_write derives lead msg/date/sender
+    # from authoritative data, not the model's echo.
+    from mcpbrain.store import Store
+
+    home = tmp_path
+    (home / "enrich_inbox").mkdir(parents=True)
+    units_dir = home / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+
+    unit_id = "u-test-inject"
+    unit_messages = [{"message_id": "m1", "sender": "a@x.org", "date": "2026-02-01"}]
+
+    # Write the unit file — this carries the authoritative thread messages
+    unit_file = units_dir / f"{unit_id}.json"
+    unit_file.write_text(json.dumps({
+        "unit_id": unit_id,
+        "kind": "thread",
+        "threads": [{"thread_id": "t-inject", "messages": unit_messages}],
+    }))
+
+    # Seed a chunk so doc_ids_for_messages has something to return
+    _seed_chunk(s, "d-inject", "t-inject", message_id="m1")
+
+    # The extraction the model returns — messages[] intentionally absent
+    ext_no_messages = {
+        "thread_id": "t-inject",
+        "org": "Acme",
+        "content_type": "update",
+        "summary": "A summary without messages.",
+        "entities": [],
+        "topics": ["logistics"],
+        "actions": [],
+        "relations": [],
+    }
+
+    # Write the inbox file as if brain_enrich_push wrote it (no messages in extraction)
+    inbox_obj = {
+        "unit_id": unit_id,
+        "extractions": [ext_no_messages],
+        "merge_answers": [],
+    }
+    _write_inbox(home, f"{unit_id}.json", inbox_obj)
+
+    captured = {}
+
+    def fake_apply(store, extraction, *, doc_ids, **kw):
+        captured["messages"] = extraction.get("messages")
+        return {"entities": 0, "relations": 0, "actions": 0}
+
+    drain.drain(s, home=home, apply=fake_apply)
+
+    assert captured["messages"] == unit_messages, (
+        f"drain must inject unit messages before apply(); got {captured.get('messages')!r}"
+    )

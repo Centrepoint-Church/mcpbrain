@@ -204,3 +204,12 @@ def test_valid_types_importable_from_chunking():
 def test_parse_first_json_object_importable_from_chunking():
     from mcpbrain.chunking import _parse_first_json_object
     assert _parse_first_json_object('{"a": 1}') == {"a": 1}
+
+
+def test_messages_not_required():
+    from mcpbrain.contract import validate_extraction
+    ext = {"thread_id": "t1", "org": "unknown", "content_type": "update",
+           "summary": "s", "entities": [{"name": "Sam", "type": "person"}],
+           "relations": [], "actions": [], "topics": ["x"]}
+    # messages intentionally absent — the daemon supplies them.
+    assert validate_extraction(ext) == []

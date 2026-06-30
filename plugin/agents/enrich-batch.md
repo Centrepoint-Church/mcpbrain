@@ -69,10 +69,7 @@ Each extraction uses this schema verbatim. Match the field names exactly.
   "resolved_action_ids": [42],
   "updated_actions": [{"id": 42, "new_text": "..."}],
   "relations": [{"source_name": "Person Name", "type": "works_at|reports_to|manages|coordinates_with|mentioned_with",
-                 "target_name": "Org Name"}],
-  "messages": [{"message_id": "m-1",
-                "sender": "Person Name <addr@example.com>",
-                "date": "YYYY-MM-DD", "labels": "INBOX", "subject": "..."}]
+                 "target_name": "Org Name"}]
 }
 ```
 
@@ -93,9 +90,6 @@ Field notes:
   confirms -> `"waiting_on": "Taryn Hamilton"`). Use the person's bare name,
   matching an entity you listed. Omit it for actions that are not blocked on
   someone's reply.
-- `messages`: provenance only. For each message in the thread emit
-  `message_id`, `sender`, `date`, `labels`, `subject`. Do NOT include the
-  message `text` body in the output. You read the body; you do not echo it.
 
 ## Using the standing context
 
@@ -176,8 +170,6 @@ extraction instead of the email-thread rules above:
   explicit commitment. Only extract actions when the doc contains clear
   directives or to-dos.
 - **summary**: one sentence saying what the document is about and its purpose.
-- **messages**: include one entry using the file_id as `message_id`, the
-  owner as `sender`, and the `modifiedTime` as `date`. Do NOT echo the body.
 
 ## Thread-mode rules
 

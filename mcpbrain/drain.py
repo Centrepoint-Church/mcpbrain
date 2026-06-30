@@ -334,6 +334,24 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
         if extractions and apply is None:
             raise TypeError("drain() requires an apply callable; inject graph_write.apply")
 
+        # Build a thread_id -> messages lookup from the unit file (when present).
+        # Message metadata is system-owned: sender/date/message_id come from
+        # prepare._thread_block, not the model. We read them back from the unit
+        # file so drain can inject them when the model omits messages[] (Task 2.3).
+        unit_messages_by_thread: dict = {}
+        unit_id = data.get("unit_id")
+        if unit_id:
+            unit_path = home_dir / "enrich_queue" / "units" / f"{unit_id}.json"
+            try:
+                unit_data = json.loads(unit_path.read_text())
+                for t in (unit_data.get("threads") or []):
+                    tid = t.get("thread_id")
+                    msgs = t.get("messages")
+                    if tid and isinstance(msgs, list) and msgs:
+                        unit_messages_by_thread[tid] = msgs
+            except (OSError, ValueError) as exc:
+                log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
+
         for extraction in extractions:
             # Per-extraction contract check (post-sanitise). A structurally
             # invalid extraction (missing thread_id, bad messages, unknown
@@ -391,6 +409,12 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                     log.debug("drain: grounding filter dropped %d item(s) on thread %s",
                               grounding_dropped, thread_id)
                     summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
+
+            # Message metadata is system-owned: attach the unit's original messages
+            # (built by prepare._thread_block) so graph_write derives lead msg/date/sender
+            # from authoritative data, not the model's echo.
+            if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
+                extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
 
             # Recover the chunks this extraction covers by message id, NOT by a
             # thread-wide query. Marking only the messages that were actually
