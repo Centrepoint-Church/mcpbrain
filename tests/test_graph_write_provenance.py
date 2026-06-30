@@ -22,3 +22,18 @@ def test_relation_gets_real_doc_id(tmp_path):
             "SELECT source_doc_id FROM entity_relations WHERE relation='reports_to'").fetchall()
     assert rows, "relation was not written"
     assert rows[0][0] == "doc-42", f"expected provenance doc-42, got {rows[0][0]!r}"
+
+
+def test_relation_valid_from_is_event_date(tmp_path):
+    s = _store(tmp_path)
+    extraction = {
+        "thread_id": "t2", "org": "unknown", "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "a@x.org", "date": "2025-09-15T10:00:00Z"}],
+        "entities": [{"name": "Sam", "type": "person"}, {"name": "Pat", "type": "person"}],
+        "relations": [{"source_name": "Sam", "type": "manages", "target_name": "Pat"}],
+        "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-9"])
+    with s._connect() as db:
+        vf = db.execute("SELECT valid_from FROM entity_relations WHERE relation='manages'").fetchone()[0]
+    assert vf.startswith("2025-09-15"), f"valid_from should be the event date, got {vf!r}"
