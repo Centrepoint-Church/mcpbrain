@@ -67,6 +67,7 @@ def test_block_drainer_failure_retains_file(tmp_path):
     def bad_drainer(store, inbox_obj):
         raise RuntimeError("boom")
 
+    s.upsert_chunk("d1", "body", "hash-d1", {"thread_id": "t1", "message_id": "m1"})  # _minimal_env's thread
     drain.BLOCK_DRAINERS["bad_block"] = bad_drainer
     try:
         (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(

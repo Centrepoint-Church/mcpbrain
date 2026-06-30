@@ -429,8 +429,37 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                        if m.get("message_id")]
             doc_ids = store.doc_ids_for_messages(msg_ids)
             if not doc_ids:
-                log.warning("drain: no chunks matched the messages of thread %s "
-                            "in %s; applying but marking nothing", thread_id, path.name)
+                # The model's message ids didn't resolve (it may have echoed bad or
+                # normalised ids). Recover from the unit's CANONICAL messages for this
+                # thread — the same authoritative source the injection step uses.
+                _u = unit_messages_by_thread.get(thread_id) or []
+                _umids = [m.get("message_id") for m in _u if m.get("message_id")]
+                doc_ids = store.doc_ids_for_messages(_umids) if _umids else []
+            if not doc_ids:
+                # Still nothing: a valid, content-bearing extraction we cannot tie to
+                # ANY chunk (e.g. the model rewrote the thread_id). Applying here would
+                # write un-groundable edges (provenance enriched-{phantom}) AND, because
+                # mark_enriched([]) marks nothing, the real chunks would re-queue every
+                # cycle forever without reaching the Q8 cap. Instead: skip the apply and
+                # bump the cap on the unit's own chunks so the loop terminates. Mirrors
+                # the invalid-extraction skip path.
+                _unit_mids = [m.get("message_id")
+                              for msgs in unit_messages_by_thread.values()
+                              for m in msgs if m.get("message_id")]
+                _unit_dids = store.doc_ids_for_messages(_unit_mids) if _unit_mids else []
+                if _unit_dids:
+                    try:
+                        attempts = store.bump_enrich_attempts(_unit_dids)
+                        if attempts >= _EMPTY_ATTEMPT_CAP:
+                            store.mark_enriched(_unit_dids)
+                            summary["gave_up"] = summary.get("gave_up", 0) + 1
+                    except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
+                        log.debug("drain: unit-cap bookkeeping failed: %s", exc)
+                log.warning("drain: thread %s extraction matched no chunk in %s; "
+                            "skipping apply and bumping the unit's attempt cap",
+                            thread_id, path.name)
+                summary["skipped"] = summary.get("skipped", 0) + 1
+                continue
             try:
                 # Pass the run-scoped dedup index only when built (flag on) so an
                 # injected/legacy apply that doesn't accept the kwarg is unaffected.
