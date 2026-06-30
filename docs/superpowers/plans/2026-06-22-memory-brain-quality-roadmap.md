@@ -211,7 +211,7 @@ Issue map: Q1#5 Q2#9 Q3#10 Q4#8 Q5#11 Q8#12 / B2#14 B3#13 B4#15 B5#16 B6#17 / S1
 
 | Item | Status | Real vs wrapper (trade-down) | Activates on live store today? | Validated? |
 |---|---|---|---|---|
-| **Q1** salience gate | 🟡 flag off | Real after `source_type` re-key fix; Drive-mention rule opt-in. | No — `enrich_state` all `''`, 0 cold. | ❌ never run on live corpus; issue left open |
+| **Q1** salience gate | ✅ default ON since 0.7.65 (was 🟡 flag off in this snapshot) | Real after `source_type` re-key fix; Drive-mention rule opt-in. | Yes — runs every cycle; cold-marks promo email + tabular/short Drive docs (reversible). | ✅ validated on live store (~40% gated, no recall impact); shipped in 0.7.70 |
 | **Q2** schema grounding | 🟡 flag off (RELATION_TYPES constraint **always-on**) | Deterministic token-overlap anchor; per-triple **LLM grounding deferred**. | Type-constraint yes; grounding filter no. | ❌ no live precision delta (ODKE #s are external) |
 | **Q3** entity resolution / write-time dedup | 🟡 flag off | Cascade exact→token≥0.8; **embedding semantic blocking deferred** (no entity vectors). | No write-time dedup. | 🟠 problem measured (5,579 dup pairs) but fix-effect unmeasured |
 | **Q4** org backfill | ✅ wired (daily) | Deterministic `org_from_email` — best-available deterministic. | Yes, runs daily. | ✅ audit-closed; cleanest item |
