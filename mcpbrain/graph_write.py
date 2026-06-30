@@ -845,9 +845,12 @@ def apply(store, extraction, *, doc_ids, identity=None,
     LIFECYCLE (owner/deadline inference, age/notification gates, resolve/update)
     is Task 3 — actions are not written here.
 
-    doc_ids: currently unused in this structural pass. Kept as a required kwarg
-    because it is the forward seam for Task 3 (action provenance) and Task 5
-    (semantic doc linkage) — leave it required so callers wire it through now.
+    doc_ids: the thread's chunk doc_ids supplied by drain. The first entry
+    (``doc_ids[0]``) is stamped as ``source_doc_id`` on every relation written
+    here, giving graph edges concrete provenance back to the indexed document.
+    Falls back to ``enriched-{thread_id}`` for threads that have no concrete
+    lead doc. Still the forward seam for Task 3 (action provenance) and Task 5
+    (semantic doc linkage) — leave it required so callers wire it through.
 
     clock: optional callable returning a `datetime` (the current "now", UTC),
     for deterministic time in tests. Defaults to datetime.now(timezone.utc). It
@@ -889,6 +892,11 @@ def apply(store, extraction, *, doc_ids, identity=None,
     entities_list = extraction.get("entities", []) or []
     messages = extraction.get("messages", []) or []
     thread_id = extraction.get("thread_id", "") or ""
+
+    # Provenance: the originating doc for every fact this extraction yields.
+    # doc_ids is the thread's chunk doc_ids (drain passes them); fall back to the
+    # synthetic enriched-thread id when a thread has no concrete lead doc.
+    prov_doc_id = (doc_ids[0] if doc_ids else "") or (f"enriched-{thread_id}" if thread_id else "")
 
     # Thread lead = earliest message by date. Falls back to first listed.
     lead = None
@@ -1134,7 +1142,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 continue
 
         if upsert_relation(store, source_id, rel_type, target_id,
-                           valid_from=lead_date_iso or today, evidence=lead_msg_id):
+                           valid_from=lead_date_iso or today, evidence=lead_msg_id,
+                           source_doc_id=prov_doc_id):
             relations_created += 1
 
     # ── 4. Action lifecycle (Task 3) ────────────────────────────────────────
