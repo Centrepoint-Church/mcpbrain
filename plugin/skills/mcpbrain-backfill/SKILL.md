@@ -13,9 +13,12 @@ the queue stays empty.
 
 ## Models (same split as the hourly enrichment cycle)
 
-- **Coordinator (you): Sonnet.** Run this loop on Sonnet — it does the wave
-  orchestration, the requeue-guard judgement, and the daemon nudging. If you are not
-  already on Sonnet, switch before starting (`/model sonnet`).
+- **Coordinator (you): Haiku.** The orchestration is mechanical — fan out one subagent
+  per unit, then check each reply against a fixed string shape. **Run this loop on Haiku**
+  (set it explicitly; do not assume Sonnet). The requeue guard is a literal check, not
+  a judgement: a unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or
+  `unit <unit_id>: gone`. Escalate to Sonnet only if a unit fails all retries across
+  multiple runs and needs investigation.
 - **Subagents: Haiku.** Dispatch every `enrich-batch` subagent — first try AND retries
   — with **`model: haiku` set EXPLICITLY in the Task call**. The agent frontmatter is
   not always honored, and extraction follows the rules well on Haiku at a fraction of

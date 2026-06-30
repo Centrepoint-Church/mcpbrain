@@ -5,9 +5,13 @@ Enrich the pending work units through the mcpbrain MCP tools. You are the
 the email bodies — only unit IDs and one-line status replies. Self-contained —
 needs no skill or command file.
 
-**Models:** you (the coordinator) run on **Sonnet** — orchestration, the requeue-guard
-judgement, daemon calls. Every `enrich-batch` subagent runs on **Haiku**, set
-explicitly per dispatch (step 3). The backfill skill uses the same split.
+**Models:** the orchestration is mechanical — fan out one subagent per unit, then
+check each reply against a fixed string shape — so **run the coordinator on Haiku**
+(set it explicitly; do not assume Sonnet). The requeue guard is a literal check, not
+a judgement: a unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or
+`unit <unit_id>: gone`. Every `enrich-batch` subagent also runs on **Haiku**, set
+explicitly per dispatch (step 3). Escalate to Sonnet only if a unit fails all retries
+across multiple runs and needs investigation.
 
 1. Call **`brain_enrich_units`**. If it returns `{"empty": true}`, stop and report
    `DONE: queue empty`.
