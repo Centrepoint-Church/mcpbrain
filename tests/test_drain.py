@@ -187,6 +187,7 @@ def test_drain_applies_good_skips_bad_in_mixed_batch(store, home):
     # skipped, and the batch is not quarantined.
     good = _envelope("t-good")
     bad = _envelope("t-bad", content_type="not-a-real-type")
+    _seed_chunk(store, "d-good", "t-good")  # the valid extraction's thread has chunks
     _write_inbox(home, "mixed.json", _batch("batch-mixed", [good, bad]))
 
     app = RecordingApply()
@@ -205,6 +206,7 @@ def test_drain_sanitizes_empty_relations_keeps_extraction(store, home):
         {"source_name": "Joel", "type": "works_at", "target_name": "Sam"},
         {"source_name": "", "type": "", "target_name": ""},
     ])
+    _seed_chunk(store, "d-rel", "t-rel")  # the extraction's thread has chunks
     _write_inbox(home, "rel.json", _batch("batch-rel", [env]))
 
     app = RecordingApply()
@@ -671,6 +673,92 @@ def test_drain_does_not_overwrite_model_messages(tmp_path, monkeypatch):
         f"drain must NOT overwrite model-supplied messages; "
         f"expected {model_messages!r}, got {captured.get('messages')!r}"
     )
+
+
+def test_drain_recovers_doc_ids_from_unit_when_model_ids_unresolvable(tmp_path):
+    # I-1: a VALID content-bearing extraction whose model-supplied message ids do not
+    # resolve to chunks must recover the chunks from the unit's CANONICAL messages
+    # (authoritative), apply with those doc_ids, and mark them enriched — not silently
+    # "apply but mark nothing" and re-queue forever.
+    from mcpbrain.store import Store
+
+    home = tmp_path
+    (home / "enrich_inbox").mkdir(parents=True)
+    units_dir = home / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+
+    unit_id = "u-recover"
+    unit_messages = [{"message_id": "good-m1", "sender": "a@x.org", "date": "2026-02-01"}]
+    (units_dir / f"{unit_id}.json").write_text(json.dumps({
+        "unit_id": unit_id, "kind": "thread",
+        "threads": [{"thread_id": "t-recover", "messages": unit_messages}],
+    }))
+    _seed_chunk(s, "d-recover", "t-recover", message_id="good-m1")
+
+    # Model supplies messages[] (so injection is skipped) but with an id that does NOT
+    # resolve to any chunk.
+    ext = {
+        "thread_id": "t-recover", "org": "Acme", "content_type": "update",
+        "summary": "Valid content.", "entities": [], "topics": ["x"],
+        "actions": [], "relations": [],
+        "messages": [{"message_id": "bad-m1", "sender": "a@x.org", "date": "2026-02-01"}],
+    }
+    _write_inbox(home, f"{unit_id}.json", {"unit_id": unit_id, "extractions": [ext], "merge_answers": []})
+
+    captured = {}
+
+    def fake_apply(store, extraction, *, doc_ids, **kw):
+        captured["doc_ids"] = list(doc_ids)
+        return {"entities": 0, "relations": 0, "actions": 0}
+
+    summary = drain.drain(s, home=home, apply=fake_apply)
+    assert captured.get("doc_ids") == ["d-recover"], (
+        f"drain must recover doc_ids from the unit's canonical messages; got {captured.get('doc_ids')!r}"
+    )
+    assert summary["applied"] == 1 and summary["marked"] == 1
+
+
+def test_drain_caps_valid_extraction_with_unrecoverable_chunks(tmp_path):
+    # I-1: a VALID content-bearing extraction we cannot tie to ANY chunk (model rewrote
+    # the thread_id) must NOT be counted as a phantom apply, and must bump the Q8 cap on
+    # the unit's chunks so the underlying chunk can't re-queue forever.
+    from mcpbrain.store import Store
+
+    home = tmp_path
+    (home / "enrich_inbox").mkdir(parents=True)
+    units_dir = home / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+
+    unit_id = "u-phantom"
+    unit_messages = [{"message_id": "u-m1", "sender": "a@x.org", "date": "2026-02-01"}]
+    (units_dir / f"{unit_id}.json").write_text(json.dumps({
+        "unit_id": unit_id, "kind": "thread",
+        "threads": [{"thread_id": "t-real", "messages": unit_messages}],
+    }))
+    _seed_chunk(s, "d-real", "t-real", message_id="u-m1")
+
+    # Model returns a valid extraction but with a thread_id that matches NO unit thread
+    # and no resolvable messages.
+    ext = {
+        "thread_id": "t-PHANTOM", "org": "Acme", "content_type": "update",
+        "summary": "Valid content.", "entities": [], "topics": ["x"],
+        "actions": [], "relations": [],
+    }
+    _write_inbox(home, f"{unit_id}.json", {"unit_id": unit_id, "extractions": [ext], "merge_answers": []})
+
+    bumped = []
+    orig = s.bump_enrich_attempts
+    s.bump_enrich_attempts = lambda dids: (bumped.append(list(dids)) or orig(dids))
+
+    apply_calls = []
+    summary = drain.drain(s, home=home, apply=lambda *a, **k: apply_calls.append(1) or {})
+    assert not apply_calls, "must NOT apply (write phantom-provenance edges) when no chunk is identifiable"
+    assert summary.get("applied", 0) == 0, "must not count a phantom apply"
+    assert any("d-real" in c for c in bumped), f"must bump the unit's chunk toward the cap; got {bumped!r}"
 
 
 def test_drain_attempt_cap_fires_when_invalid_extraction_has_unit_messages(tmp_path):

@@ -254,6 +254,8 @@ def test_drain_grounding_flag_off_does_not_filter(tmp_path):
                           "sender": "alice@example.com", "text": "Hello world."}],
         }],
     }
+    store.upsert_chunk("d1", "Hello world.", "hash-d1",
+                       {"thread_id": "t1", "message_id": "m1"})  # thread has chunks
     (inbox / "b1.json").write_text(json.dumps(batch))
 
     applied = []
@@ -306,6 +308,8 @@ def test_drain_grounding_flag_on_removes_fabricated_entity(tmp_path):
                           "text": "Alice sent a message today."}],
         }],
     }
+    store.upsert_chunk("d1", "Alice sent a message today.", "hash-d1",
+                       {"thread_id": "t1", "message_id": "m1"})  # thread has chunks
     (inbox / "b1.json").write_text(json.dumps(batch))
 
     applied = []

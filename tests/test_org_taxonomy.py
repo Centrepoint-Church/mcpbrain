@@ -187,6 +187,8 @@ class TestDrainOrgDrift:
             "resolved_action_ids": [], "updated_actions": [],
             "reply_needed": False, "reply_reason": "",
         }
+        store.upsert_chunk("d-drift", "body", "hash-d-drift",
+                           {"thread_id": "t-drift", "message_id": "m-d1"})  # thread has chunks
         (home / "enrich_inbox" / "b1.json").write_text(json.dumps(
             {"batch_id": "b1", "extractions": [envelope], "merge_answers": []}))
 
