@@ -27,3 +27,16 @@ def test_graph_metrics_basic(tmp_path):
     assert m["person_email_pct"] == 50.0                   # 1 of 2 persons has email
     assert m["observation_attributes"] == {"role": 1}
     assert m["relation_type_counts"]["reports_to"] == 1
+
+
+def test_graph_metrics_empty_store(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=384)
+    s.init()
+    m = graph_metrics(s)
+    assert m["relations_total"] == 0
+    assert m["relations_with_doc_id_pct"] == 0.0
+    assert m["relations_semantic_pct"] == 0.0
+    assert m["entities_total"] == 0
+    assert m["person_email_pct"] == 0.0
+    assert m["observation_attributes"] == {}
+    assert m["relation_type_counts"] == {}
