@@ -39,8 +39,15 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
-- Feature flags (`salience_gate`, `schema_grounding`, `write_time_dedup`) default **OFF** in
+- Some feature flags (`schema_grounding`, `write_time_dedup`) still default **OFF** in
   `config.py` — releasing the wheel does NOT activate them; they need config + real-data validation.
-- **Current state (2026-06-23):** source is locally at `0.7.56` (unpushed), the published wheel
-  is `0.7.41`, and the **plugin manifests are still `0.7.39`** — so a release would first need the
-  manifests bumped to match. The whole 0.7.42→0.7.56 line (embedder fix, Phase 0/1, OCR) is unshipped.
+- The **Q1 salience gate (`salience_gate`) is the exception: validated on the live store
+  (~40% of the corpus gated as tabular/low-signal with no recall impact) and flipped default
+  **ON** in 0.7.65** (commit `cfe0338`). It ships active for all users. Source-aware
+  `should_enrich()` in `prepare.py` cold-marks promotional email + tabular/short Drive docs
+  before extraction; cold-marking is reversible (chunks stay embedded/searchable). The aggressive
+  `salience_require_drive_mention` sub-flag remains opt-in OFF.
+- **Current state (2026-06-30):** all four version files **and** the published wheel are at
+  `0.7.70` — source, dist index, and plugin manifests are in step. The 0.7.42→0.7.70 line
+  (embedder fix, Phase 0/1, OCR, validated brain layer ON, salience gate ON, Windows support)
+  is shipped.
