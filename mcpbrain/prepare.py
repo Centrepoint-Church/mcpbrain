@@ -543,6 +543,8 @@ def _atomic_write(target, text: str) -> None:
 # Sourced from config.unit_pull_cap() — default raised from 40_000 → 60_000 to
 # pack more threads per Haiku call (Task 5.1). This module-level constant mirrors
 # the default so existing callers that pass pull_cap=_UNIT_PULL_CAP remain correct.
+# FROZEN AT IMPORT TIME — a config change to unit_pull_cap is not visible until the
+# daemon process restarts. write_units accepts pull_cap= so callers can override.
 _UNIT_PULL_CAP = config.unit_pull_cap()
 _UNIT_RULES_RESERVE = 11_000
 _UNIT_BLOCKS = ("merge_review", "synthesis", "profile_synthesis",

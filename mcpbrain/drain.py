@@ -353,6 +353,16 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
 
         for extraction in extractions:
+            # Message metadata is system-owned: attach the unit's original messages
+            # (built by prepare._thread_block) so graph_write derives lead msg/date/sender
+            # from authoritative data, not the model's echo. Injection happens BEFORE
+            # validate_extraction so the Q8 attempt-cap logic (which reads messages[])
+            # has ids available even when the model omitted messages[] AND the extraction
+            # is contract-invalid — without this the chunk re-queues forever on empty
+            # content without bumping the attempt counter.
+            if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
+                extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
+
             # Per-extraction contract check (post-sanitise). A structurally
             # invalid extraction (missing thread_id, bad messages, unknown
             # content_type…) is dropped and logged, NOT quarantined with the
@@ -409,12 +419,6 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                     log.debug("drain: grounding filter dropped %d item(s) on thread %s",
                               grounding_dropped, thread_id)
                     summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
-
-            # Message metadata is system-owned: attach the unit's original messages
-            # (built by prepare._thread_block) so graph_write derives lead msg/date/sender
-            # from authoritative data, not the model's echo.
-            if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
-                extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
 
             # Recover the chunks this extraction covers by message id, NOT by a
             # thread-wide query. Marking only the messages that were actually
