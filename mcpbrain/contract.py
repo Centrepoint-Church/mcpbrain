@@ -72,24 +72,17 @@ def validate_extraction(d: object) -> list[str]:
     if not isinstance(d.get("summary"), str):
         problems.append("summary must be a string")
 
-    # messages: required, non-empty list; each with message_id/sender/date.
+    # messages: OPTIONAL — the daemon attaches the canonical messages from the unit
+    # it built (sender/date/message_id are system-owned, not model output). Validate
+    # shape only if the model included them.
     messages = d.get("messages")
-    if not isinstance(messages, list):
-        problems.append("messages must be a list")
-    elif not messages:
-        problems.append("messages must be a non-empty list")
-    else:
-        for i, msg in enumerate(messages):
-            if not isinstance(msg, dict):
-                problems.append(f"messages[{i}] must be an object")
-                continue
-            for field in ("message_id", "date"):
-                value = msg.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    problems.append(f"messages[{i}].{field} must be a non-empty string")
-            # sender is optional — calendar events have no sender; allow empty string
-            if not isinstance(msg.get("sender", ""), str):
-                problems.append(f"messages[{i}].sender must be a string")
+    if messages is not None:
+        if not isinstance(messages, list):
+            problems.append("messages, when present, must be a list")
+        else:
+            for i, msg in enumerate(messages):
+                if not isinstance(msg, dict):
+                    problems.append(f"messages[{i}] must be an object")
 
     # entities / actions / relations / topics: must be lists (may be empty).
     for field in ("entities", "actions", "relations", "topics"):
