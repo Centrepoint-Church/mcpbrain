@@ -99,7 +99,13 @@ def test_run_restores_before_migrate(monkeypatch, tmp_path):
         lambda self, backend=dmod.EMBED_BACKEND: order.append("migrate") or 0,
     )
 
-    d = Daemon(s, _FakeEmbedder(), services={}, interval_s=0.01)
+    # Inject a tmp-path single-writer lock so run() never contends for the real
+    # ~/.../mcpbrain/daemon.lock. The lock guard resolves its default path via the
+    # module-level `app_dir` import, which the dmod.config monkeypatch above does
+    # NOT intercept — without this injection the test fails with AlreadyRunningError
+    # whenever a real daemon is running on the same machine.
+    d = Daemon(s, _FakeEmbedder(), services={}, interval_s=0.01,
+               lock=dmod.SingleWriterLock(tmp_path / "daemon.lock"))
     d.stop()  # pre-stop so run() does startup work then exits the loop at once
     d.run()
 
