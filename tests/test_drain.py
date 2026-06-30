@@ -608,3 +608,66 @@ def test_drain_attaches_unit_messages_before_apply(tmp_path, monkeypatch):
     assert captured["messages"] == unit_messages, (
         f"drain must inject unit messages before apply(); got {captured.get('messages')!r}"
     )
+
+
+def test_drain_does_not_overwrite_model_messages(tmp_path, monkeypatch):
+    # When the model DOES supply messages[], drain must NOT overwrite them with
+    # unit messages. The model's messages are authoritative for the extraction.
+    from mcpbrain.store import Store
+
+    home = tmp_path
+    (home / "enrich_inbox").mkdir(parents=True)
+    units_dir = home / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+
+    unit_id = "u-test-nooverwrite"
+    unit_messages = [{"message_id": "unit-m1", "sender": "unit@x.org", "date": "2026-01-01"}]
+    model_messages = [{"message_id": "model-m1", "sender": "model@x.org", "date": "2026-02-01"}]
+
+    # Write the unit file with its own messages
+    unit_file = units_dir / f"{unit_id}.json"
+    unit_file.write_text(json.dumps({
+        "unit_id": unit_id,
+        "kind": "thread",
+        "threads": [{"thread_id": "t-nooverwrite", "messages": unit_messages}],
+    }))
+
+    # Seed a chunk so doc_ids_for_messages has something to return
+    _seed_chunk(s, "d-nooverwrite", "t-nooverwrite", message_id="model-m1")
+
+    # The extraction the model returns — messages[] PRESENT
+    ext_with_messages = {
+        "thread_id": "t-nooverwrite",
+        "org": "Acme",
+        "content_type": "update",
+        "summary": "A summary with model messages.",
+        "entities": [],
+        "topics": ["logistics"],
+        "actions": [],
+        "relations": [],
+        "messages": model_messages,
+    }
+
+    # Write the inbox file with model-supplied messages
+    inbox_obj = {
+        "unit_id": unit_id,
+        "extractions": [ext_with_messages],
+        "merge_answers": [],
+    }
+    _write_inbox(home, f"{unit_id}.json", inbox_obj)
+
+    captured = {}
+
+    def fake_apply(store, extraction, *, doc_ids, **kw):
+        captured["messages"] = extraction.get("messages")
+        return {"entities": 0, "relations": 0, "actions": 0}
+
+    drain.drain(s, home=home, apply=fake_apply)
+
+    assert captured["messages"] == model_messages, (
+        f"drain must NOT overwrite model-supplied messages; "
+        f"expected {model_messages!r}, got {captured.get('messages')!r}"
+    )
