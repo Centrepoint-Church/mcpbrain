@@ -14,6 +14,12 @@ no marking, no sending. Two files, in and out.
 
 ## The task
 
+**Your ONLY output is the `brain_enrich_push` tool call followed by the single
+confirmation line.** Do not narrate your reasoning, do not describe the extractions in
+text, do not summarise what you found. Prose output instead of (or alongside) a real
+tool call causes the unit to be counted as derailed and re-dispatched. The push itself
+is the deliverable — everything else is noise.
+
 Produce exactly one extraction per thread in `threads`. Read each message's
 `text` body to do the extraction. Then assemble the output file:
 

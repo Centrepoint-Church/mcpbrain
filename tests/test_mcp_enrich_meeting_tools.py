@@ -261,6 +261,22 @@ def test_push_allows_missing_extractions_for_block_units(tmp_path):
     assert r3["written"] is True, f"block push with memory_distil should succeed, got {r3}"
 
 
+def test_push_rejects_empty_extractions_without_block_answers(tmp_path):
+    # extractions=[] with no block answers must be rejected for thread units — an empty
+    # list would silently write an inbox file that drains the unit with zero extractions
+    # applied, the same failure mode as the old coercion bug.
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    r = asyncio.run(push(unit_id="u1", extractions=[]))
+    assert r["written"] is False, f"expected written=False for empty extractions, got {r}"
+    assert "extractions" in r.get("error", "").lower() or "non-empty" in r.get("error", "").lower(), (
+        f"error should mention extractions or non-empty: {r}"
+    )
+    # But extractions=[] IS allowed for block units (they have their own answer field).
+    r_block = asyncio.run(push(unit_id="u2", extractions=[],
+                               merge_answers=[{"pair_id": "a|b", "same": False, "canonical": ""}]))
+    assert r_block["written"] is True, f"block unit with extractions=[] should succeed, got {r_block}"
+
+
 # --- meeting packs ----------------------------------------------------------
 
 def test_meeting_pack_upsert_and_get_roundtrip_with_context_hash(tmp_path):
