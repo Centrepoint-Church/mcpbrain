@@ -540,7 +540,10 @@ def _atomic_write(target, text: str) -> None:
 # Must stay in lockstep with mcp_server._PULL_MAX_CHARS: a unit is sized so its pull
 # (unit work + rules + context) fits the cap. _UNIT_RULES_RESERVE is the room left
 # for the rules block the pull attaches.
-_UNIT_PULL_CAP = 40_000
+# Sourced from config.unit_pull_cap() — default raised from 40_000 → 60_000 to
+# pack more threads per Haiku call (Task 5.1). This module-level constant mirrors
+# the default so existing callers that pass pull_cap=_UNIT_PULL_CAP remain correct.
+_UNIT_PULL_CAP = config.unit_pull_cap()
 _UNIT_RULES_RESERVE = 11_000
 _UNIT_BLOCKS = ("merge_review", "synthesis", "profile_synthesis",
                 "community_synthesis", "memory_distil", "profile_audit")
