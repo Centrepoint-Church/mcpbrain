@@ -18,6 +18,12 @@ cache (~10% cost) for the rest of the fan-out. Do not re-fetch the rules over th
 
 ## Protocol
 
+**Your ONLY output is the `brain_enrich_push` tool call followed by the single
+confirmation line.** Do not narrate your reasoning, do not describe the extractions in
+text, do not summarise what you found. Prose output instead of (or alongside) a real
+tool call causes the unit to be counted as derailed and re-dispatched. The push itself
+is the deliverable — everything else is noise.
+
 1. Load the tools:
    `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
 2. Call `brain_enrich_pull` with `unit_id=<your unit_id>` and `with_rules=false` (the
@@ -30,8 +36,14 @@ cache (~10% cost) for the rest of the fan-out. Do not re-fetch the rules over th
      (`merge_review` → `merge_answers`; otherwise the field of the same name:
      `synthesis` / `profile_synthesis` / `community_synthesis` / `memory_distil` /
      `profile_audit`).
-4. Call `brain_enrich_push` with `unit_id=<your unit_id>`, `extractions=[…]` (and the
-   block answer field if this is a block unit). Confirm `{"written": true}`.
+4. Call `brain_enrich_push` with:
+   - `unit_id=<your unit_id>`
+   - For a **thread unit**: `extractions=[…]` — an array of extraction objects, one
+     per thread. This field is **required** for thread units; omitting it or passing
+     a non-list will be rejected by the tool with an error.
+   - For a **block unit**: pass the block answer field (`merge_answers`, `synthesis`,
+     etc.); `extractions` may be omitted for block units.
+   Confirm the response is `{"written": true}`.
 5. Return ONE line only: `unit <unit_id>: <n> <kind>`, or `ERROR: <reason>`.
 
 Use the MCP tools only. Do not read the spool via shell, and do not read skill or
