@@ -590,6 +590,77 @@ def test_merge_review_block_caps_pairs(monkeypatch):
     assert out[0]["a"]["id"] == "a0"  # order preserved, just truncated
 
 
+# --- unit_pull_cap: configurable cap and lockstep assertion ----------------
+
+def test_unit_pull_cap_default():
+    # config.unit_pull_cap() must return 60_000 when unconfigured.
+    from mcpbrain import config
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as td:
+        assert config.unit_pull_cap(td) == 60_000
+
+
+def test_unit_pull_cap_from_config():
+    # config.unit_pull_cap() must respect an explicit 'unit_pull_cap' in config.json.
+    from mcpbrain import config
+    import tempfile, json
+    with tempfile.TemporaryDirectory() as td:
+        (config._path(td)).write_text(json.dumps({"unit_pull_cap": 80_000}))
+        assert config.unit_pull_cap(td) == 80_000
+
+
+def test_prepare_and_server_caps_in_lockstep():
+    # prepare._UNIT_PULL_CAP and mcp_server._PULL_MAX_CHARS must equal the
+    # config.unit_pull_cap() default (60_000) so neither side is stale.
+    from mcpbrain import prepare, mcp_server, config
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        default_cap = config.unit_pull_cap(td)
+    assert prepare._UNIT_PULL_CAP == default_cap, (
+        f"prepare._UNIT_PULL_CAP ({prepare._UNIT_PULL_CAP}) != "
+        f"config.unit_pull_cap() default ({default_cap})"
+    )
+    assert mcp_server._PULL_MAX_CHARS == default_cap, (
+        f"mcp_server._PULL_MAX_CHARS ({mcp_server._PULL_MAX_CHARS}) != "
+        f"config.unit_pull_cap() default ({default_cap})"
+    )
+
+
+def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
+    # With a higher pull_cap, write_units fits more threads into each unit file,
+    # yielding fewer unit files for the same input.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    import json as _json
+    from mcpbrain import prepare
+
+    # Build threads each ~4KB serialized — three should pack into one unit at
+    # 60K cap (budget ~47K), but split into two at 12K cap (budget ~-1K → clamped
+    # to 2K, fitting only one thread per unit).
+    thread_body = "x" * 4000
+    threads = [
+        {"thread_id": f"t-{i}", "messages": [{"text": thread_body}]}
+        for i in range(3)
+    ]
+    data = {"threads": threads, "context": {}}
+
+    # Small cap — threads must split into multiple units.
+    units_dir_small = tmp_path / "small" / "enrich_queue" / "units"
+    summary_small = prepare.write_units(
+        data, home=str(tmp_path / "small"), pull_cap=12_000
+    )
+
+    # Large cap — all threads fit in fewer units.
+    units_dir_big = tmp_path / "big" / "enrich_queue" / "units"
+    summary_big = prepare.write_units(
+        data, home=str(tmp_path / "big"), pull_cap=60_000
+    )
+
+    assert summary_big["units_written"] < summary_small["units_written"], (
+        f"Expected fewer units at high cap ({summary_big['units_written']}) than "
+        f"low cap ({summary_small['units_written']})"
+    )
+
+
 # --- helpers ---------------------------------------------------------------
 
 def _read_pending(home):
