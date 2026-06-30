@@ -4,6 +4,9 @@ graph_metrics(store) is a pure read over the live schema; it does not mutate.
 Run before and after each graph-shape change to prove improvement / no regression.
 """
 
+import argparse
+import json
+
 _STRUCTURAL_RELATIONS = frozenset({"involved_in", "authored", "instance_of"})
 
 
@@ -38,3 +41,31 @@ def graph_metrics(store) -> dict:
         "observation_attributes": obs,
         "relation_type_counts": rel_types,
     }
+
+
+def _open_store():
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.embed import get_embedder
+    return Store(config.store_path(), dim=get_embedder("bge-small").dim)
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--baseline", help="write metrics JSON to this path")
+    ap.add_argument("--compare", help="diff current metrics against this saved baseline")
+    args = ap.parse_args(argv)
+    m = graph_metrics(_open_store())
+    if args.baseline:
+        with open(args.baseline, "w") as f:
+            json.dump(m, f, indent=2)
+    if args.compare:
+        base = json.load(open(args.compare))
+        for k in ("relations_with_doc_id_pct", "relations_semantic_pct",
+                  "person_email_pct", "relations_total"):
+            print(f"{k}: {base.get(k)} -> {m.get(k)}")
+    print(json.dumps(m, indent=2))
+
+
+if __name__ == "__main__":
+    main()

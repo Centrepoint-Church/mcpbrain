@@ -40,3 +40,14 @@ def test_graph_metrics_empty_store(tmp_path):
     assert m["person_email_pct"] == 0.0
     assert m["observation_attributes"] == {}
     assert m["relation_type_counts"] == {}
+
+
+def test_main_writes_baseline(tmp_path, monkeypatch, capsys):
+    s = _seed(tmp_path)
+    monkeypatch.setattr("mcpbrain.enrich_eval._open_store", lambda: s)
+    from mcpbrain.enrich_eval import main
+    out = tmp_path / "base.json"
+    main(["--baseline", str(out)])
+    import json
+    saved = json.loads(out.read_text())
+    assert saved["relations_total"] == 2
