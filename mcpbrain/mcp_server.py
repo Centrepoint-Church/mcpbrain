@@ -455,6 +455,8 @@ def _enrich_rules() -> str:
 # caller must Read back. Sourced from config.unit_pull_cap() (default 60_000 as of
 # Task 5.1 — raised from 40_000 to pack more threads per Haiku call). Must stay in
 # lockstep with prepare._UNIT_PULL_CAP (the producer sizes units against this).
+# FROZEN AT IMPORT TIME — a config change to unit_pull_cap is not visible until the
+# daemon process restarts.
 _PULL_MAX_CHARS = config.unit_pull_cap()
 
 

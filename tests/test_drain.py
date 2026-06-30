@@ -671,3 +671,85 @@ def test_drain_does_not_overwrite_model_messages(tmp_path, monkeypatch):
         f"drain must NOT overwrite model-supplied messages; "
         f"expected {model_messages!r}, got {captured.get('messages')!r}"
     )
+
+
+def test_drain_attempt_cap_fires_when_invalid_extraction_has_unit_messages(tmp_path):
+    """Fix 2 regression: message injection must happen BEFORE validate_extraction.
+
+    When an extraction is contract-invalid AND the model omitted messages[], the Q8
+    attempt-cap logic must still bump and (eventually) consume the chunk. Before the
+    fix, injection happened after validate_extraction — so a contract-invalid
+    extraction with no model messages had no ids to look up and the chunk re-queued
+    forever without ever hitting the attempt cap.
+
+    This test:
+    1. Writes a unit file carrying the authoritative thread messages.
+    2. Posts a contract-invalid extraction (missing required 'org') with no messages[].
+    3. Verifies that bump_enrich_attempts IS called (i.e., injection happened first).
+    """
+    from mcpbrain.store import Store
+
+    home = tmp_path
+    (home / "enrich_inbox").mkdir(parents=True)
+    units_dir = home / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+
+    unit_id = "u-test-cap"
+    unit_messages = [{"message_id": "m-cap-1", "sender": "a@x.org", "date": "2026-02-01",
+                      "labels": "INBOX", "subject": "Test"}]
+
+    # Authoritative unit file with messages for this thread
+    (units_dir / f"{unit_id}.json").write_text(json.dumps({
+        "unit_id": unit_id,
+        "kind": "thread",
+        "threads": [{"thread_id": "t-cap", "messages": unit_messages}],
+    }))
+
+    # Seed the chunk so doc_ids_for_messages returns something
+    _seed_chunk(s, "d-cap", "t-cap", message_id="m-cap-1")
+
+    # Contract-invalid extraction: 'org' is None which fails validate_extraction.
+    # No messages[] supplied — relies on unit injection to provide them.
+    invalid_ext = {
+        "thread_id": "t-cap",
+        "org": None,          # invalid — will fail validate_extraction
+        "content_type": "update",
+        "summary": "A short summary.",
+        "entities": [],
+        "topics": [],
+        "actions": [],
+        "relations": [],
+        # messages[] intentionally absent — must be injected from unit file
+    }
+
+    inbox_obj = {
+        "unit_id": unit_id,
+        "extractions": [invalid_ext],
+        "merge_answers": [],
+    }
+    _write_inbox(home, f"{unit_id}.json", inbox_obj)
+
+    bump_calls = []
+    original_bump = s.bump_enrich_attempts
+
+    def recording_bump(doc_ids):
+        bump_calls.append(list(doc_ids))
+        return original_bump(doc_ids)
+
+    s.bump_enrich_attempts = recording_bump
+
+    summary = drain.drain(s, home=home, apply=RecordingApply())
+
+    assert summary["skipped"] == 1, "the contract-invalid extraction must be skipped"
+    assert bump_calls, (
+        "bump_enrich_attempts must be called — message injection must happen before "
+        "validate_extraction so the Q8 attempt-cap has ids to work with"
+    )
+    # The chunk's doc_id must appear in the bumped set
+    all_bumped = [did for call in bump_calls for did in call]
+    assert "d-cap" in all_bumped, (
+        f"chunk d-cap must be in the bumped set; got {bump_calls!r}"
+    )
