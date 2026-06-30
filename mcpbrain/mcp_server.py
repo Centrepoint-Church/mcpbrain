@@ -651,6 +651,13 @@ def make_brain_enrich_push(home: str):
                     "error": "extractions is required for thread units (must be a list of "
                              "extraction objects); omit or pass [] only for block units that "
                              "provide a block-answer field (merge_answers, synthesis, etc.)"}
+        # An empty extractions list with no block answers is also invalid for thread units —
+        # it would silently drain the unit with zero extractions applied, the same failure
+        # mode as the coercion bug.  Only block units legitimately push with no extractions.
+        if extractions == [] and not has_block_answer:
+            return {"written": False,
+                    "error": "extractions must be a non-empty list for thread units; "
+                             "pass merge_answers/synthesis for block units"}
         extractions = extractions if extractions is not None else []
         try:
             inbox = Path(home) / "enrich_inbox"
