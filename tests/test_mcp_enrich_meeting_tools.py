@@ -229,6 +229,38 @@ def test_push_requires_unit_or_batch(tmp_path):
     assert asyncio.run(push(unit_id="u1", extractions="notalist"))["written"] is False
 
 
+def test_push_rejects_missing_extractions_without_block_answers(tmp_path):
+    # A thread-unit subagent that narratively describes results without calling the
+    # tool properly must be caught at the tool boundary — not silently written as an
+    # empty-extractions inbox file that drains the unit without applying any work.
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    # Missing extractions with no block answers: must error, not {"written": True}
+    r1 = asyncio.run(push(unit_id="u1"))
+    assert r1["written"] is False, f"expected written=False for missing extractions, got {r1}"
+    assert "extractions" in r1.get("error", "").lower(), f"error should mention extractions: {r1}"
+    # extractions=None with no block answers: same rejection
+    r2 = asyncio.run(push(unit_id="u1", extractions=None))
+    assert r2["written"] is False, f"expected written=False for extractions=None, got {r2}"
+    # extractions as a non-list (e.g. a narrated string or a dict): must reject
+    r3 = asyncio.run(push(unit_id="u1", extractions={"thread_id": "t1"}))
+    assert r3["written"] is False, f"expected written=False for dict extractions, got {r3}"
+    r4 = asyncio.run(push(unit_id="u1", extractions=42))
+    assert r4["written"] is False, f"expected written=False for int extractions, got {r4}"
+
+
+def test_push_allows_missing_extractions_for_block_units(tmp_path):
+    # Block units (merge_review, synthesis, memory_distil, etc.) legitimately push
+    # with no thread extractions — the answer is in the block-specific field.
+    # These must NOT be rejected by the extractions guard.
+    push = mcp_server.make_brain_enrich_push(str(tmp_path))
+    r1 = asyncio.run(push(unit_id="u1", merge_answers=[{"pair_id": "a|b", "same": False, "canonical": ""}]))
+    assert r1["written"] is True, f"block push with merge_answers should succeed, got {r1}"
+    r2 = asyncio.run(push(unit_id="u2", synthesis=[{"thread_id": "t1", "contextual_summary": "..."}]))
+    assert r2["written"] is True, f"block push with synthesis should succeed, got {r2}"
+    r3 = asyncio.run(push(unit_id="u3", memory_distil=[{"doc_id": "n1", "verdict": "keep", "reason": "x"}]))
+    assert r3["written"] is True, f"block push with memory_distil should succeed, got {r3}"
+
+
 # --- meeting packs ----------------------------------------------------------
 
 def test_meeting_pack_upsert_and_get_roundtrip_with_context_hash(tmp_path):

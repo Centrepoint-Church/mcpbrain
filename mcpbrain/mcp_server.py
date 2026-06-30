@@ -618,14 +618,40 @@ def make_brain_enrich_push(home: str):
         daemon to drain (it applies the result, marks chunks enriched, and deletes the
         unit). Besides `extractions` and `merge_answers`, accepts the optional answer
         blocks (synthesis, profile_synthesis, community_synthesis, memory_distil,
-        profile_audit) and forwards each. Returns {"written": bool, path|error}."""
+        profile_audit) and forwards each. Returns {"written": bool, path|error}.
+
+        Schema rules:
+          - `extractions` must be a list when provided; passing a non-list (string,
+            dict, number) is rejected with a clear error so a subagent that narrates
+            its result instead of producing a proper tool call is caught at the
+            boundary rather than silently consuming the unit with zero extractions.
+          - `extractions` may be None/omitted ONLY for block units that carry their
+            answer in a block field (merge_answers, synthesis, profile_synthesis,
+            community_synthesis, memory_distil, profile_audit).  A push with no
+            extractions AND no block answers is rejected — it indicates a derailed
+            subagent that produced prose instead of a real extraction payload.
+        """
         import json as _json
         from pathlib import Path
-        extractions = extractions or []
-        if not isinstance(extractions, list):
-            return {"written": False, "error": "extractions must be a list"}
         if not unit_id:
             return {"written": False, "error": "unit_id required"}
+        # Type check before the or-coercion so a dict/string/number is never silently
+        # treated as an empty list.  extractions=None is handled separately below.
+        if extractions is not None and not isinstance(extractions, list):
+            return {"written": False, "error": "extractions must be a list"}
+        # A push with extractions=None/missing is only valid for block units — when at
+        # least one block-answer field carries the real payload.  Without block answers
+        # a missing extractions means the subagent derailed (produced prose, timed out,
+        # or skipped the tool call entirely) and must not silently drain the unit.
+        has_block_answer = (merge_answers is not None and merge_answers != []) or any(
+            blocks.get(k) for k in _ENRICH_ANSWER_BLOCKS
+        )
+        if extractions is None and not has_block_answer:
+            return {"written": False,
+                    "error": "extractions is required for thread units (must be a list of "
+                             "extraction objects); omit or pass [] only for block units that "
+                             "provide a block-answer field (merge_answers, synthesis, etc.)"}
+        extractions = extractions if extractions is not None else []
         try:
             inbox = Path(home) / "enrich_inbox"
             inbox.mkdir(parents=True, exist_ok=True)
@@ -1196,9 +1222,11 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await enrich_pull(unit_id=arguments.get("unit_id", ""))
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
+            # Do NOT coerce extractions=None to [] here — the handler must see None
+            # when the field is absent so the block-unit vs thread-unit guard works.
             out = await enrich_push(
                 unit_id=arguments.get("unit_id", ""),
-                extractions=arguments.get("extractions") or [],
+                extractions=arguments.get("extractions"),  # None if absent; validated in handler
                 merge_answers=arguments.get("merge_answers") or [],
                 **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
             )
