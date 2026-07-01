@@ -971,6 +971,23 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
     entities_created = 0
 
+    # Header email lookup: every message's sender header (system-attached by
+    # drain, Phase 2), not just the lead's. Lets a non-lead sender who also
+    # appears in entities[] (e.g. someone who replied later in the thread) get
+    # email_addr too — the lead-only sender_id upsert above only covers message
+    # 1. First writer wins on a name collision (don't overwrite).
+    header_email_by_name: dict = {}
+    for msg in messages:
+        msg_header = msg.get("sender", "") or ""
+        if not msg_header:
+            continue
+        msg_email = _extract_email_addr(msg_header)
+        if not msg_email:
+            continue
+        msg_name_key = strip_affiliation(_extract_name(msg_header)).strip().lower()
+        if msg_name_key and msg_name_key not in header_email_by_name:
+            header_email_by_name[msg_name_key] = msg_email
+
     # Write-time dedup index. Prefer a caller-supplied index (drain builds ONE per
     # run and reuses it — avoids rebuilding the 25k-entity index on every apply);
     # fall back to building it here for direct callers. Near-duplicates redirect to
@@ -1000,6 +1017,12 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if etype == "person" and is_junk_entity(ename, "person"):
             continue
 
+        # Any message's header email whose sender name matches this entity
+        # (e.g. someone who replied later in the thread), not just the lead's.
+        eemail = ""
+        if etype == "person":
+            eemail = header_email_by_name.get(ename.strip().lower(), "")
+
         # Q3 write-time dedup: redirect near-duplicates to the existing entity.
         if _dedup_enabled:
             existing_id = write_time_dedup_check(ename, etype, _entity_index)
@@ -1014,6 +1037,14 @@ def apply(store, extraction, *, doc_ids, identity=None,
                         store.update_entity_org_if_empty(entity_id, eorg)
                     except Exception:  # noqa: BLE001
                         pass
+                # Same for email: a redirect shouldn't lose a header-sourced
+                # address either — otherwise this fix becomes dead code once
+                # write_time_dedup defaults on (Task 5.3).
+                if eemail:
+                    try:
+                        store.update_entity_email_if_empty(entity_id, eemail)
+                    except Exception:  # noqa: BLE001
+                        pass
                 if entity_id not in linked:
                     if store.link_email_entity(lead_msg_id, entity_id, role="mentioned"):
                         _bump_email_count(store, entity_id)
@@ -1024,7 +1055,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 continue
 
         entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg,
-                                  taxonomy=taxonomy, valid_from=lead_date_iso)
+                                  email_addr=eemail, taxonomy=taxonomy, valid_from=lead_date_iso)
         if not entity_id:
             continue
         # Keep the index current so a later entity in THIS batch dedups against
