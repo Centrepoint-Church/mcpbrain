@@ -54,6 +54,14 @@ wrong and MUST be right:
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
 - **Current state (2026-07-01):** all four version files **and** the published wheel are at
-  `0.7.72` — source, dist index, and plugin manifests are in step. 0.7.72 adds the Session-1
+  `0.7.73` — source, dist index, and plugin manifests are in step. 0.7.72 shipped the Session-1
   enrichment-efficiency work (coordinator→Haiku, provenance stamping, message-metadata off the
-  model, bigger batches, strict push schema) + the cold-recall decouple.
+  model, bigger batches, strict push schema) + the cold-recall decouple. 0.7.73 adds Session-2
+  graph-depth (header `email_addr`, deterministic org default + `works_at`/`mentioned_with`
+  relations, reconciled entity/relation vocabulary, temporal `entity_observations`, and
+  write-time email/token dedup — `write_time_dedup` now default ON).
+- **KNOWN LATENT BUG (do not wire live until fixed):** `resolve.resolve_entities` →
+  `_deterministic_merges` collapses entities on canonical-name-key across ALL types, incl.
+  structural document/thread nodes sharing generic titles ("Untitled document") — merged ~3,980
+  in one shot on a real-corpus copy. It has **no live callers** (safe today). Before any caller
+  is added, exclude structural types / require a stronger identity key.
