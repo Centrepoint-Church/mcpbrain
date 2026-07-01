@@ -513,9 +513,10 @@ SYSTEM_LABELS = {
     "CATEGORY_UPDATES", "CATEGORY_FORUMS",
 }
 
-# Relation types the structural pass accepts. Mirrors enrich_gmail.py:1542.
+# Relation types the structural pass accepts. Mirrors RELATION_TYPES in contract.py.
 VALID_RELATION_TYPES = {
     "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
+    "collaborates_with", "attended",
 }
 
 # Endpoint-type constraints for the person-centric relations. The LLM over-applies

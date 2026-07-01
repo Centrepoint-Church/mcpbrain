@@ -29,13 +29,14 @@ from mcpbrain.chunking import _VALID_CONTENT_TYPES
 # Closed entity type set. Extractors must return one of these; sanitize_extraction
 # drops any entity whose type is not in this set. Kept as a frozenset so callers
 # can use 'in' without a function call.
-ENTITY_TYPES: frozenset[str] = frozenset({"person", "org", "project"})
+ENTITY_TYPES: frozenset[str] = frozenset({"person", "org", "project", "meeting", "event", "topic"})
 
 # Closed relation type set. Matches VALID_RELATION_TYPES in graph_write.py; defined
 # here so contract.py can sanitize off-schema relation types before apply() ever
 # sees them — earlier rejection than the apply-time filter.
 RELATION_TYPES: frozenset[str] = frozenset({
     "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
+    "collaborates_with", "attended",
 })
 
 
