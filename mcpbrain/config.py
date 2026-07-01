@@ -143,6 +143,14 @@ def enrich_structural_relations_enabled(home) -> bool:
     return bool(read_config(home).get("enrich_structural_relations_enabled", True))
 
 
+def enrich_sender_entities(home) -> bool:
+    """Whether the daemon creates person entities for message senders from headers
+    (so the LLM extracts only body-mentioned people). Default True; kill-switch only.
+    Junk-guarded (is_junk_entity) and owner-excluded; senders on noise threads never
+    reach apply() because the salience/noise filter drops them upstream."""
+    return bool(read_config(home).get("enrich_sender_entities", True))
+
+
 def enrich_rich_observations_enabled(home) -> bool:
     """Whether graph_write.apply() wires the extraction's `observations[]`
     field (dated, attributable facts about an already-listed entity — job
