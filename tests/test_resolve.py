@@ -58,6 +58,34 @@ def test_deterministic_merges_same_type_only(tmp_path):
     assert "prayer-person" in ids
 
 
+def test_deterministic_merges_excludes_structural_types(tmp_path):
+    # A document/thread/topic's identity is its SOURCE ID, not its title. Distinct
+    # such nodes routinely share generic titles ("Untitled document", "TEST") and
+    # must NEVER be merged on canonical name — doing so collapsed ~3,980 entities on
+    # the real corpus. Only name-identity types (person/org/project) merge on name.
+    from mcpbrain.resolve import _deterministic_merges
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    store.upsert_entity("doc-a", "Untitled document", "document", seen="2026-05-30")
+    store.upsert_entity("doc-b", "Untitled document", "document", seen="2026-05-30")
+    store.upsert_entity("thr-a", "TEST", "thread", seen="2026-05-30")
+    store.upsert_entity("thr-b", "TEST", "thread", seen="2026-05-30")
+    store.upsert_entity("top-a", "Budget", "topic", seen="2026-05-30")
+    store.upsert_entity("top-b", "Budget", "topic", seen="2026-05-30")
+    # a genuine person duplicate SHOULD still merge (name IS the identity).
+    store.upsert_entity("sam-a", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("sam-b", "Sam Lee", "person", seen="2026-05-30")
+
+    merged = _deterministic_merges(store)
+
+    ids = {e["id"] for e in store.list_entities()}
+    assert {"doc-a", "doc-b"} <= ids, "distinct documents must not merge on title"
+    assert {"thr-a", "thr-b"} <= ids, "distinct threads must not merge on title"
+    assert {"top-a", "top-b"} <= ids, "distinct topics must not merge on name"
+    assert len({"sam-a", "sam-b"} & ids) == 1, "the person duplicate should merge"
+    assert merged == 1, f"only the person pair should merge, got {merged}"
+
+
 def test_deterministic_survivor_is_highest_mentions(tmp_path):
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
