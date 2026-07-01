@@ -143,6 +143,25 @@ def enrich_structural_relations_enabled(home) -> bool:
     return bool(read_config(home).get("enrich_structural_relations_enabled", True))
 
 
+def enrich_rich_observations_enabled(home) -> bool:
+    """Whether graph_write.apply() wires the extraction's `observations[]`
+    field (dated, attributable facts about an already-listed entity — job
+    title changes, org moves, project-membership changes) through
+    write_observation(), generalizing the existing role-observation path to
+    arbitrary attributes with the same bi-temporal supersession.
+
+    When True, each observations[] item ({"entity_name", "attribute",
+    "value", "date"}) is resolved to an entity via name_to_id (exact match
+    only; unresolved names are skipped, never invented) and written via
+    write_observation(store, entity_id, attribute, value, "llm_extraction",
+    valid_from, "medium").
+
+    Default: TRUE. Set 'enrich_rich_observations_enabled': false in
+    config.json to disable, reverting to the model's own `role` field only.
+    """
+    return bool(read_config(home).get("enrich_rich_observations_enabled", True))
+
+
 def salience_require_drive_mention(home) -> bool:
     """Stricter Drive gate: only graph-extract a Drive doc if it's referenced in
     email (ops-brain's mention rule). Config 'salience_require_drive_mention'.
