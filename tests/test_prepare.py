@@ -14,6 +14,7 @@ import json
 
 
 from mcpbrain import prepare
+from mcpbrain.store import Store
 
 _NOW = _datetime.datetime(2026, 6, 2, 9, 30, 0, tzinfo=_datetime.timezone.utc)
 
@@ -255,8 +256,12 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text('{"salience_gate": false}')
     noise = FakeBatch("t-noise", ["d-n1"],
                       [_msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "x")])
+    # Non-trivial body (has an action cue) so this thread exercises the normal
+    # build_pending/write_units mechanics rather than the trivial-thread
+    # short-circuit (covered separately by its own tests below).
     good = FakeBatch("t-good", ["d-g1"],
-                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B", "x")])
+                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B",
+                           "Can you confirm the Hall B booking for Sunday?")])
     store = FakeStore()
     monkeypatch.setattr(prepare, "_group_unenriched_threads",
                         lambda store, **kw: [noise, good])
@@ -315,6 +320,154 @@ def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
     data = _read_pending(tmp_path)
     assert [t["thread_id"] for t in data["threads"]] == ["t-good"]
     assert ["d-n1"] in store.marked
+
+
+# --- 2.1.1 trivial-thread short-circuit -------------------------------------
+
+def test_is_trivial_thread_short_no_action_cue():
+    assert prepare.is_trivial_thread([{"text": "Thanks, sounds good."}]) is True
+
+
+def test_is_trivial_thread_false_when_over_char_budget():
+    long_text = "x" * 301
+    assert prepare.is_trivial_thread([{"text": long_text}]) is False
+
+
+def test_is_trivial_thread_false_when_action_cue_present():
+    assert prepare.is_trivial_thread([{"text": "Thanks! Can you send the file?"}]) is False
+    assert prepare.is_trivial_thread([{"text": "Please review this."}]) is False
+    assert prepare.is_trivial_thread([{"text": "Sounds good?"}]) is False
+
+
+def test_is_trivial_thread_empty_messages_is_true():
+    assert prepare.is_trivial_thread([]) is True
+
+
+def test_prepare_units_applies_trivial_thread_without_model_unit(tmp_path, monkeypatch):
+    # A trivial thread (short, no action cue) must be deterministically
+    # extracted and marked enriched directly by prepare_units — it must never
+    # reach build_pending/write_units, so no unit file carries it and no
+    # model call happens for it.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
+    store = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    store.init()
+    store.upsert_chunk(
+        doc_id="d-triv1", text="Thanks, sounds good.", content_hash="h-triv1",
+        metadata={"thread_id": "t-trivial", "sender": "Dana Lee <dana@centrepoint.church>",
+                  "subject": "Re: Hall B", "date": "2026-06-01"},
+    )
+    trivial = FakeBatch(
+        "t-trivial", ["d-triv1"],
+        [_msg("m1", "Dana Lee <dana@centrepoint.church>", "2026-06-01",
+              "Re: Hall B", "Thanks, sounds good.")],
+    )
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [trivial])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    assert summary["threads"] == 0
+    units_dir = tmp_path / "enrich_queue" / "units"
+    units = list(units_dir.glob("*.json")) if units_dir.exists() else []
+    for u in units:
+        d = json.loads(u.read_text())
+        if d["kind"] == "thread":
+            assert all(t["thread_id"] != "t-trivial" for t in d["threads"])
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT thread_id FROM email_context WHERE thread_id='t-trivial'"
+        ).fetchone()
+        enriched = db.execute(
+            "SELECT enriched FROM chunks WHERE doc_id='d-triv1'"
+        ).fetchone()[0]
+    assert row is not None, "trivial thread must get a deterministic email_context row"
+    assert enriched == 1, "trivial thread's chunk must be marked enriched"
+
+
+def test_prepare_units_leaves_nontrivial_thread_to_model_path(tmp_path, monkeypatch):
+    # A non-trivial thread (long body / action cue) must still flow through
+    # build_pending/write_units unchanged — no deterministic short-circuit.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
+    store = FakeStore()
+    nontrivial = FakeBatch(
+        "t-real", ["d-r1"],
+        [_msg("m1", "joel@example.org", "2026-06-01", "Hall B booking",
+              "Can you confirm the Hall B booking for Sunday?")],
+    )
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [nontrivial])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    assert summary["threads"] == 1
+    units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
+    tids = set()
+    for u in units:
+        d = json.loads(u.read_text())
+        if d["kind"] == "thread":
+            tids.update(t["thread_id"] for t in d["threads"])
+    assert tids == {"t-real"}
+    assert store.marked == []  # not marked by the trivial path; drain marks it later
+
+
+def test_prepare_units_trivial_short_circuit_works_with_default_home(tmp_path, monkeypatch):
+    # Regression: prepare_units() may be called with home=None (its default);
+    # _apply_trivial_threads must resolve that to config.app_dir(), same as
+    # every other config.*(home) call site in this module, not hand None
+    # straight to config.read_config (which would raise on Path(None)).
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
+    store = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    store.init()
+    store.upsert_chunk(
+        doc_id="d-triv3", text="Thanks, sounds good.", content_hash="h-triv3",
+        metadata={"thread_id": "t-trivial3", "sender": "joel@example.org",
+                  "subject": "Re: Hall B", "date": "2026-06-01"},
+    )
+    trivial = FakeBatch(
+        "t-trivial3", ["d-triv3"],
+        [_msg("m1", "joel@example.org", "2026-06-01", "Re: Hall B", "Thanks, sounds good.")],
+    )
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [trivial])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW)  # home omitted -> None
+
+    assert summary["threads"] == 0
+
+
+def test_prepare_units_trivial_short_circuit_respects_kill_switch(tmp_path, monkeypatch):
+    # With enrich_trivial_thread_summary=False, a trivial thread must flow
+    # through the normal model path unchanged (kill-switch only, default ON).
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"salience_gate": False, "enrich_trivial_thread_summary": False}))
+    store = FakeStore()
+    trivial = FakeBatch(
+        "t-trivial2", ["d-triv2"],
+        [_msg("m1", "joel@example.org", "2026-06-01", "Re: Hall B", "Thanks, sounds good.")],
+    )
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [trivial])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    assert summary["threads"] == 1
+    assert store.marked == []
 
 
 # --- 2.3 thread block shape ------------------------------------------------
