@@ -790,6 +790,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "verify_interval_s": None,
              "feedback_aggregate_interval_s": None,
              "org_backfill_interval_s": None,
+             "resolve_entities_interval_s": None,
              "salience_score_interval_s": None,
              "decay_pass_interval_s": None,
              "consolidation_interval_s": None,
@@ -1105,3 +1106,96 @@ def test_maybe_stale_reextract_not_due_before_interval(tmp_path):
         second = daemon.maybe_stale_reextract()
     assert second is None
     mock_sweep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 3.3 — _run_resolve_entities cadence tests (daily deterministic dedup,
+# issue #23-fix validated). Modelled directly on _run_org_backfill: no
+# constructor param, attrs set post-construction (same as org_backfill_interval_s
+# / _last_org_backfill), OFF unless resolve_entities_interval_s is set.
+# ---------------------------------------------------------------------------
+
+def _resolve_entities_daemon(tmp_path, *, resolve_entities_interval_s=None, clock=None):
+    store = _make_store(tmp_path, name="resolve_entities.sqlite3")
+    daemon = Daemon(
+        store, _FakeEmbedder(),
+        services={},
+        lock=SingleWriterLock(tmp_path / "re.lock"),
+        clock=clock or _Clock(),
+    )
+    daemon._resolve_entities_interval_s = resolve_entities_interval_s
+    return store, daemon
+
+
+def test_run_resolve_entities_off_when_unconfigured(tmp_path):
+    """resolve_entities_interval_s not supplied (None) -> _run_resolve_entities()
+    returns None without calling resolve.resolve_entities (the numeric-interval
+    kill-switch: 0/negative maps to None via _cadences_from_config)."""
+    store, daemon = _resolve_entities_daemon(tmp_path)  # no interval -> None
+    with patch("mcpbrain.resolve.resolve_entities") as mock_resolve:
+        result = daemon._run_resolve_entities()
+    assert result is None
+    mock_resolve.assert_not_called()
+
+
+def test_run_resolve_entities_runs_when_due(tmp_path):
+    store, daemon = _resolve_entities_daemon(tmp_path, resolve_entities_interval_s=86400.0)
+    fake = {"mode": "deterministic", "auto_merges": 95, "llm_merges": 0,
+            "llm_calls": 0, "kept_distinct": 0}
+    with patch("mcpbrain.resolve.resolve_entities", return_value=fake) as mock_resolve:
+        result = daemon._run_resolve_entities()
+    assert result == fake
+    mock_resolve.assert_called_once()
+    # Called with the daemon's store and home=... per the brief's exact call shape.
+    args, kwargs = mock_resolve.call_args
+    assert args[0] is store
+    assert "home" in kwargs
+    assert daemon._last_resolve_entities is not None
+
+
+def test_run_resolve_entities_swallows_errors(tmp_path):
+    clock = _Clock()
+    store, daemon = _resolve_entities_daemon(
+        tmp_path, resolve_entities_interval_s=100.0, clock=clock)
+    with patch("mcpbrain.resolve.resolve_entities",
+               side_effect=RuntimeError("boom")):
+        result = daemon._run_resolve_entities()
+    assert result["resolve_entities"] is False
+    # _last not advanced on failure -> next call retries.
+    assert daemon._last_resolve_entities is None
+
+
+def test_run_resolve_entities_not_due_before_interval(tmp_path):
+    """After a successful run, a call within the interval returns None."""
+    clock = _Clock()
+    store, daemon = _resolve_entities_daemon(
+        tmp_path, resolve_entities_interval_s=100.0, clock=clock)
+    fake = {"mode": "deterministic", "auto_merges": 0, "llm_merges": 0,
+            "llm_calls": 0, "kept_distinct": 0}
+    with patch("mcpbrain.resolve.resolve_entities", return_value=fake):
+        first = daemon._run_resolve_entities()
+    assert first is not None
+
+    clock.advance(50.0)
+    with patch("mcpbrain.resolve.resolve_entities") as mock_resolve:
+        second = daemon._run_resolve_entities()
+    assert second is None
+    mock_resolve.assert_not_called()
+
+
+def test_run_resolve_entities_runs_again_after_interval(tmp_path):
+    """After the interval elapses fully, the pass is due again."""
+    clock = _Clock()
+    store, daemon = _resolve_entities_daemon(
+        tmp_path, resolve_entities_interval_s=100.0, clock=clock)
+    fake = {"mode": "deterministic", "auto_merges": 0, "llm_merges": 0,
+            "llm_calls": 0, "kept_distinct": 0}
+    with patch("mcpbrain.resolve.resolve_entities", return_value=fake) as mock_resolve:
+        first = daemon._run_resolve_entities()
+    assert first is not None
+
+    clock.advance(100.0)
+    with patch("mcpbrain.resolve.resolve_entities", return_value=fake) as mock_resolve2:
+        second = daemon._run_resolve_entities()
+    assert second is not None
+    mock_resolve2.assert_called_once()
