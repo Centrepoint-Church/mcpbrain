@@ -494,7 +494,7 @@ _ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis"
 
 
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
-_UNITS_BATCH_DEFAULT = 12  # max units handed out (and claimed) per brain_enrich_units call
+_UNITS_BATCH_DEFAULT = 30  # max units handed out (and claimed) per brain_enrich_units call
 
 
 def _units_batch() -> int:
