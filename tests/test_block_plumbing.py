@@ -44,7 +44,7 @@ def test_drain_dispatches_registered_block(tmp_path):
         (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(
             {"batch_id": "b1", "extractions": [env], "merge_answers": [],
              "my_block": [{"id": 1}]}))
-        drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids: {})
+        drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids, entity_index=None: {})
         assert seen["items"] == [{"id": 1}]
     finally:
         del drain.BLOCK_DRAINERS["my_block"]
@@ -73,7 +73,7 @@ def test_block_drainer_failure_retains_file(tmp_path):
         (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(
             {"batch_id": "b1", "extractions": [_minimal_env()], "merge_answers": [],
              "bad_block": [{"id": 1}]}))
-        summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids: {})
+        summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids, entity_index=None: {})
         assert summary["applied"] == 1       # extraction still applied
         # A raising drainer must NOT delete the file: the answers are retained
         # on disk for retry, matching the synthesis-drain failure path.
@@ -95,7 +95,7 @@ def test_block_drainer_falsy_result_reports_zero(tmp_path):
         (tmp_path / "enrich_inbox" / "b1.json").write_text(json.dumps(
             {"batch_id": "b1", "extractions": [_minimal_env()], "merge_answers": [],
              "empty_block": [{"id": 1}]}))
-        summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids: {})
+        summary = drain.drain(s, home=tmp_path, apply=lambda st, e, *, doc_ids, entity_index=None: {})
         # Success with a falsy result still reports the key so the daemon can
         # clear its stash for that block.
         assert summary["empty_block_drained"] == 0

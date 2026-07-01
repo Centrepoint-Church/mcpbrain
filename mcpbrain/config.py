@@ -509,18 +509,27 @@ def auto_enable_enabled(home) -> bool:
 
 
 def write_time_dedup_enabled(home) -> bool:
-    """Whether write-time entity dedup runs the cascade matcher before inserting.
+    """Whether entity dedup (write-time cascade + email-equality batch pass) runs.
 
-    When True, apply() checks each new entity against an in-memory index of
-    existing same-type entities using a two-step cascade: exact canonical-key
-    match → high-confidence token-similarity (≥ 0.8). A match redirects the
-    write to the existing entity rather than creating a duplicate.
+    Gates TWO behaviors:
+    1. Write-time cascade (graph_write.apply()): each new entity is checked
+       against an in-memory index of existing same-type entities using a
+       two-step cascade — exact canonical-key match → high-confidence
+       token-similarity (≥ 0.8). A match redirects the write to the existing
+       entity rather than creating a duplicate.
+    2. Email-equality batch merge (resolve._email_equality_merges, Task 5.3):
+       existing person entities sharing a normalized email_addr are merged
+       into the highest-mentions survivor (method="email" in
+       entity_merge_log) — catches near-duplicates whose names diverge too
+       much for the token-similarity cascade (e.g. "Sam Lee" vs "Samuel Lee").
 
-    Default: False — safe rollout. Enable via config 'write_time_dedup': true.
-    Note: embedding-based blocking (cosine on entity vectors) is deferred until
-    entity vectors exist.
+    Default: True (Task 5.3) — validated on the live store (Phase-5 gate:
+    merge-review volume drop, no wrong merges in a 20-row entity_merge_log
+    spot-check); ships on for all users. Disable via config
+    'write_time_dedup': false. Note: embedding-based blocking (cosine on
+    entity vectors) is deferred until entity vectors exist.
     """
-    return bool(read_config(home).get("write_time_dedup", False))
+    return bool(read_config(home).get("write_time_dedup", True))
 
 
 def unit_pull_cap(home=None) -> int:

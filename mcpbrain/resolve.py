@@ -10,10 +10,18 @@ Step 3 (write-time dedup, Q3): before inserting a new entity, check the
 current in-memory index for a same-type near-duplicate above the high-confidence
 threshold (_WRITE_TIME_MERGE_THRESHOLD). If found, redirect to the existing
 entity instead of creating a duplicate. Behind config flag
-`write_time_dedup_enabled` (default False). The cascade:
+`write_time_dedup_enabled` (default True as of Task 5.3). The cascade:
   exact canonical key → high-confidence token similarity → create new.
   Ambiguous band [_CANDIDATE_GATE, _WRITE_TIME_MERGE_THRESHOLD): still queued
   for LLM review via the existing spool merge_review mechanism.
+
+Step 4 (email-equality merge, Task 5.3): a batch pass over EXISTING person
+entities (_email_equality_merges), grouping by normalized email_addr rather
+than name — catches duplicates whose names diverge too much for canonical-key
+or token-similarity blocking (e.g. "Sam Lee" vs "Samuel Lee" sharing one
+inbox). Also gated by `write_time_dedup_enabled`; logs merges with
+method="email" so they're distinguishable from the name-based tiers in
+entity_merge_log.
 
 Note: embedding-based semantic blocking (cosine similarity on entity vectors)
 would give better recall for non-overlapping names (e.g. "Joel" vs "J. Chelliah")
@@ -27,6 +35,7 @@ prepare._merge_review_block.
 
 import logging
 
+from mcpbrain import config
 from mcpbrain.chunking import slugify, _canonical_name
 
 log = logging.getLogger(__name__)
@@ -61,6 +70,49 @@ def _deterministic_merges(store) -> int:
         for m in members:
             if m["id"] != survivor["id"]:
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
+                merged += 1
+    return merged
+
+
+def _email_equality_merges(store, home=None) -> int:
+    """Merge person entities that share a normalized email_addr into the
+    highest-mentions survivor. Returns the number of merges applied.
+
+    A THIRD dedup mechanism (Task 5.3), separate from _deterministic_merges
+    (canonical-name-key) and write_time_dedup_check (write-time token-similarity
+    redirect for NEW entities). This one is a batch pass over EXISTING entities,
+    grouping by email_addr rather than name — catches genuine duplicates whose
+    names diverge too much for canonical-key or token-similarity blocking to see
+    (e.g. "Sam Lee" vs "Samuel Lee") but who share an email inbox.
+
+    Gated behind config.write_time_dedup_enabled (same flag as the write-time
+    cascade): reuses it rather than adding a new switch, per the plan.
+
+    Query is self-contained (not entities_for_resolution(), which doesn't expose
+    email_addr) — deliberately scoped to this module per the task's file list.
+    """
+    home_str = str(home) if home is not None else str(config.app_dir())
+    if not config.write_time_dedup_enabled(home_str):
+        return 0
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT id, name, email_addr, mentions FROM entities "
+            "WHERE type='person' AND COALESCE(email_addr,'') != '' ORDER BY id"
+        ).fetchall()
+    groups = {}   # normalized email -> [entity dicts]
+    for r in rows:
+        email = r["email_addr"].strip().lower()
+        if not email:
+            continue
+        groups.setdefault(email, []).append(dict(r))
+    merged = 0
+    for _email, members in groups.items():
+        if len(members) < 2:
+            continue
+        survivor = max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+        for m in members:
+            if m["id"] != survivor["id"]:
+                store.merge_entities(m["id"], survivor["id"], method="email")
                 merged += 1
     return merged
 
@@ -204,12 +256,18 @@ def write_time_dedup_check(name: str, entity_type: str,
     return None
 
 
-def resolve_entities(store, client=None, *, max_adjudications: int = 200) -> dict:
+def resolve_entities(store, client=None, *, max_adjudications: int = 200, home=None) -> dict:
     """Resolve duplicate entities (deterministic tier only; §9A).
 
     The LLM-adjudication tier is removed — spool merge_review handles it. Fuzzy
     candidate generation (_candidate_pairs) is preserved for prepare._merge_review_block.
+
+    Runs _deterministic_merges (canonical-name-key) first, then
+    _email_equality_merges (Task 5.3) — email merging can still catch entities
+    that survived name-based merging as distinct (different names, same inbox).
+    Both counts are summed into auto_merges.
     """
     auto = _deterministic_merges(store)
+    auto += _email_equality_merges(store, home=home)
     return {"mode": "deterministic", "auto_merges": auto, "llm_merges": 0,
             "llm_calls": 0, "kept_distinct": 0}

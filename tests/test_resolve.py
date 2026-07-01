@@ -1,7 +1,10 @@
+import json
+
 from mcpbrain.resolve import (
     canonical_key,
     _candidate_pairs,
     resolve_entities,
+    _email_equality_merges,
 )
 from mcpbrain.store import Store
 
@@ -184,3 +187,121 @@ def test_resolve_idempotent_second_run(tmp_path):
     out2 = resolve_entities(store, client=None)
     assert out2["auto_merges"] == 0
     assert out2["llm_merges"] == 0
+
+
+# --- Task 5.3: email-equality deterministic merge -------------------------
+
+def _set_email(store, entity_id, email_addr):
+    with store._connect() as db:
+        db.execute("UPDATE entities SET email_addr=? WHERE id=?", (email_addr, entity_id))
+
+
+def _enable_write_time_dedup(tmp_path) -> str:
+    """Write a config.json with write_time_dedup explicitly True and return the
+    home path string, the pattern this session's other kill-switch tests use."""
+    (tmp_path / "config.json").write_text(json.dumps({"write_time_dedup": True}))
+    return str(tmp_path)
+
+
+def _disable_write_time_dedup(tmp_path) -> str:
+    (tmp_path / "config.json").write_text(json.dumps({"write_time_dedup": False}))
+    return str(tmp_path)
+
+
+def test_email_equality_merge_same_case(tmp_path):
+    """Brief's literal acceptance test: two person entities sharing the same
+    email_addr, flag on -> one survives, merge_log gains a method='email' row."""
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    store.upsert_entity("sam-1", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("sam-2", "Samuel Lee", "person", seen="2026-05-30")
+    _set_email(store, "sam-1", "sam@example.org")
+    _set_email(store, "sam-2", "sam@example.org")
+
+    home = _enable_write_time_dedup(tmp_path)
+    merged = _email_equality_merges(store, home=home)
+
+    assert merged == 1
+    ids = {e["id"] for e in store.list_entities()}
+    assert len(ids & {"sam-1", "sam-2"}) == 1
+
+    log_rows = [r for r in store.list_entity_merges() if r["method"] == "email"]
+    assert len(log_rows) == 1
+
+
+def test_email_equality_merge_normalizes_case_and_whitespace(tmp_path):
+    """'Sam@X.org' and 'sam@x.org ' (mixed case / stray whitespace) must group
+    together under the normalized (stripped, lowercased) email."""
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    store.upsert_entity("sam-1", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("sam-2", "Samuel Lee", "person", seen="2026-05-30")
+    _set_email(store, "sam-1", "Sam@X.org")
+    _set_email(store, "sam-2", " sam@x.org ")
+
+    home = _enable_write_time_dedup(tmp_path)
+    merged = _email_equality_merges(store, home=home)
+
+    assert merged == 1
+    ids = {e["id"] for e in store.list_entities()}
+    assert len(ids & {"sam-1", "sam-2"}) == 1
+
+
+def test_email_equality_merge_different_emails_not_merged(tmp_path):
+    """Two person entities with DIFFERENT email_addr must not be merged."""
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    store.upsert_entity("sam", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("pat", "Pat Nguyen", "person", seen="2026-05-30")
+    _set_email(store, "sam", "sam@example.org")
+    _set_email(store, "pat", "pat@example.org")
+
+    home = _enable_write_time_dedup(tmp_path)
+    merged = _email_equality_merges(store, home=home)
+
+    assert merged == 0
+    ids = {e["id"] for e in store.list_entities()}
+    assert {"sam", "pat"} <= ids
+
+
+def test_email_equality_merge_flag_off_no_merge(tmp_path):
+    """write_time_dedup explicitly False -> the email-sharing pair must NOT be
+    merged, proving the gate is real (not a no-op default-on check)."""
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    store.upsert_entity("sam-1", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("sam-2", "Samuel Lee", "person", seen="2026-05-30")
+    _set_email(store, "sam-1", "sam@example.org")
+    _set_email(store, "sam-2", "sam@example.org")
+
+    home = _disable_write_time_dedup(tmp_path)
+    merged = _email_equality_merges(store, home=home)
+
+    assert merged == 0
+    ids = {e["id"] for e in store.list_entities()}
+    assert {"sam-1", "sam-2"} <= ids
+
+
+def test_resolve_entities_combines_deterministic_and_email_merges(tmp_path):
+    """Top-level resolve_entities(store, home=...) must report the SUM of
+    canonical-key merges and email-equality merges when both apply."""
+    store = Store(tmp_path / "resolve.sqlite3", dim=4)
+    store.init()
+    # canonical-key pair: "Joel" / "Ps Joel" (name-based, same as existing coverage).
+    store.upsert_entity("joel", "Joel", "person", seen="2026-05-30")
+    store.upsert_entity("ps-joel", "Ps Joel", "person", seen="2026-05-30")
+    # email-equality pair: distinct names, distinct canonical keys, shared email.
+    store.upsert_entity("sam-1", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("sam-2", "Samuel Lee", "person", seen="2026-05-30")
+    _set_email(store, "sam-1", "sam@example.org")
+    _set_email(store, "sam-2", "sam@example.org")
+
+    home = _enable_write_time_dedup(tmp_path)
+    out = resolve_entities(store, client=None, home=home)
+
+    assert out["auto_merges"] == 2
+    ids = {e["id"] for e in store.list_entities()}
+    # "Joel" / "Ps Joel" merge into one survivor (tiebreak: mentions, then
+    # longer name, then id -> "Ps Joel" wins on name length here).
+    assert len(ids & {"joel", "ps-joel"}) == 1
+    assert len(ids & {"sam-1", "sam-2"}) == 1
