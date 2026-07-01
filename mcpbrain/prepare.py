@@ -592,7 +592,7 @@ def _pack_by_size(items, budget, sizer):
 
 
 def write_units(data: dict, *, home=None, pull_cap: int = _UNIT_PULL_CAP,
-                window: int = 200) -> dict:
+                window: int = 600) -> dict:
     """Turn a prepared batch dict (threads + optional blocks + context) into
     immutable, pre-sized work-unit files under enrich_queue/units/, plus a shared
     enrich_queue/context.json the pull attaches. Each unit is sized so its pull
@@ -640,7 +640,7 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
                   resolution_due: bool, now=None,
                   synthesis_requests: list | None = None,
                   extra_blocks: dict | None = None, home=None,
-                  window: int = 200) -> dict:
+                  window: int = 600) -> dict:
     """Build the current batch (un-enriched threads + due blocks) and write it as
     work units. The work-queue replacement for prepare(): no single pending.json —
     a bounded queue of immutable units the enrich session consumes. Unlike prepare()
