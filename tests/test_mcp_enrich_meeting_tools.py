@@ -163,11 +163,11 @@ def test_units_batch_caps_handout_and_leaves_rest(tmp_path, monkeypatch):
     assert asyncio.run(tool()) == {"empty": True}                 # all leased now
 
 
-def test_units_batch_defaults_to_twelve(monkeypatch):
+def test_units_batch_default(monkeypatch):
     monkeypatch.delenv("MCPBRAIN_ENRICH_UNITS_BATCH", raising=False)
-    assert mcp_server._units_batch() == 12
+    assert mcp_server._units_batch() == 30
     monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_BATCH", "garbage")
-    assert mcp_server._units_batch() == 12                        # invalid override -> default
+    assert mcp_server._units_batch() == 30                        # invalid override -> default
 
 
 def test_pull_unit_attaches_rules_and_context(tmp_path):

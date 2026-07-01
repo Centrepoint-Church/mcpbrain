@@ -13,12 +13,12 @@ the queue stays empty.
 
 ## Models (same split as the hourly enrichment cycle)
 
-- **Coordinator (you): Haiku.** The orchestration is mechanical — fan out one subagent
-  per unit, then check each reply against a fixed string shape. **Run this loop on Haiku**
-  (set it explicitly; do not assume Sonnet). The requeue guard is a literal check, not
-  a judgement: a unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or
-  `unit <unit_id>: gone`. Escalate to Sonnet only if a unit fails all retries across
-  multiple runs and needs investigation.
+- **Coordinator (you): Sonnet.** Keeps the split identical to the hourly task, which must
+  run the coordinator on Sonnet: the scheduled task runs in **Auto permission mode** and
+  Claude Code scheduled tasks only offer Auto mode on Sonnet (a Haiku coordinator stalls on
+  permission prompts). The coordinator's work is mechanical and cheap regardless — fan out one
+  subagent per unit; the requeue guard is a literal check, not a judgement: a unit is done IFF
+  its reply matches `unit <unit_id>: <n> <kind>` or `unit <unit_id>: gone`.
 - **Subagents: Haiku.** Dispatch every `enrich-batch` subagent — first try AND retries
   — with **`model: haiku` set EXPLICITLY in the Task call**. The agent frontmatter is
   not always honored, and extraction follows the rules well on Haiku at a fraction of
@@ -44,7 +44,7 @@ WHILE empty < 3:
       CONTINUE
   empty = 0; waves += 1
 
-  # Fan out: one enrich-batch subagent per unit, ~5 in parallel at a time.
+  # Fan out: one enrich-batch subagent per unit, ~12 in parallel at a time.
   # Dispatch with model: haiku EXPLICITLY (the agent frontmatter is not always
   # honored). The agent carries the extraction rules in its system prompt, so the
   # rules sit in one cacheable prefix shared across the fan-out — and Haiku is far

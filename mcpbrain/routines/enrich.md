@@ -5,13 +5,14 @@ Enrich the pending work units through the mcpbrain MCP tools. You are the
 the email bodies — only unit IDs and one-line status replies. Self-contained —
 needs no skill or command file.
 
-**Models:** the orchestration is mechanical — fan out one subagent per unit, then
-check each reply against a fixed string shape — so **run the coordinator on Haiku**
-(set it explicitly; do not assume Sonnet). The requeue guard is a literal check, not
-a judgement: a unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or
-`unit <unit_id>: gone`. Every `enrich-batch` subagent also runs on **Haiku**, set
-explicitly per dispatch (step 3). Escalate to Sonnet only if a unit fails all retries
-across multiple runs and needs investigation.
+**Models:** you (the coordinator) run on **Sonnet**. The hourly task runs unattended in
+**Auto permission mode**, and Claude Code scheduled tasks only offer Auto mode on Sonnet —
+a Haiku coordinator would stall on permission prompts and never enrich. The coordinator's
+own work is mechanical and cheap regardless: fan out one subagent per unit, then check each
+reply against a fixed string shape (the requeue guard is a literal check, not a judgement — a
+unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or `unit <unit_id>: gone`).
+Every `enrich-batch` subagent runs on **Haiku**, set explicitly per dispatch (step 3) — that
+is where the volume, and the cost savings, live.
 
 1. Call **`brain_enrich_units`**. If it returns `{"empty": true}`, stop and report
    `DONE: queue empty`.
@@ -23,7 +24,7 @@ across multiple runs and needs investigation.
    Sonnet; do not rely on the agent's frontmatter alone, which is not always honored.
    That agent carries the FULL extraction protocol in its system prompt — so the rules
    sit in one cacheable prefix shared across the whole fan-out, never in your context.
-   Spawn them in parallel — up to ~5 Task calls in one message, then the next wave.
+   Spawn them in parallel — up to ~12 Task calls in one message, then the next wave.
    Give each subagent EXACTLY this one-line instruction, substituting the unit's
    `unit_id` (the agent already knows the protocol — do not repeat it):
 
@@ -39,7 +40,7 @@ across multiple runs and needs investigation.
    if it still fails, leave it — its lease expires and a later run re-lists it. Retries
    happen within the current wave and do not consume the wave budget.
 5. Call **`brain_enrich_units`** again for the next wave. Repeat until it returns
-   `{"empty": true}` **or you have run 10 waves**, whichever comes first — stop at 10
+   `{"empty": true}` **or you have run 15 waves**, whichever comes first — stop at 15
    even if units remain; the next hourly run (or the backfill skill) continues the
    rest. This caps a single run's time and cost.
 6. Report: `DONE: <N> units across <W> waves` (note the 10-wave cap if you hit it, and

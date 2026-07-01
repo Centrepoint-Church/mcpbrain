@@ -57,11 +57,13 @@ def test_enrichment_skill_body_names_contract():
     assert "pending.json" in body and "enrich_inbox" in body
 
 
-def test_coordinator_runs_on_haiku():
+def test_coordinator_runs_on_sonnet_for_auto_mode():
+    # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
+    # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
+    # would stall on permission prompts unattended. Executor subagents stay Haiku.
     for p in ("mcpbrain/routines/enrich.md",
               "plugin/skills/mcpbrain-backfill/SKILL.md"):
         text = Path(p).read_text().lower()
-        # The orchestrator must not be pinned to Sonnet anymore.
-        assert "you (the coordinator) run on **sonnet**" not in text
-        assert "run this loop on sonnet" not in text
-        assert "coordinator" in text and "haiku" in text
+        assert "coordinator" in text and "sonnet" in text
+        assert "auto permission mode" in text        # the reason the coordinator is Sonnet
+        assert "haiku" in text                        # subagents still run on Haiku
