@@ -1182,6 +1182,41 @@ def apply(store, extraction, *, doc_ids, identity=None,
             store.link_email_entity(lead_msg_id, topic_id, role="about")
             topics_created += 1
 
+    # ── 2.4 Deterministic sender entities (Task 1.1) ────────────────────────
+    # Every message's sender is structured header data — no LLM inference is
+    # needed to know a person sent a message. Create a person entity for any
+    # sender the model didn't already surface in entities[] (name_to_id), so
+    # the 2.5 structural-relations pass below can link them (works_at /
+    # mentioned_with) without depending on the model re-listing headers. This
+    # frees the model's extraction budget for body-mentioned people only.
+    # Junk-guarded and owner-excluded, same as every other entity-creation path.
+    _sender_home = str(home) if home is not None else str(config.app_dir())
+    if config.enrich_sender_entities(_sender_home):
+        for msg in messages:
+            hdr = msg.get("sender", "") or ""
+            if not hdr:
+                continue
+            s_name = strip_affiliation(_extract_name(hdr)).strip()
+            s_email = _extract_email_addr(hdr)
+            # Require a resolvable email, matching the lead-sender guard above
+            # (":1008", `sender_name and sender_email`) — a bare display name
+            # with no email is not reliable enough structured data to anchor a
+            # deterministic entity on.
+            if not s_name or not s_email or _is_owner(s_name, owner) \
+                    or is_junk_entity(s_name, "person"):
+                continue
+            if s_name.strip().lower() in {n.strip().lower() for n in name_to_id}:
+                continue  # model already surfaced this person
+            sid = upsert_entity(store, name=s_name, entity_type="person", org="",
+                                email_addr=s_email, taxonomy=taxonomy, valid_from=lead_date_iso)
+            if not sid:
+                continue
+            name_to_id[s_name] = sid
+            if sid not in linked:
+                if store.link_email_entity(lead_msg_id, sid, role="authored"):
+                    _bump_email_count(store, sid)
+                linked.add(sid)
+
     # ── 2.5 Structural relations: deterministic works_at / mentioned_with ──
     # Runs BEFORE the model's relations loop (Task 3.4). Header participants
     # already resolved to an entity THIS apply() call (via name_to_id — never
