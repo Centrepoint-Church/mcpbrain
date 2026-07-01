@@ -47,7 +47,13 @@ wrong and MUST be right:
   `should_enrich()` in `prepare.py` cold-marks promotional email + tabular/short Drive docs
   before extraction; cold-marking is reversible (chunks stay embedded/searchable). The aggressive
   `salience_require_drive_mention` sub-flag remains opt-in OFF.
-- **Current state (2026-06-30):** all four version files **and** the published wheel are at
-  `0.7.70` — source, dist index, and plugin manifests are in step. The 0.7.42→0.7.70 line
-  (embedder fix, Phase 0/1, OCR, validated brain layer ON, salience gate ON, Windows support)
-  is shipped.
+- **Cold-marking is an ENRICHMENT-cost optimization, NOT a retrieval filter (0.7.72).** A
+  one-shot backfill grew the cold set to ~40% of the corpus and HALVED gold recall@10
+  (0.750→0.350) because `daemon.search` was excluding cold chunks from recall. Fixed in 0.7.72:
+  cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
+  so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
+  for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
+- **Current state (2026-07-01):** all four version files **and** the published wheel are at
+  `0.7.72` — source, dist index, and plugin manifests are in step. 0.7.72 adds the Session-1
+  enrichment-efficiency work (coordinator→Haiku, provenance stamping, message-metadata off the
+  model, bigger batches, strict push schema) + the cold-recall decouple.
