@@ -32,6 +32,7 @@ def graph_metrics(store) -> dict:
         persons = scalar("SELECT COUNT(*) FROM entities WHERE type='person'")
         persons_email = scalar(
             "SELECT COUNT(*) FROM entities WHERE type='person' AND COALESCE(email_addr,'')!=''")
+        senders = scalar("SELECT COUNT(DISTINCT entity_id) FROM email_entities WHERE role='authored'")
         obs = dict(db.execute(
             "SELECT attribute, COUNT(*) FROM entity_observations GROUP BY attribute").fetchall())
         rel_types = dict(db.execute(
@@ -46,6 +47,7 @@ def graph_metrics(store) -> dict:
         "relations_semantic_pct": pct(rel_sem, rel_total),
         "entities_total": ent_total,
         "person_email_pct": pct(persons_email, persons),
+        "senders_as_entities_pct": pct(senders, persons),
         "observation_attributes": obs,
         "relation_type_counts": rel_types,
     }
