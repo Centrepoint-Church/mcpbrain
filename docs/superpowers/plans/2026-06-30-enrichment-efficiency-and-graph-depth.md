@@ -732,7 +732,9 @@ git add mcpbrain/prepare.py mcpbrain/graph_write.py mcpbrain/config.py tests/tes
 git commit -m "feat(enrich): deterministic org default from sender domain (model overrides only on signal)"
 ```
 
-### Task 3.3: Deterministic `content_type` default from source/mime
+### Task 3.3: Deterministic `content_type` default from source/mime — **SKIPPED (2026-07-01)**
+
+**Skipped as a plan defect, decided with Josh.** `content_type`'s real enum (`chunking._VALID_CONTENT_TYPES = {"request","update","decision","fyi","notification"}`) is a message-**purpose** classification (`graph_write.apply()` uses e.g. `content_type == "notification"` to suppress action creation) — not a source-type discriminator. The task's own examples ("calendar→`event`, Drive mime→doc type, else `email`") aren't even members of that enum. Source/mime alone cannot reliably predict request-vs-update-vs-fyi-vs-notification; that classification is genuinely semantic, which is why it's LLM-extracted today. Forcing a source-based default here would write incorrect classifications into the graph — the opposite of this plan's quality goal. No code changed; no flag added. Superseded text below is the plan's original (unimplemented) task, kept for history.
 
 **Files:**
 - Modify: `mcpbrain/prepare.py` — attach `content_type_hint` per unit (calendar→`event`, Drive mime→doc type, else `email`)
