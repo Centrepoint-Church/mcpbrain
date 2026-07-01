@@ -805,6 +805,21 @@ class Store:
                 (org, entity_id))
             return cur.rowcount > 0
 
+    def update_entity_email_if_empty(self, entity_id: str, email_addr: str) -> bool:
+        """Set email_addr on an entity only if it currently has none. Returns True if set.
+
+        Used by write-time dedup: when a new mention carries a header-sourced
+        email and redirects to an existing entity that lacks one, fill it
+        without clobbering a better-sourced address.
+        """
+        if not email_addr:
+            return False
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE entities SET email_addr=? WHERE id=? AND (email_addr='' OR email_addr IS NULL)",
+                (email_addr, entity_id))
+            return cur.rowcount > 0
+
     def upsert_meeting_pack(self, event_id: str, event_title: str,
                             event_date: str, pack_text: str,
                             attendees: list | None = None,
