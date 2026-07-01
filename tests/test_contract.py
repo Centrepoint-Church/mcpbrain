@@ -213,3 +213,30 @@ def test_messages_not_required():
            "relations": [], "actions": [], "topics": ["x"]}
     # messages intentionally absent — the daemon supplies them.
     assert validate_extraction(ext) == []
+
+
+# --- 1.4: extended entity and relation types (Task 4.1) --------------------
+
+def test_entity_types_include_meeting():
+    from mcpbrain.contract import ENTITY_TYPES
+    assert "meeting" in ENTITY_TYPES
+
+
+def test_entity_types_include_event():
+    from mcpbrain.contract import ENTITY_TYPES
+    assert "event" in ENTITY_TYPES
+
+
+def test_entity_types_include_topic():
+    from mcpbrain.contract import ENTITY_TYPES
+    assert "topic" in ENTITY_TYPES
+
+
+def test_relation_types_include_collaborates_with():
+    from mcpbrain.contract import RELATION_TYPES
+    assert "collaborates_with" in RELATION_TYPES
+
+
+def test_relation_types_include_attended():
+    from mcpbrain.contract import RELATION_TYPES
+    assert "attended" in RELATION_TYPES

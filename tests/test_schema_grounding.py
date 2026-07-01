@@ -30,11 +30,11 @@ from mcpbrain.contract import (
 # ---------------------------------------------------------------------------
 
 def test_entity_types_has_expected_values():
-    assert ENTITY_TYPES == frozenset({"person", "org", "project"})
+    assert ENTITY_TYPES == frozenset({"person", "org", "project", "meeting", "event", "topic"})
 
 
 def test_relation_types_has_expected_values():
-    expected = {"works_at", "reports_to", "manages", "coordinates_with", "mentioned_with"}
+    expected = {"works_at", "reports_to", "manages", "coordinates_with", "mentioned_with", "collaborates_with", "attended"}
     assert RELATION_TYPES == frozenset(expected)
 
 
