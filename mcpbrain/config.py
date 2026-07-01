@@ -151,6 +151,18 @@ def enrich_sender_entities(home) -> bool:
     return bool(read_config(home).get("enrich_sender_entities", True))
 
 
+def enrich_trivial_thread_summary(home) -> bool:
+    """Whether prepare short-circuits trivial threads (very short body, no action
+    cue — see prepare.is_trivial_thread) straight to a deterministic extractive
+    summary via graph_write.apply(), skipping the model call entirely. Sender
+    entities still get created through apply()'s existing Task-1.1 path; this
+    flag only gates whether the deterministic summary path runs at all.
+
+    Default: TRUE. Set 'enrich_trivial_thread_summary': false in config.json to
+    disable, reverting trivial threads to the normal model-unit path."""
+    return bool(read_config(home).get("enrich_trivial_thread_summary", True))
+
+
 def enrich_rich_observations_enabled(home) -> bool:
     """Whether graph_write.apply() wires the extraction's `observations[]`
     field (dated, attributable facts about an already-listed entity — job
