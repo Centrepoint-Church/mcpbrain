@@ -140,3 +140,59 @@ def test_dedup_redirect_backfills_email_from_header(tmp_path):
     assert email == "pat.nguyen@centrepoint.church", (
         "redirected entity must have email backfilled from the header via update_entity_email_if_empty"
     )
+
+
+def test_apply_uses_org_hint_when_model_org_unknown(tmp_path, monkeypatch):
+    """When the model returns org='unknown' (its own sentinel for "couldn't tell"),
+    apply() falls back to the deterministic org_hint (sender-domain-derived,
+    attached by prepare._thread_block) rather than writing 'unknown' to
+    email_context. enrich_org_default_enabled defaults True, so no config key
+    for it is needed; 'orgs' is configured so canonical_org resolves org_hint
+    to the taxonomy's own display-case name instead of passing it through raw.
+
+    MCPBRAIN_HOME is set to tmp_path because apply()'s taxonomy lookup
+    (orgs.taxonomy_from_config(), used for canonical_org) reads config.app_dir()
+    directly rather than the home= kwarg — matching the pre-existing convention
+    the sibling dedup-redirect test in this file already relies on.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    s = _store(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+    }))
+    extraction = {
+        "thread_id": "t6", "org": "unknown", "org_hint": "Centrepoint",
+        "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>",
+                      "date": "2026-02-01"}],
+        "entities": [], "relations": [], "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-10"], home=str(tmp_path))
+    with s._connect() as db:
+        org = db.execute("SELECT org FROM email_context WHERE message_id='m1'").fetchone()[0]
+    assert org == "Centrepoint", f"expected org_hint fallback 'Centrepoint', got {org!r}"
+
+
+def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):
+    """The model's own real (non-empty, non-'unknown') org signal always wins
+    over org_hint, even when they disagree — org_hint is a fallback only.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    s = _store(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "orgs": [
+            {"name": "Acme", "domains": ["example.org"]},
+            {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+        ],
+    }))
+    extraction = {
+        "thread_id": "t7", "org": "Acme", "org_hint": "Centrepoint",
+        "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>",
+                      "date": "2026-02-01"}],
+        "entities": [], "relations": [], "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-11"], home=str(tmp_path))
+    with s._connect() as db:
+        org = db.execute("SELECT org FROM email_context WHERE message_id='m1'").fetchone()[0]
+    assert org == "Acme", f"model's own org signal must win over org_hint, got {org!r}"
