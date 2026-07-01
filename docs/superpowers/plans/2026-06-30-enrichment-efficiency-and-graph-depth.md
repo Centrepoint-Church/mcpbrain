@@ -24,9 +24,11 @@ Merged to `main` and released across all three repos (source `2f688a7`, dist `2f
 
 **Unplanned but critical finding (the eval harness earned its keep on day one):** a one-shot salience backfill had cold-marked ~40% of the corpus, and `daemon.search` was excluding cold chunks from recall — **halving gold recall@10 (0.750→0.350)**. Fixed by decoupling cold-EXCLUSION from `tiered_memory` into `recall_excludes_cold` (**default OFF**): the salience gate is an *enrichment-cost* optimization, not a *retrieval* filter. Recall restored to **0.750 / MRR 0.556** with no store mutation. The gold eval now measures the true production path (include-cold + three-axis).
 
-### ▶ Session 2 — NOT STARTED
+### ▶ Session 2 — IN PROGRESS (branch `enrich-graph-depth-session-2`)
 
 Deepen the graph, now preceded by the salience/recall investigation the finding above surfaced (Phase 2.5). See the Session plan below.
+
+**Task 2.5.1 decision (2026-07-01): gate is NOT cold-marking gold-relevant docs — no tightening needed.** Added `gold_docs_cold_marked(store)` to `enrich_eval.py` (commit `ebb9203`) and ran it against the live store (81,545 chunks, 31,888 cold ≈ 39%): of the gold set's 20 unique expected chunk ids present in the store, **0 are cold-marked (present=20, cold=0, pct=0.0%)**. `should_enrich`'s existing rules (`_MIN_DRIVE_TEXT` floor, promotional-label skip, tabular-mime skip) already avoid the gold-relevant prose docs — the ~40% cold set is genuinely low-signal content, not false positives. **No change to `should_enrich` in this session.**
 
 ---
 
