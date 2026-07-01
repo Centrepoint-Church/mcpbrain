@@ -54,13 +54,16 @@ wrong and MUST be right:
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
 - **Current state (2026-07-01):** all four version files **and** the published wheel are at
-  `0.7.74` — source, dist index, and plugin manifests are in step. 0.7.72 shipped the Session-1
-  enrichment-efficiency work (coordinator→Haiku, provenance stamping, message-metadata off the
-  model, bigger batches, strict push schema) + the cold-recall decouple. 0.7.73 adds Session-2
-  graph-depth (header `email_addr`, deterministic org default + `works_at`/`mentioned_with`
-  relations, reconciled entity/relation vocabulary, temporal `entity_observations`, and
-  write-time email/token dedup — `write_time_dedup` now default ON). 0.7.74 fixes the
-  `_deterministic_merges` structural-collapse bug (issue #23).
+  `0.7.75` — source, dist index, and plugin manifests are in step. 0.7.72 shipped the Session-1
+  enrichment-efficiency work (provenance stamping, message-metadata off the model, bigger
+  batches, strict push schema) + the cold-recall decouple. 0.7.73 adds Session-2 graph-depth
+  (header `email_addr`, deterministic org default + `works_at`/`mentioned_with` relations,
+  reconciled entity/relation vocabulary, temporal `entity_observations`, and write-time
+  email/token dedup — `write_time_dedup` now default ON). 0.7.74 fixes the
+  `_deterministic_merges` structural-collapse bug (issue #23). 0.7.75 keeps the enrich
+  **coordinator on Sonnet** (Claude Code scheduled tasks only offer Auto permission mode on
+  Sonnet — a Haiku coordinator stalls unattended; executor subagents stay Haiku) and raises
+  throughput caps (units/wave 30, producer window 600, subagent fan-out ~12, hourly wave cap 15).
 - **`_deterministic_merges` structural collapse — FIXED in 0.7.74 (issue #23).** It used to group
   by `(type, canonical_key)` across ALL types, so structural nodes (document/thread/topic/…)
   sharing generic titles ("Untitled document") collapsed — ~3,980 merged in one shot on a
