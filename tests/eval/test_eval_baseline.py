@@ -63,30 +63,38 @@ def test_recall_and_mrr_above_floor(fixture_store):
 # target. Recall is measured DOCUMENT-level (any chunk of the expected doc counts —
 # see gold_eval._doc_key) because mcpbrain re-chunks independently.
 #
-# PRODUCTION PATH: eval uses exclude_cold=True — identical to daemon.search() when
-# tiered_memory is on. Session-2 review found the non-production path (exclude_cold=False)
-# was being used, masking the real user-facing quality. Production path confirmed
-# net-positive: cold-exclusion pushes low-salience noise out of top ranks.
+# PRODUCTION PATH (0.7.72): importance_recall ON (three-axis ranker) and cold chunks
+# are NO LONGER excluded from recall (recall_excludes_cold default OFF). Cold-exclusion
+# was decoupled from tiered_memory after a salience backfill grew the cold set to ~40%
+# of the corpus and HALVED gold recall@10 (0.750→0.350): cold-marked but genuinely
+# relevant docs fell out of recall entirely. The salience gate is an enrichment-cost
+# optimization (skip graph-extraction), NOT a retrieval filter — cold stays searchable.
+# So the eval measures the true production path: include cold + three-axis weights.
 #
 # Active gold set: golden_retrieval_set_mcpbrain_candidate.yaml (mcpbrain-native,
-# curated 2026-06-24). 20 cases, 20/20 coverable on the live store (80,705 chunks).
+# curated 2026-06-24). 20 cases, 20/20 coverable on the live store.
 # Ambiguous clusters resolved: CP College Semester Two invite emails cross-linked
 # (Mitch/Lisa/Joe invitations accept any of the three); Capes financial docs
 # cross-linked (budget/P&L/balance-sheet accept any of the three).
-# Measured 2026-06-24 (production path, exclude_cold=True): recall@10=0.750, MRR=0.483.
+# Measured 2026-07-01 (production path, include cold + three-axis): recall@10=0.750, MRR=0.556.
 GOLD_RECALL_FLOOR = 0.55   # measured doc-level baseline 0.750 (production path)
-GOLD_MRR_FLOOR = 0.35      # measured baseline 0.483 (production path); raised from 0.20
+GOLD_MRR_FLOOR = 0.35      # measured baseline 0.556 (production path)
 MIN_COVERED = 15           # with 20 cases need at least 15 covered to gate meaningfully
+
+# The production recall ranking as of 0.7.72 (importance_recall ON). Mirrors the
+# weights daemon.search applies via config.importance_weights so the eval measures
+# what users actually get.
+_PROD_WEIGHTS = {"recency_weight": 0.15, "importance_weight": 0.10,
+                 "decay_weight": 0.10, "recency_alpha": 0.01}
 
 
 def test_gold_recall_floor():
     """Gold set: recall@10 / MRR over COVERABLE cases must clear the floor.
 
-    Uses exclude_cold=True — the production path (daemon.search sets this when
-    tiered_memory is on). Skips honestly when there is no real store (CI / fresh
-    install) or when too few gold cases are coverable against the current corpus
-    (mid-backfill). As backfill fills the corpus, `covered` rises and this test
-    starts gating real retrieval quality.
+    Measures the true production path (0.7.72): cold chunks INCLUDED
+    (recall_excludes_cold default OFF) + three-axis ranker (importance_recall ON).
+    Skips honestly when there is no real store (CI / fresh install) or when too few
+    gold cases are coverable against the current corpus (mid-backfill).
     """
     from tests.eval.run_eval import try_open_real_store, gold_eval, load_gold_cases
 
@@ -98,7 +106,7 @@ def test_gold_recall_floor():
         pytest.skip("real brain store unavailable or empty")
 
     store, emb = result
-    m = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": True})
+    m = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": False, **_PROD_WEIGHTS})
     print(f"\ngold set: covered {m['covered']}/{m['total']} cases "
           f"({m['missing']} not yet in corpus)")
     if m["covered"] < MIN_COVERED:
@@ -141,12 +149,12 @@ def test_gold_three_axis_does_not_regress_on_production_path():
         pytest.skip("real brain store unavailable or empty")
     store, emb = result
 
-    base = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": True})
+    base = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": False})
     if base["covered"] < MIN_COVERED:
         pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
 
     on = gold_eval(store, emb, k=10, search_kwargs={
-        "exclude_cold": True,
+        "exclude_cold": False,
         "recency_weight": 0.15, "importance_weight": 0.10,
         "decay_weight": 0.10, "recency_alpha": 0.01})
 

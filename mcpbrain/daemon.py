@@ -730,8 +730,12 @@ class Daemon:
                     "decay_weight":      w["decay_weight"],
                     "recency_alpha":     w["recency_alpha"],
                 })
-            # B2: exclude cold chunks from default recall when tiered_memory is on
-            if config.tiered_memory_enabled(home):
+            # Cold chunks stay searchable by default: the salience gate is an
+            # enrichment-cost optimization (skip graph-extraction), NOT a retrieval
+            # filter. Excluding cold from recall halved gold recall (0.75→0.35) once
+            # the salience backfill grew the cold set, so exclusion is now decoupled
+            # from tiered_memory and behind its own opt-in flag (default OFF).
+            if config.recall_excludes_cold(home):
                 search_kwargs["exclude_cold"] = True
             # Q6: route() wraps hybrid_search with routing/CRAG/rerank when flags on
             if any([config.retrieval_routing_enabled(home),
