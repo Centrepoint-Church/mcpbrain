@@ -84,7 +84,7 @@ DEFAULT_BACKUP_INTERVAL_S = 3600
 _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
 # Spool prepare bounds. The per-cycle thread ceiling now lives in config
-# (config.spool_thread_cap, default 500) so it can be tuned live for backfill
+# (config.spool_thread_cap, default 2000) so it can be tuned live for backfill
 # without a daemon restart. char_budget splits an over-long thread before the
 # extractor sees it.
 SPOOL_CHAR_BUDGET = 24000
