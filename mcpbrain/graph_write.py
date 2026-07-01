@@ -1201,9 +1201,14 @@ def apply(store, extraction, *, doc_ids, identity=None,
             # Require a resolvable email, matching the lead-sender guard above
             # (":1008", `sender_name and sender_email`) — a bare display name
             # with no email is not reliable enough structured data to anchor a
-            # deterministic entity on.
+            # deterministic entity on. Also mirror the lead-sender identity
+            # check (":1008-1009"): _is_owner only matches configured name
+            # aliases, so a sender whose header email is the owner's own
+            # `identity` but whose display name isn't an alias (signature
+            # variant, nickname, different casing) must still be excluded.
             if not s_name or not s_email or _is_owner(s_name, owner) \
-                    or is_junk_entity(s_name, "person"):
+                    or is_junk_entity(s_name, "person") \
+                    or (identity and identity.lower() in s_email.lower()):
                 continue
             if s_name.strip().lower() in {n.strip().lower() for n in name_to_id}:
                 continue  # model already surfaced this person
