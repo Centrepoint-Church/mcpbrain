@@ -883,7 +883,18 @@ def apply(store, extraction, *, doc_ids, identity=None,
     now = (clock() if clock else datetime.now(timezone.utc))
     today = now.strftime("%Y-%m-%d")
 
-    org = canonical_org(extraction.get("org", "unknown") or "unknown", taxonomy)
+    # Org default: the model's own org signal always wins when present. Only
+    # when it's empty or the model's own "unknown" sentinel — and the
+    # kill-switch resolves True — fall back to org_hint, the deterministic
+    # sender-domain guess prepare._thread_block attaches to every thread's
+    # payload. org_hint is a fallback only; it never overrides a real model
+    # answer, even one that disagrees with it.
+    raw_org = (extraction.get("org", "unknown") or "unknown")
+    if raw_org in ("", "unknown"):
+        _org_default_home = str(home) if home is not None else str(config.app_dir())
+        if config.enrich_org_default_enabled(_org_default_home):
+            raw_org = extraction.get("org_hint") or raw_org
+    org = canonical_org(raw_org, taxonomy)
     content_type = extraction.get("content_type", "") or ""
     summary = extraction.get("summary", "") or ""
     contextual_summary = extraction.get("contextual_summary", "") or ""

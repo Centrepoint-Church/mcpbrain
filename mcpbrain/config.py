@@ -108,6 +108,20 @@ def salience_gate_enabled(home) -> bool:
     return bool(read_config(home).get("salience_gate", True))
 
 
+def enrich_org_default_enabled(home) -> bool:
+    """Whether graph_write.apply() falls back to the sender-domain-derived
+    org_hint when the model's own extraction.get("org") is empty or the
+    literal sentinel "unknown". org_hint is attached to every thread's payload
+    by prepare._thread_block (deterministic, cheap to compute); this flag only
+    gates whether apply() is allowed to *consume* it as a fallback — the
+    model's own real org signal always wins when present.
+
+    Default: TRUE. Set 'enrich_org_default_enabled': false in config.json to
+    disable, reverting to the model's verbatim "unknown" when it can't tell.
+    """
+    return bool(read_config(home).get("enrich_org_default_enabled", True))
+
+
 def salience_require_drive_mention(home) -> bool:
     """Stricter Drive gate: only graph-extract a Drive doc if it's referenced in
     email (ops-brain's mention rule). Config 'salience_require_drive_mention'.

@@ -343,6 +343,43 @@ def test_prepare_thread_block_shape(tmp_path, monkeypatch):
     assert m["text"] == "body text"
 
 
+def test_thread_block_has_org_hint(monkeypatch):
+    """_thread_block attaches org_hint derived from the lead sender's domain,
+    via graph_write.org_from_email against the configured taxonomy. A lead
+    sender at a domain the taxonomy recognises yields a non-empty org_hint
+    equal to what org_from_email would return directly.
+    """
+    from mcpbrain import orgs as _orgs
+
+    tax = _orgs.OrgTaxonomy(
+        names=("Centrepoint",),
+        domain_map={"centrepoint.church": "Centrepoint"},
+    )
+    monkeypatch.setattr(_orgs, "taxonomy_from_config", lambda: tax)
+
+    batch = FakeBatch("t-a", ["d-a1"], [
+        _msg("m1", "Sam Lee <sam.lee@centrepoint.church>", "2026-06-01",
+             "Hall B", "body text"),
+    ])
+    store = FakeStore()
+    _stub_reassemble(monkeypatch)
+
+    block = prepare._thread_block(store, batch)
+
+    assert block["org_hint"] == "Centrepoint"
+
+
+def test_thread_block_org_hint_empty_when_no_messages(monkeypatch):
+    """No lead message (empty thread) degrades org_hint to '' rather than raising."""
+    batch = FakeBatch("t-a", [], [])
+    store = FakeStore()
+    _stub_reassemble(monkeypatch)
+
+    block = prepare._thread_block(store, batch)
+
+    assert block["org_hint"] == ""
+
+
 def test_prepare_messages_ordered_by_date(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1", "d-a2"], [

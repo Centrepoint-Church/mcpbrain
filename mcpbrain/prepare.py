@@ -361,6 +361,14 @@ def _thread_block(store, batch) -> dict:
 
     prior_thread_context is '' until Phase 3 populates it; degrade to empty
     rather than fail. open_actions is [] when the thread has no open actions.
+
+    org_hint is a deterministic org guess derived from the lead message's
+    (earliest by date, same tie-break as graph_write.apply()) sender email
+    domain, resolved against the configured org taxonomy. It's computed
+    unconditionally — cheap (one header parse + one dict lookup) and harmless
+    to ship even when the consuming kill-switch (config.enrich_org_default_enabled,
+    checked in graph_write.apply()) is off. Degrades to '' when the thread has
+    no messages or the lead has no parseable sender email; never raises.
     """
     messages = list(_reassemble_thread(batch.chunks))
     try:
@@ -371,11 +379,19 @@ def _thread_block(store, batch) -> dict:
         actions = store.unified_actions(thread_id=batch.thread_id, status="open") or []
     except AttributeError:  # Defensive: unified_actions exists post-Phase-1; guard retained for fake stores in tests that omit it.
         actions = []
+    org_hint = ""
+    if messages:
+        from mcpbrain import graph_write, orgs
+        lead = min(messages, key=lambda m: m.get("date", "") or "")
+        email = graph_write._extract_email_addr(lead.get("sender", "") or "")
+        if email:
+            org_hint = graph_write.org_from_email(email, orgs.taxonomy_from_config())
     return {
         "thread_id": batch.thread_id,
         "prior_thread_context": prior,
         "open_actions": actions,
         "messages": messages,
+        "org_hint": org_hint,
     }
 
 
