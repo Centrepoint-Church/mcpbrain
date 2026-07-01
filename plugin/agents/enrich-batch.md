@@ -125,6 +125,10 @@ The `context` block is given so you don't re-derive what is already known.
 
 Entities and relations are the part most worth getting right.
 
+- **Scope.** The system already creates an entity for every message sender from
+  the header (name + email), so list in `entities` only people/orgs/projects
+  named in the BODY that are not message senders — the sender-people are handled
+  for you. Re-listing a sender is harmless (it dedups) but wastes effort.
 - **Naming.** An entity `name` is the bare proper name, nothing else. Strip
   role descriptors, employer phrases, and articles: "Franz from The Church Co"
   becomes `Franz` (with `org` set to The Church Co), "the Optus Stadium team"
