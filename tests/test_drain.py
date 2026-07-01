@@ -8,9 +8,12 @@ quarantined to enrich_inbox/bad/ rather than crashing the daemon.
 
 apply() is graph_write.apply, injected as a parameter. These tests pass a
 recording stub matching its real signature: apply(store, extraction, *,
-doc_ids). drain accepts an embedder= but does not forward it to apply (the
-structural apply takes no embedder), so the stub does not accept one. The
-end-to-end round trip against the real apply lives in test_integration_spool.py.
+doc_ids, entity_index=None). drain accepts an embedder= but does not forward
+it to apply (the structural apply takes no embedder), so the stub does not
+accept one. entity_index is forwarded only when write_time_dedup_enabled is
+True (default since Task 5.3), so the stub must accept (and can ignore) it.
+The end-to-end round trip against the real apply lives in
+test_integration_spool.py.
 """
 
 import json
@@ -122,7 +125,7 @@ class RecordingApply:
         self.per_thread = per_thread or {}
         self.returns = returns
 
-    def __call__(self, store, extraction, *, doc_ids):
+    def __call__(self, store, extraction, *, doc_ids, entity_index=None):
         thread_id = extraction["thread_id"]
         self.calls.append({
             "thread_id": thread_id,

@@ -194,7 +194,7 @@ class TestDrainOrgDrift:
 
         seen = []
 
-        def fake_apply(store_, extraction, *, doc_ids):
+        def fake_apply(store_, extraction, *, doc_ids, entity_index=None):
             seen.append(extraction)
             return {"entities": 0, "relations": 0}
 
