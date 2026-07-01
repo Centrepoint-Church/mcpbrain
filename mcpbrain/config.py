@@ -122,6 +122,27 @@ def enrich_org_default_enabled(home) -> bool:
     return bool(read_config(home).get("enrich_org_default_enabled", True))
 
 
+def enrich_structural_relations_enabled(home) -> bool:
+    """Whether graph_write.apply() deterministically writes works_at (from
+    header-email domain) and mentioned_with (among header senders) BEFORE the
+    model's own relations loop runs, independent of what the model returns.
+
+    When True, every message sender already resolved to an entity this
+    apply() call (via name_to_id) whose header-email domain maps to a real
+    configured org gets a provenance-backed works_at edge, and every pair of
+    such senders in the thread gets mentioned_with in both directions. This
+    frees the model from re-deriving facts already implicit in the headers so
+    its extraction budget goes to the semantic relations (reports_to, manages,
+    coordinates_with) headers can't supply.
+
+    Default: TRUE — this scaffold is required for the deterministic edges to
+    carry source_doc_id/valid_from; the kill-switch exists only for an
+    in-the-field emergency. Set 'enrich_structural_relations_enabled': false
+    in config.json to disable, reverting to model-only relations.
+    """
+    return bool(read_config(home).get("enrich_structural_relations_enabled", True))
+
+
 def salience_require_drive_mention(home) -> bool:
     """Stricter Drive gate: only graph-extract a Drive doc if it's referenced in
     email (ops-brain's mention rule). Config 'salience_require_drive_mention'.

@@ -371,6 +371,31 @@ def _bump_observation(conn, relation_id, *, last_seen, confidence_delta):
     )
 
 
+def _backfill_provenance_if_empty(conn, relation_id, *, source_doc_id, valid_from):
+    """Fill source_doc_id/valid_from on an existing relation row ONLY where
+    currently empty/unset — never overwrite a real value already present.
+
+    The re-observation branch of upsert_relation (same entity_a/relation/
+    entity_b) only ever called _bump_observation, which touches last_seen/
+    confidence but not provenance. A row created via a provenance-less path
+    (e.g. the legacy _ensure_works_at INSERT OR IGNORE) would then never gain
+    source_doc_id/valid_from even when a later, provenance-carrying write for
+    the same triple arrives — exactly the gap this closes. COALESCE(col,'')=''
+    treats NULL and '' as equally "unset", matching this file's existing
+    read-side convention (see _set_org_recency's COALESCE(org,'') checks)
+    rather than introducing a NULLIF idiom not used elsewhere in this codebase.
+    """
+    conn.execute(
+        "UPDATE entity_relations "
+        "SET source_doc_id = CASE WHEN COALESCE(source_doc_id,'') = '' "
+        "                         THEN ? ELSE source_doc_id END, "
+        "    valid_from = CASE WHEN COALESCE(valid_from,'') = '' "
+        "                      THEN ? ELSE valid_from END "
+        "WHERE id = ?",
+        (source_doc_id, valid_from, relation_id),
+    )
+
+
 def _increment_degree(conn, entity_a, entity_b):
     """Bump degree on both endpoints. Replaces the Nexus degree triggers, which
     this port does not carry. Only called on a NEW row insert, never on a
@@ -418,6 +443,8 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
         if same_target:
             rid = same_target[0]["id"]
             _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
+            _backfill_provenance_if_empty(
+                conn, rid, source_doc_id=source_doc_id, valid_from=valid_from)
             return rid
 
         # Recency rule for SINGLETON relations (works_at/reports_to): a person has
@@ -1103,6 +1130,65 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if topic_id:
             store.link_email_entity(lead_msg_id, topic_id, role="about")
             topics_created += 1
+
+    # ── 2.5 Structural relations: deterministic works_at / mentioned_with ──
+    # Runs BEFORE the model's relations loop (Task 3.4). Header participants
+    # already resolved to an entity THIS apply() call (via name_to_id — never
+    # invented from a bare header the model didn't extract) get a
+    # provenance-backed works_at edge when their header-email domain maps to a
+    # REAL configured org, and every pair of such senders gets mentioned_with
+    # in both directions. This frees the model's extraction budget for the
+    # semantic relations (reports_to/manages/coordinates_with) headers can't
+    # supply. Guarded by the same home-resolution idiom used twice above for
+    # enrich_org_default_enabled/write_time_dedup_enabled.
+    _structural_home = str(home) if home is not None else str(config.app_dir())
+    if config.enrich_structural_relations_enabled(_structural_home):
+        structural_person_ids: list = []
+        for msg in messages:
+            msg_header = msg.get("sender", "") or ""
+            if not msg_header:
+                continue
+            msg_email = _extract_email_addr(msg_header)
+            if not msg_email:
+                continue
+            msg_name_key = strip_affiliation(_extract_name(msg_header)).strip().lower()
+            if not msg_name_key:
+                continue
+            # Match against name_to_id's exact-cased keys case-insensitively;
+            # skip participants the model never surfaced as an entity this call
+            # (no entity_id at all) rather than inventing one.
+            person_id = None
+            for ename, eid in name_to_id.items():
+                if ename.strip().lower() == msg_name_key:
+                    person_id = eid
+                    break
+            if not person_id:
+                continue
+            if person_id not in structural_person_ids:
+                structural_person_ids.append(person_id)
+
+            msg_domain_org = org_from_email(msg_email, taxonomy)
+            if not msg_domain_org or msg_domain_org in ("external", "unknown", ""):
+                continue
+            org_entity_id = upsert_entity(
+                store, name=msg_domain_org, entity_type="org", org=msg_domain_org,
+                taxonomy=taxonomy, valid_from=lead_date_iso)
+            if not org_entity_id:
+                continue
+            upsert_relation(store, person_id, "works_at", org_entity_id,
+                           valid_from=lead_date_iso or today, evidence=lead_msg_id,
+                           source_doc_id=prov_doc_id)
+
+        # mentioned_with among every distinct pair of resolved senders, both
+        # directions — symmetric co-participation fact, directional rows.
+        for i, a_id in enumerate(structural_person_ids):
+            for b_id in structural_person_ids[i + 1:]:
+                upsert_relation(store, a_id, "mentioned_with", b_id,
+                                valid_from=lead_date_iso or today, evidence=lead_msg_id,
+                                source_doc_id=prov_doc_id)
+                upsert_relation(store, b_id, "mentioned_with", a_id,
+                                valid_from=lead_date_iso or today, evidence=lead_msg_id,
+                                source_doc_id=prov_doc_id)
 
     # ── 3. Relations ────────────────────────────────────────────────────────
     relations_created = 0
