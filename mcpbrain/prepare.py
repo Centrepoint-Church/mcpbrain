@@ -145,6 +145,40 @@ def thread_is_noise(messages) -> bool:
     return _is_bulk_body(lead.get("text", ""))
 
 
+# --- trivial-thread short-circuit (Task 2.1) --------------------------------
+
+# Total body chars across a thread's messages under this is a candidate for
+# the deterministic extractive-summary path (no model call). Deliberately
+# small: this is meant to catch one-line acks ("Thanks, sounds good."), not
+# genuinely short-but-substantive threads.
+_TRIVIAL_CHARS = 300
+
+# A simple, cheap substring scan for action cues. Per the task brief this is
+# intentionally NOT the heavier extractor action-heuristics — a false negative
+# here (missing a real action cue) just means the thread falls through to the
+# normal model path, which is the safe direction to err in.
+_ACTION_CUES = ("?", "can you", "please")
+
+
+def is_trivial_thread(messages) -> bool:
+    """True when a thread is short enough and free of action cues to be safely
+    summarised deterministically instead of sent through the model.
+
+    True when the total character count across all messages' "text" is under
+    _TRIVIAL_CHARS AND no message's text contains an action cue (a case-
+    insensitive substring scan for "?", "can you", or "please"). An empty
+    thread (no messages) is trivial by definition — zero chars, no cues.
+    """
+    total = 0
+    for m in messages:
+        text = m.get("text", "") or ""
+        total += len(text)
+        lower = text.lower()
+        if any(cue in lower for cue in _ACTION_CUES):
+            return False
+    return total < _TRIVIAL_CHARS
+
+
 # --- Phase 1 seams ---------------------------------------------------------
 
 def _group_unenriched_threads(store, **kw):
@@ -350,6 +384,69 @@ def _filter_noise(store, batches) -> list:
             store.mark_enriched(batch.doc_ids)
         else:
             kept.append(batch)
+    return kept
+
+
+_SENTENCE_SPLIT = re.compile(r"[.!?]")
+
+
+def _extractive_summary(lead: dict) -> str:
+    """Deterministic summary for a trivial thread: the lead message's subject
+    plus the first sentence of its body (split on . / ! / ?, first non-empty
+    segment, whitespace-trimmed). Falls back gracefully when either piece is
+    missing so this never raises on a sparse fixture."""
+    subject = (lead.get("subject") or "").strip()
+    text = lead.get("text") or ""
+    first_sentence = ""
+    for segment in _SENTENCE_SPLIT.split(text):
+        segment = segment.strip()
+        if segment:
+            first_sentence = segment
+            break
+    if subject and first_sentence:
+        return f"{subject}: {first_sentence}"
+    return subject or first_sentence
+
+
+def _apply_trivial_threads(store, batches, *, home=None) -> list:
+    """Route trivial threads (see is_trivial_thread) straight to a deterministic
+    extractive-summary write via graph_write.apply(), skipping the model unit
+    path entirely; return the remaining (non-trivial) batches unchanged for the
+    normal build_pending/write_units flow.
+
+    Mirrors _filter_noise's shape and write-ownership: this is a second place
+    prepare writes the store, again safe because prepare runs single-writer in
+    the daemon. Each batch's thread is reassembled via _thread_block (this
+    duplicates one _thread_block call for batches that turn out non-trivial —
+    the same accepted tradeoff _filter_noise's docstring calls out for kept
+    batches being reassembled again downstream).
+    """
+    _home = str(home) if home is not None else str(config.app_dir())
+    if not config.enrich_trivial_thread_summary(_home):
+        return batches
+    from mcpbrain import graph_write
+
+    kept = []
+    for batch in batches:
+        block = _thread_block(store, batch)
+        messages = block["messages"]
+        if not is_trivial_thread(messages):
+            kept.append(batch)
+            continue
+        lead = min(messages, key=lambda m: m.get("date", "") or "") if messages else {}
+        extraction = {
+            "thread_id": block["thread_id"],
+            "org": block["org_hint"] or "unknown",
+            "content_type": "fyi",  # valid per chunking._VALID_CONTENT_TYPES
+            "summary": _extractive_summary(lead),
+            "messages": messages,
+            "entities": [],
+            "relations": [],
+            "actions": [],
+            "topics": [],
+        }
+        graph_write.apply(store, extraction, doc_ids=batch.doc_ids, home=home)
+        store.mark_enriched(batch.doc_ids)
     return kept
 
 
@@ -656,7 +753,14 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
         batches, salience_summary = _apply_salience_gate(
             store, batches,
             require_drive_mention=config.salience_require_drive_mention(_home))
-    kept = _filter_noise(store, batches)[:thread_cap]
+    non_noise = _filter_noise(store, batches)
+    # Trivial threads are deterministically extracted and marked enriched here
+    # (no model call), before thread_cap is applied — thread_cap caps the
+    # number of threads that actually reach the model, and a trivial thread
+    # never does, so letting it consume a cap slot would silently shrink the
+    # model-bound throughput per cycle for free (already-cheap) work.
+    non_trivial = _apply_trivial_threads(store, non_noise, home=home)
+    kept = non_trivial[:thread_cap]
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,
                          synthesis_requests=synthesis_requests,
