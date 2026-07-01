@@ -250,7 +250,7 @@ def quarantine(home: Path, batch_id: str, raw: str, reason: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# ETA formatting (shared between drain_backlog and parallel_backfill)
+# ETA formatting (shared between drain_backlog and other backfill drivers)
 # ---------------------------------------------------------------------------
 
 def format_eta(seconds: float) -> str:
