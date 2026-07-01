@@ -572,7 +572,7 @@ def unit_pull_cap(home=None) -> int:
 
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
-    units (config 'spool_thread_cap', default 500).
+    units (config 'spool_thread_cap', default 2000).
 
     group_unenriched_threads returns the first N un-enriched threads each cycle, so
     the work queue is bounded at roughly this many threads. Raising it deepens the
@@ -581,9 +581,9 @@ def spool_thread_cap(home) -> int:
     during steady-state new-mail enrichment. Read every cycle, so a config edit
     takes effect on the next drain — no daemon restart needed."""
     try:
-        return max(1, int(read_config(home).get("spool_thread_cap", 500)))
+        return max(1, int(read_config(home).get("spool_thread_cap", 2000)))
     except (TypeError, ValueError):
-        return 500
+        return 2000
 
 
 def clickup_api_key(home) -> str:
