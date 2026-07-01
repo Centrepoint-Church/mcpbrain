@@ -263,60 +263,86 @@ def fetch_role(store, entity_id: str, *, current_only: bool = True) -> str:
     return row["value"] if row else ""
 
 
-def write_role_observation(store, entity_id: str, title: str, source: str,
-                           valid_from: str, confidence: str) -> None:
-    """Write a 'role' observation with provenance + supersession.
+def write_observation(store, entity_id: str, attribute: str, value: str, source: str,
+                      valid_from: str, confidence: str) -> None:
+    """Write an `attribute` observation with provenance + supersession.
 
-    Ported from memory_db.py:1100-1143, repointed at store._connect(). Rejects
-    over-long values and junk roles; skips low-ranked sources when an
-    authoritative role already exists; supersedes a prior same-source role by
-    setting its valid_to.
+    Generalized from the original role-only `write_role_observation`
+    (memory_db.py:1100-1143), repointed at store._connect(). The supersession
+    logic — same-source same-attribute re-observation dedup, recency-aware
+    valid_to retirement, revival ordering against a newer same-source
+    observation — applies to every attribute identically.
+
+    Three guards are semantically specific to job titles (the 'role'
+    attribute) and are skipped entirely for any other attribute:
+      (a) the 80-char length cap tuned for titles — actually kept
+          attribute-agnostic below (a reasonable general data-quality guard,
+          with no evidence it's wrong for other attributes);
+      (b) the junk-value check against _JUNK_ROLE_VALUES (contextual/social
+          words like "volunteer" that aren't real job titles) — role only;
+      (c) the source-rank gate (blocks a low-ranked source from writing a
+          role when an authoritative role source already exists) — role only.
+    A value like an org-move description or a project name should not be
+    filtered against a job-title junk-word list or rank-gated the same way.
     """
-    if len(title) > 80:
+    if len(value) > 80:
         return
-    if title.strip().lower() in _JUNK_ROLE_VALUES:
+    if attribute == "role" and value.strip().lower() in _JUNK_ROLE_VALUES:
         return
 
     with store._connect() as conn:
-        # Skip low-ranked sources when an authoritative observation already exists.
-        if _source_rank(source) < _BODY_MENTION_RANK:
-            if conn.execute(
-                "SELECT 1 FROM entity_observations "
-                "WHERE entity_id = ? AND attribute = 'role' AND valid_to IS NULL "
-                "AND source IN ('email_signature', 'from_header', 'body_mention')",
-                (entity_id,),
-            ).fetchone():
-                return
+        if attribute == "role":
+            # Skip low-ranked sources when an authoritative observation already exists.
+            if _source_rank(source) < _BODY_MENTION_RANK:
+                if conn.execute(
+                    "SELECT 1 FROM entity_observations "
+                    "WHERE entity_id = ? AND attribute = ? AND valid_to IS NULL "
+                    "AND source IN ('email_signature', 'from_header', 'body_mention')",
+                    (entity_id, attribute),
+                ).fetchone():
+                    return
 
         existing = conn.execute(
             "SELECT value FROM entity_observations "
-            "WHERE entity_id = ? AND attribute = 'role' AND source = ? AND valid_to IS NULL",
-            (entity_id, source),
+            "WHERE entity_id = ? AND attribute = ? AND source = ? AND valid_to IS NULL",
+            (entity_id, attribute, source),
         ).fetchone()
-        if existing and existing[0] == title:
+        if existing and existing[0] == value:
             return
-        # Recency rule: retire prior same-source roles only if they are older-or-equal
-        # (so an older role arriving late doesn't unseat a newer one). If a NEWER
-        # same-source role is already current, the incoming older one is inserted as
-        # historical (valid_to = that newer role's valid_from).
+        # Recency rule: retire prior same-source observations only if they are
+        # older-or-equal (so an older observation arriving late doesn't unseat a
+        # newer one). If a NEWER same-source observation is already current, the
+        # incoming older one is inserted as historical (valid_to = that newer
+        # observation's valid_from).
         conn.execute(
             "UPDATE entity_observations SET valid_to = ? "
-            "WHERE entity_id = ? AND attribute = 'role' AND source = ? "
+            "WHERE entity_id = ? AND attribute = ? AND source = ? "
             "AND valid_to IS NULL AND valid_from <= ?",
-            (valid_from, entity_id, source, valid_from),
+            (valid_from, entity_id, attribute, source, valid_from),
         )
         newer = conn.execute(
             "SELECT MIN(valid_from) FROM entity_observations "
-            "WHERE entity_id = ? AND attribute = 'role' AND source = ? "
+            "WHERE entity_id = ? AND attribute = ? AND source = ? "
             "AND valid_to IS NULL AND valid_from > ?",
-            (entity_id, source, valid_from),
+            (entity_id, attribute, source, valid_from),
         ).fetchone()[0]
         conn.execute(
             "INSERT INTO entity_observations "
             "(entity_id, attribute, value, source, valid_from, valid_to, confidence_source) "
-            "VALUES (?, 'role', ?, ?, ?, ?, ?)",
-            (entity_id, title, source, valid_from, newer, confidence),
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (entity_id, attribute, value, source, valid_from, newer, confidence),
         )
+
+
+def write_role_observation(store, entity_id: str, title: str, source: str,
+                           valid_from: str, confidence: str) -> None:
+    """Write a 'role' observation with provenance + supersession.
+
+    Thin wrapper over write_observation, kept so the two existing call sites
+    in apply() (entities loop + write-time-dedup redirect branch) and any
+    other callers keep working unchanged.
+    """
+    write_observation(store, entity_id, "role", title, source, valid_from, confidence)
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1139,30 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if erole and etype == "person":
             write_role_observation(store, entity_id, erole, "llm_extraction",
                                    lead_date_iso or "2026-01-01", "medium")
+
+    # ── 1.5 Rich observations: dated, attributable facts (Task 4.2) ────────
+    # observations[] items ({"entity_name", "attribute", "value", "date"})
+    # generalize the role field's bi-temporal supersession to typed, dated
+    # facts (title changes, org moves, project-membership changes) that don't
+    # fit `role` (a current-title snapshot) or the relation types. Resolved
+    # against name_to_id ONLY — exact match, no affiliation-stripping
+    # fallback — an unresolved entity_name is skipped, never invented.
+    _observations_home = str(home) if home is not None else str(config.app_dir())
+    if config.enrich_rich_observations_enabled(_observations_home):
+        for obs in extraction.get("observations", []) or []:
+            obs_entity_name = (obs.get("entity_name") or "").strip()
+            obs_attribute = (obs.get("attribute") or "").strip()
+            obs_value = (obs.get("value") or "").strip()
+            if not obs_entity_name or not obs_attribute or not obs_value:
+                continue
+            obs_entity_id = name_to_id.get(obs_entity_name)
+            if not obs_entity_id:
+                continue
+            obs_date_raw = (obs.get("date") or "").strip()
+            obs_valid_from = (_parse_date_iso(obs_date_raw) or obs_date_raw
+                              or lead_date_iso or today)
+            write_observation(store, obs_entity_id, obs_attribute, obs_value,
+                              "llm_extraction", obs_valid_from, "medium")
 
     # ── 2. Topics with min-distinct-orgs gate (Task 2.6) ───────────────────
     # A topic entity is only created once it has appeared in email_context under
