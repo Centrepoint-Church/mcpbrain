@@ -49,12 +49,27 @@ def canonical_key(name: str) -> str:
     return slugify(_canonical_name(name))
 
 
+# Types whose IDENTITY is their name — safe to merge on canonical name. Everything
+# else (document, thread, topic, meeting, event, group, facility, system, unknown…)
+# is identified by its source id or is too generic to merge on title: distinct such
+# nodes routinely share titles ("Untitled document", "TEST", "Budget") and merging
+# them on canonical key collapsed ~3,980 entities on the real corpus. Allowlist, so a
+# new/unrecognised type is never name-merged by default (fail-safe).
+_NAME_MERGEABLE_TYPES = frozenset({"person", "org", "project"})
+
+
 def _deterministic_merges(store) -> int:
     """Merge same-type, canonical-key-identical entities into the highest-mentions
-    survivor. Returns the number of merges applied. Safe (no LLM)."""
+    survivor. Returns the number of merges applied. Safe (no LLM).
+
+    Only name-identity types (_NAME_MERGEABLE_TYPES) are merged on canonical name;
+    structural/artifact types are keyed by source id, not title, so they are never
+    name-merged here (they would collide catastrophically on generic titles)."""
     ents = store.entities_for_resolution()
     groups = {}   # (type, canonical_key) -> [entity dicts]
     for e in ents:
+        if e["type"] not in _NAME_MERGEABLE_TYPES:
+            continue
         key = canonical_key(e["name"])
         if not key:
             continue
