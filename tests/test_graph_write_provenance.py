@@ -1,5 +1,6 @@
 # tests/test_graph_write_provenance.py
 import json
+from pathlib import Path
 
 from mcpbrain.store import Store
 from mcpbrain import graph_write
@@ -7,6 +8,18 @@ from mcpbrain import graph_write
 
 def _store(tmp_path):
     s = Store(str(tmp_path / "b.sqlite3"), dim=384); s.init(); return s
+
+
+def _seed_entity(store, entity_id, *, name="Sam", entity_type="person"):
+    """Insert a bare entity row directly, bypassing upsert_entity's junk/dedup
+    checks — used by write_observation unit tests that don't need apply()'s
+    full entity-creation pipeline."""
+    with store._connect() as db:
+        db.execute(
+            "INSERT INTO entities (id, name, type) VALUES (?, ?, ?)",
+            (entity_id, name, entity_type),
+        )
+    return entity_id
 
 
 def test_relation_gets_real_doc_id(tmp_path):
@@ -347,6 +360,146 @@ def test_structural_relations_kill_switch_suppresses_deterministic_writes(tmp_pa
         ).fetchone()[0]
     assert works_at_with_prov == 0, "kill-switch must suppress the deterministic works_at pass"
     assert mentioned_with == 0, "kill-switch must suppress the deterministic mentioned_with pass"
+
+
+def test_observation_written_and_superseded_by_later_date(tmp_path):
+    """Task 4.2 Step 1 (brief's literal example, done properly): an extraction
+    with entities=[Sam] and observations=[{attribute:'title', value:'COO',
+    date:'2026-01-01'}] writes one entity_observations row with
+    attribute='title', value='COO'. A second extraction for the same
+    thread/entity with a later-dated title observation supersedes the first
+    (valid_to set on the old row; the new row is current)."""
+    s = _store(tmp_path)
+    extraction1 = {
+        "thread_id": "t20", "org": "unknown", "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "a@x.org", "date": "2026-01-01"}],
+        "entities": [{"name": "Sam", "type": "person"}],
+        "observations": [
+            {"entity_name": "Sam", "attribute": "title", "value": "COO", "date": "2026-01-01"},
+        ],
+        "relations": [], "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction1, doc_ids=["doc-20"], home=str(tmp_path))
+
+    with s._connect() as db:
+        sam_id = db.execute("SELECT id FROM entities WHERE name='Sam'").fetchone()[0]
+        rows = db.execute(
+            "SELECT value, valid_to FROM entity_observations "
+            "WHERE entity_id=? AND attribute='title'", (sam_id,)
+        ).fetchall()
+    assert len(rows) == 1, f"expected exactly one title observation, got {rows}"
+    assert rows[0][0] == "COO"
+    assert rows[0][1] is None or rows[0][1] == "", "first observation should be current (no valid_to)"
+
+    extraction2 = {
+        "thread_id": "t20", "org": "unknown", "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m2", "sender": "a@x.org", "date": "2026-06-01"}],
+        "entities": [{"name": "Sam", "type": "person"}],
+        "observations": [
+            {"entity_name": "Sam", "attribute": "title", "value": "CEO", "date": "2026-06-01"},
+        ],
+        "relations": [], "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction2, doc_ids=["doc-21"], home=str(tmp_path))
+
+    with s._connect() as db:
+        rows2 = db.execute(
+            "SELECT value, valid_to FROM entity_observations "
+            "WHERE entity_id=? AND attribute='title' ORDER BY id", (sam_id,)
+        ).fetchall()
+    assert len(rows2) == 2, f"expected two title observation rows after supersession, got {rows2}"
+    old_row, new_row = rows2[0], rows2[1]
+    assert old_row[0] == "COO"
+    assert old_row[1], "the first (COO) row must now be superseded (valid_to set)"
+    assert new_row[0] == "CEO"
+    assert not new_row[1], "the new (CEO) row must be current (no valid_to)"
+
+
+def test_write_observation_skips_role_guards_for_non_role_attribute():
+    """write_observation, called directly (not through apply()), must NOT apply
+    the role-specific junk-value/source-rank guards to a non-role attribute.
+    'volunteer' is in _JUNK_ROLE_VALUES and would be rejected as a role — but
+    for attribute='org_move' it must be written."""
+    import tempfile
+    from mcpbrain.graph_write import write_observation
+
+    with tempfile.TemporaryDirectory() as d:
+        s = _store(Path(d))
+        entity_id = _seed_entity(s, "sam")
+        write_observation(s, entity_id, "org_move", "volunteer",
+                          "llm_extraction", "2026-01-01", "medium")
+        with s._connect() as db:
+            row = db.execute(
+                "SELECT value FROM entity_observations "
+                "WHERE entity_id=? AND attribute='org_move'", (entity_id,)
+            ).fetchone()
+    assert row is not None, "org_move observation with a role-junk value must still be written"
+    assert row[0] == "volunteer"
+
+
+def test_write_role_observation_still_rejects_junk_after_refactor(tmp_path):
+    """Regression guard: write_role_observation's existing behavior (junk role
+    rejection) must be completely unchanged after generalizing to
+    write_observation. Called via the thin wrapper, 'volunteer' must still be
+    rejected for attribute='role'."""
+    s = _store(tmp_path)
+    entity_id = _seed_entity(s, "sam")
+    graph_write.write_role_observation(
+        s, entity_id, "volunteer", "llm_extraction", "2026-01-01", "medium")
+    with s._connect() as db:
+        row = db.execute(
+            "SELECT value FROM entity_observations "
+            "WHERE entity_id=? AND attribute='role'", (entity_id,)
+        ).fetchone()
+    assert row is None, "junk role value 'volunteer' must still be rejected post-refactor"
+
+
+def test_observations_kill_switch_suppresses_wiring(tmp_path):
+    """enrich_rich_observations_enabled=False must suppress apply()'s
+    observations[] wiring entirely — no entity_observations rows written for
+    the new attributes."""
+    s = _store(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "enrich_rich_observations_enabled": False,
+    }))
+    extraction = {
+        "thread_id": "t21", "org": "unknown", "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "a@x.org", "date": "2026-01-01"}],
+        "entities": [{"name": "Sam", "type": "person"}],
+        "observations": [
+            {"entity_name": "Sam", "attribute": "title", "value": "COO", "date": "2026-01-01"},
+        ],
+        "relations": [], "actions": [], "topics": [],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-22"], home=str(tmp_path))
+    with s._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM entity_observations WHERE attribute='title'"
+        ).fetchone()[0]
+    assert count == 0, "kill-switch must suppress the observations[] wiring"
+
+
+def test_observation_unresolved_entity_name_is_skipped(tmp_path):
+    """An observations[] item whose entity_name doesn't resolve to anything in
+    name_to_id must be skipped without raising."""
+    s = _store(tmp_path)
+    extraction = {
+        "thread_id": "t22", "org": "unknown", "content_type": "email", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "a@x.org", "date": "2026-01-01"}],
+        "entities": [{"name": "Sam", "type": "person"}],
+        "observations": [
+            {"entity_name": "Nobody Real", "attribute": "title", "value": "COO", "date": "2026-01-01"},
+        ],
+        "relations": [], "actions": [], "topics": [],
+    }
+    # Must not raise.
+    graph_write.apply(s, extraction, doc_ids=["doc-23"], home=str(tmp_path))
+    with s._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM entity_observations WHERE attribute='title'"
+        ).fetchone()[0]
+    assert count == 0, "unresolved entity_name must not write an observation"
 
 
 def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):

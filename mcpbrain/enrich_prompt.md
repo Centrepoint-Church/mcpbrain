@@ -62,7 +62,9 @@ Each extraction uses this schema verbatim. Match the field names exactly.
   "resolved_action_ids": [42],
   "updated_actions": [{"id": 42, "new_text": "..."}],
   "relations": [{"source_name": "Person Name", "type": "works_at|reports_to|manages|coordinates_with|mentioned_with",
-                 "target_name": "Org Name"}]
+                 "target_name": "Org Name"}],
+  "observations": [{"entity_name": "Person Name", "attribute": "title|org_move|project_membership",
+                    "value": "...", "date": "YYYY-MM-DD"}]
 }
 ```
 
@@ -155,6 +157,22 @@ Entities and relations are the part most worth getting right.
       NOT both message senders (the system already covers sender-pairs).
   Any other relation type will be silently dropped. Emit only relations the
   text explicitly supports; skip rather than guess.
+- **Observations.** `role` on an entity is a snapshot of their CURRENT title,
+  not a dated history — use `observations` for a dated, attributable fact
+  about an already-listed entity that a snapshot or a relation can't carry.
+  Three attributes:
+    - `title` — a job-title change, dated (e.g. "she was promoted to COO in
+      January 2026" → `{"entity_name": "...", "attribute": "title",
+      "value": "COO", "date": "2026-01-01"}`).
+    - `org_move` — a person's affiliation changing from one org to another,
+      dated (e.g. "moved from Centrepoint Church to Capes Community Church
+      last March").
+    - `project_membership` — a person joining or leaving a named project,
+      dated.
+  Each item: `{"entity_name": ..., "attribute": "title"|"org_move"|
+  "project_membership", "value": ..., "date": "YYYY-MM-DD"}`. `entity_name`
+  must match an entity you already listed in `entities`, verbatim. Emit only
+  when the text explicitly supports a dated fact; skip rather than guess.
 - **Grounding.** Every entity name and every relation endpoint name must appear
   in the source text (the email/document you are extracting from). Do not
   fabricate names that are not present in the messages. Add a short
