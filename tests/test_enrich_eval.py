@@ -186,3 +186,14 @@ def test_gold_docs_cold_marked_all_cold(tmp_path, monkeypatch):
     assert m["present"] == 2
     assert m["cold"] == 2
     assert m["pct"] == 100.0
+
+
+def test_sender_coverage_metric(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr) VALUES('p1','A','person','a@x.org')")
+        db.execute("INSERT INTO entities(id,name,type,email_addr) VALUES('p2','B','person','')")
+        db.execute("INSERT INTO email_entities(message_id,entity_id,role) VALUES('m1','p1','authored')")
+    m = graph_metrics(s)
+    assert m["senders_as_entities_pct"] == 50.0   # 1 of 2 persons is an authored sender
