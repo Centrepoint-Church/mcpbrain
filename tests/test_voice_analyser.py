@@ -2,7 +2,15 @@
 import json
 import os
 import pytest
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _recent_date() -> str:
+    """Draft date guaranteed inside the analyser's lookback window. Using a hardcoded
+    literal made these tests age out: _collect_draft_samples filters created_at >=
+    now - lookback_days, so a fixed date silently falls out of the window as time passes."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 @pytest.fixture
@@ -105,7 +113,7 @@ def test_is_disabled_after_three_strikes(store, home_proc, monkeypatch):
         db.execute(
             "INSERT INTO draft_records (email_id, thread_id, intent, draft_text, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("e1", "t1", "reply", "Hi Josh, thanks for reaching out.", "2026-06-23")
+            ("e1", "t1", "reply", "Hi Josh, thanks for reaching out.", _recent_date())
         )
 
     # Make _call_claude always raise so maybe_run_analysis increments strikes
@@ -138,7 +146,7 @@ def test_run_analysis_writes_suggestions(store, home_proc, monkeypatch):
         db.execute(
             "INSERT INTO draft_records (email_id, thread_id, intent, draft_text, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("e1", "t1", "reply", "I hope this helps! Synergy is key.", "2026-06-23")
+            ("e1", "t1", "reply", "I hope this helps! Synergy is key.", _recent_date())
         )
 
     fake_response = json.dumps([{
@@ -168,7 +176,7 @@ def test_run_analysis_filters_low_confidence(store, home_proc, monkeypatch):
         db.execute(
             "INSERT INTO draft_records (email_id, thread_id, intent, draft_text, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("e2", "t2", "reply", "Some draft text.", "2026-06-23")
+            ("e2", "t2", "reply", "Some draft text.", _recent_date())
         )
 
     fake_response = json.dumps([{
