@@ -485,6 +485,41 @@ def test_split_long_thread_single_oversized_message():
     assert parts[0]["messages"][0]["message_id"] == "m-big"
 
 
+def test_split_long_thread_carries_org_hint_single_oversized_message():
+    # The single-oversized-message early return must also carry org_hint.
+    block = {
+        "thread_id": "t-x",
+        "prior_thread_context": "",
+        "open_actions": [],
+        "org_hint": "Centrepoint",
+        "messages": [_msg("m-big", "a@b.com", "2026-06-01", "x", "x" * 200)],
+    }
+    parts = prepare._split_long_thread(block, char_budget=50)
+    assert len(parts) == 1
+    assert parts[0]["org_hint"] == "Centrepoint"
+
+
+def test_split_long_thread_carries_org_hint_across_parts():
+    # A thread split into multiple parts must carry org_hint into every part —
+    # it's thread-level metadata (derived from the lead sender), same as
+    # thread_id/prior_thread_context/open_actions, not per-message data.
+    big = "x" * 60
+    block = {
+        "thread_id": "t-long",
+        "prior_thread_context": "",
+        "open_actions": [],
+        "org_hint": "Centrepoint",
+        "messages": [
+            _msg("m1", "a@b.com", "2026-06-01", "s1", big),
+            _msg("m2", "a@b.com", "2026-06-02", "s2", big),
+            _msg("m3", "a@b.com", "2026-06-03", "s3", big),
+        ],
+    }
+    parts = prepare._split_long_thread(block, char_budget=100)
+    assert len(parts) > 1
+    assert all(p["org_hint"] == "Centrepoint" for p in parts)
+
+
 # --- 2.5 merge-review block ------------------------------------------------
 
 def test_prepare_no_merge_review_when_not_due(tmp_path, monkeypatch):
