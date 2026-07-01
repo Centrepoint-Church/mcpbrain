@@ -397,9 +397,10 @@ def _thread_block(store, batch) -> dict:
 
 def _split_long_thread(block, char_budget: int) -> list:
     """Split a thread whose joined message bodies exceed char_budget into ordered
-    sub-batches. Each sub-batch shares the thread_id, prior_thread_context, and
-    open_actions, and carries {"part": i, "of": k} so the drain can re-group them
-    by thread_id before apply. Message order is preserved across the split.
+    sub-batches. Each sub-batch shares the thread_id, prior_thread_context,
+    open_actions, and org_hint (all thread-level metadata, not per-message), and
+    carries {"part": i, "of": k} so the drain can re-group them by thread_id
+    before apply. Message order is preserved across the split.
     """
     messages = block["messages"]
     total = sum(len(m.get("text", "")) for m in messages)
@@ -441,6 +442,7 @@ def _split_long_thread(block, char_budget: int) -> list:
             "thread_id": block["thread_id"],
             "prior_thread_context": block["prior_thread_context"],
             "open_actions": block["open_actions"],
+            "org_hint": block.get("org_hint", ""),
             "part": i,
             "of": k,
             "messages": group,
