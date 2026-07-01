@@ -525,3 +525,19 @@ def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):
     with s._connect() as db:
         org = db.execute("SELECT org FROM email_context WHERE message_id='m1'").fetchone()[0]
     assert org == "Acme", f"model's own org signal must win over org_hint, got {org!r}"
+
+
+def test_sender_entity_created_without_model(tmp_path, monkeypatch):
+    monkeypatch.setattr("mcpbrain.config.enrich_sender_entities", lambda home: True)
+    s = _store(tmp_path)
+    extraction = {
+        "thread_id": "t9", "org": "unknown", "content_type": "update", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "Dana Lee <dana@centrepoint.church>", "date": "2026-02-01"}],
+        "entities": [],   # model surfaced NO entities
+        "relations": [], "actions": [], "topics": ["x"],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-1"])
+    with s._connect() as db:
+        row = db.execute("SELECT type, email_addr FROM entities WHERE name='Dana Lee'").fetchone()
+    assert row is not None, "sender must be created as an entity even when the model omits it"
+    assert row[0] == "person" and row[1] == "dana@centrepoint.church"
