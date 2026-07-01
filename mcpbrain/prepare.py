@@ -755,10 +755,11 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
             require_drive_mention=config.salience_require_drive_mention(_home))
     non_noise = _filter_noise(store, batches)
     # Trivial threads are deterministically extracted and marked enriched here
-    # (no model call), before thread_cap is applied — thread_cap caps the
-    # number of threads that actually reach the model, and a trivial thread
-    # never does, so letting it consume a cap slot would silently shrink the
-    # model-bound throughput per cycle for free (already-cheap) work.
+    # (no model call) before thread_cap is applied. group_unenriched_threads already
+    # caps the pool at thread_cap, so within THIS cycle excluding trivial threads
+    # doesn't add more model calls. The benefit is cross-cycle: resolving trivial
+    # threads clears them from the backlog faster, making more distinct non-trivial
+    # threads visible to group_unenriched_threads in the NEXT cycle.
     non_trivial = _apply_trivial_threads(store, non_noise, home=home)
     kept = non_trivial[:thread_cap]
     data = build_pending(store, kept, char_budget=char_budget, now=now,
