@@ -181,14 +181,32 @@ def importance_weights(home) -> dict:
 def tiered_memory_enabled(home) -> bool:
     """Whether B2 tiered memory + always-injected core block is active.
 
-    When True, core-tier chunks are prepended to every /api/recall response
-    and cold-tier chunks are excluded from default recall. The tier pass seeds a
-    durable identity core block (seed_core_identity) so the always-injected block
-    is useful day-one, independent of consolidation.
-    Default: TRUE (shipped on in 0.7.65 — cold-exclusion validated net-positive on
-    the production path: MRR 0.322→0.483). Set 'tiered_memory': false to disable.
+    When True, core-tier chunks are prepended to every /api/recall response. The
+    tier pass seeds a durable identity core block (seed_core_identity) so the
+    always-injected block is useful day-one, independent of consolidation.
+    Default: TRUE (shipped on in 0.7.65).
+
+    NOTE: cold-tier EXCLUSION from recall used to be coupled to this flag. It was
+    decoupled in 0.7.72 into `recall_excludes_cold` (default OFF) after a salience
+    backfill grew the cold set and halved gold recall (0.75→0.35): the salience
+    gate is an enrichment-cost optimization, not a retrieval filter. Cold chunks
+    stay searchable by default; this flag now controls only the core-tier prepend.
     """
     return bool(read_config(home).get("tiered_memory", True))
+
+
+def recall_excludes_cold(home) -> bool:
+    """Whether default recall EXCLUDES cold-tier chunks.
+
+    Default: FALSE — cold chunks stay searchable. The salience gate cold-marks
+    chunks to skip LLM graph-EXTRACTION (a cost optimization); it must not double
+    as a retrieval filter. When the salience backfill grew the cold set to ~40% of
+    the corpus, excluding cold from recall halved gold recall@10 (0.75→0.35) because
+    genuinely-relevant docs were cold-marked. Keeping cold in recall honors the
+    gate's original 'stays embedded/searchable' guarantee. Opt back in (e.g. after a
+    validated, narrower cold definition) via 'recall_excludes_cold': true.
+    """
+    return bool(read_config(home).get("recall_excludes_cold", False))
 
 
 def decay_enabled(home) -> bool:
