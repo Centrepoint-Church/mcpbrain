@@ -141,6 +141,18 @@ Entities and relations are the part most worth getting right.
     - `manages` — person manages a person, org, or project
     - `coordinates_with` — person collaborates with another person/org/project
     - `mentioned_with` — two entities co-mentioned without a stronger relation
+  The system already derives `works_at` deterministically for every message
+  sender from their header email's domain, and `mentioned_with` between every
+  pair of message senders in the thread — do NOT re-emit those; it would only
+  duplicate provenance-backed edges the daemon already writes. What you SHOULD
+  still emit:
+    - `works_at` — only when the body states an affiliation for someone who is
+      NOT a message sender (e.g. a third party mentioned in the text), or when
+      the body contradicts/refines what the header domain implies.
+    - `reports_to`, `manages`, `coordinates_with` — unchanged, still fully your
+      job; these are semantic and cannot be derived from headers alone.
+    - `mentioned_with` — only for two entities co-mentioned in the body who are
+      NOT both message senders (the system already covers sender-pairs).
   Any other relation type will be silently dropped. Emit only relations the
   text explicitly supports; skip rather than guess.
 - **Grounding.** Every entity name and every relation endpoint name must appear
