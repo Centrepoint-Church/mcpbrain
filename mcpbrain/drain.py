@@ -37,7 +37,7 @@ import os
 import re
 from pathlib import Path
 
-from mcpbrain import config, orgs
+from mcpbrain import config, orgs, review_apply
 from mcpbrain.contract import (
     normalise_org, sanitize_batch, validate_batch_wrapper, validate_extraction,
 )
@@ -117,6 +117,10 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
 # when the key is present; failures are isolated (log + continue). Registered by
 # block modules at import time.
 BLOCK_DRAINERS: dict = {}
+# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
+BLOCK_DRAINERS["review_orphan"] = lambda store, data: review_apply.apply_orphan_verdicts(
+    store, data.get("review_orphan") or [], cap=50
+)
 
 
 def _home(home) -> Path:
