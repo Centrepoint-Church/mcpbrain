@@ -5,6 +5,7 @@ import re
 import secrets
 import tempfile
 import threading
+import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -129,6 +130,33 @@ class ControlServer:
                             server.store, str(server.home), server.daemon.status()))
                     except Exception as exc:
                         log.exception("dashboard stats failed")
+                        return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] == "/api/graph/canvas":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    try:
+                        from mcpbrain import graph_view
+                        qs = urllib.parse.urlparse(self.path).query
+                        q = urllib.parse.parse_qs(qs)
+                        def _int(name, default):
+                            try:
+                                return int(q.get(name, [default])[0])
+                            except (TypeError, ValueError):
+                                return default
+                        result = graph_view.graph_canvas(
+                            server.store,
+                            min_conn=_int("min_conn", 7),
+                            org=q.get("org", [""])[0],
+                            community=q.get("community", [""])[0],
+                            types=q.get("type", []),
+                            recency_days=_int("recency_days", 0),
+                            max_links=_int("max_links", 5000),
+                        )
+                        if isinstance(result, dict) and result.get("error") == "too_large":
+                            return h_json(self, 413, result)
+                        return h_json(self, 200, result)
+                    except Exception as exc:
+                        log.exception("graph canvas failed")
                         return h_json(self, 500, {"error": str(exc)})
                 if self.path == "/api/dashboard/today":
                     if server.store is None:
