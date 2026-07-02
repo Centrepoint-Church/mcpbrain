@@ -6,6 +6,7 @@ from mcpbrain.review_apply import (
     apply_missing_org_verdicts,
     apply_ownerless_verdicts,
     apply_org_verdicts,
+    apply_duplicate_verdicts,
 )
 
 
@@ -673,3 +674,118 @@ def test_cap_is_shared_across_canonicalize_and_add_to_config(tmp_path):
         suggestions = db.execute("SELECT * FROM org_suggestions").fetchall()
     assert suggestions == []
     assert len(s.open_findings("org_unrecognised")) == 1
+
+
+# --- apply_duplicate_verdicts (merge_review hardening) ----------------------
+#
+# This tier is the LLM-adjudicated entity-merge applier ported from drain.
+# _apply_merge_answers, hardened with the type/role-address guards the other
+# review-adjudication appliers above already have (see review_apply.py's
+# apply_duplicate_verdicts docstring for the safety rationale).
+
+
+def _pair_id(a_id, b_id):
+    return "|".join(sorted((a_id, b_id)))
+
+
+def _set_email(store, entity_id, email_addr):
+    with store._connect() as db:
+        db.execute("UPDATE entities SET email_addr=? WHERE id=?", (email_addr, entity_id))
+
+
+def _seed_dupes(tmp_path):
+    s = Store(str(tmp_path / "dupes.sqlite3"), dim=4)
+    s.init()
+    return s
+
+
+def test_duplicate_verdict_merges_mergeable_type_with_normal_emails(tmp_path):
+    s = _seed_dupes(tmp_path)
+    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", "Acme", "2026-04-01")
+    s.upsert_entity("joel-chelliah", "Joel Chelliah", "person", "Acme", "2026-04-02")  # mentions=2
+    s.upsert_entity("j-chelliah", "J Chelliah", "person", "Acme", "2026-04-01")  # mentions=1
+    _set_email(s, "joel-chelliah", "joel.chelliah@acme.com")
+    _set_email(s, "j-chelliah", "j.chelliah@acme.com")
+
+    ans = {"pair_id": _pair_id("joel-chelliah", "j-chelliah"),
+           "same": True, "canonical": "Joel Chelliah"}
+    result = apply_duplicate_verdicts(s, [ans], cap=50)
+
+    assert result == {"merged": 1, "guarded": 0, "capped": 0, "skipped": 0}
+    assert s.get_entity("j-chelliah") is None
+    assert s.get_entity("joel-chelliah") is not None
+    merges = s.list_entity_merges()
+    assert len(merges) == 1
+    assert merges[0]["winner_id"] == "joel-chelliah"
+    assert merges[0]["loser_id"] == "j-chelliah"
+    assert merges[0]["method"] == "llm"
+
+
+def test_duplicate_verdict_on_non_mergeable_type_is_guarded(tmp_path):
+    s = _seed_dupes(tmp_path)
+    s.upsert_entity("doc-a", "Untitled document", "document", "", "2026-04-01")
+    s.upsert_entity("doc-b", "Untitled document", "document", "", "2026-04-01")
+
+    ans = {"pair_id": _pair_id("doc-a", "doc-b"), "same": True, "canonical": "Untitled document"}
+    result = apply_duplicate_verdicts(s, [ans], cap=50)
+
+    assert result == {"merged": 0, "guarded": 1, "capped": 0, "skipped": 0}
+    assert s.get_entity("doc-a") is not None
+    assert s.get_entity("doc-b") is not None
+    assert s.list_entity_merges() == []
+
+
+def test_duplicate_verdict_with_role_address_is_guarded(tmp_path):
+    s = _seed_dupes(tmp_path)
+    s.upsert_entity("staffer-a", "Alex Staffer", "person", "Acme", "2026-04-01")
+    s.upsert_entity("staffer-b", "Sam Staffer", "person", "Acme", "2026-04-01")
+    _set_email(s, "staffer-a", "office@centrepoint.church")
+    _set_email(s, "staffer-b", "sam.staffer@acme.com")
+
+    ans = {"pair_id": _pair_id("staffer-a", "staffer-b"), "same": True, "canonical": "Staffer"}
+    result = apply_duplicate_verdicts(s, [ans], cap=50)
+
+    assert result == {"merged": 0, "guarded": 1, "capped": 0, "skipped": 0}
+    assert s.get_entity("staffer-a") is not None
+    assert s.get_entity("staffer-b") is not None
+    assert s.list_entity_merges() == []
+
+
+def test_duplicate_verdict_cap_stops_applying_merges(tmp_path):
+    s = _seed_dupes(tmp_path)
+    s.upsert_entity("a1", "Alpha One", "person", "Acme", "2026-04-01")
+    s.upsert_entity("a2", "Alpha Two", "person", "Acme", "2026-04-01")
+    s.upsert_entity("b1", "Beta One", "person", "Acme", "2026-04-01")
+    s.upsert_entity("b2", "Beta Two", "person", "Acme", "2026-04-01")
+
+    answers = [
+        {"pair_id": _pair_id("a1", "a2"), "same": True, "canonical": "Alpha"},
+        {"pair_id": _pair_id("b1", "b2"), "same": True, "canonical": "Beta"},
+    ]
+    result = apply_duplicate_verdicts(s, answers, cap=1)
+
+    assert result == {"merged": 1, "guarded": 0, "capped": 1, "skipped": 0}
+    merges = s.list_entity_merges()
+    assert len(merges) == 1
+    # whichever pair merged, the other pair's two entities both still exist
+    # untouched (capped means untouched, not consumed).
+    merged_ids = {merges[0]["winner_id"], merges[0]["loser_id"]}
+    other_pair = {"b1", "b2"} if merged_ids == {"a1", "a2"} else {"a1", "a2"}
+    for eid in other_pair:
+        assert s.get_entity(eid) is not None
+
+
+def test_duplicate_verdict_preexisting_skip_reasons_still_handled(tmp_path):
+    s = _seed_dupes(tmp_path)
+    s.upsert_entity("only-one", "Only One", "person", "Acme", "2026-04-01")
+
+    answers = [
+        {"pair_id": "malformed", "same": True, "canonical": ""},  # bad pair_id
+        {"pair_id": _pair_id("ghost-1", "ghost-2"), "same": True, "canonical": ""},  # missing entity
+        {"pair_id": _pair_id("only-one", "only-one"), "same": "true", "canonical": ""},  # non-bool same
+    ]
+    result = apply_duplicate_verdicts(s, answers, cap=50)
+
+    assert result == {"merged": 0, "guarded": 0, "capped": 0, "skipped": 3}
+    assert s.get_entity("only-one") is not None
+    assert s.list_entity_merges() == []

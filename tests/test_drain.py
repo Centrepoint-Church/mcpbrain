@@ -426,6 +426,32 @@ def test_drain_merge_answer_unknown_pair_skipped(store, home):
     assert summary["merges"] == 0
 
 
+def test_drain_merge_answers_use_configured_review_cap(store, home, monkeypatch):
+    """drain's merge_answers call site sources cap= from
+    config.review_max_apply_per_run, the same established pattern as the four
+    review_* BLOCK_DRAINERS registrations (see
+    test_block_drainers_use_configured_review_cap below)."""
+    from mcpbrain import config
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    config.write_config(str(home), {"review_max_apply_per_run": 3})
+
+    captured = {}
+
+    def _fake(store_arg, answers, *, cap):
+        captured["cap"] = cap
+        return {"merged": 0, "guarded": 0, "capped": 0, "skipped": 0}
+
+    monkeypatch.setattr(drain.review_apply, "apply_duplicate_verdicts", _fake)
+
+    ans = {"pair_id": _pair_id("ghost-1", "ghost-2"), "same": True, "canonical": ""}
+    _write_inbox(home, "batch.json", _batch("batch-1", [], merge_answers=[ans]))
+
+    drain.drain(store, home=home, apply=RecordingApply())
+
+    assert captured["cap"] == 3
+
+
 # --- 4.4: delete on full success + idempotency -----------------------------
 
 
