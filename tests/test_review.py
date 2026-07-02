@@ -1,5 +1,5 @@
 from mcpbrain.store import Store
-from mcpbrain.review import build_review_packet
+from mcpbrain.review import build_review_packet, build_review_units
 
 
 def _seed(tmp_path):
@@ -20,3 +20,17 @@ def test_packet_has_entity_and_source_text(tmp_path):
     assert pk["entity"]["name"] == "Sam Lee"
     assert pk["entity"]["email_addr"] == "sam@acme.com"
     assert any("Acme rollout" in span for span in pk["source_spans"]), "must carry the source text the entity came from"
+
+
+def test_build_review_units_respects_cap(tmp_path):
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan 1")
+    s.record_finding("lint:orphan_entity", "e2", summary="orphan 2")
+    s.record_finding("lint:orphan_entity", "e3", summary="orphan 3")
+
+    units = build_review_units(s, kinds=["lint:orphan_entity"], cap=2)
+
+    assert len(units) <= 2
+    for unit in units:
+        assert set(unit.keys()) == {"finding_id", "packet"}
+        assert isinstance(unit["finding_id"], int)
