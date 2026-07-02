@@ -130,8 +130,14 @@
       const tip = $("tooltip");
       renderer.on("enterNode", ({ node }) => {
         const a = g.getNodeAttributes(node);
-        tip.innerHTML = "<b>" + a.label + "</b><br>" + (a._type || "") +
-          " · " + (a._org || "no org") + " · " + (a._conn || 0) + " connections";
+        tip.textContent = "";
+        const name = document.createElement("b");
+        name.textContent = a.label;
+        tip.appendChild(name);
+        tip.appendChild(document.createElement("br"));
+        tip.appendChild(document.createTextNode(
+          (a._type || "") + " · " + (a._org || "no org") + " · " + (a._conn || 0) + " connections"
+        ));
         tip.style.display = "block";
       });
       renderer.getMouseCaptor().on("mousemovebody", (e) => {
