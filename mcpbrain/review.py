@@ -35,3 +35,15 @@ def build_review_packet(store, finding: dict) -> dict:
           "relations": ent.get("relations", []), "observations": ent.get("observations", []),
           "taxonomy": list(orgs.taxonomy_from_config().names)}
     return pk
+
+
+def build_review_units(store, *, kinds: list[str], cap: int) -> list[dict]:
+    units = []
+    for kind in kinds:
+        if len(units) >= cap:
+            break
+        for finding in store.open_findings(kind):
+            if len(units) >= cap:
+                break
+            units.append({"finding_id": finding["id"], "packet": build_review_packet(store, finding)})
+    return units
