@@ -525,3 +525,58 @@ def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):
     with s._connect() as db:
         org = db.execute("SELECT org FROM email_context WHERE message_id='m1'").fetchone()[0]
     assert org == "Acme", f"model's own org signal must win over org_hint, got {org!r}"
+
+
+def test_sender_entity_created_without_model(tmp_path, monkeypatch):
+    monkeypatch.setattr("mcpbrain.config.enrich_sender_entities", lambda home: True)
+    s = _store(tmp_path)
+    extraction = {
+        "thread_id": "t9", "org": "unknown", "content_type": "update", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "Dana Lee <dana@centrepoint.church>", "date": "2026-02-01"}],
+        "entities": [],   # model surfaced NO entities
+        "relations": [], "actions": [], "topics": ["x"],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-1"])
+    with s._connect() as db:
+        row = db.execute("SELECT type, email_addr FROM entities WHERE name='Dana Lee'").fetchone()
+    assert row is not None, "sender must be created as an entity even when the model omits it"
+    assert row[0] == "person" and row[1] == "dana@centrepoint.church"
+
+
+def test_sender_entity_not_created_for_owner_by_identity(tmp_path, monkeypatch):
+    """The deterministic sender-entity loop (Task 1.1) must mirror the
+    lead-sender exclusion at :1008-1009: skip a sender whose header email
+    matches `identity` even when _is_owner's alias matching would not catch
+    the sender's display name (e.g. a signature variant with no configured
+    alias). Owner here is "Sam Chen" with aliases {"sam", "sam chen"} — the
+    non-lead message uses "S. Chen", which neither alias matches as a whole
+    word or substring, but whose header email is the owner's own identity.
+    """
+    monkeypatch.setattr("mcpbrain.config.enrich_sender_entities", lambda home: True)
+    s = _store(tmp_path)
+    owner = graph_write.OwnerIdentity(
+        name="Sam Chen", entity_id="sam-chen",
+        aliases=frozenset({"sam", "sam chen"}),
+    )
+    assert not graph_write._is_owner("S. Chen", owner), (
+        "test setup: alias matching must NOT catch this display name"
+    )
+    extraction = {
+        "thread_id": "t10", "org": "unknown", "content_type": "update", "summary": "s",
+        "messages": [
+            {"message_id": "m1", "sender": "Dana Lee <dana@centrepoint.church>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "S. Chen <sam.chen@centrepoint.church>", "date": "2026-02-02"},
+        ],
+        "entities": [],  # model surfaced NO entities
+        "relations": [], "actions": [], "topics": ["x"],
+    }
+    graph_write.apply(
+        s, extraction, doc_ids=["doc-2"],
+        owner=owner, identity="sam.chen@centrepoint.church",
+    )
+    with s._connect() as db:
+        row = db.execute("SELECT id FROM entities WHERE name='S. Chen'").fetchone()
+    assert row is None, (
+        "owner must be excluded from deterministic sender-entity creation by "
+        "identity/email, not just alias matching"
+    )
