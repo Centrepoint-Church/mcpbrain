@@ -47,3 +47,26 @@ def test_vendor_rejects_unknown(tmp_path):
             assert e.code == 404
     finally:
         srv.stop()
+
+
+def test_graph_html_has_expected_hooks():
+    html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "graph.html").read_text()
+    for marker in ['/vendor/graphology.umd.min.js', '/vendor/sigma.min.js',
+                   '/vendor/graphology-layout-forceatlas2.min.js',
+                   '/api/graph/canvas', 'id="graph"', 'new Sigma',
+                   'forceAtlas2', '__MCPBRAIN_TOKEN__']:
+        assert marker in html, f"missing: {marker}"
+
+
+def test_graph_html_js_syntax():
+    import re
+    import shutil
+    import subprocess
+    html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "graph.html").read_text()
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)  # inline only (no src)
+    assert scripts, "expected an inline <script>"
+    if shutil.which("node"):
+        for i, js in enumerate(scripts):
+            f = Path(f"/tmp/_graph_{i}.js"); f.write_text(js)
+            r = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr

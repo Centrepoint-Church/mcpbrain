@@ -1,8 +1,185 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><title>mcpbrain graph</title></head>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph — mcpbrain</title>
+<style>
+  :root{
+    --ink:#12151b; --muted:#697280; --faint:#98a0ab; --line:#e6e8ee;
+    --paper:#f4f6f9; --card:#ffffff; --signal:#0b5cff; --graph:#6a4cff;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Fira Mono","Consolas",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans);
+    -webkit-font-smoothing:antialiased;display:flex;flex-direction:column}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;
+    border-bottom:1px solid var(--line);background:var(--card);flex:0 0 auto}
+  .wordmark{font-weight:680;letter-spacing:-.01em}
+  .eyebrow{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
+  a.back{color:var(--muted);text-decoration:none;font-size:13px}
+  a.back:hover{color:var(--ink)}
+  .layout{flex:1 1 auto;display:flex;min-height:0}
+  .filters{flex:0 0 220px;border-right:1px solid var(--line);background:var(--card);
+    padding:16px;display:flex;flex-direction:column;gap:16px;overflow-y:auto}
+  .filters label{display:flex;flex-direction:column;gap:6px;font-size:12px;
+    text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  .filters input[type=range]{width:100%}
+  .filters select,.filters input[type=text]{font:inherit;padding:6px 8px;border:1px solid var(--line);
+    border-radius:8px;background:#fff}
+  .deg-val{font-family:var(--mono);color:var(--ink)}
+  #stage{flex:1 1 auto;position:relative;min-width:0}
+  #graph{position:absolute;inset:0}
+  #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:var(--muted);font-size:14px;background:var(--paper);z-index:5}
+  #overlay.hidden{display:none}
+  #tooltip{position:absolute;z-index:10;pointer-events:none;display:none;
+    background:#1a1f27;color:#fff;border-radius:8px;padding:7px 10px;font-size:12.5px;
+    max-width:260px;line-height:1.4}
+  #tooltip b{font-weight:640}
+  .count{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
 <body>
-<!-- Placeholder for Task 4; Task 5 replaces this with the real interactive graph page. -->
-<script>window.MCPBRAIN_TOKEN = "__MCPBRAIN_TOKEN__";</script>
+  <header>
+    <span class="wordmark">mcpbrain</span>
+    <span class="eyebrow">Knowledge graph</span>
+    <a class="back" href="/dashboard">← Dashboard</a>
+    <span id="count" class="count"></span>
+  </header>
+  <div class="layout">
+    <aside class="filters">
+      <label>Min connections <span class="deg-val" id="deg-val">7</span>
+        <input type="range" id="f-degree" min="1" max="50" value="7">
+      </label>
+      <label>Organisation
+        <select id="f-org"><option value="">All</option></select>
+      </label>
+      <label>Type
+        <select id="f-type"><option value="">All</option></select>
+      </label>
+    </aside>
+    <div id="stage">
+      <div id="graph"></div>
+      <div id="overlay">Loading graph…</div>
+      <div id="tooltip"></div>
+    </div>
+  </div>
+
+  <script src="/vendor/graphology.umd.min.js"></script>
+  <script src="/vendor/sigma.min.js"></script>
+  <script src="/vendor/graphology-layout-forceatlas2.min.js"></script>
+  <script>
+    const TOKEN = "__MCPBRAIN_TOKEN__";
+    const H = { headers: { Authorization: "Bearer " + TOKEN } };
+    const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
+    const $ = (id) => document.getElementById(id);
+    const PALETTE = ["#6a4cff","#0b5cff","#1f9d54","#b7791f","#d64545","#0e7490",
+                     "#9333ea","#c2410c","#0891b2","#4d7c0f"];
+
+    let renderer = null;
+
+    function colorFor(node){
+      if (node.community == null) return "#9aa1ab";
+      return PALETTE[Math.abs(Number(node.community)) % PALETTE.length];
+    }
+    function sizeFor(conn){ return Math.max(2, Math.min(18, 2 + Math.sqrt(conn || 1))); }
+
+    function populateFilterOptions(nodes){
+      const orgs = new Set(), types = new Set();
+      for (const n of nodes){ if (n.org) orgs.add(n.org); if (n.type) types.add(n.type); }
+      const orgSel = $("f-org"), typeSel = $("f-type");
+      const cur = { org: orgSel.value, type: typeSel.value };
+      orgSel.innerHTML = '<option value="">All</option>';
+      [...orgs].sort().forEach(o => orgSel.add(new Option(o, o)));
+      typeSel.innerHTML = '<option value="">All</option>';
+      [...types].sort().forEach(t => typeSel.add(new Option(t, t)));
+      orgSel.value = cur.org; typeSel.value = cur.type;
+    }
+
+    function buildGraph(data){
+      const g = new graphology.Graph();
+      for (const n of data.nodes){
+        g.addNode(n.id, {
+          label: n.name, x: Math.random(), y: Math.random(),
+          size: sizeFor(n.connections), color: colorFor(n),
+          _type: n.type, _org: n.org, _conn: n.connections,
+        });
+      }
+      for (const e of data.links){
+        if (g.hasNode(e.source) && g.hasNode(e.target) && !g.hasEdge(e.source, e.target)){
+          try { g.addEdge(e.source, e.target, { size: 0.4, color: "#d8dbe2" }); }
+          catch (err) { /* parallel/self edges ignored */ }
+        }
+      }
+      const iters = reduce ? 60 : Math.min(400, 120 + g.order);
+      try { forceAtlas2.assign(g, { iterations: iters,
+        settings: { gravity: 1, scalingRatio: 8, slowDown: 2, barnesHutOptimize: g.order > 800 } }); }
+      catch (err) { /* keep random positions on layout failure */ }
+      return g;
+    }
+
+    function render(g){
+      if (renderer){ renderer.kill(); renderer = null; }
+      renderer = new Sigma(g, $("graph"), {
+        renderLabels: true, labelRenderedSizeThreshold: 9,
+        defaultEdgeColor: "#d8dbe2",
+      });
+      const tip = $("tooltip");
+      renderer.on("enterNode", ({ node }) => {
+        const a = g.getNodeAttributes(node);
+        tip.innerHTML = "<b>" + a.label + "</b><br>" + (a._type || "") +
+          " · " + (a._org || "no org") + " · " + (a._conn || 0) + " connections";
+        tip.style.display = "block";
+      });
+      renderer.getMouseCaptor().on("mousemovebody", (e) => {
+        tip.style.left = (e.x + 14) + "px"; tip.style.top = (e.y + 14) + "px";
+      });
+      renderer.on("leaveNode", () => { tip.style.display = "none"; });
+    }
+
+    function currentFilters(){
+      const p = new URLSearchParams();
+      p.set("min_conn", $("f-degree").value);
+      if ($("f-org").value) p.set("org", $("f-org").value);
+      if ($("f-type").value) p.set("type", $("f-type").value);
+      return p.toString();
+    }
+
+    let loading = false;
+    async function load(){
+      if (loading) return; loading = true;
+      const ov = $("overlay"); ov.textContent = "Loading graph…"; ov.classList.remove("hidden");
+      try {
+        const res = await fetch("/api/graph/canvas?" + currentFilters(), H);
+        if (res.status === 413){
+          const info = await res.json();
+          ov.textContent = "Too many nodes (" + (info.candidate_count || "5000+") +
+            ") — raise “Min connections” to narrow the view.";
+          loading = false; return;
+        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        populateFilterOptions(data.nodes);
+        $("count").textContent = data.nodes.length + " nodes · " + data.links.length + " links";
+        if (!data.nodes.length){ ov.textContent = "No entities match these filters."; loading = false; return; }
+        ov.textContent = "Laying out…";
+        const g = buildGraph(data);
+        render(g);
+        ov.classList.add("hidden");
+      } catch (e){
+        ov.textContent = "Couldn’t load the graph. Is the daemon running?";
+      } finally { loading = false; }
+    }
+
+    const deg = $("f-degree");
+    deg.addEventListener("input", () => { $("deg-val").textContent = deg.value; });
+    deg.addEventListener("change", load);
+    $("f-org").addEventListener("change", load);
+    $("f-type").addEventListener("change", load);
+    load();
+  </script>
 </body>
 </html>
