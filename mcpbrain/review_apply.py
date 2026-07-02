@@ -5,7 +5,6 @@ store.update_entity_org), any unrecognised verdict is a no-op 'skip' so
 ambiguity never turns into an unattended mutation."""
 
 from mcpbrain import orgs
-from mcpbrain.resolve import _NAME_MERGEABLE_TYPES
 
 
 def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
@@ -202,21 +201,13 @@ def apply_org_verdicts(
       "missing" instead.
     - "canonicalize" on lint:duplicate_org: only applied when `canonical_org`
       is present AND in the taxonomy. `ref_id` is the variant org string, not
-      an entity id, so this looks up an ORG-TYPED entity by name for BOTH
-      `ref_id` (the variant) and `canonical_org` (the target). store.
-      merge_entities has no return value and silently no-ops on a missing or
-      equal id, so existence and distinctness are verified here BEFORE
-      calling it — merge_entities' silent no-op can never be mistaken for a
-      successful merge. If both org-typed entities exist, have different
-      ids, and "org" is one of resolve._NAME_MERGEABLE_TYPES (org-typed rows
-      trivially satisfy this since the lookup already filtered type='org';
-      checked explicitly anyway as a defensive guard matching this
-      codebase's established safety pattern for any entity merge): store.
-      merge_entities(loser_id=<variant>, winner_id=<canonical>,
-      canonical_name=canonical_org, method="review_org_canonicalize"), then
-      resolve the finding, count "canonicalized". Otherwise (either entity
-      missing, or the two ids are the same) there is nothing safe to do yet:
-      the finding is left open, tallied under "missing".
+      an entity id. This is a bulk, non-destructive TEXT FIELD correction —
+      NOT an entity merge: store.rewrite_org_field(ref_id, canonical_org)
+      relabels every entity currently tagged org=<ref_id> to org=
+      <canonical_org> in one UPDATE, returning the row count. If the count is
+      > 0, resolve the finding, count "canonicalized". If it's 0 (no entity
+      currently carries that org value — a stale finding), the finding is
+      left open, tallied under "missing".
     - "add_to_config" on org_unrecognised: store.suggest_org_mapping(ref_id,
       reason=...) then resolve the finding, count "suggested". This writes
       only to the org_suggestions table — NEVER to config.json — a
@@ -271,21 +262,8 @@ def apply_org_verdicts(
             if _budget_used() >= cap:
                 result["capped"] += 1
                 continue
-            with store._connect() as db:
-                variant_row = db.execute(
-                    "SELECT id FROM entities WHERE type='org' AND name=?", (ref_id,)
-                ).fetchone()
-                canon_row = db.execute(
-                    "SELECT id FROM entities WHERE type='org' AND name=?", (canonical_org,)
-                ).fetchone()
-            merged = False
-            if (variant_row and canon_row and variant_row["id"] != canon_row["id"]
-                    and "org" in _NAME_MERGEABLE_TYPES):
-                store.merge_entities(
-                    loser_id=variant_row["id"], winner_id=canon_row["id"],
-                    canonical_name=canonical_org, method="review_org_canonicalize")
-                merged = True
-            if merged:
+            updated = store.rewrite_org_field(ref_id, canonical_org)
+            if updated > 0:
                 store.resolve_finding(finding_id)
                 result["canonicalized"] += 1
             else:
