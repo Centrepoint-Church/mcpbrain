@@ -59,7 +59,12 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                        COALESCE(e.degree, 0) AS degree
                 FROM entities e
                 LEFT JOIN entity_suppressions s ON s.entity_id = e.id
-                LEFT JOIN entity_communities ec ON ec.entity_id = e.id AND ec.level = 0
+                LEFT JOIN (
+                    SELECT entity_id, MIN(community_id) AS community_id
+                    FROM entity_communities
+                    WHERE level = 0
+                    GROUP BY entity_id
+                ) ec ON ec.entity_id = e.id
                 LEFT JOIN community_summaries cs
                        ON cs.community_id = ec.community_id AND cs.level = 0
                 WHERE {' AND '.join(where)}
@@ -71,7 +76,12 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                     SELECT COUNT(*) AS n
                     FROM entities e
                     LEFT JOIN entity_suppressions s ON s.entity_id = e.id
-                    LEFT JOIN entity_communities ec ON ec.entity_id = e.id AND ec.level = 0
+                    LEFT JOIN (
+                        SELECT entity_id, MIN(community_id) AS community_id
+                        FROM entity_communities
+                        WHERE level = 0
+                        GROUP BY entity_id
+                    ) ec ON ec.entity_id = e.id
                     WHERE {' AND '.join(where)}
                 """, params).fetchone()["n"]
                 return {"error": "too_large", "cap": _MAX_NODES, "candidate_count": total}

@@ -105,6 +105,14 @@ def test_canvas_degrades_on_corrupt_file(tmp_path):
     assert out == {"nodes": [], "links": [], "communities": {}}
 
 
+def test_canvas_dedupes_multiple_level0_communities(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, entities=[("e1", "Alice", "person", "", 9, "")], relations=[],
+          communities=[("e1", 3, 0), ("e1", 7, 0)])
+    out = graph_view.graph_canvas(_Store(p), min_conn=1)
+    assert len([n for n in out["nodes"] if n["id"] == "e1"]) == 1
+
+
 def test_canvas_too_large_reports_true_count(tmp_path):
     p = tmp_path / "b.sqlite3"
     ents = [(f"e{i}", f"N{i}", "person", "", 9, "") for i in range(6000)]
