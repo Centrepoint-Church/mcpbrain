@@ -41,7 +41,6 @@ from mcpbrain import config, orgs, review_apply
 from mcpbrain.contract import (
     normalise_org, sanitize_batch, validate_batch_wrapper, validate_extraction,
 )
-from mcpbrain.resolve import _pick_winner
 
 log = logging.getLogger(__name__)
 
@@ -237,47 +236,6 @@ def _regroup_parts(extractions: list) -> list:
         merged.pop("of", None)
         recombined.append(merged)
     return recombined
-
-
-def _apply_merge_answers(store, answers) -> int:
-    """Apply the LLM-adjudicated merge answers. Returns the number of merges done.
-
-    Each answer is {pair_id, same, canonical}. pair_id is the two entity ids
-    sorted and joined by '|' (see prepare._merge_pair), so split on '|' to
-    recover them. For same:true, look both up, pick the winner with
-    resolve._pick_winner (winner, loser) and fold the loser in via merge_entities
-    with method='llm'. If either entity is gone (a prior cycle already merged
-    it), skip and log. This is the LLM tier of resolution, adjudicated in the
-    spool session and applied here by the daemon: no second Claude call, no
-    Gemini.
-    """
-    merges = 0
-    for ans in answers or []:
-        # Strict bool: validate_batch_file already rejects non-bool `same`, but
-        # require True here too so no truthy non-bool can ever drive a merge.
-        if ans.get("same") is not True:
-            continue
-        pair_id = ans.get("pair_id", "")
-        ids = pair_id.split("|")
-        if len(ids) != 2 or not all(ids):
-            log.warning("drain: malformed merge pair_id %r, skipping", pair_id)
-            continue
-        a = store.get_entity(ids[0])
-        b = store.get_entity(ids[1])
-        if a is None or b is None:
-            log.info("drain: merge pair %s has a missing entity, skipping", pair_id)
-            continue
-        winner, loser = _pick_winner(a, b)
-        try:
-            store.merge_entities(loser["id"], winner["id"],
-                                 canonical_name=ans.get("canonical") or None,
-                                 method="llm")
-        except Exception as exc:
-            log.error("drain: merge failed for %s <- %s: %s",
-                      winner["id"], loser["id"], exc)
-            continue
-        merges += 1
-    return merges
 
 
 def drain(store, *, home=None, apply=None, embedder=None) -> dict:
@@ -498,7 +456,11 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             summary["marked"] += len(doc_ids)
 
         try:
-            summary["merges"] += _apply_merge_answers(store, data.get("merge_answers"))
+            _merge_result = review_apply.apply_duplicate_verdicts(
+                store, data.get("merge_answers") or [],
+                cap=config.review_max_apply_per_run(str(config.app_dir()))
+            )
+            summary["merges"] += _merge_result["merged"]
         except Exception as exc:
             log.error("drain: merge-answer processing failed in %s: %s", path.name, exc)
             file_ok = False
