@@ -84,7 +84,7 @@ DEFAULT_BACKUP_INTERVAL_S = 3600
 _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
 # Spool prepare bounds. The per-cycle thread ceiling now lives in config
-# (config.spool_thread_cap, default 500) so it can be tuned live for backfill
+# (config.spool_thread_cap, default 2000) so it can be tuned live for backfill
 # without a daemon restart. char_budget splits an over-long thread before the
 # extractor sees it.
 SPOOL_CHAR_BUDGET = 24000
@@ -177,6 +177,9 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # Q4 org backfill: deterministic org_from_email over org-less entities.
     CadencePass("org_backfill", "_org_backfill_interval_s",
                 "_last_org_backfill", "_run_org_backfill"),
+    # Task 3.3: daily deterministic entity dedup (issue #23-fix validated).
+    CadencePass("resolve_entities", "_resolve_entities_interval_s",
+                "_last_resolve_entities", "_run_resolve_entities"),
     # B3 salience scoring: structural importance per chunk.
     # needs_configured=False: salience is identity-agnostic.
     CadencePass("salience_score", "_salience_score_interval_s",
@@ -516,6 +519,10 @@ class Daemon:
         # OFF by default; enabled via cadences config.
         self._org_backfill_interval_s: float | None = None
         self._last_org_backfill = None
+        # Task 3.3: daily deterministic entity dedup (issue #23-fix validated).
+        # OFF by default; enabled via cadences config.
+        self._resolve_entities_interval_s: float | None = None
+        self._last_resolve_entities = None
         # B3 salience scoring: structural importance per chunk (daily).
         self._salience_score_interval_s: float | None = None
         self._last_salience_score = None
@@ -876,6 +883,7 @@ class Daemon:
             self._verify_interval_s = cadences["verify_interval_s"]
             self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
             self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
+            self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
             self._salience_score_interval_s = cadences["salience_score_interval_s"]
             self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
@@ -1558,6 +1566,24 @@ class Daemon:
         self._last_org_backfill = now
         return summary
 
+    # -- Task 3.3 entity resolution (deterministic) ----------------------------
+
+    def _run_resolve_entities(self) -> dict | None:
+        """Daily deterministic entity-dedup pass (Task 3.3, issue #23-fix validated)."""
+        if not self._is_due("_resolve_entities_interval_s", "_last_resolve_entities"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain import resolve
+            from mcpbrain import config as _config
+            summary = resolve.resolve_entities(self._store, home=str(_config.app_dir()))
+            log.info("resolve_entities: auto_merges=%d", summary.get("auto_merges", 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("resolve_entities failed: %s", exc, exc_info=True)
+            return {"resolve_entities": False, "error": str(exc)}
+        self._last_resolve_entities = now
+        return summary
+
     # -- periodic graph lint ------------------------------------------------
 
     def _run_lint(self) -> dict | None:
@@ -2022,6 +2048,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "stale_reextract_interval_s":     86400.0,
     "feedback_aggregate_interval_s":  86400.0,   # S2: nightly aggregate
     "org_backfill_interval_s":        86400.0,   # Q4: daily deterministic backfill
+    "resolve_entities_interval_s":    86400.0,   # Task 3.3: daily deterministic entity dedup (issue #23-fix validated)
     "salience_score_interval_s":      86400.0,   # B3: daily structural salience
     "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
@@ -2047,6 +2074,7 @@ _CADENCE_KEYS = (
     "verify_interval_s",
     "feedback_aggregate_interval_s",
     "org_backfill_interval_s",
+    "resolve_entities_interval_s",
     "salience_score_interval_s",
     "decay_pass_interval_s",
     "consolidation_interval_s",
@@ -2130,6 +2158,7 @@ def main(argv=None) -> None:
     # S2/Q4/B3/B5/B4/B6 cadences: not constructor params; wire after construction.
     daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
+    daemon._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
     daemon._salience_score_interval_s = cadences["salience_score_interval_s"]
     daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]
     daemon._consolidation_interval_s = cadences["consolidation_interval_s"]

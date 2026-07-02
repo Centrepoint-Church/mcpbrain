@@ -143,6 +143,26 @@ def enrich_structural_relations_enabled(home) -> bool:
     return bool(read_config(home).get("enrich_structural_relations_enabled", True))
 
 
+def enrich_sender_entities(home) -> bool:
+    """Whether the daemon creates person entities for message senders from headers
+    (so the LLM extracts only body-mentioned people). Default True; kill-switch only.
+    Junk-guarded (is_junk_entity) and owner-excluded; senders on noise threads never
+    reach apply() because the salience/noise filter drops them upstream."""
+    return bool(read_config(home).get("enrich_sender_entities", True))
+
+
+def enrich_trivial_thread_summary(home) -> bool:
+    """Whether prepare short-circuits trivial threads (very short body, no action
+    cue — see prepare.is_trivial_thread) straight to a deterministic extractive
+    summary via graph_write.apply(), skipping the model call entirely. Sender
+    entities still get created through apply()'s existing Task-1.1 path; this
+    flag only gates whether the deterministic summary path runs at all.
+
+    Default: TRUE. Set 'enrich_trivial_thread_summary': false in config.json to
+    disable, reverting trivial threads to the normal model-unit path."""
+    return bool(read_config(home).get("enrich_trivial_thread_summary", True))
+
+
 def enrich_rich_observations_enabled(home) -> bool:
     """Whether graph_write.apply() wires the extraction's `observations[]`
     field (dated, attributable facts about an already-listed entity — job
@@ -552,7 +572,7 @@ def unit_pull_cap(home=None) -> int:
 
 def spool_thread_cap(home) -> int:
     """Per-cycle ceiling on how many un-enriched threads the daemon turns into work
-    units (config 'spool_thread_cap', default 500).
+    units (config 'spool_thread_cap', default 2000).
 
     group_unenriched_threads returns the first N un-enriched threads each cycle, so
     the work queue is bounded at roughly this many threads. Raising it deepens the
@@ -561,9 +581,9 @@ def spool_thread_cap(home) -> int:
     during steady-state new-mail enrichment. Read every cycle, so a config edit
     takes effect on the next drain — no daemon restart needed."""
     try:
-        return max(1, int(read_config(home).get("spool_thread_cap", 500)))
+        return max(1, int(read_config(home).get("spool_thread_cap", 2000)))
     except (TypeError, ValueError):
-        return 500
+        return 2000
 
 
 def clickup_api_key(home) -> str:

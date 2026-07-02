@@ -1,0 +1,24 @@
+{
+  "relations_total": 78704,
+  "relations_with_doc_id_pct": 0.6,
+  "relations_semantic_pct": 21.0,
+  "entities_total": 25696,
+  "person_email_pct": 28.5,
+  "senders_as_entities_pct": 0.0,
+  "observation_attributes": {
+    "role": 3068,
+    "title": 1
+  },
+  "relation_type_counts": {
+    "attended": 363,
+    "authored": 10570,
+    "collaborates_with": 3891,
+    "coordinates_with": 1927,
+    "instance_of": 103,
+    "involved_in": 51503,
+    "manages": 308,
+    "mentioned_with": 6865,
+    "reports_to": 61,
+    "works_at": 3113
+  }
+}
