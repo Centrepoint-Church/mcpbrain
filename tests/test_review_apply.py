@@ -1,7 +1,7 @@
 import json
 
 from mcpbrain.store import Store
-from mcpbrain.review_apply import apply_orphan_verdicts, apply_missing_org_verdicts
+from mcpbrain.review_apply import apply_orphan_verdicts, apply_missing_org_verdicts, apply_ownerless_verdicts
 
 
 def _seed(tmp_path):
@@ -276,3 +276,134 @@ def test_assign_verdict_with_missing_entity_leaves_finding_open(tmp_path):
     # Finding left open — will be picked up again on a future pass.
     open_ids = {f["id"] for f in s.open_findings("lint:missing_org")}
     assert finding["id"] in open_ids
+
+
+# --- Task 3.1: apply_ownerless_verdicts -----------------------------------
+
+
+def _seed_ownerless(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    action_ids = {}
+    with s._connect() as db:
+        for key, text in (("a1", "Send the budget"), ("a2", "Follow up with vendor")):
+            cur = db.execute(
+                "INSERT INTO actions(text, owner, status, source) VALUES(?, '', 'open', 'email')",
+                (text,))
+            action_ids[key] = cur.lastrowid
+    return s, action_ids
+
+
+def test_owner_verdict_with_valid_action_sets_owner_and_resolves(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    finding = s.open_findings("lint:ownerless_action")[0]
+
+    result = apply_ownerless_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": action_ids["a1"], "verdict": "owner",
+          "owner": "Alice Admin", "owner_entity_id": "e1"}],
+        cap=50,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT owner, owner_entity_id FROM actions WHERE id=?", (action_ids["a1"],)).fetchone()
+    assert row["owner"] == "Alice Admin"
+    assert row["owner_entity_id"] == "e1"
+    assert s.open_findings("lint:ownerless_action") == []
+    assert result == {"owner_assigned": 1, "waiting_on": 0, "unowned": 0, "skipped": 0, "capped": 0, "missing": 0}
+
+
+def test_owner_verdict_with_stale_action_leaves_finding_open(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid = s.record_finding("lint:ownerless_action", "9999", summary="ownerless")
+    finding = s.open_findings("lint:ownerless_action")[0]
+
+    result = apply_ownerless_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": 9999, "verdict": "owner", "owner": "Ghost Owner"}],
+        cap=50,
+    )
+
+    assert result == {"owner_assigned": 0, "waiting_on": 0, "unowned": 0, "skipped": 0, "capped": 0, "missing": 1}
+    open_ids = {f["id"] for f in s.open_findings("lint:ownerless_action")}
+    assert finding["id"] in open_ids
+
+
+def test_waiting_on_unowned_skip_resolve_without_owner_change(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid_a = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    fid_b = s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
+    findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:ownerless_action")}
+
+    result = apply_ownerless_verdicts(
+        s,
+        [
+            {"finding_id": findings[str(action_ids["a1"])], "ref_id": action_ids["a1"], "verdict": "waiting_on"},
+            {"finding_id": findings[str(action_ids["a2"])], "ref_id": action_ids["a2"], "verdict": "unowned"},
+        ],
+        cap=50,
+    )
+
+    with s._connect() as db:
+        rows = db.execute("SELECT owner FROM actions WHERE id IN (?,?)", (action_ids["a1"], action_ids["a2"])).fetchall()
+    assert {r["owner"] for r in rows} == {""}
+    assert s.open_findings("lint:ownerless_action") == []
+    assert result == {"owner_assigned": 0, "waiting_on": 1, "unowned": 1, "skipped": 0, "capped": 0, "missing": 0}
+
+
+def test_unrecognised_verdict_treated_as_skip_ownerless(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    finding = s.open_findings("lint:ownerless_action")[0]
+
+    result = apply_ownerless_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": action_ids["a1"], "verdict": "maybe???"}],
+        cap=50,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT owner FROM actions WHERE id=?", (action_ids["a1"],)).fetchone()
+    assert row["owner"] == ""
+    assert s.open_findings("lint:ownerless_action") == []
+    assert result == {"owner_assigned": 0, "waiting_on": 0, "unowned": 0, "skipped": 1, "capped": 0, "missing": 0}
+
+
+def test_owner_verdict_missing_owner_field_treated_as_skip(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    finding = s.open_findings("lint:ownerless_action")[0]
+
+    result = apply_ownerless_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": action_ids["a1"], "verdict": "owner"}],
+        cap=50,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT owner FROM actions WHERE id=?", (action_ids["a1"],)).fetchone()
+    assert row["owner"] == ""
+    assert s.open_findings("lint:ownerless_action") == []
+    assert result == {"owner_assigned": 0, "waiting_on": 0, "unowned": 0, "skipped": 1, "capped": 0, "missing": 0}
+
+
+def test_cap_stops_applying_owner_verdicts(tmp_path):
+    s, action_ids = _seed_ownerless(tmp_path)
+    fid1 = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    fid2 = s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
+    findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:ownerless_action")}
+
+    verdicts = [
+        {"finding_id": findings[str(action_ids["a1"])], "ref_id": action_ids["a1"], "verdict": "owner", "owner": "Alice"},
+        {"finding_id": findings[str(action_ids["a2"])], "ref_id": action_ids["a2"], "verdict": "owner", "owner": "Bob"},
+    ]
+    result = apply_ownerless_verdicts(s, verdicts, cap=1)
+
+    assert result["owner_assigned"] == 1
+    assert result["capped"] == 1
+    with s._connect() as db:
+        rows = db.execute("SELECT id FROM actions WHERE owner!=''").fetchall()
+    assert len(rows) == 1
+    # The capped finding is left open (not resolved) so it's picked up next run.
+    assert len(s.open_findings("lint:ownerless_action")) == 1
