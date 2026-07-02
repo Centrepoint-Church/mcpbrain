@@ -233,6 +233,54 @@ string. Guidance:
 
 When `merge_review` is empty or absent, `merge_answers` is `[]`.
 
+## Orphan-entity review rules
+
+`pending.json` may carry a `review_orphan` list: entities the graph-hygiene
+lint flagged as having no relations or observations. Each item gives a
+`finding_id`, the entity's `ref_id`, and an evidence packet — the `entity`
+sub-record (name, type, org), plus `source_spans`, `relations`, and
+`observations`. Decide whether the entity is real. Emit one verdict per item
+into `review_orphan`:
+
+```json
+{"finding_id": 42, "ref_id": "e_9f3", "verdict": "suppress", "reason": "signature-block artifact"}
+```
+
+- `suppress`: the entity is CLEARLY extraction noise — a mis-parsed name
+  fragment, a signature-block artifact ("Sent from my iPhone"), a generic
+  term wrongly tagged as an entity. Give a short `reason`.
+- `keep`: a legitimate entity that simply hasn't accumulated connections yet
+  (a new contact, a project mentioned once). This is the default whenever the
+  name reads as a real person, org, or thing.
+- `skip`: unsure either way.
+
+Prefer `keep` or `skip` over `suppress`. Suppression is only for entities
+that are CLEARLY not real — never for "probably fine but under-connected." A
+wrong suppress hides a real entity from the graph; a missed suppress just
+leaves one noise row around a little longer.
+
+## Missing-org review rules
+
+`pending.json` may carry a `review_missing_org` list: entities with no `org`
+tag. Each item gives a `finding_id`, the entity's `ref_id`, its evidence
+packet (`entity`, `source_spans`), and the packet's `taxonomy` — the list of
+this install's configured org names. Emit one verdict per item into
+`review_missing_org`:
+
+```json
+{"finding_id": 57, "ref_id": "e_1a2", "verdict": "assign", "org": "Acme"}
+```
+
+- `assign`: the source spans clearly show the entity belongs to one of the
+  configured orgs. `org` must be copied verbatim from `taxonomy` — never
+  invent, abbreviate, or guess an org name that isn't in that list.
+- `external`: the source spans clearly show the entity is outside every
+  configured org (an external vendor, a personal contact, a one-off sender).
+- `skip`: the text doesn't clearly indicate either. When unsure, `skip`.
+
+Never infer an org from a name or email domain alone if it isn't confirmed by
+the source spans and doesn't appear verbatim in `taxonomy`.
+
 ## Thread-synthesis rules
 
 `pending.json` may carry a `synthesis` list: threads active enough to deserve a

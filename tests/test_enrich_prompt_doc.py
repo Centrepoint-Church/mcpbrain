@@ -63,6 +63,29 @@ def test_prompt_scopes_entities_to_body():
     assert "body" in text  # entities are the body-mentioned delta
 
 
+def test_orphan_and_missing_org_review_rules_documented():
+    """Task 2.2: the AI-adjudicator prompt must carry rules + verdict schema
+    for both review kinds, in both the canonical prompt and its byte-identical
+    copy in the enrich-batch subagent (kept in sync by bin/sync_agents.py)."""
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    for fname in ["mcpbrain/enrich_prompt.md", "plugin/agents/enrich-batch.md"]:
+        text = (root / fname).read_text()
+        assert "Orphan-entity review rules" in text, f"orphan rules missing from {fname}"
+        assert "Missing-org review rules" in text, f"missing-org rules missing from {fname}"
+        for key in (
+            "review_orphan",
+            "review_missing_org",
+            "finding_id",
+            "ref_id",
+            "suppress",
+            "assign",
+            "external",
+            "taxonomy",
+        ):
+            assert key in text, f"{key!r} not found in {fname}"
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
