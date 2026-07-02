@@ -1,6 +1,5 @@
 import urllib.error
 import urllib.request
-from unittest import mock
 from pathlib import Path
 
 from mcpbrain.control_api import ControlServer
