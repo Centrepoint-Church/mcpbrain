@@ -297,6 +297,73 @@ subject matter or category tag. When the only signal is a document-level
 tag/category or the person's mere association with a document about an org,
 that does not clear the "clearly show" bar: `skip`.
 
+## Ownerless-action review rules
+
+`pending.json` may carry a `review_ownerless` list: open actions the graph-
+hygiene lint flagged as having no clear owner. Each item gives a
+`finding_id`, the action's `ref_id`, and an evidence packet — the `action`
+sub-record (`text`, `deadline`, `owner`, `owner_entity_id`), the `thread`
+sub-record (`participants` and `sender`, each a name/email pair), and
+`source_spans`. Decide who — if anyone — owns the action. Emit one verdict
+per item into `review_ownerless`:
+
+```json
+{"finding_id": 71, "ref_id": 123, "verdict": "owner", "owner": "Alice Admin"}
+```
+
+- `owner`: the action text itself makes clear who owns it. "I'll send the
+  report" said by the thread's sender means the sender owns it; "can you
+  send me X" directed at a specific recipient means that recipient owns it.
+  When assigning `owner`, supply the sender's or a participant's name from
+  the packet's `thread` data as the `owner` string — never invent a name
+  that isn't in `thread.participants` or `thread.sender`.
+- `waiting_on`: the action is blocked on someone else's response or action —
+  not truly "owned" by anyone yet, just pending. Use this instead of
+  `owner` when the text describes what's being waited on, not who will do
+  the work.
+- `unowned`: genuinely no signal in the text or thread about who is
+  responsible.
+- `skip`: unclear either way.
+
+Prefer `waiting_on`, `unowned`, or `skip` over guessing an `owner`. A wrong
+`owner` misattributes real work; a missed one just leaves the action
+unowned a little longer.
+
+## Org-hygiene review rules
+
+`pending.json` may carry a `review_org` list bundling THREE different
+graph-hygiene finding kinds together: `lint:ambiguous_org`,
+`lint:duplicate_org`, and `org_unrecognised`. Each item's packet gives a
+`finding_id`, its `ref_id`, and the packet's own `finding_type` telling you
+which of the three kinds this item is, plus `summary`/`detail` text and the
+packet's `taxonomy` — this install's configured org names. Read the
+`detail` text carefully — it names the relevant org verbatim: `should_be`
+for `lint:ambiguous_org`, `canonical_org` for `lint:duplicate_org`. Emit one
+verdict per item into `review_org`:
+
+```json
+{"finding_id": 88, "finding_type": "lint:duplicate_org", "ref_id": "Acme Corp",
+ "verdict": "canonicalize", "canonical_org": "Acme"}
+```
+
+- `canonicalize`: the evidence clearly supports folding this into an
+  existing configured org. `canonical_org` must be copied VERBATIM from
+  `taxonomy` — never invent, abbreviate, or guess an org name that isn't in
+  that list. Valid for `lint:ambiguous_org` (the entity should be
+  reclassified to the org named in `should_be`) and `lint:duplicate_org`
+  (the variant org string should be folded into the org named in
+  `canonical_org`).
+- `add_to_config`: ONLY valid for `org_unrecognised`. This is a real-looking
+  organisation name the system doesn't recognise yet — suggest recording it
+  for a human to review. Never invent a taxonomy entry and never emit
+  `add_to_config` for `lint:ambiguous_org` or `lint:duplicate_org`, which
+  always have a taxonomy target to canonicalize against instead.
+- `skip`: unsure either way, for any of the three kinds.
+
+Never auto-write config.json — canonicalizing or adding-to-config only ever
+produces a verdict for the applier to act on; the taxonomy itself is edited
+by a human. Never invent an org name that isn't verbatim in `taxonomy`.
+
 ## Thread-synthesis rules
 
 `pending.json` may carry a `synthesis` list: threads active enough to deserve a

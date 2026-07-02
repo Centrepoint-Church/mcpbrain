@@ -1,7 +1,12 @@
 import json
 
 from mcpbrain.store import Store
-from mcpbrain.review_apply import apply_orphan_verdicts, apply_missing_org_verdicts, apply_ownerless_verdicts
+from mcpbrain.review_apply import (
+    apply_orphan_verdicts,
+    apply_missing_org_verdicts,
+    apply_ownerless_verdicts,
+    apply_org_verdicts,
+)
 
 
 def _seed(tmp_path):
@@ -407,3 +412,255 @@ def test_cap_stops_applying_owner_verdicts(tmp_path):
     assert len(rows) == 1
     # The capped finding is left open (not resolved) so it's picked up next run.
     assert len(s.open_findings("lint:ownerless_action")) == 1
+
+
+# --- Task 3.2: apply_org_verdicts -----------------------------------------
+#
+# Three bundled finding kinds with different ref_id semantics:
+#   lint:ambiguous_org  -> ref_id is a real entity id
+#   lint:duplicate_org  -> ref_id is the variant ORG STRING itself
+#   org_unrecognised    -> ref_id is the raw unrecognised org string
+
+
+def _seed_org(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    # entity tagged 'external' whose domain actually maps to a configured org
+    s.upsert_entity("e1", "External Contact", "person", org="external", seen="2026-05-30")
+    s.upsert_entity("e2", "Second External", "person", org="external", seen="2026-05-30")
+    # org-typed entities used by duplicate_org canonicalize tests
+    s.upsert_entity("eo1", "Acme Corp", "org", org="Acme Corp", seen="2026-05-30")
+    s.upsert_entity("eo2", "Acme", "org", org="Acme", seen="2026-05-30")
+    return s
+
+
+def test_ambiguous_org_canonicalize_updates_entity_org_and_resolves(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous org",
+                      detail="{'should_be': 'Acme'}")
+    finding = s.open_findings("lint:ambiguous_org")[0]
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "lint:ambiguous_org",
+          "ref_id": "e1", "verdict": "canonicalize", "canonical_org": "Acme"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
+    assert row["org"] == "Acme"
+    assert s.open_findings("lint:ambiguous_org") == []
+    assert result == {"canonicalized": 1, "suggested": 0, "skipped": 0, "capped": 0, "missing": 0}
+
+
+def test_ambiguous_org_canonicalize_with_invalid_org_treated_as_skip(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous org")
+    finding = s.open_findings("lint:ambiguous_org")[0]
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "lint:ambiguous_org",
+          "ref_id": "e1", "verdict": "canonicalize", "canonical_org": "MadeUpOrg"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
+    assert row["org"] == "external"  # not silently applied
+    assert s.open_findings("lint:ambiguous_org") == []
+    assert result == {"canonicalized": 0, "suggested": 0, "skipped": 1, "capped": 0, "missing": 0}
+
+
+def test_duplicate_org_canonicalize_merges_org_entities(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:duplicate_org", "Acme Corp", summary="likely duplicate",
+                      detail="{'canonical_org': 'Acme', 'entity_count': 3, 'score': 90}")
+    finding = s.open_findings("lint:duplicate_org")[0]
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "lint:duplicate_org",
+          "ref_id": "Acme Corp", "verdict": "canonicalize", "canonical_org": "Acme"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        variant = db.execute("SELECT id FROM entities WHERE id='eo1'").fetchone()
+        winner = db.execute("SELECT id, name FROM entities WHERE id='eo2'").fetchone()
+        merge_log = db.execute("SELECT * FROM entity_merge_log").fetchall()
+    assert variant is None  # loser entity gone
+    assert winner is not None
+    assert len(merge_log) == 1
+    assert merge_log[0]["loser_id"] == "eo1"
+    assert merge_log[0]["winner_id"] == "eo2"
+    assert s.open_findings("lint:duplicate_org") == []
+    assert result == {"canonicalized": 1, "suggested": 0, "skipped": 0, "capped": 0, "missing": 0}
+
+
+def test_duplicate_org_canonicalize_missing_variant_entity_leaves_open(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:duplicate_org", "Ghost Corp", summary="likely duplicate",
+                      detail="{'canonical_org': 'Acme'}")
+    finding = s.open_findings("lint:duplicate_org")[0]
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "lint:duplicate_org",
+          "ref_id": "Ghost Corp", "verdict": "canonicalize", "canonical_org": "Acme"}],
+        cap=50,
+        home=home,
+    )
+
+    assert result == {"canonicalized": 0, "suggested": 0, "skipped": 0, "capped": 0, "missing": 1}
+    with s._connect() as db:
+        merge_log = db.execute("SELECT * FROM entity_merge_log").fetchall()
+    assert merge_log == []  # merge_entities was never called
+    open_ids = {f["id"] for f in s.open_findings("lint:duplicate_org")}
+    assert finding["id"] in open_ids
+
+
+def test_org_unrecognised_add_to_config_records_suggestion(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("org_unrecognised", "widgetco llc", summary="unconfigured org")
+    finding = s.open_findings("org_unrecognised")[0]
+    config_path = f"{home}/config.json"
+    with open(config_path) as f:
+        before = f.read()
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "org_unrecognised",
+          "ref_id": "widgetco llc", "verdict": "add_to_config"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT * FROM org_suggestions WHERE raw_org='widgetco llc'").fetchone()
+    assert row is not None
+    assert s.open_findings("org_unrecognised") == []
+    with open(config_path) as f:
+        after = f.read()
+    assert after == before  # config.json is never auto-written
+    assert result == {"canonicalized": 0, "suggested": 1, "skipped": 0, "capped": 0, "missing": 0}
+
+
+def test_org_skip_resolves_without_mutation_for_each_kind(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous")
+    s.record_finding("lint:duplicate_org", "Acme Corp", summary="dup")
+    s.record_finding("org_unrecognised", "widgetco llc", summary="unrecognised")
+    findings = {
+        "lint:ambiguous_org": s.open_findings("lint:ambiguous_org")[0]["id"],
+        "lint:duplicate_org": s.open_findings("lint:duplicate_org")[0]["id"],
+        "org_unrecognised": s.open_findings("org_unrecognised")[0]["id"],
+    }
+
+    verdicts = [
+        {"finding_id": findings["lint:ambiguous_org"], "finding_type": "lint:ambiguous_org",
+         "ref_id": "e1", "verdict": "skip"},
+        {"finding_id": findings["lint:duplicate_org"], "finding_type": "lint:duplicate_org",
+         "ref_id": "Acme Corp", "verdict": "skip"},
+        {"finding_id": findings["org_unrecognised"], "finding_type": "org_unrecognised",
+         "ref_id": "widgetco llc", "verdict": "skip"},
+    ]
+    result = apply_org_verdicts(s, verdicts, cap=50, home=home)
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
+        merge_log = db.execute("SELECT * FROM entity_merge_log").fetchall()
+        suggestions = db.execute("SELECT * FROM org_suggestions").fetchall()
+    assert row["org"] == "external"
+    assert merge_log == []
+    assert suggestions == []
+    assert s.open_findings("lint:ambiguous_org") == []
+    assert s.open_findings("lint:duplicate_org") == []
+    assert s.open_findings("org_unrecognised") == []
+    assert result == {"canonicalized": 0, "suggested": 0, "skipped": 3, "capped": 0, "missing": 0}
+
+
+def test_unrecognised_verdict_treated_as_skip_org(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous")
+    finding = s.open_findings("lint:ambiguous_org")[0]
+
+    result = apply_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "finding_type": "lint:ambiguous_org",
+          "ref_id": "e1", "verdict": "maybe???"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
+    assert row["org"] == "external"
+    assert s.open_findings("lint:ambiguous_org") == []
+    assert result == {"canonicalized": 0, "suggested": 0, "skipped": 1, "capped": 0, "missing": 0}
+
+
+def test_cap_stops_applying_org_canonicalize_verdicts(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous 1")
+    s.record_finding("lint:ambiguous_org", "e2", summary="ambiguous 2")
+    findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:ambiguous_org")}
+
+    verdicts = [
+        {"finding_id": findings["e1"], "finding_type": "lint:ambiguous_org",
+         "ref_id": "e1", "verdict": "canonicalize", "canonical_org": "Acme"},
+        {"finding_id": findings["e2"], "finding_type": "lint:ambiguous_org",
+         "ref_id": "e2", "verdict": "canonicalize", "canonical_org": "Acme"},
+    ]
+    result = apply_org_verdicts(s, verdicts, cap=1, home=home)
+
+    assert result["canonicalized"] == 1
+    assert result["capped"] == 1
+    with s._connect() as db:
+        rows = db.execute("SELECT id FROM entities WHERE org='Acme' AND id IN ('e1','e2')").fetchall()
+    assert len(rows) == 1
+    # The capped finding is left open (not resolved) so it's picked up next run.
+    assert len(s.open_findings("lint:ambiguous_org")) == 1
+
+
+def test_cap_is_shared_across_canonicalize_and_add_to_config(tmp_path):
+    """The cap is one shared mutation budget across all three org-hygiene
+    kinds bundled into this applier (matches the single `capped` counter in
+    the return shape and the single `cap=50` passed to the whole review_org
+    block in drain.py's BLOCK_DRAINERS registration)."""
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("lint:ambiguous_org", "e1", summary="ambiguous")
+    s.record_finding("org_unrecognised", "widgetco llc", summary="unrecognised")
+    findings = {
+        "lint:ambiguous_org": s.open_findings("lint:ambiguous_org")[0]["id"],
+        "org_unrecognised": s.open_findings("org_unrecognised")[0]["id"],
+    }
+
+    verdicts = [
+        {"finding_id": findings["lint:ambiguous_org"], "finding_type": "lint:ambiguous_org",
+         "ref_id": "e1", "verdict": "canonicalize", "canonical_org": "Acme"},
+        {"finding_id": findings["org_unrecognised"], "finding_type": "org_unrecognised",
+         "ref_id": "widgetco llc", "verdict": "add_to_config"},
+    ]
+    result = apply_org_verdicts(s, verdicts, cap=1, home=home)
+
+    assert result["canonicalized"] == 1
+    assert result["suggested"] == 0
+    assert result["capped"] == 1
+    with s._connect() as db:
+        suggestions = db.execute("SELECT * FROM org_suggestions").fetchall()
+    assert suggestions == []
+    assert len(s.open_findings("org_unrecognised")) == 1
