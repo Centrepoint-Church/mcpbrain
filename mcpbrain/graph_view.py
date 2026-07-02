@@ -67,7 +67,14 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
             """, params).fetchall()
 
             if len(rows) > _MAX_NODES:
-                return {"error": "too_large", "cap": _MAX_NODES, "candidate_count": len(rows)}
+                total = db.execute(f"""
+                    SELECT COUNT(*) AS n
+                    FROM entities e
+                    LEFT JOIN entity_suppressions s ON s.entity_id = e.id
+                    LEFT JOIN entity_communities ec ON ec.entity_id = e.id AND ec.level = 0
+                    WHERE {' AND '.join(where)}
+                """, params).fetchone()["n"]
+                return {"error": "too_large", "cap": _MAX_NODES, "candidate_count": total}
 
             node_ids = {r["id"] for r in rows}
             nodes = [{
@@ -101,6 +108,6 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
             return {"nodes": nodes, "links": links, "communities": communities}
         finally:
             db.close()
-    except sqlite3.OperationalError as exc:
+    except sqlite3.Error as exc:
         log.warning("graph_canvas: read failed (%s) — returning empty", exc)
         return dict(_EMPTY)
