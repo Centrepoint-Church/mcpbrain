@@ -117,21 +117,21 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
 # when the key is present; failures are isolated (log + continue). Registered by
 # block modules at import time.
 BLOCK_DRAINERS: dict = {}
-# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
 BLOCK_DRAINERS["review_orphan"] = lambda store, data: review_apply.apply_orphan_verdicts(
-    store, data.get("review_orphan") or [], cap=50
+    store, data.get("review_orphan") or [],
+    cap=config.review_max_apply_per_run(str(config.app_dir()))
 )
-# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
 BLOCK_DRAINERS["review_missing_org"] = lambda store, data: review_apply.apply_missing_org_verdicts(
-    store, data.get("review_missing_org") or [], cap=50
+    store, data.get("review_missing_org") or [],
+    cap=config.review_max_apply_per_run(str(config.app_dir()))
 )
-# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
 BLOCK_DRAINERS["review_ownerless"] = lambda store, data: review_apply.apply_ownerless_verdicts(
-    store, data.get("review_ownerless") or [], cap=50
+    store, data.get("review_ownerless") or [],
+    cap=config.review_max_apply_per_run(str(config.app_dir()))
 )
-# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
 BLOCK_DRAINERS["review_org"] = lambda store, data: review_apply.apply_org_verdicts(
-    store, data.get("review_org") or [], cap=50
+    store, data.get("review_org") or [],
+    cap=config.review_max_apply_per_run(str(config.app_dir()))
 )
 
 
