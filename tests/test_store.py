@@ -591,7 +591,7 @@ def test_suppress_entity_writes_row_and_returns_true(tmp_path):
 
     with s._connect() as db:
         row = db.execute(
-            "SELECT entity_id, reason, suppressed_at FROM suppressed_entities WHERE entity_id='e1'"
+            "SELECT entity_id, reason, suppressed_at FROM entity_suppressions WHERE entity_id='e1'"
         ).fetchone()
     assert row is not None
     assert row["reason"] == "extraction noise"
@@ -599,7 +599,7 @@ def test_suppress_entity_writes_row_and_returns_true(tmp_path):
 
 
 def test_suppress_entity_does_not_touch_entities_table(tmp_path):
-    """Suppression is purely a row in suppressed_entities — the entities row
+    """Suppression is purely a row in entity_suppressions — the entities row
     (and thus the entity's data) is never mutated or deleted."""
     s = _store(tmp_path)
     s.upsert_entity("e1", "Junk Entity", "person", org="Acme", seen="2026-05-30")
@@ -615,7 +615,7 @@ def test_suppress_entity_returns_false_for_unknown_id(tmp_path):
     s = _store(tmp_path)
     assert s.suppress_entity("ghost", reason="noise") is False
     with s._connect() as db:
-        row = db.execute("SELECT * FROM suppressed_entities WHERE entity_id='ghost'").fetchone()
+        row = db.execute("SELECT * FROM entity_suppressions WHERE entity_id='ghost'").fetchone()
     assert row is None
 
 
@@ -627,7 +627,7 @@ def test_unsuppress_entity_removes_row_entity_recoverable(tmp_path):
     assert s.unsuppress_entity("e1") is True
 
     with s._connect() as db:
-        row = db.execute("SELECT * FROM suppressed_entities WHERE entity_id='e1'").fetchone()
+        row = db.execute("SELECT * FROM entity_suppressions WHERE entity_id='e1'").fetchone()
     assert row is None
     # Entity row itself was never touched, so it's still there post-unsuppress.
     assert "e1" in {e["id"] for e in s.list_entities()}

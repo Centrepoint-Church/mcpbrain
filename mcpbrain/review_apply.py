@@ -13,14 +13,19 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
     - "suppress": store.suppress_entity(ref_id, reason) then resolve the
       finding. Capped: once `cap` suppressions have been applied in this call,
       further suppress verdicts are left untouched (entity not suppressed,
-      finding left open) so they're picked up again next run.
+      finding left open) so they're picked up again next run. If
+      suppress_entity returns False (ref_id no longer names a real entity —
+      e.g. merged/renamed away between detection and verdict), the finding is
+      left open (not resolved) rather than counted as a success; it'll stop
+      being re-detected as an orphan on its own once the entity is truly gone,
+      and resolve via the normal resolve_findings_not_in cleanup.
     - "keep" / "skip" / anything unrecognised: resolve the finding with no
       graph mutation. Unrecognised strings are treated as "skip" — the safe
       default when this loop can't tell what the adjudicator meant.
 
-    Returns {"suppressed": n, "kept": n, "skipped": n, "capped": n}.
+    Returns {"suppressed": n, "kept": n, "skipped": n, "capped": n, "missing": n}.
     """
-    result = {"suppressed": 0, "kept": 0, "skipped": 0, "capped": 0}
+    result = {"suppressed": 0, "kept": 0, "skipped": 0, "capped": 0, "missing": 0}
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
         ref_id = verdict.get("ref_id")
@@ -30,9 +35,11 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
             if result["suppressed"] >= cap:
                 result["capped"] += 1
                 continue
-            store.suppress_entity(ref_id, reason=verdict.get("reason", ""))
-            store.resolve_finding(finding_id)
-            result["suppressed"] += 1
+            if store.suppress_entity(ref_id, reason=verdict.get("reason", "")):
+                store.resolve_finding(finding_id)
+                result["suppressed"] += 1
+            else:
+                result["missing"] += 1
         elif verdict_str == "keep":
             store.resolve_finding(finding_id)
             result["kept"] += 1
