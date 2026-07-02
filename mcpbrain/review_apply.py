@@ -110,3 +110,62 @@ def apply_missing_org_verdicts(
             result["skipped"] += 1
 
     return result
+
+
+def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
+    """Apply a batch of ownerless-action-finding verdicts.
+
+    Each verdict: {"finding_id": int, "ref_id": <action id>, "verdict":
+    "owner"|"waiting_on"|"unowned"|"skip", "owner"?: str, "owner_entity_id"?: str}.
+
+    - "owner": only applied when `owner` (a name string) is present. When
+      present: store.assign_action_owner(ref_id, owner, owner_entity_id=...)
+      then resolve the finding. Capped: once `cap` owner assignments have been
+      applied in this call, further owner verdicts are left untouched (owner
+      not set, finding left open) so they're picked up again next run.
+      If assign_action_owner returns False (ref_id no longer names a real
+      action — e.g. resolved/deleted between detection and verdict), the
+      finding is left open (not resolved) rather than counted as a success;
+      it's tallied under "missing" instead.
+      An "owner" verdict with no `owner` field falls through to the same
+      "skip" handling as an unrecognised verdict — a bad adjudicator output
+      (no name) must never masquerade as a successful assignment.
+    - "waiting_on" / "unowned" / "skip": resolve the finding with no owner
+      change. Each is counted under its own key so the verdict mix stays
+      visible (mirrors Task 2.2's `external`-gets-its-own-counter precedent).
+    - Any other/unrecognised verdict string, or an "owner" verdict missing
+      the `owner` field: treated as "skip" (conservative default) — resolve,
+      count under "skipped".
+
+    Returns {"owner_assigned": n, "waiting_on": n, "unowned": n, "skipped": n,
+    "capped": n, "missing": n}.
+    """
+    result = {"owner_assigned": 0, "waiting_on": 0, "unowned": 0, "skipped": 0, "capped": 0, "missing": 0}
+    for verdict in verdicts:
+        finding_id = verdict.get("finding_id")
+        ref_id = verdict.get("ref_id")
+        verdict_str = verdict.get("verdict")
+        owner = verdict.get("owner")
+
+        if verdict_str == "owner" and owner:
+            if result["owner_assigned"] >= cap:
+                result["capped"] += 1
+                continue
+            if store.assign_action_owner(ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", "")):
+                store.resolve_finding(finding_id)
+                result["owner_assigned"] += 1
+            else:
+                result["missing"] += 1
+        elif verdict_str == "waiting_on":
+            store.resolve_finding(finding_id)
+            result["waiting_on"] += 1
+        elif verdict_str == "unowned":
+            store.resolve_finding(finding_id)
+            result["unowned"] += 1
+        else:
+            # "skip", an "owner" verdict with a missing `owner` field, and any
+            # unrecognised verdict string.
+            store.resolve_finding(finding_id)
+            result["skipped"] += 1
+
+    return result

@@ -65,3 +65,38 @@ def test_review_metrics(tmp_path):
 
     # resolved_last_run is currently hardcoded to 0
     assert metrics["resolved_last_run"] == 0
+
+
+# --- Task 3.1: ownerless_action packets are action-anchored, not entity-anchored ---
+
+
+def test_packet_for_ownerless_action_carries_action_thread_and_source(tmp_path):
+    s = Store(str(tmp_path / "ownerless.sqlite3"), dim=4)
+    s.init()
+    with s._connect() as db:
+        db.execute(
+            "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded) "
+            "VALUES('d1','Please send the updated budget by Friday.','h1','{}',1)")
+        cur = db.execute(
+            "INSERT INTO actions(text, deadline, thread_id, source_doc_id, owner, owner_entity_id) "
+            "VALUES('Send the updated budget','2026-07-10','t1','d1','','')")
+        action_id = cur.lastrowid
+        db.execute(
+            "INSERT INTO email_context(message_id, sender, sender_email, thread_id, date_iso) "
+            "VALUES('m1','Alice Admin','alice@acme.com','t1','2026-07-01T00:00:00Z')")
+        db.execute(
+            "INSERT INTO email_context(message_id, sender, sender_email, thread_id, date_iso) "
+            "VALUES('m2','Bob Builder','bob@acme.com','t1','2026-07-02T00:00:00Z')")
+
+    finding = {"finding_type": "lint:ownerless_action", "ref_id": str(action_id),
+               "summary": "ownerless_action: Send the updated budget", "detail": ""}
+    pk = build_review_packet(s, finding)
+
+    assert pk["entity"] is None
+    assert pk["action"]["text"] == "Send the updated budget"
+    assert pk["action"]["deadline"] == "2026-07-10"
+    assert pk["action"]["owner"] == ""
+    assert pk["action"]["owner_entity_id"] == ""
+    assert any("updated budget" in span for span in pk["source_spans"])
+    assert {p["sender"] for p in pk["thread"]["participants"]} == {"Alice Admin", "Bob Builder"}
+    assert pk["thread"]["sender"]["sender"] == "Alice Admin"  # earliest by date_iso
