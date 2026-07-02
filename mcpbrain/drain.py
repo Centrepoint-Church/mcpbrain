@@ -129,6 +129,10 @@ BLOCK_DRAINERS["review_missing_org"] = lambda store, data: review_apply.apply_mi
 BLOCK_DRAINERS["review_ownerless"] = lambda store, data: review_apply.apply_ownerless_verdicts(
     store, data.get("review_ownerless") or [], cap=50
 )
+# cap is a literal until Task 4.1 wires this to config.review_max_apply_per_run
+BLOCK_DRAINERS["review_org"] = lambda store, data: review_apply.apply_org_verdicts(
+    store, data.get("review_org") or [], cap=50
+)
 
 
 def _home(home) -> Path:

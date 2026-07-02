@@ -496,6 +496,16 @@ class Store:
                 suppressed_at TEXT DEFAULT ''
             )""")
 
+            # --- Session-4, Task 3.2: org-suggestion inbox ----------------------
+            # Purely additive/inspectable: an org string the extractor keeps
+            # seeing that isn't in the configured taxonomy. Never auto-applied
+            # to config.json — a human (or a future dashboard/CLI) reviews these.
+            db.execute("""CREATE TABLE IF NOT EXISTS org_suggestions (
+                raw_org       TEXT PRIMARY KEY,
+                reason        TEXT DEFAULT '',
+                suggested_at  TEXT DEFAULT ''
+            )""")
+
             # --- Phase 1 capture: change_log -----------------------------------
             db.execute("""CREATE TABLE IF NOT EXISTS change_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2103,6 +2113,28 @@ class Store:
         with self._connect() as db:
             cur = db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (entity_id,))
             return cur.rowcount > 0
+
+    # --- Session-4, Task 3.2: org-suggestion inbox ---------------------------
+
+    def suggest_org_mapping(self, raw_org: str, reason: str = "") -> bool:
+        """Record a suggestion that `raw_org` (an unrecognised org string the
+        extractor keeps seeing) be added to the configured taxonomy.
+
+        Purely additive: never writes config.json itself, just an inspectable
+        row for a human (or a future dashboard/CLI) to review. INSERT OR
+        REPLACE keyed on raw_org, so re-suggesting the same string refreshes
+        reason/suggested_at instead of accumulating duplicates. Always
+        succeeds — unlike suppress_entity, there's no existence precondition
+        to fail (raw_org is a free-text string, not a foreign key).
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO org_suggestions(raw_org, reason, suggested_at) "
+                "VALUES(?, ?, ?)",
+                (raw_org, reason, now),
+            )
+            return True
 
     def find_open_action_by_fingerprint(self, fp: str) -> int | None:
         if not fp:
