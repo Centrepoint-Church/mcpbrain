@@ -70,3 +70,11 @@ def test_graph_html_js_syntax():
             f = Path(f"/tmp/_graph_{i}.js"); f.write_text(js)
             r = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
             assert r.returncode == 0, r.stderr
+
+
+def test_dashboard_links_to_graph():
+    html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "dashboard.html").read_text()
+    assert "/graph" in html                       # explore button targets the page
+    assert "Explore graph" in html
+    # the button is no longer a disabled "soon" teaser
+    assert 'class="explore" disabled' not in html
