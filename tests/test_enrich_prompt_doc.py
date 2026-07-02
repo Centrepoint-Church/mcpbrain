@@ -107,6 +107,37 @@ def test_missing_org_rule_flags_document_category_anti_pattern():
         )
 
 
+def test_ownerless_and_org_hygiene_review_rules_documented():
+    """Task 3.2: the AI-adjudicator prompt must carry rules + verdict schema
+    for the ownerless-action review kind (Task 3.1, applier shipped without
+    its own prompt rules) and the three bundled org-hygiene review kinds
+    (this task), in both the canonical prompt and its byte-identical copy in
+    the enrich-batch subagent (kept in sync by bin/sync_agents.py)."""
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    for fname in ["mcpbrain/enrich_prompt.md", "plugin/agents/enrich-batch.md"]:
+        text = (root / fname).read_text()
+        assert "Ownerless-action review rules" in text, f"ownerless rules missing from {fname}"
+        assert "Org-hygiene review rules" in text, f"org-hygiene rules missing from {fname}"
+        for key in (
+            "review_ownerless",
+            "review_org",
+            "finding_id",
+            "ref_id",
+            "owner",
+            "waiting_on",
+            "unowned",
+            "lint:ambiguous_org",
+            "lint:duplicate_org",
+            "org_unrecognised",
+            "canonicalize",
+            "add_to_config",
+            "canonical_org",
+            "taxonomy",
+        ):
+            assert key in text, f"{key!r} not found in {fname}"
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
