@@ -370,8 +370,17 @@ verdict per item into `review_org`:
   `taxonomy` — never invent, abbreviate, or guess an org name that isn't in
   that list. Valid for `lint:ambiguous_org` (the entity should be
   reclassified to the org named in `should_be`) and `lint:duplicate_org`
-  (the variant org string should be folded into the org named in
-  `canonical_org`).
+  (every entity currently tagged with the variant org string gets its `org`
+  field bulk-relabeled to `canonical_org` — a plain text-field correction,
+  never an entity merge or delete). Even though `lint:duplicate_org`
+  canonicalize is low-risk (nothing is merged or deleted, and it only
+  touches the `org` field), still apply real judgment rather than
+  rubber-stamping every fuzzy match: a short, acronym-like variant (e.g.
+  "ACC" vs "ACCI") is much more likely to name a genuinely DIFFERENT
+  organisation than a clear typo/casing/full-name variant (e.g. "Acme Corp"
+  vs "Acme Corporation"). When the variant could plausibly be a distinct
+  real org rather than a misspelling, prefer `skip` — mislabeling an org tag
+  is still a real data-quality mistake even though it's reversible.
 - `add_to_config`: ONLY valid for `org_unrecognised`. This is a real-looking
   organisation name the system doesn't recognise yet — suggest recording it
   for a human to review. Never invent a taxonomy entry and never emit

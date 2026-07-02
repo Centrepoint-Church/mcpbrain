@@ -428,9 +428,6 @@ def _seed_org(tmp_path):
     # entity tagged 'external' whose domain actually maps to a configured org
     s.upsert_entity("e1", "External Contact", "person", org="external", seen="2026-05-30")
     s.upsert_entity("e2", "Second External", "person", org="external", seen="2026-05-30")
-    # org-typed entities used by duplicate_org canonicalize tests
-    s.upsert_entity("eo1", "Acme Corp", "org", org="Acme Corp", seen="2026-05-30")
-    s.upsert_entity("eo2", "Acme", "org", org="Acme", seen="2026-05-30")
     return s
 
 
@@ -477,11 +474,19 @@ def test_ambiguous_org_canonicalize_with_invalid_org_treated_as_skip(tmp_path):
     assert result == {"canonicalized": 0, "suggested": 0, "skipped": 1, "capped": 0, "missing": 0}
 
 
-def test_duplicate_org_canonicalize_merges_org_entities(tmp_path):
+def test_duplicate_org_canonicalize_rewrites_org_field(tmp_path):
+    """canonicalize on lint:duplicate_org is a bulk text-field rewrite: every
+    entity tagged org=<variant> gets relabeled org=<canonical>. No entity is
+    merged or deleted."""
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_org(tmp_path)
+    # Regular entities tagged with the variant org string — this is what
+    # check_duplicate_orgs actually flags (the .org text field, not a
+    # dedicated org-typed node).
+    s.upsert_entity("p1", "Person One", "person", org="Acme Corp", seen="2026-05-30")
+    s.upsert_entity("p2", "Person Two", "person", org="Acme Corp", seen="2026-05-30")
     s.record_finding("lint:duplicate_org", "Acme Corp", summary="likely duplicate",
-                      detail="{'canonical_org': 'Acme', 'entity_count': 3, 'score': 90}")
+                      detail="{'canonical_org': 'Acme', 'entity_count': 2, 'score': 90}")
     finding = s.open_findings("lint:duplicate_org")[0]
 
     result = apply_org_verdicts(
@@ -493,19 +498,21 @@ def test_duplicate_org_canonicalize_merges_org_entities(tmp_path):
     )
 
     with s._connect() as db:
-        variant = db.execute("SELECT id FROM entities WHERE id='eo1'").fetchone()
-        winner = db.execute("SELECT id, name FROM entities WHERE id='eo2'").fetchone()
+        rows = db.execute(
+            "SELECT id, org FROM entities WHERE id IN ('p1','p2')").fetchall()
         merge_log = db.execute("SELECT * FROM entity_merge_log").fetchall()
-    assert variant is None  # loser entity gone
-    assert winner is not None
-    assert len(merge_log) == 1
-    assert merge_log[0]["loser_id"] == "eo1"
-    assert merge_log[0]["winner_id"] == "eo2"
+    assert len(rows) == 2
+    assert all(r["org"] == "Acme" for r in rows)
+    assert merge_log == []  # nothing was merged — only the org field changed
     assert s.open_findings("lint:duplicate_org") == []
     assert result == {"canonicalized": 1, "suggested": 0, "skipped": 0, "capped": 0, "missing": 0}
 
 
-def test_duplicate_org_canonicalize_missing_variant_entity_leaves_open(tmp_path):
+def test_duplicate_org_canonicalize_no_matching_entities_leaves_open(tmp_path):
+    """A stale finding: no entity currently carries org=<variant> (e.g. it
+    was already fixed or the finding predates other changes). rewrite_org_field
+    returns 0 rows updated, so the finding is left open and tallied 'missing',
+    with zero mutation to the entities table."""
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_org(tmp_path)
     s.record_finding("lint:duplicate_org", "Ghost Corp", summary="likely duplicate",
@@ -523,7 +530,9 @@ def test_duplicate_org_canonicalize_missing_variant_entity_leaves_open(tmp_path)
     assert result == {"canonicalized": 0, "suggested": 0, "skipped": 0, "capped": 0, "missing": 1}
     with s._connect() as db:
         merge_log = db.execute("SELECT * FROM entity_merge_log").fetchall()
-    assert merge_log == []  # merge_entities was never called
+        orgs_seen = {r["org"] for r in db.execute("SELECT org FROM entities").fetchall()}
+    assert merge_log == []  # nothing was merged
+    assert orgs_seen == {"external"}  # no entities table changes
     open_ids = {f["id"] for f in s.open_findings("lint:duplicate_org")}
     assert finding["id"] in open_ids
 
