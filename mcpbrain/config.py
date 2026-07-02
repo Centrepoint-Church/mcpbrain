@@ -586,20 +586,6 @@ def spool_thread_cap(home) -> int:
         return 2000
 
 
-def review_interval_s(home) -> float:
-    """Review cadence interval in seconds (config 'review_interval_s', default 86400).
-
-    Seconds between review passes. Set to 0 to disable the cadence (kill-switch).
-    Default 86400 (one day). Like other daemon cadences, 0 disables the pass,
-    and the function simply returns the configured value without special-casing it —
-    the caller interprets 0 as "disabled".
-    """
-    try:
-        return float(read_config(home).get("review_interval_s", 86400))
-    except (TypeError, ValueError):
-        return 86400.0
-
-
 def review_max_apply_per_run(home) -> int:
     """Per-run ceiling on how many review rules to apply (config 'review_max_apply_per_run', default 50).
 
