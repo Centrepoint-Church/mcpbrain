@@ -812,6 +812,16 @@ class Store:
                 (org, org_valid_from, entity_id))
             return cur.rowcount > 0
 
+    def rewrite_org_field(self, variant_org: str, canonical_org: str) -> int:
+        """Bulk-correct the org field: relabel every entity currently tagged
+        with variant_org to canonical_org. Returns the number of rows updated
+        (0 means no entity currently carries variant_org — a stale finding)."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE entities SET org=? WHERE org=?",
+                (canonical_org, variant_org))
+            return cur.rowcount
+
     def update_entity_org_if_empty(self, entity_id: str, org: str) -> bool:
         """Set org on an entity only if it currently has none. Returns True if set.
 

@@ -138,6 +138,22 @@ def test_ownerless_and_org_hygiene_review_rules_documented():
             assert key in text, f"{key!r} not found in {fname}"
 
 
+def test_duplicate_org_canonicalize_risk_judgment_documented():
+    """duplicate_org canonicalize is a bulk org-field rewrite (never a merge/
+    delete), but the prompt must still tell the adjudicator to weigh whether
+    a short/acronym-like variant is more likely a genuinely different org
+    than a typo — not rubber-stamp every fuzzy match the lint check surfaces."""
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    for fname in ["mcpbrain/enrich_prompt.md", "plugin/agents/enrich-batch.md"]:
+        text = (root / fname).read_text()
+        lower = text.lower()
+        assert "acronym" in lower, f"acronym-vs-typo guidance missing from {fname}"
+        assert "genuinely" in lower and "misspelling" in lower, (
+            f"distinct-org guidance missing from {fname}"
+        )
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
