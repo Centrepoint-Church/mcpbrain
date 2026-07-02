@@ -165,7 +165,7 @@ def test_assign_with_valid_taxonomy_org_sets_org_and_resolves(tmp_path):
         row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
     assert row["org"] == "Acme"
     assert s.open_findings("lint:missing_org") == []
-    assert result == {"assigned": 1, "external": 0, "skipped": 0, "capped": 0}
+    assert result == {"assigned": 1, "external": 0, "skipped": 0, "capped": 0, "missing": 0}
 
 
 def test_assign_with_org_not_in_taxonomy_does_not_apply(tmp_path):
@@ -185,7 +185,7 @@ def test_assign_with_org_not_in_taxonomy_does_not_apply(tmp_path):
         row = db.execute("SELECT org FROM entities WHERE id='e2'").fetchone()
     assert row["org"] == ""  # not silently applied
     # Not counted as a success — an invalid-org "assign" must not masquerade as one.
-    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0}
+    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0, "missing": 0}
 
 
 def test_external_and_skip_resolve_without_org_change(tmp_path):
@@ -209,7 +209,7 @@ def test_external_and_skip_resolve_without_org_change(tmp_path):
         rows = db.execute("SELECT id, org FROM entities WHERE id IN ('e2','e3')").fetchall()
     assert {r["org"] for r in rows} == {""}
     assert s.open_findings("lint:missing_org") == []
-    assert result == {"assigned": 0, "external": 1, "skipped": 1, "capped": 0}
+    assert result == {"assigned": 0, "external": 1, "skipped": 1, "capped": 0, "missing": 0}
 
 
 def test_unrecognised_verdict_treated_as_skip_missing_org(tmp_path):
@@ -226,7 +226,7 @@ def test_unrecognised_verdict_treated_as_skip_missing_org(tmp_path):
     )
 
     assert s.open_findings("lint:missing_org") == []
-    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0}
+    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0, "missing": 0}
 
 
 def test_cap_stops_applying_assign_verdicts(tmp_path):
@@ -249,3 +249,30 @@ def test_cap_stops_applying_assign_verdicts(tmp_path):
     assert len(rows) == 1
     # The capped finding is left open (not resolved) so it's picked up next run.
     assert len(s.open_findings("lint:missing_org")) == 1
+
+
+def test_assign_verdict_with_missing_entity_leaves_finding_open(tmp_path):
+    """ref_id no longer names a real row in entities (e.g. merged/renamed away
+    between when the finding was detected and when the verdict was applied).
+    store.update_entity_org returns False; this must NOT be counted as a
+    successful assignment, must NOT resolve the finding, and must NOT create
+    or touch any entity row. It's tallied under "missing" instead."""
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid = s.record_finding("lint:missing_org", "e_ghost", summary="no org")
+    finding = s.open_findings("lint:missing_org")[0]
+
+    result = apply_missing_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": "e_ghost", "verdict": "assign", "org": "Acme"}],
+        cap=50,
+        home=home,
+    )
+
+    assert result == {"assigned": 0, "external": 0, "skipped": 0, "capped": 0, "missing": 1}
+    with s._connect() as db:
+        row = db.execute("SELECT * FROM entities WHERE id='e_ghost'").fetchone()
+    assert row is None
+    # Finding left open — will be picked up again on a future pass.
+    open_ids = {f["id"] for f in s.open_findings("lint:missing_org")}
+    assert finding["id"] in open_ids

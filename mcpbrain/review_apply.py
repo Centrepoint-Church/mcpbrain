@@ -73,14 +73,18 @@ def apply_missing_org_verdicts(
       a successful assignment — and it falls through to the same "skip"
       handling as an unrecognised verdict: the finding is resolved (it's a
       no-op either way) but counted under "skipped", not "assigned".
+      If store.update_entity_org returns False (ref_id no longer names a real
+      entity — e.g. merged/renamed away between detection and verdict), the
+      finding is left open (not resolved) rather than counted as a success;
+      it's tallied under "missing" instead.
     - "external" / "skip" / anything unrecognised: resolve the finding with
       no graph mutation. Unrecognised strings are treated as "skip" — the
       safe default when this loop can't tell what the adjudicator meant.
 
-    Returns {"assigned": n, "external": n, "skipped": n, "capped": n}.
+    Returns {"assigned": n, "external": n, "skipped": n, "capped": n, "missing": n}.
     """
     valid_orgs = orgs.taxonomy_from_config(home).valid_orgs
-    result = {"assigned": 0, "external": 0, "skipped": 0, "capped": 0}
+    result = {"assigned": 0, "external": 0, "skipped": 0, "capped": 0, "missing": 0}
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
         ref_id = verdict.get("ref_id")
@@ -91,9 +95,11 @@ def apply_missing_org_verdicts(
             if result["assigned"] >= cap:
                 result["capped"] += 1
                 continue
-            store.update_entity_org(ref_id, org)
-            store.resolve_finding(finding_id)
-            result["assigned"] += 1
+            if store.update_entity_org(ref_id, org):
+                store.resolve_finding(finding_id)
+                result["assigned"] += 1
+            else:
+                result["missing"] += 1
         elif verdict_str == "external":
             store.resolve_finding(finding_id)
             result["external"] += 1
