@@ -579,3 +579,61 @@ def test_reflow_outdated_chunks_resets_only_old_versions(tmp_path):
     assert rows["old"]["enriched"] == 0 and rows["old"]["embedded"] == 1   # re-flowed, embedding kept
     assert rows["cur"]["enriched"] == 1                                    # current stays
     assert s.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, cap=10) == 0     # nothing left outdated
+
+
+# --- reversible entity suppression (Session-4, Task 2.1) -----------------
+
+def test_suppress_entity_writes_row_and_returns_true(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_entity("e1", "Junk Entity", "person", org="", seen="2026-05-30")
+
+    assert s.suppress_entity("e1", reason="extraction noise") is True
+
+    with s._connect() as db:
+        row = db.execute(
+            "SELECT entity_id, reason, suppressed_at FROM entity_suppressions WHERE entity_id='e1'"
+        ).fetchone()
+    assert row is not None
+    assert row["reason"] == "extraction noise"
+    assert row["suppressed_at"]  # ISO timestamp populated
+
+
+def test_suppress_entity_does_not_touch_entities_table(tmp_path):
+    """Suppression is purely a row in entity_suppressions — the entities row
+    (and thus the entity's data) is never mutated or deleted."""
+    s = _store(tmp_path)
+    s.upsert_entity("e1", "Junk Entity", "person", org="Acme", seen="2026-05-30")
+
+    s.suppress_entity("e1", reason="orphan")
+
+    entities = {e["id"]: e for e in s.list_entities()}
+    assert "e1" in entities
+    assert entities["e1"]["name"] == "Junk Entity"
+
+
+def test_suppress_entity_returns_false_for_unknown_id(tmp_path):
+    s = _store(tmp_path)
+    assert s.suppress_entity("ghost", reason="noise") is False
+    with s._connect() as db:
+        row = db.execute("SELECT * FROM entity_suppressions WHERE entity_id='ghost'").fetchone()
+    assert row is None
+
+
+def test_unsuppress_entity_removes_row_entity_recoverable(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_entity("e1", "Junk Entity", "person", org="", seen="2026-05-30")
+    s.suppress_entity("e1", reason="noise")
+
+    assert s.unsuppress_entity("e1") is True
+
+    with s._connect() as db:
+        row = db.execute("SELECT * FROM entity_suppressions WHERE entity_id='e1'").fetchone()
+    assert row is None
+    # Entity row itself was never touched, so it's still there post-unsuppress.
+    assert "e1" in {e["id"] for e in s.list_entities()}
+
+
+def test_unsuppress_entity_returns_false_when_no_row(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_entity("e1", "Junk Entity", "person", org="", seen="2026-05-30")
+    assert s.unsuppress_entity("e1") is False

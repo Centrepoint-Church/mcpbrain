@@ -233,6 +233,146 @@ string. Guidance:
 
 When `merge_review` is empty or absent, `merge_answers` is `[]`.
 
+## Orphan-entity review rules
+
+`pending.json` may carry a `review_orphan` list: entities the graph-hygiene
+lint flagged as having no relations or observations. Each item gives a
+`finding_id`, the entity's `ref_id`, and an evidence packet — the `entity`
+sub-record (name, type, org), plus `source_spans`, `relations`, and
+`observations`. Decide whether the entity is real. Emit one verdict per item
+into `review_orphan`:
+
+```json
+{"finding_id": 42, "ref_id": "e_9f3", "verdict": "suppress", "reason": "signature-block artifact"}
+```
+
+- `suppress`: the entity is CLEARLY extraction noise — a mis-parsed name
+  fragment, a signature-block artifact ("Sent from my iPhone"), a generic
+  term wrongly tagged as an entity. Give a short `reason`.
+- `keep`: a legitimate entity that simply hasn't accumulated connections yet
+  (a new contact, a project mentioned once). This is the default whenever the
+  name reads as a real person, org, or thing.
+- `skip`: unsure either way.
+
+Prefer `keep` or `skip` over `suppress`. Suppression is only for entities
+that are CLEARLY not real — never for "probably fine but under-connected." A
+wrong suppress hides a real entity from the graph; a missed suppress just
+leaves one noise row around a little longer.
+
+## Missing-org review rules
+
+`pending.json` may carry a `review_missing_org` list: entities with no `org`
+tag. Each item gives a `finding_id`, the entity's `ref_id`, its evidence
+packet (`entity`, `source_spans`), and the packet's `taxonomy` — the list of
+this install's configured org names. Emit one verdict per item into
+`review_missing_org`:
+
+```json
+{"finding_id": 57, "ref_id": "e_1a2", "verdict": "assign", "org": "Acme"}
+```
+
+- `assign`: the source spans clearly show the entity belongs to one of the
+  configured orgs. `org` must be copied verbatim from `taxonomy` — never
+  invent, abbreviate, or guess an org name that isn't in that list.
+- `external`: the source spans clearly show the entity is outside every
+  configured org (an external vendor, a personal contact, a one-off sender).
+- `skip`: the text doesn't clearly indicate either. When unsure, `skip`.
+
+Never infer an org from a name or email domain alone if it isn't confirmed by
+the source spans and doesn't appear verbatim in `taxonomy`.
+
+**Anti-pattern: document category is not personal affiliation.** A
+category/classification tag on the document or chunk itself — a bracketed
+label like `[ACC]` at the top of an email, a folder or project tag — describes
+what the DOCUMENT is about, not who the PERSON works for. Do not treat a
+document-level tag as evidence of the entity's own affiliation. Likewise,
+being named as an author, sender, or participant in a document that is
+*about* org X (an agreement, MOU, or contract between org X and org Y) does
+not by itself mean the person belongs to org X — they could belong to X, Y,
+neither, or be a facilitator/third party. `assign` requires the source spans
+to state or clearly imply the person's OWN affiliation (e.g. "Donna K, ACC
+finance lead," an email signature, a stated job title, an email domain that
+maps to the org) — not just co-occurrence with an org name in a document's
+subject matter or category tag. When the only signal is a document-level
+tag/category or the person's mere association with a document about an org,
+that does not clear the "clearly show" bar: `skip`.
+
+## Ownerless-action review rules
+
+`pending.json` may carry a `review_ownerless` list: open actions the graph-
+hygiene lint flagged as having no clear owner. Each item gives a
+`finding_id`, the action's `ref_id`, and an evidence packet — the `action`
+sub-record (`text`, `deadline`, `owner`, `owner_entity_id`), the `thread`
+sub-record (`participants` and `sender`, each a name/email pair), and
+`source_spans`. Decide who — if anyone — owns the action. Emit one verdict
+per item into `review_ownerless`:
+
+```json
+{"finding_id": 71, "ref_id": 123, "verdict": "owner", "owner": "Alice Admin"}
+```
+
+- `owner`: the action text itself makes clear who owns it. "I'll send the
+  report" said by the thread's sender means the sender owns it; "can you
+  send me X" directed at a specific recipient means that recipient owns it.
+  When assigning `owner`, supply the sender's or a participant's name from
+  the packet's `thread` data as the `owner` string — never invent a name
+  that isn't in `thread.participants` or `thread.sender`.
+- `waiting_on`: the action is blocked on someone else's response or action —
+  not truly "owned" by anyone yet, just pending. Use this instead of
+  `owner` when the text describes what's being waited on, not who will do
+  the work.
+- `unowned`: genuinely no signal in the text or thread about who is
+  responsible.
+- `skip`: unclear either way.
+
+Prefer `waiting_on`, `unowned`, or `skip` over guessing an `owner`. A wrong
+`owner` misattributes real work; a missed one just leaves the action
+unowned a little longer.
+
+## Org-hygiene review rules
+
+`pending.json` may carry a `review_org` list bundling THREE different
+graph-hygiene finding kinds together: `lint:ambiguous_org`,
+`lint:duplicate_org`, and `org_unrecognised`. Each item's packet gives a
+`finding_id`, its `ref_id`, and the packet's own `finding_type` telling you
+which of the three kinds this item is, plus `summary`/`detail` text and the
+packet's `taxonomy` — this install's configured org names. Read the
+`detail` text carefully — it names the relevant org verbatim: `should_be`
+for `lint:ambiguous_org`, `canonical_org` for `lint:duplicate_org`. Emit one
+verdict per item into `review_org`:
+
+```json
+{"finding_id": 88, "finding_type": "lint:duplicate_org", "ref_id": "Acme Corp",
+ "verdict": "canonicalize", "canonical_org": "Acme"}
+```
+
+- `canonicalize`: the evidence clearly supports folding this into an
+  existing configured org. `canonical_org` must be copied VERBATIM from
+  `taxonomy` — never invent, abbreviate, or guess an org name that isn't in
+  that list. Valid for `lint:ambiguous_org` (the entity should be
+  reclassified to the org named in `should_be`) and `lint:duplicate_org`
+  (every entity currently tagged with the variant org string gets its `org`
+  field bulk-relabeled to `canonical_org` — a plain text-field correction,
+  never an entity merge or delete). Even though `lint:duplicate_org`
+  canonicalize is low-risk (nothing is merged or deleted, and it only
+  touches the `org` field), still apply real judgment rather than
+  rubber-stamping every fuzzy match: a short, acronym-like variant (e.g.
+  "ACC" vs "ACCI") is much more likely to name a genuinely DIFFERENT
+  organisation than a clear typo/casing/full-name variant (e.g. "Acme Corp"
+  vs "Acme Corporation"). When the variant could plausibly be a distinct
+  real org rather than a misspelling, prefer `skip` — mislabeling an org tag
+  is still a real data-quality mistake even though it's reversible.
+- `add_to_config`: ONLY valid for `org_unrecognised`. This is a real-looking
+  organisation name the system doesn't recognise yet — suggest recording it
+  for a human to review. Never invent a taxonomy entry and never emit
+  `add_to_config` for `lint:ambiguous_org` or `lint:duplicate_org`, which
+  always have a taxonomy target to canonicalize against instead.
+- `skip`: unsure either way, for any of the three kinds.
+
+Never auto-write config.json — canonicalizing or adding-to-config only ever
+produces a verdict for the applier to act on; the taxonomy itself is edited
+by a human. Never invent an org name that isn't verbatim in `taxonomy`.
+
 ## Thread-synthesis rules
 
 `pending.json` may carry a `synthesis` list: threads active enough to deserve a
