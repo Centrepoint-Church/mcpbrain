@@ -51,12 +51,28 @@ def check_missing_org(conn) -> list[dict]:
 
 
 def check_orphan_entities(conn) -> list[dict]:
-    """Entities with no email appearances and no relationships."""
-    rows = conn.execute("""
+    """Entities with no email appearances and no relationships.
+
+    entity_suppressions is optional: it only exists once the AI-adjudicator
+    suppress feature has run (or Store.init() has created it), so older/test
+    stores may not have it. Join + filter on it only when present — otherwise
+    the whole query would error rather than degrade gracefully like today.
+    """
+    has_supp = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='entity_suppressions'"
+    ).fetchone() is not None
+    supp_join = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
+                 if has_supp else "")
+    supp_filter = "AND s.entity_id IS NULL" if has_supp else ""
+
+    rows = conn.execute(f"""
         SELECT e.id, e.name, e.type, e.org
         FROM entities e
+        {supp_join}
         WHERE e.email_count = 0
           AND e.type != 'meeting'
+          {supp_filter}
           AND NOT EXISTS (
               SELECT 1 FROM entity_relations
               WHERE entity_a = e.id OR entity_b = e.id
