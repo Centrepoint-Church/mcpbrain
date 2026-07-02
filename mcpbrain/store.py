@@ -794,12 +794,13 @@ class Store:
             rows = db.execute(sql).fetchall()
             return [dict(r) for r in rows]
 
-    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> None:
-        """Set the org (and optionally org_valid_from) on one entity."""
+    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> bool:
+        """Set the org (and optionally org_valid_from) on one entity. Returns True if a row was actually updated."""
         with self._connect() as db:
-            db.execute(
+            cur = db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
                 (org, org_valid_from, entity_id))
+            return cur.rowcount > 0
 
     def update_entity_org_if_empty(self, entity_id: str, org: str) -> bool:
         """Set org on an entity only if it currently has none. Returns True if set.
