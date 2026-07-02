@@ -4,7 +4,12 @@ findings unattended on a daily cadence — a capped, conservative loop: only
 store.update_entity_org), any unrecognised verdict is a no-op 'skip' so
 ambiguity never turns into an unattended mutation."""
 
+import logging
+
 from mcpbrain import orgs
+from mcpbrain.resolve import _NAME_MERGEABLE_TYPES, _pick_winner, is_role_address
+
+log = logging.getLogger(__name__)
 
 
 def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
@@ -281,5 +286,95 @@ def apply_org_verdicts(
             # unrecognised verdict string.
             store.resolve_finding(finding_id)
             result["skipped"] += 1
+
+    return result
+
+
+def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
+    """Apply the LLM-adjudicated entity-merge answers from the merge_review
+    spool block — the LIVE, unattended tier that folds a `same=true` pair
+    into one entity via resolve._pick_winner + store.merge_entities. Ported
+    from drain._apply_merge_answers with the two safety guards this
+    codebase's other review-adjudication appliers (above) already have and
+    this tier was missing:
+
+    - Type guard: only entities of a _NAME_MERGEABLE_TYPES type (person/org/
+      project) may be merged. _candidate_pairs only blocks on matching
+      `type`, not on that allowlist, so a same-type pair of e.g. two
+      `document` entities could in theory reach here; merging on generic
+      titles/ids is exactly the structural-collapse failure mode
+      _deterministic_merges was restricted to guard against (issue #23).
+    - Role-address guard (the C1 fix, retrofitted to this tier): if either
+      entity's email_addr is a shared/role mailbox (office@, info@, ...),
+      the pair is never merged — a role inbox must not key an identity
+      merge, since distinct people commonly share one.
+
+    Each answer: {"pair_id": "a-id|b-id", "same": bool, "canonical": str}.
+    pair_id is the two entity ids sorted and joined by '|' (see
+    prepare._merge_pair). For same:true on a mergeable, non-role pair: look
+    both up, pick the winner with resolve._pick_winner (winner, loser) and
+    fold the loser in via merge_entities with method='llm'. Malformed
+    pair_id, a missing entity, or `same` not strictly True are all skipped
+    (unchanged from the ported behaviour) — this is the LLM tier of
+    resolution, adjudicated in the spool session and applied here by the
+    daemon: no second Claude call, no Gemini.
+
+    Capped: once `cap` merges have been applied in this call, further
+    same=true verdicts are left un-applied (entities untouched) so they're
+    picked up again next cycle — this pipeline regenerates candidate pairs
+    fresh every cycle, so no "already tried" state needs to persist.
+
+    Returns {"merged": n, "guarded": n, "capped": n, "skipped": n}.
+    "skipped" covers the pre-existing skip reasons (malformed pair_id,
+    missing entity, `same` not strictly True). "guarded" covers the two
+    NEW safety-guard rejections (non-mergeable type, role address).
+    """
+    result = {"merged": 0, "guarded": 0, "capped": 0, "skipped": 0}
+    for ans in answers or []:
+        # Strict bool: validate_batch_file already rejects non-bool `same`,
+        # but require True here too so no truthy non-bool can ever drive a
+        # merge.
+        if ans.get("same") is not True:
+            result["skipped"] += 1
+            continue
+        pair_id = ans.get("pair_id", "")
+        ids = pair_id.split("|")
+        if len(ids) != 2 or not all(ids):
+            log.warning("review_apply: malformed merge pair_id %r, skipping", pair_id)
+            result["skipped"] += 1
+            continue
+        a = store.get_entity(ids[0])
+        b = store.get_entity(ids[1])
+        if a is None or b is None:
+            log.info("review_apply: merge pair %s has a missing entity, skipping", pair_id)
+            result["skipped"] += 1
+            continue
+
+        if a["type"] not in _NAME_MERGEABLE_TYPES or b["type"] not in _NAME_MERGEABLE_TYPES:
+            log.warning(
+                "review_apply: merge pair %s has a non-mergeable type (%s, %s), guarding",
+                pair_id, a["type"], b["type"])
+            result["guarded"] += 1
+            continue
+        if is_role_address(a.get("email_addr", "")) or is_role_address(b.get("email_addr", "")):
+            log.warning(
+                "review_apply: merge pair %s has a role-address entity, guarding", pair_id)
+            result["guarded"] += 1
+            continue
+
+        if result["merged"] >= cap:
+            result["capped"] += 1
+            continue
+
+        winner, loser = _pick_winner(a, b)
+        try:
+            store.merge_entities(loser["id"], winner["id"],
+                                 canonical_name=ans.get("canonical") or None,
+                                 method="llm")
+        except Exception as exc:
+            log.error("review_apply: merge failed for %s <- %s: %s",
+                      winner["id"], loser["id"], exc)
+            continue
+        result["merged"] += 1
 
     return result
