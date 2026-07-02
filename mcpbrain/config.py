@@ -586,6 +586,20 @@ def spool_thread_cap(home) -> int:
         return 2000
 
 
+def review_max_apply_per_run(home) -> int:
+    """Per-run ceiling on how many review rules to apply (config 'review_max_apply_per_run', default 50).
+
+    When the review cadence runs, it processes up to this many rows from the review
+    queue per application pass, spreading work across cycles rather than applying
+    all at once. This bounds the cost and memory footprint per pass.
+    Default 50. Must be at least 1.
+    """
+    try:
+        return max(1, int(read_config(home).get("review_max_apply_per_run", 50)))
+    except (TypeError, ValueError):
+        return 50
+
+
 def clickup_api_key(home) -> str:
     """Return the ClickUp personal API token from config, or '' if unset."""
     return read_config(home).get("clickup_api_key", "") or ""

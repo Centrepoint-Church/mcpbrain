@@ -486,6 +486,26 @@ class Store:
                 "ON proactive_findings(finding_type) WHERE resolved_at IS NULL"
             )
 
+            # --- Session-4, Task 2.1: reversible entity suppression ------------
+            # Presence of a row here is the entire suppression mechanism: the
+            # entities row itself is never mutated or deleted, so suppression is
+            # trivially reversible via unsuppress_entity (just delete this row).
+            db.execute("""CREATE TABLE IF NOT EXISTS entity_suppressions (
+                entity_id     TEXT PRIMARY KEY,
+                reason        TEXT DEFAULT '',
+                suppressed_at TEXT DEFAULT ''
+            )""")
+
+            # --- Session-4, Task 3.2: org-suggestion inbox ----------------------
+            # Purely additive/inspectable: an org string the extractor keeps
+            # seeing that isn't in the configured taxonomy. Never auto-applied
+            # to config.json — a human (or a future dashboard/CLI) reviews these.
+            db.execute("""CREATE TABLE IF NOT EXISTS org_suggestions (
+                raw_org       TEXT PRIMARY KEY,
+                reason        TEXT DEFAULT '',
+                suggested_at  TEXT DEFAULT ''
+            )""")
+
             # --- Phase 1 capture: change_log -----------------------------------
             db.execute("""CREATE TABLE IF NOT EXISTS change_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -784,12 +804,23 @@ class Store:
             rows = db.execute(sql).fetchall()
             return [dict(r) for r in rows]
 
-    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> None:
-        """Set the org (and optionally org_valid_from) on one entity."""
+    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> bool:
+        """Set the org (and optionally org_valid_from) on one entity. Returns True if a row was actually updated."""
         with self._connect() as db:
-            db.execute(
+            cur = db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
                 (org, org_valid_from, entity_id))
+            return cur.rowcount > 0
+
+    def rewrite_org_field(self, variant_org: str, canonical_org: str) -> int:
+        """Bulk-correct the org field: relabel every entity currently tagged
+        with variant_org to canonical_org. Returns the number of rows updated
+        (0 means no entity currently carries variant_org — a stale finding)."""
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE entities SET org=? WHERE org=?",
+                (canonical_org, variant_org))
+            return cur.rowcount
 
     def update_entity_org_if_empty(self, entity_id: str, org: str) -> bool:
         """Set org on an entity only if it currently has none. Returns True if set.
@@ -1423,6 +1454,20 @@ class Store:
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
             return cur.rowcount
 
+    def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "") -> bool:
+        """Set owner/owner_entity_id on one action. Returns True if a row was actually updated.
+
+        Used by the ownerless-action review applier (Session-4, Task 3.1): a
+        rowcount check so a stale/nonexistent action_id (e.g. resolved or
+        deleted between detection and verdict) is reported as a no-op miss
+        rather than a phantom success.
+        """
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE actions SET owner=?, owner_entity_id=? WHERE id=?",
+                (owner, owner_entity_id, action_id))
+            return cur.rowcount > 0
+
     def snooze_action(self, action_id: int, until_iso: str) -> bool:
         """Snooze an OPEN action until until_iso (a YYYY-MM-DD date).
 
@@ -2051,6 +2096,55 @@ class Store:
                 "UPDATE proactive_findings SET resolved_at=? "
                 "WHERE id=? AND resolved_at IS NULL", (now, finding_id))
             return cur.rowcount > 0
+
+    # --- Session-4, Task 2.1: reversible entity suppression ------------------
+
+    def suppress_entity(self, entity_id: str, reason: str = "") -> bool:
+        """Suppress an entity by inserting a row into entity_suppressions.
+
+        Purely additive/reversible: the entities row is validated to exist but
+        never touched (no column added, no delete). Returns False (no-op) if
+        entity_id isn't a real entity. Reverse with unsuppress_entity.
+        """
+        with self._connect() as db:
+            row = db.execute("SELECT id FROM entities WHERE id=?", (entity_id,)).fetchone()
+            if not row:
+                return False
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            db.execute(
+                "INSERT OR REPLACE INTO entity_suppressions(entity_id, reason, suppressed_at) "
+                "VALUES(?, ?, ?)",
+                (entity_id, reason, now),
+            )
+            return True
+
+    def unsuppress_entity(self, entity_id: str) -> bool:
+        """Remove a suppression. True if a row was deleted."""
+        with self._connect() as db:
+            cur = db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (entity_id,))
+            return cur.rowcount > 0
+
+    # --- Session-4, Task 3.2: org-suggestion inbox ---------------------------
+
+    def suggest_org_mapping(self, raw_org: str, reason: str = "") -> bool:
+        """Record a suggestion that `raw_org` (an unrecognised org string the
+        extractor keeps seeing) be added to the configured taxonomy.
+
+        Purely additive: never writes config.json itself, just an inspectable
+        row for a human (or a future dashboard/CLI) to review. INSERT OR
+        REPLACE keyed on raw_org, so re-suggesting the same string refreshes
+        reason/suggested_at instead of accumulating duplicates. Always
+        succeeds — unlike suppress_entity, there's no existence precondition
+        to fail (raw_org is a free-text string, not a foreign key).
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO org_suggestions(raw_org, reason, suggested_at) "
+                "VALUES(?, ?, ?)",
+                (raw_org, reason, now),
+            )
+            return True
 
     def find_open_action_by_fingerprint(self, fp: str) -> int | None:
         if not fp:
