@@ -281,6 +281,22 @@ this install's configured org names. Emit one verdict per item into
 Never infer an org from a name or email domain alone if it isn't confirmed by
 the source spans and doesn't appear verbatim in `taxonomy`.
 
+**Anti-pattern: document category is not personal affiliation.** A
+category/classification tag on the document or chunk itself — a bracketed
+label like `[ACC]` at the top of an email, a folder or project tag — describes
+what the DOCUMENT is about, not who the PERSON works for. Do not treat a
+document-level tag as evidence of the entity's own affiliation. Likewise,
+being named as an author, sender, or participant in a document that is
+*about* org X (an agreement, MOU, or contract between org X and org Y) does
+not by itself mean the person belongs to org X — they could belong to X, Y,
+neither, or be a facilitator/third party. `assign` requires the source spans
+to state or clearly imply the person's OWN affiliation (e.g. "Donna K, ACC
+finance lead," an email signature, a stated job title, an email domain that
+maps to the org) — not just co-occurrence with an org name in a document's
+subject matter or category tag. When the only signal is a document-level
+tag/category or the person's mere association with a document about an org,
+that does not clear the "clearly show" bar: `skip`.
+
 ## Thread-synthesis rules
 
 `pending.json` may carry a `synthesis` list: threads active enough to deserve a

@@ -86,6 +86,27 @@ def test_orphan_and_missing_org_review_rules_documented():
             assert key in text, f"{key!r} not found in {fname}"
 
 
+def test_missing_org_rule_flags_document_category_anti_pattern():
+    """Task 2.3 gate fix: a live adjudication run wrongly `assign`ed a person to
+    an org based on a document/chunk category tag (e.g. a bracketed `[ACC]`
+    label) plus the person co-occurring with an org name in a document *about*
+    that org (an MOU/contract), not any statement of the person's own
+    affiliation. The rule text must explicitly warn against conflating
+    document-level categorization with personal-affiliation evidence, in both
+    the canonical prompt and its byte-identical enrich-batch copy."""
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    for fname in ["mcpbrain/enrich_prompt.md", "plugin/agents/enrich-batch.md"]:
+        text = (root / fname).read_text()
+        lower = text.lower()
+        assert "document" in lower and "categor" in lower, (
+            f"document-categorization anti-pattern guidance missing from {fname}"
+        )
+        assert "own affiliation" in lower or "personal affiliation" in lower, (
+            f"personal-affiliation distinction missing from {fname}"
+        )
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
