@@ -37,6 +37,41 @@ def test_build_review_units_respects_cap(tmp_path):
         assert isinstance(unit["finding_id"], int)
 
 
+def test_build_review_units_cap_is_per_kind_not_shared(tmp_path):
+    """cap bounds each kind independently; it must not be a single shared
+    budget across kinds (the starvation bug: a backlog in the first kind
+    used to consume the whole cap and starve every other kind)."""
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan 1")
+    s.record_finding("lint:orphan_entity", "e2", summary="orphan 2")
+    s.record_finding("lint:orphan_entity", "e3", summary="orphan 3")
+    s.record_finding("lint:missing_org", "e1", summary="missing org 1")
+    s.record_finding("lint:missing_org", "e2", summary="missing org 2")
+    s.record_finding("lint:missing_org", "e3", summary="missing org 3")
+
+    units = build_review_units(s, kinds=["lint:orphan_entity", "lint:missing_org"], cap=2)
+
+    orphan_ids = {f["id"] for f in s.open_findings("lint:orphan_entity")}
+    missing_org_ids = {f["id"] for f in s.open_findings("lint:missing_org")}
+    unit_ids = {u["finding_id"] for u in units}
+
+    orphan_units = unit_ids & orphan_ids
+    missing_org_units = unit_ids & missing_org_ids
+
+    assert len(orphan_units) == 2
+    assert len(missing_org_units) == 2
+    assert len(units) == 4
+
+
+def test_build_review_units_kind_with_fewer_than_cap_returns_all(tmp_path):
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan 1")
+
+    units = build_review_units(s, kinds=["lint:orphan_entity"], cap=50)
+
+    assert len(units) == 1
+
+
 def test_review_metrics(tmp_path):
     s = Store(str(tmp_path / "metrics.sqlite3"), dim=4)
     s.init()
