@@ -157,7 +157,22 @@ _TRIVIAL_CHARS = 300
 # intentionally NOT the heavier extractor action-heuristics — a false negative
 # here (missing a real action cue) just means the thread falls through to the
 # normal model path, which is the safe direction to err in.
-_ACTION_CUES = ("?", "can you", "please")
+# A thread is NOT trivial if any message hints at a question, request, OR a
+# commitment/action — short messages routinely carry real actions ("I'll send it
+# Monday"), and a false-trivial classification drops that action (the model never
+# sees it). Err toward non-trivial: an over-match just costs one model call, while a
+# missed commitment is silent data loss. Substring, case-insensitive.
+_ACTION_CUES = (
+    "?", "can you", "please",
+    # commitments
+    "i'll", "i will", "we'll", "we will", "i'm going", "we're going", "let me", "let's",
+    # action verbs
+    "send", "confirm", "schedule", "pay", "wire", "sign", "review", "follow up",
+    "followup", "deadline", "due", "action", "next step", "to-do", "todo",
+    # time anchors that usually accompany a commitment
+    "tomorrow", "next week", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "by eod", "by end of",
+)
 
 
 def is_trivial_thread(messages) -> bool:

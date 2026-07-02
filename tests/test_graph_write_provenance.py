@@ -527,6 +527,24 @@ def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):
     assert org == "Acme", f"model's own org signal must win over org_hint, got {org!r}"
 
 
+def test_sender_role_address_not_email_keyed(tmp_path, monkeypatch):
+    # I1/C1: a sender on a shared/role inbox (office@) must NOT be stamped with that
+    # address as their email_addr — otherwise email-equality dedup would later merge
+    # every distinct person who sends from that shared inbox.
+    monkeypatch.setattr("mcpbrain.config.enrich_sender_entities", lambda home: True)
+    s = _store(tmp_path)
+    extraction = {
+        "thread_id": "t-role", "org": "unknown", "content_type": "update", "summary": "s",
+        "messages": [{"message_id": "m1", "sender": "Dana Ng <office@centrepoint.church>", "date": "2026-02-01"}],
+        "entities": [], "relations": [], "actions": [], "topics": ["x"],
+    }
+    graph_write.apply(s, extraction, doc_ids=["doc-1"])
+    with s._connect() as db:
+        row = db.execute("SELECT email_addr FROM entities WHERE name='Dana Ng'").fetchone()
+    if row is not None:
+        assert (row[0] or "") == "", "role-address sender must not be email-keyed"
+
+
 def test_sender_entity_created_without_model(tmp_path, monkeypatch):
     monkeypatch.setattr("mcpbrain.config.enrich_sender_entities", lambda home: True)
     s = _store(tmp_path)

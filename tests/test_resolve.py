@@ -58,6 +58,39 @@ def test_deterministic_merges_same_type_only(tmp_path):
     assert "prayer-person" in ids
 
 
+def test_is_role_address():
+    from mcpbrain.resolve import is_role_address
+    assert is_role_address("office@centrepoint.church") is True
+    assert is_role_address("info@x.org") is True
+    assert is_role_address("no-reply@x.org") is True
+    assert is_role_address("hello+tag@x.org") is True          # +tag stripped
+    assert is_role_address("john.smith@centrepoint.church") is False
+    assert is_role_address("") is False
+    assert is_role_address("notanemail") is False
+
+
+def test_email_equality_skips_role_addresses(tmp_path):
+    # C1: distinct real people who share a ROLE/shared inbox (office@, info@) must
+    # NEVER be identity-merged — that would irreversibly collapse them. A genuine
+    # duplicate on a PERSONAL address still merges.
+    from mcpbrain.resolve import _email_equality_merges
+    store = Store(tmp_path / "resolve.sqlite3", dim=4); store.init()
+    store.upsert_entity("p1", "John Smith", "person", seen="2026-05-30")
+    store.upsert_entity("p2", "Jane Doe", "person", seen="2026-05-30")
+    store.upsert_entity("d1", "Sam Lee", "person", seen="2026-05-30")
+    store.upsert_entity("d2", "Samuel Lee", "person", seen="2026-05-30")
+    with store._connect() as db:
+        db.execute("UPDATE entities SET email_addr='office@centrepoint.church' WHERE id IN ('p1','p2')")
+        db.execute("UPDATE entities SET email_addr='sam.lee@x.org' WHERE id IN ('d1','d2')")
+
+    merged = _email_equality_merges(store, home=str(tmp_path))
+
+    ids = {e["id"] for e in store.list_entities()}
+    assert {"p1", "p2"} <= ids, "distinct people on a role inbox must NOT merge"
+    assert len({"d1", "d2"} & ids) == 1, "a real duplicate on a personal inbox should merge"
+    assert merged == 1
+
+
 def test_deterministic_merges_excludes_structural_types(tmp_path):
     # A document/thread/topic's identity is its SOURCE ID, not its title. Distinct
     # such nodes routinely share generic titles ("Untitled document", "TEST") and

@@ -41,6 +41,30 @@ from mcpbrain.chunking import slugify, _canonical_name
 log = logging.getLogger(__name__)
 
 
+# Shared/role mailbox local-parts. A person's identity must NEVER be keyed on one
+# of these: multiple DISTINCT people send from office@/info@/hello@ (a church runs
+# shared inboxes heavily), and email-equality dedup would irreversibly collapse them
+# into one entity. Kept broad; extend as new shared aliases appear.
+_ROLE_LOCAL_PARTS = frozenset({
+    "info", "hello", "hi", "hey", "support", "admin", "team", "contact", "contactus",
+    "enquiries", "enquiry", "office", "mail", "email", "noreply", "no-reply",
+    "donotreply", "do-not-reply", "notifications", "newsletter", "accounts",
+    "billing", "hr", "jobs", "careers", "sales", "help", "helpdesk", "service",
+    "feedback", "events", "media", "press", "marketing", "giving", "prayer",
+    "kids", "youth", "reception", "general", "all", "everyone", "staff",
+})
+
+
+def is_role_address(email: str) -> bool:
+    """True when an email is a shared/role mailbox (its local-part is a role token),
+    not a personal address. Such addresses must not key person-identity merges."""
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return False
+    local = email.split("@", 1)[0].split("+", 1)[0]  # drop +tags
+    return local in _ROLE_LOCAL_PARTS
+
+
 def canonical_key(name: str) -> str:
     """Normalised dedup key: honorific-stripped + accent-folded + slugified.
 
@@ -124,6 +148,8 @@ def _email_equality_merges(store, home=None) -> int:
     for _email, members in groups.items():
         if len(members) < 2:
             continue
+        if is_role_address(_email):
+            continue  # shared/role inbox — distinct people, never identity-merge (C1)
         survivor = max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
         for m in members:
             if m["id"] != survivor["id"]:
