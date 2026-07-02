@@ -441,7 +441,14 @@ def stats(store, home, status: dict) -> dict:
             "indexed": indexed,
             "enriched": enriched,
             "cold": gc["cold"],
-            "enriched_pct": round(enriched / indexed * 100) if indexed else 0,
+            # Measured against ELIGIBLE (warm) chunks, not the whole corpus:
+            # cold/low-signal chunks are deliberately never enriched, so
+            # including them in the denominator would peg the number low forever
+            # and read as "behind" when the pipeline is working as designed.
+            "enriched_pct": (
+                round(enriched / (indexed - gc["cold"]) * 100)
+                if (indexed - gc["cold"]) > 0 else 0
+            ),
         },
         "graph": {
             "entities": entities,
