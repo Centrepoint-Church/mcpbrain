@@ -1,6 +1,6 @@
 [project]
 name = "mcpbrain"
-version = "0.7.79"
+version = "0.7.80"
 requires-python = ">=3.12"
 dependencies = [
   "sqlite-vec>=0.1.6",
@@ -76,6 +76,7 @@ exclude = ["mcpbrain.maintenance*"]
     "enrich_prompt.md",
     "routines/*.md",
     "wizard/img/*",
+    "wizard/vendor/*",
     "records_templates/*",
     "records_templates/**/*",
 ]
