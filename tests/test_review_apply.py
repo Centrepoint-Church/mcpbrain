@@ -1,5 +1,7 @@
+import json
+
 from mcpbrain.store import Store
-from mcpbrain.review_apply import apply_orphan_verdicts
+from mcpbrain.review_apply import apply_orphan_verdicts, apply_missing_org_verdicts
 
 
 def _seed(tmp_path):
@@ -9,6 +11,14 @@ def _seed(tmp_path):
     s.upsert_entity("e2", "Real Person", "person", org="Acme", seen="2026-05-30")
     s.upsert_entity("e3", "Mystery Entity", "person", org="", seen="2026-05-30")
     return s
+
+
+def _write_config(tmp_path, data: dict) -> str:
+    (tmp_path / "config.json").write_text(json.dumps(data))
+    return str(tmp_path)
+
+
+ACME_CFG = {"orgs": [{"name": "Acme", "domains": ["acme.com"]}, {"name": "Personal"}]}
 
 
 def test_suppress_verdict_suppresses_entity_and_resolves_finding(tmp_path):
@@ -123,3 +133,119 @@ def test_suppress_verdict_with_missing_entity_leaves_finding_open(tmp_path):
     # Finding left open — will be picked up again on a future pass.
     open_ids = {f["id"] for f in s.open_findings("lint:orphan_entity")}
     assert finding["id"] in open_ids
+
+
+# --- Task 2.2: apply_missing_org_verdicts ---------------------------------
+
+
+def _seed_missing_org(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    s.upsert_entity("e1", "Vendor Co", "org", org="", seen="2026-05-30")
+    s.upsert_entity("e2", "Some Contact", "person", org="", seen="2026-05-30")
+    s.upsert_entity("e3", "Another Contact", "person", org="", seen="2026-05-30")
+    s.upsert_entity("e4", "Fourth Contact", "person", org="", seen="2026-05-30")
+    return s
+
+
+def test_assign_with_valid_taxonomy_org_sets_org_and_resolves(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid = s.record_finding("lint:missing_org", "e1", summary="no org")
+    finding = s.open_findings("lint:missing_org")[0]
+
+    result = apply_missing_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": "e1", "verdict": "assign", "org": "Acme"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
+    assert row["org"] == "Acme"
+    assert s.open_findings("lint:missing_org") == []
+    assert result == {"assigned": 1, "external": 0, "skipped": 0, "capped": 0}
+
+
+def test_assign_with_org_not_in_taxonomy_does_not_apply(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid = s.record_finding("lint:missing_org", "e2", summary="no org")
+    finding = s.open_findings("lint:missing_org")[0]
+
+    result = apply_missing_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": "e2", "verdict": "assign", "org": "MadeUpOrg"}],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        row = db.execute("SELECT org FROM entities WHERE id='e2'").fetchone()
+    assert row["org"] == ""  # not silently applied
+    # Not counted as a success — an invalid-org "assign" must not masquerade as one.
+    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0}
+
+
+def test_external_and_skip_resolve_without_org_change(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid_a = s.record_finding("lint:missing_org", "e2", summary="no org")
+    fid_b = s.record_finding("lint:missing_org", "e3", summary="no org")
+    findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:missing_org")}
+
+    result = apply_missing_org_verdicts(
+        s,
+        [
+            {"finding_id": findings["e2"], "ref_id": "e2", "verdict": "external"},
+            {"finding_id": findings["e3"], "ref_id": "e3", "verdict": "skip"},
+        ],
+        cap=50,
+        home=home,
+    )
+
+    with s._connect() as db:
+        rows = db.execute("SELECT id, org FROM entities WHERE id IN ('e2','e3')").fetchall()
+    assert {r["org"] for r in rows} == {""}
+    assert s.open_findings("lint:missing_org") == []
+    assert result == {"assigned": 0, "external": 1, "skipped": 1, "capped": 0}
+
+
+def test_unrecognised_verdict_treated_as_skip_missing_org(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid = s.record_finding("lint:missing_org", "e2", summary="no org")
+    finding = s.open_findings("lint:missing_org")[0]
+
+    result = apply_missing_org_verdicts(
+        s,
+        [{"finding_id": finding["id"], "ref_id": "e2", "verdict": "maybe???"}],
+        cap=50,
+        home=home,
+    )
+
+    assert s.open_findings("lint:missing_org") == []
+    assert result == {"assigned": 0, "external": 0, "skipped": 1, "capped": 0}
+
+
+def test_cap_stops_applying_assign_verdicts(tmp_path):
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_missing_org(tmp_path)
+    fid1 = s.record_finding("lint:missing_org", "e1", summary="no org")
+    fid2 = s.record_finding("lint:missing_org", "e4", summary="no org")
+    findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:missing_org")}
+
+    verdicts = [
+        {"finding_id": findings["e1"], "ref_id": "e1", "verdict": "assign", "org": "Acme"},
+        {"finding_id": findings["e4"], "ref_id": "e4", "verdict": "assign", "org": "Personal"},
+    ]
+    result = apply_missing_org_verdicts(s, verdicts, cap=1, home=home)
+
+    assert result["assigned"] == 1
+    assert result["capped"] == 1
+    with s._connect() as db:
+        rows = db.execute("SELECT id, org FROM entities WHERE org!=''").fetchall()
+    assert len(rows) == 1
+    # The capped finding is left open (not resolved) so it's picked up next run.
+    assert len(s.open_findings("lint:missing_org")) == 1
