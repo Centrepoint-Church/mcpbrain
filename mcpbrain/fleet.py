@@ -15,9 +15,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _STALE_HOURS = 48
-_PROBE_ORDER = ("google", "claude", "clickup", "backup", "records", "enrichment")
+_PROBE_ORDER = ("google", "claude", "backup", "records", "enrichment")
 _PROBE_LABELS = {
-    "google": "Google", "claude": "Claude", "clickup": "ClickUp",
+    "google": "Google", "claude": "Claude",
     "backup": "Backup", "records": "Records", "enrichment": "Enrichment",
 }
 _GLYPH = {"ok": "✅", "needs_action": "⚠️", "not_started": "❌"}

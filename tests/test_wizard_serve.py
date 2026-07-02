@@ -199,7 +199,6 @@ def test_timezone_is_a_select():
 def test_prefill_and_dropdown_bootstrap_present():
     assert "/api/config" in WIZ          # one-shot prefill fetch
     assert "/api/timezones" in WIZ       # dropdown population
-    assert "leave blank to keep" in WIZ  # masked-token placeholder
 
 
 def test_home_status_renders_before_main():
@@ -212,12 +211,9 @@ def test_connection_order_includes_new_cards():
 
 
 def test_guided_elements_present():
-    assert "Settings → Apps → API Token" in WIZ
-    assert "Copy link" in WIZ                       # List ID instructions
     assert 'id="step-projects"' in WIZ
     assert "/api/records/scaffold" in WIZ
-    assert "onerror" in WIZ                          # screenshots hide when absent
-    assert "/img/clickup-apps-token.png" in WIZ
+    assert "clickup" not in WIZ.lower()             # ClickUp fully removed from setup
 
 
 def test_final_step_defers_scheduling_to_claude_code():

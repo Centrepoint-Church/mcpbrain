@@ -56,6 +56,10 @@ def probe_claude(home) -> dict:
     return _state("ok", "Connected", last_verified=last)
 
 
+# NOTE: ClickUp is not currently surfaced as a product connection — it was
+# removed from all_connections()/verify_connections() (and the setup wizard).
+# probe_clickup/_verify_clickup are kept dormant so the integration can be
+# re-wired later without rebuilding the probe.
 def probe_clickup(home) -> dict:
     key = config.clickup_api_key(home).strip()
     if not key:
@@ -103,7 +107,7 @@ def _verify_google(home) -> dict:
 
 def verify_connections(home, store=None) -> dict:
     """Run the expensive (network) checks and cache them to connections.json atomically."""
-    verified = {"clickup": _verify_clickup(home), "google": _verify_google(home)}
+    verified = {"google": _verify_google(home)}
     import os
     import tempfile
     p = Path(home) / "connections.json"
@@ -195,7 +199,6 @@ def all_connections(home, store=None) -> dict:
     cheap = {
         "google": probe_google(home),
         "claude": probe_claude(home),
-        "clickup": probe_clickup(home),
         "backup": probe_backup(home),
         "records": probe_records(home),
         "enrichment": probe_enrichment(home),
