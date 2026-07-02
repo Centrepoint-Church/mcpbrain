@@ -1784,11 +1784,11 @@ class Daemon:
             profile_reqs = build_profile_requests(self._store)
             community_reqs = build_community_requests(self._store)
             distil_reqs = build_distil_requests(self._store)
-            self._pending_blocks = {
+            self._pending_blocks.update({
                 "profile_synthesis": profile_reqs,
                 "community_synthesis": community_reqs,
                 "memory_distil": distil_reqs,
-            }
+            })
         except Exception as exc:  # noqa: BLE001 — must never crash the loop
             log.warning(
                 "blocks build failed (will retry next due): %s", exc, exc_info=True
