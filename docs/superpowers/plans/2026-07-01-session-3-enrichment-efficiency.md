@@ -8,6 +8,16 @@
 
 **Tech Stack:** Python 3.12, SQLite (`brain.sqlite3`), pytest, ruff, Claude Code subagents (Sonnet coordinator / Haiku executors), MCP tools (`brain_enrich_units`/`_pull`/`_push`/`_advance`).
 
+---
+
+## STATUS — 2026-07-02
+
+- **All phases SHIPPED as 0.7.76**, then a critical fix in **0.7.77** (source/dist/plugin + local daemon all at 0.7.77). Suite 1816 passed.
+- **Phase 1** (deterministic sender entities + prompt scope), **Phase 2** (trivial-thread short-circuit), **Phase 3.1** (`spool_thread_cap` 500→2000), **Phase 3.2** (`parallel_backfill` removed, #24), **Phase 3.3** (`resolve_entities` daily cadence, default ON, kill-switch = interval 0) — all landed.
+- **Post-ship review (multi-agent) found a CRITICAL bug 0.7.76 introduced (fixed in 0.7.77):** the daily `resolve_entities` cadence ran `_email_equality_merges`, which grouped ALL persons by `email_addr` with no shared-inbox guard — combined with Session-3's deterministic sender-email stamping, distinct people on a role/shared inbox (`office@`/`info@`) would have been irreversibly merged, daily and unattended. Fix: `resolve.is_role_address()` guards `_email_equality_merges` and all three person email-stamping sites in `graph_write.apply()`. **No live corruption occurred** — a live check showed 129 persons carry a role email but 0 role address had >1 person (no collision yet), so the fix was preventive. Also broadened trivial-thread cues (0.7.76 could drop short commitments like "I'll send it Monday").
+- **Phase 4 (at-scale aggregate validation): OPEN — accruing.** Now unblocked (daemon on 0.7.77 + higher throughput); measure `enrich-eval --compare enrich-baseline-session3.json` after a few hundred threads process. Baseline snapshot committed in Phase 0.
+- **Open (not code):** marketplace deployment (manual org-admin step); optional cosmetic cleanup of the 129 role-email-stamped persons (no merge exposure, low priority).
+
 ## Global Constraints
 
 - **Version lives in FOUR files, kept equal:** `pyproject.toml`, `mcpbrain/__init__.py`, `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json` (+ `uv.lock` mcpbrain entry). Current released version is **0.7.75**. Release is a separate, explicitly-instructed step (`docs/RELEASE-RUNBOOK.md`) — do not release within a task.
