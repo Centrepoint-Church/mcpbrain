@@ -53,8 +53,16 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-01):** all four version files **and** the published wheel are at
-  `0.7.75` — source, dist index, and plugin manifests are in step. 0.7.72 shipped the Session-1
+- **Current state (2026-07-02):** all four version files **and** the published wheel are at
+  `0.7.77` — source, dist index, and plugin manifests are in step. 0.7.76 shipped Session-3
+  efficiency (deterministic sender person-entities so Haiku extracts only body-mentioned
+  people, trivial-thread short-circuit, `spool_thread_cap` default 500→2000, `parallel_backfill`
+  removed, `resolve_entities` wired into a daily cadence). **0.7.77 fixes a CRITICAL bug that
+  0.7.76 introduced:** the daily `resolve_entities` cadence + deterministic sender-email stamping
+  would have irreversibly merged distinct people who share a role/shared inbox (`office@`/`info@`);
+  now `is_role_address()` blocks role-address groups in `_email_equality_merges` and refuses to
+  key any person on a role address. Also broadened trivial-thread cues (was dropping short
+  commitments). Below the state line: 0.7.72 shipped the Session-1
   enrichment-efficiency work (provenance stamping, message-metadata off the model, bigger
   batches, strict push schema) + the cold-recall decouple. 0.7.73 adds Session-2 graph-depth
   (header `email_addr`, deterministic org default + `works_at`/`mentioned_with` relations,
