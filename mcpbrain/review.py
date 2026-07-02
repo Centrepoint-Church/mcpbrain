@@ -19,7 +19,7 @@ def _entity_sub(store, eid):
                 spans.append(row[0][:400])
     return {"id": r[0], "name": r[1], "type": r[2], "org": r[3], "email_addr": r[4] or "",
             "aliases": r[5] or "", "mentions": r[6] or 0,
-            "relations": [{"relation": x[0], "other": x[1]} for x in rels],
+            "relations": [{"relation": x[0], "other_name": x[1]} for x in rels],
             "observations": [{"attribute": x[0], "value": x[1]} for x in obs],
             "source_spans": spans}
 
