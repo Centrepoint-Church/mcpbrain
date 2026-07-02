@@ -96,3 +96,19 @@ def test_canvas_degrades_on_bad_store(tmp_path):
         pass  # no tables
     out = graph_view.graph_canvas(_Store(p), min_conn=1)
     assert out == {"nodes": [], "links": [], "communities": {}}
+
+
+def test_canvas_degrades_on_corrupt_file(tmp_path):
+    p = tmp_path / "corrupt.sqlite3"
+    p.write_bytes(b"not a database")
+    out = graph_view.graph_canvas(_Store(p), min_conn=1)
+    assert out == {"nodes": [], "links": [], "communities": {}}
+
+
+def test_canvas_too_large_reports_true_count(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    ents = [(f"e{i}", f"N{i}", "person", "", 9, "") for i in range(6000)]
+    _seed(p, entities=ents, relations=[])
+    out = graph_view.graph_canvas(_Store(p), min_conn=1)
+    assert out.get("error") == "too_large" and out["cap"] == 5000
+    assert out["candidate_count"] == 6000
