@@ -57,6 +57,12 @@ def test_enrichment_skill_body_names_contract():
     assert "pending.json" in body and "enrich_inbox" in body
 
 
+def test_prompt_scopes_entities_to_body():
+    text = PROMPT_PATH.read_text().lower()
+    assert "already creates an entity for every message sender" in text
+    assert "body" in text  # entities are the body-mentioned delta
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
