@@ -1434,6 +1434,20 @@ class Store:
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
             return cur.rowcount
 
+    def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "") -> bool:
+        """Set owner/owner_entity_id on one action. Returns True if a row was actually updated.
+
+        Used by the ownerless-action review applier (Session-4, Task 3.1): a
+        rowcount check so a stale/nonexistent action_id (e.g. resolved or
+        deleted between detection and verdict) is reported as a no-op miss
+        rather than a phantom success.
+        """
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE actions SET owner=?, owner_entity_id=? WHERE id=?",
+                (owner, owner_entity_id, action_id))
+            return cur.rowcount > 0
+
     def snooze_action(self, action_id: int, until_iso: str) -> bool:
         """Snooze an OPEN action until until_iso (a YYYY-MM-DD date).
 

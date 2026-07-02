@@ -24,9 +24,51 @@ def _entity_sub(store, eid):
             "source_spans": spans}
 
 
+def _action_sub(store, action_id):
+    with store._connect() as db:
+        r = db.execute(
+            "SELECT text, deadline, thread_id, source_doc_id, owner, owner_entity_id "
+            "FROM actions WHERE id=?", (action_id,)).fetchone()
+        if not r:
+            return None
+        spans = []
+        if r[3]:
+            row = db.execute("SELECT text FROM chunks WHERE doc_id=? LIMIT 1", (r[3],)).fetchone()
+            if row and row[0]:
+                spans.append(row[0][:400])
+        participants = db.execute(
+            "SELECT DISTINCT sender, sender_email FROM email_context "
+            "WHERE thread_id=? ORDER BY date_iso ASC LIMIT 10", (r[2],)).fetchall()
+        first = db.execute(
+            "SELECT sender, sender_email FROM email_context "
+            "WHERE thread_id=? ORDER BY date_iso ASC LIMIT 1", (r[2],)).fetchone()
+    return {"text": r[0], "deadline": r[1], "thread_id": r[2], "source_doc_id": r[3],
+            "owner": r[4] or "", "owner_entity_id": r[5] or "",
+            "source_spans": spans,
+            "participants": [{"sender": p[0], "sender_email": p[1]} for p in participants],
+            "sender": {"sender": first[0], "sender_email": first[1]} if first else {}}
+
+
 def build_review_packet(store, finding: dict) -> dict:
     ftype = finding.get("finding_type", "")
     ref = finding.get("ref_id", "")
+    if ftype == "lint:ownerless_action" or ftype.startswith("ownerless_action"):
+        try:
+            action_id = int(ref)
+        except (TypeError, ValueError):
+            action_id = None
+        act = _action_sub(store, action_id) if action_id is not None else None
+        act = act or {}
+        pk = {"finding_type": ftype, "ref_id": ref,
+              "summary": finding.get("summary", ""), "detail": finding.get("detail", ""),
+              "entity": None,
+              "action": {k: act.get(k) for k in ("text", "deadline", "owner", "owner_entity_id")},
+              "source_spans": act.get("source_spans", []),
+              "thread": {"participants": act.get("participants", []), "sender": act.get("sender", {})},
+              "relations": [], "observations": [],
+              "taxonomy": list(orgs.taxonomy_from_config().names)}
+        return pk
+
     ent = _entity_sub(store, ref) or {}
     pk = {"finding_type": ftype, "ref_id": ref,
           "summary": finding.get("summary", ""), "detail": finding.get("detail", ""),
