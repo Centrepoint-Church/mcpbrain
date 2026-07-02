@@ -844,3 +844,40 @@ def test_drain_attempt_cap_fires_when_invalid_extraction_has_unit_messages(tmp_p
     assert "d-cap" in all_bumped, (
         f"chunk d-cap must be in the bumped set; got {bump_calls!r}"
     )
+
+
+# --- Task 4.2: review_* BLOCK_DRAINERS pull their cap from config -----------
+#
+# Tasks 2.1-3.2 registered the four review_* BLOCK_DRAINERS with a literal
+# cap=50 ("cap is a literal until Task 4.1 wires this to
+# config.review_max_apply_per_run"). Task 4.1 added the config accessor;
+# Task 4.2 wires it in. These tests exercise the registration lambdas
+# directly (not the apply_*_verdicts functions, which the review_apply tests
+# already cover with an explicit cap= argument) to confirm the wiring itself.
+
+@pytest.mark.parametrize("block_key,fn_name", [
+    ("review_orphan", "apply_orphan_verdicts"),
+    ("review_missing_org", "apply_missing_org_verdicts"),
+    ("review_ownerless", "apply_ownerless_verdicts"),
+    ("review_org", "apply_org_verdicts"),
+])
+def test_block_drainers_use_configured_review_cap(
+        tmp_path, monkeypatch, block_key, fn_name):
+    """Each review_* registration passes config.review_max_apply_per_run's
+    value as cap=, not a hardcoded 50."""
+    from mcpbrain import config
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    config.write_config(str(tmp_path), {"review_max_apply_per_run": 3})
+
+    captured = {}
+
+    def _fake(store, verdicts, *, cap, **kwargs):
+        captured["cap"] = cap
+        return {}
+
+    monkeypatch.setattr(drain.review_apply, fn_name, _fake)
+
+    drain.BLOCK_DRAINERS[block_key](None, {block_key: []})
+
+    assert captured["cap"] == 3
