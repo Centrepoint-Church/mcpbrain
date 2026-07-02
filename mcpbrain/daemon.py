@@ -180,6 +180,8 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # Task 3.3: daily deterministic entity dedup (issue #23-fix validated).
     CadencePass("resolve_entities", "_resolve_entities_interval_s",
                 "_last_resolve_entities", "_run_resolve_entities"),
+    # Session-4: daily AI-adjudicated graph-hygiene review (build review units).
+    CadencePass("review", "_review_interval_s", "_last_review", "_run_review"),
     # B3 salience scoring: structural importance per chunk.
     # needs_configured=False: salience is identity-agnostic.
     CadencePass("salience_score", "_salience_score_interval_s",
@@ -523,6 +525,10 @@ class Daemon:
         # OFF by default; enabled via cadences config.
         self._resolve_entities_interval_s: float | None = None
         self._last_resolve_entities = None
+        # Session-4: daily AI-adjudicated graph-hygiene review (build review units).
+        # OFF by default; enabled via cadences config.
+        self._review_interval_s: float | None = None
+        self._last_review = None
         # B3 salience scoring: structural importance per chunk (daily).
         self._salience_score_interval_s: float | None = None
         self._last_salience_score = None
@@ -884,6 +890,7 @@ class Daemon:
             self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
             self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
             self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
+            self._review_interval_s = cadences["review_interval_s"]
             self._salience_score_interval_s = cadences["salience_score_interval_s"]
             self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
@@ -1584,6 +1591,47 @@ class Daemon:
         self._last_resolve_entities = now
         return summary
 
+    # -- Session-4 AI-adjudication review (graph-hygiene findings) ------------
+
+    def _run_review(self) -> dict | None:
+        """Daily AI-adjudication review cadence (Session-4). Builds review units
+        from open graph-hygiene findings and stashes them as block units for the
+        existing enrich pipeline to pick up — no new units/pull/push mechanism.
+        """
+        if not self._is_due("_review_interval_s", "_last_review"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain import review
+            from mcpbrain import config as _config
+            home = str(_config.app_dir())
+            cap = _config.review_max_apply_per_run(home)
+            kind_to_block_key = {
+                "lint:orphan_entity": "review_orphan",
+                "lint:missing_org": "review_missing_org",
+                "lint:ownerless_action": "review_ownerless",
+                "lint:ambiguous_org": "review_org",
+                "lint:duplicate_org": "review_org",
+                "org_unrecognised": "review_org",
+            }
+            units = review.build_review_units(
+                self._store, kinds=list(kind_to_block_key), cap=cap)
+            by_block: dict[str, list] = {}
+            for u in units:
+                block_key = kind_to_block_key.get(u["packet"].get("finding_type"))
+                if block_key:
+                    by_block.setdefault(block_key, []).append(u)
+            for key, items in by_block.items():
+                if items:
+                    self._pending_blocks[key] = items
+            counts = {k: len(v) for k, v in by_block.items()}
+            log.info("review: stashed %s", counts)
+        except Exception as exc:  # noqa: BLE001 — review must never crash the loop
+            log.warning("review pass failed (will retry next due): %s", exc, exc_info=True)
+            return {"review": False, "error": str(exc)}
+        self._last_review = now
+        return counts
+
     # -- periodic graph lint ------------------------------------------------
 
     def _run_lint(self) -> dict | None:
@@ -2049,6 +2097,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "feedback_aggregate_interval_s":  86400.0,   # S2: nightly aggregate
     "org_backfill_interval_s":        86400.0,   # Q4: daily deterministic backfill
     "resolve_entities_interval_s":    86400.0,   # Task 3.3: daily deterministic entity dedup (issue #23-fix validated)
+    "review_interval_s":              86400.0,   # Session-4: daily AI-adjudicated graph-hygiene review
     "salience_score_interval_s":      86400.0,   # B3: daily structural salience
     "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
@@ -2075,6 +2124,7 @@ _CADENCE_KEYS = (
     "feedback_aggregate_interval_s",
     "org_backfill_interval_s",
     "resolve_entities_interval_s",
+    "review_interval_s",
     "salience_score_interval_s",
     "decay_pass_interval_s",
     "consolidation_interval_s",
@@ -2159,6 +2209,7 @@ def main(argv=None) -> None:
     daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
     daemon._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
+    daemon._review_interval_s = cadences["review_interval_s"]
     daemon._salience_score_interval_s = cadences["salience_score_interval_s"]
     daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]
     daemon._consolidation_interval_s = cadences["consolidation_interval_s"]
