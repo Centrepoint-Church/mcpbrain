@@ -23,7 +23,7 @@ from email.utils import parsedate_to_datetime
 from nameparser import HumanName
 
 from mcpbrain import config, orgs
-from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index
+from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index, is_role_address
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
     _normalise_title_for_dedup,
@@ -1007,9 +1007,12 @@ def apply(store, extraction, *, doc_ids, identity=None,
     sender_id = ""
     if sender_name and sender_email and not _is_owner(sender_name, owner) \
             and (not identity or identity.lower() not in sender_email.lower()):
+        # Do not key a person on a shared/role inbox (office@/info@): distinct people
+        # send from it and email-equality dedup would collapse them (C1).
+        _sender_email = "" if is_role_address(sender_email) else sender_email
         sender_id = upsert_entity(
             store, name=sender_name, entity_type="person", org=sender_org,
-            email_addr=sender_email, taxonomy=taxonomy, valid_from=lead_date_iso) or ""
+            email_addr=_sender_email, taxonomy=taxonomy, valid_from=lead_date_iso) or ""
 
     # email_context row for the lead message.
     store.upsert_email_context(
@@ -1050,7 +1053,9 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if not msg_email:
             continue
         msg_name_key = strip_affiliation(_extract_name(msg_header)).strip().lower()
-        if msg_name_key and msg_name_key not in header_email_by_name:
+        # Never map a person to a shared/role inbox (office@/info@): it would email-key
+        # them and later collapse distinct senders (C1). Skip; they get no header email.
+        if msg_name_key and msg_name_key not in header_email_by_name and not is_role_address(msg_email):
             header_email_by_name[msg_name_key] = msg_email
 
     # Write-time dedup index. Prefer a caller-supplied index (drain builds ONE per
@@ -1212,8 +1217,13 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 continue
             if s_name.strip().lower() in {n.strip().lower() for n in name_to_id}:
                 continue  # model already surfaced this person
+            # Create the person, but do NOT key them on a shared/role inbox — multiple
+            # distinct people send from office@/info@ and email-equality dedup would
+            # collapse them (C1). A real human on a shared inbox is still captured, just
+            # without the misleading shared address as their identity.
+            entity_email = "" if is_role_address(s_email) else s_email
             sid = upsert_entity(store, name=s_name, entity_type="person", org="",
-                                email_addr=s_email, taxonomy=taxonomy, valid_from=lead_date_iso)
+                                email_addr=entity_email, taxonomy=taxonomy, valid_from=lead_date_iso)
             if not sid:
                 continue
             name_to_id[s_name] = sid
