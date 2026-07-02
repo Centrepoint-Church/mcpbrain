@@ -496,6 +496,19 @@ def test_prepare_thread_block_shape(tmp_path, monkeypatch):
     assert m["text"] == "body text"
 
 
+def test_trivial_thread_keeps_short_commitments():
+    # I2: a genuinely trivial ack is short-circuited, but a SHORT message carrying a
+    # commitment/action must NOT be classified trivial — otherwise the model never
+    # sees it and the action is silently dropped.
+    from mcpbrain.prepare import is_trivial_thread
+    assert is_trivial_thread([{"text": "Thanks, sounds good!"}]) is True
+    assert is_trivial_thread([{"text": "Great, see you there."}]) is True
+    assert is_trivial_thread(
+        [{"text": "Confirmed, I'll send the contract Monday and wire the deposit."}]) is False
+    assert is_trivial_thread(
+        [{"text": "Sounds good — we'll follow up next week."}]) is False
+
+
 def test_thread_block_has_org_hint(monkeypatch):
     """_thread_block attaches org_hint derived from the lead sender's domain,
     via graph_write.org_from_email against the configured taxonomy. A lead
