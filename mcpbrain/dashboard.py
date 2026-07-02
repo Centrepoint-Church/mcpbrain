@@ -357,6 +357,111 @@ def circles_today(store) -> list[dict]:
         return []
 
 
+def _graph_counts(path: Path) -> dict:
+    """Row counts for the knowledge-graph + cold-chunk stats, read-only.
+
+    Every table is guarded on existence so a fresh store (or an older schema
+    without a table/column) degrades each count to 0 rather than failing the
+    whole stats payload. Table names come from a fixed allowlist, never input.
+    """
+    out = {"entities": 0, "relations": 0, "observations": 0, "cold": 0}
+    try:
+        db = _open_ro(path)
+        try:
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+            def count(table: str) -> int:
+                if table not in tables:
+                    return 0
+                return db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+            out["entities"] = count("entities")
+            out["relations"] = count("entity_relations")
+            out["observations"] = count("entity_observations")
+            if "chunks" in tables:
+                cols = {r["name"] for r in db.execute("PRAGMA table_info(chunks)").fetchall()}
+                if "enrich_state" in cols:
+                    out["cold"] = db.execute(
+                        "SELECT COUNT(*) FROM chunks WHERE enrich_state='cold'").fetchone()[0]
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        log.warning("_graph_counts: cannot read graph tables: %s", exc)
+    return out
+
+
+_SOURCE_LABELS = {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar"}
+_CONNECTION_LABELS = {
+    "google": "Google", "claude": "Claude plugin", "backup": "Backup",
+    "records": "Records", "enrichment": "Enrichment",
+}
+
+
+def stats(store, home, status: dict) -> dict:
+    """Assemble the daemon/plugin stats payload for the dashboard.
+
+    Pure w.r.t. its inputs: the daemon's status() snapshot supplies index/enrich
+    counts, spool depth, per-source backfill, connections, version and paused
+    state; the store supplies the graph row-counts and community count. Kept
+    testable by taking `status` as an argument rather than reaching for a daemon.
+    """
+    path = store._path if hasattr(store, "_path") else store.path
+    gc = _graph_counts(path)
+    try:
+        communities = len(store.list_communities())
+    except Exception as exc:  # noqa: BLE001 — degrade, never break the payload
+        log.warning("stats: list_communities failed: %s", exc)
+        communities = 0
+
+    indexed = int(status.get("chunk_count") or 0)
+    enriched = int(status.get("enriched_count") or 0)
+    entities = gc["entities"]
+    relations = gc["relations"]
+
+    backfill = status.get("backfill") or {}
+    sources = [
+        {"name": s, "label": _SOURCE_LABELS[s],
+         "reached": (backfill.get(s) or {}).get("reached"),
+         "done": bool((backfill.get(s) or {}).get("done"))}
+        for s in ("gmail", "drive", "calendar")
+    ]
+
+    conns = status.get("connections") or {}
+    connections = [
+        {"name": k, "label": _CONNECTION_LABELS.get(k, k.title()),
+         "state": (conns.get(k) or {}).get("state", "not_started"),
+         "detail": (conns.get(k) or {}).get("detail", "")}
+        for k in ("google", "claude", "backup", "records", "enrichment") if k in conns
+    ]
+
+    return {
+        "as_of": _now_iso(),
+        "index": {
+            "indexed": indexed,
+            "enriched": enriched,
+            "cold": gc["cold"],
+            "enriched_pct": round(enriched / indexed * 100) if indexed else 0,
+        },
+        "graph": {
+            "entities": entities,
+            "relations": relations,
+            "observations": gc["observations"],
+            "communities": communities,
+            "links_per_entity": round(relations / entities, 1) if entities else 0.0,
+        },
+        "sources": sources,
+        "spool": status.get("spool") or {"pending": 0, "inbox": 0},
+        "connections": connections,
+        "daemon": {
+            "paused": bool(status.get("paused")),
+            "version": status.get("version") or "",
+            "enrich_enabled": bool(status.get("enrich_enabled")),
+            "open_findings": int(status.get("open_findings") or 0),
+        },
+    }
+
+
 def annotate_meeting_packs(store, calendar_events: list[dict]) -> list[dict]:
     """Set has_pack=True on calendar events that have a meeting pack in the store."""
     if not calendar_events:

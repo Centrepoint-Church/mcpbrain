@@ -128,28 +128,8 @@
     <div class="row" style="margin-top:8px">
       <button class="ghost" type="button" onclick="addOrgRow()">+ Add organisation</button>
     </div>
-    <p class="desc" style="margin-top:14px">ClickUp integration syncs dashboard actions to a list. Both fields are optional.</p>
-    <details class="howto">
-      <summary>Show me how to get my ClickUp token &amp; list ID</summary>
-      <p><b>API token:</b> Settings → Apps → API Token</p>
-      <ol>
-        <li>In ClickUp, click your avatar (top-right) → <b>Settings</b>.</li>
-        <li>In the sidebar, click <b>Apps</b>.</li>
-        <li>Under <b>API Token</b>, click <b>Generate</b>, then <b>Copy</b> (it starts with <code>pk_</code>).</li>
-      </ol>
-      <img src="/img/clickup-apps-token.png" alt="ClickUp API Token screen" onerror="this.style.display='none'">
-      <p><b>List ID:</b> right-click the List in the sidebar → <b>Copy link</b>. The number after <code>/li/</code> in the link is your List ID.</p>
-      <img src="/img/clickup-list-copylink.png" alt="ClickUp Copy link" onerror="this.style.display='none'">
-      <p><a href="https://app.clickup.com" target="_blank" rel="noopener">Open ClickUp</a></p>
-    </details>
-    <div class="row">
-      <input id="clickup_api_key" type="password" placeholder="ClickUp API token (pk_…)" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="clickup_list_id" type="text" placeholder="ClickUp list ID (e.g. 901610549962)" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="row" style="margin-top:8px">
-      <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;font-weight:600;color:var(--ink);flex:1">Timezone (required for ClickUp deadlines)
+    <div class="row" style="margin-top:14px">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;font-weight:600;color:var(--ink);flex:1">Timezone (used for deadlines &amp; daily digests)
         <select id="timezone" required></select>
       </label>
     </div>
@@ -276,10 +256,6 @@ async function saveProfile(){
   if(orole) body.owner_role = orole;
   const orgRows = collectOrgs();
   if(orgRows.length) body.orgs = orgRows;
-  const ck = $("clickup_api_key").value.trim();
-  if(ck) body.clickup_api_key = ck;
-  const cl = $("clickup_list_id").value.trim();
-  if(cl) body.clickup_list_id = cl;
   const tz = $("timezone").value.trim();
   if(tz) body.timezone = tz;
   try{
@@ -355,7 +331,7 @@ function renderStatus(j){
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 function renderConnections(conns){
-  const order = ["google","claude","clickup","backup","records","enrichment"];
+  const order = ["google","claude","backup","records","enrichment"];
   const cards = order.filter(k => conns[k]).map(k => {
     const c = conns[k];
     const detail = c.detail ? ` — ${esc(c.detail)}` : "";
@@ -505,10 +481,6 @@ async function prefillFromConfig(){
       row.querySelector(".org-domains").value = (o.domains || []).join(", ");
       if(i > 0) rows.appendChild(row);
     });
-  }
-  if(c.clickup_list_id) $("clickup_list_id").value = c.clickup_list_id;
-  if(c.clickup_api_key_set){
-    $("clickup_api_key").placeholder = "•••• configured — leave blank to keep";
   }
   const fleet = c.fleet || {};
   if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;

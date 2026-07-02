@@ -63,6 +63,14 @@ class TrayController:
         """Return the number of open findings from the last status snapshot."""
         return int(self._last.get("open_findings") or 0) if self._last else 0
 
+    def indexed_count(self) -> int:
+        """Number of indexed chunks from the last status snapshot."""
+        return int(self._last.get("chunk_count") or 0) if self._last else 0
+
+    def enriched_count(self) -> int:
+        """Number of graph-enriched chunks from the last status snapshot."""
+        return int(self._last.get("enriched_count") or 0) if self._last else 0
+
     def attention(self) -> list[dict]:
         """Connections that need the user to act, as [{connection, detail}]."""
         if not self._last:
@@ -136,19 +144,22 @@ class TrayController:
     # -- menu description (no pystray types) ----------------------------------
 
     def menu_items(self) -> list[tuple[str, object, bool]]:
-        """Return a plain (label, handler, enabled) description of the menu."""
-        if self.is_paused():
-            toggle = ("Resume", self.on_resume, self._available)
+        """Return a plain (label, handler, enabled) description of the menu.
+
+        Layout: Indexed/Enriched counts (or a "not running" line when the daemon
+        is down) → Open Dashboard → conditional Reconnect Google → version →
+        Quit. Pause/Resume and Open-setup have moved off the tray: setup now
+        lives behind the dashboard's settings cog.
+        """
+        items: list[tuple[str, object, bool]] = []
+        if not self._available or self._last is None:
+            items.append(("Daemon not running", None, False))
         else:
-            toggle = ("Pause", self.on_pause, self._available)
-        items = [
-            (self.status_text(), None, False),
-            ("Open Dashboard", self.on_open_dashboard, True),
-            toggle,
-        ]
+            items.append((f"Indexed: {self.indexed_count():,}", None, False))
+            items.append((f"Enriched: {self.enriched_count():,}", None, False))
+        items.append(("Open Dashboard", self.on_open_dashboard, True))
         if any(a["connection"] == "google" for a in self.attention()):
             items.append(("Reconnect Google", self.on_reconnect_google, self._available))
-        items.append(("Open setup…", self.on_open_setup, True))
         ver = (self._last or {}).get("version")
         items.append((f"Up to date · v{ver}" if ver else "mcpbrain", None, False))
         items.append(("Quit", self.on_quit, True))

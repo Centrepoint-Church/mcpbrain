@@ -117,6 +117,19 @@ class ControlServer:
                     st = server.daemon.status()
                     return h_json(self, 200, {"connected": st["google_connected"],
                                               "granted_scopes": st["granted_scopes"]})
+                if self.path == "/api/dashboard/stats":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    # Same JSON-error contract as the other dashboard reads: a
+                    # raise here would drop the connection and the page could only
+                    # say "Could not load data" with no cause.
+                    try:
+                        from mcpbrain import dashboard as dash
+                        return h_json(self, 200, dash.stats(
+                            server.store, str(server.home), server.daemon.status()))
+                    except Exception as exc:
+                        log.exception("dashboard stats failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path == "/api/dashboard/today":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})

@@ -13,10 +13,11 @@ from mcpbrain.tray import TrayController
 class FakeClient:
     """Stand-in for ControlClient. `up=False` simulates a stopped daemon."""
 
-    def __init__(self, up=True, paused=False, count=7, open_findings=0):
+    def __init__(self, up=True, paused=False, count=7, enriched=0, open_findings=0):
         self.up = up
         self.paused = paused
         self.count = count
+        self.enriched = enriched
         self.open_findings = open_findings
         self.calls = []
 
@@ -25,6 +26,7 @@ class FakeClient:
         if not self.up:
             raise DaemonUnavailable("no daemon")
         return {"paused": self.paused, "chunk_count": self.count,
+                "enriched_count": self.enriched,
                 "google_connected": True, "granted_scopes": [], "enrich_enabled": False,
                 "open_findings": self.open_findings}
 
@@ -67,17 +69,26 @@ def test_status_text_daemon_down():
     assert c.is_paused() is False
 
 
-def test_menu_toggle_and_enabled_flags():
-    # Running: shows Pause, enabled.
-    labels = [(lab, e) for (lab, _, e) in _ctrl().menu_items()]
-    assert ("Pause", True) in labels
-    # Paused: shows Resume.
-    assert any(lab == "Resume" and e for (lab, _, e) in _ctrl(paused=True).menu_items())
-    # Down: toggle present but disabled; status line + Quit still there.
+def test_menu_shows_indexed_and_enriched_counts():
+    # Running: first two lines are the Indexed / Enriched counts, disabled.
+    items = _ctrl(count=2249, enriched=1337).menu_items()
+    assert items[0] == ("Indexed: 2,249", None, False)
+    assert items[1] == ("Enriched: 1,337", None, False)
+
+
+def test_menu_omits_pause_and_setup():
+    # Pause/Resume and Open setup no longer live in the tray menu.
+    labels = [lab for (lab, _, _) in _ctrl().menu_items()]
+    assert not any("Pause" in lab or "Resume" in lab for lab in labels)
+    assert not any("setup" in lab.lower() for lab in labels)
+
+
+def test_menu_when_daemon_down():
+    # Down: a single "Daemon not running" line (disabled); Quit still enabled.
     down = _ctrl(up=False).menu_items()
-    assert down[0][2] is False                      # status line disabled
+    assert down[0] == ("Daemon not running", None, False)
+    assert not any(lab.startswith("Enriched:") for (lab, _, _) in down)
     assert any(lab == "Quit" and e for (lab, _, e) in down)
-    assert any(lab == "Pause" and e is False for (lab, _, e) in down)
 
 
 def test_pause_resume_call_client_and_refresh():
@@ -138,10 +149,10 @@ def test_dashboard_url_returns_empty_when_unavailable(tmp_path):
 
 
 def test_menu_has_open_dashboard():
-    """The second item in menu_items() has label 'Open Dashboard'."""
+    """menu_items() has an always-enabled 'Open Dashboard' item after the counts."""
     items = _ctrl().menu_items()
-    assert items[1][0] == "Open Dashboard"
-    assert items[1][2] is True  # always enabled
+    assert items[2][0] == "Open Dashboard"
+    assert items[2][2] is True  # always enabled
 
 
 def test_on_open_dashboard_calls_webbrowser(monkeypatch):
