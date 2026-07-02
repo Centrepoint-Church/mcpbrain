@@ -1,5 +1,6 @@
 from mcpbrain.store import Store
 from mcpbrain.review import build_review_packet, build_review_units
+from mcpbrain.review_eval import review_metrics
 
 
 def _seed(tmp_path):
@@ -34,3 +35,33 @@ def test_build_review_units_respects_cap(tmp_path):
     for unit in units:
         assert set(unit.keys()) == {"finding_id", "packet"}
         assert isinstance(unit["finding_id"], int)
+
+
+def test_review_metrics(tmp_path):
+    s = Store(str(tmp_path / "metrics.sqlite3"), dim=4)
+    s.init()
+
+    # Record findings across 2 different types with distinct ref_ids
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan entity 1")
+    s.record_finding("lint:orphan_entity", "e2", summary="orphan entity 2")
+    s.record_finding("lint:unreferenced_chunk", "c1", summary="unreferenced chunk")
+
+    metrics = review_metrics(s)
+
+    # Assert structure and values
+    assert isinstance(metrics, dict)
+    assert "open_findings" in metrics
+    assert "by_type" in metrics
+    assert "resolved_last_run" in metrics
+
+    # Total count should be 3
+    assert metrics["open_findings"] == 3
+
+    # by_type should have correct counts per type
+    assert metrics["by_type"] == {
+        "lint:orphan_entity": 2,
+        "lint:unreferenced_chunk": 1,
+    }
+
+    # resolved_last_run is currently hardcoded to 0
+    assert metrics["resolved_last_run"] == 0
