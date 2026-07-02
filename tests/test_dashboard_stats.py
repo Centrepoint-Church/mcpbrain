@@ -73,7 +73,8 @@ def test_stats_index_and_graph_counts(tmp_path):
     _seed(p, entities=50, relations=125, observations=90, cold=12, warm=88)
     out = dashboard.stats(_Store(p, communities=7), str(tmp_path), _status())
 
-    assert out["index"] == {"indexed": 100, "enriched": 61, "cold": 12, "enriched_pct": 61}
+    # enriched_pct is measured against ELIGIBLE (warm) chunks: 61 / (100-12) = 69%.
+    assert out["index"] == {"indexed": 100, "enriched": 61, "cold": 12, "enriched_pct": 69}
     assert out["graph"]["entities"] == 50
     assert out["graph"]["relations"] == 125
     assert out["graph"]["observations"] == 90
@@ -122,6 +123,16 @@ def test_stats_degrades_on_empty_store(tmp_path):
     assert out["index"]["enriched_pct"] == 0
     assert out["graph"]["entities"] == 0
     assert out["graph"]["links_per_entity"] == 0.0
+
+
+def test_stats_pct_zero_when_all_cold(tmp_path):
+    # Every indexed chunk is low-signal → no eligible chunks → pct 0, no div error.
+    p = tmp_path / "b.sqlite3"
+    _seed(p, cold=40)
+    out = dashboard.stats(_Store(p), str(tmp_path),
+                          _status(chunk_count=40, enriched_count=0))
+    assert out["index"]["cold"] == 40
+    assert out["index"]["enriched_pct"] == 0
 
 
 # --- GET /api/dashboard/stats route ------------------------------------------
