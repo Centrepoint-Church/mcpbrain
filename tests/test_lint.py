@@ -9,6 +9,7 @@ Sub-tasks covered:
 """
 
 import json
+import sqlite3
 
 from mcpbrain.store import Store
 from mcpbrain.lint_graph import (
@@ -114,6 +115,50 @@ def test_check_orphan_entities_truly_orphaned(tmp_path):
 
     ids = [r["id"] for r in flagged]
     assert "truly-orphan" in ids, "truly-orphan (no emails, no relations) should be flagged"
+
+
+def test_check_orphan_entities_excludes_suppressed(tmp_path):
+    """A suppressed orphan entity must not keep being re-detected/re-adjudicated,
+    but an unsuppressed orphan entity must still be flagged (selective, not blanket)."""
+    s = _store(tmp_path)
+    _add_entity(s, "suppressed-orphan", "Suppressed Orphan", org="Acme", email_count=0)
+    _add_entity(s, "truly-orphan", "Truly Orphan", org="Acme", email_count=0)
+    s.suppress_entity("suppressed-orphan", reason="test")
+
+    with s._connect() as db:
+        flagged = check_orphan_entities(db)
+
+    ids = [r["id"] for r in flagged]
+    assert "suppressed-orphan" not in ids, "suppressed orphan should be excluded"
+    assert "truly-orphan" in ids, "unsuppressed orphan should still be flagged"
+
+
+def test_check_orphan_entities_without_suppressions_table(tmp_path):
+    """Must not crash (and must behave identically) against a raw connection whose
+    store predates the entity_suppressions table."""
+    p = tmp_path / "no_supp.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', email_count INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "relation TEXT, entity_b TEXT, strength REAL DEFAULT 1)")
+        db.execute("INSERT INTO entities(id,name,type,org,email_count) "
+                   "VALUES('truly-orphan','Truly Orphan','person','Acme',0)")
+        db.execute("INSERT INTO entities(id,name,type,org,email_count) "
+                   "VALUES('connected','Connected','person','Acme',0)")
+        db.execute("INSERT INTO entities(id,name,type,org,email_count) "
+                   "VALUES('other','Other','person','Acme',0)")
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,strength) "
+                   "VALUES(0,'connected','knows','other',1)")
+
+    with sqlite3.connect(str(p)) as db:
+        db.row_factory = sqlite3.Row
+        flagged = check_orphan_entities(db)
+
+    ids = [r["id"] for r in flagged]
+    assert "truly-orphan" in ids
+    assert "connected" not in ids
+    assert "other" not in ids
 
 
 # ---------------------------------------------------------------------------
