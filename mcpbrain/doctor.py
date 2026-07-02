@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 # "guided" keys carry the remedy string to print. Keys absent here are reported
 # verbatim with no action.
 #
-# Note: probe keys are google/claude/clickup/backup/records/enrichment. The
+# Note: probe keys are google/claude/backup/records/enrichment. The
 # report adds a synthetic "scheduled_tasks" line inferred from enrichment.
 _DISPOSITIONS: dict[str, dict] = {
     "claude":     {"kind": "auto", "repair": "daemon",
@@ -38,8 +38,6 @@ _DISPOSITIONS: dict[str, dict] = {
     "records":    {"kind": "auto", "repair": "records", "label": "Records"},
     "google":     {"kind": "guided", "label": "Google",
                    "guided": "Run: mcpbrain auth"},
-    "clickup":    {"kind": "guided", "label": "ClickUp",
-                   "guided": "Re-enter your ClickUp key in the mcpbrain wizard"},
     "enrichment": {"kind": "guided", "label": "Enrichment",
                    "guided": "Open Claude or run /mcpbrain-fix in Cowork"},
     "backup":     {"kind": "guided", "label": "Backup",
@@ -47,7 +45,7 @@ _DISPOSITIONS: dict[str, dict] = {
 }
 
 # States that mean "needs attention". not_started is deliberately healthy for
-# the optional connections (clickup/backup/enrichment): an unconfigured feature
+# the optional connections (backup/enrichment): an unconfigured feature
 # is not a fault. claude not_started (plugin never connected) and records
 # not_started (repo never created) ARE actionable, so they are handled per-key.
 _FAIL_STATES = {"needs_action"}

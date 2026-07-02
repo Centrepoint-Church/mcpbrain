@@ -976,6 +976,6 @@ def test_status_includes_connections_block(tmp_path, monkeypatch):
     st = d.status()
     assert "connections" in st
     assert set(st["connections"]) == {
-        "google", "claude", "clickup", "backup", "records", "enrichment",
+        "google", "claude", "backup", "records", "enrichment",
     }
     assert st["connections"]["claude"]["state"] == "not_started"  # no heartbeat yet

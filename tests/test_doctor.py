@@ -16,7 +16,7 @@ def _conns(**states):
     Pass e.g. claude="needs_action" to flip one probe.
     """
     base = {k: {"state": "ok", "detail": "Connected", "last_verified": None}
-            for k in ("google", "claude", "clickup", "backup", "records", "enrichment")}
+            for k in ("google", "claude", "backup", "records", "enrichment")}
     for name, state in states.items():
         base[name] = {"state": state, "detail": state, "last_verified": None}
     return base
@@ -44,17 +44,16 @@ def test_all_ok_exit_zero_no_repairs():
 
 
 def test_not_started_optional_renders_distinct_glyph_not_green_check():
-    # clickup/backup not configured = deliberately optional, not a fault and not
-    # "healthy". Must render with the ➖ glyph, NOT a green ✅, and not be counted.
-    conns = _conns(clickup="not_started", backup="not_started")
+    # backup not configured = deliberately optional, not a fault and not
+    # "healthy". Must render with the ➖ glyph, NOT a green ✅, and not counted.
+    conns = _conns(backup="not_started")
     code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns,
                                   repairs={"daemon": _Recorder(), "agent": _Recorder(),
                                            "records": _Recorder()})
     assert code == 0  # optional unconfigured features are not actionable
-    assert "➖ ClickUp" in msg
     assert "➖ Backup" in msg
     assert "optional — not configured" in msg
-    assert "✅ ClickUp" not in msg  # never a green check for "not set up"
+    assert "✅ Backup" not in msg  # never a green check for "not set up"
 
 
 def test_daemon_down_repair_called_reprobe_fixed():

@@ -174,7 +174,7 @@ def test_remedies_map_has_exact_strings():
     r = session_hooks._REMEDIES
     assert r["google"] == "Google sign-in expired → run: mcpbrain auth"
     assert r["claude"] == "Daemon/plugin not seen recently → run: mcpbrain doctor"
-    assert r["clickup"] == "ClickUp key invalid → re-enter it in the mcpbrain wizard"
+    assert "clickup" not in r  # ClickUp is no longer a surfaced connection
     assert r["backup"] == "Backup overdue → run: mcpbrain doctor"
     assert r["records"] == "Records repo problem → run: mcpbrain doctor"
     assert r["enrichment"] == (

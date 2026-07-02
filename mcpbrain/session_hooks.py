@@ -40,7 +40,6 @@ _MAX_CONTENT = 24000
 _REMEDIES: dict[str, str] = {
     "google": "Google sign-in expired → run: mcpbrain auth",
     "claude": "Daemon/plugin not seen recently → run: mcpbrain doctor",
-    "clickup": "ClickUp key invalid → re-enter it in the mcpbrain wizard",
     "backup": "Backup overdue → run: mcpbrain doctor",
     "records": "Records repo problem → run: mcpbrain doctor",
     "enrichment": (
@@ -54,7 +53,6 @@ _REMEDY_PRIORITY: tuple[str, ...] = (
     "claude",
     "records",
     "backup",
-    "clickup",
     "enrichment",
 )
 

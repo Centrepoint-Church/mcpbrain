@@ -59,7 +59,7 @@ def test_records_not_started_when_absent(tmp_path):
 
 def test_all_connections_has_every_key(tmp_path):
     conns = probes.all_connections(_home(tmp_path, {}), store=None)
-    assert set(conns) == {"google", "claude", "clickup", "backup", "records", "enrichment"}
+    assert set(conns) == {"google", "claude", "backup", "records", "enrichment"}
     for v in conns.values():
         assert set(v) == {"state", "detail", "last_verified"}
         assert v["state"] in {"not_started", "ok", "needs_action"}
