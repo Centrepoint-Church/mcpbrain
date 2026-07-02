@@ -143,3 +143,58 @@ def test_run_review_runs_again_after_interval(tmp_path):
     second = daemon._run_review()
     assert second is not None
     assert second == {"review_orphan": 1}
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — _run_blocks must MERGE into _pending_blocks, not replace it
+# ---------------------------------------------------------------------------
+
+def test_run_blocks_merges_preserving_undrained_review_batch(tmp_path):
+    """Reproduces the replace-vs-merge race: an undrained review_* batch
+    stashed by _run_review() must survive a co-firing _run_blocks() call.
+
+    Before the fix, _run_blocks() did `self._pending_blocks = {...}` (a full
+    replace), which would silently wipe out any review_* keys sitting in
+    _pending_blocks while awaiting subagent pull/push. The fix changes that
+    to `self._pending_blocks.update({...})`, an additive merge, so
+    _run_blocks() still correctly sets/overwrites its own three keys every
+    time it fires, without clobbering keys it doesn't own.
+    """
+    store = _make_store(tmp_path, name="blocks_merge.sqlite3")
+    daemon = Daemon(
+        store, _FakeEmbedder(),
+        services={},
+        lock=SingleWriterLock(tmp_path / "bm.lock"),
+        blocks_interval_s=86400.0,
+        clock=_Clock(),
+    )
+
+    # Simulate an undrained review batch left in _pending_blocks by a prior
+    # _run_review() tick that a subagent hasn't pulled/pushed verdicts for yet.
+    sentinel_review_batch = [{"packet": {"finding_type": "lint:orphan_entity",
+                                          "ref_id": "e1"}}]
+    daemon._pending_blocks["review_orphan"] = sentinel_review_batch
+
+    fake_profiles = [{"entity_id": "e-1", "name": "Alice"}]
+    fake_communities = [{"community_id": "c-1"}]
+    fake_distil = [{"memory_id": "m-1"}]
+
+    with patch("mcpbrain.profile_synth.build_profile_requests",
+               return_value=fake_profiles), \
+         patch("mcpbrain.community_synth.build_community_requests",
+               return_value=fake_communities), \
+         patch("mcpbrain.memory_distil.build_distil_requests",
+               return_value=fake_distil):
+        result = daemon._run_blocks()
+
+    assert result == {
+        "profile_synthesis_requested": 1,
+        "community_synthesis_requested": 1,
+        "memory_distil_requested": 1,
+    }
+    # The undrained review batch must survive the merge, untouched.
+    assert daemon._pending_blocks["review_orphan"] is sentinel_review_batch
+    # _run_blocks()'s own three keys are still set correctly.
+    assert daemon._pending_blocks["profile_synthesis"] == fake_profiles
+    assert daemon._pending_blocks["community_synthesis"] == fake_communities
+    assert daemon._pending_blocks["memory_distil"] == fake_distil
