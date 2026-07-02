@@ -96,6 +96,10 @@ class ControlServer:
                 if self.path.startswith("/img/"):
                     m = re.match(r"^/img/([A-Za-z0-9._-]+\.png)$", self.path)
                     return server._serve_image(self, m.group(1) if m else "")
+                if self.path == "/graph": return server._serve_graph(self)
+                if self.path.startswith("/vendor/"):
+                    m = re.match(r"^/vendor/([A-Za-z0-9._-]+\.js)$", self.path)
+                    return server._serve_vendor(self, m.group(1) if m else "")
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
                 if self.path == "/api/core":
@@ -222,6 +226,26 @@ class ControlServer:
             h.send_response(404); h.end_headers(); return
         data = p.read_bytes()
         h.send_response(200); h.send_header("Content-Type", "image/png")
+        h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
+
+    def _serve_graph(self, h):
+        p = Path(__file__).parent / "wizard" / "graph.html"
+        if not p.exists():
+            b = b"wizard/graph.html not found (packaging error)"
+            h.send_response(500); h.send_header("Content-Type", "text/plain")
+            h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
+            return
+        html = p.read_text().replace("__MCPBRAIN_TOKEN__", self.token).encode()
+        h.send_response(200); h.send_header("Content-Type", "text/html")
+        h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
+
+    def _serve_vendor(self, h, name):
+        root = (Path(__file__).parent / "wizard" / "vendor").resolve()
+        p = (root / name).resolve()
+        if root not in p.parents or not p.is_file() or p.suffix != ".js":
+            h.send_response(404); h.end_headers(); return
+        data = p.read_bytes()
+        h.send_response(200); h.send_header("Content-Type", "text/javascript")
         h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
 
     def _handle_post(self, h):
