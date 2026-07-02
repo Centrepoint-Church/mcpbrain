@@ -77,3 +77,25 @@ def test_reextract_enabled_default_and_pause(tmp_path):
     # explicit pause
     (tmp_path / "config.json").write_text(json.dumps({"reextract": False}))
     assert reextract_enabled(str(tmp_path)) is False
+
+
+def test_review_interval_s_default_and_override(tmp_path):
+    home = str(tmp_path)
+    assert config.review_interval_s(home) == 86400.0           # default when unset
+    write_config(home, {"review_interval_s": 3600.0})
+    assert config.review_interval_s(home) == 3600.0            # explicit override
+    write_config(home, {"review_interval_s": 0})
+    assert config.review_interval_s(home) == 0.0               # 0 is valid (disables cadence)
+    write_config(home, {"review_interval_s": "garbage"})
+    assert config.review_interval_s(home) == 86400.0           # invalid -> default
+
+
+def test_review_max_apply_per_run_default_and_override(tmp_path):
+    home = str(tmp_path)
+    assert config.review_max_apply_per_run(home) == 50          # default when unset
+    write_config(home, {"review_max_apply_per_run": 100})
+    assert config.review_max_apply_per_run(home) == 100         # explicit override
+    write_config(home, {"review_max_apply_per_run": "garbage"})
+    assert config.review_max_apply_per_run(home) == 50          # invalid -> default
+    write_config(home, {"review_max_apply_per_run": 0})
+    assert config.review_max_apply_per_run(home) == 1           # floored at 1
