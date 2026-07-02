@@ -80,12 +80,22 @@ def build_review_packet(store, finding: dict) -> dict:
 
 
 def build_review_units(store, *, kinds: list[str], cap: int) -> list[dict]:
+    """Pull open findings for each requested kind and build a review packet for each.
+
+    `cap` is a PER-KIND limit, not a total shared across all kinds: each kind
+    in `kinds` independently contributes up to `cap` units, matching the
+    per-block-type capping pattern used elsewhere (e.g. prepare._merge_review_block's
+    _MERGE_REVIEW_CAP). With N kinds and this cap, the worst case total returned
+    is N * cap, not cap. This is intentional so that one kind reaching the cap
+    (e.g. a backlog of `lint:orphan_entity` findings) never starves the other
+    kinds out of a review batch.
+    """
     units = []
     for kind in kinds:
-        if len(units) >= cap:
-            break
+        count_for_kind = 0
         for finding in store.open_findings(kind):
-            if len(units) >= cap:
+            if count_for_kind >= cap:
                 break
             units.append({"finding_id": finding["id"], "packet": build_review_packet(store, finding)})
+            count_for_kind += 1
     return units
