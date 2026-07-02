@@ -26,29 +26,42 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
     """Return Sigma-shaped {nodes, links, communities} or a too_large marker."""
     path = store._path if hasattr(store, "_path") else store.path
 
-    where = ["COALESCE(e.degree, 0) >= :min_conn", "s.entity_id IS NULL"]
-    params: dict = {"min_conn": int(min_conn)}
-    if org:
-        where.append("COALESCE(e.org, '') = :org")
-        params["org"] = "" if org == "unassigned" else org
-    if community:
-        where.append("ec.community_id = :community")
-        try:
-            params["community"] = int(community)
-        except (TypeError, ValueError):
-            return dict(_EMPTY)
-    if types:
-        where.append("e.type IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")")
-        for i, t in enumerate(types):
-            params[f"t{i}"] = t
-    if recency_days and int(recency_days) > 0:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(recency_days))).strftime("%Y-%m-%d")
-        where.append("COALESCE(e.last_seen, '') >= :cutoff")
-        params["cutoff"] = cutoff
-
     try:
         db = _open_ro(Path(path))
         try:
+            # entity_suppressions is optional: it only exists once the graph-edit
+            # (suppress/delete) feature has run, so most stores don't have it yet.
+            # Join + filter on it only when present — otherwise the whole read
+            # would error and degrade to an empty graph for every such store.
+            has_supp = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='entity_suppressions'"
+            ).fetchone() is not None
+            supp_join = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
+                         if has_supp else "")
+
+            where = ["COALESCE(e.degree, 0) >= :min_conn"]
+            params: dict = {"min_conn": int(min_conn)}
+            if has_supp:
+                where.append("s.entity_id IS NULL")
+            if org:
+                where.append("COALESCE(e.org, '') = :org")
+                params["org"] = "" if org == "unassigned" else org
+            if community:
+                try:
+                    params["community"] = int(community)
+                except (TypeError, ValueError):
+                    return dict(_EMPTY)
+                where.append("ec.community_id = :community")
+            if types:
+                where.append("e.type IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")")
+                for i, t in enumerate(types):
+                    params[f"t{i}"] = t
+            if recency_days and int(recency_days) > 0:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=int(recency_days))).strftime("%Y-%m-%d")
+                where.append("COALESCE(e.last_seen, '') >= :cutoff")
+                params["cutoff"] = cutoff
+
             rows = db.execute(f"""
                 SELECT e.id, e.name, e.type, COALESCE(e.org, '') AS org,
                        COALESCE(e.email_count, 0) AS email_count,
@@ -58,7 +71,7 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                        ec.community_id, cs.title AS community_title,
                        COALESCE(e.degree, 0) AS degree
                 FROM entities e
-                LEFT JOIN entity_suppressions s ON s.entity_id = e.id
+                {supp_join}
                 LEFT JOIN (
                     SELECT entity_id, MIN(community_id) AS community_id
                     FROM entity_communities
@@ -75,7 +88,7 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                 total = db.execute(f"""
                     SELECT COUNT(*) AS n
                     FROM entities e
-                    LEFT JOIN entity_suppressions s ON s.entity_id = e.id
+                    {supp_join}
                     LEFT JOIN (
                         SELECT entity_id, MIN(community_id) AS community_id
                         FROM entity_communities
