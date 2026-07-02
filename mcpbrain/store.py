@@ -486,6 +486,16 @@ class Store:
                 "ON proactive_findings(finding_type) WHERE resolved_at IS NULL"
             )
 
+            # --- Session-4, Task 2.1: reversible entity suppression ------------
+            # Presence of a row here is the entire suppression mechanism: the
+            # entities row itself is never mutated or deleted, so suppression is
+            # trivially reversible via unsuppress_entity (just delete this row).
+            db.execute("""CREATE TABLE IF NOT EXISTS suppressed_entities (
+                entity_id     TEXT PRIMARY KEY,
+                reason        TEXT DEFAULT '',
+                suppressed_at TEXT DEFAULT ''
+            )""")
+
             # --- Phase 1 capture: change_log -----------------------------------
             db.execute("""CREATE TABLE IF NOT EXISTS change_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2050,6 +2060,33 @@ class Store:
             cur = db.execute(
                 "UPDATE proactive_findings SET resolved_at=? "
                 "WHERE id=? AND resolved_at IS NULL", (now, finding_id))
+            return cur.rowcount > 0
+
+    # --- Session-4, Task 2.1: reversible entity suppression ------------------
+
+    def suppress_entity(self, entity_id: str, reason: str = "") -> bool:
+        """Suppress an entity by inserting a row into suppressed_entities.
+
+        Purely additive/reversible: the entities row is validated to exist but
+        never touched (no column added, no delete). Returns False (no-op) if
+        entity_id isn't a real entity. Reverse with unsuppress_entity.
+        """
+        with self._connect() as db:
+            row = db.execute("SELECT id FROM entities WHERE id=?", (entity_id,)).fetchone()
+            if not row:
+                return False
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            db.execute(
+                "INSERT OR REPLACE INTO suppressed_entities(entity_id, reason, suppressed_at) "
+                "VALUES(?, ?, ?)",
+                (entity_id, reason, now),
+            )
+            return True
+
+    def unsuppress_entity(self, entity_id: str) -> bool:
+        """Remove a suppression. True if a row was deleted."""
+        with self._connect() as db:
+            cur = db.execute("DELETE FROM suppressed_entities WHERE entity_id=?", (entity_id,))
             return cur.rowcount > 0
 
     def find_open_action_by_fingerprint(self, fp: str) -> int | None:
