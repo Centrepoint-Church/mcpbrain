@@ -45,6 +45,42 @@ def _default_bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
     return _real(store, fleet_storage, drive_id, pin)
 
 
+def _fleet_folder_id(home) -> str:
+    """The fleet folder id: local config's fleet.folder_id, else the baked-in
+    org default (org_defaults.FLEET_FOLDER_ID)."""
+    from mcpbrain import config, org_defaults
+    fleet = config.read_config(home).get("fleet") or {}
+    return fleet.get("folder_id") or org_defaults.FLEET_FOLDER_ID
+
+
+def _default_make_fleet_storage(home, drive_service):
+    """Build the prod FleetStorage over Google Drive (subsystem A's
+    DriveFleetStorage). Degrades to None when there is no drive service, no
+    fleet folder, or A is not built yet. Phase D wires the real symbol."""
+    if drive_service is None:
+        return None
+    try:
+        from mcpbrain.ingest_cache import DriveFleetStorage  # subsystem A
+    except ImportError:
+        return None
+    folder_id = _fleet_folder_id(home)
+    if not folder_id:
+        return None
+    return DriveFleetStorage(drive_service, folder_id)
+
+
+def _default_enumerate_drives(drive_service) -> list[str]:
+    """Enumerate accessible shared-drive ids (subsystem A). Degrades to [] with
+    no service or before A is built. Phase D wires the real enumeration."""
+    if drive_service is None:
+        return []
+    try:
+        from mcpbrain.ingest_cache import list_shared_drive_ids  # subsystem A
+    except ImportError:
+        return []
+    return list(list_shared_drive_ids(drive_service))
+
+
 # -- orchestrator (pure; no config, no I/O beyond the injected callables) ---
 
 _SNAPSHOT_OK = {"imported", "unchanged"}
