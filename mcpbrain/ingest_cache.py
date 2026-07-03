@@ -77,23 +77,29 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
             or art.chunker_version != pin.chunker_version
             or int(art.dim) != int(store.dim)):
         return False
-    logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
-    # Skip local re-enrichment only when the cached enrichment is at least as new
-    # as BOTH the fleet floor and this install's own logic version.
-    mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
-                                                        int(ENRICH_LOGIC_VERSION))
-    for cc in art.chunks:
-        try:
-            vector = _decode_vec(cc.embedding_b64, int(art.dim))
-        except Exception:
-            log.info("ingest_cache: corrupt vector in %s chunk %s (fallback)", art.file_id, cc.idx)
-            return False
-        meta = dict(cc.metadata or {})
-        meta[DRIVE_ID_META_KEY] = drive_id
-        doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
-        store.import_cached_chunk(
-            doc_id, cc.text, _text_hash(cc.text), meta, vector,
-            enriched=mark_enriched, enriched_version=logic_v if mark_enriched else 0)
+    try:
+        # Guard enrich field access; if malformed (e.g. string instead of dict),
+        # fall back rather than raise.
+        logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
+        # Skip local re-enrichment only when the cached enrichment is at least as new
+        # as BOTH the fleet floor and this install's own logic version.
+        mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
+                                                            int(ENRICH_LOGIC_VERSION))
+        for cc in art.chunks:
+            try:
+                vector = _decode_vec(cc.embedding_b64, int(art.dim))
+            except Exception:
+                log.info("ingest_cache: corrupt vector in %s chunk %s (fallback)", art.file_id, cc.idx)
+                return False
+            meta = dict(cc.metadata or {})
+            meta[DRIVE_ID_META_KEY] = drive_id
+            doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
+            store.import_cached_chunk(
+                doc_id, cc.text, _text_hash(cc.text), meta, vector,
+                enriched=mark_enriched, enriched_version=logic_v if mark_enriched else 0)
+    except Exception:
+        log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
+        return False
     return True
 
 

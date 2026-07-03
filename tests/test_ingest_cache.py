@@ -95,6 +95,98 @@ def test_try_import_no_enrich_block_leaves_unenriched(tmp_path):
     assert r["enriched"] == 0
 
 
+def test_try_import_malformed_enrich_field_falls_back(tmp_path):
+    """Regression: malformed enrich field (string instead of dict) must not raise.
+    _import_artifact accesses art.enrich.get() at line 80, which raises AttributeError
+    if enrich is a string. try_import must return False, not raise."""
+    import gzip, json
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    # Hand-plant an artifact with a valid outer structure but malformed enrich field
+    file_id, content_hash = "FID", "vhash1"
+    fname = artifact_filename(file_id, content_hash, PIN.embed_model, PIN.dim, PIN.chunker_version)
+    art_dict = {
+        "file_id": file_id,
+        "content_hash": content_hash,
+        "extraction_method": "gdocs",
+        "chunker_version": PIN.chunker_version,
+        "embed_model": PIN.embed_model,
+        "dim": PIN.dim,
+        "chunks": [{
+            "idx": 0,
+            "text": "hello",
+            "embedding_b64": _b64([0.1, 0.2, 0.3, 0.4]),
+            "metadata": {"source_type": "gdrive", "file_id": file_id, "chunk_index": 0}
+        }],
+        "enrich": "corrupted-not-a-dict",  # <-- malformed: string instead of dict
+        "published_by": "p@x.org",
+        "published_at": "2026-07-03"
+    }
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fname}", gzip.compress(json.dumps(art_dict).encode()))
+    # Must return False (cache miss fallback), not raise AttributeError
+    assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
+
+
+def test_try_import_hand_planted_content_hash_mismatch_inner_field(tmp_path):
+    """Test that internal content_hash validation (line 121) rejects an artifact
+    where the inner JSON field doesn't match the param, even when filename matches.
+    This tests the validation branch that the existing test can't reach."""
+    import gzip, json
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    file_id, content_hash = "FID", "vhash1"
+    fname = artifact_filename(file_id, content_hash, PIN.embed_model, PIN.dim, PIN.chunker_version)
+    # Hand-plant with correct filename path but WRONG inner content_hash field
+    art_dict = {
+        "file_id": file_id,
+        "content_hash": "WRONG_HASH",  # <-- doesn't match the param
+        "extraction_method": "gdocs",
+        "chunker_version": PIN.chunker_version,
+        "embed_model": PIN.embed_model,
+        "dim": PIN.dim,
+        "chunks": [{
+            "idx": 0,
+            "text": "hello",
+            "embedding_b64": _b64([0.1, 0.2, 0.3, 0.4]),
+            "metadata": {"source_type": "gdrive", "file_id": file_id, "chunk_index": 0}
+        }],
+        "enrich": {},
+        "published_by": "p@x.org",
+        "published_at": "2026-07-03"
+    }
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fname}", gzip.compress(json.dumps(art_dict).encode()))
+    # Should detect inner hash mismatch and return False
+    assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
+
+
+def test_try_import_hand_planted_pipeline_mismatch_inner_field(tmp_path):
+    """Test that internal pipeline validation (line 76-78) rejects an artifact
+    where inner embed_model/dim don't match, even when filename matches."""
+    import gzip, json
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    file_id, content_hash = "FID", "vhash1"
+    fname = artifact_filename(file_id, content_hash, PIN.embed_model, PIN.dim, PIN.chunker_version)
+    # Hand-plant with correct filename but WRONG inner embed_model
+    art_dict = {
+        "file_id": file_id,
+        "content_hash": content_hash,
+        "extraction_method": "gdocs",
+        "chunker_version": PIN.chunker_version,
+        "embed_model": "other-model",  # <-- doesn't match PIN
+        "dim": PIN.dim,
+        "chunks": [{
+            "idx": 0,
+            "text": "hello",
+            "embedding_b64": _b64([0.1, 0.2, 0.3, 0.4]),
+            "metadata": {"source_type": "gdrive", "file_id": file_id, "chunk_index": 0}
+        }],
+        "enrich": {},
+        "published_by": "p@x.org",
+        "published_at": "2026-07-03"
+    }
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fname}", gzip.compress(json.dumps(art_dict).encode()))
+    # Should detect pipeline mismatch and return False
+    assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
+
+
 def test_collect_chunks_is_drive_neutral(tmp_path):
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-FID-0", "hello", "c0",
