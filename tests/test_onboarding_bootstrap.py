@@ -145,3 +145,30 @@ def test_resume_skips_already_done_drives_and_snapshot(tmp_path):
     assert res["drives"]["D1"]["status"] == "skipped"
     assert res["drives"]["D2"]["status"] == "ok"
     assert res["done_drive_ids"] == {"D1", "D2"}
+
+
+def test_unavailable_status_not_marked_done(tmp_path):
+    """Prove that a benign 'unavailable' status (Phase A not built yet) does NOT
+    mark the drive as done, so it will retry once the subsystem lands."""
+    store = _store(tmp_path)
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    calls = []
+
+    def imp(store, fs_):
+        calls.append("snapshot")
+        return {"status": "imported", "entity_count": 1}
+
+    def boot(store, fs_, drive_id, pin):
+        calls.append(f"drive:{drive_id}")
+        # Simulate Phase A not built yet (e.g., ingest_cache not imported).
+        return {"status": "unavailable", "cache_hits": 0,
+                "reason": "ingest_cache not built (Phase A)"}
+
+    res = onboarding.bootstrap_baseline(
+        store, fs, ["D1"], _pin(),
+        import_snapshot=imp, bootstrap_drive=boot)
+    assert calls == ["snapshot", "drive:D1"]
+    assert res["drives"]["D1"]["status"] == "unavailable"  # status is preserved
+    assert res["done_drive_ids"] == set()                 # NOT added to done
+    assert res["cache_hits"] == 0                         # cache_hits still recorded
