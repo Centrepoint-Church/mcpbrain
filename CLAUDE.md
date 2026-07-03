@@ -54,13 +54,32 @@ wrong and MUST be right:
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
 - **Current state (2026-07-03):** all four version files **and** the published wheel are at
-  `0.7.87` — source, dist index, and plugin manifests are in step. **0.7.87 ships series/topic
+  `0.7.88` — source, dist index, and plugin manifests are in step. **0.7.88 fixes the
+  `bin/consolidate.py` migration itself**, surfaced by its first attended run on the live
+  store: `meeting_source_doc_ids()` and `meeting_series_for_old()` both assumed provenance via
+  `email_entities`/`entity_relations.source_doc_id`, which calendar-sourced meetings never
+  populate (the calendar-chunk enrichment path writes `attended`/`instance_of`/`involved_in`
+  relations with the bare Calendar event id in `evidence` but never threads `source_doc_id` or
+  `email_entities` through) — this made `meetings-reset` find 0 of 294 legacy meetings' chunks
+  to re-extract, and `meetings-retire` retire 0 of them even after re-extraction produced
+  genuine series. Both functions now also match via a shared Calendar event id (base-event-id
+  comparison, so a recurring series' per-instance date suffix doesn't block the match), same
+  ambiguous-returns-None non-destructive policy. **The live-store run itself: attended, topics
+  phase clean (1,508 merged → 1,484 canonical, gold gate held), meetings phase partially run**
+  — 28 of 294 legacy meetings retired into 6 genuine re-extracted series so far; the remaining
+  266 are non-destructively left (most still draining through re-extraction, a smaller subset
+  permanently unrecoverable because their source email chunks were already pruned by the
+  routine retention job) — **re-running `bin/consolidate.py meetings-retire` later is safe and
+  expected** (idempotent: already-retired ids are skipped, left ones get a fresh chance) to
+  sweep further as re-extraction catches up. Gold gate held at recall@10 0.750 / MRR 0.564
+  across every checkpoint of the run.
+- **0.7.87 ships series/topic
   consolidation** (write-time deterministic keying: meetings→org-scoped `meeting-<org>-<series>`
   entities with append-only `entity_observations` occurrences, driven by LLM `series_name`/
   `occurrence_date`; topics→`normalize_topic` = inflect-singularize + curated synonym map;
   calendar `recurringEventId` capture + opportunistic `calendar_series` annotation; attended,
-  backup-gated migration `bin/consolidate.py` — **built and shipped but NOT yet run on the live
-  store**). Both kill-switches (`meeting_series_enabled`/`topic_consolidation_enabled`) default ON.
+  backup-gated migration `bin/consolidate.py` — built and shipped, first live run described
+  above). Both kill-switches (`meeting_series_enabled`/`topic_consolidation_enabled`) default ON.
   0.7.87 also fixes the gold-eval gate (the `--gold` harness + migration runbook now measure the
   PRODUCTION three-axis path — recall@10 0.750 / MRR 0.564 — not the relevance-only baseline that
   misleadingly reads MRR 0.281), and folds in concurrent-session work (graph stored-XSS escaping +
