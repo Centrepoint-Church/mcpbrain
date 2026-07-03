@@ -22,6 +22,7 @@ brains contain content (PII, financial, pastoral) that must never leak to other 
 | Contribution default | ON (typed/redacted/fail-closed by construction; opt-out still consumes) | Josh |
 | Access revocation | Automatic purge, after the drive is absent for several consecutive sync cycles | Josh |
 | Curator deployment | Josh's machine, own account, `role=org_curator` (design stays host-agnostic) | Josh |
+| Build phasing | Phase 0 (fat foundation) → A ∥ B ∥ C in parallel worktrees → Phase D (convergence) | Josh |
 
 ## Core privacy invariant
 
@@ -68,14 +69,88 @@ ingest cache implements exactly the "fair" case; the claim allowlist implements 
               └────────────────────────────────┘
 ```
 
-Three subsystems, decomposed for implementation in this order:
+Three subsystems, each complete in itself (not a v1 to be redone):
 
 - **A. Shared-drive sync + ingest cache** — fixes the cost/onboarding pain immediately.
 - **B. Org graph** — contributions, curator, snapshot, consumer import.
 - **C. Onboarding integration** — `mcpbrain setup` pulls snapshot + cache for instant brains.
 
-Each subsystem is complete in itself (not a v1 to be redone); they are ordered because A's
-artifacts and B's snapshot are what C consumes.
+They are built in phases (below) rather than one linear sequence: a foundation phase
+freezes everything the three share, the three then proceed in parallel, and a
+convergence phase wires the seams that belong to no single subsystem.
+
+---
+
+## Implementation phasing
+
+The work is **not** a linear A→B→C. A, B, and C have almost no logical dependency on each
+other in code — what they share is *files and interface contracts*. So the plan front-loads
+a fat foundation phase that freezes that shared surface, runs A/B/C as parallel tracks
+(separate worktrees/branches/sessions), and closes with a convergence phase for the
+cross-cutting seams. **Parallelism is only as safe as Phase 0 is complete**: if a parallel
+branch has to add a column, a config flag, or an interface type, it collides with the others.
+
+### Phase 0 — foundations (on `main`, merged before A/B/C branch)
+
+Everything A, B, and C touch in common lands here, so the parallel branches only add
+*logic* on top of a frozen surface.
+
+- **Full schema migration, all at once** (safe on already-populated stores): `origin TEXT
+  DEFAULT 'local'` on `entities` + `entity_relations`; `drive_id` in chunk metadata;
+  new tables `org_contrib_staging`, `org_contrib_outbox`, and the cross-layer re-point log.
+  No later phase adds schema.
+- **All config flags + accessors**: `org_contrib_enabled`, `org_import_enabled`, cache
+  flags, `role`, plus the `fleet.py` / `org-config.json` pinning block (fingerprint inputs,
+  relation allowlist, `fleet_secret`) — the plumbing A (pipeline fingerprint) and B (HMAC +
+  allowlist) both consume.
+- **Frozen interface contracts, as real code** (dataclasses / typed signatures, not prose):
+  the cache-artifact JSON schema, the contribution-record shape, the snapshot / manifest /
+  tombstone schema, and the daemon **cadence registration hook-points** (stubbed no-op
+  registration slots that A and B each fill in, so they don't both edit the same
+  `daemon.py` wiring block).
+- **`role=org_curator` plumbing** — the role exists and is wired, even before B implements
+  what it does.
+- **Multi-user + curator test harness** — the simulation fixture (N users, one curator, one
+  shared-drive fixture) that all three phases and Phase D test against.
+
+**Exit gate:** migration runs clean on a real-corpus store copy; contracts compile; harness
+spins up a simulated fleet. Only then do the branches fork.
+
+### Phases A ∥ B ∥ C — parallel tracks
+
+Forked from the merged Phase 0, in separate worktrees.
+
+- **A (ingest cache)** — `sync/drive.py` shared-drive sync + `.mcpbrain-cache/` artifacts
+  (subsystem A above). Touches files B never opens; the cleanest-isolated track.
+- **B (org graph)** — contribution edge filter, curator pipeline, consumer import
+  (subsystems B1–B5 above). Independent of A in code.
+- **C (onboarding bootstrap)** — builds against Phase 0's frozen contracts with **fakes**
+  standing in for A's cache and B's snapshot. C is the *convergence-bound* track: it can be
+  written in parallel but its true end-to-end integration test only passes once A and B land.
+
+Each track: green in isolation against the shared harness before it merges. The one shared
+hotspot is `daemon.py` cadence wiring — neutralised by Phase 0's stubbed registration slots,
+so A and B fill different slots rather than editing the same block.
+
+### Phase D — convergence (after A, B, C merge)
+
+The seams that belong to no single subsystem, and can only be verified on the merged system:
+
+- **A↔B echo-dedup integration test** — cache-imported enrichment (A) must not inflate
+  corroboration at the curator (B). This is a runtime interaction between two branches; the
+  test is owned by neither and lives here.
+- **C end-to-end** — real cache + real snapshot: new-user bootstrap produces a working brain
+  with zero extraction calls on cached content (replacing C's fakes).
+- **Security / egress gate** — adversarial pass over the merged A+B surface: prove nothing
+  content-shaped escapes (no chunk text, `profile`, raw `doc_id`, or non-allowlisted type in
+  any contribution; cache artifacts only ever inside ACL-scoped drives). This is the single
+  most important gate and it spans both A and B.
+- **Rollout enablement ordering** — the flag choreography for a distributed fleet, which no
+  per-branch default can express: curator seeded and publishing a first snapshot *before*
+  `org_import_enabled` goes fleet-wide; `fleet_secret` distributed *before* `org_contrib_enabled`
+  turns on. Documented as an explicit enablement runbook.
+- **Observability slice** — origin colouring in the `/graph` explorer, cache hit-rate, and the
+  curator's pending/adjudicated queue surfaced in fleet `status.html`.
 
 ---
 
@@ -413,9 +488,16 @@ shared content" to "minutes of downloads + enrichment spend only on their person
 - **Supersession + echo:** a contributed `valid_to` update ends the canonical claim;
   N users importing the same cached enrichment yield exactly one source_ref at the
   curator (no corroboration inflation).
-- **End-to-end:** three simulated users, one curator, one shared drive fixture —
+- **End-to-end (Phase D):** three simulated users, one curator, one shared drive fixture —
   new-user bootstrap produces a working brain with zero extraction calls on cached
-  content.
+  content. This replaces C's fakes with real A cache + real B snapshot.
+- **Egress gate (Phase D):** adversarial pass over the merged A+B surface — for arbitrary
+  drain deltas and cache publishes, nothing content-shaped (chunk text, `profile`, raw
+  `doc_id`, non-allowlisted type) escapes; artifacts only ever land inside ACL-scoped drives.
+
+Tests are owned by the phase that owns the behaviour: A/B/C unit + isolation tests run
+green per-branch against the shared harness; the A↔B echo, C end-to-end, and egress tests
+are Phase D because they can only be verified on the merged system.
 
 ## Explicitly out of scope
 
