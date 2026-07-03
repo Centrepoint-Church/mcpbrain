@@ -64,6 +64,7 @@ def normalise_calendar(event: dict) -> list[Chunk]:
         "location": location[:200],
         "attendees": attendees[:300],
         "status": event.get("status", "confirmed"),
+        "recurring_event_id": event.get("recurringEventId", ""),
     }
     return [Chunk(doc_id=f"cal-{eid}", text=text, content_hash=content_hash(text), metadata=meta)]
 
