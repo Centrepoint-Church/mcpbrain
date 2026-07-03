@@ -82,6 +82,19 @@ def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     return db
 
 
+_CAL_INSTANCE_SUFFIX = re.compile(r"_\d{8}T\d{6}Z$")
+
+
+def _base_cal_event_id(value: str) -> str:
+    """Strip a 'cal-' prefix and any recurring-instance date suffix
+    ('_YYYYMMDDTHHMMSSZ') from a Calendar-derived identifier (a chunk doc_id
+    or an entity_relations.evidence value), leaving the bare Calendar event id
+    shared by every instance of a recurring series."""
+    if value.startswith("cal-"):
+        value = value[len("cal-"):]
+    return _CAL_INSTANCE_SUFFIX.sub("", value)
+
+
 class Store:
     def __init__(self, path: Path, dim: int, read_only: bool = False):
         self.path = Path(path)
@@ -1954,9 +1967,16 @@ class Store:
     def meeting_source_doc_ids(self) -> list[str]:
         """Doc_ids of chunks that produced any type='meeting' entity.
 
-        Union of two provenance paths: email_entities links (message -> chunk via
-        doc_ids_for_messages) and entity_relations.source_doc_id. Used by the scoped
-        meeting migration to reset exactly those chunks for re-extraction."""
+        Three provenance paths, unioned: email_entities links (message -> chunk
+        via doc_ids_for_messages), entity_relations.source_doc_id, and — for
+        calendar-sourced meetings whose attended/instance_of/involved_in
+        relations were written without a stamped source_doc_id (a real gap:
+        the calendar-chunk enrichment path never threads doc_ids through) —
+        entity_relations.evidence, which holds the bare Calendar event id,
+        matched against that event's own chunk doc_id convention
+        ('cal-<event_id>', or 'cal-<event_id>_<instant>' for a recurring
+        instance). Used by the scoped meeting migration to reset exactly those
+        chunks for re-extraction."""
         with self._connect() as db:
             msg_ids = [r["message_id"] for r in db.execute(
                 "SELECT DISTINCT ee.message_id FROM email_entities ee "
@@ -1965,7 +1985,18 @@ class Store:
                 "SELECT DISTINCT er.source_doc_id FROM entity_relations er "
                 "JOIN entities e ON (e.id=er.entity_a OR e.id=er.entity_b) "
                 "WHERE e.type='meeting' AND COALESCE(er.source_doc_id,'')!=''").fetchall()]
-        docs = set(self.doc_ids_for_messages(msg_ids)) | set(rel_docs)
+            cal_evidence = [r["evidence"] for r in db.execute(
+                "SELECT DISTINCT er.evidence FROM entity_relations er "
+                "JOIN entities e ON (e.id=er.entity_a OR e.id=er.entity_b) "
+                "WHERE e.type='meeting' AND COALESCE(er.source_doc_id,'')='' "
+                "AND COALESCE(er.evidence,'')!=''").fetchall()]
+            cal_docs: set[str] = set()
+            for ev in cal_evidence:
+                for r in db.execute(
+                        "SELECT doc_id FROM chunks WHERE doc_id LIKE ?",
+                        (f"cal-{ev}%",)).fetchall():
+                    cal_docs.add(r["doc_id"])
+        docs = set(self.doc_ids_for_messages(msg_ids)) | set(rel_docs) | cal_docs
         return sorted(docs)
 
     def reset_enriched(self, doc_ids) -> int:
@@ -1989,7 +2020,17 @@ class Store:
         at least one 'occurrence' observation (written by append_occurrence). A
         legacy bare 'meeting-*' slug (e.g. 'meeting-with-bob', pre-dating the
         series scheme) has none, so it is never mistaken for a candidate series
-        and never creates false ambiguity for a real old_id resolution."""
+        and never creates false ambiguity for a real old_id resolution.
+
+        Two independent matching paths, unioned (still None on ambiguity across
+        their combined candidates): shared email_entities.message_id, and — for
+        calendar-sourced legacy meetings, which predate the email_entities
+        linkage convention entirely and so never match the first path — a shared
+        Calendar event id, comparing old_id's entity_relations.evidence (the bare
+        event id; the same gap meeting_source_doc_ids() works around) against a
+        candidate series' own calendar-derived email_entities.message_id
+        ('cal-<event_id>[_<instant>]'), by base event id so a recurring series'
+        per-instance suffix doesn't block the match."""
         with self._connect() as db:
             rows = db.execute(
                 "SELECT DISTINCT e2.id FROM email_entities ee1 "
@@ -2000,7 +2041,25 @@ class Store:
                 "AND EXISTS (SELECT 1 FROM entity_observations o "
                 "            WHERE o.entity_id = e2.id AND o.attribute = 'occurrence')",
                 (old_id, old_id)).fetchall()
-        series = [r["id"] for r in rows]
+            series = {r["id"] for r in rows}
+
+            old_events = {_base_cal_event_id(r["evidence"]) for r in db.execute(
+                "SELECT DISTINCT evidence FROM entity_relations "
+                "WHERE (entity_a=? OR entity_b=?) AND COALESCE(evidence,'')!=''",
+                (old_id, old_id)).fetchall()}
+            if old_events:
+                candidates = db.execute(
+                    "SELECT DISTINCT ee.entity_id, ee.message_id FROM email_entities ee "
+                    "JOIN entities e ON e.id = ee.entity_id "
+                    "WHERE e.type='meeting' AND e.id != ? AND e.id LIKE 'meeting-%' "
+                    "AND ee.message_id LIKE 'cal-%' "
+                    "AND EXISTS (SELECT 1 FROM entity_observations o "
+                    "            WHERE o.entity_id = e.id AND o.attribute = 'occurrence')",
+                    (old_id,)).fetchall()
+                for r in candidates:
+                    if _base_cal_event_id(r["message_id"]) in old_events:
+                        series.add(r["entity_id"])
+        series = list(series)
         return series[0] if len(series) == 1 else None
 
     # --- Phase 3, Task 0.5A: community reader/writer methods ----------------

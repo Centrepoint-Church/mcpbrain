@@ -1,5 +1,6 @@
 import pytest
 
+from mcpbrain.graph_write import upsert_relation
 from mcpbrain.store import Store
 
 
@@ -762,6 +763,54 @@ def test_meeting_series_for_old_ambiguous_returns_none(store):
     store.link_email_entity("m1", "meeting-acme-board", role="about")
     store.link_email_entity("m1", "meeting-acme-staff", role="about")
     assert store.meeting_series_for_old("board-12-may") is None
+
+
+def test_meeting_series_for_old_matches_via_calendar_evidence(store):
+    # A calendar-sourced legacy meeting predates the email_entities linkage
+    # convention entirely (real-store finding: ALL 294 legacy meetings had zero
+    # email_entities rows), so the email_entities join can never match it. The
+    # calendar-evidence fallback matches old_id's entity_relations.evidence (the
+    # bare Calendar event id) against the new series' own calendar-derived
+    # email_entities.message_id ('cal-<event_id>').
+    store.upsert_entity("meeting-standup-20260512", "Standup 12 May", "meeting",
+                        "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "cal-evt123")
+    store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
+    upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
+                     valid_from="2026-05-12", evidence="evt123", source_doc_id="")
+    assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
+
+
+def test_meeting_series_for_old_matches_via_calendar_evidence_recurring_instance(store):
+    # old_id's evidence is the bare event id; the new series may be linked via a
+    # recurring-instance-suffixed doc_id ('cal-<event_id>_<instant>') — base
+    # event id comparison must still match.
+    store.upsert_entity("meeting-standup-20260512", "Standup 12 May", "meeting",
+                        "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup",
+                            "cal-evt123_20260512T090000Z")
+    store.link_email_entity("cal-evt123_20260512T090000Z", "meeting-acme-standup", role="about")
+    upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
+                     valid_from="2026-05-12", evidence="evt123", source_doc_id="")
+    assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
+
+
+def test_meeting_series_for_old_calendar_evidence_ambiguous_returns_none(store):
+    # old_id's evidence matches TWO distinct genuine series via the calendar
+    # fallback -> ambiguous, must stay None (non-destructive policy).
+    store.upsert_entity("meeting-standup-20260512", "Standup 12 May", "meeting",
+                        "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-sync", "Sync", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "cal-evt123")
+    store.append_occurrence("meeting-acme-sync", "2026-05-12", "sync", "cal-evt123")
+    store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
+    store.link_email_entity("cal-evt123", "meeting-acme-sync", role="about")
+    upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
+                     valid_from="2026-05-12", evidence="evt123", source_doc_id="")
+    assert store.meeting_series_for_old("meeting-standup-20260512") is None
 
 
 def test_merge_repoints_observations_email_and_carries_aliases(tmp_path):
