@@ -143,3 +143,91 @@ def collect_chunks(store, file_id) -> list[CacheChunk]:
         out.append(CacheChunk(idx=int(row["idx"]), text=row["text"],
                               embedding_b64=_encode_vec(vec), metadata=meta))
     return out
+
+
+# -- write path -------------------------------------------------------------
+
+def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
+            *, enrich=None, published_by="") -> None:
+    """Write the gzip-JSON CacheArtifact for `chunks` (a sequence of CacheChunk),
+    then best-effort GC older/stale artifacts for this file. No-op when unpinned
+    or chunks is empty. Content-hash keying makes concurrent publishers idempotent
+    (byte-equivalent artifacts, last-write-wins is harmless)."""
+    if not pin.is_pinned or not chunks:
+        return
+    chunks = tuple(chunks)
+    extraction_method = (chunks[0].metadata or {}).get("extraction_method", "")
+    art = CacheArtifact(
+        file_id=file_id, content_hash=content_hash,
+        extraction_method=extraction_method, chunker_version=pin.chunker_version,
+        embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
+        enrich=enrich or {}, published_by=published_by,
+        published_at=datetime.now(timezone.utc).isoformat())
+    data = gzip.compress(json.dumps(art.to_dict()).encode("utf-8"))
+    fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin), data)
+    try:
+        gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
+    except Exception as exc:  # noqa: BLE001 — GC failure must not fail the publish
+        log.info("ingest_cache: gc_superseded skipped for %s: %s", file_id, exc)
+
+
+def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
+                 *, enrich=None, published_by="") -> bool:
+    """Collect a locally-embedded file's chunks from the store and publish them.
+    Returns True if an artifact was written."""
+    if not pin.is_pinned:
+        return False
+    chunks = collect_chunks(store, file_id)
+    if not chunks:
+        return False
+    publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
+            enrich=enrich, published_by=published_by)
+    return True
+
+
+# -- GC / lifecycle ---------------------------------------------------------
+
+def _cache_names(fleet_storage):
+    for path in fleet_storage.list_paths(CACHE_DIR + "/"):
+        name = path.rsplit("/", 1)[-1]
+        parsed = _parse_name(name)
+        if parsed:
+            yield path, parsed
+
+
+def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> int:
+    """Delete artifacts for `file_id` whose content hash differs from
+    keep_content_hash OR whose pipeline fingerprint is stale. Returns count."""
+    keep12 = keep_content_hash[:12]
+    cur_pf8 = _pf8(pin)
+    removed = 0
+    for path, (fid, h12, pf8) in _cache_names(fleet_storage):
+        if fid != file_id:
+            continue
+        if h12 != keep12 or pf8 != cur_pf8:
+            fleet_storage.delete(path)
+            removed += 1
+    return removed
+
+
+def sweep_drive(fleet_storage, live_file_ids) -> int:
+    """Opportunistically delete artifacts whose file id is not in live_file_ids
+    (the set of files currently present in the drive). Returns count deleted."""
+    live = set(live_file_ids)
+    removed = 0
+    for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
+        if fid not in live:
+            fleet_storage.delete(path)
+            removed += 1
+    return removed
+
+
+def remove_file_artifacts(fleet_storage, file_id) -> int:
+    """Delete every artifact (all content hashes / pipelines) for one file —
+    used when a file is deleted (changes.list removal event). Returns count."""
+    removed = 0
+    for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
+        if fid == file_id:
+            fleet_storage.delete(path)
+            removed += 1
+    return removed
