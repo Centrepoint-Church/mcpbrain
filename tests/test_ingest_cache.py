@@ -21,14 +21,14 @@ def _b64(vec):
 
 
 def _write_artifact(fs, file_id, content_hash, *, dim=4, embed_model="bge-small",
-                    chunker="v1", enrich=None, chunks=None):
+                    chunker="v1", enrich=None, chunks=None, published_at="2026-07-03"):
     chunks = chunks or (CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
                                    metadata={"source_type": "gdrive", "file_id": file_id,
                                              "chunk_index": 0}),)
     art = CacheArtifact(file_id=file_id, content_hash=content_hash,
                         extraction_method="gdocs", chunker_version=chunker,
                         embed_model=embed_model, dim=dim, chunks=tuple(chunks),
-                        enrich=enrich or {}, published_by="p@x.org", published_at="2026-07-03")
+                        enrich=enrich or {}, published_by="p@x.org", published_at=published_at)
     import gzip, json
     fname = artifact_filename(file_id, content_hash, embed_model, dim, chunker)
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fname}", gzip.compress(json.dumps(art.to_dict()).encode()))
@@ -217,3 +217,25 @@ def test_bootstrap_drive_unpinned_is_noop(tmp_path):
     _write_artifact(fs, "FID", "vhash1")
     out = ingest_cache.bootstrap_drive(s, fs, "D1", FleetPin())
     assert out["imported"] == 0 and out["cache_hits"] == 0
+
+
+def test_bootstrap_drive_prefers_newest_content_version(tmp_path):
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    # Two artifacts for the same file_id but different content versions (different hashes, different timestamps)
+    # Write an older artifact
+    _write_artifact(fs, "FID", "old_hash", chunks=(
+        CacheChunk(idx=0, text="old content here", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                   metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),
+    ), published_at="2026-07-01")
+    # Write a newer artifact with different content and a later timestamp
+    _write_artifact(fs, "FID", "new_hash", chunks=(
+        CacheChunk(idx=0, text="new content here", embedding_b64=_b64([0.5, 0.6, 0.7, 0.8]),
+                   metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),
+    ), published_at="2026-07-03")
+    # bootstrap_drive should import only the newer version
+    summary = ingest_cache.bootstrap_drive(s, fs, "D1", PIN)
+    assert summary["imported"] == 1 and summary["chunks"] == 1
+    # Verify the imported chunk has the NEWER artifact's text, not the older one's
+    ch = s.get_chunk("gdrive-FID-0")
+    assert ch is not None and ch["text"] == "new content here"
+    assert ch["metadata"]["drive_id"] == "D1"
