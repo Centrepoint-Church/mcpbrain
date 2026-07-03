@@ -264,7 +264,7 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
         if art is None:
             continue
         prev = best.get(fid)
-        if prev is None or (art.published_at or "") > prev[0]:
+        if prev is None or (art.published_at or "") < prev[0]:
             best[fid] = (art.published_at or "", art)
     for _fid, (_pa, art) in best.items():
         if _import_artifact(store, drive_id, art, pin):
@@ -287,3 +287,46 @@ def purge_drive(store, drive_id) -> dict:
              drive_id, deleted, invalidated)
     return {"drive_id": drive_id, "docs": len(doc_ids),
             "chunks_deleted": deleted, "relations_invalidated": invalidated}
+
+
+# -- consecutive-absence revocation counter (spec §A3) ----------------------
+
+_KNOWN_DRIVES_META = "ingest_cache.known_drives"
+
+
+def _absence_key(drive_id: str) -> str:
+    return f"ingest_cache.absent:{drive_id}"
+
+
+def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
+    """Track per-drive consecutive absence and auto-purge after `threshold`
+    consecutive missing cycles (spec §A3: guard against a transient Drive glitch
+    reading as revocation). State lives in the meta table — no schema, no cadence.
+
+    A present drive resets its counter and is remembered; a known drive absent for
+    `threshold` cycles is purge_drive'd and forgotten. Returns {'purged','tracked'}.
+    """
+    try:
+        known = set(json.loads(store.get_meta(_KNOWN_DRIVES_META) or "[]"))
+    except (ValueError, TypeError):
+        known = set()
+    present = set(present_ids)
+    known |= present
+    purged = []
+    for d in sorted(known):
+        if d in present:
+            store.set_meta(_absence_key(d), "0")
+            continue
+        try:
+            n = int(store.get_meta(_absence_key(d)) or "0") + 1
+        except (ValueError, TypeError):
+            n = 1
+        if n >= threshold:
+            purge_drive(store, d)
+            purged.append(d)
+            store.set_meta(_absence_key(d), "0")
+        else:
+            store.set_meta(_absence_key(d), str(n))
+    known -= set(purged)
+    store.set_meta(_KNOWN_DRIVES_META, json.dumps(sorted(known)))
+    return {"purged": purged, "tracked": len(known)}

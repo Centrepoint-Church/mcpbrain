@@ -78,3 +78,32 @@ def test_purge_drive_empty_drive_returns_zeros(tmp_path):
     out = ingest_cache.purge_drive(s, "NONEXISTENT_DRIVE")
     assert out == {"drive_id": "NONEXISTENT_DRIVE", "docs": 0,
                    "chunks_deleted": 0, "relations_invalidated": 0}
+
+
+def test_note_drive_presence_purges_after_threshold(tmp_path):
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    # cycle 1: D1 present -> known, counter 0
+    assert ingest_cache.note_drive_presence(s, ["D1"], threshold=3)["purged"] == []
+    # cycles 2-4: D1 absent -> counts 1, 2, then purge on the 3rd
+    assert ingest_cache.note_drive_presence(s, [], threshold=3)["purged"] == []
+    assert ingest_cache.note_drive_presence(s, [], threshold=3)["purged"] == []
+    out = ingest_cache.note_drive_presence(s, [], threshold=3)
+    assert out["purged"] == ["D1"]
+    assert s.doc_ids_for_drive("D1") == []          # purge ran
+    # forgotten: a further absent cycle does nothing
+    assert ingest_cache.note_drive_presence(s, [], threshold=3)["purged"] == []
+
+
+def test_note_drive_presence_transient_glitch_recovers(tmp_path):
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    ingest_cache.note_drive_presence(s, ["D1"], threshold=3)
+    ingest_cache.note_drive_presence(s, [], threshold=3)          # 1 absent
+    ingest_cache.note_drive_presence(s, ["D1"], threshold=3)      # reappears -> reset
+    ingest_cache.note_drive_presence(s, [], threshold=3)          # 1 absent again
+    out = ingest_cache.note_drive_presence(s, [], threshold=3)    # 2 absent — NOT purged
+    assert out["purged"] == []
+    assert s.doc_ids_for_drive("D1") == ["gdrive-F1-0"]
