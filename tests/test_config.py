@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 
@@ -88,3 +89,21 @@ def test_review_max_apply_per_run_default_and_override(tmp_path):
     assert config.review_max_apply_per_run(home) == 50          # invalid -> default
     write_config(home, {"review_max_apply_per_run": 0})
     assert config.review_max_apply_per_run(home) == 1           # floored at 1
+
+
+def test_meeting_series_enabled_default_true(tmp_path):
+    assert config.meeting_series_enabled(str(tmp_path)) is True
+
+
+def test_topic_consolidation_enabled_default_true(tmp_path):
+    assert config.topic_consolidation_enabled(str(tmp_path)) is True
+
+
+def test_meeting_series_can_be_disabled(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"meeting_series_enabled": False}))
+    assert config.meeting_series_enabled(str(tmp_path)) is False
+
+
+def test_topic_consolidation_can_be_disabled(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"topic_consolidation_enabled": False}))
+    assert config.topic_consolidation_enabled(str(tmp_path)) is False
