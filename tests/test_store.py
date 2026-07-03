@@ -637,3 +637,29 @@ def test_unsuppress_entity_returns_false_when_no_row(tmp_path):
     s = _store(tmp_path)
     s.upsert_entity("e1", "Junk Entity", "person", org="", seen="2026-05-30")
     assert s.unsuppress_entity("e1") is False
+
+
+def _seed_entity(store, eid="e1", name="Alice", **kw):
+    with store._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES(?,?,'person')", (eid, name))
+
+def test_rename_entity_sets_name_and_keeps_alias(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init(); _seed_entity(s)
+    assert s.rename_entity("e1", "Alice Smith") is True
+    e = s.get_entity("e1")
+    assert e["name"] == "Alice Smith"
+    assert "Alice" in e["aliases"].split("|")
+
+def test_rename_entity_unknown_id(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    assert s.rename_entity("nope", "X") is False
+
+def test_set_entity_email_and_notes(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init(); _seed_entity(s)
+    assert s.set_entity_email("e1", "alice@acme.com") is True
+    assert s.set_entity_notes("e1", "prefers email") is True
+    e = s.get_entity("e1")
+    assert e["email_addr"] == "alice@acme.com" and e["notes"] == "prefers email"

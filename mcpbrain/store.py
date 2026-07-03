@@ -812,6 +812,43 @@ class Store:
                 (org, org_valid_from, entity_id))
             return cur.rowcount > 0
 
+    def rename_entity(self, entity_id: str, new_name: str) -> bool:
+        """Rename an entity, preserving the old name as an alias.
+
+        aliases is a '|'-separated, de-duplicated list. The old name is appended
+        (case-preserving) unless it already equals the new name or is already
+        present. Returns True iff the entity exists and was updated.
+        """
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return False
+        with self._connect() as db:
+            row = db.execute("SELECT name, COALESCE(aliases,'') AS aliases "
+                             "FROM entities WHERE id=?", (entity_id,)).fetchone()
+            if row is None:
+                return False
+            old = (row["name"] or "").strip()
+            parts = [a for a in row["aliases"].split("|") if a]
+            if old and old != new_name and old not in parts:
+                parts.append(old)
+            db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",
+                       (new_name, "|".join(parts), entity_id))
+            return True
+
+    def set_entity_email(self, entity_id: str, email_addr: str) -> bool:
+        """Set an entity's email_addr. Returns True iff a row was updated."""
+        with self._connect() as db:
+            cur = db.execute("UPDATE entities SET email_addr=? WHERE id=?",
+                             (email_addr or "", entity_id))
+            return cur.rowcount > 0
+
+    def set_entity_notes(self, entity_id: str, notes: str) -> bool:
+        """Set an entity's notes. Returns True iff a row was updated."""
+        with self._connect() as db:
+            cur = db.execute("UPDATE entities SET notes=? WHERE id=?",
+                             (notes or "", entity_id))
+            return cur.rowcount > 0
+
     def rewrite_org_field(self, variant_org: str, canonical_org: str) -> int:
         """Bulk-correct the org field: relabel every entity currently tagged
         with variant_org to canonical_org. Returns the number of rows updated
