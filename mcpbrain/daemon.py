@@ -203,6 +203,14 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # Auto-graduation: flip data-gated flags (bandit/lessons/decay) ON when ready.
     CadencePass("auto_enable", "_auto_enable_interval_s",
                 "_last_auto_enable", "_run_auto_enable"),
+    # Org-baseline (Phase 0) cadences: registered as no-op stubs; subsystem B
+    # fills the _run_* bodies.
+    CadencePass("org_contrib_upload", "_org_contrib_upload_interval_s",
+                "_last_org_contrib_upload", "_run_org_contrib_upload"),
+    CadencePass("org_import", "_org_import_interval_s",
+                "_last_org_import", "_run_org_import"),
+    CadencePass("org_curate", "_org_curate_interval_s",
+                "_last_org_curate", "_run_org_curate"),
 )
 
 
@@ -549,6 +557,14 @@ class Daemon:
         # Auto-graduation cadence: flip data-gated brain flags ON when ready.
         self._auto_enable_interval_s: float | None = None
         self._last_auto_enable = None
+        # Org-baseline (Phase 0) cadences: registered as no-op stubs; subsystem B
+        # fills the _run_* bodies. Intervals set from cadences config on start.
+        self._org_contrib_upload_interval_s: float | None = None
+        self._last_org_contrib_upload = None
+        self._org_import_interval_s: float | None = None
+        self._last_org_import = None
+        self._org_curate_interval_s: float | None = None
+        self._last_org_curate = None
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
@@ -899,6 +915,9 @@ class Daemon:
             self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
             self._self_improve_interval_s = cadences["self_improve_interval_s"]
             self._auto_enable_interval_s = cadences["auto_enable_interval_s"]
+            self._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
+            self._org_import_interval_s = cadences["org_import_interval_s"]
+            self._org_curate_interval_s = cadences["org_curate_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -1634,6 +1653,30 @@ class Daemon:
         self._last_review = now
         return counts
 
+    # -- Org-baseline cadences (Phase 0 stubs; bodies land in subsystem B) ----
+
+    def _run_org_contrib_upload(self) -> dict | None:
+        """Upload pending org_contrib_outbox rows to the fleet folder.
+        Phase 0: no-op stub — subsystem B implements the body."""
+        if not self._is_due("_org_contrib_upload_interval_s", "_last_org_contrib_upload"):
+            return None
+        return None
+
+    def _run_org_import(self) -> dict | None:
+        """Import a newer org-graph snapshot into origin='org' rows.
+        Phase 0: no-op stub — subsystem B implements the body."""
+        if not self._is_due("_org_import_interval_s", "_last_org_import"):
+            return None
+        return None
+
+    def _run_org_curate(self) -> dict | None:
+        """Curator-only: ingest contributions, adjudicate, publish a snapshot.
+        Phase 0: no-op stub — subsystem B implements the body (and gates on
+        config.is_org_curator inside it)."""
+        if not self._is_due("_org_curate_interval_s", "_last_org_curate"):
+            return None
+        return None
+
     # -- periodic graph lint ------------------------------------------------
 
     def _run_lint(self) -> dict | None:
@@ -2110,6 +2153,9 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "audit_interval_s":               604800.0,
     "verify_interval_s":              3600.0,
     "auto_update_interval_s":         86400.0,
+    "org_contrib_upload_interval_s":  86400.0,   # Phase 0 stub: daily contribution upload
+    "org_import_interval_s":          86400.0,   # Phase 0 stub: daily snapshot import
+    "org_curate_interval_s":          86400.0,   # Phase 0 stub: daily curator adjudication
 }
 
 _CADENCE_KEYS = (
@@ -2133,6 +2179,9 @@ _CADENCE_KEYS = (
     "voice_analyse_interval_s",
     "self_improve_interval_s",
     "auto_enable_interval_s",
+    "org_contrib_upload_interval_s",
+    "org_import_interval_s",
+    "org_curate_interval_s",
 )
 
 
@@ -2218,6 +2267,9 @@ def main(argv=None) -> None:
     daemon._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
     daemon._self_improve_interval_s = cadences["self_improve_interval_s"]
     daemon._auto_enable_interval_s = cadences["auto_enable_interval_s"]
+    daemon._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
+    daemon._org_import_interval_s = cadences["org_import_interval_s"]
+    daemon._org_curate_interval_s = cadences["org_curate_interval_s"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
