@@ -937,6 +937,10 @@ def apply(store, extraction, *, doc_ids, identity=None,
     now = (clock() if clock else datetime.now(timezone.utc))
     today = now.strftime("%Y-%m-%d")
 
+    # Resolved once and reused everywhere below instead of recomputing this
+    # same expression per flag lookup.
+    _home = str(home) if home is not None else str(config.app_dir())
+
     # Org default: the model's own org signal always wins when present. Only
     # when it's empty or the model's own "unknown" sentinel — and the
     # kill-switch resolves True — fall back to org_hint, the deterministic
@@ -945,18 +949,16 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # answer, even one that disagrees with it.
     raw_org = (extraction.get("org", "unknown") or "unknown")
     if raw_org in ("", "unknown"):
-        _org_default_home = str(home) if home is not None else str(config.app_dir())
-        if config.enrich_org_default_enabled(_org_default_home):
+        if config.enrich_org_default_enabled(_home):
             raw_org = extraction.get("org_hint") or raw_org
     org = canonical_org(raw_org, taxonomy)
     content_type = extraction.get("content_type", "") or ""
     summary = extraction.get("summary", "") or ""
     contextual_summary = extraction.get("contextual_summary", "") or ""
     topics_list = extraction.get("topics", []) or []
-    _topic_home = str(home) if home is not None else str(config.app_dir())
-    if config.topic_consolidation_enabled(_topic_home):
-        topics_list = [topics.normalize_topic(t, _topic_home) for t in topics_list]
-        topics_list = [t for t in topics_list if t]
+    if config.topic_consolidation_enabled(_home):
+        topics_list = [topics.normalize_topic(t, _home) for t in topics_list]
+        topics_list = list(dict.fromkeys(t for t in topics_list if t))
     topics_str = ", ".join(topics_list)
     entities_list = extraction.get("entities", []) or []
     messages = extraction.get("messages", []) or []
@@ -1066,10 +1068,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # run and reuses it — avoids rebuilding the 25k-entity index on every apply);
     # fall back to building it here for direct callers. Near-duplicates redirect to
     # the existing entity rather than fragmenting the graph.
-    _dedup_home = str(home) if home is not None else str(config.app_dir())
-    _dedup_enabled = config.write_time_dedup_enabled(_dedup_home)
-    _meeting_home = str(home) if home is not None else str(config.app_dir())
-    _meeting_series = config.meeting_series_enabled(_meeting_home)
+    _dedup_enabled = config.write_time_dedup_enabled(_home)
+    _meeting_series = config.meeting_series_enabled(_home)
     _entity_index = entity_index
     if _dedup_enabled and _entity_index is None:
         try:
@@ -1182,8 +1182,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # fit `role` (a current-title snapshot) or the relation types. Resolved
     # against name_to_id ONLY — exact match, no affiliation-stripping
     # fallback — an unresolved entity_name is skipped, never invented.
-    _observations_home = str(home) if home is not None else str(config.app_dir())
-    if config.enrich_rich_observations_enabled(_observations_home):
+    if config.enrich_rich_observations_enabled(_home):
         for obs in extraction.get("observations", []) or []:
             obs_entity_name = (obs.get("entity_name") or "").strip()
             obs_attribute = (obs.get("attribute") or "").strip()
@@ -1225,8 +1224,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # mentioned_with) without depending on the model re-listing headers. This
     # frees the model's extraction budget for body-mentioned people only.
     # Junk-guarded and owner-excluded, same as every other entity-creation path.
-    _sender_home = str(home) if home is not None else str(config.app_dir())
-    if config.enrich_sender_entities(_sender_home):
+    if config.enrich_sender_entities(_home):
         for msg in messages:
             hdr = msg.get("sender", "") or ""
             if not hdr:
@@ -1270,10 +1268,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # REAL configured org, and every pair of such senders gets mentioned_with
     # in both directions. This frees the model's extraction budget for the
     # semantic relations (reports_to/manages/coordinates_with) headers can't
-    # supply. Guarded by the same home-resolution idiom used twice above for
-    # enrich_org_default_enabled/write_time_dedup_enabled.
-    _structural_home = str(home) if home is not None else str(config.app_dir())
-    if config.enrich_structural_relations_enabled(_structural_home):
+    # supply. Guarded by the shared `_home` computed near the top of apply().
+    if config.enrich_structural_relations_enabled(_home):
         structural_person_ids: list = []
         for msg in messages:
             msg_header = msg.get("sender", "") or ""

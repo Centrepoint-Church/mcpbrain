@@ -36,6 +36,19 @@ def test_remap_topics_leaves_distinct(store, tmp_path):
     assert n == 2  # no synonym entry -> stay distinct
 
 
+def test_remap_topics_renormalizes_email_context(store, tmp_path):
+    # Historical email_context.topics strings hold un-normalized tags — F-M4
+    # requires remap_topics to renormalize them too, so the min-2-org gate
+    # doesn't transiently mix old/new forms of the same topic.
+    store.upsert_email_context("m1", subject="s", topics="budgets, prayer")
+    out = consolidate.remap_topics(store, str(tmp_path))
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT topics FROM email_context WHERE message_id='m1'").fetchone()
+    assert row["topics"] == "budget, prayer"
+    assert out["rows_renormalized"] == 1
+
+
 def test_reset_meeting_sources(store):
     store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
     store.upsert_chunk("gmail-m1-body-0", "t", "h", {"message_id": "m1"})
@@ -46,9 +59,32 @@ def test_reset_meeting_sources(store):
     assert out["chunks_reset"] == 1
 
 
+def test_reset_meeting_sources_unclods_chunks(store):
+    # A meeting-source chunk gated 'cold' by the Q1 salience gate would
+    # otherwise be reset to enriched=0 but never re-queue, since
+    # unenriched_chunks() excludes cold chunks. reset_meeting_sources must
+    # clear enrich_state too, scoped to exactly the meeting-source doc_ids.
+    store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
+    store.upsert_chunk("gmail-m1-body-0", "t", "h", {"message_id": "m1"})
+    store.mark_enriched(["gmail-m1-body-0"])
+    store.set_enrich_state(["gmail-m1-body-0"], "cold")
+    store.link_email_entity("m1", "board-12-may", role="about")
+    out = consolidate.reset_meeting_sources(store)
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT enriched, enrich_state FROM chunks WHERE doc_id='gmail-m1-body-0'"
+        ).fetchone()
+    assert row["enriched"] == 0
+    assert row["enrich_state"] == ""
+    assert out["uncold"] == 1
+
+
 def test_retire_meeting_duplicates(store):
     store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
     store.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-05-12")
+    # A GENUINE series carries an occurrence observation (M8) — without one it
+    # no longer qualifies as a candidate series for meeting_series_for_old.
+    store.append_occurrence("meeting-acme-board", "2026-05-12", "board mtg", "m1")
     store.link_email_entity("m1", "board-12-may", role="about")
     store.link_email_entity("m1", "meeting-acme-board", role="about")
     out = consolidate.retire_meeting_duplicates(store, ["board-12-may"])
@@ -56,6 +92,38 @@ def test_retire_meeting_duplicates(store):
         remaining = db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()
     assert [r["id"] for r in remaining] == ["meeting-acme-board"]
     assert out["retired"] == 1
+
+
+def test_retire_meeting_duplicates_legacy_bare_meeting_slug(store):
+    # A legacy meeting entity whose slug happens to start with 'meeting-'
+    # ("Meeting with Bob" -> 'meeting-with-bob') must still be retired into a
+    # GENUINE re-extracted series — the old `startswith("meeting-")` guard
+    # false-positived on exactly this shape (M8b).
+    store.upsert_entity("meeting-with-bob", "Meeting with Bob", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "m1")
+    store.link_email_entity("m1", "meeting-with-bob", role="about")
+    store.link_email_entity("m1", "meeting-acme-standup", role="about")
+    out = consolidate.retire_meeting_duplicates(store, ["meeting-with-bob"])
+    with store._connect() as db:
+        remaining = db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()
+    assert [r["id"] for r in remaining] == ["meeting-acme-standup"]
+    assert out["retired"] == 1
+
+
+def test_retire_meeting_duplicates_skips_genuine_series_in_pre_ids(store):
+    # A genuine series (has an occurrence) passed in pre_ids — e.g. on a
+    # re-run — must be skipped entirely: not merged into anything, still
+    # present, and not counted as retired or left.
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "m1")
+    out = consolidate.retire_meeting_duplicates(store, ["meeting-acme-standup"])
+    with store._connect() as db:
+        remaining = [r["id"] for r in db.execute(
+            "SELECT id FROM entities WHERE type='meeting'").fetchall()]
+    assert remaining == ["meeting-acme-standup"]
+    assert out["retired"] == 0
+    assert out["left"] == 0
 
 
 def _load_bin():
