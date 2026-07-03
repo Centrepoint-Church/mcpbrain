@@ -93,8 +93,18 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         from mcpbrain.embed import get_embedder
         get_embedder().embed_query("warm")
 
+    def _repair_baseline():
+        # Re-run the baseline bootstrap via the running daemon (which owns the
+        # store + Google services). Degrades if the daemon is down.
+        from mcpbrain.control_client import ControlClient, DaemonUnavailable
+        try:
+            return ControlClient(home, timeout=600).bootstrap_baseline()
+        except DaemonUnavailable:
+            return {"status": "skipped", "reason": "daemon not running"}
+
     return {"daemon": _repair_daemon, "agent": _repair_agent,
-            "records": _repair_records, "embedder": _repair_embedder}
+            "records": _repair_records, "embedder": _repair_embedder,
+            "baseline": _repair_baseline}
 
 
 def _is_problem(key: str, state: str) -> bool:
@@ -236,6 +246,22 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                 lines.append(f"❌ {'Embedder':<16} weights missing → re-download did not "
                              f"land (needs network; rerun mcpbrain doctor when online)")
                 need_action += 1
+
+    # Baseline bootstrap: re-runnable import of the org snapshot + shared-drive
+    # ingest caches. Injected so tests don't hit the network; a down daemon or an
+    # unreachable fleet is a graceful skip (➖), never an actionable fault.
+    baseline = repairs.get("baseline")
+    if baseline is None:
+        lines.append(f"➖ {'Baseline':<16} not checked")
+    else:
+        try:
+            res = baseline() or {}
+            st = res.get("status", "unknown")
+            glyph = "✅" if st in ("done", "skipped") else "❌"
+            lines.append(f"{glyph} {'Baseline':<16} bootstrap {st}"
+                         + (f" ({res['reason']})" if res.get("reason") else ""))
+        except Exception as exc:  # noqa: BLE001 — never fatal
+            lines.append(f"➖ {'Baseline':<16} skipped ({exc})")
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")

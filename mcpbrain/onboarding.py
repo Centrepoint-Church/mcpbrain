@@ -234,3 +234,20 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
     # any caller that serializes the summary (control API).
     summary["done_drive_ids"] = sorted(summary["done_drive_ids"])
     return summary
+
+
+# -- CLI entry ----------------------------------------------------------------
+
+def bootstrap_main(argv=None) -> int:
+    """`mcpbrain bootstrap` — re-run the baseline import via the daemon."""
+    import argparse
+    from mcpbrain.config import app_dir
+    from mcpbrain.control_client import ControlClient, DaemonUnavailable
+    argparse.ArgumentParser(prog="mcpbrain bootstrap").parse_args(argv or [])
+    try:
+        res = ControlClient(str(app_dir()), timeout=600).bootstrap_baseline()
+    except DaemonUnavailable:
+        print("The mcpbrain daemon is not running; start it with `mcpbrain daemon`.")
+        return 1
+    print(json.dumps(res, indent=2))
+    return 0
