@@ -216,3 +216,51 @@ def search_entities(store, q: str, limit: int = 10) -> list[dict]:
     except sqlite3.OperationalError as exc:
         log.warning("search_entities: read failed (%s)", exc)
         return []
+
+
+def update_entity(store, entity_id: str, *, name=None, org=None,
+                  email_addr=None, notes=None) -> dict | None:
+    """Correct existing fields on an entity. Returns the fresh detail, or None
+    if the entity is unknown. Only provided (non-None) fields are written."""
+    if store.get_entity(entity_id) is None:
+        return None
+    changed = []
+    if name is not None and name.strip():
+        store.rename_entity(entity_id, name); changed.append("name")
+    if org is not None:
+        store.update_entity_org(entity_id, org); changed.append("org")
+    if email_addr is not None:
+        store.set_entity_email(entity_id, email_addr); changed.append("email")
+    if notes is not None:
+        store.set_entity_notes(entity_id, notes); changed.append("notes")
+    if changed:
+        store.record_change("entity_edited", ref_id=entity_id,
+                            summary=f"edited {', '.join(changed)}")
+    return entity_detail(store, entity_id)
+
+
+def merge_entities(store, loser_id: str, winner_id: str) -> dict:
+    """Merge loser into winner, guarded. Refuses self-merge and role-inbox pairs."""
+    from mcpbrain.resolve import is_role_address
+    if loser_id == winner_id:
+        return {"ok": False, "error": "self_merge",
+                "message": "Can't merge an entity into itself."}
+    loser, winner = store.get_entity(loser_id), store.get_entity(winner_id)
+    if loser is None or winner is None:
+        return {"ok": False, "error": "not_found", "message": "Entity not found."}
+    if is_role_address(loser.get("email_addr", "")) or is_role_address(winner.get("email_addr", "")):
+        return {"ok": False, "error": "role_inbox",
+                "message": "One of these is keyed on a shared/role inbox "
+                           "(e.g. office@) — merging could fuse distinct people. Refused."}
+    store.merge_entities(loser_id, winner_id)
+    store.record_change("entity_merged", ref_id=winner_id,
+                        summary=f"merged {loser_id} into {winner_id}")
+    return {"ok": True}
+
+
+def suppress_entity(store, entity_id: str) -> dict:
+    """Soft-delete (reversible) an entity."""
+    ok = store.suppress_entity(entity_id, reason="graph-ui")
+    if ok:
+        store.record_change("entity_suppressed", ref_id=entity_id, summary="suppressed via graph")
+    return {"ok": bool(ok)}
