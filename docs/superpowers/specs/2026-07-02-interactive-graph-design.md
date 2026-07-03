@@ -74,7 +74,10 @@ Pure functions over a `store` (unit-testable without a daemon, mirroring
 
 - `graph_canvas(store, *, min_conn, org, community, types, recency_days, max_links=5000) -> dict` — **shipped.** `{nodes, links, communities}`, degree/org/community/type/recency filters, 5000 cap → `too_large` (413), tolerant of a missing `entity_suppressions` table.
 - `entity_detail(store, entity_id) -> dict | None` — **new.**
-  `{id, name, type, org, email_addr, aliases, notes, connections, relations: [{other_id, other_name, relation, strength, direction}], observations: [{text, ts, ...}], backlinks: [{id, name, relation}]}`. `None` when the id is unknown/suppressed → 404.
+  `{id, name, type, org, email_addr, aliases, notes, connections, relations: [{other_id, other_name, relation, strength, direction}], observations: [{attribute, value, valid_from, valid_to, source}], backlinks: [{id, name, relation}]}`. Read-only pass over `entities` + `entity_relations` (joined to the other endpoint for names/strength) + `entity_observations`. `None` when the id is unknown/suppressed → 404.
+- `search_entities(store, q, limit=10) -> list[dict]` — **new.** Powers the merge
+  type-ahead: `[{id, name, type, org}]` for entities whose name matches `q`
+  (case-insensitive prefix/substring), excluding suppressed. Empty `q` → `[]`.
 - Mutations (thin wrappers; the route layer stays declarative). Every mutation
   records to `change_log` (audit; consistent with existing dashboard mutations):
   - `update_entity(store, id, *, name?, org?, email_addr?, notes?) -> dict` — corrects
@@ -103,6 +106,7 @@ the existing `mark_done` / `resolve_finding` routes.
 | GET | `/vendor/<name>.js` | serve vendored libs (allowlisted) | shipped |
 | GET | `/api/graph/canvas` | `graph_view.graph_canvas(...)`; 413 too_large; 503 no store | shipped |
 | GET | `/api/graph/entity/{id}` | `graph_view.entity_detail(...)`; 404 if unknown | **new** |
+| GET | `/api/graph/search?q=` | `graph_view.search_entities(...)`; `[]` on empty `q` | **new** (merge type-ahead) |
 | POST | `/api/graph/entity/{id}` | `graph_view.update_entity(...)`; body `{name?, org?, email_addr?, notes?}`; 400 on empty/invalid | **new** |
 | POST | `/api/graph/merge` | `graph_view.merge_entities(...)`; `{loser_id, winner_id}`; 409 on role-inbox / self-merge refusal | **new** |
 | DELETE | `/api/graph/entity/{id}` | `graph_view.suppress_entity(...)`; 404 if unknown | **new** |
@@ -117,9 +121,13 @@ entity drawer:**
   relation · strength · direction), the **observations** timeline, and
   **backlinks**.
 - **Editing in the drawer** (correction/curation only):
-  - **Edit fields** — name, org (works-at), email, notes → `POST /api/graph/entity/{id}`.
-  - **Merge** — pick another entity as the merge target, confirm → `POST /api/graph/merge`
-    (server refuses role-inbox/self-merge with a clear message).
+  - **Edit fields via edit-mode** — the drawer is read-only until an **"Edit"**
+    button turns name, org (works-at), email, and notes into inputs with explicit
+    **Save / Cancel**. Save → `POST /api/graph/entity/{id}`. (No accidental writes.)
+  - **Merge via type-ahead** — a "Merge into…" box queries `GET /api/graph/search?q=`,
+    you pick the target, then a **confirm modal** ("*this* merges into *target* —
+    its links move, and *this* becomes an alias") → `POST /api/graph/merge`. Server
+    refuses role-inbox / self-merge → 409 shown inline.
   - **Suppress** — confirm → `DELETE /api/graph/entity/{id}` (reversible).
   - On success, patch the in-memory graph and/or re-fetch the canvas so the map
     reflects the change.
@@ -135,10 +143,13 @@ entity drawer:**
 
 ## Testing
 - **Backend unit** (`tests/test_graph_view.py`, seeded store): `entity_detail`
-  fields + unknown-id `None`; `update_entity` (name→alias, org, email, notes);
-  `merge_entities` happy path, **role-inbox refusal**, **self-merge refusal**;
-  `suppress_entity`. (`graph_canvas` tests already exist.)
-- **Route** (`ControlServer`): 200/400/401/404/409 across the new endpoints.
+  fields (relations split into out/backlinks, observations) + unknown-id `None`;
+  `search_entities` (name match, excludes suppressed, empty-`q` → `[]`);
+  `update_entity` (name→alias, org, email, notes); `merge_entities` happy path,
+  **role-inbox refusal**, **self-merge refusal**; `suppress_entity`.
+  (`graph_canvas` tests already exist.)
+- **Route** (`ControlServer`): 200/400/401/404/409 across the new endpoints
+  (incl. `GET /api/graph/search`).
 - **Frontend:** `node --check` on the inline script; static-marker assertions for
   the drawer hooks; a stubbed-fetch render harness (as used for the dashboard and
   the graph) confirming the drawer opens, shows detail, and the edit/merge/suppress
@@ -149,11 +160,12 @@ entity drawer:**
 Explore + readability are **shipped**. The one remaining phase delivers the whole
 of the rest of this spec at once:
 
-**Entity drawer with editing** — `entity_detail` + `update_entity` + `merge` +
-`suppress` in `graph_view.py`; the four new routes; new store setters
-(`rename_entity`, `set_entity_email`, `set_entity_notes`); and the drawer UI
-(view + edit fields + merge + suppress, with confirmations and the role-inbox
-guard). When this ships, the spec is done.
+**Entity drawer with editing** — `entity_detail` + `search_entities` +
+`update_entity` + `merge` + `suppress` in `graph_view.py`; the five new routes
+(entity, search, update, merge, delete); new store setters (`rename_entity`,
+`set_entity_email`, `set_entity_notes`); and the drawer UI (view + edit-mode
+fields with Save/Cancel + type-ahead merge + suppress, with confirmations and the
+role-inbox guard). When this ships, the spec is done.
 
 ## Decisions (resolved — formerly "open questions")
 - **Hard-delete:** not built. Suppress (reversible) is the correct, safe default.
@@ -164,4 +176,8 @@ guard). When this ships, the spec is done.
 - **Authoring:** correcting existing entity facts (name/org/email/notes) + merge +
   suppress only; no new entities/relations/observations. Confirmed with Josh
   2026-07-03.
+- **Merge target selection:** type-ahead search in the drawer (`GET /api/graph/search`),
+  not click-on-canvas — works even when the duplicate isn't on-screen. (Josh 2026-07-03.)
+- **Field editing:** explicit edit-mode with Save/Cancel, not always-inline —
+  intentional writes on a curation surface. (Josh 2026-07-03.)
 - **Release versions** are chosen at release time, not fixed in the spec.
