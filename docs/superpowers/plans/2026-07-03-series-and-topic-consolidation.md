@@ -1342,7 +1342,7 @@ Expected: prints `Gold set: recall@10=<r> MRR=<m> ...`. Record both numbers; bot
 
 The attended migration sequence (curator, on the live store):
 1. `python bin/consolidate.py topics` → then `mcpbrain enrich-eval`; if regressed, restore the printed backup.
-2. `python bin/consolidate.py meetings-reset` → let the daemon drain/re-extract the reset chunks (watch the spool empty).
+2. `python bin/consolidate.py meetings-reset` → let the daemon drain/re-extract the reset chunks (watch the spool empty). Note: cold-marked meeting-source chunks (salience-gated, `enrich_state='cold'`) are reset by `meetings-reset` but the daemon's `unenriched_chunks()` won't re-queue them, so a small residue of cold-sourced meetings may remain unconsolidated as single-occurrence entities (non-destructive). If fuller consolidation is later wanted, also clear `enrich_state` for the scoped set.
 3. `python bin/consolidate.py meetings-retire` → then `mcpbrain enrich-eval`; if regressed, restore.
 4. Count checks: `SELECT type, COUNT(*) FROM entities GROUP BY type` — meeting + topic node counts should drop; verify occurrence rows exist (`SELECT COUNT(*) FROM entity_observations WHERE attribute='occurrence'`).
 

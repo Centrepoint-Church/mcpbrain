@@ -1111,6 +1111,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 if store.link_email_entity(lead_msg_id, eid, role="about"):
                     _bump_email_count(store, eid)
                 linked.add(eid)
+                entities_created += 1
             occ_date = _parse_date_iso(ent.get("occurrence_date") or "") or lead_date_iso or today
             occ_value = (ent.get("source_span") or summary or "")[:200]
             store.append_occurrence(eid, occ_date, occ_value, lead_msg_id or prov_doc_id)
