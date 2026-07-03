@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 
-from mcpbrain.org_contracts import ContributionRecord, FleetPin, source_ref
+from mcpbrain.org_contracts import ContributionRecord, FleetPin, FleetStorage, source_ref
 from mcpbrain.resolve import is_role_address
 
 log = logging.getLogger(__name__)
@@ -118,3 +119,27 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
             db.execute("INSERT INTO org_contrib_outbox(record) VALUES(?)",
                        (json.dumps(rec.to_dict(), sort_keys=True),))
     return len(records)
+
+
+def upload_pending(store, fleet_storage: FleetStorage, contributor_email: str) -> dict:
+    """Drain all pending (uploaded_at=='') org_contrib_outbox rows into ONE
+    append-only JSONL batch at contrib/<email>/<utc-timestamp>.jsonl, then stamp
+    them uploaded. Idempotent-safe: only rows still pending are taken, so a
+    re-run after a successful upload is a no-op. Returns
+    {"uploaded": n, "batch": path} ({"uploaded": 0, "batch": ""} when nothing
+    is pending)."""
+    with store._connect() as db:
+        rows = db.execute(
+            "SELECT id, record FROM org_contrib_outbox WHERE uploaded_at='' ORDER BY id"
+        ).fetchall()
+    if not rows:
+        return {"uploaded": 0, "batch": ""}
+    payload = ("\n".join(r["record"] for r in rows) + "\n").encode("utf-8")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = f"contrib/{contributor_email}/{ts}.jsonl"
+    fleet_storage.put_bytes(path, payload)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with store._connect() as db:
+        db.executemany("UPDATE org_contrib_outbox SET uploaded_at=? WHERE id=?",
+                        [(now, r["id"]) for r in rows])
+    return {"uploaded": len(rows), "batch": path}
