@@ -1,31 +1,25 @@
 # Vendored graph libraries
 
 Browser UMD builds, committed so the dashboard graph works fully offline
-(no CDN, no build step). Served by the daemon at `/vendor/<name>.js`.
+(no CDN, no build step). Served by the daemon at `/vendor/<name>.js` and loaded
+by `wizard/graph.html`.
 
 | File | Package | Version | Source |
 |---|---|---|---|
-| graphology.umd.min.js | graphology | 0.25.4 | jsDelivr npm dist |
-| sigma.min.js | sigma | 2.4.0 | jsDelivr npm build (UMD; v3 is ESM-only) |
-| graphology-layout-forceatlas2.min.js | graphology-layout-forceatlas2 | 0.4.4 | jsDelivr npm build |
+| force-graph.min.js | force-graph | 1.51.4 | jsDelivr npm dist |
+| d3.min.js | d3 | 7.9.0 | jsDelivr npm dist (full bundle; provides `d3-force`) |
 
-Globals exposed: `window.graphology` (Graph constructor), `window.Sigma`,
-`window.forceAtlas2` (`.assign(graph, opts)`).
+Globals exposed: `window.ForceGraph` (constructor: `new ForceGraph(el)`),
+`window.d3` (used for `forceManyBody`/`forceCollide`/`forceLink`/`forceRadial`/
+`forceCenter`).
 
-**Deviation from the original plan:** `graphology-layout-forceatlas2` stopped
-publishing a `build/*.min.js` (UMD) bundle after 0.5.x — every version from
-0.6.0 through the current 0.10.1 ships only CommonJS source (`index.js`,
-`require()`-based, no bundled dist). 0.4.4 is the newest published version
-that still has a UMD build under `build/`, so it's what's vendored here; its
-exposed global is `window.forceAtlas2` (not `graphologyLayoutForceAtlas2` as
-originally assumed, and it has no separate `.min.js` name distinct from the
-`build/` path). Verified compatible with the vendored graphology 0.25.4:
-built a `graphology.Graph`, ran `forceAtlas2.assign(graph, {iterations, settings})`
-against it, and confirmed node positions moved as expected — the algorithm's
-public API (`assign`/`inferSettings`, `graph.forEachNode`/attribute
-getters-setters) has been stable across these graphology versions.
+The graph renderer in `graph.html` is a direct port of the ops-brain
+`workstation-frontend/src/workspaces/graph/explore/canvas.ts` — force-graph
+driving a live d3-force simulation, retuned to mcpbrain's palette via the
+`--graph-*` CSS tokens defined in `graph.html`.
+
+The full `d3` bundle is vendored (rather than the standalone `d3-force`, which
+is not self-contained — it `require`s `d3-quadtree`/`d3-dispatch`/`d3-timer`).
 
 To update: re-fetch the same paths at a new pinned version, re-run
 `tests/test_graph_assets.py` and `tests/test_graph_page.py`, and update this table.
-If a future `graphology-layout-forceatlas2` release restores a UMD dist,
-prefer that over 0.4.4 and update the global name accordingly.
