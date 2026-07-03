@@ -147,8 +147,9 @@ def _annotate_series_from_event(store, event, owner) -> bool:
     org) resolves to an EXISTING series entity. Writes a 'calendar_series'
     observation (value=recurringEventId). Never creates or re-keys an entity, so
     it cannot mis-merge two series. Org is unknown from a bare calendar event, so
-    we try the owner's default org first, then 'external' — the two buckets a
-    calendar-derived series would have been keyed under.
+    this only matches against the 'external'-scoped series id — the conservative
+    org bucket a calendar-derived series falls under — and does not attempt
+    owner-org matching.
     """
     rec_id = event.get("recurringEventId", "")
     summary = (event.get("summary") or "").strip()
@@ -172,7 +173,7 @@ def _annotate_series_from_event(store, event, owner) -> bool:
             db.execute(
                 "INSERT INTO entity_observations "
                 "(entity_id, attribute, value, source, valid_from, confidence_source) "
-                "VALUES (?, 'calendar_series', ?, ?, ?, 'gdrive')",
+                "VALUES (?, 'calendar_series', ?, ?, ?, 'calendar')",
                 (eid, rec_id, f"cal-{event.get('id','')}",
                  (event.get("start") or {}).get("date")
                  or (event.get("start") or {}).get("dateTime", "")[:10] or ""))
