@@ -49,8 +49,9 @@ Each extraction uses this schema verbatim. Match the field names exactly.
   "content_type": "request|update|decision|fyi|notification",
   "summary": "One plain sentence.",
   "contextual_summary": "Optional longer situational summary, or omit it.",
-  "entities": [{"name": "Person Name", "type": "person|org|project",
+  "entities": [{"name": "Person Name", "type": "person|org|project|meeting",
                 "org": "<org tag>", "role": "Job title",
+                "series_name": "Board Meeting", "occurrence_date": "YYYY-MM-DD",
                 "source_span": "exact short phrase from the text"}],
   "topics": ["facilities", "worship"],
   "actions": [{"description": "...", "owner_name": "Person Name",
@@ -80,6 +81,13 @@ Field notes:
 - `summary`: one plain sentence. `contextual_summary` is optional; leave it as
   an empty string when there is nothing situational to add.
 - `entities`, `topics`, `actions`, `relations`: lists. Empty lists are fine.
+- **Meetings/events.** For a `meeting` entity, also set `series_name` — the
+  recurring series identity with the specific-occasion parts removed (drop
+  dates, "weekly", week numbers, "#3"): "College Board Meeting — 12 May" →
+  `series_name` "College Board Meeting". Set `occurrence_date` (YYYY-MM-DD) to
+  the date of THIS occurrence. These let the graph record one meeting series
+  with each mention as a dated occurrence, instead of a new node per mention.
+  Omit both for a genuine one-off meeting.
 - `waiting_on` (on an action): optional. Set it to the name of the person the
   action is awaiting a reply or input from (the action is blocked until "Taryn"
   confirms -> `"waiting_on": "Taryn Hamilton"`). Use the person's bare name,

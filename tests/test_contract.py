@@ -240,3 +240,29 @@ def test_relation_types_include_collaborates_with():
 def test_relation_types_include_attended():
     from mcpbrain.contract import RELATION_TYPES
     assert "attended" in RELATION_TYPES
+
+
+# --- Task 7: meeting series_name/occurrence_date entity fields --------------
+
+def test_meeting_series_fields_pass_validation():
+    from mcpbrain.contract import validate_extraction
+    ext = {"thread_id": "t1", "org": "Acme", "content_type": "update",
+           "summary": "s", "entities": [
+               {"name": "Board 12 May", "type": "meeting",
+                "series_name": "Board", "occurrence_date": "2026-05-12"}],
+           "topics": [], "actions": [], "relations": []}
+    assert validate_extraction(ext) == []
+
+
+def test_meeting_series_fields_survive_sanitize():
+    from mcpbrain.contract import sanitize_extraction
+    ext = {"thread_id": "t1", "org": "Acme", "content_type": "update",
+           "summary": "s", "entities": [
+               {"name": "Board 12 May", "type": "meeting",
+                "series_name": "Board", "occurrence_date": "2026-05-12"}],
+           "topics": [], "actions": [], "relations": []}
+    cleaned, dropped = sanitize_extraction(ext)
+    assert dropped == 0
+    ent = cleaned["entities"][0]
+    assert ent["series_name"] == "Board"
+    assert ent["occurrence_date"] == "2026-05-12"
