@@ -54,7 +54,18 @@ wrong and MUST be right:
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
 - **Current state (2026-07-03):** all four version files **and** the published wheel are at
-  `0.7.86` — source, dist index, and plugin manifests are in step. 0.7.85 added graph
+  `0.7.87` — source, dist index, and plugin manifests are in step. **0.7.87 ships series/topic
+  consolidation** (write-time deterministic keying: meetings→org-scoped `meeting-<org>-<series>`
+  entities with append-only `entity_observations` occurrences, driven by LLM `series_name`/
+  `occurrence_date`; topics→`normalize_topic` = inflect-singularize + curated synonym map;
+  calendar `recurringEventId` capture + opportunistic `calendar_series` annotation; attended,
+  backup-gated migration `bin/consolidate.py` — **built and shipped but NOT yet run on the live
+  store**). Both kill-switches (`meeting_series_enabled`/`topic_consolidation_enabled`) default ON.
+  0.7.87 also fixes the gold-eval gate (the `--gold` harness + migration runbook now measure the
+  PRODUCTION three-axis path — recall@10 0.750 / MRR 0.564 — not the relevance-only baseline that
+  misleadingly reads MRR 0.281), and folds in concurrent-session work (graph stored-XSS escaping +
+  search LIKE-escape, radial-layout default, `merge_entities` observation/email repointing + loser-
+  alias carry). 0.7.85 added graph
   readability (clustered map + semantic zoom); **0.7.86 fixes issue #4** — `_candidate_pairs`
   now restricts merge-review candidate generation to name-identity types (person/org/project),
   the same allowlist as `_deterministic_merges` (#23) and `apply_duplicate_verdicts`, cutting
