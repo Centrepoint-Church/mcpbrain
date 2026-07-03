@@ -1,4 +1,13 @@
+import pytest
+
 from mcpbrain.store import Store
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = Store(tmp_path / "brain.db", dim=4)
+    s.init()
+    return s
 
 
 def test_init_creates_tables_and_roundtrips_chunk(tmp_path):
@@ -698,3 +707,38 @@ def test_append_occurrence_distinct_dates_coexist(tmp_path):
         n = db.execute("SELECT COUNT(*) FROM entity_observations "
                        "WHERE entity_id='meeting-acme-board'").fetchone()[0]
     assert n == 2  # occurrences accumulate; no supersession
+
+
+def test_meeting_source_doc_ids_via_email_link(store):
+    store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
+    store.upsert_chunk("gmail-m1-body-0", "text", "h1", {"message_id": "m1"})
+    store.link_email_entity("m1", "board-12-may", role="about")
+    assert store.meeting_source_doc_ids() == ["gmail-m1-body-0"]
+
+
+def test_reset_enriched(store):
+    store.upsert_chunk("d1", "t", "h", {})
+    store.mark_enriched(["d1"])
+    assert store.reset_enriched(["d1"]) == 1
+    with store._connect() as db:
+        row = db.execute("SELECT enriched, enriched_version FROM chunks WHERE doc_id='d1'").fetchone()
+    assert row["enriched"] == 0 and row["enriched_version"] == 0
+
+
+def test_meeting_series_for_old_unique_match(store):
+    # old bare entity + new series both linked to message m1 -> maps old->series.
+    store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-05-12")
+    store.link_email_entity("m1", "board-12-may", role="about")
+    store.link_email_entity("m1", "meeting-acme-board", role="about")
+    assert store.meeting_series_for_old("board-12-may") == "meeting-acme-board"
+
+
+def test_meeting_series_for_old_ambiguous_returns_none(store):
+    store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-acme-staff", "Staff", "meeting", "Acme", "2026-05-12")
+    store.link_email_entity("m1", "board-12-may", role="about")
+    store.link_email_entity("m1", "meeting-acme-board", role="about")
+    store.link_email_entity("m1", "meeting-acme-staff", role="about")
+    assert store.meeting_series_for_old("board-12-may") is None
