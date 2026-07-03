@@ -15,12 +15,6 @@
     --graph-ring:#cdbff5; --graph-ring-text:#697280; --graph-node-fallback:#7a828d;
     --graph-person:#0b5cff; --graph-org:#6a4cff; --graph-project:#1f9d54;
     --graph-document:#b7791f; --graph-topic:#0e7490; --graph-meeting:#db2777;
-    --graph-community-0:#0b5cff;  --graph-community-1:#6a4cff;  --graph-community-2:#1f9d54;
-    --graph-community-3:#b7791f;  --graph-community-4:#0e7490;  --graph-community-5:#d64545;
-    --graph-community-6:#9333ea;  --graph-community-7:#c2410c;  --graph-community-8:#0891b2;
-    --graph-community-9:#4d7c0f;  --graph-community-10:#db2777; --graph-community-11:#7c3aed;
-    --graph-community-12:#059669; --graph-community-13:#ca8a04; --graph-community-14:#2563eb;
-    --graph-community-15:#dc2626; --graph-community-16:#0d9488; --graph-community-17:#a21caf;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -30,9 +24,8 @@
     border-bottom:1px solid var(--line);background:var(--card);flex:0 0 auto}
   .wordmark{font-weight:680;letter-spacing:-.01em}
   .eyebrow{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
-  a.back,.linkbtn{color:var(--muted);text-decoration:none;font-size:13px;background:none;border:0;cursor:pointer;font:inherit}
-  a.back:hover,.linkbtn:hover{color:var(--ink)}
-  #back-btn{display:none}
+  a.back{color:var(--muted);text-decoration:none;font-size:13px}
+  a.back:hover{color:var(--ink)}
   .count{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
   .layout{flex:1 1 auto;display:flex;min-height:0}
   .filters{flex:0 0 230px;border-right:1px solid var(--line);background:var(--card);
@@ -88,16 +81,14 @@
     <span class="wordmark">mcpbrain</span>
     <span class="eyebrow">Knowledge graph</span>
     <a class="back" href="/dashboard">← Dashboard</a>
-    <button id="back-btn" class="linkbtn">← Back to map</button>
     <span id="count" class="count"></span>
   </header>
   <div class="layout">
     <aside class="filters">
-      <label>Group by
-        <select id="f-group">
-          <option value="community" selected>Community</option>
-          <option value="org">Organisation</option>
-          <option value="type">Type</option>
+      <label>Layout
+        <select id="f-layout">
+          <option value="emergent" selected>Emergent (by connections)</option>
+          <option value="radial">Radial (hubs centred)</option>
         </select>
       </label>
       <label>Min connections <span class="deg-val" id="deg-val">7</span>
@@ -112,7 +103,7 @@
       <label>Search
         <input type="text" id="f-search" placeholder="highlight by name" autocomplete="off">
       </label>
-      <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · click a cluster to open it · right-click a node to focus its neighbourhood · double-click empty space to reset.</div>
+      <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · hover for a name · click a node for details · right-click to focus its neighbourhood · double-click empty space to reset.</div>
     </aside>
     <div id="stage">
       <div id="graph"></div>
@@ -133,11 +124,8 @@
     const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
     const $ = (id) => document.getElementById(id);
 
-    // ---- level-of-detail thresholds (tune here) ----
-    const LOD_NODES_MIN = 1.5;   // below this zoom: hubs only
-    const LOD_LABELS_MIN = 3.0;  // above this zoom: cluster labels fade out
-    const TOP30_FRACTION = 0.30; // links between two top-30%-connected nodes get flow particles
-    const HULL_PAD = 18, HULL_THROTTLE_MS = 150;
+    const TOP30_FRACTION = 0.30;  // links between two top-30%-connected nodes get flow particles
+    const INTRA_COMMUNITY_BOOST = 3;  // same-community links pull harder so clusters emerge
 
     const TYPE_TOKEN = { person:"--graph-person", org:"--graph-org", project:"--graph-project",
                          document:"--graph-document", topic:"--graph-topic", meeting:"--graph-meeting" };
@@ -145,15 +133,13 @@
     function readVar(n, fb=""){ const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || fb; }
     function readPalette(){
       const byType = {}; for (const [k,t] of Object.entries(TYPE_TOKEN)) byType[k] = readVar(t);
-      const community = []; for (let i=0;i<18;i++) community.push(readVar(`--graph-community-${i}`));
       return { bg:readVar("--graph-bg","#fff"), label:readVar("--graph-label","#12151b"),
         fade:readVar("--graph-fade","#c9ced7"), linkIdle:readVar("--graph-link-idle","#dfe3ea"),
         linkMute:readVar("--graph-link-mute","#eef1f5"), linkHot:readVar("--graph-link-hot","#0b5cff"),
         ring:readVar("--graph-ring","#cdbff5"), ringText:readVar("--graph-ring-text","#697280"),
-        nodeFallback:readVar("--graph-node-fallback","#7a828d"), byType, community };
+        nodeFallback:readVar("--graph-node-fallback","#7a828d"), byType };
     }
     const palette = readPalette();
-    function hashIndex(s, n){ let h=0; for (let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return h % n; }
 
     // colour is ALWAYS by entity type
     function nodeColour(n){ return palette.byType[n.type] || palette.nodeFallback; }
@@ -164,87 +150,23 @@
     }
 
     const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
-                    egoDepth:1, egoHops:{}, groupBy:"community", searchTerm:"",
-                    drill:null /* {dim,key,name} */ };
+                    egoDepth:1, egoHops:{}, layout:"emergent", searchTerm:"" };
     let CURRENT = { nodes:[], links:[], communities:{} };
-    let ANCHORS = {};           // groupKey -> {x,y}
-    let NODE_GROUP = new Map(); // id -> groupKey
-    let TOP30 = new Set();      // ids of the top-30% most-connected nodes
-    let HULLS = [];             // [{poly,cx,cy,name,colour,key}]
-    let lastHull = 0;
+    let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
+    let TOP30 = new Set();     // ids of the top-30% most-connected nodes
+    let MAXDEG = 1;
 
-    function groupKeyOf(n){
-      if (state.groupBy === "org") return n.org || "unassigned";
-      if (state.groupBy === "type") return n.type || "unknown";
-      return n.community == null ? "—" : String(n.community);  // community
-    }
-    function groupName(key){
-      if (state.groupBy === "community") return CURRENT.communities[key] || (key === "—" ? "No community" : "Community " + key);
-      if (state.groupBy === "org") return key === "unassigned" ? "Unassigned" : key;
-      return key.charAt(0).toUpperCase() + key.slice(1);  // type
-    }
-    function groupColour(key){
-      if (state.groupBy === "type") return palette.byType[key] || palette.nodeFallback;
-      if (state.groupBy === "community"){ const i = /^\d+$/.test(key) ? (+key % 18) : hashIndex(key,18); return palette.community[i]; }
-      return palette.community[hashIndex(key,18)];  // org
-    }
-
-    function recomputeGroups(){
-      NODE_GROUP = new Map();
-      const counts = new Map();
-      for (const n of CURRENT.nodes){ const k = groupKeyOf(n); NODE_GROUP.set(n.id, k); counts.set(k,(counts.get(k)||0)+1); }
-      // anchors: groups on a circle, largest first, radius grows with group count
-      const keys = [...counts.keys()].sort((a,b)=> (counts.get(b)-counts.get(a)) || (a<b?-1:1));
-      const G = keys.length, R = 40 * Math.sqrt(Math.max(1, G));
-      ANCHORS = {};
-      keys.forEach((k,i)=>{ const a = 2*Math.PI*i/Math.max(1,G); ANCHORS[k] = { x:R*Math.cos(a), y:R*Math.sin(a) }; });
-      // top-30% most-connected nodes overall (drives which links get flow particles)
+    function recomputeDerived(){
+      COMMUNITY = new Map(); let maxd = 0;
+      for (const n of CURRENT.nodes){
+        COMMUNITY.set(n.id, n.community == null ? "—" : String(n.community));
+        if ((n.connections||0) > maxd) maxd = n.connections||0;
+      }
+      MAXDEG = maxd || 1;
       TOP30 = new Set();
       const ranked = [...CURRENT.nodes].sort((a,b)=>(b.connections||0)-(a.connections||0));
       const cut = Math.ceil(ranked.length * TOP30_FRACTION);
       for (let i=0;i<cut;i++) TOP30.add(ranked[i].id);
-    }
-    function anchorOf(n){ return ANCHORS[NODE_GROUP.get(n.id)] || {x:0,y:0}; }
-
-    // ---- hulls (throttled compute, drawn behind nodes) ----
-    function recomputeHulls(){
-      const byGroup = new Map();
-      for (const n of CURRENT.nodes){
-        if (n.x == null) continue;
-        const k = NODE_GROUP.get(n.id); (byGroup.get(k) || byGroup.set(k,[]).get(k)).push([n.x, n.y]);
-      }
-      HULLS = [];
-      for (const [k, pts] of byGroup){
-        if (pts.length < 3) continue;
-        const hull = d3.polygonHull(pts); if (!hull) continue;
-        const c = d3.polygonCentroid(hull);
-        const padded = hull.map(([x,y]) => { const dx=x-c[0], dy=y-c[1], d=Math.hypot(dx,dy)||1;
-          return [x + dx/d*HULL_PAD, y + dy/d*HULL_PAD]; });
-        HULLS.push({ poly:padded, cx:c[0], cy:c[1], name:groupName(k), colour:groupColour(k), key:k });
-      }
-    }
-    function drawHulls(ctx, globalScale){
-      const now = performance.now();
-      if (now - lastHull > HULL_THROTTLE_MS){ recomputeHulls(); lastHull = now; }
-      for (const h of HULLS){
-        ctx.beginPath(); ctx.moveTo(h.poly[0][0], h.poly[0][1]);
-        for (let i=1;i<h.poly.length;i++) ctx.lineTo(h.poly[i][0], h.poly[i][1]);
-        ctx.closePath();
-        ctx.globalAlpha = 0.08; ctx.fillStyle = h.colour; ctx.fill();
-        ctx.globalAlpha = 0.5; ctx.strokeStyle = h.colour; ctx.lineWidth = 1/globalScale; ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-      // cluster labels fade out as you zoom in (overview -> detail)
-      const t = (LOD_LABELS_MIN - globalScale) / (LOD_LABELS_MIN - LOD_NODES_MIN);
-      const op = Math.max(0, Math.min(1, t));
-      if (op > 0.02){
-        for (const h of HULLS){
-          ctx.save(); ctx.globalAlpha = op * 0.9; ctx.fillStyle = h.colour;
-          ctx.font = `700 ${13/globalScale}px ${getComputedStyle(document.body).fontFamily}`;
-          ctx.textAlign = "center"; ctx.textBaseline = "middle";
-          ctx.fillText(h.name, h.cx, h.cy); ctx.restore();
-        }
-      }
     }
 
     // ---- ego (right-click focus) ----
@@ -259,15 +181,12 @@
     }
 
     // ---- node colour (default force-graph rendering) + hover label + particles ----
-    // Colour is by entity type; the selected node is emphasised and search
-    // non-matches fade. force-graph draws the circle itself (nodeVal sizing).
     function nodeColourState(n){
       if (n.id === state.selectedNodeId) return palette.label;
       if (state.searchTerm) return n.name.toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
       return nodeColour(n);
     }
-    // Names on hover only, via force-graph's built-in nodeLabel (HTML tooltip).
-    // esc() (defined below, hoisted) escapes ingested entity text — XSS guard.
+    // Names on hover only (force-graph's built-in nodeLabel). esc() (hoisted, below) guards XSS.
     function nodeHoverLabel(n){
       return '<div style="background:#1a1f27;color:#fff;border-radius:8px;padding:7px 10px;'
         + 'font:12.5px/1.4 -apple-system,system-ui,sans-serif;max-width:260px">'
@@ -275,16 +194,15 @@
         + esc(n.type || "") + ' · ' + esc(n.org || "no org") + ' · '
         + (n.connections || 0) + ' connections</span></div>';
     }
-    // Flow particles on: the selected node's links, OR links whose BOTH ends are
-    // top-30%-connected. Everything else gets none (keeps ~5k links cheap).
+    // Flow particles: the selected node's links, OR links whose BOTH ends are top-30% connected.
     function linkParticlesFor(l){
       const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
       if (state.selectedNodeId && (sid===state.selectedNodeId || tid===state.selectedNodeId)) return 4;
       return (TOP30.has(sid) && TOP30.has(tid)) ? 2 : 0;
     }
-    function edgeKind(l){
+    function sameCommunity(l){
       const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
-      return NODE_GROUP.get(s) === NODE_GROUP.get(t) ? "intra" : "inter";
+      return COMMUNITY.get(s) === COMMUNITY.get(t);
     }
     function linkColourFor(l){
       const focus = state.hoveredNodeId || state.selectedNodeId;
@@ -292,13 +210,13 @@
       if (focus) return (sid===focus||tid===focus) ? palette.linkHot : palette.linkMute;
       if (state.searchTerm){ const sn=l.source?.name?.toLowerCase().includes(state.searchTerm), tn=l.target?.name?.toLowerCase().includes(state.searchTerm);
         return (sn||tn) ? palette.linkHot : palette.linkMute; }
-      return edgeKind(l) === "inter" ? palette.linkIdle : palette.linkMute;
+      return sameCommunity(l) ? palette.linkMute : palette.linkIdle;   // cross-community links stay visible
     }
     function linkWidthFor(l){
       const focus = state.hoveredNodeId || state.selectedNodeId;
       const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
       if (focus) return (sid===focus||tid===focus) ? 1.6 : 0.4;
-      return edgeKind(l) === "inter" ? 0.6 : 0.3;
+      return sameCommunity(l) ? 0.3 : 0.6;
     }
     function drawEgoRings(ctx){
       if (state.mode !== "ego" || !state.egoNodeId) return;
@@ -318,62 +236,51 @@
       .linkColor(linkColourFor).linkWidth(linkWidthFor)
       .linkDirectionalParticles(linkParticlesFor)
       .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
-      .onRenderFramePre((ctx, gs)=> drawHulls(ctx, gs))
       .onRenderFramePost((ctx)=> drawEgoRings(ctx))
       .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; })
       .onNodeClick((node)=>{ state.selectedNodeId = node.id; openDrawer(node.id); })
       .onNodeRightClick((node)=> enterEgo(node.id))
-      .onBackgroundClick((ev)=> onBg(ev))
+      .onBackgroundClick(()=> onBg())
       .warmupTicks(reduce ? 80 : 30).cooldownTime(reduce ? 0 : 4000);
 
-    fg.d3Force("charge", d3.forceManyBody().strength(-40).distanceMax(300));
+    fg.d3Force("charge", d3.forceManyBody().strength(-60).distanceMax(360));
     fg.d3Force("collide", d3.forceCollide().radius((n)=>(n._r ?? nodeRadius(n)) + 2));
     const linkF = fg.d3Force("link");
-    if (linkF) linkF.distance(60).strength((l)=>{ const s=(l.source.connections)||1, t=(l.target.connections)||1; return 0.1/Math.min(s,t); });
+    if (linkF) linkF.distance(50).strength((l)=>{
+      const s=(l.source.connections)||1, t=(l.target.connections)||1, base = 0.1/Math.min(s,t);
+      return sameCommunity(l) ? base*INTRA_COMMUNITY_BOOST : base;   // communities coalesce organically
+    });
     fg.d3AlphaDecay(0.02);
 
-    function applyClusterForces(){
-      fg.d3Force("center", null); fg.d3Force("radial", null);
-      fg.d3Force("x", d3.forceX((n)=>anchorOf(n).x).strength(0.28));
-      fg.d3Force("y", d3.forceY((n)=>anchorOf(n).y).strength(0.28));
+    // Emergent: charge + community-boosted links + a gentle centring pull (no positional grouping).
+    // Radial: pull each node to a ring by degree — hubs centre, leaves outer.
+    function radialRadius(n){ return 320 * (1 - Math.min(1, (n.connections||0) / MAXDEG)); }
+    function applyLayout(){
+      if (state.mode === "ego" && state.egoNodeId){ applyEgoForces(); return; }
+      fg.d3Force("x", null); fg.d3Force("y", null);
       for (const n of CURRENT.nodes){ n.fx = undefined; n.fy = undefined; }
+      if (state.layout === "radial"){
+        fg.d3Force("center", null);
+        fg.d3Force("radial", d3.forceRadial((n)=> radialRadius(n), 0, 0).strength(0.7));
+      } else {
+        fg.d3Force("radial", null);
+        fg.d3Force("center", d3.forceCenter(0, 0).strength(0.04));
+      }
     }
     function applyEgoForces(){
-      fg.d3Force("x", null); fg.d3Force("y", null); fg.d3Force("center", null);
+      fg.d3Force("center", null);
       const f = CURRENT.nodes.find((n)=>n.id===state.egoNodeId); if (f){ f.fx=0; f.fy=0; }
       for (const n of CURRENT.nodes) if (n.id!==state.egoNodeId){ n.fx=undefined; n.fy=undefined; }
       fg.d3Force("radial", d3.forceRadial((n)=>(state.egoHops[n.id]||0)*90,0,0).strength(0.8));
     }
-    function relayout(){
-      if (state.mode === "ego" && state.egoNodeId) applyEgoForces(); else applyClusterForces();
-      fg.d3ReheatSimulation();
-      setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200);
-    }
+    function reframe(){ setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200); }
     function enterEgo(id){
       state.mode="ego"; state.egoNodeId=id; state.selectedNodeId=id;
       state.egoHops = computeEgoHops(CURRENT.nodes, CURRENT.links, id, state.egoDepth);
       applyEgoForces(); fg.d3ReheatSimulation();
     }
-    function exitEgo(){ if (state.mode!=="ego") return; state.mode="map"; state.egoNodeId=null; state.egoHops={}; applyClusterForces(); fg.d3ReheatSimulation(); }
-
-    // background click: exit ego, else hit-test hulls -> drill into a cluster
-    function onBg(ev){
-      if (state.mode === "ego"){ exitEgo(); return; }
-      if (state.drill){ state.selectedNodeId = null; return; }  // already inside a cluster
-      const p = fg.screen2GraphCoords(ev.offsetX, ev.offsetY);
-      for (const h of HULLS){ if (pointInPoly([p.x,p.y], h.poly)){ drillInto(h.key); return; } }
-      state.selectedNodeId = null;
-    }
-    function pointInPoly(pt, poly){
-      let inside=false; for (let i=0,j=poly.length-1;i<poly.length;j=i++){
-        const xi=poly[i][0],yi=poly[i][1],xj=poly[j][0],yj=poly[j][1];
-        if (((yi>pt[1])!==(yj>pt[1])) && (pt[0] < (xj-xi)*(pt[1]-yi)/(yj-yi)+xi)) inside=!inside; }
-      return inside;
-    }
-    function drillInto(key){ state.drill = { dim: state.groupBy, key, name: groupName(key) }; $("back-btn").style.display="inline"; load(); }
-    $("back-btn").addEventListener("click", ()=>{ state.drill=null; $("back-btn").style.display="none"; load(); });
-
-    // (Node names are shown on hover via force-graph's built-in nodeLabel.)
+    function exitEgo(){ if (state.mode!=="ego") return; state.mode="map"; state.egoNodeId=null; state.egoHops={}; applyLayout(); fg.d3ReheatSimulation(); }
+    function onBg(){ if (state.mode==="ego"){ exitEgo(); return; } state.selectedNodeId = null; }
     container.addEventListener("dblclick", ()=>{ if(!state.hoveredNodeId) exitEgo(); });
 
     // ---- legend (fixed entity-type colour key) ----
@@ -398,17 +305,15 @@
         el.innerHTML='<option value="">All</option>'; [...vals].sort().forEach((v)=>el.add(new Option(v,v))); el.value=cur; }
     }
     function filterQuery(){
-      const p=new URLSearchParams();
-      if (state.drill){ p.set(state.drill.dim, state.drill.key); p.set("min_conn","1"); }
-      else { p.set("min_conn", $("f-degree").value);
-        if ($("f-org").value) p.set("org", $("f-org").value);
-        if ($("f-type").value) p.set("type", $("f-type").value); }
+      const p=new URLSearchParams(); p.set("min_conn", $("f-degree").value);
+      if ($("f-org").value) p.set("org", $("f-org").value);
+      if ($("f-type").value) p.set("type", $("f-type").value);
       return p.toString();
     }
     let loading=false;
     async function load(){
       if (loading) return; loading=true;
-      const ov=$("overlay"); ov.textContent = state.drill ? ("Opening “"+state.drill.name+"”…") : "Loading graph…"; ov.classList.remove("hidden");
+      const ov=$("overlay"); ov.textContent = "Loading graph…"; ov.classList.remove("hidden");
       try{
         const res = await fetch("/api/graph/canvas?"+filterQuery(), H);
         if (res.status===413){ const i=await res.json(); ov.textContent="Too many nodes ("+(i.candidate_count||"5000+")+") — raise “Min connections”."; loading=false; return; }
@@ -416,14 +321,13 @@
         const data = await res.json();
         CURRENT = { nodes:data.nodes, links:data.links, communities:data.communities||{} };
         populateOptions(data.nodes);
-        const G = new Set(data.nodes.map(groupKeyOf)).size;
-        $("count").textContent = data.nodes.length+" nodes · "+data.links.length+" links · "+G+" groups";
+        $("count").textContent = data.nodes.length+" nodes · "+data.links.length+" links";
         if (!data.nodes.length){ ov.textContent="No entities match these filters."; loading=false; return; }
         for (const n of data.nodes) n._r = nodeRadius(n);
         state.mode="map"; state.egoNodeId=null; state.egoHops={};
-        recomputeGroups(); applyClusterForces();
+        recomputeDerived(); applyLayout();
         fg.graphData({ nodes:data.nodes, links:data.links });
-        setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200);
+        reframe();
         ov.classList.add("hidden");
       }catch(e){ ov.textContent="Couldn’t load the graph. Is the daemon running?"; }
       finally{ loading=false; }
@@ -434,7 +338,7 @@
     deg.addEventListener("change", load);
     $("f-org").addEventListener("change", load);
     $("f-type").addEventListener("change", load);
-    $("f-group").addEventListener("change", (e)=>{ state.groupBy=e.target.value; recomputeGroups(); relayout(); });
+    $("f-layout").addEventListener("change", (e)=>{ state.layout=e.target.value; applyLayout(); fg.d3ReheatSimulation(); reframe(); });
     let searchT=null;
     $("f-search").addEventListener("input", (e)=>{ clearTimeout(searchT);
       searchT=setTimeout(()=>{ state.searchTerm=e.target.value.trim().toLowerCase(); fg.nodeColor(fg.nodeColor()); }, 150); });
@@ -506,7 +410,7 @@
         const r = await fetch("/api/graph/entity/" + encodeURIComponent(dwId),
           { method:"POST", headers:{...H.headers,"Content-Type":"application/json"}, body:JSON.stringify(body) });
         if (!r.ok) throw new Error("HTTP " + r.status);
-        dwData = await r.json(); renderDrawer(); load();   // refresh map (name/colour/labels)
+        dwData = await r.json(); renderDrawer(); load();   // refresh map (name/colour)
       }catch(e){ const el = $("dw-edit-err"); if (el) el.textContent = "Save failed."; }
     }
 
