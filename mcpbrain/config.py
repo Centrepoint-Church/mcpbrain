@@ -843,9 +843,13 @@ def ingest_cache_enabled(home) -> bool:
 
 def fleet_pin(home):
     """Typed view of the fleet-wide pin staged under config['org_config']['org_pin']
-    by fleet.merge_org_config. Absent fields fall back to FleetPin defaults."""
+    by fleet.merge_org_config. Absent or malformed fields (a hand-edited config.json
+    with the wrong shape) fall back to FleetPin defaults rather than raising."""
     from mcpbrain.org_contracts import FleetPin
-    raw = (read_config(home).get("org_config") or {}).get("org_pin") or {}
+    org_config = read_config(home).get("org_config")
+    raw = org_config.get("org_pin") if isinstance(org_config, dict) else None
+    if not isinstance(raw, dict):
+        raw = {}
     kwargs = dict(
         embed_model=raw.get("embed_model", ""),
         dim=int(raw.get("dim", 0) or 0),
@@ -854,7 +858,7 @@ def fleet_pin(home):
         fleet_secret=raw.get("fleet_secret", ""),
     )
     allow = raw.get("relation_allowlist")
-    if allow is not None:
+    if isinstance(allow, (list, tuple)) and all(isinstance(x, str) for x in allow):
         kwargs["relation_allowlist"] = tuple(allow)
     return FleetPin(**kwargs)
 
