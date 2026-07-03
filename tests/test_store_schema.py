@@ -512,3 +512,36 @@ def test_entity_relations_has_no_normalised_strength_or_since(tmp_path):
     with s._connect() as db:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)").fetchall()}
     assert "normalised_strength" not in cols and "since" not in cols
+
+
+# --- Phase 0, Task 1: origin column on entities + entity_relations --
+
+def test_origin_column_present_on_fresh_store(tmp_path):
+    s = _store(tmp_path)
+    assert "origin" in _cols(s, "entities")
+    assert "origin" in _cols(s, "entity_relations")
+
+
+def test_origin_defaults_to_local_and_backfills_old_store(tmp_path):
+    import sqlite3
+    path = tmp_path / "old_origin.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("""CREATE TABLE entities(
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL)""")
+    db.execute("""CREATE TABLE entity_relations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, entity_a TEXT NOT NULL,
+        relation TEXT NOT NULL, entity_b TEXT NOT NULL,
+        UNIQUE(entity_a, relation, entity_b))""")
+    db.execute("INSERT INTO entities(id,name,type) VALUES('joel','Joel','person')")
+    db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+               "VALUES('joel','works_at','acme')")
+    db.commit(); db.close()
+
+    s = Store(path, dim=4); s.init()
+    with s._connect() as conn:
+        assert "origin" in _cols(s, "entities")
+        ent = conn.execute("SELECT origin FROM entities WHERE id='joel'").fetchone()
+        rel = conn.execute("SELECT origin FROM entity_relations "
+                           "WHERE entity_a='joel'").fetchone()
+    assert ent["origin"] == "local"
+    assert rel["origin"] == "local"
