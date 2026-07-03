@@ -183,7 +183,7 @@
     // ---- node colour (default force-graph rendering) + hover label + particles ----
     function nodeColourState(n){
       if (n.id === state.selectedNodeId) return palette.label;
-      if (state.searchTerm) return n.name.toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
+      if (state.searchTerm) return (n.name||"").toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
       return nodeColour(n);
     }
     // Names on hover only (force-graph's built-in nodeLabel). esc() (hoisted, below) guards XSS.
@@ -349,6 +349,11 @@
     $("dw-close").addEventListener("click", closeDrawer);
     function closeDrawer(){ dw.hidden = true; dwId = null; dwData = null; }
     function esc(s){ const d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+    // esc() is safe for TEXT-node contexts only (it doesn't escape quotes). For
+    // quoted HTML attributes use escAttr(), which also escapes " and '.
+    function escAttr(s){ return String(s == null ? "" : s)
+      .replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/'/g,"&#39;")
+      .replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
     async function openDrawer(id){
       dwId = id; dw.hidden = false; dwBody.textContent = "Loading…";
@@ -400,7 +405,7 @@
     }
     function field(label,id,val,area){
       const input = area ? `<textarea id="${id}" rows="2">${esc(val)}</textarea>`
-                         : `<input id="${id}" value="${esc(val)}">`;
+                         : `<input id="${id}" value="${escAttr(val)}">`;
       return `<div class="dw-field"><label>${label}</label>${input}</div>`;
     }
     async function doSave(){
@@ -432,7 +437,7 @@
       try{
         const r = await fetch("/api/graph/search?q=" + encodeURIComponent(q), H);
         const hits = (await r.json()).filter(h => h.id !== dwId).slice(0, 8);
-        ul.innerHTML = hits.map(h => `<li data-id="${esc(h.id)}">${esc(h.name)} `
+        ul.innerHTML = hits.map(h => `<li data-id="${escAttr(h.id)}">${esc(h.name)} `
           + `<span style="color:var(--faint)">${esc(h.type)}${h.org ? " · " + esc(h.org) : ""}</span></li>`).join("");
         ul.hidden = hits.length === 0;
         [...ul.children].forEach(li => li.onclick = ()=> confirmMerge(li.dataset.id, li.textContent));
