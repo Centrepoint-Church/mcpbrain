@@ -52,7 +52,9 @@ def test_graph_html_has_expected_hooks():
     html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "graph.html").read_text()
     for marker in ['/vendor/force-graph.min.js', '/vendor/d3.min.js',
                    '/api/graph/canvas', 'id="graph"', 'new ForceGraph',
-                   'd3.forceManyBody', '__MCPBRAIN_TOKEN__']:
+                   'd3.forceManyBody', 'id="f-group"', 'polygonHull',
+                   'onRenderFramePre', 'zoomToFit', 'screen2GraphCoords',
+                   'id="legend"', 'id="back-btn"', '__MCPBRAIN_TOKEN__']:
         assert marker in html, f"missing: {marker}"
 
 
