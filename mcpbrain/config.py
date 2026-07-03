@@ -795,6 +795,53 @@ def is_configured(home) -> bool:
     return has_identity and has_org
 
 
+def install_role(home) -> str:
+    """This install's role: 'member' (default) or 'org_curator'. The curator
+    runs the org-graph adjudication cadence; members contribute + consume."""
+    return read_config(home).get("role", "member")
+
+
+def is_org_curator(home) -> bool:
+    """True when this install curates the org graph (config['role']=='org_curator')."""
+    return install_role(home) == "org_curator"
+
+
+def org_contrib_enabled(home) -> bool:
+    """Contribute allowlisted/redacted claims to the org graph. Default True —
+    safe because contribution additionally requires a fleet_secret (fleet_pin)."""
+    return bool(read_config(home).get("org_contrib_enabled", True))
+
+
+def org_import_enabled(home) -> bool:
+    """Import the published org-graph snapshot. Default True — no-ops until a
+    snapshot exists in the fleet folder."""
+    return bool(read_config(home).get("org_import_enabled", True))
+
+
+def ingest_cache_enabled(home) -> bool:
+    """Use/publish the shared-drive ingest cache. Default True — no-ops until a
+    fleet pin is present."""
+    return bool(read_config(home).get("ingest_cache", True))
+
+
+def fleet_pin(home):
+    """Typed view of the fleet-wide pin staged under config['org_config']['org_pin']
+    by fleet.merge_org_config. Absent fields fall back to FleetPin defaults."""
+    from mcpbrain.org_contracts import FleetPin
+    raw = (read_config(home).get("org_config") or {}).get("org_pin") or {}
+    kwargs = dict(
+        embed_model=raw.get("embed_model", ""),
+        dim=int(raw.get("dim", 0) or 0),
+        chunker_version=raw.get("chunker_version", ""),
+        enrich_logic_floor=int(raw.get("enrich_logic_floor", 0) or 0),
+        fleet_secret=raw.get("fleet_secret", ""),
+    )
+    allow = raw.get("relation_allowlist")
+    if allow is not None:
+        kwargs["relation_allowlist"] = tuple(allow)
+    return FleetPin(**kwargs)
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 
