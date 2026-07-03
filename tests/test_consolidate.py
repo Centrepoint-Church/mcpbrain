@@ -1,5 +1,8 @@
 """One-shot migration logic (Boulder 3, Task 11) and the attended CLI (Task 12)."""
 
+import importlib.util
+import pathlib
+
 import pytest
 
 from mcpbrain import consolidate
@@ -53,3 +56,18 @@ def test_retire_meeting_duplicates(store):
         remaining = db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()
     assert [r["id"] for r in remaining] == ["meeting-acme-board"]
     assert out["retired"] == 1
+
+
+def _load_bin():
+    path = pathlib.Path(__file__).resolve().parents[1] / "bin" / "consolidate.py"
+    spec = importlib.util.spec_from_file_location("bin_consolidate", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def test_backup_db_creates_copy(tmp_path):
+    db = tmp_path / "brain.db"; db.write_bytes(b"sqlitedata")
+    mod = _load_bin()
+    backup = mod._backup_db(db)
+    assert backup.exists() and backup.read_bytes() == b"sqlitedata"
+    assert backup != db
