@@ -172,3 +172,31 @@ def test_unavailable_status_not_marked_done(tmp_path):
     assert res["drives"]["D1"]["status"] == "unavailable"  # status is preserved
     assert res["done_drive_ids"] == set()                 # NOT added to done
     assert res["cache_hits"] == 0                         # cache_hits still recorded
+
+
+def test_default_bindings_degrade_when_A_B_unbuilt():
+    # Until subsystems A/B land, the default bindings must not raise — they
+    # report "unavailable" so the orchestrator no-ops safely in prod today.
+    assert onboarding._default_import_snapshot(object(), object())["status"] == "unavailable"
+    d = onboarding._default_bootstrap_drive(object(), object(), "D1", _pin())
+    assert d["status"] == "unavailable" and d["cache_hits"] == 0
+
+
+def test_default_make_fleet_storage_none_without_service(tmp_path):
+    assert onboarding._default_make_fleet_storage(str(tmp_path), None) is None
+
+
+def test_default_enumerate_drives_empty_without_service():
+    assert onboarding._default_enumerate_drives(None) == []
+
+
+def test_default_factories_degrade_when_A_unbuilt(tmp_path):
+    # A drive_service is present but subsystem A's DriveFleetStorage/enumeration
+    # module isn't built yet -> factories degrade rather than crash onboarding.
+    assert onboarding._default_make_fleet_storage(str(tmp_path), object()) is None
+    assert onboarding._default_enumerate_drives(object()) == []
+
+
+def test_fleet_folder_id_falls_back_to_org_default(tmp_path):
+    from mcpbrain import org_defaults
+    assert onboarding._fleet_folder_id(str(tmp_path)) == org_defaults.FLEET_FOLDER_ID
