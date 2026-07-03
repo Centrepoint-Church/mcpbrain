@@ -419,6 +419,38 @@ class Store:
                 method      TEXT NOT NULL,
                 at          TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
+            # -- Org-baseline (Phase 0) Task 2 -----------------------------------
+            # Edge outbox: allowlisted, redacted ContributionRecords queued locally
+            # per drain; a daily cadence uploads pending rows (uploaded_at == '').
+            db.execute("""CREATE TABLE IF NOT EXISTS org_contrib_outbox(
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                record      TEXT NOT NULL,
+                created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+                uploaded_at TEXT DEFAULT '')""")
+            # Curator staging: contributions ingested from the fleet folder awaiting
+            # deterministic merge + adjudication. UNIQUE makes re-ingest idempotent.
+            db.execute("""CREATE TABLE IF NOT EXISTS org_contrib_staging(
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                contributor_email TEXT NOT NULL,
+                source_ref        TEXT NOT NULL,
+                claim             TEXT NOT NULL,
+                confidence        REAL DEFAULT 1.0,
+                valid_from        TEXT DEFAULT '',
+                valid_to          TEXT DEFAULT '',
+                source_kind       TEXT DEFAULT '',
+                batch_file        TEXT DEFAULT '',
+                ingested_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(contributor_email, source_ref, claim))""")
+            # Consumer re-point log: local entities merged into an org node at import,
+            # so a later curator split can restore local flesh (spec B4a rule 4).
+            db.execute("""CREATE TABLE IF NOT EXISTS org_repoint_log(
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_entity_id   TEXT NOT NULL,
+                to_entity_id     TEXT NOT NULL,
+                snapshot_version INTEGER DEFAULT 0,
+                reason           TEXT DEFAULT '',
+                at               TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
             # --- migration: add chunks.enriched to pre-existing stores --------
             # The real ~/.mcpbrain store predates the enriched column. Idempotent:
             # CREATE TABLE IF NOT EXISTS above won't alter an existing table, so
