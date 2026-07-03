@@ -37,3 +37,37 @@ class LocalDirFleetStorage:
         p = self._abs(path)
         if p.is_file():
             p.unlink()
+
+
+from dataclasses import dataclass
+
+from mcpbrain import config
+from mcpbrain.store import Store
+
+
+@dataclass
+class FakeInstall:
+    name: str
+    home: Path
+    store: Store
+    role: str = "member"
+
+
+def make_install(root: Path, name: str, *, dim: int = 4,
+                 role: str = "member") -> FakeInstall:
+    home = Path(root) / name
+    home.mkdir(parents=True, exist_ok=True)
+    config.write_config(str(home), {"role": role,
+                                    "owner_email": f"{name}@x.org"})
+    store = Store(home / "brain.sqlite3", dim=dim)
+    store.init()
+    return FakeInstall(name=name, home=home, store=store, role=role)
+
+
+def make_fleet(root: Path, n_members: int, *, dim: int = 4
+               ) -> tuple[list[FakeInstall], FakeInstall, LocalDirFleetStorage]:
+    members = [make_install(root, f"member{i}", dim=dim)
+               for i in range(n_members)]
+    curator = make_install(root, "curator", dim=dim, role="org_curator")
+    fs = LocalDirFleetStorage(Path(root) / "fleet")
+    return members, curator, fs
