@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 
 CACHE_ARTIFACT_SCHEMA = 1
