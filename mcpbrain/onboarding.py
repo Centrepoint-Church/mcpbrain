@@ -48,6 +48,7 @@ def _default_bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
 # -- orchestrator (pure; no config, no I/O beyond the injected callables) ---
 
 _SNAPSHOT_OK = {"imported", "unchanged"}
+_DRIVE_OK = {"ok"}
 
 
 def bootstrap_baseline(store, fleet_storage, drives, pin, *,
@@ -92,9 +93,11 @@ def bootstrap_baseline(store, fleet_storage, drives, pin, *,
             continue
         try:
             detail = bootstrap_drive(store, fleet_storage, drive_id, pin) or {}
-            result["drives"][drive_id] = {"status": "ok", "detail": detail}
+            status = detail.get("status", "ok")
+            result["drives"][drive_id] = {"status": status, "detail": detail}
             result["cache_hits"] += int(detail.get("cache_hits", 0) or 0)
-            done.add(drive_id)
+            if status in _DRIVE_OK:
+                done.add(drive_id)
         except Exception as exc:  # noqa: BLE001 — one bad drive never blocks the rest
             log.warning("baseline cache import failed for %s: %s", drive_id, exc,
                         exc_info=True)
