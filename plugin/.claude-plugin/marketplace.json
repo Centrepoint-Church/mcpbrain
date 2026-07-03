@@ -10,7 +10,7 @@
       "name": "mcpbrain",
       "source": "./",
       "description": "Personal AI brain for Centrepoint — syncs Gmail and Drive, surfaces context, actions, and memory inside Cowork.",
-      "version": "0.7.86",
+      "version": "0.7.87",
       "author": { "name": "Centrepoint Church", "email": "josh.k@centrepoint.church" }
     }
   ]
