@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import asdict, dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 CACHE_ARTIFACT_SCHEMA = 1
 CONTRIBUTION_SCHEMA = 1
@@ -170,6 +170,7 @@ def artifact_filename(file_id: str, content_hash: str, embed_model: str,
 
 # -- transport contract -----------------------------------------------------
 
+@runtime_checkable
 class FleetStorage(Protocol):
     """Blob transport over the fleet folder / in-drive cache folders. Prod
     implements this over Google Drive (built in Phase A); tests implement it
