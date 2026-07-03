@@ -41,3 +41,24 @@ def test_fleet_pin_reads_org_config_block(tmp_path):
     assert pin.embed_model == "bge-small" and pin.dim == 384
     assert pin.enrich_logic_floor == 2 and pin.is_pinned is True
     assert pin.relation_allowlist == ("works_at", "member_of")
+
+
+def test_fleet_pin_ignores_non_dict_org_config(tmp_path):
+    config.write_config(str(tmp_path), {"org_config": "not-a-dict"})
+    pin = config.fleet_pin(str(tmp_path))
+    assert pin == FleetPin()
+
+
+def test_fleet_pin_ignores_non_dict_org_pin(tmp_path):
+    config.write_config(str(tmp_path), {"org_config": {"org_pin": ["not", "a", "dict"]}})
+    pin = config.fleet_pin(str(tmp_path))
+    assert pin == FleetPin()
+
+
+def test_fleet_pin_ignores_non_string_iterable_relation_allowlist(tmp_path):
+    config.write_config(str(tmp_path), {"org_config": {"org_pin": {
+        "fleet_secret": "s3cret", "relation_allowlist": "works_at"}}})
+    pin = config.fleet_pin(str(tmp_path))
+    # A bare string must not be silently exploded into a char-tuple.
+    assert pin.relation_allowlist == DEFAULT_RELATION_ALLOWLIST
+    assert pin.is_pinned is True
