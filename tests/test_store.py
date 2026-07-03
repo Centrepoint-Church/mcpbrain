@@ -752,6 +752,12 @@ def test_meeting_series_for_old_ambiguous_returns_none(store):
     store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
     store.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-05-12")
     store.upsert_entity("meeting-acme-staff", "Staff", "meeting", "Acme", "2026-05-12")
+    # Both candidates must be GENUINE series (carry an occurrence observation) for
+    # this to exercise the real 2-series ambiguity path — without them the
+    # occurrence-EXISTS filter in meeting_series_for_old would drop both and return
+    # None for the wrong reason (zero candidates, not ambiguity).
+    store.append_occurrence("meeting-acme-board", "2026-05-12", "occ", "m1")
+    store.append_occurrence("meeting-acme-staff", "2026-05-12", "occ", "m2")
     store.link_email_entity("m1", "board-12-may", role="about")
     store.link_email_entity("m1", "meeting-acme-board", role="about")
     store.link_email_entity("m1", "meeting-acme-staff", role="about")
