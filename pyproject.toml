@@ -36,6 +36,7 @@ dependencies = [
   "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
   # Note: tesseract is an optional external binary for scanned-PDF OCR.
   # It is NOT a pip dependency — install via OS package manager if needed.
+  "inflect>=7",            # singular/plural normalization in text_norm.singularize
 ]
 
 [project.scripts]
