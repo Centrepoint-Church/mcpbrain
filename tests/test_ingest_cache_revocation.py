@@ -1,0 +1,53 @@
+from mcpbrain.store import Store
+
+
+def _store(tmp_path):
+    s = Store(tmp_path / "a.sqlite3", dim=4)
+    s.init()
+    return s
+
+
+def test_doc_ids_for_drive_and_file(tmp_path):
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    s.import_cached_chunk("gdrive-F1-1", "b", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    s.import_cached_chunk("gdrive-F2-0", "c", "c", {"file_id": "F2", "drive_id": "D2"}, [0.0]*4)
+    assert set(s.doc_ids_for_drive("D1")) == {"gdrive-F1-0", "gdrive-F1-1"}
+    assert set(s.doc_ids_for_file("F1")) == {"gdrive-F1-0", "gdrive-F1-1"}
+    assert s.doc_ids_for_drive("D2") == ["gdrive-F2-0"]
+
+
+def test_delete_chunks_removes_row_and_mirrors(tmp_path):
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.1]*4)
+    n = s.delete_chunks(["gdrive-F1-0"])
+    assert n == 1
+    assert s.get_chunk("gdrive-F1-0") is None
+    assert s.embedding_for_doc("gdrive-F1-0") is None
+    assert s.delete_chunks([]) == 0
+
+
+def test_invalidate_local_relations_scopes_to_local_and_docs(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('a','A','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('b','B','org','local')")
+        # local relation sourced from a purged doc -> invalidate
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('a','works_at','b','gdrive-F1-0','local')")
+        # local relation from a still-live doc -> survive
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('a','member_of','b','gdrive-LIVE-0','local')")
+        # org relation from a purged doc -> untouched (layer 1 is safe-by-construction)
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('a','mentioned_with','b','gdrive-F1-0','org')")
+    n = s.invalidate_local_relations_for_docs(["gdrive-F1-0"])
+    assert n == 1
+    with s._connect() as db:
+        rows = {(r["relation"], r["origin"]): r["invalidated_at"]
+                for r in db.execute("SELECT relation,origin,invalidated_at FROM entity_relations")}
+    assert rows[("works_at", "local")] is not None       # invalidated
+    assert rows[("member_of", "local")] is None           # live source survives
+    assert rows[("mentioned_with", "org")] is None         # org untouched
+    # idempotent: a second call invalidates nothing new
+    assert s.invalidate_local_relations_for_docs(["gdrive-F1-0"]) == 0

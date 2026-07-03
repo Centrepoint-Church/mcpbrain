@@ -1074,6 +1074,60 @@ class Store:
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", rowids)
             return len(rowids)
 
+    def doc_ids_for_drive(self, drive_id: str) -> list[str]:
+        """Chunk doc_ids whose metadata drive_id matches (see DRIVE_ID_META_KEY)."""
+        with self._connect() as db:
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.drive_id')=?",
+                (drive_id,)).fetchall()]
+
+    def doc_ids_for_file(self, file_id: str) -> list[str]:
+        """Chunk doc_ids for one Drive file (gdrive-<file_id>-*)."""
+        with self._connect() as db:
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE doc_id LIKE ?",
+                (f"gdrive-{file_id}-%",)).fetchall()]
+
+    def delete_chunks(self, doc_ids) -> int:
+        """Delete the given chunk rows and their vec_chunks/fts_chunks mirrors
+        (keyed on rowid, mirroring delete_calendar_chunks_after). Graph rows are
+        NOT touched here — invalidation is a separate, bitemporal step. Returns
+        the number of chunk rows deleted."""
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return 0
+        with self._connect() as db:
+            qs = ",".join("?" * len(doc_ids))
+            rowids = [r["rowid"] for r in db.execute(
+                f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
+            if not rowids:
+                return 0
+            ph = ",".join("?" * len(rowids))
+            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            return len(rowids)
+
+    def invalidate_local_relations_for_docs(self, doc_ids, *,
+                                            reason: str = "drive_revoked",
+                                            at: str | None = None) -> int:
+        """Bitemporally invalidate origin='local' relations whose source_doc_id is
+        in doc_ids and are not already invalidated. Sets invalidated_at (UTC ISO)
+        and superseded_reason. origin='org' rows are never touched — layer 1 is
+        curator-owned and safe-by-construction (spec A3). Returns rows changed."""
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return 0
+        at = at or datetime.now(timezone.utc).isoformat()
+        qs = ",".join("?" * len(doc_ids))
+        with self._connect() as db:
+            cur = db.execute(
+                f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
+                f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
+                f"AND COALESCE(origin,'local')='local'",
+                (at, reason, *doc_ids))
+            return cur.rowcount
+
     def chunk_count(self) -> int:
         """Total number of rows in the chunks table."""
         with self._connect() as db:
