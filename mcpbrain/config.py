@@ -182,6 +182,23 @@ def enrich_rich_observations_enabled(home) -> bool:
     return bool(read_config(home).get("enrich_rich_observations_enabled", True))
 
 
+def meeting_series_enabled(home) -> bool:
+    """Whether graph_write.apply() keys meeting/event entities as one
+    'meeting-<org>-<series>' series entity (with per-occurrence
+    entity_observations rows) instead of minting a new node per name variant.
+    Default TRUE; kill-switch only. Set 'meeting_series_enabled': false in
+    config.json to revert to bare slugify(name) meeting entities."""
+    return bool(read_config(home).get("meeting_series_enabled", True))
+
+
+def topic_consolidation_enabled(home) -> bool:
+    """Whether topic tags are normalized (singularize + curated synonym map)
+    before the topic entity id is derived, so variants converge on one node.
+    Default TRUE; kill-switch only. Set 'topic_consolidation_enabled': false in
+    config.json to revert to raw lowercased tags."""
+    return bool(read_config(home).get("topic_consolidation_enabled", True))
+
+
 def salience_require_drive_mention(home) -> bool:
     """Stricter Drive gate: only graph-extract a Drive doc if it's referenced in
     email (ops-brain's mention rule). Config 'salience_require_drive_mention'.
