@@ -141,3 +141,96 @@ def bootstrap_baseline(store, fleet_storage, drives, pin, *,
             errors.append(f"drive {drive_id}: {exc}")
 
     return result
+
+
+# -- marker (idempotence + resume; a plain file, NOT config/schema) ---------
+
+def _marker_path(home) -> Path:
+    return Path(home) / "baseline_bootstrap.json"
+
+
+def _read_marker(home) -> dict:
+    p = _marker_path(home)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_marker(home, data) -> None:
+    try:
+        _marker_path(home).write_text(json.dumps(data, indent=2))
+    except OSError as exc:
+        log.warning("could not write baseline marker: %s", exc)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# -- gate + glue ------------------------------------------------------------
+
+def should_bootstrap(home) -> bool:
+    """Cheap per-cycle gate for the daemon: worth attempting only once the
+    install is configured, at least one org flag is on, and it isn't done."""
+    from mcpbrain import config
+    if _read_marker(home).get("completed_at"):
+        return False
+    if not config.is_configured(home):
+        return False
+    return config.org_import_enabled(home) or config.ingest_cache_enabled(home)
+
+
+def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
+                  drives=None, pin=None, force=False,
+                  import_snapshot=_default_import_snapshot,
+                  bootstrap_drive=_default_bootstrap_drive,
+                  make_fleet_storage=_default_make_fleet_storage,
+                  enumerate_drives=_default_enumerate_drives) -> dict:
+    """Resolve inputs from config/services, enforce the idempotence marker, run
+    the orchestrator, persist resume state. Returns the summary tagged with a
+    top-level 'status' in {'skipped','degraded','done'}."""
+    from mcpbrain import config
+    import_on = config.org_import_enabled(home)
+    cache_on = config.ingest_cache_enabled(home)
+    if not force and not (import_on or cache_on):
+        return {"status": "skipped", "reason": "flags_off"}
+
+    marker = _read_marker(home)
+    if not force and marker.get("completed_at"):
+        return {"status": "skipped", "reason": "already_bootstrapped",
+                "completed_at": marker["completed_at"]}
+
+    if pin is None:
+        pin = config.fleet_pin(home)
+    if fleet_storage is None:
+        fleet_storage = make_fleet_storage(home, drive_service)
+    if drives is None:
+        drives = enumerate_drives(drive_service) if cache_on else []
+
+    prev_done = set(marker.get("done_drive_ids") or [])
+    prev_snapshot = bool(marker.get("snapshot_done"))
+    summary = bootstrap_baseline(
+        store, fleet_storage, list(drives), pin,
+        import_snapshot=import_snapshot, bootstrap_drive=bootstrap_drive,
+        done_drive_ids=prev_done,
+        # If import is off, treat the snapshot as already handled (skip it).
+        snapshot_done=prev_snapshot or not import_on)
+
+    degraded = fleet_storage is None
+    _write_marker(home, {
+        "snapshot_done": summary["snapshot_done"],
+        "done_drive_ids": sorted(summary["done_drive_ids"]),
+        "cache_hits": summary.get("cache_hits", 0),
+        # Finalize only when a real transport existed; a degraded run (no fleet
+        # folder yet) stays retryable so a later cycle completes it.
+        "completed_at": "" if degraded else _utcnow_iso(),
+    })
+    summary["status"] = "degraded" if degraded else "done"
+    # done_drive_ids is a set (from the orchestrator) — make it JSON-friendly for
+    # any caller that serializes the summary (control API).
+    summary["done_drive_ids"] = sorted(summary["done_drive_ids"])
+    return summary
