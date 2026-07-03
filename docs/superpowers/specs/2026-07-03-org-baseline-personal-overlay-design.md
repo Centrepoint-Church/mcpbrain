@@ -217,6 +217,20 @@ AI-adjudicated, reversible, capped appliers, per the 0.7.84 hardening):
   all local relations/observations are preserved on top. The row is marked
   `origin='org'` with local enrichment intact — org is the skeleton, personal is the
   flesh.
+- **Cross-layer edges are free by construction:** a layer-2 relation (e.g.
+  `document → mentions → joel-chelliah`, or a private observation on an org person)
+  is an ordinary local row pointing at whatever entity row owns that slug, org-origin
+  or not. There is no bridge table and no layer awareness in recall/graph traversal —
+  mixed-origin neighborhoods are just the graph.
+- **Slug-drift reconciliation:** deterministic keying can split one person across two
+  nodes when the local variant differs (`joel-c` locally vs `joel-chelliah` in the
+  snapshot), stranding local observations on the orphan. At import time, incoming org
+  entities are reconciled against existing local entities using the existing
+  `resolve.py` machinery: email-equality merges deterministically (role-address guard
+  applies), and org-supplied alias lists match name variants via canonical-key/token
+  similarity. The local node merges *into* the org node (local flesh re-attached);
+  anything still ambiguous goes to the normal local fuzzy-review queue instead of
+  auto-merging. Merges are logged in `entity_merge_log` as usual.
 - **Conflict rule:** where org and local relations contradict, both coexist
   bitemporally (the store already models supersession); display/recall prefers the
   latest `valid_from` regardless of origin, so *the user's own fresher knowledge wins
@@ -275,6 +289,10 @@ shared content" to "minutes of downloads + enrichment spend only on their person
 - **Import semantics:** wholesale-replace per origin never touches local rows;
   tombstone suppression; same-slug merge preserves local aliases/profile; transactional
   rollback on injected failure.
+- **Slug-drift reconciliation:** local `joel-c` with private observations + snapshot
+  `joel-chelliah` sharing an email or alias → single node with observations intact;
+  ambiguous name-only pairs land in the fuzzy queue, never auto-merge; role-address
+  pairs never merge.
 - **Curator:** two synthetic contributors with overlapping + conflicting claims →
   deterministic merge + adjudication → snapshot; role-address groups never merge
   (0.7.77 regression tests extended); corroboration counting via HMAC refs.
