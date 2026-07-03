@@ -242,3 +242,48 @@ def remove_file_artifacts(fleet_storage, file_id) -> int:
             except Exception as exc:  # noqa: BLE001
                 log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
+
+
+# -- bulk import (onboarding) + revocation ----------------------------------
+
+def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
+    """Bulk-import all cache artifacts for a drive whose pipeline matches `pin`.
+    For a file with several content versions, the newest published_at wins.
+    Returns {'imported','chunks','skipped','cache_hits'} where cache_hits ==
+    imported (files served from cache). Subsystem C sums cache_hits across drives
+    for its onboarding summary (spec §C.2)."""
+    summary = {"imported": 0, "chunks": 0, "skipped": 0, "cache_hits": 0}
+    if not pin.is_pinned:
+        return summary
+    cur_pf8 = _pf8(pin)
+    best: dict[str, tuple[str, CacheArtifact]] = {}   # file_id -> (published_at, art)
+    for path, (fid, _h12, pf8) in _cache_names(fleet_storage):
+        if pf8 != cur_pf8:
+            continue
+        art = _load(fleet_storage, path)
+        if art is None:
+            continue
+        prev = best.get(fid)
+        if prev is None or (art.published_at or "") > prev[0]:
+            best[fid] = (art.published_at or "", art)
+    for _fid, (_pa, art) in best.items():
+        if _import_artifact(store, drive_id, art, pin):
+            summary["imported"] += 1
+            summary["chunks"] += len(art.chunks)
+        else:
+            summary["skipped"] += 1
+    summary["cache_hits"] = summary["imported"]
+    return summary
+
+
+def purge_drive(store, drive_id) -> dict:
+    """Access-revocation purge (spec §A3): bitemporally invalidate local relations
+    sourced from this drive's docs, then delete its chunks/vectors/FTS. org rows
+    are untouched. Returns a summary dict."""
+    doc_ids = store.doc_ids_for_drive(drive_id)
+    invalidated = store.invalidate_local_relations_for_docs(doc_ids)
+    deleted = store.delete_chunks(doc_ids)
+    log.info("ingest_cache: purged drive %s — %d chunks, %d relations invalidated",
+             drive_id, deleted, invalidated)
+    return {"drive_id": drive_id, "docs": len(doc_ids),
+            "chunks_deleted": deleted, "relations_invalidated": invalidated}

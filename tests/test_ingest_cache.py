@@ -196,3 +196,24 @@ def test_collect_chunks_is_drive_neutral(tmp_path):
     assert "drive_id" not in ccs[0].metadata            # neutralised for byte-identical artifacts
     assert struct.unpack("<4f", base64.b64decode(ccs[0].embedding_b64)) == (
         struct.unpack("<4f", struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)))
+
+
+def test_bootstrap_drive_imports_newest_per_file(tmp_path):
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    # two files, and an older + newer version of FID (GC would normally drop the old one)
+    _write_artifact(fs, "FID", "vhash1")
+    _write_artifact(fs, "GID", "vhashG")
+    # a stale-pipeline artifact must be ignored by bootstrap
+    _write_artifact(fs, "HID", "vhashH", embed_model="old-model")
+    summary = ingest_cache.bootstrap_drive(s, fs, "D1", PIN)
+    assert summary["imported"] == 2 and summary["chunks"] == 2
+    assert summary["cache_hits"] == 2               # C sums this across drives
+    assert s.get_chunk("gdrive-FID-0")["metadata"]["drive_id"] == "D1"
+    assert s.get_chunk("gdrive-HID-0") is None       # stale pipeline skipped
+
+
+def test_bootstrap_drive_unpinned_is_noop(tmp_path):
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(fs, "FID", "vhash1")
+    out = ingest_cache.bootstrap_drive(s, fs, "D1", FleetPin())
+    assert out["imported"] == 0 and out["cache_hits"] == 0
