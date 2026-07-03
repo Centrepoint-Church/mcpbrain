@@ -143,3 +143,43 @@ def upload_pending(store, fleet_storage: FleetStorage, contributor_email: str) -
         db.executemany("UPDATE org_contrib_outbox SET uploaded_at=? WHERE id=?",
                         [(now, r["id"]) for r in rows])
     return {"uploaded": len(rows), "batch": path}
+
+
+def _delta_since_watermark(store) -> tuple[dict, dict]:
+    """Build a drain_delta of entity_relations changed since the stored
+    watermark (org_contrib_hwm = max row id last seen, org_contrib_ts = last
+    scan timestamp), plus their endpoint entities. Because Phase B has no
+    per-drain hook, the daily upload cadence calls this to do collection AND
+    upload in one pass: any row with an id beyond the high-water mark (new
+    edge) or an invalidated_at/last_seen after the last scan (supersession or
+    re-observation) is picked up, so collect_from_drain sees the same shape a
+    future drain-path hook would hand it. Returns (drain_delta, new_watermark)
+    where new_watermark = {"hwm": int, "ts": iso}."""
+    hwm = int(store.get_meta("org_contrib_hwm") or 0)
+    last_ts = store.get_meta("org_contrib_ts") or ""
+    with store._connect() as db:
+        rel_rows = db.execute(
+            "SELECT id, entity_a, relation, entity_b, valid_from, valid_to, "
+            "       confidence, origin, source_doc_id "
+            "FROM entity_relations "
+            "WHERE id > ? "
+            "   OR (invalidated_at IS NOT NULL AND invalidated_at > ?) "
+            "   OR (last_seen IS NOT NULL AND last_seen > ?) "
+            "ORDER BY id",
+            (hwm, last_ts, last_ts)).fetchall()
+        max_id = db.execute(
+            "SELECT COALESCE(MAX(id),0) m FROM entity_relations").fetchone()["m"]
+    relations = [dict(r) for r in rel_rows]
+    ent_ids = {r["entity_a"] for r in relations} | {r["entity_b"] for r in relations}
+    entities: dict = {}
+    if ent_ids:
+        placeholders = ",".join("?" * len(ent_ids))
+        with store._connect() as db:
+            for e in db.execute(
+                    f"SELECT id, name, type, org, email_addr, aliases, origin "
+                    f"FROM entities WHERE id IN ({placeholders})",
+                    tuple(ent_ids)).fetchall():
+                entities[e["id"]] = dict(e)
+    new_wm = {"hwm": int(max_id),
+              "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return {"relations": relations, "entities": entities}, new_wm
