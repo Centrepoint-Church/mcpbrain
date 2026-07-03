@@ -12,6 +12,7 @@ from googleapiclient.errors import HttpError
 from mcpbrain.chunking import content_hash
 from mcpbrain.graph_write import (
     _is_owner,
+    _meeting_series_id,
     is_junk_entity,
     owner_identity_from_config,
     upsert_entity,
@@ -139,6 +140,46 @@ def _apply_attendees_to_graph(store, event: dict, owner) -> int:
     return written
 
 
+def _annotate_series_from_event(store, event, owner) -> bool:
+    """Stamp a matching meeting series with this recurring event's id.
+
+    Conservative: only fires for a recurring event whose (normalized summary,
+    org) resolves to an EXISTING series entity. Writes a 'calendar_series'
+    observation (value=recurringEventId). Never creates or re-keys an entity, so
+    it cannot mis-merge two series. Org is unknown from a bare calendar event, so
+    we try the owner's default org first, then 'external' — the two buckets a
+    calendar-derived series would have been keyed under.
+    """
+    rec_id = event.get("recurringEventId", "")
+    summary = (event.get("summary") or "").strip()
+    if not rec_id or not summary:
+        return False
+    candidate_orgs = []
+    # owner's configured org (if any alias carries one) then external fallback.
+    candidate_orgs.append("external")
+    for org in candidate_orgs:
+        eid = _meeting_series_id(summary, org)
+        with store._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM entities WHERE id=? AND type='meeting'", (eid,)).fetchone()
+            if not exists:
+                continue
+            already = db.execute(
+                "SELECT 1 FROM entity_observations WHERE entity_id=? "
+                "AND attribute='calendar_series' AND value=?", (eid, rec_id)).fetchone()
+            if already:
+                return False
+            db.execute(
+                "INSERT INTO entity_observations "
+                "(entity_id, attribute, value, source, valid_from, confidence_source) "
+                "VALUES (?, 'calendar_series', ?, ?, ?, 'gdrive')",
+                (eid, rec_id, f"cal-{event.get('id','')}",
+                 (event.get("start") or {}).get("date")
+                 or (event.get("start") or {}).get("dateTime", "")[:10] or ""))
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Internal: paginated events.list
 # ---------------------------------------------------------------------------
@@ -220,6 +261,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
         if chunks:
             count += 1
             _apply_attendees_to_graph(store, ev, owner)
+            _annotate_series_from_event(store, ev, owner)
     return count
 
 
@@ -283,6 +325,7 @@ def sync_calendar(
         if chunks:
             count += 1
             _apply_attendees_to_graph(store, ev, owner)
+            _annotate_series_from_event(store, ev, owner)
 
     # Advance cursor only after all upserts are durable.
     if next_sync:
