@@ -121,3 +121,44 @@ def test_should_bootstrap_gate(tmp_path):
     (inst.home / "baseline_bootstrap.json").write_text(
         json.dumps({"completed_at": "2026-01-01T00:00:00Z"}))
     assert onboarding.should_bootstrap(str(inst.home)) is False
+
+
+def test_end_to_end_with_fakes_zero_extraction_and_idempotent(tmp_path):
+    from tests.helpers.org_fleet import make_fleet, LocalDirFleetStorage
+    members, curator, _ = make_fleet(tmp_path, n_members=1)
+    inst = members[0]
+    _configure(inst.home)                         # configured + pinned
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+
+    extracted = {"count": 0}                        # sentinel: must stay 0
+
+    def imp(store, fs_):
+        with store._connect() as db:
+            db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin) "
+                       "VALUES('ceo','CEO','person','org')")
+        return {"status": "imported", "entity_count": 1}
+
+    def boot(store, fs_, drive_id, pin):
+        extracted["count"] += 0                     # cache import != extraction
+        with store._connect() as db:
+            db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin) "
+                       f"VALUES('doc-{drive_id}','Doc','document','local')")
+        return {"cache_hits": 10, "drive_id": drive_id}
+
+    res = onboarding.run_bootstrap(
+        str(inst.home), inst.store, fleet_storage=fs, drives=["D1", "D2"],
+        import_snapshot=imp, bootstrap_drive=boot)
+
+    assert res["status"] == "done"
+    assert res["cache_hits"] == 20
+    assert extracted["count"] == 0                  # nothing extracted on cache hits
+    with inst.store._connect() as db:
+        origins = dict(db.execute("SELECT id, origin FROM entities").fetchall())
+    assert origins["ceo"] == "org"                  # snapshot skeleton present
+    assert origins["doc-D1"] == "local"             # cache-imported rows present
+
+    # Re-run: marker makes it a no-op (no duplicate work).
+    res2 = onboarding.run_bootstrap(
+        str(inst.home), inst.store, fleet_storage=fs, drives=["D1", "D2"],
+        import_snapshot=imp, bootstrap_drive=boot)
+    assert res2["status"] == "skipped"
