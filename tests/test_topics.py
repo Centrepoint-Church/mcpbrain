@@ -29,3 +29,8 @@ def test_distinct_concepts_not_merged(tmp_path):
 
 def test_empty(tmp_path):
     assert topics.normalize_topic("   ", str(tmp_path)) == ""
+
+def test_synonym_key_with_leading_qualifier_matches(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"topic_synonyms": {"the budget": "finance"}}))
+    assert topics.normalize_topic("the budget", str(tmp_path)) == "finance"

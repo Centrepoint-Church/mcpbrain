@@ -727,11 +727,25 @@ def test_reset_enriched(store):
 
 def test_meeting_series_for_old_unique_match(store):
     # old bare entity + new series both linked to message m1 -> maps old->series.
+    # The series candidate must carry an occurrence observation (M8) to count
+    # as GENUINE — that's what append_occurrence records for a re-extracted series.
     store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
     store.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-05-12")
+    store.append_occurrence("meeting-acme-board", "2026-05-12", "board mtg", "m1")
     store.link_email_entity("m1", "board-12-may", role="about")
     store.link_email_entity("m1", "meeting-acme-board", role="about")
     assert store.meeting_series_for_old("board-12-may") == "meeting-acme-board"
+
+
+def test_meeting_series_for_old_ignores_legacy_bare_slug_without_occurrence(store):
+    # A legacy bare 'meeting-*' slug with no occurrence observation must never
+    # be counted as a candidate series (M8) — it isn't a genuine re-extracted
+    # series, just an old id that happens to share the 'meeting-' prefix.
+    store.upsert_entity("board-12-may", "Board 12 May", "meeting", "Acme", "2026-05-12")
+    store.upsert_entity("meeting-with-bob", "Meeting with Bob", "meeting", "Acme", "2026-05-12")
+    store.link_email_entity("m1", "board-12-may", role="about")
+    store.link_email_entity("m1", "meeting-with-bob", role="about")
+    assert store.meeting_series_for_old("board-12-may") is None
 
 
 def test_meeting_series_for_old_ambiguous_returns_none(store):
