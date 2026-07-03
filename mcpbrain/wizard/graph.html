@@ -10,23 +10,11 @@
     --paper:#f4f6f9; --card:#ffffff; --signal:#0b5cff; --graph:#6a4cff;
     --mono:ui-monospace,"SF Mono","JetBrains Mono","Fira Mono","Consolas",monospace;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-
-    /* graph canvas tokens (read at runtime by the renderer) — mcpbrain-tuned */
-    --graph-bg:#ffffff;
-    --graph-label:#12151b;
-    --graph-fade:#c9ced7;
-    --graph-link-idle:#dfe3ea;
-    --graph-link-mute:#eef1f5;
-    --graph-link-hot:#0b5cff;
-    --graph-ring:#cdbff5;
-    --graph-ring-text:#697280;
-    --graph-node-fallback:#7a828d;
-    --graph-person:#0b5cff;
-    --graph-org:#6a4cff;
-    --graph-project:#1f9d54;
-    --graph-document:#b7791f;
-    --graph-topic:#0e7490;
-    --graph-meeting:#db2777;
+    --graph-bg:#ffffff; --graph-label:#12151b; --graph-fade:#c9ced7;
+    --graph-link-idle:#dfe3ea; --graph-link-mute:#eef1f5; --graph-link-hot:#0b5cff;
+    --graph-ring:#cdbff5; --graph-ring-text:#697280; --graph-node-fallback:#7a828d;
+    --graph-person:#0b5cff; --graph-org:#6a4cff; --graph-project:#1f9d54;
+    --graph-document:#b7791f; --graph-topic:#0e7490; --graph-meeting:#db2777;
     --graph-community-0:#0b5cff;  --graph-community-1:#6a4cff;  --graph-community-2:#1f9d54;
     --graph-community-3:#b7791f;  --graph-community-4:#0e7490;  --graph-community-5:#d64545;
     --graph-community-6:#9333ea;  --graph-community-7:#c2410c;  --graph-community-8:#0891b2;
@@ -42,8 +30,9 @@
     border-bottom:1px solid var(--line);background:var(--card);flex:0 0 auto}
   .wordmark{font-weight:680;letter-spacing:-.01em}
   .eyebrow{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
-  a.back{color:var(--muted);text-decoration:none;font-size:13px}
-  a.back:hover{color:var(--ink)}
+  a.back,.linkbtn{color:var(--muted);text-decoration:none;font-size:13px;background:none;border:0;cursor:pointer;font:inherit}
+  a.back:hover,.linkbtn:hover{color:var(--ink)}
+  #back-btn{display:none}
   .count{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
   .layout{flex:1 1 auto;display:flex;min-height:0}
   .filters{flex:0 0 230px;border-right:1px solid var(--line);background:var(--card);
@@ -60,11 +49,16 @@
   #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     color:var(--muted);font-size:14px;background:var(--paper);z-index:5;text-align:center;padding:24px}
   #overlay.hidden{display:none}
-  #tooltip{position:absolute;z-index:10;pointer-events:none;display:none;
-    background:#1a1f27;color:#fff;border-radius:8px;padding:7px 10px;font-size:12.5px;
-    max-width:260px;line-height:1.4}
+  #tooltip{position:absolute;z-index:10;pointer-events:none;display:none;background:#1a1f27;color:#fff;
+    border-radius:8px;padding:7px 10px;font-size:12.5px;max-width:260px;line-height:1.4}
   #tooltip b{font-weight:640}
   #tooltip .sub{color:#c9ced7}
+  #legend{position:absolute;top:12px;right:12px;z-index:8;background:rgba(255,255,255,.92);
+    border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12px;
+    box-shadow:0 2px 8px rgba(20,24,29,.06)}
+  #legend h4{margin:0 0 7px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:700}
+  #legend .row{display:flex;align-items:center;gap:7px;padding:1.5px 0;color:var(--ink)}
+  #legend .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
 </style>
 </head>
 <body>
@@ -72,19 +66,20 @@
     <span class="wordmark">mcpbrain</span>
     <span class="eyebrow">Knowledge graph</span>
     <a class="back" href="/dashboard">← Dashboard</a>
+    <button id="back-btn" class="linkbtn">← Back to map</button>
     <span id="count" class="count"></span>
   </header>
   <div class="layout">
     <aside class="filters">
+      <label>Group by
+        <select id="f-group">
+          <option value="community" selected>Community</option>
+          <option value="org">Organisation</option>
+          <option value="type">Type</option>
+        </select>
+      </label>
       <label>Min connections <span class="deg-val" id="deg-val">7</span>
         <input type="range" id="f-degree" min="1" max="50" value="7">
-      </label>
-      <label>Colour by
-        <select id="f-colour">
-          <option value="community" selected>Community</option>
-          <option value="type">Type</option>
-          <option value="org">Organisation</option>
-        </select>
       </label>
       <label>Organisation
         <select id="f-org"><option value="">All</option></select>
@@ -95,10 +90,11 @@
       <label>Search
         <input type="text" id="f-search" placeholder="highlight by name" autocomplete="off">
       </label>
-      <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · right-click a node to focus its neighbourhood · double-click empty space to reset.</div>
+      <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · click a cluster to open it · right-click a node to focus its neighbourhood · double-click empty space to reset.</div>
     </aside>
     <div id="stage">
       <div id="graph"></div>
+      <div id="legend"></div>
       <div id="overlay">Loading graph…</div>
       <div id="tooltip"></div>
     </div>
@@ -112,243 +108,330 @@
     const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
     const $ = (id) => document.getElementById(id);
 
-    // ---- palette: resolve --graph-* CSS tokens at runtime (ported from canvas.ts) ----
+    // ---- level-of-detail thresholds (tune here) ----
+    const LOD_NODES_MIN = 1.5;   // below this zoom: hubs only
+    const LOD_LABELS_MIN = 3.0;  // above this zoom: all in-view labels
+    const HUBS_PER_GROUP = 4;
+    const HULL_PAD = 18, HULL_THROTTLE_MS = 150;
+
     const TYPE_TOKEN = { person:"--graph-person", org:"--graph-org", project:"--graph-project",
                          document:"--graph-document", topic:"--graph-topic", meeting:"--graph-meeting" };
-    function readVar(name, fb=""){ const v = getComputedStyle(document.documentElement)
-        .getPropertyValue(name).trim(); return v || fb; }
+    const TYPE_ORDER = ["person","org","project","document","topic","meeting"];
+    function readVar(n, fb=""){ const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || fb; }
     function readPalette(){
       const byType = {}; for (const [k,t] of Object.entries(TYPE_TOKEN)) byType[k] = readVar(t);
       const community = []; for (let i=0;i<18;i++) community.push(readVar(`--graph-community-${i}`));
-      return {
-        bg: readVar("--graph-bg","#ffffff"), label: readVar("--graph-label","#12151b"),
-        fade: readVar("--graph-fade","#c9ced7"), linkIdle: readVar("--graph-link-idle","#dfe3ea"),
-        linkMute: readVar("--graph-link-mute","#eef1f5"), linkHot: readVar("--graph-link-hot","#0b5cff"),
-        ring: readVar("--graph-ring","#cdbff5"), ringText: readVar("--graph-ring-text","#697280"),
-        nodeFallback: readVar("--graph-node-fallback","#7a828d"), byType, community,
-      };
+      return { bg:readVar("--graph-bg","#fff"), label:readVar("--graph-label","#12151b"),
+        fade:readVar("--graph-fade","#c9ced7"), linkIdle:readVar("--graph-link-idle","#dfe3ea"),
+        linkMute:readVar("--graph-link-mute","#eef1f5"), linkHot:readVar("--graph-link-hot","#0b5cff"),
+        ring:readVar("--graph-ring","#cdbff5"), ringText:readVar("--graph-ring-text","#697280"),
+        nodeFallback:readVar("--graph-node-fallback","#7a828d"), byType, community };
     }
-    let palette = readPalette();
-
-    // deterministic colour for an org name (mcpbrain has no fixed org list)
+    const palette = readPalette();
     function hashIndex(s, n){ let h=0; for (let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return h % n; }
-    function nodeColour(n, mode){
-      if (mode === "org") return n.org ? palette.community[hashIndex(n.org, palette.community.length)] : palette.nodeFallback;
-      if (mode === "community") return n.community != null
-        ? (palette.community[n.community % palette.community.length] || palette.nodeFallback)
-        : palette.nodeFallback;
-      return palette.byType[n.type] || palette.nodeFallback;
-    }
+
+    // colour is ALWAYS by entity type
+    function nodeColour(n){ return palette.byType[n.type] || palette.nodeFallback; }
     function nodeRadius(n){
-      const conn = n.connections || 0;
-      const scale = window.innerWidth <= 768 ? 1.4 : 1;
+      const conn = n.connections || 0, scale = window.innerWidth <= 768 ? 1.4 : 1;
       if (n.type === "org" || n.type === "project") return (8 + Math.min(conn*0.15, 12)) * scale;
       return (3 + Math.min(conn*0.08, 8)) * scale;
     }
-    function computeEgoHops(nodes, links, focusId, depth){
-      const hops = { [focusId]: 0 }; const adj = new Map();
-      for (const l of links){
-        const s = typeof l.source==="object"? l.source.id : l.source;
-        const t = typeof l.target==="object"? l.target.id : l.target;
-        if (!adj.has(s)) adj.set(s, new Set()); if (!adj.has(t)) adj.set(t, new Set());
-        adj.get(s).add(t); adj.get(t).add(s);
+
+    const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
+                    egoDepth:1, egoHops:{}, groupBy:"community", searchTerm:"",
+                    drill:null /* {dim,key,name} */ };
+    let CURRENT = { nodes:[], links:[], communities:{} };
+    let ANCHORS = {};           // groupKey -> {x,y}
+    let NODE_GROUP = new Map(); // id -> groupKey
+    let HUBS = new Set();       // hub node ids
+    let HULLS = [];             // [{poly,cx,cy,name,colour,key}]
+    let lastHull = 0;
+
+    function groupKeyOf(n){
+      if (state.groupBy === "org") return n.org || "unassigned";
+      if (state.groupBy === "type") return n.type || "unknown";
+      return n.community == null ? "—" : String(n.community);  // community
+    }
+    function groupName(key){
+      if (state.groupBy === "community") return CURRENT.communities[key] || (key === "—" ? "No community" : "Community " + key);
+      if (state.groupBy === "org") return key === "unassigned" ? "Unassigned" : key;
+      return key.charAt(0).toUpperCase() + key.slice(1);  // type
+    }
+    function groupColour(key){
+      if (state.groupBy === "type") return palette.byType[key] || palette.nodeFallback;
+      if (state.groupBy === "community"){ const i = /^\d+$/.test(key) ? (+key % 18) : hashIndex(key,18); return palette.community[i]; }
+      return palette.community[hashIndex(key,18)];  // org
+    }
+
+    function recomputeGroups(){
+      NODE_GROUP = new Map();
+      const counts = new Map();
+      for (const n of CURRENT.nodes){ const k = groupKeyOf(n); NODE_GROUP.set(n.id, k); counts.set(k,(counts.get(k)||0)+1); }
+      // anchors: groups on a circle, largest first, radius grows with group count
+      const keys = [...counts.keys()].sort((a,b)=> (counts.get(b)-counts.get(a)) || (a<b?-1:1));
+      const G = keys.length, R = 40 * Math.sqrt(Math.max(1, G));
+      ANCHORS = {};
+      keys.forEach((k,i)=>{ const a = 2*Math.PI*i/Math.max(1,G); ANCHORS[k] = { x:R*Math.cos(a), y:R*Math.sin(a) }; });
+      // hubs: top HUBS_PER_GROUP by connections within each group
+      HUBS = new Set();
+      const byGroup = new Map();
+      for (const n of CURRENT.nodes){ const k = NODE_GROUP.get(n.id); (byGroup.get(k) || byGroup.set(k,[]).get(k)).push(n); }
+      for (const arr of byGroup.values()){
+        arr.sort((a,b)=>(b.connections||0)-(a.connections||0));
+        for (let i=0;i<Math.min(HUBS_PER_GROUP, arr.length);i++) HUBS.add(arr[i].id);
       }
-      const q = [[focusId,0]];
-      while (q.length){ const [id,d] = q.shift(); if (d>=depth) continue;
-        for (const nb of adj.get(id) || []) if (hops[nb]===undefined){ hops[nb]=d+1; q.push([nb,d+1]); } }
+    }
+    function anchorOf(n){ return ANCHORS[NODE_GROUP.get(n.id)] || {x:0,y:0}; }
+
+    // ---- hulls (throttled compute, drawn behind nodes) ----
+    function recomputeHulls(){
+      const byGroup = new Map();
+      for (const n of CURRENT.nodes){
+        if (n.x == null) continue;
+        const k = NODE_GROUP.get(n.id); (byGroup.get(k) || byGroup.set(k,[]).get(k)).push([n.x, n.y]);
+      }
+      HULLS = [];
+      for (const [k, pts] of byGroup){
+        if (pts.length < 3) continue;
+        const hull = d3.polygonHull(pts); if (!hull) continue;
+        const c = d3.polygonCentroid(hull);
+        const padded = hull.map(([x,y]) => { const dx=x-c[0], dy=y-c[1], d=Math.hypot(dx,dy)||1;
+          return [x + dx/d*HULL_PAD, y + dy/d*HULL_PAD]; });
+        HULLS.push({ poly:padded, cx:c[0], cy:c[1], name:groupName(k), colour:groupColour(k), key:k });
+      }
+    }
+    function drawHulls(ctx, globalScale){
+      const now = performance.now();
+      if (now - lastHull > HULL_THROTTLE_MS){ recomputeHulls(); lastHull = now; }
+      for (const h of HULLS){
+        ctx.beginPath(); ctx.moveTo(h.poly[0][0], h.poly[0][1]);
+        for (let i=1;i<h.poly.length;i++) ctx.lineTo(h.poly[i][0], h.poly[i][1]);
+        ctx.closePath();
+        ctx.globalAlpha = 0.08; ctx.fillStyle = h.colour; ctx.fill();
+        ctx.globalAlpha = 0.5; ctx.strokeStyle = h.colour; ctx.lineWidth = 1/globalScale; ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      // cluster labels fade out as you zoom in (overview -> detail)
+      const t = (LOD_LABELS_MIN - globalScale) / (LOD_LABELS_MIN - LOD_NODES_MIN);
+      const op = Math.max(0, Math.min(1, t));
+      if (op > 0.02){
+        for (const h of HULLS){
+          ctx.save(); ctx.globalAlpha = op * 0.9; ctx.fillStyle = h.colour;
+          ctx.font = `700 ${13/globalScale}px ${getComputedStyle(document.body).fontFamily}`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(h.name, h.cx, h.cy); ctx.restore();
+        }
+      }
+    }
+
+    // ---- ego (right-click focus) ----
+    function computeEgoHops(nodes, links, focusId, depth){
+      const hops = { [focusId]:0 }, adj = new Map();
+      for (const l of links){ const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
+        (adj.get(s)||adj.set(s,new Set()).get(s)).add(t); (adj.get(t)||adj.set(t,new Set()).get(t)).add(s); }
+      const q=[[focusId,0]];
+      while(q.length){ const [id,d]=q.shift(); if(d>=depth) continue;
+        for(const nb of adj.get(id)||[]) if(hops[nb]===undefined){ hops[nb]=d+1; q.push([nb,d+1]); } }
       return hops;
     }
 
-    const state = { hoveredNodeId:null, selectedNodeId:null, mode:"canvas",
-                    egoNodeId:null, egoDepth:1, egoHops:{}, colourMode:"community", searchTerm:"" };
-
-    // ---- draw + link styling (ported from canvas.ts) ----
-    function drawNode(node, ctx){
+    // ---- node + edge drawing ----
+    let labelBoxes = [];  // per-frame label collision boxes
+    function drawNode(node, ctx, globalScale){
       const r = node._r ?? nodeRadius(node);
+      const isHub = HUBS.has(node.id);
+      // overview: hubs only; below LOD_NODES_MIN non-hubs draw as faint dots
+      if (globalScale < LOD_NODES_MIN && !isHub && node.id !== state.hoveredNodeId && node.id !== state.selectedNodeId){
+        ctx.beginPath(); ctx.arc(node.x, node.y, Math.max(0.6, r*0.5), 0, 2*Math.PI);
+        ctx.fillStyle = palette.fade; ctx.globalAlpha = 0.5; ctx.fill(); ctx.globalAlpha = 1; return;
+      }
       const isSel = node.id === state.selectedNodeId, isHov = node.id === state.hoveredNodeId;
       const isEgo = state.mode === "ego" && state.egoNodeId === node.id;
       const searching = state.searchTerm.length > 0;
       const match = !searching || node.name.toLowerCase().includes(state.searchTerm);
-      const fill = isSel ? palette.label : (searching && !match ? palette.fade : nodeColour(node, state.colourMode));
-      ctx.beginPath(); ctx.arc(node.x ?? 0, node.y ?? 0, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
-      if (isHov || (searching && match)){ ctx.strokeStyle = palette.label; ctx.lineWidth = 1.5; ctx.stroke(); }
-      const showLabel = isEgo || r > 7 || isHov || isSel || (searching && match) ||
-        (state.mode === "ego" && state.egoHops[node.id] !== undefined && (node.connections ?? 0) >= 3);
-      if (!showLabel) return;
-      const fontSize = isEgo ? 14 : Math.max(9, Math.min(12, r*1.2));
-      ctx.font = `${isEgo?"bold ":""}${fontSize}px ${getComputedStyle(document.body).fontFamily}`;
+      const fill = isSel ? palette.label : (searching && !match ? palette.fade : nodeColour(node));
+      ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
+      if (isHov || (searching && match)){ ctx.strokeStyle = palette.label; ctx.lineWidth = 1.5/globalScale; ctx.stroke(); }
+      const wantLabel = isEgo || isHub || isHov || isSel || (searching && match) || globalScale >= LOD_LABELS_MIN;
+      if (!wantLabel) return;
+      // label-collision skip (screen-space AABB)
+      const fs = isEgo ? 14 : Math.max(9, Math.min(12, r*globalScale*1.2)) / globalScale;
+      ctx.font = `${isEgo?"bold ":""}${fs}px ${getComputedStyle(document.body).fontFamily}`;
+      const w = ctx.measureText(node.name).width, lx = node.x, ly = node.y + r + 3/globalScale;
+      const box = [lx - w/2, ly, lx + w/2, ly + fs];
+      for (const b of labelBoxes){ if (box[0]<b[2]&&box[2]>b[0]&&box[1]<b[3]&&box[3]>b[1]){ if(!(isHub||isHov||isSel)) return; } }
+      labelBoxes.push(box);
       ctx.textAlign = "center"; ctx.textBaseline = "top";
       ctx.save(); ctx.globalAlpha = searching && !match ? 0.30 : 0.85; ctx.fillStyle = palette.label;
-      ctx.fillText(node.name, node.x ?? 0, (node.y ?? 0) + r + 3); ctx.restore();
+      ctx.fillText(node.name, lx, ly); ctx.restore();
+    }
+    function edgeKind(l){
+      const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
+      return NODE_GROUP.get(s) === NODE_GROUP.get(t) ? "intra" : "inter";
     }
     function linkColourFor(l){
-      const sid = typeof l.source==="object"? l.source.id : l.source;
-      const tid = typeof l.target==="object"? l.target.id : l.target;
-      if (state.searchTerm){
-        const sn = l.source?.name?.toLowerCase().includes(state.searchTerm);
-        const tn = l.target?.name?.toLowerCase().includes(state.searchTerm);
-        return (sn || tn) ? palette.linkHot : palette.linkMute;
-      }
       const focus = state.hoveredNodeId || state.selectedNodeId;
-      if (!focus) return palette.linkIdle;
-      return (sid === focus || tid === focus) ? palette.linkHot : palette.linkMute;
+      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+      if (focus) return (sid===focus||tid===focus) ? palette.linkHot : palette.linkMute;
+      if (state.searchTerm){ const sn=l.source?.name?.toLowerCase().includes(state.searchTerm), tn=l.target?.name?.toLowerCase().includes(state.searchTerm);
+        return (sn||tn) ? palette.linkHot : palette.linkMute; }
+      return edgeKind(l) === "inter" ? palette.linkIdle : palette.linkMute;
     }
     function linkWidthFor(l){
       const focus = state.hoveredNodeId || state.selectedNodeId;
-      if (!focus && !state.searchTerm) return 0.6;
-      const sid = typeof l.source==="object"? l.source.id : l.source;
-      const tid = typeof l.target==="object"? l.target.id : l.target;
-      return (sid === focus || tid === focus) ? 1.6 : 0.4;
+      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+      if (focus) return (sid===focus||tid===focus) ? 1.6 : 0.4;
+      return edgeKind(l) === "inter" ? 0.6 : 0.3;
     }
     function drawEgoRings(ctx){
       if (state.mode !== "ego" || !state.egoNodeId) return;
       const ringR = 90; ctx.save(); ctx.strokeStyle = palette.ring; ctx.lineWidth = 1;
-      for (let hop=1; hop<=state.egoDepth; hop++){
-        ctx.beginPath(); ctx.arc(0,0,hop*ringR,0,2*Math.PI); ctx.stroke();
+      for (let hop=1; hop<=state.egoDepth; hop++){ ctx.beginPath(); ctx.arc(0,0,hop*ringR,0,2*Math.PI); ctx.stroke();
         ctx.fillStyle = palette.ringText; ctx.font = "11px "+getComputedStyle(document.body).fontFamily;
-        ctx.textAlign = "center"; ctx.textBaseline = "bottom";
-        ctx.fillText(`${hop} hop${hop>1?"s":""}`, 0, -hop*ringR - 4);
-      }
+        ctx.textAlign="center"; ctx.textBaseline="bottom"; ctx.fillText(`${hop} hop${hop>1?"s":""}`, 0, -hop*ringR-4); }
       ctx.restore();
     }
 
-    // ---- force-graph init (ported from canvas.ts initCanvas) ----
+    // ---- force-graph init ----
     const container = $("graph");
     const fg = new ForceGraph(container)
-      .backgroundColor(palette.bg)
-      .nodeId("id").linkSource("source").linkTarget("target")
-      .nodeRelSize(1)
-      .nodeVal((n) => Math.pow(n._r ?? nodeRadius(n), 2))
-      .nodeLabel(() => "")
+      .backgroundColor(palette.bg).nodeId("id").linkSource("source").linkTarget("target")
+      .nodeRelSize(1).nodeVal((n)=>Math.pow(n._r ?? nodeRadius(n),2)).nodeLabel(()=> "")
       .linkColor(linkColourFor).linkWidth(linkWidthFor)
-      .nodeCanvasObject((node, ctx) => drawNode(node, ctx))
-      .onNodeClick((node) => { state.selectedNodeId = node.id; })
-      .onNodeHover((node) => {
-        state.hoveredNodeId = node ? node.id : null;
-        container.style.cursor = node ? "pointer" : "default";
-        showTooltip(node);
-      })
-      .onNodeDrag(() => hideTooltip())
-      .onBackgroundClick(() => { if (state.mode !== "ego") state.selectedNodeId = null; })
-      .onNodeRightClick((node) => enterEgo(node.id))
-      .onRenderFramePost((ctx) => drawEgoRings(ctx))
-      .warmupTicks(reduce ? 60 : 30)
-      .cooldownTime(reduce ? 0 : 4000);
+      .onRenderFramePre((ctx, gs)=>{ labelBoxes = []; drawHulls(ctx, gs); })
+      .nodeCanvasObject((node, ctx, gs)=> drawNode(node, ctx, gs))
+      .onRenderFramePost((ctx)=> drawEgoRings(ctx))
+      .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; showTooltip(node); })
+      .onNodeDrag(()=> hideTooltip())
+      .onNodeClick((node)=>{ state.selectedNodeId = node.id; })
+      .onNodeRightClick((node)=> enterEgo(node.id))
+      .onBackgroundClick((ev)=> onBg(ev))
+      .warmupTicks(reduce ? 80 : 30).cooldownTime(reduce ? 0 : 4000);
 
-    fg.d3Force("charge", d3.forceManyBody().strength(-80).distanceMax(300));
-    fg.d3Force("collide", d3.forceCollide().radius((n) => (n._r ?? nodeRadius(n)) + 2));
+    fg.d3Force("charge", d3.forceManyBody().strength(-40).distanceMax(300));
+    fg.d3Force("collide", d3.forceCollide().radius((n)=>(n._r ?? nodeRadius(n)) + 2));
     const linkF = fg.d3Force("link");
-    if (linkF) linkF.distance(60).strength((l) => {
-      const s = (l.source.connections)||1, t = (l.target.connections)||1; return 0.1 / Math.min(s,t);
-    });
+    if (linkF) linkF.distance(60).strength((l)=>{ const s=(l.source.connections)||1, t=(l.target.connections)||1; return 0.1/Math.min(s,t); });
     fg.d3AlphaDecay(0.02);
 
-    let CURRENT = { nodes: [], links: [] };
-    function applyFreeForces(nodes){
-      for (const n of nodes){ n.fx = undefined; n.fy = undefined; }
-      fg.d3Force("radial", null);
-      fg.d3Force("center", d3.forceCenter(0,0).strength(0.05));
+    function applyClusterForces(){
+      fg.d3Force("center", null); fg.d3Force("radial", null);
+      fg.d3Force("x", d3.forceX((n)=>anchorOf(n).x).strength(0.28));
+      fg.d3Force("y", d3.forceY((n)=>anchorOf(n).y).strength(0.28));
+      for (const n of CURRENT.nodes){ n.fx = undefined; n.fy = undefined; }
     }
-    function applyEgoForces(nodes){
-      const focus = nodes.find((n) => n.id === state.egoNodeId);
-      if (focus){ focus.fx = 0; focus.fy = 0; }
-      for (const n of nodes) if (n.id !== state.egoNodeId){ n.fx = undefined; n.fy = undefined; }
-      fg.d3Force("radial", d3.forceRadial((n) => (state.egoHops[n.id]||0)*90, 0, 0).strength(0.8));
-      fg.d3Force("center", null);
+    function applyEgoForces(){
+      fg.d3Force("x", null); fg.d3Force("y", null); fg.d3Force("center", null);
+      const f = CURRENT.nodes.find((n)=>n.id===state.egoNodeId); if (f){ f.fx=0; f.fy=0; }
+      for (const n of CURRENT.nodes) if (n.id!==state.egoNodeId){ n.fx=undefined; n.fy=undefined; }
+      fg.d3Force("radial", d3.forceRadial((n)=>(state.egoHops[n.id]||0)*90,0,0).strength(0.8));
     }
-    function setData(nodes, links){
-      for (const n of nodes) n._r = nodeRadius(n);
-      CURRENT = { nodes, links };
-      if (state.mode === "ego" && state.egoNodeId) applyEgoForces(nodes); else applyFreeForces(nodes);
-      fg.graphData({ nodes, links });
+    function relayout(){
+      if (state.mode === "ego" && state.egoNodeId) applyEgoForces(); else applyClusterForces();
+      fg.d3ReheatSimulation();
+      setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200);
     }
     function enterEgo(id){
-      state.mode = "ego"; state.egoNodeId = id; state.selectedNodeId = id;
+      state.mode="ego"; state.egoNodeId=id; state.selectedNodeId=id;
       state.egoHops = computeEgoHops(CURRENT.nodes, CURRENT.links, id, state.egoDepth);
-      applyEgoForces(CURRENT.nodes); fg.d3ReheatSimulation();
+      applyEgoForces(); fg.d3ReheatSimulation();
     }
-    function exitEgo(){
-      if (state.mode !== "ego") return;
-      state.mode = "canvas"; state.egoNodeId = null; state.egoHops = {};
-      applyFreeForces(CURRENT.nodes); fg.d3ReheatSimulation();
+    function exitEgo(){ if (state.mode!=="ego") return; state.mode="map"; state.egoNodeId=null; state.egoHops={}; applyClusterForces(); fg.d3ReheatSimulation(); }
+
+    // background click: exit ego, else hit-test hulls -> drill into a cluster
+    function onBg(ev){
+      if (state.mode === "ego"){ exitEgo(); return; }
+      if (state.drill){ state.selectedNodeId = null; return; }  // already inside a cluster
+      const p = fg.screen2GraphCoords(ev.offsetX, ev.offsetY);
+      for (const h of HULLS){ if (pointInPoly([p.x,p.y], h.poly)){ drillInto(h.key); return; } }
+      state.selectedNodeId = null;
     }
-    // force-graph has no background dblclick event; use the canvas element.
-    container.addEventListener("dblclick", () => { if (!state.hoveredNodeId) exitEgo(); });
+    function pointInPoly(pt, poly){
+      let inside=false; for (let i=0,j=poly.length-1;i<poly.length;j=i++){
+        const xi=poly[i][0],yi=poly[i][1],xj=poly[j][0],yj=poly[j][1];
+        if (((yi>pt[1])!==(yj>pt[1])) && (pt[0] < (xj-xi)*(pt[1]-yi)/(yj-yi)+xi)) inside=!inside; }
+      return inside;
+    }
+    function drillInto(key){ state.drill = { dim: state.groupBy, key, name: groupName(key) }; $("back-btn").style.display="inline"; load(); }
+    $("back-btn").addEventListener("click", ()=>{ state.drill=null; $("back-btn").style.display="none"; load(); });
 
     // ---- tooltip ----
     const tip = $("tooltip");
     function showTooltip(node){
       if (!node){ hideTooltip(); return; }
-      const hop = state.mode === "ego" ? state.egoHops[node.id] : undefined;
-      tip.innerHTML = "";
-      const b = document.createElement("b"); b.textContent = node.name; tip.appendChild(b);
-      const sub = document.createElement("div"); sub.className = "sub";
-      sub.textContent = (node.type || "") + " · " + (node.org || "no org") + " · " +
-        (node.connections || 0) + " connections" + (hop !== undefined ? " · hop " + hop : "");
-      tip.appendChild(sub);
-      tip.style.display = "block";
+      const hop = state.mode==="ego" ? state.egoHops[node.id] : undefined;
+      tip.innerHTML = ""; const b=document.createElement("b"); b.textContent=node.name; tip.appendChild(b);
+      const sub=document.createElement("div"); sub.className="sub";
+      sub.textContent = (node.type||"")+" · "+(node.org||"no org")+" · "+(node.connections||0)+" connections"+(hop!==undefined?" · hop "+hop:"");
+      tip.appendChild(sub); tip.style.display="block";
     }
-    function hideTooltip(){ tip.style.display = "none"; }
-    $("stage").addEventListener("mousemove", (e) => {
-      if (tip.style.display === "block"){ tip.style.left = (e.offsetX + 14) + "px"; tip.style.top = (e.offsetY + 14) + "px"; }
-    });
+    function hideTooltip(){ tip.style.display="none"; }
+    $("stage").addEventListener("mousemove", (e)=>{ if(tip.style.display==="block"){ tip.style.left=(e.offsetX+14)+"px"; tip.style.top=(e.offsetY+14)+"px"; } });
+    container.addEventListener("dblclick", ()=>{ if(!state.hoveredNodeId) exitEgo(); });
 
-    // repaint helper for non-pointer state changes (colour/search)
-    function nudge(){ fg.nodeColor(fg.nodeColor()); }  // no-op setter forces a redraw
+    // ---- legend (fixed entity-type colour key) ----
+    function renderLegend(){
+      const el = $("legend"); el.innerHTML = "<h4>Type</h4>";
+      for (const t of TYPE_ORDER){ const row=document.createElement("div"); row.className="row";
+        const sw=document.createElement("span"); sw.className="sw"; sw.style.background=palette.byType[t]||palette.nodeFallback;
+        const lb=document.createElement("span"); lb.textContent=t;
+        row.appendChild(sw); row.appendChild(lb); el.appendChild(row); }
+    }
+    renderLegend();
 
     // ---- sizing ----
-    function fit(){ const r = $("stage").getBoundingClientRect(); fg.width(r.width).height(r.height); }
+    function fit(){ const r=$("stage").getBoundingClientRect(); fg.width(r.width).height(r.height); }
     fit(); new ResizeObserver(fit).observe($("stage"));
 
-    // ---- filters + data load ----
+    // ---- filters + data ----
     function populateOptions(nodes){
-      const orgs = new Set(), types = new Set();
-      for (const n of nodes){ if (n.org) orgs.add(n.org); if (n.type) types.add(n.type); }
-      for (const [sel, vals] of [["f-org", orgs], ["f-type", types]]){
-        const el = $(sel), cur = el.value;
-        el.innerHTML = '<option value="">All</option>';
-        [...vals].sort().forEach((v) => el.add(new Option(v, v)));
-        el.value = cur;
-      }
+      const orgs=new Set(), types=new Set();
+      for (const n of nodes){ if(n.org) orgs.add(n.org); if(n.type) types.add(n.type); }
+      for (const [sel,vals] of [["f-org",orgs],["f-type",types]]){ const el=$(sel), cur=el.value;
+        el.innerHTML='<option value="">All</option>'; [...vals].sort().forEach((v)=>el.add(new Option(v,v))); el.value=cur; }
     }
     function filterQuery(){
-      const p = new URLSearchParams(); p.set("min_conn", $("f-degree").value);
-      if ($("f-org").value) p.set("org", $("f-org").value);
-      if ($("f-type").value) p.set("type", $("f-type").value);
+      const p=new URLSearchParams();
+      if (state.drill){ p.set(state.drill.dim, state.drill.key); p.set("min_conn","1"); }
+      else { p.set("min_conn", $("f-degree").value);
+        if ($("f-org").value) p.set("org", $("f-org").value);
+        if ($("f-type").value) p.set("type", $("f-type").value); }
       return p.toString();
     }
-    let loading = false;
+    let loading=false;
     async function load(){
-      if (loading) return; loading = true;
-      const ov = $("overlay"); ov.textContent = "Loading graph…"; ov.classList.remove("hidden");
+      if (loading) return; loading=true;
+      const ov=$("overlay"); ov.textContent = state.drill ? ("Opening “"+state.drill.name+"”…") : "Loading graph…"; ov.classList.remove("hidden");
       try{
-        const res = await fetch("/api/graph/canvas?" + filterQuery(), H);
-        if (res.status === 413){ const i = await res.json();
-          ov.textContent = "Too many nodes (" + (i.candidate_count || "5000+") + ") — raise “Min connections”.";
-          loading = false; return; }
-        if (!res.ok) throw new Error("HTTP " + res.status);
+        const res = await fetch("/api/graph/canvas?"+filterQuery(), H);
+        if (res.status===413){ const i=await res.json(); ov.textContent="Too many nodes ("+(i.candidate_count||"5000+")+") — raise “Min connections”."; loading=false; return; }
+        if (!res.ok) throw new Error("HTTP "+res.status);
         const data = await res.json();
+        CURRENT = { nodes:data.nodes, links:data.links, communities:data.communities||{} };
         populateOptions(data.nodes);
-        $("count").textContent = data.nodes.length + " nodes · " + data.links.length + " links";
-        if (!data.nodes.length){ ov.textContent = "No entities match these filters."; loading = false; return; }
-        exitEgo();
-        setData(data.nodes, data.links);
+        const G = new Set(data.nodes.map(groupKeyOf)).size;
+        $("count").textContent = data.nodes.length+" nodes · "+data.links.length+" links · "+G+" groups";
+        if (!data.nodes.length){ ov.textContent="No entities match these filters."; loading=false; return; }
+        for (const n of data.nodes) n._r = nodeRadius(n);
+        state.mode="map"; state.egoNodeId=null; state.egoHops={};
+        recomputeGroups(); applyClusterForces();
+        fg.graphData({ nodes:data.nodes, links:data.links });
+        setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200);
         ov.classList.add("hidden");
-      }catch(e){ ov.textContent = "Couldn’t load the graph. Is the daemon running?"; }
-      finally{ loading = false; }
+      }catch(e){ ov.textContent="Couldn’t load the graph. Is the daemon running?"; }
+      finally{ loading=false; }
     }
 
-    const deg = $("f-degree");
-    deg.addEventListener("input", () => { $("deg-val").textContent = deg.value; });
+    const deg=$("f-degree");
+    deg.addEventListener("input", ()=>{ $("deg-val").textContent=deg.value; });
     deg.addEventListener("change", load);
     $("f-org").addEventListener("change", load);
     $("f-type").addEventListener("change", load);
-    $("f-colour").addEventListener("change", (e) => { state.colourMode = e.target.value; nudge(); });
-    let searchT = null;
-    $("f-search").addEventListener("input", (e) => {
-      clearTimeout(searchT);
-      searchT = setTimeout(() => { state.searchTerm = e.target.value.trim().toLowerCase(); nudge(); }, 150);
-    });
+    $("f-group").addEventListener("change", (e)=>{ state.groupBy=e.target.value; recomputeGroups(); relayout(); });
+    let searchT=null;
+    $("f-search").addEventListener("input", (e)=>{ clearTimeout(searchT);
+      searchT=setTimeout(()=>{ state.searchTerm=e.target.value.trim().toLowerCase(); fg.nodeColor(fg.nodeColor()); }, 150); });
 
     load();
   </script>
