@@ -522,11 +522,13 @@ class Daemon:
         self._org_backfill_interval_s: float | None = None
         self._last_org_backfill = None
         # Task 3.3: daily deterministic entity dedup (issue #23-fix validated).
-        # OFF by default; enabled via cadences config.
+        # Default 86400s (daily) via _CADENCE_DEFAULTS; set resolve_entities_interval_s: 0
+        # in the cadences config to disable. (This attr is the pre-config placeholder.)
         self._resolve_entities_interval_s: float | None = None
         self._last_resolve_entities = None
         # Session-4: daily AI-adjudicated graph-hygiene review (build review units).
-        # OFF by default; enabled via cadences config.
+        # Default 86400s (daily) via _CADENCE_DEFAULTS; set review_interval_s: 0 in the
+        # cadences config to disable. (This attr is the pre-config placeholder.)
         self._review_interval_s: float | None = None
         self._last_review = None
         # B3 salience scoring: structural importance per chunk (daily).

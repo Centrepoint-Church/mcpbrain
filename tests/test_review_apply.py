@@ -27,6 +27,41 @@ def _write_config(tmp_path, data: dict) -> str:
 ACME_CFG = {"orgs": [{"name": "Acme", "domains": ["acme.com"]}, {"name": "Personal"}]}
 
 
+def test_orphan_applier_targets_finding_ref_not_verdict_ref(tmp_path):
+    # M1: a malformed verdict claiming a DIFFERENT ref_id must not redirect the
+    # unattended mutation. The applier acts on the FINDING's own ref_id (e1),
+    # never the verdict's claimed e2.
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+    result = apply_orphan_verdicts(
+        s, [{"finding_id": fid, "ref_id": "e2", "verdict": "suppress"}], cap=50)
+    with s._connect() as db:
+        e1 = db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id='e1'").fetchone()
+        e2 = db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id='e2'").fetchone()
+    assert e1 is not None, "must act on the finding's own ref_id (e1)"
+    assert e2 is None, "must NOT act on the verdict's claimed ref_id (e2)"
+    assert result["suppressed"] == 1
+
+
+def test_orphan_applier_skips_unknown_finding_id(tmp_path):
+    # M1: a verdict pointing at a finding that doesn't exist (or is resolved)
+    # mutates nothing.
+    s = _seed(tmp_path)
+    result = apply_orphan_verdicts(
+        s, [{"finding_id": 999999, "ref_id": "e1", "verdict": "suppress"}], cap=50)
+    with s._connect() as db:
+        assert db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id='e1'").fetchone() is None
+    assert result["suppressed"] == 0 and result["skipped"] == 1
+
+
+def test_duplicate_applier_skips_self_pair(tmp_path):
+    # M2: a "x|x" pair_id is a no-op merge and must be skipped, not counted merged.
+    s = _seed(tmp_path)
+    result = apply_duplicate_verdicts(s, [{"pair_id": "e1|e1", "same": True}], cap=50)
+    assert result["merged"] == 0 and result["skipped"] == 1
+
+
 def test_suppress_verdict_suppresses_entity_and_resolves_finding(tmp_path):
     s = _seed(tmp_path)
     fid = s.record_finding("lint:orphan_entity", "e1", summary="orphan")
