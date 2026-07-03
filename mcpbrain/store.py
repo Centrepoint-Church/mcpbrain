@@ -2088,6 +2088,22 @@ class Store:
             ).fetchone()
             return row[0] if row else 0
 
+    def get_finding(self, finding_id) -> dict | None:
+        """Return one finding as {id, finding_type, ref_id, resolved_at} or None.
+
+        The review appliers use this to target the finding's OWN stored ref_id
+        and finding_type rather than trusting the adjudicator's verdict payload —
+        so a malformed verdict can't redirect an unattended mutation onto an
+        arbitrary entity or resolve an unrelated finding (defense-in-depth)."""
+        with self._connect() as db:
+            r = db.execute(
+                "SELECT id, finding_type, ref_id, resolved_at FROM proactive_findings WHERE id=?",
+                (finding_id,)).fetchone()
+        if r is None:
+            return None
+        return {"id": r["id"], "finding_type": r["finding_type"],
+                "ref_id": r["ref_id"], "resolved_at": r["resolved_at"] or ""}
+
     def resolve_finding(self, finding_id: int) -> bool:
         """Dismiss one finding (sets resolved_at). True if a row changed."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
