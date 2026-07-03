@@ -145,8 +145,124 @@ def test_delta_since_watermark_picks_up_new_and_superseded(tmp_path):
     rels = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta["relations"]}
     assert ("joel", "works_at", "acme") in rels
     assert "joel" in delta["entities"] and "acme" in delta["entities"]
-    # advancing the watermark then re-scanning yields nothing new
+    # Advancing the watermark then re-scanning must never surface a row we
+    # haven't already seen. It MAY harmlessly re-surface an already-seen row
+    # if last_seen/invalidated_at lands in the same second as the watermark's
+    # own ts (the >= boundary — see test_delta_since_watermark_picks_up_same_second_*
+    # for why that's required, not a bug): 1-second string timestamp
+    # resolution means a strict > would silently and permanently drop same-
+    # second changes, so the trade is a bounded, already-deduped-downstream
+    # re-scan rather than data loss.
     s.set_meta("org_contrib_hwm", str(wm["hwm"]))
     s.set_meta("org_contrib_ts", wm["ts"])
     delta2, _ = org_contrib._delta_since_watermark(s)
-    assert delta2["relations"] == []
+    ids2 = {r["id"] for r in delta2["relations"]}
+    assert ids2 <= {r["id"] for r in delta["relations"]}
+
+
+def test_delta_since_watermark_picks_up_same_second_reobservation(tmp_path):
+    """Regression for the >= fix: a re-observation (last_seen bump) landing in
+    the SAME wall-clock second as the persisted watermark checkpoint must still
+    be picked up. Before the fix (strict > on last_seen), a same-second bump
+    failed id>hwm (row already had an id <= hwm), failed invalidated_at (NULL),
+    and failed last_seen>last_ts (equal, not greater) — permanently lost, since
+    the watermark only advances forward. We force the collision deterministically
+    via direct SQL rather than depending on real elapsed time between calls."""
+    from mcpbrain import graph_write
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name, typ in (("joel", "Joel", "person"), ("acme", "Acme", "org")):
+            db.execute("INSERT INTO entities(id,name,type,origin) VALUES(?,?,?,'local')",
+                       (eid, name, typ))
+    rid = graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                      source_doc_id="msg-1")
+    delta, wm = org_contrib._delta_since_watermark(s)
+    assert wm["hwm"] == rid
+    collision_ts = wm["ts"]                          # the exact watermark checkpoint
+    s.set_meta("org_contrib_hwm", str(wm["hwm"]))
+    s.set_meta("org_contrib_ts", collision_ts)
+
+    # Re-observe the same triple (bumps last_seen via _bump_observation), then
+    # force last_seen to land EXACTLY on the watermark second — the collision
+    # the bug missed, rather than relying on enough wall time passing.
+    graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                source_doc_id="msg-1")
+    with s._connect() as db:
+        db.execute("UPDATE entity_relations SET last_seen=? WHERE id=?", (collision_ts, rid))
+
+    delta2, _ = org_contrib._delta_since_watermark(s)
+    rels2 = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta2["relations"]}
+    assert ("joel", "works_at", "acme") in rels2
+
+
+def test_delta_since_watermark_picks_up_same_second_supersession(tmp_path):
+    """Regression for the >= fix: a supersession (invalidated_at set) landing in
+    the SAME wall-clock second as the persisted watermark checkpoint must still
+    be picked up. works_at is a singleton relation, so upserting joel->beta
+    supersedes the existing joel->acme row (graph_write._mark_superseded sets
+    invalidated_at/valid_to on it) rather than leaving it untouched."""
+    from mcpbrain import graph_write
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name, typ in (("joel", "Joel", "person"), ("acme", "Acme", "org"),
+                               ("beta", "Beta", "org")):
+            db.execute("INSERT INTO entities(id,name,type,origin) VALUES(?,?,?,'local')",
+                       (eid, name, typ))
+    old_rid = graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                          source_doc_id="msg-1")
+    delta, wm = org_contrib._delta_since_watermark(s)
+    assert wm["hwm"] == old_rid
+    collision_ts = wm["ts"]
+    s.set_meta("org_contrib_hwm", str(wm["hwm"]))
+    s.set_meta("org_contrib_ts", collision_ts)
+
+    # Supersede joel->acme with joel->beta (newer valid_from -> the singleton
+    # recency rule retires acme), then force invalidated_at to land EXACTLY on
+    # the watermark second.
+    graph_write.upsert_relation(s, "joel", "works_at", "beta", valid_from="2026-02-01",
+                                source_doc_id="msg-2")
+    with s._connect() as db:
+        db.execute("UPDATE entity_relations SET invalidated_at=? WHERE id=?",
+                   (collision_ts, old_rid))
+        row = db.execute("SELECT invalidated_at FROM entity_relations WHERE id=?",
+                         (old_rid,)).fetchone()
+        assert row["invalidated_at"] == collision_ts
+
+    delta2, _ = org_contrib._delta_since_watermark(s)
+    ids2 = {r["id"] for r in delta2["relations"]}
+    assert old_rid in ids2                            # superseded row picked up
+    rels2 = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta2["relations"]}
+    assert ("joel", "works_at", "beta") in rels2      # and the new current row too
+
+
+def test_delta_since_watermark_hwm_reflects_fetched_rows_not_a_later_insert(tmp_path):
+    """Regression for the second (narrower) bug: hwm must be derived from the
+    rows actually fetched, not a separate MAX(id) query. Simulate a relation
+    inserted after the scan's SELECT by inserting AFTER calling
+    _delta_since_watermark and asserting the returned hwm does not cover it —
+    so the next scan (id > hwm) still finds it, instead of it being silently
+    skipped forever because a stale MAX(id) had already advanced past it."""
+    from mcpbrain import graph_write
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name, typ in (("joel", "Joel", "person"), ("acme", "Acme", "org"),
+                               ("beta", "Beta", "org")):
+            db.execute("INSERT INTO entities(id,name,type,origin) VALUES(?,?,?,'local')",
+                       (eid, name, typ))
+    rid1 = graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                       source_doc_id="msg-1")
+    delta, wm = org_contrib._delta_since_watermark(s)
+    assert wm["hwm"] == rid1
+    s.set_meta("org_contrib_hwm", str(wm["hwm"]))
+    s.set_meta("org_contrib_ts", wm["ts"])
+
+    # A relation "inserted after the scan" — with the old separate-query hwm
+    # this row's id would already be covered by a MAX(id) taken after it landed,
+    # even though `relations` never included it. With the fix, hwm can only ever
+    # be derived from rows we actually saw, so this new row's id must exceed hwm.
+    rid2 = graph_write.upsert_relation(s, "joel", "mentioned_with", "beta", valid_from="2026-02-01",
+                                       source_doc_id="msg-2")
+    delta2, wm2 = org_contrib._delta_since_watermark(s)
+    rels2 = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta2["relations"]}
+    assert ("joel", "mentioned_with", "beta") in rels2
+    assert wm2["hwm"] == rid2
