@@ -344,6 +344,13 @@ class ControlServer:
                 return h_json(h, 202, {"started": True})
             if h.path == "/api/enrich-backfill/cancel":
                 d.cancel_enrich_backfill(); return h_json(h, 200, {"cancelled": True})
+            if h.path == "/api/bootstrap-baseline":
+                # Import the org snapshot + shared-drive ingest caches before the
+                # first sync, or re-run on demand (wizard / doctor / `mcpbrain
+                # bootstrap`). Synchronous like /api/backup/auto; returns the
+                # summary. force=True because an explicit call means "run it now".
+                return h_json(h, 200,
+                              d.bootstrap_baseline_once(force=True) or {"status": "skipped"})
             if h.path == "/api/records/scaffold":
                 from mcpbrain import records
                 return h_json(h, 200, {"scaffolded": records.scaffold_records(str(self.home))})
