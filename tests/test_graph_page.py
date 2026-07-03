@@ -30,7 +30,7 @@ def test_graph_page_injects_token(tmp_path):
 def test_vendor_serves_js(tmp_path):
     srv = ControlServer(_Daemon(), str(tmp_path), store=None); srv.start()
     try:
-        code, ctype, body = _raw(f"http://127.0.0.1:{srv.port}/vendor/sigma.min.js")
+        code, ctype, body = _raw(f"http://127.0.0.1:{srv.port}/vendor/force-graph.min.js")
         assert code == 200 and "javascript" in ctype and len(body) > 1000
     finally:
         srv.stop()
@@ -50,10 +50,9 @@ def test_vendor_rejects_unknown(tmp_path):
 
 def test_graph_html_has_expected_hooks():
     html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "graph.html").read_text()
-    for marker in ['/vendor/graphology.umd.min.js', '/vendor/sigma.min.js',
-                   '/vendor/graphology-layout-forceatlas2.min.js',
-                   '/api/graph/canvas', 'id="graph"', 'new Sigma',
-                   'forceAtlas2', '__MCPBRAIN_TOKEN__']:
+    for marker in ['/vendor/force-graph.min.js', '/vendor/d3.min.js',
+                   '/api/graph/canvas', 'id="graph"', 'new ForceGraph',
+                   'd3.forceManyBody', '__MCPBRAIN_TOKEN__']:
         assert marker in html, f"missing: {marker}"
 
 

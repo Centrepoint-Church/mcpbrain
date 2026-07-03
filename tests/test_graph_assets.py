@@ -1,8 +1,7 @@
 from pathlib import Path
 
 VENDOR = Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "vendor"
-FILES = ["graphology.umd.min.js", "sigma.min.js",
-         "graphology-layout-forceatlas2.min.js"]
+FILES = ["force-graph.min.js", "d3.min.js"]
 
 def test_vendor_files_present_and_nonempty():
     for name in FILES:
@@ -12,7 +11,7 @@ def test_vendor_files_present_and_nonempty():
 
 def test_vendor_readme_records_versions():
     readme = (VENDOR / "README.md").read_text()
-    for pkg in ("graphology", "sigma", "graphology-layout-forceatlas2"):
+    for pkg in ("force-graph", "d3"):
         assert pkg in readme
 
 
