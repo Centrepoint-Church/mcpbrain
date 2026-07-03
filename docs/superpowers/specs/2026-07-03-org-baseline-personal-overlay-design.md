@@ -240,6 +240,34 @@ AI-adjudicated, reversible, capped appliers, per the 0.7.84 hardening):
   graph tools, and the `/graph` explorer see the union for free.
 - Config: `org_import_enabled` (default ON once shipped), `fleet.folder_id` reused.
 
+### B4a. Merge rules across layers
+
+Local installs run their own merge machinery (write-time dedup cascade, daily
+`resolve_entities` cadence, brain-review appliers). Without constraints, local merges
+of org rows fight the wholesale-replace import. The rules:
+
+1. **Local machinery never merges org↔org.** Deduplicating the org layer is the
+   curator's job. When local resolution flags two org-origin entities as a duplicate
+   pair, the pair is *contributed upstream* as a merge-candidate signal instead of
+   applied locally (applying it would be resurrected by the next import anyway).
+2. **Any local↔org merge leaves the org node surviving.** Local flesh re-attaches to
+   the org node (the slug-drift direction). Merging an org node *into* a local node is
+   forbidden — the import would resurrect the org node with the local data stranded on
+   its twin.
+3. **Local writes never overwrite org skeleton fields.** Writes landing on an
+   org-origin entity (same slug, write-time dedup, enrichment upserts) may add —
+   aliases, mentions, profile, local relations/observations — but `name`, `type`,
+   `org`, `email_addr` stay org-authoritative between imports. Prevents silent local
+   drift that the next import would churn back.
+4. **All cross-layer re-points are logged** in `entity_merge_log` (which local
+   references were moved to which org node, and why). This is what makes a curator
+   *split* recoverable: when a later snapshot splits a previously-merged entity, the
+   consumer consults its re-point log to restore local flesh to the resurrected node
+   instead of leaving it all on the merged target.
+
+Summary: org→org merges happen only at the curator; local→org merges are the only
+cross-layer merges consumers perform; org→local merges never happen.
+
 ### B5. Source-of-truth rules (the "data going bad" answer)
 
 1. Layer 1 is writable **only** by the curator; consumers treat it as replaceable cache.
@@ -293,6 +321,11 @@ shared content" to "minutes of downloads + enrichment spend only on their person
   `joel-chelliah` sharing an email or alias → single node with observations intact;
   ambiguous name-only pairs land in the fuzzy queue, never auto-merge; role-address
   pairs never merge.
+- **Cross-layer merge rules:** local `resolve_entities`/appliers presented an org↔org
+  duplicate pair → no local merge, a merge-candidate contribution is emitted; a
+  local↔org merge always survives as the org node; enrichment upsert on an org-origin
+  slug cannot change skeleton fields; curator split after merge → local flesh restored
+  from the re-point log.
 - **Curator:** two synthetic contributors with overlapping + conflicting claims →
   deterministic merge + adjudication → snapshot; role-address groups never merge
   (0.7.77 regression tests extended); corroboration counting via HMAC refs.
