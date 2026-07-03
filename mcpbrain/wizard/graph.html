@@ -87,8 +87,8 @@
     <aside class="filters">
       <label>Layout
         <select id="f-layout">
-          <option value="emergent" selected>Emergent (by connections)</option>
-          <option value="radial">Radial (hubs centred)</option>
+          <option value="radial" selected>Radial</option>
+          <option value="emergent">Emergent</option>
         </select>
       </label>
       <label>Min connections <span class="deg-val" id="deg-val">7</span>
@@ -150,7 +150,7 @@
     }
 
     const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
-                    egoDepth:1, egoHops:{}, layout:"emergent", searchTerm:"" };
+                    egoDepth:1, egoHops:{}, layout:"radial", searchTerm:"" };
     let CURRENT = { nodes:[], links:[], communities:{} };
     let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
     let TOP30 = new Set();     // ids of the top-30% most-connected nodes
