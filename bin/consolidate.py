@@ -11,20 +11,26 @@ Every phase takes a full DB backup FIRST. If the post-run gold eval regresses
 writes the pre-migration id snapshot to <home>/consolidate_pre_ids.json for the
 later meetings-retire phase.
 """
-import argparse, json, shutil, sys, time
+import argparse, json, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mcpbrain import config, consolidate            # noqa: E402
+from mcpbrain.backup import snapshot                 # noqa: E402
 from mcpbrain.embed import get_embedder             # noqa: E402
 from mcpbrain.store import Store                     # noqa: E402
 
 
 def _backup_db(db_path: Path) -> Path:
+    # WAL-safe backup: the store runs journal_mode=WAL, so committed writes can
+    # live in the -wal sidecar. A bare shutil.copy2 of the main .sqlite3 file can
+    # silently MISS the latest committed transactions. backup.snapshot() runs
+    # PRAGMA wal_checkpoint(TRUNCATE) first (folding WAL frames into the main
+    # file), then copies — so the .bak is a complete, restorable snapshot. This
+    # is the reversibility guarantee for the destructive migration.
     db_path = Path(db_path)
     backup = db_path.with_suffix(db_path.suffix + f".bak-{int(time.time())}")
-    shutil.copy2(db_path, backup)
-    return backup
+    return snapshot(db_path, backup)
 
 
 def main(argv=None):

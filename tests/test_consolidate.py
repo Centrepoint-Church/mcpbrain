@@ -66,8 +66,21 @@ def _load_bin():
 
 
 def test_backup_db_creates_copy(tmp_path):
-    db = tmp_path / "brain.db"; db.write_bytes(b"sqlitedata")
+    # _backup_db routes through backup.snapshot(), which runs a WAL checkpoint
+    # then copies — so it needs a REAL SQLite store, not raw bytes. Build one,
+    # seed a row, and assert the backup is a distinct file that is itself a valid
+    # SQLite copy carrying that row (proves a real, restorable snapshot).
+    db = tmp_path / "brain.db"
+    s = Store(db, dim=4)
+    s.init()
+    s.upsert_entity("topic-budget", "budget", "topic", "", "2026-01-01")
+
     mod = _load_bin()
     backup = mod._backup_db(db)
-    assert backup.exists() and backup.read_bytes() == b"sqlitedata"
+
+    assert backup.exists()
     assert backup != db
+    restored = Store(backup, dim=4)
+    with restored._connect() as rdb:
+        row = rdb.execute("SELECT name FROM entities WHERE id='topic-budget'").fetchone()
+    assert row["name"] == "budget"
