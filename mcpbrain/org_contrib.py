@@ -151,10 +151,17 @@ def _delta_since_watermark(store) -> tuple[dict, dict]:
     scan timestamp), plus their endpoint entities. Because Phase B has no
     per-drain hook, the daily upload cadence calls this to do collection AND
     upload in one pass: any row with an id beyond the high-water mark (new
-    edge) or an invalidated_at/last_seen after the last scan (supersession or
-    re-observation) is picked up, so collect_from_drain sees the same shape a
-    future drain-path hook would hand it. Returns (drain_delta, new_watermark)
-    where new_watermark = {"hwm": int, "ts": iso}."""
+    edge) or an invalidated_at/last_seen at-or-after the last scan (supersession
+    or re-observation) is picked up, so collect_from_drain sees the same shape a
+    future drain-path hook would hand it. The timestamp comparisons are >=, not
+    >, because org_contrib_ts and invalidated_at/last_seen share the same
+    1-second string resolution (graph_write._now_iso) — a row changed in the
+    same wall-clock second as the last watermark checkpoint would otherwise
+    fail every clause and be silently, permanently lost (the watermark only
+    moves forward). The harmless cost is a bounded duplicate re-scan of rows
+    already seen in that boundary second, absorbed by org_contrib_staging's
+    UNIQUE(contributor_email, source_ref, claim). Returns
+    (drain_delta, new_watermark) where new_watermark = {"hwm": int, "ts": iso}."""
     hwm = int(store.get_meta("org_contrib_hwm") or 0)
     last_ts = store.get_meta("org_contrib_ts") or ""
     with store._connect() as db:
@@ -163,12 +170,10 @@ def _delta_since_watermark(store) -> tuple[dict, dict]:
             "       confidence, origin, source_doc_id "
             "FROM entity_relations "
             "WHERE id > ? "
-            "   OR (invalidated_at IS NOT NULL AND invalidated_at > ?) "
-            "   OR (last_seen IS NOT NULL AND last_seen > ?) "
+            "   OR (invalidated_at IS NOT NULL AND invalidated_at >= ?) "
+            "   OR (last_seen IS NOT NULL AND last_seen >= ?) "
             "ORDER BY id",
             (hwm, last_ts, last_ts)).fetchall()
-        max_id = db.execute(
-            "SELECT COALESCE(MAX(id),0) m FROM entity_relations").fetchone()["m"]
     relations = [dict(r) for r in rel_rows]
     ent_ids = {r["entity_a"] for r in relations} | {r["entity_b"] for r in relations}
     entities: dict = {}
@@ -180,6 +185,11 @@ def _delta_since_watermark(store) -> tuple[dict, dict]:
                     f"FROM entities WHERE id IN ({placeholders})",
                     tuple(ent_ids)).fetchall():
                 entities[e["id"]] = dict(e)
-    new_wm = {"hwm": int(max_id),
+    # hwm is derived from the FETCHED rows (not a separate MAX(id) query run after
+    # the fact) so a relation inserted between the SELECT above and now can never
+    # be silently skipped forever: it wasn't in `relations`, so hwm is never
+    # advanced past it, and it will have id > hwm on the very next scan.
+    new_hwm = max([hwm] + [r["id"] for r in relations])
+    new_wm = {"hwm": int(new_hwm),
               "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     return {"relations": relations, "entities": entities}, new_wm
