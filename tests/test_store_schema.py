@@ -545,3 +545,25 @@ def test_origin_defaults_to_local_and_backfills_old_store(tmp_path):
                            "WHERE entity_a='joel'").fetchone()
     assert ent["origin"] == "local"
     assert rel["origin"] == "local"
+
+
+# --- Phase 0, Task 2: org_contrib_outbox/staging + org_repoint_log --------
+
+def test_org_tables_created(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"org_contrib_outbox", "org_contrib_staging", "org_repoint_log"} <= names
+
+
+def test_org_contrib_staging_dedups_identical_rows(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for _ in range(2):
+            db.execute(
+                "INSERT OR IGNORE INTO org_contrib_staging"
+                "(contributor_email, source_ref, claim) VALUES(?,?,?)",
+                ("a@x.org", "deadbeef", '{"kind":"entity","id":"joel"}'))
+        n = db.execute("SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"]
+    assert n == 1
