@@ -200,7 +200,7 @@ class ControlServer:
                 return server._handle_post(self)                        # Task 2.2
             def do_DELETE(self):
                 if not self._auth_ok(): return
-                m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path)
+                m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path.split("?")[0])
                 if m:
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
                     from mcpbrain import graph_view

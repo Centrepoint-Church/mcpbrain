@@ -232,3 +232,23 @@ def test_suppress(tmp_path):
     s = _rw_store(tmp_path)
     assert graph_view.suppress_entity(s, "al")["ok"] is True
     assert graph_view.entity_detail(s, "al") is None
+
+
+def test_search_escapes_like_wildcards(tmp_path):
+    p = tmp_path / "sw.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, org TEXT DEFAULT '')")
+        db.execute("INSERT INTO entities VALUES('a','50% off','person','')")
+        db.execute("INSERT INTO entities VALUES('b','50X off','person','')")
+    hits = {r["name"] for r in graph_view.search_entities(_Store(p), "50%")}
+    assert hits == {"50% off"}   # % matched literally, not as a wildcard
+
+
+def test_search_excludes_suppressed(tmp_path):
+    p = tmp_path / "ss.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, org TEXT DEFAULT '')")
+        db.execute("CREATE TABLE entity_suppressions(entity_id TEXT PRIMARY KEY, reason TEXT, suppressed_at TEXT)")
+        db.execute("INSERT INTO entities VALUES('a','Alice','person','')")
+        db.execute("INSERT INTO entity_suppressions VALUES('a','x','t')")
+    assert graph_view.search_entities(_Store(p), "Alice") == []
