@@ -108,3 +108,24 @@ def test_records_round_trip_through_contribution_record(tmp_path):
     org_contrib.collect_from_drain(s, _delta(), _pin(), "a@x.org")
     for raw in _outbox(s):
         assert ContributionRecord.from_dict(raw).contributor_email == "a@x.org"
+
+
+def test_upload_pending_writes_one_batch_and_marks_uploaded(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    s = _store(tmp_path)
+    org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org")
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    res = org_contrib.upload_pending(s, fs, "alice@x.org")
+    assert res["uploaded"] == 3
+    assert res["batch"].startswith("contrib/alice@x.org/") and res["batch"].endswith(".jsonl")
+    body = fs.get_bytes(res["batch"]).decode().strip().splitlines()
+    assert len(body) == 3
+    # second call has nothing pending
+    assert org_contrib.upload_pending(s, fs, "alice@x.org") == {"uploaded": 0, "batch": ""}
+
+
+def test_upload_pending_empty_is_noop(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    s = _store(tmp_path)
+    assert org_contrib.upload_pending(s, LocalDirFleetStorage(tmp_path / "f"), "a@x.org") == {
+        "uploaded": 0, "batch": ""}
