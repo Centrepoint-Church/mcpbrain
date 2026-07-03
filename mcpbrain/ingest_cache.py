@@ -264,7 +264,7 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
         if art is None:
             continue
         prev = best.get(fid)
-        if prev is None or (art.published_at or "") < prev[0]:
+        if prev is None or (art.published_at or "") > prev[0]:
             best[fid] = (art.published_at or "", art)
     for _fid, (_pa, art) in best.items():
         if _import_artifact(store, drive_id, art, pin):
