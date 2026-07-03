@@ -1357,6 +1357,31 @@ class Store:
                     (eid, tag, today, today))
         return eid
 
+    def append_occurrence(self, entity_id, valid_from, value, source) -> bool:
+        """Append one occurrence row to entity_observations, idempotently.
+
+        Occurrences are ACCUMULATING facts (a recurring meeting's instances), not a
+        superseding attribute, so this deliberately does NOT go through
+        graph_write.write_observation (which retires prior same-source rows). Keyed
+        for idempotency on (entity_id, 'occurrence', valid_from, source): re-applying
+        a thread must not duplicate the row. Single-writer daemon, so SELECT-then-
+        INSERT is race-free. Returns True on insert, False when the row already
+        exists.
+        """
+        with self._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM entity_observations "
+                "WHERE entity_id=? AND attribute='occurrence' AND valid_from=? AND source=?",
+                (entity_id, valid_from, source)).fetchone()
+            if exists:
+                return False
+            db.execute(
+                "INSERT INTO entity_observations "
+                "(entity_id, attribute, value, source, valid_from, confidence_source) "
+                "VALUES (?, 'occurrence', ?, ?, ?, 'llm_extraction')",
+                (entity_id, value, source, valid_from))
+        return True
+
     def add_relation(self, entity_a, relation, entity_b, source_doc_id="") -> bool:
         """Insert a relation triple. Returns True if a new row was inserted,
         False if the (entity_a, relation, entity_b) triple already existed."""
