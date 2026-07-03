@@ -15,9 +15,13 @@ brains contain content (PII, financial, pastoral) that must never leak to other 
 | Org daemon role | **Curator, not extractor** — people-context lives in emails the org daemon can't see, so everyone contributes filtered claims; the org daemon adjudicates and keeps layer 1 clean | Josh |
 | Layer split | Layer 1 (org): people, orgs, projects, filtered topics + relations between them. Layer 2 (personal): everything else | Josh |
 | Embeddings | Shared per-file cache gated by Drive ACLs; devices self-embed new/changed files and publish back | Josh |
-| Sharing rule for claims | **Allowlist + org-daemon adjudication** (type filter at the edge, AI judgment at the centre) | Claude (recommended; Josh AFK — review this) |
-| Layer-1 storage on consumers | Tagged rows (`origin` column) in the single local `brain.sqlite3`, not an attached second DB | Claude — review this |
-| Transport | Google-Drive-mediated throughout (fleet folder + in-drive cache folders); no server, no new auth | Claude — review this |
+| Sharing rule for claims | **Allowlist + org-daemon adjudication** (type filter at the edge, AI judgment at the centre) | Josh (confirmed) |
+| Layer-1 storage on consumers | Tagged rows (`origin` column) in the single local `brain.sqlite3`, not an attached second DB | Josh (confirmed) |
+| Transport | Google-Drive-mediated throughout (fleet folder + in-drive cache folders); no server, no new auth | Josh (confirmed) |
+| Relation allowlist | `works_at`, `member_of`, `mentioned_with` (co-occurrence, corroboration-guarded); `works_on`/`part_of` dropped — projects connect via co-occurrence | Josh |
+| Contribution default | ON (typed/redacted/fail-closed by construction; opt-out still consumes) | Josh |
+| Access revocation | Automatic purge, after the drive is absent for several consecutive sync cycles | Josh |
+| Curator deployment | Josh's machine, own account, `role=org_curator` (design stays host-agnostic) | Josh |
 
 ## Core privacy invariant
 
@@ -155,8 +159,10 @@ folder to put artifacts in that others can see; single-consumer anyway).
 ### A3. Access revocation
 
 The fairness rule ("if they have access, it's their brain") runs both ways: when access
-goes away, so should the content. When a shared drive disappears from `drives.list`
-(or its cursor 404s persistently):
+goes away, so should the content — **automatically, no human in the loop**. To keep a
+transient Drive glitch from reading as revocation, purge triggers only after the drive
+is absent from `drives.list` (or its cursor 404s) across **several consecutive sync
+cycles**. Then:
 
 - **Purge** that drive's chunks + vectors + FTS rows locally (`drive_id` metadata makes
   this a targeted delete).
@@ -186,12 +192,16 @@ processing without overwriting newer artifacts.
   are not contributed automatically — too noisy and occasionally sensitive).
   Fields shared: `name`, `type`, `org`, `email_addr`, `aliases`. **Never** `profile`,
   `mentions` counts, or anything synthesized from personal context.
-- **Relations:** allowlisted types only. Initial allowlist:
-  `works_at`, `member_of`, `part_of`, `works_on`. Explicitly excluded: `mentioned_with`
-  (association metadata — leaks who talks to whom), sentiment/role observations,
-  anything financial/pastoral/health. The allowlist is **distributed via the existing
-  fleet `org-config.json` overlay** (extend `fleet._ALLOWLIST` with an `org_graph` key),
-  so it can be tightened org-wide without a release.
+- **Relations:** allowlisted types only. Initial allowlist: `works_at`, `member_of`,
+  and `mentioned_with` (co-occurrence). `mentioned_with` is communication metadata, so
+  it carries a **per-type corroboration guard**: it becomes canonical only with ≥2
+  independent `source_ref`s — a one-off co-occurrence in a single mailbox never
+  surfaces org-wide. `works_on`/`part_of` are deliberately **not** contributed
+  (project involvement can reveal unannounced work); projects connect to people
+  through corroborated co-occurrence instead. Explicitly excluded: sentiment/role
+  observations, anything financial/pastoral/health. The allowlist is **distributed via
+  the existing fleet `org-config.json` overlay** (extend `fleet._ALLOWLIST` with an
+  `org_graph` key), so it can be tuned org-wide without a release.
 - **Org taxonomy:** the canonical org list (already a config concept) becomes org-managed.
 - Bitemporal fields (`valid_from`/`valid_to`) carry over; layer 1 is bitemporal like
   layer 2.
@@ -231,16 +241,21 @@ New module `mcpbrain/org_contrib.py`:
 
 ### B3. Curator (org daemon)
 
-A standard mcpbrain install with `config.role = "org_curator"` on an always-on machine.
-It does **not** need access to every shared drive or anyone's email — it curates claims,
-it doesn't extract. Pipeline (daily cadence, reusing the brain-review pattern —
+A standard mcpbrain install with `config.role = "org_curator"`. It does **not** need
+access to every shared drive or anyone's email — it curates claims, it doesn't extract.
+The design is host-agnostic; at Centrepoint it runs on Josh's machine under his account
+(zero new infra; curation freshness is bounded by that machine being on, which the
+daily-cadence contract tolerates — moving it to a dedicated identity/host later is a
+config change, not a design change). Pipeline (daily cadence, reusing the brain-review pattern —
 AI-adjudicated, reversible, capped appliers, per the 0.7.84 hardening):
 
 1. **Ingest** new contribution files → staging tables (`org_contrib_staging`).
 2. **Deterministic merge** using the existing `resolve.py` machinery: canonical-key
    merge for person/org/project, email-equality merge with the role-address guard.
    Claims corroborated by ≥2 distinct contributors *or* ≥2 distinct `source_ref`s get
-   elevated confidence; singletons are not blocked (adjudication decides).
+   elevated confidence; singletons are not blocked (adjudication decides) — except
+   types with a per-type corroboration guard (`mentioned_with`), which stay pending
+   until independently corroborated.
 3. **AI adjudication** for everything deterministic merging can't settle: fuzzy
    name-pair candidates, contradictions (two contributors assert conflicting
    `works_at` with overlapping validity), suspicious merges. Verdicts target the
@@ -409,4 +424,6 @@ shared content" to "minutes of downloads + enrichment spend only on their person
   contributions, ever).
 - A server or new auth model — everything rides existing per-user OAuth + Drive.
 - Automatic `topic` contribution (curator can promote topics manually/by review).
-- `mentioned_with` in layer 1 (communication-metadata leak).
+- Unguarded `mentioned_with`: co-occurrence enters layer 1 only via the ≥2-source
+  corroboration guard; project-involvement relations (`works_on`/`part_of`) don't
+  enter at all.
