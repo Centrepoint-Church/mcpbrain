@@ -54,7 +54,12 @@ wrong and MUST be right:
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
 - **Current state (2026-07-03):** all four version files **and** the published wheel are at
-  `0.7.84` — source, dist index, and plugin manifests are in step. 0.7.78–0.7.82 shipped
+  `0.7.86` — source, dist index, and plugin manifests are in step. 0.7.85 added graph
+  readability (clustered map + semantic zoom); **0.7.86 fixes issue #4** — `_candidate_pairs`
+  now restricts merge-review candidate generation to name-identity types (person/org/project),
+  the same allowlist as `_deterministic_merges` (#23) and `apply_duplicate_verdicts`, cutting
+  the live pair count 365,895→25,711 and keeping structural entities out of the merge queue.
+  Issues #23 and #24 closed (fixed in 0.7.74 / removed in Session 3). 0.7.78–0.7.82 shipped
   Session-4 (brain-review: AI-adjudicated graph hygiene on a daily cadence — reversible/
   capped appliers) + the interactive knowledge graph (Sigma/force-graph explorer at `/graph`);
   0.7.83 added the live force-graph renderer; **0.7.84 hardens the review appliers** —
