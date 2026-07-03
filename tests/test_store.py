@@ -663,3 +663,38 @@ def test_set_entity_email_and_notes(tmp_path):
     assert s.set_entity_notes("e1", "prefers email") is True
     e = s.get_entity("e1")
     assert e["email_addr"] == "alice@acme.com" and e["notes"] == "prefers email"
+
+
+def test_append_occurrence_inserts(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-01-01")
+    assert s.append_occurrence("meeting-acme-board", "2026-01-05", "budget review", "m1") is True
+    with s._connect() as db:
+        rows = db.execute(
+            "SELECT valid_from, value, source, attribute FROM entity_observations "
+            "WHERE entity_id='meeting-acme-board'").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["attribute"] == "occurrence"
+    assert rows[0]["valid_from"] == "2026-01-05"
+
+
+def test_append_occurrence_idempotent(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-01-01")
+    s.append_occurrence("meeting-acme-board", "2026-01-05", "v", "m1")
+    assert s.append_occurrence("meeting-acme-board", "2026-01-05", "v", "m1") is False
+    with s._connect() as db:
+        n = db.execute("SELECT COUNT(*) FROM entity_observations "
+                       "WHERE entity_id='meeting-acme-board'").fetchone()[0]
+    assert n == 1
+
+
+def test_append_occurrence_distinct_dates_coexist(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_entity("meeting-acme-board", "Board", "meeting", "Acme", "2026-01-01")
+    s.append_occurrence("meeting-acme-board", "2026-01-05", "a", "m1")
+    s.append_occurrence("meeting-acme-board", "2026-01-12", "b", "m2")
+    with s._connect() as db:
+        n = db.execute("SELECT COUNT(*) FROM entity_observations "
+                       "WHERE entity_id='meeting-acme-board'").fetchone()[0]
+    assert n == 2  # occurrences accumulate; no supersession
