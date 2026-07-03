@@ -330,6 +330,7 @@
     function relayout(){
       if (state.mode === "ego" && state.egoNodeId) applyEgoForces(); else applyClusterForces();
       fg.d3ReheatSimulation();
+      setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200);
     }
     function enterEgo(id){
       state.mode="ego"; state.egoNodeId=id; state.selectedNodeId=id;
@@ -341,7 +342,7 @@
     // background click: exit ego, else hit-test hulls -> drill into a cluster
     function onBg(ev){
       if (state.mode === "ego"){ exitEgo(); return; }
-      if (state.drill){ return; }  // already inside a cluster
+      if (state.drill){ state.selectedNodeId = null; return; }  // already inside a cluster
       const p = fg.screen2GraphCoords(ev.offsetX, ev.offsetY);
       for (const h of HULLS){ if (pointInPoly([p.x,p.y], h.poly)){ drillInto(h.key); return; } }
       state.selectedNodeId = null;
