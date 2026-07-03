@@ -1068,6 +1068,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # the existing entity rather than fragmenting the graph.
     _dedup_home = str(home) if home is not None else str(config.app_dir())
     _dedup_enabled = config.write_time_dedup_enabled(_dedup_home)
+    _meeting_home = str(home) if home is not None else str(config.app_dir())
+    _meeting_series = config.meeting_series_enabled(_meeting_home)
     _entity_index = entity_index
     if _dedup_enabled and _entity_index is None:
         try:
@@ -1089,6 +1091,29 @@ def apply(store, extraction, *, doc_ids, identity=None,
         if not ename or _is_owner(ename, owner):
             continue
         if etype == "person" and is_junk_entity(ename, "person"):
+            continue
+
+        # ── Meeting/event series (Task 5) ─────────────────────────────────
+        # A meeting/event is not a name-identity entity; each mention names it
+        # differently ('College Meeting 12 May'). Key it on an org-scoped SERIES
+        # id and record this mention as an append-only occurrence, so variants
+        # converge on one node instead of fragmenting. 'event' folds into the
+        # same scheme (stored as type 'meeting').
+        if etype in ("meeting", "event") and _meeting_series:
+            series = (ent.get("series_name") or ename).strip()
+            if not series:
+                continue
+            m_org = canonical_org(eorg or org, taxonomy)
+            eid = _meeting_series_id(series, m_org)
+            store.upsert_entity(eid, series, "meeting", m_org, lead_date_iso)
+            name_to_id[ename] = eid
+            if eid not in linked:
+                if store.link_email_entity(lead_msg_id, eid, role="about"):
+                    _bump_email_count(store, eid)
+                linked.add(eid)
+            occ_date = _parse_date_iso(ent.get("occurrence_date") or "") or lead_date_iso or today
+            occ_value = (ent.get("source_span") or summary or "")[:200]
+            store.append_occurrence(eid, occ_date, occ_value, lead_msg_id or prov_doc_id)
             continue
 
         # Any message's header email whose sender name matches this entity
@@ -1717,6 +1742,15 @@ def _append_alias(conn, entity_id: str, new_alias: str) -> None:
         existing.append(new_alias.strip())
         conn.execute("UPDATE entities SET aliases = ? WHERE id = ?",
                      (", ".join(existing), entity_id))
+
+
+def _meeting_series_id(series_name: str, org: str) -> str:
+    """Deterministic, org-scoped series id for a meeting/event.
+
+    Org-scoping is the structural guard against the 'Staff Meeting across two
+    orgs' collision: distinct orgs -> distinct ids, no heuristic needed.
+    """
+    return slugify(f"meeting-{org}-{series_name}")
 
 
 def _bump_email_count(store, entity_id: str) -> None:

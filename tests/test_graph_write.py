@@ -1163,3 +1163,72 @@ def test_topic_variants_converge(tmp_path):
         ids = [r["id"] for r in db.execute(
             "SELECT id FROM entities WHERE type='topic'").fetchall()]
     assert ids == ["topic-budget"]  # 'budgets'/'the budget'/'budget' -> one node
+
+
+# --- Task 5: meeting/event series convergence -------------------------------
+
+def _meeting_extraction(entities, thread_id="t1", org="Acme", msg_id="m1"):
+    return {
+        "thread_id": thread_id, "org": org, "content_type": "update",
+        "summary": "s", "topics": [], "actions": [], "relations": [],
+        "entities": entities,
+        "messages": [{"message_id": msg_id, "sender": "A <a@acme.org>",
+                      "date": "2026-01-05", "subject": "sub"}],
+    }
+
+
+def test_meeting_series_id_is_org_scoped():
+    a = gw._meeting_series_id("Board Meeting", "Acme")
+    b = gw._meeting_series_id("Board Meeting", "Beta")
+    assert a == "meeting-acme-board-meeting"
+    assert a != b  # same name, different org -> different series
+
+
+def test_meeting_mentions_converge_on_one_series(tmp_path):
+    # NOTE: brief specified a `store` pytest fixture with `store.db_path`; this
+    # file has no such fixture (only the local `_store(tmp_path)` helper used
+    # throughout, whose Store exposes the db path as `.path`, not `.db_path`).
+    # Adapted accordingly, same as test_topic_variants_converge above.
+    store = _store(tmp_path)
+    home = str(store.path.parent)
+    ext = _meeting_extraction(
+        [{"name": "College Meeting 12 May", "type": "meeting",
+          "series_name": "College Meeting", "occurrence_date": "2026-05-12"}])
+    gw.apply(store, ext, doc_ids=["gmail-m1-body-0"], home=home)
+    ext2 = _meeting_extraction(
+        [{"name": "College Meeting 19 May", "type": "meeting",
+          "series_name": "College Meeting", "occurrence_date": "2026-05-19"}],
+        thread_id="t2", msg_id="m2")
+    gw.apply(store, ext2, doc_ids=["gmail-m2-body-0"], home=home)
+    with store._connect() as db:
+        meetings = db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()
+        occ = db.execute("SELECT COUNT(*) FROM entity_observations "
+                         "WHERE entity_id='meeting-acme-college-meeting' "
+                         "AND attribute='occurrence'").fetchone()[0]
+    assert [m["id"] for m in meetings] == ["meeting-acme-college-meeting"]
+    assert occ == 2  # two occurrences on the one series
+
+
+def test_event_folds_into_meeting_series(tmp_path):
+    store = _store(tmp_path)
+    home = str(store.path.parent)
+    ext = _meeting_extraction(
+        [{"name": "Youth Camp", "type": "event",
+          "series_name": "Youth Camp", "occurrence_date": "2026-05-12"}])
+    gw.apply(store, ext, doc_ids=["gmail-m1-body-0"], home=home)
+    with store._connect() as db:
+        row = db.execute("SELECT id, type FROM entities WHERE id='meeting-acme-youth-camp'").fetchone()
+    assert row is not None and row["type"] == "meeting"
+
+
+def test_meeting_series_disabled_falls_back(tmp_path):
+    store = _store(tmp_path)
+    home = str(store.path.parent)
+    (store.path.parent / "config.json").write_text('{"meeting_series_enabled": false}')
+    ext = _meeting_extraction(
+        [{"name": "College Meeting 12 May", "type": "meeting",
+          "series_name": "College Meeting", "occurrence_date": "2026-05-12"}])
+    gw.apply(store, ext, doc_ids=["gmail-m1-body-0"], home=home)
+    with store._connect() as db:
+        ids = [r["id"] for r in db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()]
+    assert ids == ["college-meeting-12-may"]  # legacy bare slugify(name)
