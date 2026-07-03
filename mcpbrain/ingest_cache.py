@@ -193,6 +193,8 @@ def _cache_names(fleet_storage):
         parsed = _parse_name(name)
         if parsed:
             yield path, parsed
+        else:
+            log.info("ingest_cache: skipping unparseable cache filename %s", name)
 
 
 def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> int:
@@ -205,8 +207,11 @@ def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> i
         if fid != file_id:
             continue
         if h12 != keep12 or pf8 != cur_pf8:
-            fleet_storage.delete(path)
-            removed += 1
+            try:
+                fleet_storage.delete(path)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 
@@ -217,8 +222,11 @@ def sweep_drive(fleet_storage, live_file_ids) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid not in live:
-            fleet_storage.delete(path)
-            removed += 1
+            try:
+                fleet_storage.delete(path)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 
@@ -228,6 +236,9 @@ def remove_file_artifacts(fleet_storage, file_id) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid == file_id:
-            fleet_storage.delete(path)
-            removed += 1
+            try:
+                fleet_storage.delete(path)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
