@@ -36,8 +36,15 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
     result = {"suppressed": 0, "kept": 0, "skipped": 0, "capped": 0, "missing": 0}
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
-        ref_id = verdict.get("ref_id")
         verdict_str = verdict.get("verdict")
+        # M1: target the finding's OWN stored ref_id, not the verdict's — a
+        # malformed verdict must not redirect an unattended mutation onto an
+        # arbitrary entity or resolve an unrelated finding.
+        f = store.get_finding(finding_id)
+        if not f or f["resolved_at"] or f["finding_type"] != "lint:orphan_entity":
+            result["skipped"] += 1
+            continue
+        ref_id = f["ref_id"]
 
         if verdict_str == "suppress":
             if result["suppressed"] >= cap:
@@ -92,9 +99,14 @@ def apply_missing_org_verdicts(
     result = {"assigned": 0, "external": 0, "skipped": 0, "capped": 0, "missing": 0}
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
-        ref_id = verdict.get("ref_id")
         verdict_str = verdict.get("verdict")
         org = verdict.get("org")
+        # M1: authoritative target from the finding, not the verdict.
+        f = store.get_finding(finding_id)
+        if not f or f["resolved_at"] or f["finding_type"] != "lint:missing_org":
+            result["skipped"] += 1
+            continue
+        ref_id = f["ref_id"]
 
         if verdict_str == "assign" and org and org in valid_orgs:
             if result["assigned"] >= cap:
@@ -148,9 +160,14 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
     result = {"owner_assigned": 0, "waiting_on": 0, "unowned": 0, "skipped": 0, "capped": 0, "missing": 0}
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
-        ref_id = verdict.get("ref_id")
         verdict_str = verdict.get("verdict")
         owner = verdict.get("owner")
+        # M1: authoritative target (action id) from the finding, not the verdict.
+        f = store.get_finding(finding_id)
+        if not f or f["resolved_at"] or f["finding_type"] != "lint:ownerless_action":
+            result["skipped"] += 1
+            continue
+        ref_id = f["ref_id"]
 
         if verdict_str == "owner" and owner:
             if result["owner_assigned"] >= cap:
@@ -245,12 +262,19 @@ def apply_org_verdicts(
     def _budget_used() -> int:
         return result["canonicalized"] + result["suggested"]
 
+    _ORG_KINDS = ("lint:ambiguous_org", "lint:duplicate_org", "org_unrecognised")
     for verdict in verdicts:
         finding_id = verdict.get("finding_id")
-        finding_type = verdict.get("finding_type")
-        ref_id = verdict.get("ref_id")
         verdict_str = verdict.get("verdict")
         canonical_org = verdict.get("canonical_org")
+        # M1: route on the finding's OWN stored type + ref_id, not the verdict's —
+        # so a verdict can't spoof the kind or redirect the target.
+        f = store.get_finding(finding_id)
+        if not f or f["resolved_at"] or f["finding_type"] not in _ORG_KINDS:
+            result["skipped"] += 1
+            continue
+        finding_type = f["finding_type"]
+        ref_id = f["ref_id"]
 
         if verdict_str == "canonicalize" and canonical_org and canonical_org in valid_orgs \
                 and finding_type == "lint:ambiguous_org":
@@ -341,6 +365,10 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
         ids = pair_id.split("|")
         if len(ids) != 2 or not all(ids):
             log.warning("review_apply: malformed merge pair_id %r, skipping", pair_id)
+            result["skipped"] += 1
+            continue
+        if ids[0] == ids[1]:
+            # M2: a self-pair ("x|x") is a no-op merge — skip, don't count it merged.
             result["skipped"] += 1
             continue
         a = store.get_entity(ids[0])
