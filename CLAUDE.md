@@ -53,8 +53,15 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-02):** all four version files **and** the published wheel are at
-  `0.7.77` — source, dist index, and plugin manifests are in step. 0.7.76 shipped Session-3
+- **Current state (2026-07-03):** all four version files **and** the published wheel are at
+  `0.7.84` — source, dist index, and plugin manifests are in step. 0.7.78–0.7.82 shipped
+  Session-4 (brain-review: AI-adjudicated graph hygiene on a daily cadence — reversible/
+  capped appliers) + the interactive knowledge graph (Sigma/force-graph explorer at `/graph`);
+  0.7.83 added the live force-graph renderer; **0.7.84 hardens the review appliers** —
+  they target the finding's own stored `ref_id`/type (via `store.get_finding`) so a
+  malformed unattended verdict can't redirect a mutation, skip self-pair merges, and the
+  daily `resolve_entities`/`review` cadences are correctly documented as ON-by-default.
+  Earlier: 0.7.77 — source, dist index, and plugin manifests are in step. 0.7.76 shipped Session-3
   efficiency (deterministic sender person-entities so Haiku extracts only body-mentioned
   people, trivial-thread short-circuit, `spool_thread_cap` default 500→2000, `parallel_backfill`
   removed, `resolve_entities` wired into a daily cadence). **0.7.77 fixes a CRITICAL bug that
