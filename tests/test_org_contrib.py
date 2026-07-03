@@ -160,6 +160,36 @@ def test_delta_since_watermark_picks_up_new_and_superseded(tmp_path):
     assert ids2 <= {r["id"] for r in delta["relations"]}
 
 
+def test_delta_since_watermark_excludes_stale_already_seen_relation(tmp_path):
+    """Positive exclusion check: a relation already covered by hwm whose
+    last_seen is strictly BEFORE the watermark's ts must NOT reappear on a
+    later scan. The rescan-idempotency test's `ids2 <= {...}` assertion alone
+    would also pass for a naive "return everything" regression (its fixture
+    only ever has one relation); this test forces a positive negative case
+    independent of wall-clock timing, so it fails if the WHERE clause is
+    dropped or widened incorrectly."""
+    from mcpbrain import graph_write
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name, typ in (("joel", "Joel", "person"), ("acme", "Acme", "org")):
+            db.execute("INSERT INTO entities(id,name,type,origin) VALUES(?,?,?,'local')",
+                       (eid, name, typ))
+    rid = graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                      source_doc_id="msg-1")
+    delta, wm = org_contrib._delta_since_watermark(s)
+    assert wm["hwm"] == rid
+    s.set_meta("org_contrib_hwm", str(wm["hwm"]))
+    s.set_meta("org_contrib_ts", wm["ts"])
+    # Force last_seen strictly BEFORE the persisted watermark ts (unambiguously
+    # stale, not a same-second collision) so this proves exclusion regardless
+    # of test wall-clock timing.
+    with s._connect() as db:
+        db.execute("UPDATE entity_relations SET last_seen='2020-01-01T00:00:00Z' WHERE id=?",
+                   (rid,))
+    delta2, _ = org_contrib._delta_since_watermark(s)
+    assert delta2["relations"] == []
+
+
 def test_delta_since_watermark_picks_up_same_second_reobservation(tmp_path):
     """Regression for the >= fix: a re-observation (last_seen bump) landing in
     the SAME wall-clock second as the persisted watermark checkpoint must still
