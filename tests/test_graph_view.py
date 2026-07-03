@@ -188,3 +188,47 @@ def test_search_entities(tmp_path):
     ids = {r["id"] for r in graph_view.search_entities(_Store(p), "a")}
     assert "e1" in ids and "e3" in ids          # Alice, Acme
     assert graph_view.search_entities(_Store(p), "") == []
+
+
+def _rw_store(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "rw.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.executemany("INSERT INTO entities(id,name,type,org,email_addr) VALUES(?,?,?,?,?)", [
+            ("alice","Alice","person","Acme","alice@acme.com"),
+            ("al","Alice A.","person","","alice@acme.com"),
+            ("office","Office","person","Acme","office@acme.com"),
+            ("front","Front Desk","person","Acme","office@acme.com")])
+    return s
+
+def test_update_entity_applies_fields(tmp_path):
+    s = _rw_store(tmp_path)
+    d = graph_view.update_entity(s, "alice", name="Alice Smith", org="Beta", notes="vip")
+    assert d["name"] == "Alice Smith" and d["org"] == "Beta" and d["notes"] == "vip"
+    assert "Alice" in s.get_entity("alice")["aliases"].split("|")
+
+def test_update_entity_unknown(tmp_path):
+    s = _rw_store(tmp_path)
+    assert graph_view.update_entity(s, "nope", name="X") is None
+
+def test_merge_ok(tmp_path):
+    s = _rw_store(tmp_path)
+    out = graph_view.merge_entities(s, "al", "alice")
+    assert out["ok"] is True
+    assert s.get_entity("al") is None and s.get_entity("alice") is not None
+
+def test_merge_self_refused(tmp_path):
+    s = _rw_store(tmp_path)
+    out = graph_view.merge_entities(s, "alice", "alice")
+    assert out["ok"] is False and out["error"] == "self_merge"
+
+def test_merge_role_inbox_refused(tmp_path):
+    s = _rw_store(tmp_path)
+    out = graph_view.merge_entities(s, "front", "office")   # both office@ -> role address
+    assert out["ok"] is False and out["error"] == "role_inbox"
+    assert s.get_entity("front") is not None                # not merged
+
+def test_suppress(tmp_path):
+    s = _rw_store(tmp_path)
+    assert graph_view.suppress_entity(s, "al")["ok"] is True
+    assert graph_view.entity_detail(s, "al") is None
