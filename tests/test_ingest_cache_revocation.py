@@ -69,3 +69,12 @@ def test_purge_drive_deletes_chunks_and_invalidates_local(tmp_path):
     with s._connect() as db:
         r = db.execute("SELECT invalidated_at FROM entity_relations WHERE entity_a='a'").fetchone()
     assert r["invalidated_at"] is not None
+
+
+def test_purge_drive_empty_drive_returns_zeros(tmp_path):
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    # purge_drive on a drive with no chunks should return zero counts without raising
+    out = ingest_cache.purge_drive(s, "NONEXISTENT_DRIVE")
+    assert out == {"drive_id": "NONEXISTENT_DRIVE", "docs": 0,
+                   "chunks_deleted": 0, "relations_invalidated": 0}
