@@ -6,6 +6,7 @@ import pathlib
 import pytest
 
 from mcpbrain import consolidate
+from mcpbrain.graph_write import upsert_relation
 from mcpbrain.store import Store
 
 
@@ -77,6 +78,35 @@ def test_reset_meeting_sources_unclods_chunks(store):
     assert row["enriched"] == 0
     assert row["enrich_state"] == ""
     assert out["uncold"] == 1
+
+
+def test_reset_meeting_sources_recovers_calendar_evidence(store):
+    # Calendar-sourced meetings: attended/instance_of/involved_in relations are
+    # written via the generic structural pass with prov_doc_id empty (the
+    # calendar-chunk enrichment path never threads doc_ids through), so
+    # source_doc_id lands as '' even though evidence holds the bare Calendar
+    # event id. meeting_source_doc_ids() must recover the chunk via the
+    # 'cal-<event_id>' doc_id convention.
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.upsert_chunk("cal-evt123", "t", "h", {"event_id": "evt123"})
+    store.mark_enriched(["cal-evt123"])
+    upsert_relation(store, "meeting-acme-standup", "involved_in", "topic-standup",
+                     valid_from="2026-05-12", evidence="evt123", source_doc_id="")
+    out = consolidate.reset_meeting_sources(store)
+    assert out["chunks_reset"] == 1
+
+
+def test_reset_meeting_sources_recovers_calendar_evidence_recurring_instance(store):
+    # A recurring event's chunk doc_id carries a per-instance date suffix
+    # ('cal-<event_id>_<instant>'), so the recovery match must be a prefix
+    # match, not exact equality.
+    store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
+    store.upsert_chunk("cal-evt123_20260512T090000Z", "t", "h", {"event_id": "evt123"})
+    store.mark_enriched(["cal-evt123_20260512T090000Z"])
+    upsert_relation(store, "meeting-acme-standup", "involved_in", "topic-standup",
+                     valid_from="2026-05-12", evidence="evt123", source_doc_id="")
+    out = consolidate.reset_meeting_sources(store)
+    assert out["chunks_reset"] == 1
 
 
 def test_retire_meeting_duplicates(store):
