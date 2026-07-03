@@ -54,7 +54,9 @@ def test_graph_html_has_expected_hooks():
                    '/api/graph/canvas', 'id="graph"', 'new ForceGraph',
                    'd3.forceManyBody', 'id="f-group"', 'polygonHull',
                    'onRenderFramePre', 'zoomToFit', 'screen2GraphCoords',
-                   'id="legend"', 'id="back-btn"', '__MCPBRAIN_TOKEN__']:
+                   'id="legend"', 'id="back-btn"', '__MCPBRAIN_TOKEN__',
+                   'id="drawer"', '/api/graph/entity/', '/api/graph/search',
+                   '/api/graph/merge', 'openDrawer']:
         assert marker in html, f"missing: {marker}"
 
 
