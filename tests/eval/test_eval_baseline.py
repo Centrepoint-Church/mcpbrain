@@ -122,6 +122,20 @@ def test_gold_recall_floor():
         f"gold MRR {m['mrr']:.3f} below floor {GOLD_MRR_FLOOR}")
 
 
+def test_production_search_kwargs_matches_shipped_defaults():
+    """run_eval.production_search_kwargs must mirror the production retrieval path
+    (daemon.search): three-axis weights from config + cold NOT excluded. Guards the
+    trap where `run_eval.py --gold` measured the relevance-only baseline (all weights
+    0), understating MRR (~0.28 vs the real ~0.56 production path)."""
+    from tests.eval.run_eval import production_search_kwargs
+    kw = production_search_kwargs("/nonexistent-home")  # no config.json → shipped defaults
+    assert kw["exclude_cold"] is False
+    assert kw["recency_weight"] == 0.15
+    assert kw["importance_weight"] == 0.10
+    assert kw["decay_weight"] == 0.10
+    assert kw["recency_alpha"] == 0.01
+
+
 def test_gold_three_axis_does_not_regress_on_production_path():
     """B3 PRODUCTION QUALITY GATE: the three-axis ranker (recency+importance+decay)
     is ENABLED in live config (`importance_recall`), so this guards the property that
