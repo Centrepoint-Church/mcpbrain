@@ -129,3 +129,24 @@ def test_upload_pending_empty_is_noop(tmp_path):
     s = _store(tmp_path)
     assert org_contrib.upload_pending(s, LocalDirFleetStorage(tmp_path / "f"), "a@x.org") == {
         "uploaded": 0, "batch": ""}
+
+
+def test_delta_since_watermark_picks_up_new_and_superseded(tmp_path):
+    from mcpbrain import graph_write
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name, typ in (("joel", "Joel", "person"), ("acme", "Acme", "org"),
+                               ("beta", "Beta", "org")):
+            db.execute("INSERT INTO entities(id,name,type,origin) VALUES(?,?,?,'local')",
+                       (eid, name, typ))
+    graph_write.upsert_relation(s, "joel", "works_at", "acme", valid_from="2026-01-01",
+                                source_doc_id="msg-1")
+    delta, wm = org_contrib._delta_since_watermark(s)
+    rels = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta["relations"]}
+    assert ("joel", "works_at", "acme") in rels
+    assert "joel" in delta["entities"] and "acme" in delta["entities"]
+    # advancing the watermark then re-scanning yields nothing new
+    s.set_meta("org_contrib_hwm", str(wm["hwm"]))
+    s.set_meta("org_contrib_ts", wm["ts"])
+    delta2, _ = org_contrib._delta_since_watermark(s)
+    assert delta2["relations"] == []
