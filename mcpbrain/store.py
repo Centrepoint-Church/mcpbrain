@@ -1462,9 +1462,11 @@ class Store:
             return
         with self._connect() as db:
             loser = db.execute(
-                "SELECT name,type,org,mentions FROM entities WHERE id=?", (loser_id,)).fetchone()
+                "SELECT name,type,org,mentions,COALESCE(aliases,'') AS aliases "
+                "FROM entities WHERE id=?", (loser_id,)).fetchone()
             win = db.execute(
-                "SELECT name,type,org,mentions FROM entities WHERE id=?", (winner_id,)).fetchone()
+                "SELECT name,type,org,mentions,COALESCE(aliases,'') AS aliases "
+                "FROM entities WHERE id=?", (winner_id,)).fetchone()
             if loser is None or win is None:
                 return
             # Repoint relations onto the winner; UPDATE OR IGNORE drops rows that
@@ -1484,12 +1486,32 @@ class Store:
                 (winner_id,),
             )
 
+            # Repoint the loser's observations + email links onto the winner so
+            # nothing is orphaned when the loser row is deleted below. email_entities
+            # has PRIMARY KEY(message_id, entity_id): OR IGNORE drops rows that would
+            # collide with an existing winner link, then the leftover loser rows go.
+            db.execute("UPDATE entity_observations SET entity_id=? WHERE entity_id=?",
+                       (winner_id, loser_id))
+            db.execute("UPDATE OR IGNORE email_entities SET entity_id=? WHERE entity_id=?",
+                       (winner_id, loser_id))
+            db.execute("DELETE FROM email_entities WHERE entity_id=?", (loser_id,))  # admin-delete-ok
+
             new_org = win["org"] if win["org"] not in ("", "unknown") else loser["org"]
             new_type = win["type"] if win["type"] != "unknown" else loser["type"]
             new_name = canonical_name or win["name"]
             new_mentions = (win["mentions"] or 0) + (loser["mentions"] or 0)
-            db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=? WHERE id=?",
-                       (new_name, new_type, new_org, new_mentions, winner_id))
+            # Carry the loser's name + aliases (and the winner's prior name, if it was
+            # renamed) onto the winner as aliases, so a future mention of the
+            # merged-away name still resolves here.
+            alias_set = set()
+            for src in (win["aliases"], loser["aliases"]):
+                for a in (src or "").split("|"):
+                    if a: alias_set.add(a)
+            alias_set.add(win["name"]); alias_set.add(loser["name"])
+            alias_set.discard(new_name); alias_set.discard("")
+            new_aliases = "|".join(sorted(alias_set))
+            db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",
+                       (new_name, new_type, new_org, new_mentions, new_aliases, winner_id))
             db.execute(
                 "INSERT INTO entity_merge_log(winner_id,loser_id,loser_name,method) "
                 "VALUES(?,?,?,?)",
