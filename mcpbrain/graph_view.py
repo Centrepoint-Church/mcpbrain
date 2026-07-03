@@ -134,3 +134,85 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
     except sqlite3.Error as exc:
         log.warning("graph_canvas: read failed (%s) — returning empty", exc)
         return dict(_EMPTY)
+
+
+def _table_exists(db, name):
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                      (name,)).fetchone() is not None
+
+
+def entity_detail(store, entity_id: str) -> dict | None:
+    """Full drawer payload for one entity, or None if unknown/suppressed."""
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            if _table_exists(db, "entity_suppressions"):
+                if db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id=?",
+                              (entity_id,)).fetchone():
+                    return None
+            e = db.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+            if e is None:
+                return None
+            rels, backs = [], []
+            rows = db.execute(
+                "SELECT r.entity_a, r.relation, r.entity_b, COALESCE(r.strength,1) AS strength, "
+                "       ea.name AS a_name, eb.name AS b_name "
+                "FROM entity_relations r "
+                "LEFT JOIN entities ea ON ea.id=r.entity_a "
+                "LEFT JOIN entities eb ON eb.id=r.entity_b "
+                "WHERE (r.entity_a=:id OR r.entity_b=:id) AND r.invalidated_at IS NULL "
+                "ORDER BY r.strength DESC",
+                {"id": entity_id}).fetchall()
+            for r in rows:
+                if r["entity_a"] == entity_id:
+                    rels.append({"other_id": r["entity_b"], "other_name": r["b_name"] or r["entity_b"],
+                                 "relation": r["relation"], "strength": r["strength"], "direction": "out"})
+                else:
+                    backs.append({"other_id": r["entity_a"], "other_name": r["a_name"] or r["entity_a"],
+                                  "relation": r["relation"], "strength": r["strength"], "direction": "in"})
+            obs = []
+            if _table_exists(db, "entity_observations"):
+                obs = [dict(o) for o in db.execute(
+                    "SELECT attribute, value, valid_from, valid_to, source "
+                    "FROM entity_observations WHERE entity_id=? "
+                    "ORDER BY COALESCE(valid_from,'') DESC, id DESC", (entity_id,)).fetchall()]
+            return {
+                "id": e["id"], "name": e["name"], "type": e["type"],
+                "org": e["org"] or "", "email_addr": e["email_addr"] or "",
+                "aliases": e["aliases"] or "", "notes": e["notes"] or "",
+                "connections": e["degree"] or 0,
+                "relations": rels, "backlinks": backs, "observations": obs,
+            }
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        log.warning("entity_detail: read failed (%s)", exc)
+        return None
+
+
+def search_entities(store, q: str, limit: int = 10) -> list[dict]:
+    """Name search for the merge type-ahead. [] on blank q; excludes suppressed."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            supp = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
+                    if _table_exists(db, "entity_suppressions") else "")
+            where_supp = "AND s.entity_id IS NULL" if supp else ""
+            rows = db.execute(
+                f"SELECT e.id, e.name, e.type, COALESCE(e.org,'') AS org "
+                f"FROM entities e {supp} "
+                f"WHERE lower(e.name) LIKE :q {where_supp} "
+                f"ORDER BY (lower(e.name)=lower(:exact)) DESC, length(e.name) ASC "
+                f"LIMIT :lim",
+                {"q": f"%{q.lower()}%", "exact": q, "lim": int(limit)}).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        log.warning("search_entities: read failed (%s)", exc)
+        return []
