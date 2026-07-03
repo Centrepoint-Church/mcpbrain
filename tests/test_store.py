@@ -762,3 +762,23 @@ def test_meeting_series_for_old_ambiguous_returns_none(store):
     store.link_email_entity("m1", "meeting-acme-board", role="about")
     store.link_email_entity("m1", "meeting-acme-staff", role="about")
     assert store.meeting_series_for_old("board-12-may") is None
+
+
+def test_merge_repoints_observations_email_and_carries_aliases(tmp_path):
+    """merge_entities must not orphan the loser's observations/email links, and
+    must carry the loser's name (and aliases) onto the winner as aliases."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "m.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('alice','Alice','person')")
+        db.execute("INSERT INTO entities(id,name,type,aliases) VALUES('al','Alice A.','person','Ali')")
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value) VALUES('al','role','Lead')")
+        db.execute("INSERT INTO email_entities(message_id,entity_id,role) VALUES('m1','al','from')")
+    s.merge_entities("al", "alice")
+    with s._connect() as db:
+        assert db.execute("SELECT entity_id FROM entity_observations WHERE attribute='role'").fetchone()["entity_id"] == "alice"
+        assert db.execute("SELECT entity_id FROM email_entities WHERE message_id='m1'").fetchone()["entity_id"] == "alice"
+        assert db.execute("SELECT COUNT(*) FROM entity_observations WHERE entity_id='al'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM email_entities WHERE entity_id='al'").fetchone()[0] == 0
+    aliases = s.get_entity("alice")["aliases"].split("|")
+    assert "Alice A." in aliases and "Ali" in aliases   # loser name + loser's own alias carried
