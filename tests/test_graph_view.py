@@ -142,3 +142,49 @@ def test_canvas_too_large_reports_true_count(tmp_path):
     out = graph_view.graph_canvas(_Store(p), min_conn=1)
     assert out.get("error") == "too_large" and out["cap"] == 5000
     assert out["candidate_count"] == 6000
+
+
+def _seed_detail(path):
+    import sqlite3
+    with sqlite3.connect(str(path)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', email_addr TEXT DEFAULT '', aliases TEXT DEFAULT '', "
+                   "notes TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "relation TEXT, entity_b TEXT, strength REAL DEFAULT 1, invalidated_at TEXT)")
+        db.execute("CREATE TABLE entity_observations(id INTEGER PRIMARY KEY, entity_id TEXT, "
+                   "attribute TEXT, value TEXT, source TEXT, valid_from TEXT, valid_to TEXT)")
+        db.execute("CREATE TABLE entity_suppressions(entity_id TEXT PRIMARY KEY, reason TEXT, suppressed_at TEXT)")
+        db.executemany("INSERT INTO entities(id,name,type,org,email_addr,degree) VALUES(?,?,?,?,?,?)", [
+            ("e1","Alice","person","Acme","alice@acme.com",5),
+            ("e2","Bob","person","Acme","",3),
+            ("e3","Acme","org","","",9)])
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,strength) VALUES(1,'e1','works_at','e3',4)")
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,strength) VALUES(2,'e2','manages','e1',2)")
+        db.execute("INSERT INTO entity_observations(id,entity_id,attribute,value,valid_from) VALUES(1,'e1','role','Lead','2026-01')")
+
+def test_entity_detail_shape(tmp_path):
+    p = tmp_path / "b.sqlite3"; _seed_detail(p)
+    d = graph_view.entity_detail(_Store(p), "e1")
+    assert d["name"] == "Alice" and d["org"] == "Acme" and d["email_addr"] == "alice@acme.com"
+    assert {r["other_id"] for r in d["relations"]} == {"e3"}          # e1 -> e3 (out)
+    assert d["relations"][0]["other_name"] == "Acme" and d["relations"][0]["relation"] == "works_at"
+    assert {b["other_id"] for b in d["backlinks"]} == {"e2"}          # e2 -> e1 (in)
+    assert d["observations"][0]["attribute"] == "role"
+
+def test_entity_detail_unknown_is_none(tmp_path):
+    p = tmp_path / "b.sqlite3"; _seed_detail(p)
+    assert graph_view.entity_detail(_Store(p), "nope") is None
+
+def test_entity_detail_suppressed_is_none(tmp_path):
+    p = tmp_path / "b.sqlite3"; _seed_detail(p)
+    import sqlite3
+    with sqlite3.connect(str(p)) as db:
+        db.execute("INSERT INTO entity_suppressions(entity_id,reason,suppressed_at) VALUES('e1','x','t')")
+    assert graph_view.entity_detail(_Store(p), "e1") is None
+
+def test_search_entities(tmp_path):
+    p = tmp_path / "b.sqlite3"; _seed_detail(p)
+    ids = {r["id"] for r in graph_view.search_entities(_Store(p), "a")}
+    assert "e1" in ids and "e3" in ids          # Alice, Acme
+    assert graph_view.search_entities(_Store(p), "") == []
