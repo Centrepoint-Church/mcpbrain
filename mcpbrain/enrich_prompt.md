@@ -130,12 +130,15 @@ Entities and relations are the part most worth getting right.
   "from <org>", "at <org>", or role phrasing, if present. The sender
   "Franz from The Church Co <franz@thechurchco.com>" yields the name `Franz`,
   not "Franz from The Church Co".
-- **Type.** Exactly three valid types — `person`, `org`, `project`. Do not
+- **Type.** Four valid types — `person`, `org`, `project`, `meeting`. Do not
   invent others. `person` is a named individual. `org` is any company, church,
   store, venue, team, school, or agency. `project` is a named initiative
   or body of work, not a thing or a place. When torn between `org` and
   `person`, a name that could sign a contract or own a building is an `org`.
-  Any entity with a type outside these three will be silently dropped.
+  `meeting` is a named recurring or one-off meeting or event (an event uses
+  type `meeting` too — events fold into the meeting series); for a `meeting`
+  set `series_name` and `occurrence_date` as described in the field notes
+  above. Any entity with a type outside these four will be silently dropped.
 - **Per-entity org.** An entity's `org` is where THAT entity belongs, not the
   thread's org. It is fixed by THAT entity's own email domain (via
   `org_domain_map`) or a stated affiliation, NOT by what the email is about. A
