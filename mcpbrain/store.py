@@ -140,12 +140,23 @@ class Store:
                 email_addr  TEXT DEFAULT '',
                 notes       TEXT DEFAULT '')""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ent_type ON entities(type)")
+            # Migrate base columns on very old stores (pre-v0.7). Check columns
+            # before creating idx_ent_org, which references the org column.
+            ent_cols = {row["name"] for row in db.execute("PRAGMA table_info(entities)").fetchall()}
+            for _base_col, _base_def in (
+                ("org", "TEXT DEFAULT ''"),
+                ("first_seen", "TEXT DEFAULT ''"),
+                ("last_seen", "TEXT DEFAULT ''"),
+                ("mentions", "INTEGER DEFAULT 0"),
+            ):
+                if _base_col not in ent_cols:
+                    db.execute(f"ALTER TABLE entities ADD COLUMN {_base_col} {_base_def}")
+                    ent_cols.add(_base_col)
             db.execute("CREATE INDEX IF NOT EXISTS idx_ent_org  ON entities(org)")
             # Back-fill email_count/degree on pre-existing stores (mirrors the
             # chunks.enriched pattern below). Phase 1 does NOT port Nexus's
             # degree triggers (memory_db.py:486-515): graph_write.upsert_relation
             # (Task 2) increments degree explicitly instead.
-            ent_cols = {row["name"] for row in db.execute("PRAGMA table_info(entities)").fetchall()}
             if "email_count" not in ent_cols:
                 db.execute("ALTER TABLE entities ADD COLUMN email_count INTEGER DEFAULT 0")
             if "degree" not in ent_cols:
@@ -210,6 +221,20 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_b_rel       ON entity_relations(entity_b, relation)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_invalidated ON entity_relations(invalidated_at)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_valid_range ON entity_relations(valid_from, valid_to)")
+
+            # -- Org-baseline layer tag (Phase 0, Task 1) ----------------------
+            # 'local' (default) or 'org'. Populated stores migrate in place via the
+            # PRAGMA-check ALTER idiom (const default only).
+            ent_cols = {row["name"] for row in
+                        db.execute("PRAGMA table_info(entities)").fetchall()}
+            if "origin" not in ent_cols:
+                db.execute("ALTER TABLE entities ADD COLUMN origin TEXT DEFAULT 'local'")
+            er_origin_cols = {row["name"] for row in
+                              db.execute("PRAGMA table_info(entity_relations)").fetchall()}
+            if "origin" not in er_origin_cols:
+                db.execute("ALTER TABLE entity_relations ADD COLUMN origin TEXT DEFAULT 'local'")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_ent_origin ON entities(origin)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_er_origin ON entity_relations(origin)")
 
             # graph_actions/graph_decisions are only created PRE-migration. Once
             # the Task 1.7 migration has renamed them to *_legacy (meta flag set),
