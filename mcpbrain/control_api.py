@@ -162,6 +162,17 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("graph canvas failed")
                         return h_json(self, 500, {"error": str(exc)})
+                m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path.split("?")[0])
+                if m:
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    d = graph_view.entity_detail(server.store, urllib.parse.unquote(m.group(1)))
+                    return h_json(self, 200, d) if d else h_json(self, 404, {"error": "not found"})
+                if self.path.split("?")[0] == "/api/graph/search":
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
+                    return h_json(self, 200, graph_view.search_entities(server.store, q))
                 if self.path == "/api/dashboard/today":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -187,6 +198,17 @@ class ControlServer:
             def do_POST(self):
                 if not self._auth_ok(): return
                 return server._handle_post(self)                        # Task 2.2
+            def do_DELETE(self):
+                if not self._auth_ok(): return
+                m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path)
+                if m:
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    eid = urllib.parse.unquote(m.group(1))
+                    if server.store.get_entity(eid) is None:
+                        return h_json(self, 404, {"error": "not found"})
+                    return h_json(self, 200, graph_view.suppress_entity(server.store, eid))
+                self.send_response(404); self.end_headers()
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.port = self._httpd.server_address[1]
         self.home.mkdir(parents=True, exist_ok=True)
@@ -451,6 +473,24 @@ class ControlServer:
                 except Exception as exc:
                     log.exception("backup/auto failed")
                     return h_json(h, 500, {"error": str(exc)})
+
+            m = re.match(r"^/api/graph/entity/([^/?]+)$", h.path)
+            if m:
+                if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import graph_view
+                eid = urllib.parse.unquote(m.group(1))
+                d = graph_view.update_entity(
+                    self.store, eid,
+                    name=body.get("name"), org=body.get("org"),
+                    email_addr=body.get("email_addr"), notes=body.get("notes"))
+                return h_json(h, 200, d) if d else h_json(h, 404, {"error": "not found"})
+            if h.path == "/api/graph/merge":
+                if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import graph_view
+                out = graph_view.merge_entities(self.store, body.get("loser_id", ""), body.get("winner_id", ""))
+                if out.get("ok"): return h_json(h, 200, out)
+                code = 404 if out.get("error") == "not_found" else 409
+                return h_json(h, code, out)
 
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)
