@@ -1929,6 +1929,50 @@ class Store:
             ).fetchall()
         return [r["doc_id"] for r in rows]
 
+    def meeting_source_doc_ids(self) -> list[str]:
+        """Doc_ids of chunks that produced any type='meeting' entity.
+
+        Union of two provenance paths: email_entities links (message -> chunk via
+        doc_ids_for_messages) and entity_relations.source_doc_id. Used by the scoped
+        meeting migration to reset exactly those chunks for re-extraction."""
+        with self._connect() as db:
+            msg_ids = [r["message_id"] for r in db.execute(
+                "SELECT DISTINCT ee.message_id FROM email_entities ee "
+                "JOIN entities e ON e.id = ee.entity_id WHERE e.type='meeting'").fetchall()]
+            rel_docs = [r["source_doc_id"] for r in db.execute(
+                "SELECT DISTINCT er.source_doc_id FROM entity_relations er "
+                "JOIN entities e ON (e.id=er.entity_a OR e.id=er.entity_b) "
+                "WHERE e.type='meeting' AND COALESCE(er.source_doc_id,'')!=''").fetchall()]
+        docs = set(self.doc_ids_for_messages(msg_ids)) | set(rel_docs)
+        return sorted(docs)
+
+    def reset_enriched(self, doc_ids) -> int:
+        """Set enriched=0, enriched_version=0 on the given chunks so the daemon
+        re-extracts them. Returns rows affected."""
+        ids = [d for d in (doc_ids or []) if d]
+        if not ids:
+            return 0
+        ph = ",".join("?" * len(ids))
+        with self._connect() as db:
+            cur = db.execute(
+                f"UPDATE chunks SET enriched=0, enriched_version=0 WHERE doc_id IN ({ph})", ids)
+            return cur.rowcount
+
+    def meeting_series_for_old(self, old_id) -> str | None:
+        """The single 'meeting-*' series entity now linked to the same messages as
+        old_id, or None when zero or more than one match (ambiguous -> leave alone,
+        per the non-destructive migration policy)."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT e2.id FROM email_entities ee1 "
+                "JOIN email_entities ee2 ON ee1.message_id = ee2.message_id "
+                "JOIN entities e2 ON e2.id = ee2.entity_id "
+                "WHERE ee1.entity_id = ? AND e2.type='meeting' "
+                "AND e2.id != ? AND e2.id LIKE 'meeting-%'",
+                (old_id, old_id)).fetchall()
+        series = [r["id"] for r in rows]
+        return series[0] if len(series) == 1 else None
+
     # --- Phase 3, Task 0.5A: community reader/writer methods ----------------
 
     def replace_communities(self, partition: dict, summaries: dict) -> None:
