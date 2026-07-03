@@ -87,3 +87,63 @@ def test_canvas_route_requires_token(tmp_path):
             assert e.code == 401
     finally:
         srv.stop()
+
+
+def _req(url, token, method, body=None):
+    import json, urllib.request
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(url, data=data, method=method,
+                               headers={"Authorization": f"Bearer {token}",
+                                        "Content-Type": "application/json"})
+    with urllib.request.urlopen(r, timeout=5) as resp:
+        return resp.status, json.loads(resp.read() or b"{}")
+
+def _rw(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "rw.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.executemany("INSERT INTO entities(id,name,type,org,email_addr) VALUES(?,?,?,?,?)",
+                       [("alice","Alice","person","Acme","a@x.com"),
+                        ("al","Alice A.","person","","a@x.com")])
+    return s
+
+def test_entity_route(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/entity/alice", srv.token)
+        assert code == 200 and body["name"] == "Alice"
+        try:
+            _get(f"http://127.0.0.1:{srv.port}/api/graph/entity/nope", srv.token); assert False
+        except urllib.error.HTTPError as e: assert e.code == 404
+    finally: srv.stop()
+
+def test_search_route(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/search?q=alice", srv.token)
+        assert code == 200 and any(r["id"] == "alice" for r in body)
+    finally: srv.stop()
+
+def test_update_route(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _req(f"http://127.0.0.1:{srv.port}/api/graph/entity/alice", srv.token,
+                          "POST", {"org": "Beta"})
+        assert code == 200 and body["org"] == "Beta"
+    finally: srv.stop()
+
+def test_merge_route_409_role_or_self(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        try:
+            _req(f"http://127.0.0.1:{srv.port}/api/graph/merge", srv.token, "POST",
+                 {"loser_id": "alice", "winner_id": "alice"}); assert False
+        except urllib.error.HTTPError as e: assert e.code == 409
+    finally: srv.stop()
+
+def test_delete_route(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _req(f"http://127.0.0.1:{srv.port}/api/graph/entity/al", srv.token, "DELETE")
+        assert code == 200 and body["ok"] is True
+    finally: srv.stop()
