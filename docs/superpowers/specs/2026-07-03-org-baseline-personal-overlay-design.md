@@ -95,8 +95,14 @@ artifacts inside the drive they describe means Google's ACLs are the access cont
 a user who can't see the drive can't see the cache. No mcpbrain-side ACL logic exists
 or is needed.
 
-**Artifact:** one file per (source file × content version):
-`<fileId>.<contentHash12>.mbc.gz` — gzipped JSON:
+**Artifact:** one file per (source file × content version × pipeline):
+`<fileId>.<contentHash12>.<pf8>.mbc.gz` — where `pf8` is the first 8 hex chars of a
+**pipeline fingerprint** `sha256(embed_model | dim | chunker_version)`. Fingerprinting
+the filename means a mixed-version fleet (mid-rollout) never churns artifacts by
+overwriting each other — old- and new-pipeline artifacts coexist until the old ones are
+GC'd. The enrichment logic version deliberately lives *inside* the artifact, not in the
+fingerprint: an `ENRICH_LOGIC_VERSION` bump updates the `enrich` block in place and must
+not force the fleet to re-embed unchanged files. Gzipped JSON:
 
 ```json
 {
@@ -122,7 +128,21 @@ corruption → fall back to local extract/embed, then publish.
 
 **Write path:** after locally extracting+embedding a shared-drive file, publish the
 artifact. Content-hash keying makes races idempotent: two users racing produce
-byte-equivalent artifacts; last-write-wins is harmless. No locking needed.
+byte-equivalent artifacts; last-write-wins is harmless. No locking needed. To shrink
+herd races (e.g. the morning after a logic bump, when every daemon sees a fleet-wide
+miss), the cache is **re-checked immediately before processing each file** — the first
+publisher wins and everyone else imports; residual duplication is bounded and harmless.
+
+**Artifact lifecycle (GC):**
+- *File changed* → the publisher of the new artifact best-effort deletes artifacts for
+  the same `fileId` with older content hashes or stale pipeline fingerprints.
+- *File deleted* (changes.list removal event) → the observing daemon deletes the
+  artifact and its own local chunks/vectors for that `doc_id` (as removal handling
+  does today).
+- *Enrich logic bump* → whoever re-enriches first updates the artifact's `enrich`
+  block in place; embeddings untouched.
+- *Sweep* → any daemon syncing a drive opportunistically GCs artifacts whose `fileId`
+  no longer exists in that drive; no dedicated GC owner needed.
 
 **Scopes:** no new OAuth scopes. Reads are covered by the existing read-only Drive scope;
 writes use `drive.file`, which is per-OAuth-client — all installs share the bundled
@@ -131,6 +151,30 @@ Drive ACLs), the same mechanism `backup.py` already relies on.
 
 **Non-goals:** the cache is not used for My Drive or shared-with-me files (no shared
 folder to put artifacts in that others can see; single-consumer anyway).
+
+### A3. Access revocation
+
+The fairness rule ("if they have access, it's their brain") runs both ways: when access
+goes away, so should the content. When a shared drive disappears from `drives.list`
+(or its cursor 404s persistently):
+
+- **Purge** that drive's chunks + vectors + FTS rows locally (`drive_id` metadata makes
+  this a targeted delete).
+- **Invalidate** layer-2 graph rows sourced *solely* from those docs — bitemporal
+  `invalidated_at` via `source_doc_id`, the existing supersession machinery; rows also
+  corroborated by still-accessible sources survive.
+- Layer-1 (org) rows are untouched — they are safe-by-construction (typed, redacted,
+  curator-adjudicated) and not derived from the user's access.
+
+### A4. Fleet pipeline pinning
+
+`org-config.json` (the existing fleet overlay, allowlist extended) pins fleet-wide:
+`embed_model` + `dim`, `chunker_version`, an `ENRICH_LOGIC_VERSION` floor, the
+layer-1 relation allowlist, and the `fleet_secret` (HMAC key). Pinning is what makes
+cache artifacts and contributions comparable across installs; daily auto-update keeps
+skew short-lived, and the pipeline fingerprint (A2) makes any residual skew harmless
+rather than churny. A daemon whose local config predates the pin falls back to local
+processing without overwriting newer artifacts.
 
 ---
 
@@ -166,6 +210,15 @@ New module `mcpbrain/org_contrib.py`:
   The HMAC lets the curator dedupe and count *independent corroboration* across users
   without learning which email/doc a claim came from. The `fleet_secret` is distributed
   in `org-config.json`.
+- **Bitemporal updates are contributed, not just assertions:** when the local graph
+  supersedes or invalidates a previously-allowlisted claim (someone leaves an org →
+  `valid_to` set), the supersession is contributed too. Without this, layer 1
+  fossilizes — it would only ever learn that things started, never that they ended.
+- **No echo inflation:** cache-imported enrichment (A2) makes every importer of a
+  shared doc emit the same claims — but `source_ref = HMAC(doc_id)` is identical
+  across users, so the curator dedupes them to one source. Corroboration counts only
+  genuinely distinct sources; importing org data can never inflate confidence in
+  org data.
 - **Fail closed:** unknown types, missing fields, entities keyed on role addresses
   (`is_role_address`, the 0.7.77 guard), or entities appearing only in cold/low-salience
   chunks → not contributed.
@@ -192,6 +245,11 @@ AI-adjudicated, reversible, capped appliers, per the 0.7.84 hardening):
    name-pair candidates, contradictions (two contributors assert conflicting
    `works_at` with overlapping validity), suspicious merges. Verdicts target the
    finding's own stored `ref_id`/type (the 0.7.84 invariant) and are logged.
+   Adjudication sees **structural evidence only** — names, emails, aliases, types,
+   confidence, corroboration counts — never content (contributions carry none, by
+   design). When that isn't enough to decide, the verdict is **pending**: the claim
+   stays out of the snapshot and waits for more corroboration, rather than forcing
+   a call on thin evidence.
 4. **Publish** a versioned snapshot to `fleet/org-graph/`:
    - `manifest.json` — `{version, created_at, entity_count, relation_count, tombstone_count, snapshot_sha256}`
    - `snapshot.jsonl.gz` — entities, relations, org taxonomy
@@ -331,6 +389,15 @@ shared content" to "minutes of downloads + enrichment spend only on their person
   (0.7.77 regression tests extended); corroboration counting via HMAC refs.
 - **Cache round-trip:** publish from store A, import into fresh store B → identical
   chunks, vectors (bitwise), enrichment state.
+- **Version skew:** two stores on different embed models never overwrite each other's
+  artifacts (fingerprint separation); enrich-logic bump updates `enrich` in place
+  without re-embedding; pre-pin daemon falls back locally without clobbering.
+- **Lifecycle:** file change GCs superseded artifacts; file deletion removes artifact
+  + local chunks; drive-access revocation purges chunks and bitemporally invalidates
+  solely-sourced layer-2 rows while multi-source rows and org rows survive.
+- **Supersession + echo:** a contributed `valid_to` update ends the canonical claim;
+  N users importing the same cached enrichment yield exactly one source_ref at the
+  curator (no corroboration inflation).
 - **End-to-end:** three simulated users, one curator, one shared drive fixture —
   new-user bootstrap produces a working brain with zero extraction calls on cached
   content.
