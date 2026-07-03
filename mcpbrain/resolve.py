@@ -182,11 +182,19 @@ def _token_set_ratio(a: set, b: set) -> float:
 
 
 def _candidate_pairs(entities) -> list:
-    """Return (a, b) entity-dict pairs that are: same type, share a significant
-    token, token-set similarity >= gate, and NOT canonical-key-identical (those
-    are handled deterministically). No cross-type pairs, no singletons."""
+    """Return (a, b) entity-dict pairs that are: same NAME-IDENTITY type, share a
+    significant token, token-set similarity >= gate, and NOT canonical-key-identical
+    (those are handled deterministically). No cross-type pairs, no singletons.
+
+    Only _NAME_MERGEABLE_TYPES (person/org/project) are considered (#4): structural
+    types (document/thread/topic/meeting/…) are identified by their source id, not
+    their title, so pairing them explodes the candidate count (365k on the live
+    store) AND feeds pairs the merge appliers' type guard rejects anyway — the same
+    allowlist enforced in _deterministic_merges (#23) and apply_duplicate_verdicts."""
     by_type = {}
     for e in entities:
+        if e["type"] not in _NAME_MERGEABLE_TYPES:
+            continue
         by_type.setdefault(e["type"], []).append(e)
     pairs = []
     seen = set()

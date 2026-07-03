@@ -91,6 +91,26 @@ def test_email_equality_skips_role_addresses(tmp_path):
     assert merged == 1
 
 
+def test_candidate_pairs_excludes_structural_types():
+    # #4: candidate generation must only consider name-identity types. Structural
+    # entities (document/thread/topic) explode the pair count (365k on the live
+    # store) and can't be merged anyway (the apply-side guard rejects them), so they
+    # must never become merge-review candidates in the first place.
+    from mcpbrain.resolve import _candidate_pairs
+    ents = [
+        {"id": "p1", "name": "Sam Lee", "type": "person"},
+        {"id": "p2", "name": "Sam Lee jr", "type": "person"},
+        {"id": "d1", "name": "Budget 2026", "type": "document"},
+        {"id": "d2", "name": "Budget 2027", "type": "document"},
+        {"id": "t1", "name": "Weekly Sync", "type": "thread"},
+        {"id": "t2", "name": "Weekly Standup", "type": "thread"},
+    ]
+    pairs = _candidate_pairs(ents)
+    ids = {e["id"] for pair in pairs for e in pair}
+    assert ids <= {"p1", "p2"}, "only person/org/project may be merge candidates"
+    assert not any(e["type"] in ("document", "thread", "topic") for pair in pairs for e in pair)
+
+
 def test_deterministic_merges_excludes_structural_types(tmp_path):
     # A document/thread/topic's identity is its SOURCE ID, not its title. Distinct
     # such nodes routinely share generic titles ("Untitled document", "TEST") and
@@ -190,8 +210,10 @@ def test_candidate_pairs_blocking_and_scoring():
 
     assert ("joel", "joel-chelliah") in keys
     assert ("daniel-f", "daniel-p") in keys
-    assert ("5pm-prayer", "5pm-prayer-meeting") in keys
-    # no pair includes the cross-type org.
+    # meetings are a STRUCTURAL type (identified by id/time, not title) — excluded
+    # from candidate generation (#4), so they never pair even when titles overlap.
+    assert all("5pm-prayer" not in pk and "5pm-prayer-meeting" not in pk for pk in keys)
+    # the lone org is a singleton (no other org to pair with) — no pair includes it.
     assert all("acc" not in pk for pk in keys)
 
 
