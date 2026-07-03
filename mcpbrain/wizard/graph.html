@@ -49,10 +49,6 @@
   #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     color:var(--muted);font-size:14px;background:var(--paper);z-index:5;text-align:center;padding:24px}
   #overlay.hidden{display:none}
-  #tooltip{position:absolute;z-index:10;pointer-events:none;display:none;background:#1a1f27;color:#fff;
-    border-radius:8px;padding:7px 10px;font-size:12.5px;max-width:260px;line-height:1.4}
-  #tooltip b{font-weight:640}
-  #tooltip .sub{color:#c9ced7}
   #legend{position:absolute;top:12px;right:12px;z-index:8;background:rgba(255,255,255,.92);
     border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12px;
     box-shadow:0 2px 8px rgba(20,24,29,.06)}
@@ -122,7 +118,6 @@
       <div id="graph"></div>
       <div id="legend"></div>
       <div id="overlay">Loading graph…</div>
-      <div id="tooltip"></div>
       <aside id="drawer" class="drawer" hidden>
         <button id="dw-close" class="dw-x" aria-label="Close">×</button>
         <div id="dw-body"></div>
@@ -140,8 +135,8 @@
 
     // ---- level-of-detail thresholds (tune here) ----
     const LOD_NODES_MIN = 1.5;   // below this zoom: hubs only
-    const LOD_LABELS_MIN = 3.0;  // above this zoom: all in-view labels
-    const HUBS_PER_GROUP = 4;
+    const LOD_LABELS_MIN = 3.0;  // above this zoom: cluster labels fade out
+    const TOP30_FRACTION = 0.30; // links between two top-30%-connected nodes get flow particles
     const HULL_PAD = 18, HULL_THROTTLE_MS = 150;
 
     const TYPE_TOKEN = { person:"--graph-person", org:"--graph-org", project:"--graph-project",
@@ -174,7 +169,7 @@
     let CURRENT = { nodes:[], links:[], communities:{} };
     let ANCHORS = {};           // groupKey -> {x,y}
     let NODE_GROUP = new Map(); // id -> groupKey
-    let HUBS = new Set();       // hub node ids
+    let TOP30 = new Set();      // ids of the top-30% most-connected nodes
     let HULLS = [];             // [{poly,cx,cy,name,colour,key}]
     let lastHull = 0;
 
@@ -203,14 +198,11 @@
       const G = keys.length, R = 40 * Math.sqrt(Math.max(1, G));
       ANCHORS = {};
       keys.forEach((k,i)=>{ const a = 2*Math.PI*i/Math.max(1,G); ANCHORS[k] = { x:R*Math.cos(a), y:R*Math.sin(a) }; });
-      // hubs: top HUBS_PER_GROUP by connections within each group
-      HUBS = new Set();
-      const byGroup = new Map();
-      for (const n of CURRENT.nodes){ const k = NODE_GROUP.get(n.id); (byGroup.get(k) || byGroup.set(k,[]).get(k)).push(n); }
-      for (const arr of byGroup.values()){
-        arr.sort((a,b)=>(b.connections||0)-(a.connections||0));
-        for (let i=0;i<Math.min(HUBS_PER_GROUP, arr.length);i++) HUBS.add(arr[i].id);
-      }
+      // top-30% most-connected nodes overall (drives which links get flow particles)
+      TOP30 = new Set();
+      const ranked = [...CURRENT.nodes].sort((a,b)=>(b.connections||0)-(a.connections||0));
+      const cut = Math.ceil(ranked.length * TOP30_FRACTION);
+      for (let i=0;i<cut;i++) TOP30.add(ranked[i].id);
     }
     function anchorOf(n){ return ANCHORS[NODE_GROUP.get(n.id)] || {x:0,y:0}; }
 
@@ -266,35 +258,29 @@
       return hops;
     }
 
-    // ---- node + edge drawing ----
-    let labelBoxes = [];  // per-frame label collision boxes
-    function drawNode(node, ctx, globalScale){
-      const r = node._r ?? nodeRadius(node);
-      const isHub = HUBS.has(node.id);
-      // overview: hubs only; below LOD_NODES_MIN non-hubs draw as faint dots
-      if (globalScale < LOD_NODES_MIN && !isHub && node.id !== state.hoveredNodeId && node.id !== state.selectedNodeId){
-        ctx.beginPath(); ctx.arc(node.x, node.y, Math.max(0.6, r*0.5), 0, 2*Math.PI);
-        ctx.fillStyle = palette.fade; ctx.globalAlpha = 0.5; ctx.fill(); ctx.globalAlpha = 1; return;
-      }
-      const isSel = node.id === state.selectedNodeId, isHov = node.id === state.hoveredNodeId;
-      const isEgo = state.mode === "ego" && state.egoNodeId === node.id;
-      const searching = state.searchTerm.length > 0;
-      const match = !searching || node.name.toLowerCase().includes(state.searchTerm);
-      const fill = isSel ? palette.label : (searching && !match ? palette.fade : nodeColour(node));
-      ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2*Math.PI); ctx.fillStyle = fill; ctx.fill();
-      if (isHov || (searching && match)){ ctx.strokeStyle = palette.label; ctx.lineWidth = 1.5/globalScale; ctx.stroke(); }
-      const wantLabel = isEgo || isHub || isHov || isSel || (searching && match) || globalScale >= LOD_LABELS_MIN;
-      if (!wantLabel) return;
-      // label-collision skip (screen-space AABB)
-      const fs = isEgo ? 14 : Math.max(9, Math.min(12, r*globalScale*1.2)) / globalScale;
-      ctx.font = `${isEgo?"bold ":""}${fs}px ${getComputedStyle(document.body).fontFamily}`;
-      const w = ctx.measureText(node.name).width, lx = node.x, ly = node.y + r + 3/globalScale;
-      const box = [lx - w/2, ly, lx + w/2, ly + fs];
-      for (const b of labelBoxes){ if (box[0]<b[2]&&box[2]>b[0]&&box[1]<b[3]&&box[3]>b[1]){ if(!(isHub||isHov||isSel)) return; } }
-      labelBoxes.push(box);
-      ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.save(); ctx.globalAlpha = searching && !match ? 0.30 : 0.85; ctx.fillStyle = palette.label;
-      ctx.fillText(node.name, lx, ly); ctx.restore();
+    // ---- node colour (default force-graph rendering) + hover label + particles ----
+    // Colour is by entity type; the selected node is emphasised and search
+    // non-matches fade. force-graph draws the circle itself (nodeVal sizing).
+    function nodeColourState(n){
+      if (n.id === state.selectedNodeId) return palette.label;
+      if (state.searchTerm) return n.name.toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
+      return nodeColour(n);
+    }
+    // Names on hover only, via force-graph's built-in nodeLabel (HTML tooltip).
+    // esc() (defined below, hoisted) escapes ingested entity text — XSS guard.
+    function nodeHoverLabel(n){
+      return '<div style="background:#1a1f27;color:#fff;border-radius:8px;padding:7px 10px;'
+        + 'font:12.5px/1.4 -apple-system,system-ui,sans-serif;max-width:260px">'
+        + '<b>' + esc(n.name) + '</b><br><span style="color:#c9ced7">'
+        + esc(n.type || "") + ' · ' + esc(n.org || "no org") + ' · '
+        + (n.connections || 0) + ' connections</span></div>';
+    }
+    // Flow particles on: the selected node's links, OR links whose BOTH ends are
+    // top-30%-connected. Everything else gets none (keeps ~5k links cheap).
+    function linkParticlesFor(l){
+      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+      if (state.selectedNodeId && (sid===state.selectedNodeId || tid===state.selectedNodeId)) return 4;
+      return (TOP30.has(sid) && TOP30.has(tid)) ? 2 : 0;
     }
     function edgeKind(l){
       const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
@@ -327,13 +313,14 @@
     const container = $("graph");
     const fg = new ForceGraph(container)
       .backgroundColor(palette.bg).nodeId("id").linkSource("source").linkTarget("target")
-      .nodeRelSize(1).nodeVal((n)=>Math.pow(n._r ?? nodeRadius(n),2)).nodeLabel(()=> "")
+      .nodeRelSize(1).nodeVal((n)=>Math.pow(nodeRadius(n),2))
+      .nodeColor(nodeColourState).nodeLabel(nodeHoverLabel)
       .linkColor(linkColourFor).linkWidth(linkWidthFor)
-      .onRenderFramePre((ctx, gs)=>{ labelBoxes = []; drawHulls(ctx, gs); })
-      .nodeCanvasObject((node, ctx, gs)=> drawNode(node, ctx, gs))
+      .linkDirectionalParticles(linkParticlesFor)
+      .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
+      .onRenderFramePre((ctx, gs)=> drawHulls(ctx, gs))
       .onRenderFramePost((ctx)=> drawEgoRings(ctx))
-      .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; showTooltip(node); })
-      .onNodeDrag(()=> hideTooltip())
+      .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; })
       .onNodeClick((node)=>{ state.selectedNodeId = node.id; openDrawer(node.id); })
       .onNodeRightClick((node)=> enterEgo(node.id))
       .onBackgroundClick((ev)=> onBg(ev))
@@ -386,18 +373,7 @@
     function drillInto(key){ state.drill = { dim: state.groupBy, key, name: groupName(key) }; $("back-btn").style.display="inline"; load(); }
     $("back-btn").addEventListener("click", ()=>{ state.drill=null; $("back-btn").style.display="none"; load(); });
 
-    // ---- tooltip ----
-    const tip = $("tooltip");
-    function showTooltip(node){
-      if (!node){ hideTooltip(); return; }
-      const hop = state.mode==="ego" ? state.egoHops[node.id] : undefined;
-      tip.innerHTML = ""; const b=document.createElement("b"); b.textContent=node.name; tip.appendChild(b);
-      const sub=document.createElement("div"); sub.className="sub";
-      sub.textContent = (node.type||"")+" · "+(node.org||"no org")+" · "+(node.connections||0)+" connections"+(hop!==undefined?" · hop "+hop:"");
-      tip.appendChild(sub); tip.style.display="block";
-    }
-    function hideTooltip(){ tip.style.display="none"; }
-    $("stage").addEventListener("mousemove", (e)=>{ if(tip.style.display==="block"){ tip.style.left=(e.offsetX+14)+"px"; tip.style.top=(e.offsetY+14)+"px"; } });
+    // (Node names are shown on hover via force-graph's built-in nodeLabel.)
     container.addEventListener("dblclick", ()=>{ if(!state.hoveredNodeId) exitEgo(); });
 
     // ---- legend (fixed entity-type colour key) ----
