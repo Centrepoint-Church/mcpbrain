@@ -59,6 +59,32 @@
   #legend h4{margin:0 0 7px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:700}
   #legend .row{display:flex;align-items:center;gap:7px;padding:1.5px 0;color:var(--ink)}
   #legend .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+  .drawer{position:absolute;top:0;right:0;bottom:0;width:340px;z-index:9;background:var(--card);
+    border-left:1px solid var(--line);box-shadow:-4px 0 18px rgba(20,24,29,.06);
+    overflow-y:auto;padding:16px 18px;font-size:14px}
+  .drawer[hidden]{display:none}
+  .dw-x{position:absolute;top:10px;right:12px;border:0;background:none;font-size:20px;color:var(--muted);cursor:pointer}
+  .dw-x:hover{color:var(--ink)}
+  .dw-name{font-size:18px;font-weight:680;margin:2px 40px 2px 0}
+  .dw-meta{color:var(--muted);font-size:12.5px;margin-bottom:12px}
+  .dw-sec{margin-top:16px}
+  .dw-sec h4{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin:0 0 6px}
+  .dw-row{display:flex;gap:8px;padding:3px 0;font-size:13px;border-top:1px solid var(--line)}
+  .dw-row:first-of-type{border-top:0}
+  .dw-row .rel{color:var(--muted);flex:0 0 auto}
+  .dw-field{display:flex;flex-direction:column;gap:3px;margin:6px 0}
+  .dw-field label{font-size:11px;color:var(--muted)}
+  .dw-field input,.dw-field textarea{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px}
+  .dw-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .dw-actions button{font:inherit;font-weight:600;border-radius:8px;padding:7px 12px;cursor:pointer;border:1px solid var(--line);background:#fff}
+  .dw-actions .primary{background:var(--signal);color:#fff;border-color:transparent}
+  .dw-actions .danger{color:var(--err,#d64545);border-color:#f0c9c9}
+  .dw-search{position:relative}
+  .dw-search input{width:100%}
+  .dw-hits{list-style:none;margin:4px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;max-height:160px;overflow:auto}
+  .dw-hits li{padding:6px 9px;cursor:pointer;font-size:13px}
+  .dw-hits li:hover{background:var(--idle-bg,#eef1f5)}
+  .dw-err{color:var(--err,#d64545);font-size:12.5px;margin-top:8px}
 </style>
 </head>
 <body>
@@ -97,6 +123,10 @@
       <div id="legend"></div>
       <div id="overlay">Loading graph…</div>
       <div id="tooltip"></div>
+      <aside id="drawer" class="drawer" hidden>
+        <button id="dw-close" class="dw-x" aria-label="Close">×</button>
+        <div id="dw-body"></div>
+      </aside>
     </div>
   </div>
 
@@ -304,7 +334,7 @@
       .onRenderFramePost((ctx)=> drawEgoRings(ctx))
       .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; showTooltip(node); })
       .onNodeDrag(()=> hideTooltip())
-      .onNodeClick((node)=>{ state.selectedNodeId = node.id; })
+      .onNodeClick((node)=>{ state.selectedNodeId = node.id; openDrawer(node.id); })
       .onNodeRightClick((node)=> enterEgo(node.id))
       .onBackgroundClick((ev)=> onBg(ev))
       .warmupTicks(reduce ? 80 : 30).cooldownTime(reduce ? 0 : 4000);
@@ -432,6 +462,121 @@
     let searchT=null;
     $("f-search").addEventListener("input", (e)=>{ clearTimeout(searchT);
       searchT=setTimeout(()=>{ state.searchTerm=e.target.value.trim().toLowerCase(); fg.nodeColor(fg.nodeColor()); }, 150); });
+
+    // ---- entity drawer ----
+    const dw = $("drawer"), dwBody = $("dw-body");
+    let dwId = null, dwData = null;
+    $("dw-close").addEventListener("click", closeDrawer);
+    function closeDrawer(){ dw.hidden = true; dwId = null; dwData = null; }
+    function esc(s){ const d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+
+    async function openDrawer(id){
+      dwId = id; dw.hidden = false; dwBody.textContent = "Loading…";
+      try{
+        const r = await fetch("/api/graph/entity/" + encodeURIComponent(id), H);
+        if (r.status === 404){ dwBody.textContent = "Entity not found."; return; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        dwData = await r.json(); renderDrawer();
+      }catch(e){ dwBody.textContent = "Couldn’t load this entity."; }
+    }
+
+    function relList(items){
+      if (!items.length) return '<div class="dw-row" style="color:var(--muted)">none</div>';
+      return items.map(x => `<div class="dw-row"><span class="rel">${esc(x.relation)}</span>`
+        + `<span>${esc(x.other_name)}</span></div>`).join("");
+    }
+    function renderDrawer(){
+      const d = dwData;
+      dwBody.innerHTML =
+        `<div class="dw-name">${esc(d.name)}</div>`
+        + `<div class="dw-meta">${esc(d.type)} · ${esc(d.org || "no org")} · ${d.connections} connections`
+        + (d.email_addr ? " · " + esc(d.email_addr) : "") + `</div>`
+        + `<div class="dw-actions"><button id="dw-edit" class="primary">Edit</button>`
+        + `<button id="dw-merge-btn">Merge…</button>`
+        + `<button id="dw-suppress" class="danger">Suppress</button></div>`
+        + `<div id="dw-inline"></div>`
+        + `<div class="dw-sec"><h4>Relations</h4>${relList(d.relations)}</div>`
+        + `<div class="dw-sec"><h4>Backlinks</h4>${relList(d.backlinks)}</div>`
+        + `<div class="dw-sec"><h4>Observations</h4>`
+        + (d.observations.length ? d.observations.map(o =>
+            `<div class="dw-row"><span class="rel">${esc(o.attribute)}</span><span>${esc(o.value)}`
+            + (o.valid_from ? ` <span style="color:var(--faint)">(${esc(o.valid_from)})</span>` : "")
+            + `</span></div>`).join("")
+          : '<div class="dw-row" style="color:var(--muted)">none</div>') + `</div>`;
+      $("dw-edit").onclick = renderEdit;
+      $("dw-merge-btn").onclick = renderMerge;
+      $("dw-suppress").onclick = doSuppress;
+    }
+
+    function renderEdit(){
+      const d = dwData, box = $("dw-inline");
+      box.innerHTML =
+        field("Name","dw-f-name",d.name) + field("Organisation","dw-f-org",d.org)
+        + field("Email","dw-f-email",d.email_addr) + field("Notes","dw-f-notes",d.notes,true)
+        + `<div class="dw-actions"><button id="dw-save" class="primary">Save</button>`
+        + `<button id="dw-cancel">Cancel</button></div><div id="dw-edit-err" class="dw-err"></div>`;
+      $("dw-cancel").onclick = renderDrawer;
+      $("dw-save").onclick = doSave;
+    }
+    function field(label,id,val,area){
+      const input = area ? `<textarea id="${id}" rows="2">${esc(val)}</textarea>`
+                         : `<input id="${id}" value="${esc(val)}">`;
+      return `<div class="dw-field"><label>${label}</label>${input}</div>`;
+    }
+    async function doSave(){
+      const body = { name: $("dw-f-name").value.trim(), org: $("dw-f-org").value.trim(),
+                     email_addr: $("dw-f-email").value.trim(), notes: $("dw-f-notes").value };
+      try{
+        const r = await fetch("/api/graph/entity/" + encodeURIComponent(dwId),
+          { method:"POST", headers:{...H.headers,"Content-Type":"application/json"}, body:JSON.stringify(body) });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        dwData = await r.json(); renderDrawer(); load();   // refresh map (name/colour/labels)
+      }catch(e){ const el = $("dw-edit-err"); if (el) el.textContent = "Save failed."; }
+    }
+
+    function renderMerge(){
+      const box = $("dw-inline");
+      box.innerHTML = `<div class="dw-sec"><h4>Merge “${esc(dwData.name)}” into…</h4>`
+        + `<div class="dw-search"><input id="dw-q" placeholder="search entity to keep" autocomplete="off">`
+        + `<ul id="dw-hits" class="dw-hits" hidden></ul></div>`
+        + `<div id="dw-merge-err" class="dw-err"></div>`
+        + `<div class="dw-actions"><button id="dw-merge-cancel">Cancel</button></div></div>`;
+      $("dw-merge-cancel").onclick = renderDrawer;
+      let t = null;
+      $("dw-q").addEventListener("input", (e)=>{ clearTimeout(t);
+        t = setTimeout(()=> searchTargets(e.target.value.trim()), 180); });
+    }
+    async function searchTargets(q){
+      const ul = $("dw-hits");
+      if (!q){ ul.hidden = true; return; }
+      try{
+        const r = await fetch("/api/graph/search?q=" + encodeURIComponent(q), H);
+        const hits = (await r.json()).filter(h => h.id !== dwId).slice(0, 8);
+        ul.innerHTML = hits.map(h => `<li data-id="${esc(h.id)}">${esc(h.name)} `
+          + `<span style="color:var(--faint)">${esc(h.type)}${h.org ? " · " + esc(h.org) : ""}</span></li>`).join("");
+        ul.hidden = hits.length === 0;
+        [...ul.children].forEach(li => li.onclick = ()=> confirmMerge(li.dataset.id, li.textContent));
+      }catch(e){ ul.hidden = true; }
+    }
+    async function confirmMerge(winnerId, winnerLabel){
+      if (!window.confirm(`Merge “${dwData.name}” into “${winnerLabel}”?\n\nIts links move to the kept entity, and “${dwData.name}” becomes an alias. Reversible only via the store.`)) return;
+      try{
+        const r = await fetch("/api/graph/merge",
+          { method:"POST", headers:{...H.headers,"Content-Type":"application/json"},
+            body: JSON.stringify({ loser_id: dwId, winner_id: winnerId }) });
+        const out = await r.json();
+        if (r.ok && out.ok){ closeDrawer(); load(); }
+        else { const el = $("dw-merge-err"); if (el) el.textContent = out.message || "Merge refused."; }
+      }catch(e){ const el = $("dw-merge-err"); if (el) el.textContent = "Merge failed."; }
+    }
+
+    async function doSuppress(){
+      if (!window.confirm(`Suppress “${dwData.name}”? It’s hidden from the graph (reversible).`)) return;
+      try{
+        const r = await fetch("/api/graph/entity/" + encodeURIComponent(dwId), { method:"DELETE", headers: H.headers });
+        if (r.ok){ closeDrawer(); load(); }
+      }catch(e){ /* leave drawer open on failure */ }
+    }
 
     load();
   </script>
