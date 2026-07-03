@@ -147,3 +147,35 @@ def test_delete_route(tmp_path):
         code, body = _req(f"http://127.0.0.1:{srv.port}/api/graph/entity/al", srv.token, "DELETE")
         assert code == 200 and body["ok"] is True
     finally: srv.stop()
+
+
+def test_merge_route_role_inbox_409(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "ri.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr) VALUES('office','Office','person','office@x.com')")
+        db.execute("INSERT INTO entities(id,name,type,email_addr) VALUES('front','Front','person','office@x.com')")
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        try:
+            _req(f"http://127.0.0.1:{srv.port}/api/graph/merge", srv.token, "POST",
+                 {"loser_id": "front", "winner_id": "office"}); assert False
+        except urllib.error.HTTPError as e: assert e.code == 409
+    finally: srv.stop()
+
+
+def test_graph_routes_503_without_store(tmp_path):
+    srv = ControlServer(_Daemon(), str(tmp_path), store=None); srv.start()
+    calls = [("GET", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", None),
+             ("GET", f"http://127.0.0.1:{srv.port}/api/graph/search?q=x", None),
+             ("POST", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", {"org": "Y"}),
+             ("POST", f"http://127.0.0.1:{srv.port}/api/graph/merge", {"loser_id": "a", "winner_id": "b"}),
+             ("DELETE", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", None)]
+    try:
+        for m, url, body in calls:
+            try:
+                _get(url, srv.token) if m == "GET" else _req(url, srv.token, m, body)
+                assert False, f"expected 503 for {m} {url}"
+            except urllib.error.HTTPError as e:
+                assert e.code == 503, f"{m} {url} -> {e.code}"
+    finally: srv.stop()

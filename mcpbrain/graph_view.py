@@ -203,13 +203,15 @@ def search_entities(store, q: str, limit: int = 10) -> list[dict]:
             supp = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
                     if _table_exists(db, "entity_suppressions") else "")
             where_supp = "AND s.entity_id IS NULL" if supp else ""
+            # Escape LIKE wildcards so a query containing % or _ matches literally.
+            qesc = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = db.execute(
                 f"SELECT e.id, e.name, e.type, COALESCE(e.org,'') AS org "
                 f"FROM entities e {supp} "
-                f"WHERE lower(e.name) LIKE :q {where_supp} "
+                f"WHERE lower(e.name) LIKE :q ESCAPE '\\' {where_supp} "
                 f"ORDER BY (lower(e.name)=lower(:exact)) DESC, length(e.name) ASC "
                 f"LIMIT :lim",
-                {"q": f"%{q.lower()}%", "exact": q, "lim": int(limit)}).fetchall()
+                {"q": f"%{qesc}%", "exact": q, "lim": int(limit)}).fetchall()
             return [dict(r) for r in rows]
         finally:
             db.close()
