@@ -51,3 +51,21 @@ def test_invalidate_local_relations_scopes_to_local_and_docs(tmp_path):
     assert rows[("mentioned_with", "org")] is None         # org untouched
     # idempotent: a second call invalidates nothing new
     assert s.invalidate_local_relations_for_docs(["gdrive-F1-0"]) == 0
+
+
+def test_purge_drive_deletes_chunks_and_invalidates_local(tmp_path):
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    s.import_cached_chunk("gdrive-F1-1", "b", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0]*4)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('a','A','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('b','B','org','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('a','works_at','b','gdrive-F1-0','local')")
+    out = ingest_cache.purge_drive(s, "D1")
+    assert out["chunks_deleted"] == 2 and out["relations_invalidated"] == 1
+    assert s.doc_ids_for_drive("D1") == []
+    with s._connect() as db:
+        r = db.execute("SELECT invalidated_at FROM entity_relations WHERE entity_a='a'").fetchone()
+    assert r["invalidated_at"] is not None
