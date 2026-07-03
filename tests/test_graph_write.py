@@ -1140,3 +1140,26 @@ def test_relation_to_org_containing_at_is_preserved(tmp_path):
         "works_at edge from Alice to 'Church at the Bay' should be preserved; "
         "rels for Alice: " + str(s.relations_for(alice["id"]))
     )
+
+
+def test_topic_variants_converge(tmp_path):
+    # NOTE: brief specified a `store` pytest fixture with `store.db_path`; this
+    # file has no such fixture (only the local `_store(tmp_path)` helper used
+    # throughout, whose Store exposes the db path as `.path`, not `.db_path`).
+    # Adapted accordingly rather than inventing a second, conflicting fixture.
+    store = _store(tmp_path)
+    home = str(store.path.parent)
+    # Two orgs must mention a topic before the min-2-org gate opens it; three
+    # applies seed prior rows then create the entity (see apply() topic gate).
+    def ext(tid, mid, org, topics):
+        return {"thread_id": tid, "org": org, "content_type": "update", "summary": "s",
+                "topics": topics, "actions": [], "relations": [], "entities": [],
+                "messages": [{"message_id": mid, "sender": "A <a@acme.org>",
+                              "date": "2026-01-05", "subject": "s"}]}
+    gw.apply(store, ext("t1", "m1", "Acme", ["budgets"]), doc_ids=["d1"], home=home)
+    gw.apply(store, ext("t2", "m2", "Beta", ["the budget"]), doc_ids=["d2"], home=home)
+    gw.apply(store, ext("t3", "m3", "Acme", ["budget"]), doc_ids=["d3"], home=home)
+    with store._connect() as db:
+        ids = [r["id"] for r in db.execute(
+            "SELECT id FROM entities WHERE type='topic'").fetchall()]
+    assert ids == ["topic-budget"]  # 'budgets'/'the budget'/'budget' -> one node

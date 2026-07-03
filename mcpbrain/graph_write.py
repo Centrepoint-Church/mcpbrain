@@ -22,7 +22,7 @@ from email.utils import parsedate_to_datetime
 
 from nameparser import HumanName
 
-from mcpbrain import config, orgs
+from mcpbrain import config, orgs, topics
 from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index, is_role_address
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
@@ -953,6 +953,10 @@ def apply(store, extraction, *, doc_ids, identity=None,
     summary = extraction.get("summary", "") or ""
     contextual_summary = extraction.get("contextual_summary", "") or ""
     topics_list = extraction.get("topics", []) or []
+    _topic_home = str(home) if home is not None else str(config.app_dir())
+    if config.topic_consolidation_enabled(_topic_home):
+        topics_list = [topics.normalize_topic(t, _topic_home) for t in topics_list]
+        topics_list = [t for t in topics_list if t]
     topics_str = ", ".join(topics_list)
     entities_list = extraction.get("entities", []) or []
     messages = extraction.get("messages", []) or []
