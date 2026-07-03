@@ -1961,14 +1961,22 @@ class Store:
     def meeting_series_for_old(self, old_id) -> str | None:
         """The single 'meeting-*' series entity now linked to the same messages as
         old_id, or None when zero or more than one match (ambiguous -> leave alone,
-        per the non-destructive migration policy)."""
+        per the non-destructive migration policy).
+
+        Only counts candidates that are GENUINE re-extracted series — i.e. carry
+        at least one 'occurrence' observation (written by append_occurrence). A
+        legacy bare 'meeting-*' slug (e.g. 'meeting-with-bob', pre-dating the
+        series scheme) has none, so it is never mistaken for a candidate series
+        and never creates false ambiguity for a real old_id resolution."""
         with self._connect() as db:
             rows = db.execute(
                 "SELECT DISTINCT e2.id FROM email_entities ee1 "
                 "JOIN email_entities ee2 ON ee1.message_id = ee2.message_id "
                 "JOIN entities e2 ON e2.id = ee2.entity_id "
                 "WHERE ee1.entity_id = ? AND e2.type='meeting' "
-                "AND e2.id != ? AND e2.id LIKE 'meeting-%'",
+                "AND e2.id != ? AND e2.id LIKE 'meeting-%' "
+                "AND EXISTS (SELECT 1 FROM entity_observations o "
+                "            WHERE o.entity_id = e2.id AND o.attribute = 'occurrence')",
                 (old_id, old_id)).fetchall()
         series = [r["id"] for r in rows]
         return series[0] if len(series) == 1 else None

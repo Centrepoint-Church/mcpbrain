@@ -1165,6 +1165,34 @@ def test_topic_variants_converge(tmp_path):
     assert ids == ["topic-budget"]  # 'budgets'/'the budget'/'budget' -> one node
 
 
+def test_topic_duplicate_variants_deduped(tmp_path):
+    # A single extraction naming two variants of the same topic ("budgets" and
+    # "budget") normalizes both to "budget" (M1): the topics loop must not run
+    # twice for the same tag, and the stored topics string must not repeat it.
+    store = _store(tmp_path)
+    home = str(store.path.parent)
+
+    def ext(tid, mid, org, topics):
+        return {"thread_id": tid, "org": org, "content_type": "update", "summary": "s",
+                "topics": topics, "actions": [], "relations": [], "entities": [],
+                "messages": [{"message_id": mid, "sender": "A <a@acme.org>",
+                              "date": "2026-01-05", "subject": "s"}]}
+
+    # Seed prior appearances in two distinct orgs so the min-2-org gate is open
+    # by the third (duplicate-variant) apply.
+    gw.apply(store, ext("t1", "m1", "Acme", ["budget"]), doc_ids=["d1"], home=home)
+    gw.apply(store, ext("t2", "m2", "Beta", ["budget"]), doc_ids=["d2"], home=home)
+    gw.apply(store, ext("t3", "m3", "Acme", ["budgets", "budget"]), doc_ids=["d3"], home=home)
+
+    with store._connect() as db:
+        ids = [r["id"] for r in db.execute(
+            "SELECT id FROM entities WHERE type='topic'").fetchall()]
+        row = db.execute(
+            "SELECT topics FROM email_context WHERE message_id='m3'").fetchone()
+    assert ids == ["topic-budget"]
+    assert row["topics"] == "budget"  # deduped, not "budget, budget"
+
+
 # --- Task 5: meeting/event series convergence -------------------------------
 
 def _meeting_extraction(entities, thread_id="t1", org="Acme", msg_id="m1"):

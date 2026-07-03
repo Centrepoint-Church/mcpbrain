@@ -36,18 +36,22 @@ def normalize_topic(tag: str, home=None) -> str:
     if not t:
         return ""
 
+    syn = _synonyms(home)
+
+    # Synonym lookup runs at the RAW surface form, the qualifier-stripped form,
+    # and the singularized form: a curated entry may be authored against any of
+    # these three shapes, and all are legitimate ways for a human to write the
+    # config (e.g. "the budget" -> "finance" only matches before qualifier
+    # stripping removes "the").
+    if t in syn:
+        return syn[t]
+
     # Strip leading qualifiers while a real token remains.
     words = t.split(" ")
     while len(words) > 1 and words[0] in _LEADING_QUALIFIERS:
         words = words[1:]
     t = " ".join(words)
 
-    syn = _synonyms(home)
-
-    # Synonym lookup runs both BEFORE and AFTER singularization: a curated
-    # entry may be authored against either the surface form ('finances') or
-    # the singular head noun ('finance') that singularization produces, and
-    # both are legitimate ways for a human to write the config.
     if t in syn:
         return syn[t]
 
