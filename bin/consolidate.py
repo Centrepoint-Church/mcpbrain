@@ -67,8 +67,13 @@ def main(argv=None):
         pre_ids = json.loads(snap.read_text())
         print("[consolidate] meetings-retire:", consolidate.retire_meeting_duplicates(store, pre_ids))
 
-    print("[consolidate] Run `mcpbrain enrich-eval` now. If recall@10 < 0.55 or "
-          f"MRR < 0.35, restore: cp {backup} {db_path}")
+    print("[consolidate] Run the gold gate now (PRODUCTION path — three-axis ranker):\n"
+          "  uv run python tests/eval/run_eval.py --gold --k 10\n"
+          "  (or: uv run pytest -q tests/eval/test_eval_baseline.py::test_gold_recall_floor)\n"
+          f"  If recall@10 < 0.55 or MRR < 0.35, restore: cp {backup} {db_path}\n"
+          "  NOTE: do NOT use `mcpbrain enrich-eval` for this gate — it prints graph\n"
+          "  metrics, not gold recall/MRR; and plain --gold WITHOUT the production path\n"
+          "  reports the relevance-only baseline (~0.28 MRR), which is not what users see.")
     return 0
 
 

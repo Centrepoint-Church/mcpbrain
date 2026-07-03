@@ -17,7 +17,8 @@ Runnable as a script to sweep fusion params:
 
     uv run python tests/eval/run_eval.py
     uv run python tests/eval/run_eval.py --rrf-k 30 --vec-weight 1.5
-    uv run python tests/eval/run_eval.py --gold          # gold set against real store
+    uv run python tests/eval/run_eval.py --gold          # gold set, PRODUCTION path (three-axis)
+    uv run python tests/eval/run_eval.py --gold --relevance-only  # baseline (diagnostic; understates MRR)
 """
 from __future__ import annotations
 
@@ -244,6 +245,23 @@ def gold_eval(store, embedder, *, k: int = 10, search_kwargs: dict | None = None
     }
 
 
+def production_search_kwargs(home=None) -> dict:
+    """Search kwargs that match the PRODUCTION retrieval path (daemon.search).
+
+    daemon.search applies the three-axis ranker weights from
+    config.importance_weights and never excludes cold chunks
+    (recall_excludes_cold default OFF). gold_eval called with NO search_kwargs
+    measures the relevance-only RRF baseline (all weights 0) — which is NOT what
+    any user experiences and materially understates MRR (~0.28 baseline vs ~0.56
+    production on the live store). --gold and the migration gate must pass these
+    so they measure real production quality, not the misleading baseline.
+    """
+    from mcpbrain import config
+    if home is None:
+        home = str(config.app_dir())
+    return {"exclude_cold": False, **config.importance_weights(home)}
+
+
 def main() -> None:
     import tempfile
 
@@ -254,6 +272,10 @@ def main() -> None:
     ap.add_argument("--kw-weight", type=float, default=1.0)
     ap.add_argument("--gold", action="store_true",
                     help="Run gold set eval against the real brain store (requires populated store)")
+    ap.add_argument("--relevance-only", action="store_true",
+                    help="Gold eval: measure the relevance-only RRF baseline instead of the "
+                         "production three-axis path. Diagnostic only — this understates MRR "
+                         "and is NOT what users experience; the default --gold path is production.")
     args = ap.parse_args()
 
     if args.gold:
@@ -262,14 +284,19 @@ def main() -> None:
             print("Gold set eval: real store unavailable or empty — skipped")
             return
         store, emb = result
-        m = gold_eval(store, emb, k=args.k)
+        if args.relevance_only:
+            m = gold_eval(store, emb, k=args.k)
+            label = "relevance-only baseline — NOT production"
+        else:
+            m = gold_eval(store, emb, k=args.k, search_kwargs=production_search_kwargs())
+            label = "production path"
         if m["total"] == 0:
-            print("Gold set eval: no cases loaded (golden_retrieval_set.yaml missing?)")
+            print("Gold set eval: no cases loaded (gold set yaml missing?)")
         elif m["covered"] == 0:
             print(f"Gold set eval: 0/{m['total']} cases coverable against this corpus "
                   f"(expected chunks not yet indexed — re-run after backfill).")
         else:
-            print(f"Gold set: recall@{m['k']}={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
+            print(f"Gold set ({label}): recall@{m['k']}={m['recall_at_k']:.3f}  MRR={m['mrr']:.3f}  "
                   f"(covered {m['covered']}/{m['total']} cases; {m['missing']} not yet in corpus)")
         return
 

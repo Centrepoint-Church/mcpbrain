@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Never corrupt the graph.** Consolidation is reversible + logged, conservative-default (skip on uncertainty). Going-forward keying does **no** merges; the only destructive ops are the one-shot migrations, each protected by a full DB backup taken first.
-- **Gold gate:** recall@10 ≥ 0.55 and MRR ≥ 0.35 must be unaffected after each migration. Harness: `mcpbrain enrich-eval` (→ `mcpbrain/enrich_eval.py:main`, which calls `tests/eval/run_eval.gold_eval` at k=10).
+- **Gold gate:** recall@10 ≥ 0.55 and MRR ≥ 0.35 must be unaffected after each migration. Harness: `uv run python tests/eval/run_eval.py --gold --k 10` (PRODUCTION path — three-axis ranker + include-cold, matching `daemon.search`; ~0.750 / ~0.56 on the live store), or the CI floor test `tests/eval/test_eval_baseline.py::test_gold_recall_floor`. NOT `mcpbrain enrich-eval` (graph metrics only, no gold recall/MRR); and NOT the relevance-only baseline, which understates MRR to ~0.28 and is not what any user experiences.
 - **Ships ON behind a kill-switch:** new config flags default `True`, disabled only by an explicit `false` in `config.json`. Flag pattern: `bool(read_config(home).get("<key>", True))` (see `mcpbrain/config.py:146-182`).
 - **`store.merge_entities` is destructive** — it `DELETE`s the loser row (`store.py:1378`) and logs only the loser name. Never rely on it for going-forward consolidation.
 - **`graph_write.write_observation` supersedes** same-`(entity, attribute, source)` rows. Occurrences must use the new append-only path, never `write_observation`.
@@ -1299,8 +1299,9 @@ def main(argv=None):
         pre_ids = json.loads(snap.read_text())
         print("[consolidate] meetings-retire:", consolidate.retire_meeting_duplicates(store, pre_ids))
 
-    print("[consolidate] Run `mcpbrain enrich-eval` now. If recall@10 < 0.55 or "
-          f"MRR < 0.35, restore: cp {backup} {db_path}")
+    print("[consolidate] Run the gold gate now (PRODUCTION path):\n"
+          "  uv run python tests/eval/run_eval.py --gold --k 10\n"
+          f"  If recall@10 < 0.55 or MRR < 0.35, restore: cp {backup} {db_path}")
     return 0
 
 
@@ -1335,15 +1336,15 @@ Expected: PASS (no regressions across the repo).
 
 - [ ] **Step 2: Capture the gold-eval baseline (pre-migration)**
 
-Run: `mcpbrain enrich-eval`
-Expected: prints `Gold set: recall@10=<r> MRR=<m> ...`. Record both numbers; both must satisfy recall@10 ≥ 0.55 and MRR ≥ 0.35 already (baseline sanity).
+Run: `uv run python tests/eval/run_eval.py --gold --k 10` (PRODUCTION path — three-axis ranker + include-cold, what `daemon.search` uses)
+Expected: prints `Gold set (production path): recall@10=<r> MRR=<m> ...`. Record both; both must satisfy recall@10 ≥ 0.55 and MRR ≥ 0.35 (production baseline is ~0.750 / ~0.56 on the live store). Do NOT use `mcpbrain enrich-eval` (graph metrics only, no gold recall/MRR) or `--gold --relevance-only` (baseline ~0.28, not what users see).
 
 - [ ] **Step 3: Document the migration runbook in the PR description**
 
 The attended migration sequence (curator, on the live store):
-1. `python bin/consolidate.py topics` → then `mcpbrain enrich-eval`; if regressed, restore the printed backup.
+1. `python bin/consolidate.py topics` → then `uv run python tests/eval/run_eval.py --gold --k 10`; if regressed, restore the printed backup.
 2. `python bin/consolidate.py meetings-reset` → let the daemon drain/re-extract the reset chunks (watch the spool empty). `reset_meeting_sources` also clears `enrich_state` for exactly the scoped meeting-source doc_ids it resets, so a cold-marked chunk (salience-gated, `enrich_state='cold'`) re-queues in `unenriched_chunks()` and actually re-extracts — the earlier "cold residue" caveat no longer applies.
-3. `python bin/consolidate.py meetings-retire` → then `mcpbrain enrich-eval`; if regressed, restore.
+3. `python bin/consolidate.py meetings-retire` → then `uv run python tests/eval/run_eval.py --gold --k 10`; if regressed, restore.
 4. Count checks: `SELECT type, COUNT(*) FROM entities GROUP BY type` — meeting + topic node counts should drop; verify occurrence rows exist (`SELECT COUNT(*) FROM entity_observations WHERE attribute='occurrence'`).
 
 - [ ] **Step 4: Commit any doc/runbook note (if added) and finish**
