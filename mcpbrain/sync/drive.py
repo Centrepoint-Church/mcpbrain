@@ -16,6 +16,7 @@ all pending (file_meta, text) pairs across pages before writing anything to
 the store, then advancing the cursor only after all upserts complete.
 """
 
+import hashlib
 from mcpbrain.chunking import chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
@@ -65,7 +66,8 @@ _MIME_EXTRACTION_META: dict[str, tuple[str, str, float]] = {
 
 _CHANGES_FIELDS = (
     "nextPageToken,newStartPageToken,"
-    "changes(fileId,removed,file(id,name,mimeType,modifiedTime,owners))"
+    "changes(fileId,removed,file(id,name,mimeType,modifiedTime,owners,"
+    "md5Checksum,version,size))"
 )
 
 
@@ -101,15 +103,13 @@ def _fetch_text(service, file_meta: dict) -> str | None:
 # Normalisation
 # ---------------------------------------------------------------------------
 
-def normalise_drive(file_meta: dict, text: str) -> list[Chunk]:
+def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None) -> list[Chunk]:
     """Convert Drive file metadata + text content into indexable Chunks.
 
     doc_id format: gdrive-<file_id>-<chunk_index>.
-    Empty or whitespace-only text returns [].
-
-    Each chunk carries extraction_method, content_subtype, and confidence so
-    the enrichment pipeline can apply per-type logic (e.g. skip entity
-    extraction on table chunks) and the recall layer can surface the origin.
+    When drive_id is given (a true Shared Drive file), it is stamped into each
+    chunk's metadata under DRIVE_ID_META_KEY so revocation can target it; My Drive
+    / shared-with-me files pass drive_id=None and the key stays absent.
     """
     if not text or not text.strip():
         return []
@@ -137,6 +137,9 @@ def normalise_drive(file_meta: dict, text: str) -> list[Chunk]:
         "content_subtype": content_subtype,
         "confidence": confidence,
     }
+    if drive_id:
+        from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+        base_meta[DRIVE_ID_META_KEY] = drive_id
 
     out = []
     for i, chunk in enumerate(chunk_text(text)):
@@ -148,6 +151,35 @@ def normalise_drive(file_meta: dict, text: str) -> list[Chunk]:
             metadata=meta,
         ))
     return out
+
+
+def list_shared_drives(service) -> list[dict]:
+    """Every Shared Drive the user can see (paginated drives.list). Returns dicts
+    with at least id + name. My Drive is NOT included — it has no shared cache."""
+    out: list[dict] = []
+    page_token = None
+    while True:
+        resp = service.drives().list(
+            pageSize=100, fields="nextPageToken,drives(id,name)",
+            pageToken=page_token,
+        ).execute()
+        out.extend(resp.get("drives", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
+def _file_content_hash(file_meta: dict) -> str:
+    """A cross-user-stable file-VERSION id, computable from Changes metadata alone
+    (so the cache read path can key on it before extraction). Binary files carry a
+    Drive md5Checksum; Google-native files (Docs/Sheets/Slides) do not, so we hash
+    the monotonic `version` + modifiedTime, which is identical across installs."""
+    md5 = file_meta.get("md5Checksum")
+    if md5:
+        return md5
+    raw = f"{file_meta.get('version', '')}|{file_meta.get('modifiedTime', '')}"
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
