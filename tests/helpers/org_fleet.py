@@ -2,7 +2,11 @@
 + curator simulation builders. Shared by A/B/C and Phase D tests."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+
+from mcpbrain import config
+from mcpbrain.store import Store
 
 
 class LocalDirFleetStorage:
@@ -37,12 +41,6 @@ class LocalDirFleetStorage:
         p = self._abs(path)
         if p.is_file():
             p.unlink()
-
-
-from dataclasses import dataclass
-
-from mcpbrain import config
-from mcpbrain.store import Store
 
 
 @dataclass
