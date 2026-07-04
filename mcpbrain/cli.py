@@ -21,7 +21,7 @@ def main(argv=None):
     for name in ("daemon","mcp-server","auth","setup","connect","update","tray","home",
                  "records-prune","records-health",
                  "session-start","session-end","pre-compact","user-prompt-submit",
-                 "monitor","restore","fleet-report","doctor","enrich-eval"):
+                 "monitor","restore","fleet-report","doctor","enrich-eval","bootstrap"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -46,4 +46,6 @@ def main(argv=None):
             "mcpbrain.fleet_cli", fromlist=["main"]).main(rest),
         "doctor": lambda: __import__("mcpbrain.doctor", fromlist=["run_doctor_main"]).run_doctor_main(rest),
         "enrich-eval": lambda: __import__("mcpbrain.enrich_eval", fromlist=["main"]).main(rest),
+        "bootstrap": lambda: __import__(
+            "mcpbrain.onboarding", fromlist=["bootstrap_main"]).bootstrap_main(rest),
     }[ns.cmd]()
