@@ -47,13 +47,13 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     result = {"gmail": 0, "calendar": 0, "drive": 0, "embedded": 0}
     if gmail_service is not None:
         result["gmail"] = sync_gmail(gmail_service, store)
-        result["embedded"] += index_pending(store, embedder)
+        result["embedded"] += index_pending(store, embedder, home=home)
     if calendar_service is not None:
         result["calendar"] = sync_calendar(calendar_service, store)
-        result["embedded"] += index_pending(store, embedder)
+        result["embedded"] += index_pending(store, embedder, home=home)
     if drive_service is not None:
         result["drive"] = sync_drive(drive_service, store)
-        result["embedded"] += index_pending(store, embedder)
+        result["embedded"] += index_pending(store, embedder, home=home)
 
     # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
     # to read config from, the cache enabled, and a fleet pin present. Without a
@@ -69,7 +69,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 drive_service, store, pin=pin,
                 storage_factory=lambda d: drive_cache_storage(drive_service, d))
             # Embed the misses, THEN publish them (publish reads vectors back).
-            result["embedded"] += index_pending(store, embedder)
+            result["embedded"] += index_pending(store, embedder, home=home)
             published_by = config.owner_email(home)
             per_drive = {}
             for drive_id, info in sd.items():
@@ -99,7 +99,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     )
     result["backfill"] = bf
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
-        result["embedded"] += index_pending(store, embedder)
+        result["embedded"] += index_pending(store, embedder, home=home)
     return result
 
 
