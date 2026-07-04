@@ -151,6 +151,38 @@ def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
     assert out["_revoked"] == []
 
 
+def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
+    """A per-cycle delta only ever contains the files that changed since the
+    last cursor — it is never a complete file listing. sync_shared_drives must
+    NOT sweep the cache off that partial set: an artifact for a file that was
+    NOT touched by this cycle's delta must survive."""
+    s = _store(tmp_path)
+    s.set_cursor("drive:D1", "100")
+    fs = LocalDirFleetStorage(tmp_path / "D1")
+
+    # Pre-seed a cache artifact for UNTOUCHED, a file that will NOT appear
+    # in this cycle's delta at all.
+    src = _store(tmp_path, "src.sqlite3")
+    src.import_cached_chunk("gdrive-UNTOUCHED-0", "untouched body", "cU",
+                            {"source_type": "gdrive", "file_id": "UNTOUCHED",
+                             "chunk_index": 0}, [0.5] * 4)
+    ingest_cache.publish_file(src, fs, "D1", "UNTOUCHED", "vU", PIN)
+    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") != []
+
+    # This cycle's delta only mentions a different file, FID.
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"body text here"})
+
+    sync_shared_drives(svc, s, pin=PIN, storage_factory=lambda d: fs)
+
+    # UNTOUCHED's artifact must still be present — it was never in this
+    # cycle's (necessarily partial) live_file_ids set.
+    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") != []
+
+
 def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
     from mcpbrain import ingest_cache
     s = _store(tmp_path)
