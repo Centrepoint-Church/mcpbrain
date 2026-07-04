@@ -44,6 +44,39 @@ def test_try_import_hit_imports_chunks_and_stamps_drive_id(tmp_path):
     assert struct.pack("<4f", *back) == struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
 
 
+class _RaisingGetBytesFleetStorage:
+    """FleetStorage double whose get_bytes() raises a real I/O-style error,
+    simulating a Drive API failure (not a None/corrupt-bytes cache miss)."""
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+
+    def list_paths(self, prefix):
+        return self.wrapped.list_paths(prefix)
+
+    def put_bytes(self, path, data):
+        return self.wrapped.put_bytes(path, data)
+
+    def get_bytes(self, path):
+        raise ConnectionError("simulated Drive API failure")
+
+    def delete(self, path):
+        return self.wrapped.delete(path)
+
+
+def test_try_import_get_bytes_raising_falls_back_not_raises(tmp_path):
+    """_load's fleet_storage.get_bytes() call must be guarded: every other
+    fetch in this module treats failure as 'return None, log at info', but an
+    unguarded get_bytes() exception would propagate out of try_import and (per
+    sync/drive.py's per-drive handler) skip the WHOLE REMAINING FILE LIST for
+    that drive that cycle — violating the module's never-raise contract."""
+    s = _store(tmp_path)
+    real_fs = LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(real_fs, "FID", "vhash1")
+    fs = _RaisingGetBytesFleetStorage(real_fs)
+    # must not raise; must fall back to a cache miss (False)
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+
+
 def test_try_import_miss_returns_false(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False

@@ -119,7 +119,15 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
 
 
 def _load(fleet_storage, path) -> CacheArtifact | None:
-    data = fleet_storage.get_bytes(path)
+    try:
+        data = fleet_storage.get_bytes(path)
+    except Exception as exc:  # noqa: BLE001 — a real storage I/O error (not a
+        # None/corrupt-bytes cache miss) must still fail safe: this module's
+        # contract is "never raise into the sync loop" for every fetch, and an
+        # unguarded exception here would propagate out of try_import and skip
+        # the whole remaining file list for the drive that cycle.
+        log.info("ingest_cache: get_bytes failed for %s (fallback to local): %s", path, exc)
+        return None
     if data is None:
         return None
     try:
