@@ -754,6 +754,14 @@ class Store:
                 value      TEXT DEFAULT '',
                 updated_at TEXT DEFAULT '')""")
 
+            # --- A4, Task 1: enrich_payloads (cache enrichment payloads) ----
+            # Carries the extraction so importers skip re-enrich on shared-drive artifacts.
+            db.execute("""CREATE TABLE IF NOT EXISTS enrich_payloads(
+                doc_id        TEXT PRIMARY KEY,
+                payload       TEXT NOT NULL,
+                logic_version INTEGER DEFAULT 0,
+                at            TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
     # --- S2 recall-acceptance feedback methods --------------------------------
 
     def record_recall_feedback(self, doc_id: str, session_id: str,
@@ -1118,6 +1126,8 @@ class Store:
             db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
+                           [(d,) for d in doc_ids])
             return len(rowids)
 
     def invalidate_local_relations_for_docs(self, doc_ids, *,
@@ -1933,6 +1943,20 @@ class Store:
                 "INSERT OR REPLACE INTO stale_reextract"
                 "(thread_id, signature, triggered_at) VALUES(?,?,?)",
                 (thread_id, signature, triggered_at))
+
+    def set_enrich_payload(self, doc_id: str, payload: str, logic_version: int) -> None:
+        """Persist the validated extraction (JSON string) a drive doc produced, so
+        its shared-drive cache artifact can carry it and importers skip re-enrich."""
+        with self._connect() as db:
+            db.execute("INSERT OR REPLACE INTO enrich_payloads"
+                       "(doc_id, payload, logic_version) VALUES(?,?,?)",
+                       (doc_id, payload, int(logic_version)))
+
+    def get_enrich_payload(self, doc_id: str) -> dict | None:
+        with self._connect() as db:
+            r = db.execute("SELECT payload, logic_version FROM enrich_payloads "
+                           "WHERE doc_id=?", (doc_id,)).fetchone()
+        return {"payload": r["payload"], "logic_version": r["logic_version"]} if r else None
 
     def get_unified_action(self, action_id: int) -> dict | None:
         with self._connect() as db:

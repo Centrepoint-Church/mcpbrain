@@ -567,3 +567,29 @@ def test_org_contrib_staging_dedups_identical_rows(tmp_path):
                 ("a@x.org", "deadbeef", '{"kind":"entity","id":"joel"}'))
         n = db.execute("SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"]
     assert n == 1
+
+
+# --- A4, Task 1: enrich_payloads table + accessors + purge cleanup -------
+
+def test_enrich_payloads_roundtrip_and_purge(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "g.sqlite3", dim=4); s.init()
+    # table exists
+    with s._connect() as db:
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "enrich_payloads" in names
+    # set/get round-trip
+    assert s.get_enrich_payload("gdrive-F1-0") is None
+    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1","entities":[]}', 1)
+    got = s.get_enrich_payload("gdrive-F1-0")
+    assert got["logic_version"] == 1 and "thread_id" in got["payload"]
+    # INSERT OR REPLACE (no duplicate)
+    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1","entities":[1]}', 2)
+    assert s.get_enrich_payload("gdrive-F1-0")["logic_version"] == 2
+    # delete_chunks cleans the payload row
+    with s._connect() as db:
+        db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                   "VALUES('gdrive-F1-0','t','h','{}')")
+    s.delete_chunks(["gdrive-F1-0"])
+    assert s.get_enrich_payload("gdrive-F1-0") is None
