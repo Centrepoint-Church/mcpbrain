@@ -75,6 +75,13 @@ def _safe_entity_claim(e: dict) -> dict | None:
     name = _clean_name(e.get("name", "") or "")
     if not name:
         return None
+    # A PERSON's name must also read like a name, not free-text embedded without a
+    # separator that _clean_name would strip ("Bob divorce lawyer"). Aliases already
+    # go through _is_name_like; the primary name did not, leaving that residual leak.
+    # org/project names are taxonomy-canonical (may contain digits/lowercase, e.g.
+    # "Q3 Budget"), so they keep _clean_name only.
+    if etype == "person" and not _is_name_like(name):
+        return None
     return {"kind": "entity", "id": e["id"], "name": name, "type": etype,
             "org": e.get("org", "") or "", "email_addr": email,
             "aliases": _safe_aliases(e.get("aliases", "") or "")}
