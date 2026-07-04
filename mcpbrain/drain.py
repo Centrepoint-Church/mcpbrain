@@ -132,6 +132,16 @@ BLOCK_DRAINERS["review_org"] = lambda store, data: review_apply.apply_org_verdic
     store, data.get("review_org") or [],
     cap=config.review_max_apply_per_run(str(config.app_dir()))
 )
+# Curator fuzzy-merge adjudication (org layer): the subagent's pushed
+# 'org_merge_review' answers ({pair_id, same, canonical}) are applied by the
+# curator-scoped applier. Registered here so the org merges land on push, same
+# as the local merge_answers path and the review_* families.
+def _drain_org_merge_review(store, data):
+    from mcpbrain import org_curate
+    return org_curate.apply_org_merge_answers(
+        store, data.get("org_merge_review") or [],
+        cap=config.review_max_apply_per_run(str(config.app_dir())))
+BLOCK_DRAINERS["org_merge_review"] = _drain_org_merge_review
 
 
 def _home(home) -> Path:

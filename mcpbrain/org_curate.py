@@ -349,21 +349,65 @@ def _build_adjudication_units(store) -> list[dict]:
     the curator adjudicates STRUCTURAL evidence, it never sees claim payloads.
     """
     ents = _org_entities(store)
+    suppressed = _suppressed_pairs(store)
     units = []
     for a, b in _candidate_pairs(ents):
         pair_id = "|".join(sorted((a["id"], b["id"])))
+        if pair_id in suppressed:
+            continue                       # already judged 'distinct' — don't re-ask
         units.append({"pair_id": pair_id,
                       "a": {k: a.get(k, "") for k in ("id", "name", "type", "email_addr", "aliases")},
                       "b": {k: b.get(k, "") for k in ("id", "name", "type", "email_addr", "aliases")}})
     return units
 
 
-def adjudicate(units, *, home=None) -> list[dict]:
-    """Adjudication seam (spec B3.3). Default: return no verdicts, so every unit
-    stays 'pending' — the safe default when nothing has wired in a real curator.
-    Tests and a future Haiku-wired curator monkeypatch/replace this to return
-    [{"pair_id", "verdict": "merge"|"pending"|"skip", "canonical"?}, ...]."""
-    return []
+# Pairs a curator subagent judged 'distinct' (same=False): persisted so
+# _build_adjudication_units never re-queues them cycle after cycle (the "no
+# infinite re-ask" guard). A meta-stored set — no schema change, mirrors how
+# other curator bookkeeping avoids new tables.
+_SUPPRESS_META = "org_merge_suppressed"
+
+
+def _suppressed_pairs(store) -> set:
+    try:
+        return set(json.loads(store.get_meta(_SUPPRESS_META) or "[]"))
+    except (ValueError, TypeError):
+        return set()
+
+
+def _suppress_pair(store, pair_id: str) -> None:
+    s = _suppressed_pairs(store)
+    if pair_id not in s:
+        s.add(pair_id)
+        store.set_meta(_SUPPRESS_META, json.dumps(sorted(s)))
+
+
+def apply_org_merge_answers(store, answers, *, cap) -> dict:
+    """Drain-side entry for the curator's fuzzy-merge adjudication (spec B3.3).
+
+    The enrich subagent judges each structural pair packet and returns
+    {"pair_id", "same": bool, "canonical"?}. `same=True` becomes a curator merge
+    verdict applied through _apply_merge_verdicts (org-scoped, curator merge
+    authority, full 0.7.84 hardening: re-fetch by own id, type + role-address
+    guards, cap). `same=False` records a suppression so the pair is never
+    re-queued. Anything malformed is skipped. Returns the merge summary plus a
+    'distinct' count. Called from drain.BLOCK_DRAINERS on the pushed
+    'org_merge_review' answers."""
+    verdicts = []
+    distinct = 0
+    for a in answers or []:
+        pid = a.get("pair_id")
+        if not pid:
+            continue
+        if a.get("same") is True:
+            verdicts.append({"pair_id": pid, "verdict": "merge",
+                             "canonical": a.get("canonical") or ""})
+        else:
+            _suppress_pair(store, pid)
+            distinct += 1
+    result = _apply_merge_verdicts(store, verdicts, cap=cap)
+    result["distinct"] = distinct
+    return result
 
 
 def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
@@ -513,14 +557,21 @@ def _publish(store, fleet_storage, home) -> SnapshotManifest:
 
 def run(store, fleet_storage, home) -> dict:
     """Full curator pass: ingest -> materialise -> deterministic dedup ->
-    adjudicate -> apply -> publish. Safe to run repeatedly: ingest is
-    idempotent (UNIQUE-constrained staging) and publish versions
-    monotonically regardless of how much actually changed.
+    publish, and return the fuzzy-merge adjudication units for the daemon to
+    stash into the enrich spool. Safe to run repeatedly: ingest is idempotent
+    (UNIQUE-constrained staging) and publish versions monotonically regardless
+    of how much actually changed.
 
     Deterministic dedup here calls resolve.resolve_entities with curator=True
     (Task 11's B4a org<->org merge guard): the curator is the one caller
     allowed to merge org<->org entities during its own pass — local resolve
     callers (curator=False, the default) never do.
+
+    FUZZY adjudication is ASYNC (there is no synchronous LLM client): the
+    returned `adjudication_units` are stashed by the daemon as an
+    'org_merge_review' spool block; an enrich subagent judges each pair and the
+    verdicts are applied on push via drain -> apply_org_merge_answers. Merges
+    thus land between curator passes and are picked up by the next publish.
     """
     ing = _ingest(store, fleet_storage)
     # Backstop: re-enforce the fleet-pinned relation allowlist at the CURATOR, not
@@ -532,10 +583,7 @@ def run(store, fleet_storage, home) -> dict:
     mat = _materialise(store, pin_allowlist=pin_allowlist)
     resolve.resolve_entities(store, home=home, curator=True)
     units = _build_adjudication_units(store)
-    cap = config.review_max_apply_per_run(home)
-    verdicts = adjudicate(units, home=home)
-    adj = _apply_merge_verdicts(store, verdicts, cap=cap)
     manifest = _publish(store, fleet_storage, home)
     return {"published": True, "version": manifest.version,
             "ingested": ing["ingested"], "materialised": mat,
-            "adjudicated": adj, "units": len(units)}
+            "adjudication_units": units, "units": len(units)}

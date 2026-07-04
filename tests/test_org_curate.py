@@ -446,8 +446,79 @@ def test_mentioned_with_two_sources_materialises(tmp_path):
                           "WHERE relation='mentioned_with'").fetchone()["c"] == 1
 
 
-def test_adjudicate_default_is_all_pending(tmp_path):
-    assert org_curate.adjudicate([{"pair_id": "a|b"}]) == []
+def test_apply_org_merge_answers_merges_on_same_true(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel','Joel','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
+    res = org_curate.apply_org_merge_answers(
+        s, [{"pair_id": "joel|joel-chelliah", "same": True, "canonical": "Joel Chelliah"}],
+        cap=10)
+    assert res["merged"] == 1
+    survivors = [e for e in (s.get_entity("joel"), s.get_entity("joel-chelliah")) if e]
+    assert len(survivors) == 1
+
+
+def test_apply_org_merge_answers_same_false_suppresses_and_does_not_merge(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('sam','Sam Lee','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('samuel','Samuel Lee','person','org',1)")
+    res = org_curate.apply_org_merge_answers(
+        s, [{"pair_id": "sam|samuel", "same": False, "canonical": ""}], cap=10)
+    assert res["merged"] == 0 and res["distinct"] == 1
+    assert s.get_entity("sam") is not None and s.get_entity("samuel") is not None
+    # suppressed -> _build_adjudication_units must never re-queue this pair
+    assert "sam|samuel" in org_curate._suppressed_pairs(s)
+
+
+def test_suppressed_pair_not_requeued(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('sam','Sam Lee','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('samuel','Samuel Lee','person','org',1)")
+    before = {u["pair_id"] for u in org_curate._build_adjudication_units(s)}
+    assert "sam|samuel" in before                      # a genuine fuzzy candidate
+    org_curate.apply_org_merge_answers(
+        s, [{"pair_id": "sam|samuel", "same": False}], cap=10)
+    after = {u["pair_id"] for u in org_curate._build_adjudication_units(s)}
+    assert "sam|samuel" not in after                   # never re-asked
+
+
+def test_apply_org_merge_answers_respects_cap(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel','Joel','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
+    res = org_curate.apply_org_merge_answers(
+        s, [{"pair_id": "joel|joel-chelliah", "same": True}], cap=0)
+    assert res["capped"] == 1 and res["merged"] == 0
+    assert s.get_entity("joel") is not None and s.get_entity("joel-chelliah") is not None
+
+
+def test_run_returns_adjudication_units_for_the_daemon_to_stash(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel','Joel','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
+    summary = org_curate.run(s, fs, str(tmp_path))
+    pids = {u["pair_id"] for u in summary["adjudication_units"]}
+    assert "joel|joel-chelliah" in pids
+    # units are structural-only: no content-shaped fields
+    u = summary["adjudication_units"][0]
+    assert set(u["a"]) <= {"id", "name", "type", "email_addr", "aliases"}
 
 
 def test_apply_merge_verdict_merges_only_on_merge(tmp_path):
@@ -526,49 +597,18 @@ def test_run_second_publish_bumps_version(tmp_path):
     assert (v1, v2) == (1, 2)
 
 
-def test_run_applies_real_adjudication_verdict_end_to_end(tmp_path, monkeypatch):
-    """org_curate.run's adjudicate()/_apply_merge_verdicts wiring is normally
-    only unit-tested in isolation (adjudicate() always returns [] in this
-    phase, so a non-empty verdict list never actually flows through run()'s
-    real orchestration). Monkeypatch adjudicate to return a real 'merge'
-    verdict for a genuine fuzzy candidate pair and confirm run() applies it
-    end-to-end, through the real config-derived cap, not just when
-    _apply_merge_verdicts is called directly in a unit test."""
-    from tests.helpers.org_fleet import LocalDirFleetStorage
-    fs = LocalDirFleetStorage(tmp_path / "fleet")
-    s = _store(tmp_path)
-    with s._connect() as db:                          # a genuine fuzzy candidate pair
-        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('joel','Joel','person','org',1)")
-        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
-    pair_id = "|".join(sorted(("joel", "joel-chelliah")))
-    monkeypatch.setattr(org_curate, "adjudicate",
-                        lambda units, home=None: [{"pair_id": pair_id, "verdict": "merge"}])
-    summary = org_curate.run(s, fs, str(tmp_path))
-    assert summary["adjudicated"]["merged"] == 1
-    survivors = [e for e in (s.get_entity("joel"), s.get_entity("joel-chelliah")) if e]
-    assert len(survivors) == 1
-
-
-def test_run_cap_blocks_a_real_merge_verdict(tmp_path, monkeypatch):
-    """The config-derived cap threaded into run() must actually block a real
-    'merge' verdict end-to-end, not just in _apply_merge_verdicts' own unit
-    tests (which call it directly with a hardcoded cap, never exercising
-    config.review_max_apply_per_run's wiring through run())."""
-    from mcpbrain import config
-    from tests.helpers.org_fleet import LocalDirFleetStorage
-    fs = LocalDirFleetStorage(tmp_path / "fleet")
+def test_drain_org_merge_review_applies_via_registry(tmp_path):
+    """The drain BLOCK_DRAINERS entry routes pushed org_merge_review answers to
+    the curator applier (the async apply path)."""
+    from mcpbrain import drain
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                    "VALUES('joel','Joel','person','org',1)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                    "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
-    pair_id = "|".join(sorted(("joel", "joel-chelliah")))
-    monkeypatch.setattr(org_curate, "adjudicate",
-                        lambda units, home=None: [{"pair_id": pair_id, "verdict": "merge"}])
-    monkeypatch.setattr(config, "review_max_apply_per_run", lambda h: 0)
-    summary = org_curate.run(s, fs, str(tmp_path))
-    assert summary["adjudicated"]["capped"] == 1 and summary["adjudicated"]["merged"] == 0
-    assert s.get_entity("joel") is not None and s.get_entity("joel-chelliah") is not None
+    res = drain.BLOCK_DRAINERS["org_merge_review"](
+        s, {"org_merge_review": [{"pair_id": "joel|joel-chelliah", "same": True}]})
+    assert res["merged"] == 1
+    survivors = [e for e in (s.get_entity("joel"), s.get_entity("joel-chelliah")) if e]
+    assert len(survivors) == 1

@@ -12,6 +12,7 @@ def _daemon():
             self._last_org_import = None
             self._org_curate_interval_s = 1.0
             self._last_org_curate = None
+            self._pending_blocks = {}
             self._clock = lambda: 1000.0
 
         def ensure_services(self):          # real daemon resolves services here
@@ -124,3 +125,31 @@ def test_daemon_bodies_round_trip_contrib_curate_import(tmp_path, monkeypatch):
     assert dm_alice._last_org_contrib_upload == 1000.0
     assert dm_curator._last_org_curate == 1000.0
     assert dm_bob._last_org_import == 1000.0
+
+
+def test_run_org_curate_stashes_fuzzy_pairs_as_org_merge_review_block(tmp_path, monkeypatch):
+    """When the curator pass finds fuzzy org duplicates, the daemon body stashes
+    them as an 'org_merge_review' enrich-spool block for a subagent to judge."""
+    from mcpbrain import config, fleet_storage
+    from tests.helpers.org_fleet import make_fleet
+
+    _members, curator, fs = make_fleet(tmp_path, n_members=0)
+    config.write_config(str(curator.home), {"org_config": {"org_pin": {
+        "fleet_secret": "s3cret",
+        "relation_allowlist": ["works_at", "member_of", "mentioned_with"]}}})
+    # two genuine fuzzy org duplicates (no shared email) the deterministic tier won't merge
+    with curator.store._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('sam','Sam Lee','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('samuel','Samuel Lee','person','org',1)")
+
+    monkeypatch.setattr(fleet_storage, "fleet_folder_storage",
+                        lambda home, drive_service=None: fs)
+    monkeypatch.setattr(config, "app_dir", lambda: curator.home)
+
+    dm = _daemon()
+    dm._store = curator.store
+    dm._run_org_curate()
+    units = dm._pending_blocks.get("org_merge_review", [])
+    assert any(u["pair_id"] == "sam|samuel" for u in units)
