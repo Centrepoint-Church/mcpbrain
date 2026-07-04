@@ -192,25 +192,41 @@ class DriveFleetStorage:
     # -- FleetStorage protocol ------------------------------------------
 
     def put_bytes(self, path: str, data: bytes) -> None:
-        from googleapiclient.http import MediaInMemoryUpload
         parent, leaf = self._resolve_file(path, create_parents=True)
-        media = MediaInMemoryUpload(data, mimetype="application/octet-stream")
+        self._put_bytes_at(parent, leaf, data)
+
+    def _put_bytes_at(self, parent: str, leaf: str, data: bytes) -> None:
+        from googleapiclient.http import MediaInMemoryUpload
         existing = self._find_child(parent, leaf, folder=False)
         if existing:
             self._exec(
                 self._svc.files().update(
-                    fileId=existing, media_body=media, supportsAllDrives=True,
+                    fileId=existing,
+                    media_body=MediaInMemoryUpload(data, mimetype="application/octet-stream"),
+                    supportsAllDrives=True,
                 ),
                 context=f"update leaf {leaf!r} under {parent!r}",
             )
-        else:
-            self._exec(
-                self._svc.files().create(
-                    body={"name": leaf, "parents": [parent]},
-                    media_body=media, fields="id", supportsAllDrives=True,
-                ),
-                context=f"create leaf {leaf!r} under {parent!r}",
-            )
+            return
+        self._exec(
+            self._svc.files().create(
+                body={"name": leaf, "parents": [parent]},
+                media_body=MediaInMemoryUpload(data, mimetype="application/octet-stream"),
+                fields="id", supportsAllDrives=True,
+            ),
+            context=f"create leaf {leaf!r} under {parent!r}",
+        )
+        # Race-harden like _ensure_folder: two concurrent publishers can both
+        # see existing is None and both create a same-named leaf blob (Drive
+        # enforces no name uniqueness). We don't trust our own create()'s id
+        # for anything -- put_bytes returns None regardless -- but we
+        # re-resolve via a fresh _find_child call so every racing instance,
+        # and every future reader (get_bytes/list_paths), independently
+        # computes the SAME deterministic winner (modifiedTime desc, then id
+        # desc) rather than depending on which racer happened to run last.
+        # Unlike folders, the loser blob is not reaped here -- reaping is
+        # scoped to folders only.
+        self._find_child(parent, leaf, folder=False)
 
     def get_bytes(self, path: str) -> bytes | None:
         parent, leaf = self._resolve_file(path, create_parents=False)
