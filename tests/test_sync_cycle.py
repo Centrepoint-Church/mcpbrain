@@ -367,3 +367,71 @@ def test_sync_cycle_multi_source_accumulates_and_no_double_embed(tmp_path, emb):
     assert res2["embedded"] == 0, (
         f"Expected 0 new embeddings on second cycle (idempotent), got {res2['embedded']}"
     )
+
+
+def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import ingest_cache
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
+    store.set_cursor("drive:D1", "100")
+
+    # Route DriveFleetStorage at a local dir by monkeypatching the factory hook.
+    from mcpbrain.sync import drive as drivemod
+    calls = {}
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fsmap = {}
+    orig = drivemod.sync_shared_drives
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3):
+        return orig(service, s, pin=pin,
+                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+                    absence_threshold=absence_threshold)
+    drivemod.sync_shared_drives = _patched
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}],
+            initial_cursor="100",
+            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+            exports={"FID": b"shared drive body content"})
+        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    assert res["shared_drives"]["D1"] == 1
+    # the miss was published after embedding: an artifact now exists for FID
+    names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
+    assert any(n.rsplit("/", 1)[-1].startswith("FID.") for n in names)
+
+
+def test_run_sync_cycle_no_pin_skips_shared_drives(tmp_path):
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from tests.test_drive_sync import FakeDriveService
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts): return [[0.0]*4 for _ in texts]
+        def embed_query(self, text): return [0.0]*4
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"owner_email": "me@x.org"})   # no org_pin
+    store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
+    svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    assert "shared_drives" not in res      # gated off without a pin
