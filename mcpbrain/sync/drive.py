@@ -17,6 +17,8 @@ the store, then advancing the cursor only after all upserts complete.
 """
 
 import hashlib
+import logging
+
 from mcpbrain.chunking import chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
@@ -24,6 +26,8 @@ from mcpbrain.sync.extractors import (
     extract_text_from_docx,
     extract_text_from_xlsx,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +350,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
             store.delete_chunks(doc_ids)
         try:
             ingest_cache.remove_file_artifacts(fleet_storage, fid)
-        except Exception:  # noqa: BLE001 — artifact GC is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
+            log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
 
     if new_start:
         store.set_cursor(source, str(new_start))
