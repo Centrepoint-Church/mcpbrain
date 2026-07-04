@@ -628,3 +628,70 @@ def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured
     # ...but nothing was published to the fleet cache (no owner_email to stamp).
     names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
     assert names == [], f"expected no artifacts published without owner_email, got {names}"
+
+
+def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_path):
+    """A newly-pinned Shared Drive's PRE-EXISTING documents (everything before
+    the pin, invisible to the live delta sync because they haven't changed
+    recently) must get ingested via the progressive-backfill wiring, not just
+    files touched after the pin."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import ingest_cache
+    from tests.test_drive_sync import FakeDriveService
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    # Delta cursor already bootstrapped; this cycle's live delta sees nothing new.
+    store.set_cursor("drive:D1", "100")
+
+    from mcpbrain.sync import drive as drivemod
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fsmap = {}
+    orig = drivemod.sync_shared_drives
+
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3):
+        return orig(service, s, pin=pin,
+                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+                    absence_threshold=absence_threshold)
+    drivemod.sync_shared_drives = _patched
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}],
+            initial_cursor="100",
+            pages=[{"changes": [], "newStartPageToken": "101"}],  # nothing new via delta
+            # Only visible via files().list — a document that predates the pin
+            # and hasn't changed since, so the delta/changes feed never surfaces it.
+            file_list=[{
+                "id": "OLD1", "name": "Old Doc",
+                "mimeType": "application/vnd.google-apps.document",
+                "modifiedTime": "2020-01-01T00:00:00Z",
+                "owners": [{"displayName": "Someone"}],
+            }],
+            exports={"OLD1": b"pre-existing shared drive content from before the pin"})
+        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    # The live delta saw nothing new for D1...
+    assert res["shared_drives"]["D1"] == 0
+    # ...but the progressive-backfill step picked up the pre-existing file via
+    # backfill_shared_drive, and it was processed and published to the cache.
+    assert res["shared_drives_backfill"]["D1"] == 1
+    names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
+    assert any(n.rsplit("/", 1)[-1].startswith("OLD1.") for n in names), (
+        f"expected OLD1 artifact published via shared-drive backfill, got {names}"
+    )
