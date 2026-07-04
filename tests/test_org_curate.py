@@ -132,6 +132,61 @@ def test_materialise_writes_org_rows(tmp_path):
         assert db.execute("SELECT COUNT(*) c FROM entity_relations WHERE origin='org'").fetchone()["c"] == 1
 
 
+def test_rematerialise_updates_org_skeleton_with_new_info(tmp_path):
+    """A curator install is also a normal member machine — its own
+    resolve_entities cadence runs org<->org-guarded but org_curate._materialise
+    must remain able to update its OWN org rows' skeleton on every run,
+    otherwise a later-arriving email/org-change from a contributor would
+    silently never reach the published entity after the first materialise."""
+    s = _store(tmp_path)
+    _stage(s, [_rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person",
+                     "org": "", "email_addr": "", "aliases": ""})])
+    org_curate._materialise(s)
+    joel = s.get_entity("joel")
+    assert joel["origin"] == "org" and joel["email_addr"] == ""
+    # A later contribution reports joel's email — re-materialising (the
+    # normal daily cadence behavior, since staging accumulates permanently
+    # and is re-aggregated every run) must pick it up on the ALREADY-org row.
+    _stage(s, [_rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person",
+                     "org": "Acme", "email_addr": "joel@acme.org", "aliases": ""},
+                    sref="ref2")])
+    org_curate._materialise(s)
+    joel = s.get_entity("joel")
+    assert joel["origin"] == "org"
+    assert joel["email_addr"] == "joel@acme.org" and joel["org"] == "Acme"
+
+
+def test_tombstones_exclude_purely_local_merges(tmp_path):
+    """A curator's own ordinary local-dedup merge (both sides origin='local')
+    must never be published as a tombstone — publishing it would leak the
+    curator's private local contacts' name-derived ids fleet-wide, bypassing
+    the entire fail-closed contribution edge."""
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('john-private-donor','John Private Donor','person','local',5)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('john-donor','John Donor','person','local',2)")
+    s.merge_entities("john-donor", "john-private-donor", method="deterministic")
+    assert org_curate._tombstones(s) == []
+
+
+def test_tombstones_include_org_winner_merges(tmp_path):
+    """A merge whose winner is an org-layer row (the curator's own org<->org
+    dedup, or a slug-drift/local-into-org merge) must still be published as a
+    tombstone, so consumer re-imports don't resurrect the loser id."""
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('acme','Acme','org','org',5)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('acme-inc','Acme Inc','org','org',2)")
+    s.merge_entities("acme-inc", "acme", method="deterministic")
+    tombs = org_curate._tombstones(s)
+    assert len(tombs) == 1
+    assert tombs[0].entity_id == "acme-inc" and tombs[0].merged_into == "acme"
+
+
 def test_mentioned_with_singleton_stays_pending(tmp_path):
     s = _store(tmp_path)
     _stage(s, [
