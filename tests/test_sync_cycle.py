@@ -393,7 +393,6 @@ def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
 
     # Route DriveFleetStorage at a local dir by monkeypatching the factory hook.
     from mcpbrain.sync import drive as drivemod
-    calls = {}
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fsmap = {}
     orig = drivemod.sync_shared_drives
