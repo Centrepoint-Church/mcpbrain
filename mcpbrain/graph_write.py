@@ -1945,8 +1945,17 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 list(updates.values()) + [eid])
             if title_alias:
                 _append_alias(conn, eid, title_alias)
-            if "org" in updates and entity_type == "person":
-                _ensure_works_at(conn, eid, updates["org"])
+            # Self-heal works_at whenever the caller reports an org, matching
+            # the email-match branch above — NOT gated on "org" in updates
+            # (whether the skeleton field actually changed this call) or on
+            # _is_org (the skeleton-freeze guard protects the entities row's
+            # own org/email_addr columns, not a relation): an entity whose
+            # stored org is already correct, or is org-origin, can still be
+            # missing its works_at edge (e.g. deleted by something else), and
+            # every re-observation should keep self-healing it, not only the
+            # one call that happens to also change the org field.
+            if org and entity_type == "person":
+                _ensure_works_at(conn, eid, org)
         else:
             all_aliases = aliases
             if title_alias:

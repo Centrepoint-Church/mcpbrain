@@ -146,6 +146,24 @@ def test_upsert_entity_alias_merge(tmp_path):
     assert len(s.list_entities()) == 1
 
 
+def test_upsert_entity_alias_match_self_heals_works_at_even_when_org_unchanged(tmp_path):
+    """An entity reached via alias match whose stored org is already correct
+    (so upsert_entity's own org field never changes this call) must still
+    self-heal a missing works_at edge, matching the email-match branch's
+    unconditional behavior — self-healing must not depend on the org field
+    itself having just been written."""
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute(
+            "INSERT INTO entities(id,name,type,org,aliases,origin) VALUES(?,?,?,?,?,?)",
+            ("joel-legacy", "Joel C", "person", "Acme", "joel chelliah", "local"))
+    assert not s.list_relations()   # no works_at edge exists yet
+    eid = gw.upsert_entity(s, name="Joel Chelliah", entity_type="person", org="Acme")
+    assert eid == "joel-legacy"
+    rels = {(r["entity_a"], r["relation"], r["entity_b"]) for r in s.list_relations()}
+    assert ("joel-legacy", "works_at", "acme") in rels
+
+
 # --- 2.3 role observations with provenance + supersession -----------------
 
 def _role_rows(s, entity_id):
