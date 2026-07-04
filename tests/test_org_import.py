@@ -244,6 +244,89 @@ def test_role_address_pair_never_auto_merges(tmp_path):
     assert s.get_entity("office-local") is not None  # NOT merged (role inbox)
 
 
+def test_role_address_org_entity_never_merges_via_fuzzy_name_match(tmp_path):
+    """A role-address-keyed ORG entity must never absorb a real local person's
+    flesh via the name/alias/token-match path either — "role-address pairs
+    never auto-merge" holds regardless of which match strategy would
+    otherwise fire, not just the email-equality path."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:                        # real person, no email at all
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('joel-local','Joel Chelliah','person','local')")
+    _publish(fs, [_ent("office-org", "Joel Chelliah", email_addr="office@acme.org")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("joel-local") is not None    # NOT merged into the role inbox
+
+
+def test_fan_in_second_org_entity_matching_same_local_id_does_not_phantom_log(tmp_path):
+    """Two org entities in the SAME snapshot independently matching one local
+    id (an upstream data-quality hiccup): the first merge consumes the local
+    row; the second must not write a phantom org_repoint_log entry for a
+    merge that never happened (merge_entities silently no-ops on a missing
+    loser)."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('joel-local','Joel','person','joel@acme.org','local')")
+    _publish(fs, [_ent("joel-a", "Joel A", email_addr="joel@acme.org"),
+                  _ent("joel-b", "Joel B", email_addr="joel@acme.org")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:
+        logs = db.execute("SELECT from_entity_id, to_entity_id FROM org_repoint_log").fetchall()
+    assert len(logs) == 1                            # exactly one real repoint, no phantom
+    assert logs[0]["from_entity_id"] == "joel-local"
+
+
+def test_multiple_candidates_left_ambiguous_not_arbitrarily_merged(tmp_path):
+    """Two LOCAL rows both plausibly matching one incoming org entity (fan-in
+    the other direction) must be left alone for the fuzzy-review queue, not
+    resolved by picking one arbitrarily."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:                         # two distinct local people, same email
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('j1','Joel One','person','shared@acme.org','local')")
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('j2','Joel Two','person','shared@acme.org','local')")
+    _publish(fs, [_ent("joel-org", "Joel Org", email_addr="shared@acme.org")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("j1") is not None and s.get_entity("j2") is not None   # neither merged
+
+
+def test_restore_does_not_move_observation_added_after_the_merge(tmp_path):
+    """A curator SPLIT restore must not pull back onto the resurrected node an
+    observation the merge target accrued NATIVELY, after the original merge
+    happened — only observations recorded at-or-before the repoint belong to
+    the resurrected node's migrated flesh."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _publish(fs, [_ent("joel-old", "Joel Old"), _ent("joel-generic", "Joel Generic")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:                         # pre-merge local flesh on joel-old
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('joel-old','note','pre-merge','local','2020-01-01')")
+    _publish(fs, [_ent("joel-generic", "Joel Generic")], [], version=2,
+             tombstones=[Tombstone(entity_id="joel-old", merged_into="joel-generic")])
+    org_import.import_snapshot(s, fs)                # joel-old merged away; pre-merge note now on joel-generic
+    with s._connect() as db:
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('joel-generic','note','native-post-merge','local','2099-01-01')")
+    _publish(fs, [_ent("joel-old", "Joel Old"), _ent("joel-generic", "Joel Generic")], [], version=3)
+    org_import.import_snapshot(s, fs)                # curator splits joel-old back out
+    with s._connect() as db:
+        old_notes = {r["value"] for r in db.execute(
+            "SELECT value FROM entity_observations WHERE entity_id='joel-old'").fetchall()}
+        generic_notes = {r["value"] for r in db.execute(
+            "SELECT value FROM entity_observations WHERE entity_id='joel-generic'").fetchall()}
+    assert old_notes == {"pre-merge"}                 # migrated flesh restored
+    assert generic_notes == {"native-post-merge"}     # native-to-target flesh stays put
+
+
 def test_ambiguous_name_only_pair_left_for_fuzzy_queue(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
