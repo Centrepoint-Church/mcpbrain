@@ -15,6 +15,7 @@
     --graph-ring:#cdbff5; --graph-ring-text:#697280; --graph-node-fallback:#7a828d;
     --graph-person:#0b5cff; --graph-org:#6a4cff; --graph-project:#1f9d54;
     --graph-document:#b7791f; --graph-topic:#0e7490; --graph-meeting:#db2777;
+    --graph-node-org:#5b7ea8;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -137,12 +138,17 @@
         fade:readVar("--graph-fade","#c9ced7"), linkIdle:readVar("--graph-link-idle","#dfe3ea"),
         linkMute:readVar("--graph-link-mute","#eef1f5"), linkHot:readVar("--graph-link-hot","#0b5cff"),
         ring:readVar("--graph-ring","#cdbff5"), ringText:readVar("--graph-ring-text","#697280"),
-        nodeFallback:readVar("--graph-node-fallback","#7a828d"), byType };
+        nodeFallback:readVar("--graph-node-fallback","#7a828d"),
+        orgOrigin:readVar("--graph-node-org","#5b7ea8"), byType };
     }
     const palette = readPalette();
 
-    // colour is ALWAYS by entity type
-    function nodeColour(n){ return palette.byType[n.type] || palette.nodeFallback; }
+    // colour is by entity type, except org-baseline entities read as a
+    // distinct, consistent colour regardless of type (Phase D: origin surfacing).
+    function nodeColour(n){
+      if (n.origin === "org") return palette.orgOrigin;
+      return palette.byType[n.type] || palette.nodeFallback;
+    }
     function nodeRadius(n){
       const conn = n.connections || 0, scale = window.innerWidth <= 768 ? 1.4 : 1;
       if (n.type === "org" || n.type === "project") return (8 + Math.min(conn*0.15, 12)) * scale;
@@ -290,6 +296,10 @@
         const sw=document.createElement("span"); sw.className="sw"; sw.style.background=palette.byType[t]||palette.nodeFallback;
         const lb=document.createElement("span"); lb.textContent=t;
         row.appendChild(sw); row.appendChild(lb); el.appendChild(row); }
+      const orgRow=document.createElement("div"); orgRow.className="row";
+      const orgSw=document.createElement("span"); orgSw.className="sw"; orgSw.style.background=palette.orgOrigin;
+      const orgLb=document.createElement("span"); orgLb.textContent="org baseline";
+      orgRow.appendChild(orgSw); orgRow.appendChild(orgLb); el.appendChild(orgRow);
     }
     renderLegend();
 

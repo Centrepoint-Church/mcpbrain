@@ -40,6 +40,14 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
             supp_join = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
                          if has_supp else "")
 
+            # origin (local/org) predates some test/legacy schemas that create
+            # entities manually without it — select a literal default rather
+            # than erroring the whole read for stores missing the column.
+            has_origin = any(row["name"] == "origin"
+                             for row in db.execute("PRAGMA table_info(entities)"))
+            origin_col = ("COALESCE(e.origin, 'local') AS origin" if has_origin
+                         else "'local' AS origin")
+
             where = ["COALESCE(e.degree, 0) >= :min_conn"]
             params: dict = {"min_conn": int(min_conn)}
             if has_supp:
@@ -68,6 +76,7 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                        COALESCE(e.email_addr, '') AS email_addr,
                        COALESCE(e.first_seen, '') AS first_seen,
                        COALESCE(e.last_seen, '') AS last_seen,
+                       {origin_col},
                        ec.community_id, cs.title AS community_title,
                        COALESCE(e.degree, 0) AS degree
                 FROM entities e
@@ -106,6 +115,7 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                 "email_addr": r["email_addr"], "connections": r["degree"],
                 "community": r["community_id"],
                 "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                "origin": r["origin"],
             } for r in rows]
 
             link_cap = max(100, min(50000, int(max_links)))
