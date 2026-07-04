@@ -208,3 +208,81 @@ def test_tombstone_repoints_local_references(tmp_path):
     with s._connect() as db:
         row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
     assert row["entity_b"] == "dana-okafor"       # local ref re-pointed to the survivor
+
+
+def test_slug_drift_email_equality_merges_local_into_org(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:                        # local variant with a private observation
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin,mentions) "
+                   "VALUES('dana-c','Dana C','person','dana@acme.org','local',3)")
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('dana-c','note','private','local','2026-01-01')")
+    _publish(fs, [_ent("dana-okafor", "Dana Okafor", email_addr="dana@acme.org")],
+             [], version=1)
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("dana-c") is None            # local merged away
+    surv = s.get_entity("dana-okafor")
+    assert surv is not None and surv["origin"] == "org"   # org node survives
+    with s._connect() as db:
+        obs = db.execute("SELECT entity_id FROM entity_observations WHERE attribute='note'").fetchone()
+        rep = db.execute("SELECT from_entity_id,to_entity_id FROM org_repoint_log").fetchone()
+    assert obs["entity_id"] == "dana-okafor"       # private flesh re-attached
+    assert (rep["from_entity_id"], rep["to_entity_id"]) == ("dana-c", "dana-okafor")
+
+
+def test_role_address_pair_never_auto_merges(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('office-local','Office','person','office@acme.org','local')")
+    _publish(fs, [_ent("office-org", "Office Org", email_addr="office@acme.org")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("office-local") is not None  # NOT merged (role inbox)
+
+
+def test_ambiguous_name_only_pair_left_for_fuzzy_queue(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:                         # same-ish name, no shared email/alias
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('jsmith','J Smith','person','local')")
+    _publish(fs, [_ent("john-smith", "John Smith")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("jsmith") is not None         # not auto-merged
+    assert s.get_entity("john-smith") is not None
+
+
+def test_restore_from_repoint_log_reattaches_after_curator_split(tmp_path):
+    """A curator SPLIT: an id merged away by an earlier tombstone (repoint
+    logged from_entity_id='dana-old' -> to_entity_id='dana-generic') later
+    reappears as its own entity in a newer snapshot. The local flesh that had
+    been re-pointed onto the merge target must move back onto the resurrected
+    node."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _publish(fs, [_ent("dana-old", "Dana Old"), _ent("dana-generic", "Dana Generic")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:                         # local flesh attached to dana-old
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('doc','Doc','document','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin) "
+                   "VALUES('doc','mentioned_with','dana-old','local')")
+    _publish(fs, [_ent("dana-generic", "Dana Generic")], [], version=2,
+             tombstones=[Tombstone(entity_id="dana-old", merged_into="dana-generic")])
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("dana-old") is None          # merged away by the tombstone
+    with s._connect() as db:
+        row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
+    assert row["entity_b"] == "dana-generic"
+    # v3: curator splits dana-old back out as its own entity
+    _publish(fs, [_ent("dana-old", "Dana Old"), _ent("dana-generic", "Dana Generic")], [], version=3)
+    org_import.import_snapshot(s, fs)
+    resurrected = s.get_entity("dana-old")
+    assert resurrected is not None and resurrected["origin"] == "org"
+    with s._connect() as db:
+        row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
+    assert row["entity_b"] == "dana-old"             # local ref moved back onto the resurrected node
