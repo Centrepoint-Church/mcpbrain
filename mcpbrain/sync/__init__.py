@@ -105,17 +105,21 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                         "(files still synced and embedded locally)")
                 per_drive = {}
                 drives_fs: dict[str, object] = {}
+                total_files = 0
+                total_published = 0
                 for drive_id, info in sd.items():
                     if drive_id == "_revoked":
                         continue
                     fs = info["storage"]
                     drives_fs[drive_id] = fs
                     if published_by:
-                        _publish_drive_misses(
+                        total_published += _publish_drive_misses(
                             store, ingest_cache, fs, drive_id, info["miss"], pin, published_by)
                     per_drive[drive_id] = info["processed"]
+                    total_files += info["processed"]
                 result["shared_drives"] = per_drive
-                result["revoked_drives"] = sd.get("_revoked", [])
+                revoked = sd.get("_revoked", [])
+                result["revoked_drives"] = revoked
 
                 # One progressive-backfill window per pinned drive so a newly-
                 # pinned drive's PRE-EXISTING documents (everything before the
@@ -130,10 +134,19 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 for drive_id, res in bf_sd.items():
                     fs = drives_fs[drive_id]
                     backfill_counts[drive_id] = res["processed"]
+                    total_files += res["processed"]
                     if published_by:
-                        _publish_drive_misses(
+                        total_published += _publish_drive_misses(
                             store, ingest_cache, fs, drive_id, res["miss"], pin, published_by)
                 result["shared_drives_backfill"] = backfill_counts
+
+                # One line per pass, matching daemon.py's cadence-log convention
+                # (e.g. "feedback_aggregate: updated=%d skipped=%d"). Revocation
+                # is consequential — content left the cache because access was
+                # lost — so bump the level to warning when any drive was revoked.
+                level = log.warning if revoked else log.info
+                level("shared_drives: drives=%d files=%d published=%d revoked=%s",
+                      len(per_drive), total_files, total_published, revoked or "none")
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
             # abort the rest of the cycle (pre-existing sync + the subsequent
             # backfill step must run whether or not this succeeds)
