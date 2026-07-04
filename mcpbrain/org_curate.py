@@ -8,24 +8,32 @@ what determinism can't settle on STRUCTURAL evidence only (verdict 'pending'
 when it can't decide), and publish a versioned snapshot (manifest written LAST).
 Reversible + capped, per the 0.7.84 brain-review hardening.
 
-This module currently implements ingest, materialise (deterministic merge +
-corroboration + role-address guards), and the adjudication seam (fuzzy
-structural-only candidate packets, an injectable adjudicate() defaulting to
-all-pending, and a hardened capped merge applier). The publish step (versioned
-snapshot, manifest written last) is a later task.
+This module implements ingest, materialise (deterministic merge + corroboration
++ role-address guards), the adjudication seam (fuzzy structural-only candidate
+packets, an injectable adjudicate() defaulting to all-pending, and a hardened
+capped merge applier), and publish (versioned snapshot + tombstones written to
+the fleet folder, manifest written last) plus run() — the full ingest ->
+materialise -> dedup -> adjudicate -> apply -> publish pipeline.
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
 
-from mcpbrain import graph_write
-from mcpbrain.org_contracts import ContributionRecord
+from mcpbrain import config, graph_write, orgs, resolve
+from mcpbrain.org_contracts import ContributionRecord, SnapshotManifest, Tombstone
 from mcpbrain.resolve import (_NAME_MERGEABLE_TYPES, _candidate_pairs, _pick_winner,
                               is_role_address)
 
 log = logging.getLogger(__name__)
+
+# Fleet-relative paths the published snapshot lives at (spec B3.4/B5.4).
+SNAPSHOT_PATH = "org-graph/snapshot.jsonl.gz"
+TOMBSTONES_PATH = "org-graph/tombstones.jsonl"
+MANIFEST_PATH = "org-graph/manifest.json"
 
 # Relations that need independent-source corroboration before entering layer 1
 # (spec B3.2): co-occurrence claimed by only one contributor never surfaces
@@ -292,3 +300,87 @@ def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
                              canonical_name=v.get("canonical") or None, method="curator")
         result["merged"] += 1
     return result
+
+
+def _snapshot_lines(store, home) -> list[str]:
+    """Serialise the org layer to JSONL lines: entities, then relations, then a
+    trailing org_taxonomy line — everything a consumer needs to rebuild the
+    org graph and classify against the same taxonomy the curator used."""
+    lines = []
+    with store._connect() as db:
+        for e in db.execute(
+                "SELECT id, name, type, org, email_addr, aliases FROM entities "
+                "WHERE origin='org' ORDER BY id").fetchall():
+            lines.append(json.dumps({"kind": "entity", **dict(e)}, sort_keys=True))
+        for r in db.execute(
+                "SELECT entity_a, relation, entity_b, valid_from, valid_to, confidence "
+                "FROM entity_relations WHERE origin='org' AND invalidated_at IS NULL "
+                "ORDER BY id").fetchall():
+            lines.append(json.dumps({"kind": "relation", **dict(r)}, sort_keys=True))
+    lines.append(json.dumps({"kind": "org_taxonomy",
+                             "names": list(orgs.taxonomy_from_config(home).names)}, sort_keys=True))
+    return lines
+
+
+def _tombstones(store) -> list[Tombstone]:
+    """Every merged-away id becomes a tombstone pointing at its winner, so a
+    consumer re-import never resurrects a loser id (spec B3.4/B5.4)."""
+    return [Tombstone(entity_id=m["loser_id"], merged_into=m["winner_id"])
+            for m in store.list_entity_merges()]
+
+
+def _publish(store, fleet_storage, home) -> SnapshotManifest:
+    """Serialise the current org layer + tombstones into a versioned snapshot
+    in the fleet folder. Version is tracked in meta['org_curator_version'] and
+    incremented on every publish (never reused, even across empty runs).
+
+    Ordering matters: the snapshot and tombstones are written FIRST, the
+    manifest LAST, so a crash mid-publish never leaves a manifest pointing at
+    a missing or stale snapshot — the manifest is the "here's what's ready"
+    signal for consumers.
+    """
+    prev = int(store.get_meta("org_curator_version") or 0)
+    version = prev + 1
+    lines = _snapshot_lines(store, home)
+    gz = gzip.compress(("\n".join(lines) + "\n").encode("utf-8"))
+    tombs = _tombstones(store)
+    n_ent = sum(1 for x in lines if json.loads(x)["kind"] == "entity")
+    n_rel = sum(1 for x in lines if json.loads(x)["kind"] == "relation")
+    manifest = SnapshotManifest(
+        version=version, created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        entity_count=n_ent, relation_count=n_rel, tombstone_count=len(tombs),
+        snapshot_sha256=hashlib.sha256(gz).hexdigest())
+    fleet_storage.put_bytes(SNAPSHOT_PATH, gz)
+    fleet_storage.put_bytes(
+        TOMBSTONES_PATH,
+        ("\n".join(json.dumps(t.to_dict(), sort_keys=True) for t in tombs) + "\n").encode()
+        if tombs else b"")
+    fleet_storage.put_bytes(MANIFEST_PATH,
+                            json.dumps(manifest.to_dict(), sort_keys=True).encode())
+    store.set_meta("org_curator_version", str(version))
+    return manifest
+
+
+def run(store, fleet_storage, home) -> dict:
+    """Full curator pass: ingest -> materialise -> deterministic dedup ->
+    adjudicate -> apply -> publish. Safe to run repeatedly: ingest is
+    idempotent (UNIQUE-constrained staging) and publish versions
+    monotonically regardless of how much actually changed.
+
+    Deterministic dedup here calls resolve.resolve_entities without a
+    `curator=` kwarg: Task 11 (not yet landed) is what adds an org<->org merge
+    guard gated on that kwarg. Once Task 11 ships, this call should pass
+    `curator=True` so the curator is the one caller allowed to merge org<->org
+    entities during its own pass.
+    """
+    ing = _ingest(store, fleet_storage)
+    mat = _materialise(store)
+    resolve.resolve_entities(store, home=home)
+    units = _build_adjudication_units(store)
+    cap = config.review_max_apply_per_run(home)
+    verdicts = adjudicate(units, home=home)
+    adj = _apply_merge_verdicts(store, verdicts, cap=cap)
+    manifest = _publish(store, fleet_storage, home)
+    return {"published": True, "version": manifest.version,
+            "ingested": ing["ingested"], "materialised": mat,
+            "adjudicated": adj, "units": len(units)}

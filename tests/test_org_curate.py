@@ -1,3 +1,4 @@
+import gzip
 import json
 
 from mcpbrain import org_curate
@@ -200,3 +201,43 @@ def test_apply_merge_verdict_role_address_guarded(tmp_path):
     res = org_curate._apply_merge_verdicts(
         s, [{"pair_id": "office-a|office-b", "verdict": "merge"}], cap=10)
     assert res["guarded"] == 1 and res["merged"] == 0
+
+
+def test_run_end_to_end_publishes_snapshot(tmp_path, monkeypatch):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    from mcpbrain.org_contracts import SnapshotManifest
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _write_batch(fs, "contrib/alice@x.org/1.jsonl", [
+        _rec({"kind": "entity", "id": "joel", "name": "Joel Chelliah", "type": "person",
+              "org": "Acme", "email_addr": "joel@acme.org", "aliases": ""}),
+        _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "acme"}),
+    ])
+    summary = org_curate.run(s, fs, str(tmp_path))
+    assert summary["published"] is True and summary["version"] == 1
+    man = SnapshotManifest.from_dict(json.loads(fs.get_bytes("org-graph/manifest.json")))
+    assert man.entity_count >= 2 and man.relation_count == 1
+    gz = fs.get_bytes("org-graph/snapshot.jsonl.gz")
+    assert hashlib_sha(gz) == man.snapshot_sha256
+    lines = gzip.decompress(gz).decode().splitlines()
+    kinds = {json.loads(x)["kind"] for x in lines}
+    assert {"entity", "relation"} <= kinds
+
+
+def hashlib_sha(b):
+    import hashlib
+    return hashlib.sha256(b).hexdigest()
+
+
+def test_run_second_publish_bumps_version(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _write_batch(fs, "contrib/a@x.org/1.jsonl",
+                 [_rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
+                        "org": "", "email_addr": "", "aliases": ""})])
+    v1 = org_curate.run(s, fs, str(tmp_path))["version"]
+    v2 = org_curate.run(s, fs, str(tmp_path))["version"]
+    assert (v1, v2) == (1, 2)
