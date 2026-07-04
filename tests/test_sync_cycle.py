@@ -419,6 +419,79 @@ def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
     assert any(n.rsplit("/", 1)[-1].startswith("FID.") for n in names)
 
 
+def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path):
+    """The cycle result must surface shared-drive cache hit/miss counts so
+    they can be exposed via daemon.status() (observability). One file is
+    already cached (pre-published artifact -> hit), the other is new
+    (extracted locally -> miss)."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import FleetPin
+    from mcpbrain.sync.drive import _file_content_hash
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
+    store.set_cursor("drive:D1", "100")
+
+    pin = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+                   enrich_logic_floor=1, fleet_secret="s3cret")
+
+    # Pre-publish an artifact for FID1's current version so try_import hits
+    # for it during the cycle; FID2 has no artifact, so it's a miss.
+    fs_root = tmp_path / "D1"
+    fs_pre = LocalDirFleetStorage(fs_root)
+    src = Store(tmp_path / "src.sqlite3", dim=4); src.init()
+    src.import_cached_chunk("gdrive-FID1-0", "cached body", "c0",
+                            {"source_type": "gdrive", "file_id": "FID1", "chunk_index": 0}, [0.5] * 4)
+    fm1 = _gdoc_change("FID1")["file"]
+    ch1 = _file_content_hash(fm1)
+    # contextual_retrieval defaults True (config.contextual_retrieval_enabled),
+    # and run_sync_cycle threads that default through to try_import as a
+    # pipeline-mismatch guard, so the pre-published artifact must be stamped
+    # with the same flag or it will (correctly) miss.
+    ingest_cache.publish_file(src, fs_pre, "D1", "FID1", ch1, pin, contextual_retrieval=True)
+
+    from mcpbrain.sync import drive as drivemod
+    fsmap = {}
+    orig = drivemod.sync_shared_drives
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
+                 contextual_retrieval=False):
+        return orig(service, s, pin=pin,
+                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+                    absence_threshold=absence_threshold,
+                    contextual_retrieval=contextual_retrieval)
+    drivemod.sync_shared_drives = _patched
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}],
+            initial_cursor="100",
+            pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
+                    "newStartPageToken": "101"}],
+            exports={"FID1": b"DIFFERENT - must NOT be extracted",
+                     "FID2": b"brand new shared drive content"})
+        result = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    assert result["shared_drives"]["D1"] == 2
+    assert result["shared_drive_cache"] == {"hits": 1, "misses": 1}
+
+
 def test_run_sync_cycle_no_pin_skips_shared_drives(tmp_path):
     from mcpbrain import config
     from mcpbrain.store import Store

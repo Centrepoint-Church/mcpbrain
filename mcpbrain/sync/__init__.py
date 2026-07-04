@@ -115,6 +115,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 drives_fs: dict[str, object] = {}
                 total_files = 0
                 total_published = 0
+                total_miss = 0
                 for drive_id, info in sd.items():
                     if drive_id == "_revoked":
                         continue
@@ -126,7 +127,10 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                             contextual_retrieval=cr)
                     per_drive[drive_id] = info["processed"]
                     total_files += info["processed"]
+                    total_miss += len(info["miss"])
                 result["shared_drives"] = per_drive
+                result["shared_drive_cache"] = {
+                    "hits": max(0, total_files - total_miss), "misses": total_miss}
                 revoked = sd.get("_revoked", [])
                 result["revoked_drives"] = revoked
 
