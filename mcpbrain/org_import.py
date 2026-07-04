@@ -211,10 +211,10 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         local = [dict(r) for r in db.execute(
             "SELECT id,name,type,email_addr,aliases FROM entities WHERE origin='local'").fetchall()]
     local_by_email = {}
-    for l in local:
-        em = (l.get("email_addr") or "").strip().lower()
+    for loc in local:
+        em = (loc.get("email_addr") or "").strip().lower()
         if em and not is_role_address(em):
-            local_by_email.setdefault(em, []).append(l)
+            local_by_email.setdefault(em, []).append(loc)
 
     # Pass 1: collect each org entity's candidate match, without applying any
     # merge yet, so fan-in (multiple org entities matching one local id) can
@@ -227,7 +227,7 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         # (a) email-equality — deterministic, role-address guarded.
         em = (e.get("email_addr") or "").strip().lower()
         if em and not is_role_address(em):
-            cands = [l for l in local_by_email.get(em, []) if l["id"] != org_id]
+            cands = [loc for loc in local_by_email.get(em, []) if loc["id"] != org_id]
             if len(cands) == 1:
                 target = cands[0]
 
@@ -247,19 +247,19 @@ def _reconcile_slug_drift(store, entities, version) -> int:
             org_aliases = {a.strip().lower()
                            for a in re.split(r"[|,]", e.get("aliases") or "") if a.strip()}
             matches = []
-            for l in local:
-                if l["id"] == org_id or l["type"] != e.get("type", "person"):
+            for loc in local:
+                if loc["id"] == org_id or loc["type"] != e.get("type", "person"):
                     continue
-                if is_role_address(l.get("email_addr") or ""):
+                if is_role_address(loc.get("email_addr") or ""):
                     continue
-                lk = canonical_key(l["name"])
-                lname = l["name"].strip().lower()
+                lk = canonical_key(loc["name"])
+                lname = loc["name"].strip().lower()
                 if lk and lk == org_key:
-                    matches.append(l)
+                    matches.append(loc)
                 elif lname in org_aliases:
-                    matches.append(l)
-                elif _token_set_ratio(org_toks, _tokens(l["name"])) >= 0.8:
-                    matches.append(l)
+                    matches.append(loc)
+                elif _token_set_ratio(org_toks, _tokens(loc["name"])) >= 0.8:
+                    matches.append(loc)
             if len(matches) == 1:            # single unambiguous match only
                 target = matches[0]
 

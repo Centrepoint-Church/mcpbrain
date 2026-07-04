@@ -53,8 +53,17 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-03):** all four version files **and** the published wheel are at
-  `0.7.88` — source, dist index, and plugin manifests are in step. **0.7.88 fixes the
+- **Current state (2026-07-04):** all four version files **and** the published wheel are at
+  `0.7.89` — source, dist index, and plugin manifests are in step. **0.7.89 ships the complete
+  org-baseline feature** (org shared graph + personal overlay): shared-drive ingest cache
+  (subsystem A), curated org graph — contribution edge / curator / consumer import (B),
+  onboarding baseline-bootstrap (C), a full hardening pass, real LLM fuzzy-merge adjudication via
+  the async enrich-spool, Phase-D convergence tests + `/graph` origin colouring + cache/curator
+  `/api/status` metrics + `docs/ORG-BASELINE-ROLLOUT.md`, and A#4 (cache the enrichment payload so
+  importers skip Haiku re-enrichment on shared-drive docs). Also pytest-xdist parallel-by-default.
+  **Fleet-wide enablement gates on distributing `fleet_secret` via `org-config.json`** — nothing
+  content-shaped, no cache, and no contributions move until the pin is present (see
+  `docs/ORG-BASELINE-ROLLOUT.md`). Earlier: **0.7.88 fixes the
   `bin/consolidate.py` migration itself**, surfaced by its first attended run on the live
   store: `meeting_source_doc_ids()` and `meeting_series_for_old()` both assumed provenance via
   `email_entities`/`entity_relations.source_doc_id`, which calendar-sourced meetings never
