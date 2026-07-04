@@ -593,3 +593,14 @@ def test_enrich_payloads_roundtrip_and_purge(tmp_path):
                    "VALUES('gdrive-F1-0','t','h','{}')")
     s.delete_chunks(["gdrive-F1-0"])
     assert s.get_enrich_payload("gdrive-F1-0") is None
+
+
+def test_delete_chunks_purges_orphan_enrich_payload(tmp_path):
+    """Regression: enrich_payload row with NO matching chunk row must still be
+    deleted when delete_chunks is called on that doc_id."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "g.sqlite3", dim=4); s.init()
+    # payload row with NO matching chunk row
+    s.set_enrich_payload("gdrive-F9-0", '{"thread_id":"gdrive-F9"}', 1)
+    s.delete_chunks(["gdrive-F9-0"])          # no chunk exists for this doc_id
+    assert s.get_enrich_payload("gdrive-F9-0") is None
