@@ -118,6 +118,21 @@ def test_note_drive_presence_purges_after_threshold(tmp_path):
     assert ingest_cache.note_drive_presence(s, [], threshold=3)["purged"] == []
 
 
+def test_note_drive_presence_purges_and_deletes_orphaned_absence_meta_key(tmp_path):
+    """When a drive is purged, its absent:<id> meta key must be DELETED, not
+    reset to '0' — otherwise it accumulates forever as an orphan row."""
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0] * 4)
+    ingest_cache.note_drive_presence(s, ["D1"], threshold=3)
+    ingest_cache.note_drive_presence(s, [], threshold=3)
+    ingest_cache.note_drive_presence(s, [], threshold=3)
+    out = ingest_cache.note_drive_presence(s, [], threshold=3)
+    assert out["purged"] == ["D1"]
+    # the absence meta row must be gone entirely, not lingering at "0"
+    assert s.get_meta(ingest_cache._absence_key("D1")) is None
+
+
 def test_note_drive_presence_transient_glitch_recovers(tmp_path):
     from mcpbrain import ingest_cache
     s = _store(tmp_path)

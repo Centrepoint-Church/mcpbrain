@@ -385,7 +385,10 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
         if n >= threshold:
             purge_drive(store, d)
             purged.append(d)
-            store.set_meta(_absence_key(d), "0")
+            # The drive is being forgotten (removed from `known` below), so its
+            # absence counter must be deleted, not reset to "0" — otherwise it
+            # accumulates forever as an orphan meta row.
+            store.delete_meta(_absence_key(d))
         else:
             store.set_meta(_absence_key(d), str(n))
     known -= set(purged)
