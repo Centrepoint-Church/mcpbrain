@@ -324,10 +324,12 @@ def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
     from mcpbrain import ingest_cache
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "GONE"}, [0.0]*4)
-    # seed the counter as if GONE was seen and has been absent (threshold-1) times
-    ingest_cache.note_drive_presence(s, ["GONE"], threshold=2)  # GONE present, counter=0
-    ingest_cache.note_drive_presence(s, [], threshold=2)        # GONE absent, counter=1
-    svc = FakeDriveService(shared_drives=[])         # GONE no longer listed
+    # A persistent drive keeps the enumeration non-empty, so GONE vanishing is a
+    # genuine single-drive revocation — not a blanket-empty glitch (which the
+    # data-safety guard treats as transient and never purges).
+    ingest_cache.note_drive_presence(s, ["GONE", "KEEP"], threshold=2)  # counter=0
+    ingest_cache.note_drive_presence(s, ["KEEP"], threshold=2)          # GONE absent, counter=1
+    svc = FakeDriveService(shared_drives=[{"id": "KEEP", "name": "Keep"}])  # GONE no longer listed
     out = sync_shared_drives(svc, s, pin=PIN,
                              storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
                              absence_threshold=2)
