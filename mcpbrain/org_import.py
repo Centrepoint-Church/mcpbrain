@@ -174,8 +174,21 @@ def _reconcile_slug_drift(store, entities, version) -> int:
     (multiple-candidate or weak) name-only match — is left untouched for the
     local fuzzy-review queue; auto-merging an ambiguous pair risks folding two
     distinct people together, which is unrecoverable without curator help.
-    Each merge is logged to org_repoint_log (reason='slug_drift') so a later
-    curator SPLIT can restore the local flesh (see _restore_from_repoint_log).
+
+    Fan-in is ALSO ambiguity: if two different org entities in this same
+    snapshot both independently match the same local candidate (an upstream
+    data-quality hiccup — e.g. two org entities sharing an email that the
+    curator's own dedup should have caught but hasn't yet), the local
+    candidate's true identity can't be determined by this consumer either.
+    Matches are collected in a first pass and only applied in a second pass
+    when a local candidate maps to exactly one org entity — a candidate
+    claimed by 2+ org entities is left for the local fuzzy-review queue on
+    every one of them, the same as any other ambiguous match, rather than
+    silently letting whichever org entity happens to be processed first win.
+
+    Each applied merge is logged to org_repoint_log (reason='slug_drift') so
+    a later curator SPLIT can restore the local flesh (see
+    _restore_from_repoint_log).
     """
     with store._connect() as db:
         local = [dict(r) for r in db.execute(
@@ -186,7 +199,10 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         if em and not is_role_address(em):
             local_by_email.setdefault(em, []).append(l)
 
-    merged = 0
+    # Pass 1: collect each org entity's candidate match, without applying any
+    # merge yet, so fan-in (multiple org entities matching one local id) can
+    # be detected before anything is claimed.
+    candidate_for: dict = {}   # org_id -> local candidate id
     for e in entities:
         org_id = e["id"]
         target = None
@@ -225,21 +241,31 @@ def _reconcile_slug_drift(store, entities, version) -> int:
             if len(matches) == 1:            # single unambiguous match only
                 target = matches[0]
 
-        # Re-check the candidate still exists (not the stale `local` snapshot)
-        # right before merging: if an earlier entity in THIS SAME pass already
-        # claimed it (two org entities independently matching one local id —
-        # an upstream data-quality hiccup, not something the initial snapshot
-        # invalidates), merge_entities would silently no-op on the missing
-        # loser, and logging the repoint anyway would write a phantom
-        # org_repoint_log row a later curator SPLIT could restore against
-        # incorrectly. Only log/count a repoint that actually happened.
-        if (target is not None and store.get_entity(target["id"]) is not None
-                and store.get_entity(org_id) is not None):
+        if target is not None:
+            candidate_for[org_id] = target["id"]
+
+    # Fan-in check: a local candidate matched by 2+ org entities is ambiguous
+    # from this consumer's point of view, same as any other multi-candidate
+    # match — drop every org entity's claim on it rather than letting
+    # whichever happens to be processed first silently win.
+    claim_count: dict = {}
+    for local_id in candidate_for.values():
+        claim_count[local_id] = claim_count.get(local_id, 0) + 1
+    unambiguous = {org_id: local_id for org_id, local_id in candidate_for.items()
+                  if claim_count[local_id] == 1}
+
+    merged = 0
+    for org_id, local_id in unambiguous.items():
+        # Re-check both ids still exist right before merging: import_snapshot
+        # stubs org ids before calling this, so org_id should already be
+        # materialised; local_id is re-verified in case something upstream
+        # already touched it. Only log/count a repoint that actually happens.
+        if store.get_entity(local_id) is not None and store.get_entity(org_id) is not None:
             # Local merges INTO org (org id survives — B4a rule 2). The org row
             # must already be materialised (import_snapshot stubs it before
             # calling this) for merge_entities to have a winner to fold into.
-            store.merge_entities(target["id"], org_id, method="slug_drift")
-            _log_repoint(store, target["id"], org_id, version, "slug_drift")
+            store.merge_entities(local_id, org_id, method="slug_drift")
+            _log_repoint(store, local_id, org_id, version, "slug_drift")
             merged += 1
     return merged
 

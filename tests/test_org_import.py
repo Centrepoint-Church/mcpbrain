@@ -290,12 +290,13 @@ def test_role_address_org_entity_never_merges_via_fuzzy_name_match(tmp_path):
     assert s.get_entity("joel-local") is not None    # NOT merged into the role inbox
 
 
-def test_fan_in_second_org_entity_matching_same_local_id_does_not_phantom_log(tmp_path):
+def test_fan_in_two_org_entities_matching_same_local_id_is_ambiguous(tmp_path):
     """Two org entities in the SAME snapshot independently matching one local
-    id (an upstream data-quality hiccup): the first merge consumes the local
-    row; the second must not write a phantom org_repoint_log entry for a
-    merge that never happened (merge_entities silently no-ops on a missing
-    loser)."""
+    id (an upstream data-quality hiccup, e.g. two org entities sharing an
+    email the curator's own dedup should have caught but hasn't yet) is
+    ambiguity from this consumer's point of view too — neither should win by
+    accident of processing order. The local candidate stays untouched (left
+    for the local fuzzy-review queue) and no repoint is logged for either."""
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
@@ -305,10 +306,10 @@ def test_fan_in_second_org_entity_matching_same_local_id_does_not_phantom_log(tm
     _publish(fs, [_ent("joel-a", "Joel A", email_addr="joel@acme.org"),
                   _ent("joel-b", "Joel B", email_addr="joel@acme.org")], [], version=1)
     org_import.import_snapshot(s, fs)
+    assert s.get_entity("joel-local") is not None    # neither org entity claimed it
     with s._connect() as db:
         logs = db.execute("SELECT from_entity_id, to_entity_id FROM org_repoint_log").fetchall()
-    assert len(logs) == 1                            # exactly one real repoint, no phantom
-    assert logs[0]["from_entity_id"] == "joel-local"
+    assert logs == []                                # no repoint for either side of the fan-in
 
 
 def test_multiple_candidates_left_ambiguous_not_arbitrarily_merged(tmp_path):
