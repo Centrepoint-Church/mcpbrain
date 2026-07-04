@@ -364,19 +364,20 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
 
 def sync_shared_drives(service, store, *, pin, storage_factory,
                        absence_threshold: int = 3) -> dict:
-    """Enumerate all Shared Drives, sync each cache-first, run the consecutive-
-    absence revocation counter, and opportunistically sweep dead artifacts.
+    """Enumerate all Shared Drives, sync each cache-first, and run the
+    consecutive-absence revocation counter.
 
     `storage_factory(drive_id) -> FleetStorage` builds a drive-scoped transport
     (prod: DriveFleetStorage; tests: LocalDirFleetStorage). Per-drive failures are
     isolated so one broken drive never aborts the others. Returns
     {drive_id: {'processed','miss','storage'}} plus {'_revoked': [ids]}. The
     caller publishes each drive's misses after embedding (see run_sync_cycle).
+
+    Deliberately does NOT sweep the ingest cache off each cycle's delta — see
+    the note inline below.
     """
-    import logging as _logging
     from mcpbrain import ingest_cache
 
-    log = _logging.getLogger(__name__)
     out: dict = {}
     present: list[str] = []
     for d in list_shared_drives(service):
@@ -391,11 +392,15 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
             log.warning("shared-drive sync failed for %s (skipped): %s", drive_id, exc)
             continue
         out[drive_id] = {"processed": res["processed"], "miss": res["miss"], "storage": fs}
-        # Opportunistic sweep of artifacts whose file id vanished from the drive.
-        try:
-            ingest_cache.sweep_drive(fs, res["live_file_ids"])
-        except Exception as exc:  # noqa: BLE001 — sweep is best-effort
-            log.info("drive: sweep skipped for %s: %s", drive_id, exc)
+        # NOTE: deliberately no sweep_drive() call here. A per-cycle delta
+        # (changes.list since the last cursor) only ever contains files that
+        # changed since last time — never a complete listing of the drive's
+        # files — so it can never be used as the "live" set for a correct
+        # sweep. Explicit removal (changes.list's removed events, handled in
+        # sync_shared_drive via remove_file_artifacts) and version-churn GC
+        # (gc_superseded) already cover cleanup correctly. A genuine full-
+        # drive sweep would need a complete, explicitly-full-enumeration-
+        # driven pass — out of scope for this per-cycle delta loop.
     revoked = ingest_cache.note_drive_presence(
         store, present, threshold=absence_threshold)["purged"]
     out["_revoked"] = revoked
