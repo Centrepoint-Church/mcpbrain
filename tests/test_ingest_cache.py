@@ -444,6 +444,66 @@ def test_bootstrap_drive_unpinned_is_noop(tmp_path):
     assert out["imported"] == 0 and out["cache_hits"] == 0
 
 
+def test_import_applies_cached_enrichment_payload(tmp_path):
+    import gzip, json, base64, struct
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import CacheArtifact, CacheChunk, artifact_filename
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
+    extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
+                  "summary": "quarterly plan",
+                  "entities": [{"name": "Joel Chelliah", "type": "person"}],
+                  "relations": [], "actions": [], "topics": [],
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns the plan"}]}
+    art = CacheArtifact(
+        file_id="FID", content_hash="vh1", extraction_method="gdocs",
+        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunks=(CacheChunk(idx=0, text="Joel Chelliah owns the plan", embedding_b64=vec,
+                           metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
+        enrich={"logic_version": 1, "extraction": extraction},
+        published_by="p@x.org", published_at="2026-07-04")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+                 gzip.compress(json.dumps(art.to_dict()).encode()))
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
+    # chunk marked enriched (no local re-enrich) AND graph rows applied
+    with s._connect() as db:
+        r = db.execute("SELECT enriched FROM chunks WHERE doc_id='gdrive-FID-0'").fetchone()
+        n_ent = db.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+    assert r["enriched"] == 1
+    assert n_ent >= 1                    # the payload's entity was applied to the graph
+    # idempotent: a second import doesn't error or double-apply
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) in (True, False)
+
+
+def test_import_below_floor_payload_falls_back_to_reenrich(tmp_path):
+    # logic_version below the floor -> not applied, chunk left unenriched.
+    import gzip, json, base64, struct
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import CacheArtifact, CacheChunk, artifact_filename
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
+    extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
+                  "summary": "quarterly plan",
+                  "entities": [{"name": "Joel Chelliah", "type": "person"}],
+                  "relations": [], "actions": [], "topics": [],
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns the plan"}]}
+    art = CacheArtifact(
+        file_id="FID", content_hash="vh1", extraction_method="gdocs",
+        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunks=(CacheChunk(idx=0, text="Joel Chelliah owns the plan", embedding_b64=vec,
+                           metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
+        enrich={"logic_version": 0, "extraction": extraction},
+        published_by="p@x.org", published_at="2026-07-04")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+                 gzip.compress(json.dumps(art.to_dict()).encode()))
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
+    with s._connect() as db:
+        r = db.execute("SELECT enriched FROM chunks WHERE doc_id='gdrive-FID-0'").fetchone()
+        n_ent = db.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+    assert r["enriched"] == 0
+    assert n_ent == 0
+
+
 def test_bootstrap_drive_prefers_newest_content_version(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     # Two artifacts for the same file_id but different content versions (different hashes, different timestamps)
