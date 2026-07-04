@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,8 +184,15 @@ def _read_marker(home) -> dict:
 
 
 def _write_marker(home, data) -> None:
+    # Atomic write (tempfile + os.replace, mirroring config.write_config): a crash
+    # or concurrent writer must never leave a truncated marker that _read_marker
+    # then discards, silently re-running the whole bootstrap and re-importing every
+    # already-done drive.
     try:
-        _marker_path(home).write_text(json.dumps(data, indent=2))
+        p = _marker_path(home)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, p)
     except OSError as exc:
         log.warning("could not write baseline marker: %s", exc)
 
@@ -249,16 +257,27 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
         # If import is off, treat the snapshot as already handled (skip it).
         snapshot_done=prev_snapshot or not import_on)
 
-    degraded = fleet_storage is None
+    # Finalize the marker only when the baseline is actually IN PLACE, not merely
+    # when a transport existed. The likeliest incomplete states during rollout are
+    # not "no transport": the curator hasn't published a snapshot yet
+    # (status=no_snapshot), or the fleet_secret isn't distributed yet (pin absent
+    # => every drive skipped no_pin). Stamping completed_at then would latch the
+    # install "done" on a run that imported nothing, and should_bootstrap would
+    # never retry once the baseline lands — silently starving the exact
+    # early-adopter population the feature serves.
+    snapshot_ok = (not import_on) or summary["snapshot_done"]
+    attempted = set(summary["drives"].keys())
+    done = set(summary["done_drive_ids"])
+    drives_ok = (not cache_on) or attempted.issubset(done)  # all enumerated drives imported
+    completed = fleet_storage is not None and snapshot_ok and drives_ok
     _write_marker(home, {
         "snapshot_done": summary["snapshot_done"],
         "done_drive_ids": sorted(summary["done_drive_ids"]),
         "cache_hits": summary.get("cache_hits", 0),
-        # Finalize only when a real transport existed; a degraded run (no fleet
-        # folder yet) stays retryable so a later cycle completes it.
-        "completed_at": "" if degraded else _utcnow_iso(),
+        "completed_at": _utcnow_iso() if completed else "",
     })
-    summary["status"] = "degraded" if degraded else "done"
+    summary["status"] = ("done" if completed
+                         else "degraded" if fleet_storage is None else "pending")
     # done_drive_ids is a set (from the orchestrator) — make it JSON-friendly for
     # any caller that serializes the summary (control API).
     summary["done_drive_ids"] = sorted(summary["done_drive_ids"])

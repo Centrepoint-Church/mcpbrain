@@ -96,6 +96,30 @@ def test_no_transport_is_degraded_and_retryable(tmp_path):
     assert onboarding.should_bootstrap(str(inst.home)) is True
 
 
+def test_no_snapshot_yet_stays_retryable(tmp_path):
+    """Rollout window: flags default ON before the curator has published a
+    snapshot. The run must NOT finalize (it imported nothing) — it stays
+    retryable so the baseline lands once the curator publishes."""
+    inst = make_install(tmp_path, "al")
+    _configure(inst.home)                        # pinned, cache+import on
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+
+    def imp(store, fs_):
+        return {"status": "no_snapshot"}         # curator hasn't published yet
+
+    def boot(store, fs_, drive_id, pin):
+        return {"status": "ok", "cache_hits": 0}
+
+    res = onboarding.run_bootstrap(
+        str(inst.home), inst.store, fleet_storage=fs, drives=[],
+        import_snapshot=imp, bootstrap_drive=boot)
+    assert res["status"] == "pending"
+    marker = json.loads((inst.home / "baseline_bootstrap.json").read_text())
+    assert marker["completed_at"] == ""
+    assert onboarding.should_bootstrap(str(inst.home)) is True
+
+
 def test_pin_resolved_from_config_gates_cache(tmp_path):
     inst = make_install(tmp_path, "al")
     _configure(inst.home, pinned=False)          # no fleet_secret -> not pinned
@@ -106,9 +130,15 @@ def test_pin_resolved_from_config_gates_cache(tmp_path):
     res = onboarding.run_bootstrap(
         str(inst.home), inst.store, fleet_storage=fs, drives=["D1"],
         import_snapshot=imp, bootstrap_drive=boot)
-    assert res["status"] == "done"
+    # Cache-on but fleet_secret not distributed yet -> the drive cache CAN'T run,
+    # so the run is 'pending', NOT finalized: it must retry once the pin lands
+    # rather than latching "done" on a run that skipped every drive.
+    assert res["status"] == "pending"
     assert calls == ["snapshot"]                 # unpinned -> drive cache skipped
     assert res["drives"]["D1"]["reason"] == "no_pin"
+    marker = json.loads((inst.home / "baseline_bootstrap.json").read_text())
+    assert marker["completed_at"] == ""
+    assert onboarding.should_bootstrap(str(inst.home)) is True
 
 
 def test_should_bootstrap_gate(tmp_path):
