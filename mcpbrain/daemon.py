@@ -48,6 +48,7 @@ from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.config import app_dir
 from mcpbrain.retrieval import hybrid_search
 from mcpbrain.sync import run_sync_cycle
+from mcpbrain import onboarding
 
 # Import block modules at startup so their BLOCK_DRAINERS entries are registered
 # before the first drain pass. All four imports are intentional side effects.
@@ -586,6 +587,10 @@ class Daemon:
         # signals run_one to yield its write cycle while the backfill is live.
         self._backfill_active = threading.Event()
         self._backfill_lock = threading.Lock()
+        # Baseline bootstrap (subsystem C): import the org snapshot + shared-drive
+        # ingest caches once, before the first sync. In-process latch; the on-disk
+        # marker (onboarding.run_bootstrap) makes it idempotent across restarts.
+        self._baseline_bootstrap_done = False
 
     # -- service resolution -------------------------------------------------
 
@@ -977,6 +982,31 @@ class Daemon:
         from mcpbrain import enrich_backfill
         enrich_backfill.request_cancel(str(app_dir()))
 
+    def bootstrap_baseline_once(self, services=None, *, force=False) -> dict | None:
+        """Import the org snapshot + shared-drive ingest caches before first sync.
+
+        Idempotent: a no-op after it completes once (in-process latch + on-disk
+        marker); re-runnable with force=True (doctor / `mcpbrain bootstrap`).
+        Degrades cleanly (no fleet folder / snapshot / pin) and never raises into
+        the sync cycle."""
+        home = str(app_dir())
+        if not force and self._baseline_bootstrap_done:
+            return None
+        if not force and not onboarding.should_bootstrap(home):
+            return None
+        if services is None:
+            services = self.ensure_services()
+        try:
+            result = onboarding.run_bootstrap(
+                home, self._store,
+                drive_service=services.get("drive_service"), force=force)
+        except Exception as exc:  # noqa: BLE001 — bootstrap must never break sync
+            log.warning("baseline bootstrap failed: %s", exc, exc_info=True)
+            return {"status": "error", "error": str(exc)}
+        if result.get("status") == "done":
+            self._baseline_bootstrap_done = True
+        return result
+
     # -- wake / stop --------------------------------------------------------
 
     def sync_now(self) -> None:
@@ -1040,6 +1070,9 @@ class Daemon:
         self._graph_cleanup_once()
         self._graph_recompute_once()
         services = self.ensure_services()
+        # Before the first real sync: seed the graph from the org snapshot and
+        # bulk-import shared-drive caches, so run_cycle only extracts cache-misses.
+        self.bootstrap_baseline_once(services)
         # Snapshot the enrich client + mode under the config lock so apply_config
         # (HTTP handler thread) can't swap them mid-cycle; use the locals for this
         # cycle.
