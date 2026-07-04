@@ -79,7 +79,12 @@ class FakeDrive:
             page = files[start:start + size]
             result = {"files": page}
             end = start + size
-            if end < len(files):
+            # Real Drive only returns nextPageToken if the caller's fields=
+            # partial-response mask explicitly requested it — mirror that here
+            # so a future edit that accidentally drops "nextPageToken" from a
+            # production fields= string is caught by pagination tests going
+            # dark, rather than the fake silently keeping them green.
+            if end < len(files) and "nextPageToken" in (fields or ""):
                 result["nextPageToken"] = str(end)
             return result
         return _Req(_do)
@@ -249,6 +254,28 @@ def test_ensure_folder_race_converges_to_one_folder():
     # split-brain where different instances write into different duplicates.
     fid_b = fs_b._ensure_folder("ROOT", "shared")
     assert fid_b == fid_a == winner["id"]
+
+
+def test_fake_drive_withholds_next_page_token_when_fields_omits_it():
+    # Guards the guard: if fields= doesn't literally mention "nextPageToken",
+    # FakeDrive.list() must not hand one back even though more pages exist —
+    # matching real Drive's partial-response projection semantics. Without
+    # this, a future production edit that accidentally drops "nextPageToken"
+    # from a fields= mask would silently stop paginating while pagination
+    # tests kept passing against the fake.
+    drive = FakeDrive()
+    for i in range(5):
+        drive.files().create(
+            body={"name": "dup", "mimeType": FOLDER_MIME, "parents": ["P"]},
+        ).execute()
+    resp = drive.files().list(
+        q="'P' in parents and name = 'dup'",
+        fields="files(id,name,mimeType,modifiedTime)",  # deliberately omits nextPageToken
+        pageSize=2, pageToken=None, supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    assert len(resp["files"]) == 2          # truncated — more results exist
+    assert "nextPageToken" not in resp      # but withheld since fields= didn't ask for it
 
 
 def test_drive_cache_storage_roots_at_drive_and_uses_cache_prefix(tmp_path):
