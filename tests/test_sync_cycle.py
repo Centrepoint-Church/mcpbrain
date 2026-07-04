@@ -695,3 +695,61 @@ def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_pat
     assert any(n.rsplit("/", 1)[-1].startswith("OLD1.") for n in names), (
         f"expected OLD1 artifact published via shared-drive backfill, got {names}"
     )
+
+
+def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
+    """Success path logs exactly one summary line (drives/files/published/
+    revoked), matching the "one line per pass" convention used by other
+    periodic subsystems in daemon.py. No revocations this cycle -> info level."""
+    import logging
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("drive:D1", "100")
+
+    from mcpbrain.sync import drive as drivemod
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fsmap = {}
+    orig = drivemod.sync_shared_drives
+
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3):
+        return orig(service, s, pin=pin,
+                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+                    absence_threshold=absence_threshold)
+    drivemod.sync_shared_drives = _patched
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}],
+            initial_cursor="100",
+            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+            exports={"FID": b"shared drive body content"})
+        with caplog.at_level(logging.INFO, logger="mcpbrain.sync"):
+            run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    summary = [r for r in caplog.records if r.getMessage().startswith("shared_drives: drives=")]
+    assert len(summary) == 1, (
+        f"expected exactly one summary log line, got {[r.getMessage() for r in caplog.records]}"
+    )
+    assert summary[0].levelno == logging.INFO
+    msg = summary[0].getMessage()
+    assert "drives=1" in msg
+    assert "published=1" in msg
+    assert "revoked=none" in msg
