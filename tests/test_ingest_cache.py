@@ -187,6 +187,52 @@ def test_try_import_hand_planted_pipeline_mismatch_inner_field(tmp_path):
     assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
 
 
+def test_import_atomic_mid_artifact_corruption_writes_zero_chunks(tmp_path):
+    """A mid-artifact corrupt vector (chunk 2 of 3) must result in NOTHING
+    written to the store — not a partial 2-of-3 import. Regression for the
+    non-atomic per-chunk-transaction bug in _import_artifact."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    chunks = (
+        CacheChunk(idx=0, text="t0", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                  metadata={"file_id": "FID", "chunk_index": 0}),
+        CacheChunk(idx=1, text="t1", embedding_b64=_b64([0.5, 0.6, 0.7, 0.8]),
+                  metadata={"file_id": "FID", "chunk_index": 1}),
+        # wrong dim (3 floats, not 4) -> _decode_vec raises ValueError
+        CacheChunk(idx=2, text="t2", embedding_b64=_b64([0.9, 1.0, 1.1]),
+                  metadata={"file_id": "FID", "chunk_index": 2}),
+    )
+    _write_artifact(fs, "FID", "vhash1", chunks=chunks)
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+    assert s.get_chunk("gdrive-FID-0") is None
+    assert s.get_chunk("gdrive-FID-1") is None
+    assert s.get_chunk("gdrive-FID-2") is None
+
+
+def test_import_artifact_store_write_failure_logged_as_warning_not_info(tmp_path, caplog):
+    """A genuine store-write failure (disk full, locked db, ...) during the
+    atomic import must be logged at WARNING with a distinguishable message —
+    not treated identically to a corrupt-artifact info-log — so an operator
+    can tell the two failure classes apart. Still returns False (fail-safe
+    contract: never raise into the caller)."""
+    import logging
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(fs, "FID", "vhash1")
+
+    def boom(rows):
+        raise RuntimeError("disk full")
+    s.import_cached_chunks = boom
+
+    with caplog.at_level(logging.INFO, logger="mcpbrain.ingest_cache"):
+        assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING-level log for the store-write failure"
+    assert "NOT a cache-corruption signal" in warnings[0].message
+    # and it must not ALSO be logged at info as a generic corrupt-artifact fallback
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert not any("corrupt artifact" in r.message for r in infos)
+
+
 def test_collect_chunks_is_drive_neutral(tmp_path):
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-FID-0", "hello", "c0",
