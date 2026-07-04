@@ -168,8 +168,13 @@ def _reconcile_slug_drift(store, entities, version) -> int:
             if len(cands) == 1:
                 target = cands[0]
 
-        # (b) alias / canonical-key / token-set match, same type only.
-        if target is None:
+        # (b) alias / canonical-key / token-set match, same type only. Also
+        # role-guarded on the ORG side (not just the local side below): an
+        # org entity that is itself a role inbox must never absorb a real
+        # local person's flesh via a name/token match either — "role-address
+        # pairs never auto-merge" holds regardless of which match method
+        # would otherwise fire.
+        if target is None and not is_role_address(em):
             org_toks = _tokens(e.get("name", ""))
             org_key = canonical_key(e.get("name", ""))
             org_aliases = {a.strip().lower() for a in (e.get("aliases") or "").split(",") if a.strip()}
@@ -190,7 +195,16 @@ def _reconcile_slug_drift(store, entities, version) -> int:
             if len(matches) == 1:            # single unambiguous match only
                 target = matches[0]
 
-        if target is not None and store.get_entity(org_id) is not None:
+        # Re-check the candidate still exists (not the stale `local` snapshot)
+        # right before merging: if an earlier entity in THIS SAME pass already
+        # claimed it (two org entities independently matching one local id —
+        # an upstream data-quality hiccup, not something the initial snapshot
+        # invalidates), merge_entities would silently no-op on the missing
+        # loser, and logging the repoint anyway would write a phantom
+        # org_repoint_log row a later curator SPLIT could restore against
+        # incorrectly. Only log/count a repoint that actually happened.
+        if (target is not None and store.get_entity(target["id"]) is not None
+                and store.get_entity(org_id) is not None):
             # Local merges INTO org (org id survives — B4a rule 2). The org row
             # must already be materialised (import_snapshot stubs it before
             # calling this) for merge_entities to have a winner to fold into.
@@ -210,21 +224,32 @@ def _restore_from_repoint_log(store, entities) -> int:
     would otherwise pre-create the resurrected id and make it look
     already-present here.
 
-    Caveat: entity_observations carry no per-row provenance, so once a merge
-    has happened there is no way to tell which of the target's observations
-    originated on the resurrected node versus natively on the target — this
-    moves ALL of them back, which is a strict improvement over permanently
-    stranding the resurrected node's flesh (the pre-Task-9 behaviour), but can
-    over-restore an observation that was always native to the target. Adding
-    per-observation provenance is a schema change, out of scope here.
+    Bounded observation restore: entity_observations carry no per-row
+    provenance, so once a merge has happened there is no way to tell which of
+    the target's observations originated on the resurrected node versus
+    natively on the target. Restoring ALL of them (the naive approach) can
+    move back an observation that was always native to the target, added
+    well after the original merge. Since org_repoint_log already stamps the
+    merge time (`at`, default CURRENT_TIMESTAMP) and entity_observations
+    already carries `valid_from`, this restores only observations recorded
+    at-or-before the original repoint — anything the target accrued
+    natively AFTER the merge stays put. This is an approximation where
+    `valid_from` is date-only and `at` is a full timestamp (a same-day
+    observation compares as "at or before" a same-day repoint), not exact
+    provenance, but is a real improvement over unconditionally moving
+    everything; true per-row provenance would be a schema change, out of
+    scope here. Local relations carry no such accumulation-ambiguity (a
+    relation is a single fact, not an append-only log of a person's
+    knowledge, and the unique-triple constraint prevents duplication), so
+    they are still moved back wholesale.
     """
     incoming = {e["id"]: e for e in entities}
     restored = 0
     with store._connect() as db:
         logs = [dict(r) for r in db.execute(
-            "SELECT from_entity_id, to_entity_id FROM org_repoint_log").fetchall()]
+            "SELECT from_entity_id, to_entity_id, at FROM org_repoint_log").fetchall()]
         for lg in logs:
-            resurrected, target = lg["from_entity_id"], lg["to_entity_id"]
+            resurrected, target, repoint_at = lg["from_entity_id"], lg["to_entity_id"], lg["at"]
             if resurrected not in incoming:
                 continue
             if db.execute("SELECT 1 FROM entities WHERE id=?", (resurrected,)).fetchone() is not None:
@@ -234,7 +259,15 @@ def _restore_from_repoint_log(store, entities) -> int:
                 "INSERT INTO entities(id,name,type,origin,first_seen,last_seen) "
                 "VALUES(?,?,?, 'org', '', '')",
                 (resurrected, e.get("name", ""), e.get("type", "person")))
-            _repoint_local_refs(db, target, resurrected)
+            db.execute("UPDATE OR IGNORE entity_relations SET entity_a=? WHERE entity_a=? AND origin='local'",
+                       (resurrected, target))
+            db.execute("UPDATE OR IGNORE entity_relations SET entity_b=? WHERE entity_b=? AND origin='local'",
+                       (resurrected, target))
+            db.execute("DELETE FROM entity_relations WHERE (entity_a=? OR entity_b=?) AND origin='local'",
+                       (target, target))
+            db.execute("UPDATE entity_observations SET entity_id=? "
+                       "WHERE entity_id=? AND (valid_from IS NULL OR valid_from='' OR valid_from<=?)",
+                       (resurrected, target, repoint_at))
             restored += 1
     return restored
 
