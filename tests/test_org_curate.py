@@ -174,6 +174,68 @@ def test_materialise_writes_org_rows(tmp_path):
         assert db.execute("SELECT COUNT(*) c FROM entity_relations WHERE origin='org'").fetchone()["c"] == 1
 
 
+def test_curator_backstop_drops_non_allowlisted_relation(tmp_path):
+    """A tampered/older-version contribution carrying a non-allowlisted relation
+    (and its endpoints) must NOT materialise into the org graph, even though it
+    reached staging. The curator re-enforces the fleet-pinned allowlist."""
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "alice", "name": "Alice", "type": "person",
+              "org": "", "email_addr": "alice@x.org", "aliases": ""}),
+        _rec({"kind": "entity", "id": "dep", "name": "Depression", "type": "person",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "alice", "relation": "has_diagnosis",
+              "entity_b": "dep"}),
+    ])
+    res = org_curate._materialise(s, pin_allowlist={"works_at", "member_of", "mentioned_with"})
+    assert res["relations"] == 0
+    with s._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM entity_relations "
+                       "WHERE relation='has_diagnosis'").fetchone()["c"]
+    assert n == 0
+
+
+def test_curator_backstop_drops_non_layer1_entity_type(tmp_path):
+    """An entity claim whose type isn't a layer-1 type (person/org/project) is
+    dropped rather than published — defense-in-depth against a tampered type."""
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "secret", "name": "Secret Concept",
+              "type": "diagnosis", "org": "", "email_addr": "", "aliases": ""}),
+    ])
+    res = org_curate._materialise(s, pin_allowlist={"works_at"})
+    assert res["entities"] == 0
+    with s._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM entities WHERE id='secret'").fetchone()["c"]
+    assert n == 0
+
+
+def test_run_passes_pinned_allowlist_as_backstop(tmp_path, monkeypatch):
+    """End-to-end: run() reads the fleet-pinned allowlist from config and feeds
+    it to _materialise, so a non-allowlisted staged relation never publishes."""
+    from mcpbrain import config
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    monkeypatch.setattr(config, "app_dir", lambda: tmp_path)
+    home = str(tmp_path)
+    config.write_config(home, {"role": "org_curator", "org_config": {"org_pin": {
+        "fleet_secret": "s3cret", "relation_allowlist": ["works_at", "member_of"]}}})
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "a", "name": "A", "type": "person",
+              "org": "", "email_addr": "a@x.org", "aliases": ""}),
+        _rec({"kind": "entity", "id": "b", "name": "B", "type": "person",
+              "org": "", "email_addr": "b@x.org", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "a", "relation": "mentioned_with",
+              "entity_b": "b"}),  # not in this fleet's pinned allowlist
+    ])
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    org_curate.run(s, fs, home)
+    with s._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM entity_relations "
+                       "WHERE relation='mentioned_with' AND origin='org'").fetchone()["c"]
+    assert n == 0
+
+
 def test_rematerialise_updates_org_skeleton_with_new_info(tmp_path):
     """A curator install is also a normal member machine — its own
     resolve_entities cadence runs org<->org-guarded but org_curate._materialise
