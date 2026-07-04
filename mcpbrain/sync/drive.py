@@ -358,6 +358,46 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
     return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
 
 
+def sync_shared_drives(service, store, *, pin, storage_factory,
+                       absence_threshold: int = 3) -> dict:
+    """Enumerate all Shared Drives, sync each cache-first, run the consecutive-
+    absence revocation counter, and opportunistically sweep dead artifacts.
+
+    `storage_factory(drive_id) -> FleetStorage` builds a drive-scoped transport
+    (prod: DriveFleetStorage; tests: LocalDirFleetStorage). Per-drive failures are
+    isolated so one broken drive never aborts the others. Returns
+    {drive_id: {'processed','miss','storage'}} plus {'_revoked': [ids]}. The
+    caller publishes each drive's misses after embedding (see run_sync_cycle).
+    """
+    import logging as _logging
+    from mcpbrain import ingest_cache
+
+    log = _logging.getLogger(__name__)
+    out: dict = {}
+    present: list[str] = []
+    for d in list_shared_drives(service):
+        drive_id = d.get("id")
+        if not drive_id:
+            continue
+        present.append(drive_id)
+        fs = storage_factory(drive_id)
+        try:
+            res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin)
+        except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
+            log.warning("shared-drive sync failed for %s (skipped): %s", drive_id, exc)
+            continue
+        out[drive_id] = {"processed": res["processed"], "miss": res["miss"], "storage": fs}
+        # Opportunistic sweep of artifacts whose file id vanished from the drive.
+        try:
+            ingest_cache.sweep_drive(fs, res["live_file_ids"])
+        except Exception as exc:  # noqa: BLE001 — sweep is best-effort
+            log.info("drive: sweep skipped for %s: %s", drive_id, exc)
+    revoked = ingest_cache.note_drive_presence(
+        store, present, threshold=absence_threshold)["purged"]
+    out["_revoked"] = revoked
+    return out
+
+
 def backfill_drive(service, store, modified_after: str,
                    modified_before: str | None = None,
                    max_files: int | None = None) -> int:
