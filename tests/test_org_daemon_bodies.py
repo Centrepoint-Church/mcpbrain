@@ -39,13 +39,13 @@ def test_import_noops_without_fleet_storage(tmp_path, monkeypatch):
     # Simulate the pre-A state: subsystem A's fleet_storage module either isn't
     # importable, or its factory returns None (no Drive service). Inject a fake
     # that returns None so the assertion holds regardless of whether A has landed.
-    import sys
-    import types
-    from mcpbrain import config
+    from mcpbrain import config, fleet_storage
     monkeypatch.setattr(config, "app_dir", lambda: tmp_path)
-    fake = types.ModuleType("mcpbrain.fleet_storage")
-    fake.fleet_folder_storage = lambda home, drive_service=None: None
-    monkeypatch.setitem(sys.modules, "mcpbrain.fleet_storage", fake)
+    # Patch the real module's factory (the daemon body does `from mcpbrain import
+    # fleet_storage`, which resolves the parent-package attribute — a sys.modules
+    # fake would be bypassed once the real module has been imported elsewhere).
+    monkeypatch.setattr(fleet_storage, "fleet_folder_storage",
+                        lambda home, drive_service=None: None)
     dm = _daemon()
     assert dm._run_org_import() == {"skipped": "no_fleet_storage"}
     assert dm._last_org_import == 1000.0           # advanced despite skip
@@ -60,9 +60,7 @@ def test_daemon_bodies_round_trip_contrib_curate_import(tmp_path, monkeypatch):
     Every prior test in this file only exercises a skip/gate branch; none
     confirms the wrappers actually produce real results when nothing is
     disabled or missing."""
-    import sys
-    import types
-    from mcpbrain import config, graph_write
+    from mcpbrain import config, graph_write, fleet_storage
     from tests.helpers.org_fleet import make_fleet
 
     members, curator, fs = make_fleet(tmp_path, n_members=2)
@@ -72,9 +70,10 @@ def test_daemon_bodies_round_trip_contrib_curate_import(tmp_path, monkeypatch):
             "fleet_secret": "s3cret",
             "relation_allowlist": ["works_at", "member_of", "mentioned_with"]}}})
 
-    fake = types.ModuleType("mcpbrain.fleet_storage")
-    fake.fleet_folder_storage = lambda home, drive_service=None: fs
-    monkeypatch.setitem(sys.modules, "mcpbrain.fleet_storage", fake)
+    # Patch the real fleet_storage factory to hand back the in-test fleet (see
+    # the note in test_import_noops_without_fleet_storage).
+    monkeypatch.setattr(fleet_storage, "fleet_folder_storage",
+                        lambda home, drive_service=None: fs)
 
     # (1) alice's local graph learns joel works_at acme; her daemon body
     # collects the delta and uploads it — the real happy path, not a skip.
