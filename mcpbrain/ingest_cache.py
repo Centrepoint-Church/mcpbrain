@@ -245,12 +245,30 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     """Collect a locally-embedded file's chunks from the store and publish them.
     Returns True if an artifact was written.
 
+    When `enrich` is not explicitly passed, looks up each chunk's validated
+    extraction payload (Task 1's `store.get_enrich_payload`); if one exists at
+    or above the fleet floor (max of `pin.enrich_logic_floor` and this
+    install's `ENRICH_LOGIC_VERSION`), it's attached as
+    `{"logic_version": N, "extraction": <dict>}` so importers can skip
+    re-enrichment. One payload per file — chunks share the unit's extraction,
+    so the lookup stops at the first hit. Falls back to unchanged behaviour
+    (no payload) when nothing qualifies.
+
     `skip_gc` is forwarded to `publish` — see its docstring."""
     if not pin.is_pinned:
         return False
     chunks = collect_chunks(store, file_id)
     if not chunks:
         return False
+    if enrich is None:
+        floor = max(int(pin.enrich_logic_floor), int(ENRICH_LOGIC_VERSION))
+        for ch in chunks:
+            doc_id = f"gdrive-{file_id}-{ch.idx}"
+            row = store.get_enrich_payload(doc_id)
+            if row and int(row["logic_version"]) >= floor:
+                enrich = {"logic_version": int(row["logic_version"]),
+                         "extraction": json.loads(row["payload"])}
+                break  # one payload per file — chunks share the unit's extraction
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             enrich=enrich, published_by=published_by,
             contextual_retrieval=contextual_retrieval, skip_gc=skip_gc)
