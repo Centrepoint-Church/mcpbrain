@@ -189,11 +189,38 @@ class DriveFleetStorage:
             return None, None
         return parent, parts[-1]
 
+    def _evict_folder_cache_by_id(self, folder_id: str) -> bool:
+        """Remove any (parent_id, name) -> folder_id cache entries pointing
+        at folder_id. Returns True iff something was evicted."""
+        keys = [k for k, v in self._folder_cache.items() if v == folder_id]
+        for k in keys:
+            del self._folder_cache[k]
+        return bool(keys)
+
     # -- FleetStorage protocol ------------------------------------------
 
     def put_bytes(self, path: str, data: bytes) -> None:
+        from googleapiclient.errors import HttpError
         parent, leaf = self._resolve_file(path, create_parents=True)
-        self._put_bytes_at(parent, leaf, data)
+        try:
+            self._put_bytes_at(parent, leaf, data)
+        except HttpError:
+            # A cached folder id can go stale if it's deleted out-of-band:
+            # the write against it fails (e.g. "parent not found"). Evict
+            # the stale (parent_id, name) cache entry and retry folder
+            # resolution once via _ensure_folder, which re-creates the
+            # folder if needed, before giving up.
+            if self._evict_folder_cache_by_id(parent):
+                log.warning(
+                    "fleet_storage: put_bytes(%r) failed against cached parent "
+                    "folder id %r (likely deleted out-of-band); evicting the "
+                    "stale cache entry and retrying folder resolution once",
+                    path, parent,
+                )
+                parent, leaf = self._resolve_file(path, create_parents=True)
+                self._put_bytes_at(parent, leaf, data)
+            else:
+                raise
 
     def _put_bytes_at(self, parent: str, leaf: str, data: bytes) -> None:
         from googleapiclient.http import MediaInMemoryUpload
