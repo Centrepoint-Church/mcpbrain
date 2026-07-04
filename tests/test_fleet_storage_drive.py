@@ -418,7 +418,12 @@ def test_all_execute_calls_activate_num_retries():
     assert all(n == 5 for n in seen_num_retries), seen_num_retries
 
 
-# -- Finding 2: leaf-blob creation is race-hardened like folder creation ----
+# -- Finding 2: concurrent leaf-blob creation converges via read-time tie-break --
+# (there's no write-time race-hardening for leaves like _ensure_folder's
+# post-create re-resolve for folders -- put_bytes returns None and there's no
+# leaf-id cache to converge, so nothing would consult a write-time lookup.
+# Convergence instead comes entirely from _find_child's deterministic
+# modifiedTime/id tie-break, applied independently by every reader.)
 
 def test_put_bytes_race_converges_to_one_winning_file():
     drive = FakeDrive()
