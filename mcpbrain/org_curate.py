@@ -38,6 +38,12 @@ MANIFEST_PATH = "org-graph/manifest.json"
 # Relations that need independent-source corroboration before entering layer 1
 # (spec B3.2): co-occurrence claimed by only one contributor never surfaces
 # org-wide off a single fleet member's say-so.
+# Layer-1 entity types the curator will materialise. Defense-in-depth: the
+# contributing edge should only ever emit these, but the curator must not trust
+# that — a malformed/older-version/tampered contribution keyed on any other type
+# (e.g. a sensitive concept node) is dropped rather than published fleet-wide.
+_LAYER1_ENTITY_TYPES = frozenset({"person", "org", "project"})
+
 _CORROBORATION_GUARDED = frozenset({"mentioned_with"})
 
 # Within _CORROBORATION_GUARDED, these additionally require >=2 DISTINCT
@@ -225,6 +231,10 @@ def _materialise(store, pin_allowlist=None) -> dict:
         if kind == "entity":
             eid = claim.get("id")
             if not eid:
+                continue
+            # Backstop: only layer-1 entity types may be materialised; anything
+            # else (a concept/topic/document node, or a tampered type) is dropped.
+            if claim.get("type") not in _LAYER1_ENTITY_TYPES:
                 continue
             if claim.get("type") == "person" and is_role_address(claim.get("email_addr", "")):
                 continue
@@ -507,7 +517,13 @@ def run(store, fleet_storage, home) -> dict:
     callers (curator=False, the default) never do.
     """
     ing = _ingest(store, fleet_storage)
-    mat = _materialise(store)
+    # Backstop: re-enforce the fleet-pinned relation allowlist at the CURATOR, not
+    # only at the contributing edge. A malformed / older-version / tampered
+    # contribution that reaches staging must not materialise a non-allowlisted
+    # (e.g. sensitive) relation into the published snapshot. The pin's allowlist is
+    # the same one distributed via org-config.json (FleetPin.relation_allowlist).
+    pin_allowlist = set(config.fleet_pin(home).relation_allowlist)
+    mat = _materialise(store, pin_allowlist=pin_allowlist)
     resolve.resolve_entities(store, home=home, curator=True)
     units = _build_adjudication_units(store)
     cap = config.review_max_apply_per_run(home)
