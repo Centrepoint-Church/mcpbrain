@@ -1,6 +1,8 @@
 """DriveFleetStorage against an in-memory Drive double (no network)."""
 import itertools
 
+import pytest
+
 from mcpbrain.fleet_storage import DriveFleetStorage
 from mcpbrain.org_contracts import FleetStorage
 
@@ -374,3 +376,18 @@ def test_all_execute_calls_activate_num_retries():
 
     assert seen_num_retries, "expected at least one tracked .execute() call"
     assert all(n == 5 for n in seen_num_retries), seen_num_retries
+
+
+# -- Finding 6: get_bytes surfaces a non-bytes media response as an error --
+
+def test_get_bytes_raises_on_non_bytes_media_response():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes("a.bin", b"real bytes")
+
+    def bogus_get_media(fileId=None, supportsAllDrives=None):
+        return _Req(lambda: {"not": "bytes"})
+
+    drive.get_media = bogus_get_media
+    with pytest.raises(TypeError):
+        fs.get_bytes("a.bin")

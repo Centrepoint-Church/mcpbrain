@@ -167,7 +167,17 @@ class DriveFleetStorage:
             self._svc.files().get_media(fileId=fid, supportsAllDrives=True),
             context=f"get_media {path!r}",
         )
-        return raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
+        if not isinstance(raw, bytes):
+            # Best-effort-stringifying a non-bytes response would silently
+            # produce garbage that *looks* like a successful read for a
+            # binary (gzip) payload. Surface it as an explicit failure so
+            # callers' existing fail-safe fallback treats it as a fetch miss
+            # rather than importing corrupted content.
+            raise TypeError(
+                f"DriveFleetStorage.get_bytes({path!r}): expected bytes from "
+                f"get_media, got {type(raw).__name__}"
+            )
+        return raw
 
     def list_paths(self, prefix: str) -> list[str]:
         # Resolve the prefix's leading folder path first (targeted per-segment
