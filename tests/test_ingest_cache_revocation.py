@@ -17,6 +17,28 @@ def test_doc_ids_for_drive_and_file(tmp_path):
     assert s.doc_ids_for_drive("D2") == ["gdrive-F2-0"]
 
 
+def test_doc_ids_for_file_escapes_like_wildcards(tmp_path):
+    """Google Drive file ids legitimately contain '_', a SQL LIKE single-char
+    wildcard. Without escaping, doc_ids_for_file('F_1') would also match a
+    sibling file like 'FA1' (any char substituting for '_') — an over-match
+    that feeds the purge/delete path. It must scope to the exact file only."""
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F_1-0", "a", "c", {"file_id": "F_1"}, [0.0] * 4)
+    s.import_cached_chunk("gdrive-FA1-0", "b", "c", {"file_id": "FA1"}, [0.0] * 4)
+    assert set(s.doc_ids_for_file("F_1")) == {"gdrive-F_1-0"}
+    assert set(s.doc_ids_for_file("FA1")) == {"gdrive-FA1-0"}
+
+
+def test_chunks_for_file_escapes_like_wildcards(tmp_path):
+    """Same over-match risk as doc_ids_for_file, but for chunks_for_file —
+    this feeds the publish path (collect_chunks -> publish)."""
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F_1-0", "a", "c", {"file_id": "F_1", "chunk_index": 0}, [0.0] * 4)
+    s.import_cached_chunk("gdrive-FA1-0", "b", "c", {"file_id": "FA1", "chunk_index": 0}, [0.0] * 4)
+    rows = s.chunks_for_file("F_1")
+    assert [r["doc_id"] for r in rows] == ["gdrive-F_1-0"]
+
+
 def test_delete_chunks_removes_row_and_mirrors(tmp_path):
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.1]*4)

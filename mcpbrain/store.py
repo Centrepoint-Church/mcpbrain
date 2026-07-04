@@ -22,6 +22,18 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 ENRICH_LOGIC_VERSION = 1
 
 
+def _like_escape(value: str) -> str:
+    """Escape '%', '_' and the escape char itself for a LIKE pattern.
+
+    Google Drive file ids legitimately contain '_' (a SQL LIKE single-char
+    wildcard) with no escaping of their own, so any `doc_id LIKE 'gdrive-<id>-%'`
+    query built by interpolating a raw file_id can over-match a sibling file
+    (e.g. file_id 'F_1' matching doc_ids for file 'FA1'). Callers must pair
+    this with `ESCAPE '\\'` in the SQL.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _fts_match_query(query: str) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -1085,8 +1097,8 @@ class Store:
         """Chunk doc_ids for one Drive file (gdrive-<file_id>-*)."""
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE doc_id LIKE ?",
-                (f"gdrive-{file_id}-%",)).fetchall()]
+                "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
+                (f"gdrive-{_like_escape(file_id)}-%",)).fetchall()]
 
     def delete_chunks(self, doc_ids) -> int:
         """Delete the given chunk rows and their vec_chunks/fts_chunks mirrors
@@ -1309,13 +1321,17 @@ class Store:
 
     def chunks_for_file(self, file_id: str) -> list[dict]:
         """All gdrive-<file_id>-<i> chunks as {doc_id,text,content_hash,metadata,idx},
-        ordered by chunk index. Used to build a cache artifact from local state."""
-        like = f"gdrive-{file_id}-%"
+        ordered by chunk index. Used to build a cache artifact from local state.
+
+        Ordering authority is the Python `.sort(key=idx)` below (chunk_index is
+        the logical order; rowid is mere insertion order, which can diverge on
+        re-import) — so the SQL query intentionally does not ORDER BY anything."""
+        like = f"gdrive-{_like_escape(file_id)}-%"
         out = []
         with self._connect() as db:
             for r in db.execute(
                 "SELECT doc_id,text,content_hash,metadata FROM chunks "
-                "WHERE doc_id LIKE ? ORDER BY rowid", (like,)):
+                "WHERE doc_id LIKE ? ESCAPE '\\'", (like,)):
                 meta = json.loads(r["metadata"])
                 out.append({"doc_id": r["doc_id"], "text": r["text"],
                             "content_hash": r["content_hash"], "metadata": meta,
