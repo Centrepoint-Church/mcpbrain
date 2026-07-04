@@ -168,15 +168,21 @@ def _apply_org_skeleton(store, entity_id, aggregated_claim) -> None:
 
 
 def _corroborated(relation: str, agg: dict) -> bool:
-    """Corroboration rule (spec B3.2): a claim is corroborated by >=2 distinct
-    source_ref OR >=2 distinct contributor_email — except relations in
-    _STRICT_SOURCE_GUARDED (currently just mentioned_with), which require >=2
-    distinct source_ref specifically: independent sources, not just
-    independent people repeating one person's single-source observation."""
+    """Corroboration rule (spec B3.2). Corroboration is counted by distinct
+    SOURCE docs (source_ref), never by contributor count alone: cache-imported
+    enrichment (A2) makes many contributors emit the SAME source_ref for one
+    shared doc, so a contributor-based OR would let imported org data inflate its
+    own support — violating B2's "importing org data can never inflate confidence."
+
+    _STRICT_SOURCE_GUARDED relations (mentioned_with — sensitive communication
+    metadata) additionally require >=2 distinct CONTRIBUTORS, so a single person
+    cannot surface who-appears-with-whom org-wide from two docs in their own
+    mailbox (>=2 srefs from one contributor is not enough)."""
     distinct_sources = len(agg["srefs"])
+    distinct_contributors = len(agg["contribs"])
     if relation in _STRICT_SOURCE_GUARDED:
-        return distinct_sources >= 2
-    return distinct_sources >= 2 or len(agg["contribs"]) >= 2
+        return distinct_sources >= 2 and distinct_contributors >= 2
+    return distinct_sources >= 2
 
 
 def _today() -> str:
