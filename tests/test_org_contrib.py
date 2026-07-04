@@ -39,6 +39,30 @@ def _outbox(store):
                 for r in db.execute("SELECT record FROM org_contrib_outbox ORDER BY id").fetchall()]
 
 
+def test_outbox_dedups_identical_pending_records(tmp_path):
+    """The boundary-second watermark re-scan can re-derive identical records next
+    cycle; collect must not enqueue duplicates while the prior batch is still
+    pending (no duplicate Drive traffic)."""
+    s = _store(tmp_path)
+    n1 = org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org")
+    assert n1 == 3
+    # Same delta again before upload -> all deduped, nothing new enqueued.
+    n2 = org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org")
+    assert n2 == 0
+    assert len(_outbox(s)) == 3
+
+
+def test_unknown_source_type_labelled_unknown_not_email(tmp_path):
+    s = _store(tmp_path)
+    d = _delta(source_doc_id="weird-1")
+    # a doc whose chunk carries an unrecognised source_type
+    with s._connect() as db:
+        db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata,enrich_state) "
+                   "VALUES('weird-1','t','h','{\"source_type\":\"slack\"}','')")
+    org_contrib.collect_from_drain(s, d, _pin(), "alice@x.org")
+    assert all(r["source_kind"] == "unknown" for r in _outbox(s))
+
+
 def test_private_annotation_in_name_is_cleaned_before_contribution(tmp_path):
     s = _store(tmp_path)
     d = _delta()
