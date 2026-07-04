@@ -69,7 +69,8 @@ def _encode_vec(vector) -> str:
 
 # -- read path --------------------------------------------------------------
 
-def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
+def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
+                     contextual_retrieval: bool | None = None) -> bool:
     """Import a validated artifact's chunks into the store, atomically.
 
     All chunk vectors are decoded/validated UP FRONT, before anything is
@@ -77,7 +78,10 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
     NOTHING (never a partial import). Once every chunk validates, all rows
     are written in a single store transaction (Store.import_cached_chunks)
     so the artifact lands completely or not at all. Callers treat False as
-    a cache miss (fall back to local extraction)."""
+    a cache miss (fall back to local extraction).
+
+    `contextual_retrieval`, when not None, must match the artifact's stamped
+    enrich["contextual_retrieval"] flag (when present) — see try_import."""
     if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
             or art.chunker_version != pin.chunker_version
             or int(art.dim) != int(store.dim)):
@@ -86,6 +90,17 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
         # Guard enrich field access; if malformed (e.g. string instead of dict),
         # fall back rather than raise.
         logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
+        # The Q6 contextual-retrieval prefix materially changes the embedding
+        # vector and is NOT part of pipeline_fingerprint (embed_model/dim/
+        # chunker_version only). Two installs sharing an org_pin but differing
+        # on this LOCAL config flag could otherwise import an artifact carrying
+        # a semantically different vector under the "cache hit is bit-identical
+        # to local embedding" guarantee. contextual_retrieval=None (the default)
+        # means "don't check, accept as before" for backward compatibility.
+        if contextual_retrieval is not None and art.enrich:
+            art_cr = art.enrich.get("contextual_retrieval")
+            if art_cr is not None and bool(art_cr) != bool(contextual_retrieval):
+                return False
         # Skip local re-enrichment only when the cached enrichment is at least as new
         # as BOTH the fleet floor and this install's own logic version.
         mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
@@ -137,11 +152,17 @@ def _load(fleet_storage, path) -> CacheArtifact | None:
         return None
 
 
-def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin) -> bool:
+def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
+               *, contextual_retrieval: bool | None = None) -> bool:
     """Cache-first import for one shared-drive file version. Returns True iff the
     artifact was found, validated, and imported; False => caller extracts locally.
 
-    `content_hash` is the Drive file-version id (NOT the text hash)."""
+    `content_hash` is the Drive file-version id (NOT the text hash).
+
+    `contextual_retrieval`, when passed, must match the artifact's stamped
+    contextual-retrieval flag (see publish); a mismatch is treated as a
+    pipeline mismatch and falls back to False. Default None = don't check
+    (backward compatible with callers unaware of the flag)."""
     if not pin.is_pinned:
         return False
     art = _load(fleet_storage, _artifact_path(file_id, content_hash, pin))
@@ -149,7 +170,7 @@ def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin) -> bo
         return False
     if art.file_id != file_id or art.content_hash != content_hash:
         return False
-    return _import_artifact(store, drive_id, art, pin)
+    return _import_artifact(store, drive_id, art, pin, contextual_retrieval=contextual_retrieval)
 
 
 def collect_chunks(store, file_id) -> list[CacheChunk]:
@@ -171,20 +192,30 @@ def collect_chunks(store, file_id) -> list[CacheChunk]:
 # -- write path -------------------------------------------------------------
 
 def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            *, enrich=None, published_by="") -> None:
+            *, enrich=None, published_by="", contextual_retrieval: bool = False) -> None:
     """Write the gzip-JSON CacheArtifact for `chunks` (a sequence of CacheChunk),
     then best-effort GC older/stale artifacts for this file. No-op when unpinned
     or chunks is empty. Content-hash keying makes concurrent publishers idempotent
-    (byte-equivalent artifacts, last-write-wins is harmless)."""
+    (byte-equivalent artifacts, last-write-wins is harmless).
+
+    `contextual_retrieval` reflects whether the Q6 contextual-retrieval prefix
+    was enabled for the install doing the publishing. It is stamped into the
+    artifact's free-form `enrich` dict (not part of the frozen CacheArtifact
+    fields or pipeline_fingerprint) so _import_artifact can detect a pipeline
+    mismatch on the read side. Defaults False so existing callers are
+    unaffected; real wiring of the actual per-install value happens
+    elsewhere."""
     if not pin.is_pinned or not chunks:
         return
     chunks = tuple(chunks)
     extraction_method = (chunks[0].metadata or {}).get("extraction_method", "")
+    enrich_block = dict(enrich or {})
+    enrich_block["contextual_retrieval"] = contextual_retrieval
     art = CacheArtifact(
         file_id=file_id, content_hash=content_hash,
         extraction_method=extraction_method, chunker_version=pin.chunker_version,
         embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
-        enrich=enrich or {}, published_by=published_by,
+        enrich=enrich_block, published_by=published_by,
         published_at=datetime.now(timezone.utc).isoformat())
     # sort_keys makes the "byte-identical artifacts" guarantee actually true:
     # plain json.dumps preserves dict insertion order, so two publishers whose
@@ -200,7 +231,7 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
 
 
 def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
-                 *, enrich=None, published_by="") -> bool:
+                 *, enrich=None, published_by="", contextual_retrieval: bool = False) -> bool:
     """Collect a locally-embedded file's chunks from the store and publish them.
     Returns True if an artifact was written."""
     if not pin.is_pinned:
@@ -209,7 +240,7 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     if not chunks:
         return False
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            enrich=enrich, published_by=published_by)
+            enrich=enrich, published_by=published_by, contextual_retrieval=contextual_retrieval)
     return True
 
 
