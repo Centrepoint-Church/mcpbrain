@@ -129,8 +129,6 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     total_files += info["processed"]
                     total_miss += len(info["miss"])
                 result["shared_drives"] = per_drive
-                result["shared_drive_cache"] = {
-                    "hits": max(0, total_files - total_miss), "misses": total_miss}
                 revoked = sd.get("_revoked", [])
                 result["revoked_drives"] = revoked
 
@@ -149,11 +147,17 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     fs = drives_fs[drive_id]
                     backfill_counts[drive_id] = res["processed"]
                     total_files += res["processed"]
+                    total_miss += len(res["miss"])
                     if published_by:
                         total_published += _publish_drive_misses(
                             store, ingest_cache, fs, drive_id, res["miss"], pin, published_by,
                             contextual_retrieval=cr)
                 result["shared_drives_backfill"] = backfill_counts
+                # Cache hit/miss over BOTH the live delta and the backfill window
+                # (computed after the backfill loop so backfilled files count too —
+                # a miss is a file extracted locally, a hit is one served from cache).
+                result["shared_drive_cache"] = {
+                    "hits": max(0, total_files - total_miss), "misses": total_miss}
 
                 # One line per pass, matching daemon.py's cadence-log convention
                 # (e.g. "feedback_aggregate: updated=%d skipped=%d"). Revocation
