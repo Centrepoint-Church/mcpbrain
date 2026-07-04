@@ -599,3 +599,54 @@ def test_ensure_folder_raises_after_retries_exhausted():
         fs._ensure_folder("ROOT", "never-visible")
     # 1 initial check + 3 retry attempts, all forced to miss
     assert calls["n"] == 4
+
+
+# -- Finding 5: Shared-Drive rooted instances scope their queries -----------
+
+def _tracked_list_calls(drive):
+    calls = []
+    real_list = drive.list
+
+    def tracking_list(**kw):
+        calls.append(kw)
+        return real_list(**kw)
+
+    drive.list = tracking_list
+    return calls
+
+
+def test_root_is_drive_scopes_find_child_and_list_paths_queries():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "D1", root_is_drive=True)
+    calls = _tracked_list_calls(drive)
+
+    fs.put_bytes("a/b.bin", b"x")
+    fs.list_paths("a/")
+
+    assert calls, "expected at least one list() call"
+    assert all(c.get("corpora") == "drive" and c.get("driveId") == "D1" for c in calls)
+
+
+def test_root_is_drive_defaults_false_and_is_unscoped():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    calls = _tracked_list_calls(drive)
+
+    fs.put_bytes("a/b.bin", b"x")
+    fs.list_paths("a/")
+
+    assert calls, "expected at least one list() call"
+    assert all(c.get("corpora") is None and c.get("driveId") is None for c in calls)
+
+
+def test_drive_cache_storage_sets_root_is_drive():
+    from mcpbrain import fleet_storage
+    fs = fleet_storage.drive_cache_storage(FakeDrive(), "D1")
+    assert fs._root_is_drive is True
+
+
+def test_fleet_folder_storage_leaves_root_is_drive_false(tmp_path):
+    from mcpbrain import config, fleet_storage
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEETFOLDER"}})
+    fs = fleet_storage.fleet_folder_storage(str(tmp_path), drive_service=FakeDrive())
+    assert fs._root_is_drive is False
