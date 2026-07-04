@@ -1,6 +1,11 @@
 """DriveFleetStorage against an in-memory Drive double (no network)."""
 import itertools
 
+import httplib2
+import pytest
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
+
 from mcpbrain.fleet_storage import DriveFleetStorage
 from mcpbrain.org_contracts import FleetStorage
 
@@ -30,6 +35,18 @@ class FakeDrive:
     def create(self, body=None, media_body=None, fields=None, supportsAllDrives=None,
                modifiedTime=""):
         def _do():
+            # Simulate Drive rejecting a create whose parent no longer
+            # exists (e.g. deleted out-of-band since a caller cached its
+            # id) -- but only for parents that look like ids this fake
+            # itself minted ("id<N>"), so the literal root ids the tests
+            # use ("ROOT", "P", "D1", "FLEETFOLDER", ...) are never
+            # mistaken for a stale reference.
+            for parent in body.get("parents", []):
+                if parent.startswith("id") and parent not in self.nodes:
+                    raise HttpError(
+                        httplib2.Response({"status": 404}),
+                        f"File not found: {parent}".encode(),
+                    )
             nid = next(self._ids)
             self.nodes[nid] = {
                 "id": nid, "name": body["name"],
@@ -219,41 +236,66 @@ def test_ensure_folder_race_converges_to_one_folder():
     # same name lands concurrently (with a later modifiedTime), producing a
     # genuine duplicate under the same parent *before* fs_a's own create()
     # call returns — exactly the interleaving that makes Drive's lack of
-    # name-uniqueness enforcement dangerous.
+    # name-uniqueness enforcement dangerous. Capture both ids as they're
+    # minted (rather than scanning drive.nodes afterwards) because
+    # _ensure_folder now opportunistically reaps the loser, so only one of
+    # the two will still be present in drive.nodes once it returns.
     real_create = drive.create
+    ids = {}
 
     def racy_create(body=None, media_body=None, fields=None, supportsAllDrives=None,
                      modifiedTime=""):
-        if body.get("name") == "shared" and not racy_create.fired:
-            racy_create.fired = True
-            real_create(
+        if body.get("name") == "shared" and "racer_id" not in ids:
+            racer_resp = real_create(
                 body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
                 modifiedTime="2099-01-01T00:00:00Z",
             ).execute()
-        return real_create(body=body, media_body=media_body, fields=fields,
-                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime)
-    racy_create.fired = False
+            ids["racer_id"] = racer_resp["id"]
+        resp = real_create(body=body, media_body=media_body, fields=fields,
+                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime).execute()
+        ids["own_id"] = resp["id"]
+        return _Req(lambda: resp)
     drive.create = racy_create
 
     fid_a = fs_a._ensure_folder("ROOT", "shared")
 
-    dups = [n for n in drive.nodes.values()
-            if n["name"] == "shared" and n["mimeType"] == FOLDER_MIME]
-    assert len(dups) == 2  # the race really did create two duplicates
-    winner = max(dups, key=lambda n: n["modifiedTime"])
-    loser = next(n for n in dups if n["id"] != winner["id"])
-
     # fs_a must NOT have blindly trusted its own (losing) create() call's id
-    # — it has to re-resolve and land on the deterministic tie-break winner,
-    # the same one any other instance would independently compute.
-    assert fid_a == winner["id"]
-    assert fid_a != loser["id"]
+    # — it has to re-resolve and land on the deterministic tie-break winner
+    # (the racer's folder has the later modifiedTime), the same one any
+    # other instance would independently compute.
+    assert fid_a == ids["racer_id"]
+    assert fid_a != ids["own_id"]
 
     # A second, independent instance (fresh folder cache) resolving the same
     # now-ambiguous name afterwards must converge on the SAME id — no
     # split-brain where different instances write into different duplicates.
     fid_b = fs_b._ensure_folder("ROOT", "shared")
-    assert fid_b == fid_a == winner["id"]
+    assert fid_b == fid_a == ids["racer_id"]
+
+
+def test_ensure_folder_reaps_orphaned_duplicate():
+    # Simulates a race's aftermath: two duplicate "shared" folders already
+    # exist under the same parent (e.g. left by an earlier out-of-band race)
+    # before this instance ever looks. _ensure_folder must both converge on
+    # the deterministic winner AND opportunistically delete the loser rather
+    # than leaving it behind forever.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+
+    loser_id = drive.create(
+        body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
+        modifiedTime="2020-01-01T00:00:00Z",
+    ).execute()["id"]
+    winner_id = drive.create(
+        body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
+        modifiedTime="2099-01-01T00:00:00Z",
+    ).execute()["id"]
+
+    fid = fs._ensure_folder("ROOT", "shared")
+
+    assert fid == winner_id
+    assert winner_id in drive.nodes
+    assert loser_id not in drive.nodes  # opportunistically reaped
 
 
 def test_fake_drive_withholds_next_page_token_when_fields_omits_it():
@@ -342,3 +384,269 @@ def test_drive_cache_storage_roots_at_drive_and_uses_cache_prefix(tmp_path):
     assert fs.get_bytes(f"{ingest_cache.CACHE_DIR}/FID.h.pf.mbc.gz") == b"payload"
     names = [n["name"] for n in drive.nodes.values()]
     assert ingest_cache.CACHE_DIR in names          # exactly one cache folder, at the root
+
+
+# -- Finding 1: retry/backoff on every Drive call ----------------------------
+
+def test_all_execute_calls_activate_num_retries():
+    # Every .execute() this module issues must pass num_retries=5 so the
+    # client library's exponential backoff kicks in on transient 5xx/429/
+    # quota errors — this is the sole production transport for an
+    # unattended daemon. Assert against the fake's recorded kwargs rather
+    # than just "it still works", since a bare .execute() would pass this
+    # suite too.
+    drive = FakeDrive()
+    seen_num_retries = []
+    real_req_execute = _Req.execute
+
+    def tracking_execute(self, **kw):
+        seen_num_retries.append(kw.get("num_retries"))
+        return real_req_execute(self, **kw)
+
+    _Req.execute = tracking_execute
+    try:
+        fs = DriveFleetStorage(drive, "ROOT")
+        fs.put_bytes("a/b.bin", b"one")     # create leaf + create folder
+        fs.put_bytes("a/b.bin", b"two")     # update leaf
+        fs.get_bytes("a/b.bin")             # get_media
+        fs.list_paths("a/")                 # walk list
+        fs.delete("a/b.bin")                # delete
+    finally:
+        _Req.execute = real_req_execute
+
+    assert seen_num_retries, "expected at least one tracked .execute() call"
+    assert all(n == 5 for n in seen_num_retries), seen_num_retries
+
+
+# -- Finding 2: leaf-blob creation is race-hardened like folder creation ----
+
+def test_put_bytes_race_converges_to_one_winning_file():
+    drive = FakeDrive()
+    fs_a = DriveFleetStorage(drive, "ROOT")
+    fs_b = DriveFleetStorage(drive, "ROOT")
+
+    # Simulate two installs racing to publish the same brand-new leaf path:
+    # while fs_a's create() call for "new.bin" is in flight, a second
+    # process's create() call for the same name lands concurrently (with a
+    # later modifiedTime) -- Drive enforces no name uniqueness, so both
+    # succeed, producing a genuine duplicate blob.
+    real_create = drive.create
+
+    def racy_create(body=None, media_body=None, fields=None, supportsAllDrives=None,
+                     modifiedTime=""):
+        if body.get("name") == "new.bin" and not racy_create.fired:
+            racy_create.fired = True
+            real_create(
+                body={"name": "new.bin", "parents": ["ROOT"]},
+                media_body=MediaInMemoryUpload(b"from-race", mimetype="application/octet-stream"),
+                modifiedTime="2099-01-01T00:00:00Z",
+            ).execute()
+        return real_create(body=body, media_body=media_body, fields=fields,
+                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime)
+    racy_create.fired = False
+    drive.create = racy_create
+
+    fs_a.put_bytes("new.bin", b"from-a")
+
+    dups = [n for n in drive.nodes.values() if n["name"] == "new.bin"]
+    assert len(dups) == 2  # the race really did create two duplicate blobs
+    winner = max(dups, key=lambda n: n["modifiedTime"])
+
+    # Every subsequent reader -- a fresh instance, or fs_a itself -- converges
+    # on the SAME winning blob's content via _find_child's deterministic
+    # modifiedTime/id tie-break, rather than either racer's own view.
+    assert fs_a.get_bytes("new.bin") == winner["data"]
+    assert fs_b.get_bytes("new.bin") == winner["data"]
+
+
+# -- Finding 3: stale _folder_cache entries self-heal ------------------------
+
+def test_put_bytes_self_heals_from_stale_folder_cache():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes("a/b/c.bin", b"first")
+
+    b_folder = next(n for n in drive.nodes.values()
+                     if n["name"] == "b" and n["mimeType"] == FOLDER_MIME)
+    stale_id = b_folder["id"]
+    assert stale_id in fs._folder_cache.values()  # sanity: really cached
+
+    # Simulate the cached folder being deleted out-of-band (an admin, or
+    # another cleanup process, removes it without this instance's
+    # knowledge).
+    del drive.nodes[stale_id]
+
+    # A write into the same nested path must self-heal: evict the stale
+    # cache entry, re-resolve/re-create "b" fresh, and succeed rather than
+    # raising.
+    fs.put_bytes("a/b/c2.bin", b"second")
+
+    assert fs.get_bytes("a/b/c2.bin") == b"second"
+    assert stale_id not in fs._folder_cache.values()  # cache now points elsewhere
+
+
+def test_put_bytes_reraises_when_failure_is_not_a_stale_cache_issue():
+    # If the HttpError isn't attributable to a cached folder id (e.g. the
+    # leaf's parent is the root itself, which is never cached), there is
+    # nothing to evict and retry -- the error must propagate rather than
+    # being swallowed.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+
+    def failing_create(**kw):
+        raise HttpError(httplib2.Response({"status": 500}), b"boom")
+
+    drive.create = failing_create
+    with pytest.raises(HttpError):
+        fs.put_bytes("top.bin", b"x")  # parent is "ROOT", never a cache value
+
+
+# -- Finding 6: get_bytes surfaces a non-bytes media response as an error --
+
+def test_get_bytes_raises_on_non_bytes_media_response():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes("a.bin", b"real bytes")
+
+    def bogus_get_media(fileId=None, supportsAllDrives=None):
+        return _Req(lambda: {"not": "bytes"})
+
+    drive.get_media = bogus_get_media
+    with pytest.raises(TypeError):
+        fs.get_bytes("a.bin")
+
+
+# -- Finding 8: _find_child's id tie-break, exercised for real --------------
+
+def test_find_child_tie_break_falls_back_to_highest_id_on_identical_modified_time():
+    drive = FakeDrive()
+    ids = []
+    for _ in range(3):
+        resp = drive.create(
+            body={"name": "dup", "mimeType": FOLDER_MIME, "parents": ["P"]},
+            modifiedTime="2024-01-01T00:00:00Z",  # identical on purpose
+        ).execute()
+        ids.append(resp["id"])
+    expected = max(ids)  # single-digit "id<N>" ids sort lexicographically == numerically
+
+    fs_a = DriveFleetStorage(drive, "ROOT")
+    fs_b = DriveFleetStorage(drive, "ROOT")
+    assert fs_a._find_child("P", "dup", folder=True) == expected
+    assert fs_b._find_child("P", "dup", folder=True) == expected
+
+
+def test_find_child_tie_break_falls_back_to_highest_id_when_modified_time_both_empty():
+    drive = FakeDrive()
+    ids = []
+    for _ in range(3):
+        resp = drive.create(
+            body={"name": "dup", "mimeType": FOLDER_MIME, "parents": ["P"]},
+            modifiedTime="",  # both/all empty
+        ).execute()
+        ids.append(resp["id"])
+    expected = max(ids)
+
+    fs = DriveFleetStorage(drive, "ROOT")
+    assert fs._find_child("P", "dup", folder=True) == expected
+
+
+# -- Finding 4: _ensure_folder retries the post-create re-resolve -----------
+
+def test_ensure_folder_retries_on_eventual_consistency_then_succeeds():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", ensure_folder_retry_backoff=0)
+    original_find_child = DriveFleetStorage._find_child
+    calls = {"n": 0}
+
+    def flaky_find_child(self, parent_id, name, *, folder, reap_duplicates=False):
+        calls["n"] += 1
+        # Call 1 is the genuine pre-create existence check (must see None).
+        # Calls 2 and 3 are forced misses simulating Drive's eventual
+        # consistency lag right after create() returns, even though the
+        # fake already has the folder. Call 4+ is let through for real and
+        # must find it.
+        if calls["n"] in (2, 3):
+            return None
+        return original_find_child(self, parent_id, name, folder=folder,
+                                    reap_duplicates=reap_duplicates)
+
+    fs._find_child = flaky_find_child.__get__(fs, DriveFleetStorage)
+
+    fid = fs._ensure_folder("ROOT", "slow")
+
+    assert fid is not None
+    assert calls["n"] == 4  # 1 initial + 2 forced-miss retries + 1 real success
+
+
+def test_ensure_folder_raises_after_retries_exhausted():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", ensure_folder_retry_attempts=3,
+                            ensure_folder_retry_backoff=0)
+    original_find_child = DriveFleetStorage._find_child
+    calls = {"n": 0}
+
+    def always_missing_after_create(self, parent_id, name, *, folder, reap_duplicates=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # genuine pre-create existence check
+            return original_find_child(self, parent_id, name, folder=folder,
+                                        reap_duplicates=reap_duplicates)
+        return None  # every post-create resolve attempt "never" becomes visible
+
+    fs._find_child = always_missing_after_create.__get__(fs, DriveFleetStorage)
+
+    with pytest.raises(RuntimeError):
+        fs._ensure_folder("ROOT", "never-visible")
+    # 1 initial check + 3 retry attempts, all forced to miss
+    assert calls["n"] == 4
+
+
+# -- Finding 5: Shared-Drive rooted instances scope their queries -----------
+
+def _tracked_list_calls(drive):
+    calls = []
+    real_list = drive.list
+
+    def tracking_list(**kw):
+        calls.append(kw)
+        return real_list(**kw)
+
+    drive.list = tracking_list
+    return calls
+
+
+def test_root_is_drive_scopes_find_child_and_list_paths_queries():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "D1", root_is_drive=True)
+    calls = _tracked_list_calls(drive)
+
+    fs.put_bytes("a/b.bin", b"x")
+    fs.list_paths("a/")
+
+    assert calls, "expected at least one list() call"
+    assert all(c.get("corpora") == "drive" and c.get("driveId") == "D1" for c in calls)
+
+
+def test_root_is_drive_defaults_false_and_is_unscoped():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    calls = _tracked_list_calls(drive)
+
+    fs.put_bytes("a/b.bin", b"x")
+    fs.list_paths("a/")
+
+    assert calls, "expected at least one list() call"
+    assert all(c.get("corpora") is None and c.get("driveId") is None for c in calls)
+
+
+def test_drive_cache_storage_sets_root_is_drive():
+    from mcpbrain import fleet_storage
+    fs = fleet_storage.drive_cache_storage(FakeDrive(), "D1")
+    assert fs._root_is_drive is True
+
+
+def test_fleet_folder_storage_leaves_root_is_drive_false(tmp_path):
+    from mcpbrain import config, fleet_storage
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEETFOLDER"}})
+    fs = fleet_storage.fleet_folder_storage(str(tmp_path), drive_service=FakeDrive())
+    assert fs._root_is_drive is False
