@@ -364,3 +364,20 @@ def test_freetext_alias_note_is_dropped(tmp_path):
     assert org_contrib._is_name_like("JC") is True
     assert org_contrib._is_name_like("Joel Chelliah") is True
     assert org_contrib._safe_aliases("JC, my private note") == "JC"
+
+
+def test_person_name_freetext_without_separator_is_dropped(tmp_path):
+    """OBS-2: a person name carrying free-text with no separator (that _clean_name
+    would otherwise miss) must not leak — the person is dropped, like the no-email
+    case. org names (taxonomy-canonical, may be lowercase/digits) are unaffected."""
+    s = _store(tmp_path)
+    d = _delta()
+    d["entities"]["joel"]["name"] = "Bob divorce lawyer"     # emailed person, junk name
+    assert org_contrib.collect_from_drain(s, d, _pin(), "alice@x.org") == 0
+    assert _outbox(s) == []
+
+
+def test_real_person_name_and_org_name_still_contribute(tmp_path):
+    s = _store(tmp_path)
+    # default delta: person "Joel Chelliah" + org "Acme" — both must survive.
+    assert org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org") == 3
