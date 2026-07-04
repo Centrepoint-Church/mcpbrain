@@ -86,6 +86,10 @@ exclude = ["mcpbrain.maintenance*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist): the suite is isolation-clean and this cuts
+# a full run from ~115s to ~25-40s on a multicore box. Override with `-n0` for a
+# single-process run (e.g. when using --pdb or debugging test ordering).
+addopts = "-n auto"
 markers = [
     "slow: long-running integration tests (real subprocess + model load)",
     "e2e: full sync→prepare→drain→graph loop (CI gate)",
@@ -96,6 +100,7 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.8",
     "pyyaml>=6",
+    "pytest-xdist>=3.8.0",
 ]
 
 # Lean lint: ruff's default rules (pyflakes + core pycodestyle) — unused
