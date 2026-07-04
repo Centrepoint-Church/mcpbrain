@@ -82,14 +82,84 @@ def canonical_key(name: str) -> str:
 _NAME_MERGEABLE_TYPES = frozenset({"person", "org", "project"})
 
 
-def _deterministic_merges(store) -> int:
+def _origin_map(store) -> dict:
+    """id -> origin ('local'|'org'). Queried here (not via entities_for_resolution)
+    to keep the frozen store surface untouched, per the B4a guard scope."""
+    with store._connect() as db:
+        return {r["id"]: (r["origin"] or "local")
+                for r in db.execute("SELECT id, origin FROM entities").fetchall()}
+
+
+def _org_survivor(members, origins):
+    """B4a rule 2: whenever a group contains at least one org row, an org row
+    must survive — never a local one (the import would otherwise resurrect the
+    org node with local flesh stranded). This applies UNIVERSALLY, including
+    during the curator's own dedup pass: curator=True only controls whether
+    org<->org groups are merged at all (rule 1) — it must never also disable
+    who survives once a merge happens (rule 2), since a curator install is a
+    normal member machine too and can have its own local duplicates collide
+    with an org row in the same canonical-key/email group. When 2+ org rows
+    are present (only reachable when curator=True, since a non-curator group
+    with org_count>=2 is skipped upstream by the org<->org guard), the
+    highest-mentions org row wins — a local row never outranks any org row.
+    Returns the forced survivor, or None when the group is purely local."""
+    org_members = [m for m in members if origins.get(m["id"]) == "org"]
+    if not org_members:
+        return None
+    return max(org_members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+
+
+def _emit_merge_candidates(store, members, origins, home=None) -> None:
+    """A local pass found two ORG rows it thinks are duplicates. Local must not
+    merge them (the next import would resurrect them); instead contribute the
+    pair upstream as a merge-candidate signal for the curator (spec B4a rule 1).
+    Best-effort: no fleet pin configured, or any error, means this silently
+    no-ops — a missing signal must never break local resolution.
+
+    home must be the SAME home the caller resolved (threaded through, not
+    re-derived): a caller for a non-default store/home must never silently
+    fall back to reading a different machine's live fleet-pin config to
+    decide whether to emit."""
+    try:
+        import json
+        from mcpbrain import config as _config
+        from mcpbrain.org_contracts import ContributionRecord, source_ref
+        home = str(home) if home is not None else str(_config.app_dir())
+        pin = _config.fleet_pin(home)
+        if not pin.is_pinned:
+            return
+        org_ids = sorted(m["id"] for m in members if origins.get(m["id"]) == "org")
+        email = _config.owner_email(home)
+        for i in range(len(org_ids)):
+            for j in range(i + 1, len(org_ids)):
+                claim = {"kind": "merge_candidate", "a": org_ids[i], "b": org_ids[j]}
+                rec = ContributionRecord(
+                    claim=claim, confidence=0.5, valid_from="",
+                    contributor_email=email, source_kind="local",
+                    source_ref=source_ref(pin.fleet_secret, f"{org_ids[i]}|{org_ids[j]}"))
+                with store._connect() as db:
+                    db.execute("INSERT INTO org_contrib_outbox(record) VALUES(?)",
+                               (json.dumps(rec.to_dict(), sort_keys=True),))
+    except Exception:  # noqa: BLE001 — a best-effort signal must never break resolution
+        log.debug("resolve: merge-candidate emit failed", exc_info=True)
+
+
+def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
     """Merge same-type, canonical-key-identical entities into the highest-mentions
     survivor. Returns the number of merges applied. Safe (no LLM).
 
     Only name-identity types (_NAME_MERGEABLE_TYPES) are merged on canonical name;
     structural/artifact types are keyed by source id, not title, so they are never
-    name-merged here (they would collide catastrophically on generic titles)."""
+    name-merged here (they would collide catastrophically on generic titles).
+
+    B4a cross-layer guard: unless curator=True, a group with 2+ org-origin rows
+    is never merged locally (that's the curator's job on the org layer — a local
+    merge would just be resurrected by the next import); a group with any org
+    row always forces that org row (highest-mentions org row, if several) to
+    survive, unconditionally — rule 2 does not depend on curator (see
+    _org_survivor)."""
     ents = store.entities_for_resolution()
+    origins = _origin_map(store)
     groups = {}   # (type, canonical_key) -> [entity dicts]
     for e in ents:
         if e["type"] not in _NAME_MERGEABLE_TYPES:
@@ -102,10 +172,15 @@ def _deterministic_merges(store) -> int:
     for (_type, _key), members in groups.items():
         if len(members) < 2:
             continue
+        org_count = sum(1 for m in members if origins.get(m["id"]) == "org")
+        if not curator and org_count >= 2:
+            _emit_merge_candidates(store, members, origins, home=home)   # B4a rule 1
+            continue
         # id is the final tiebreaker so equal-mentions, equal-name-length groups
         # pick a deterministic survivor. entities_for_resolution() ORDERs BY id, so
         # group membership order is stable too, making the whole merge reproducible.
-        survivor = max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+        survivor = (_org_survivor(members, origins)
+                    or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
@@ -113,7 +188,7 @@ def _deterministic_merges(store) -> int:
     return merged
 
 
-def _email_equality_merges(store, home=None) -> int:
+def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
     """Merge person entities that share a normalized email_addr into the
     highest-mentions survivor. Returns the number of merges applied.
 
@@ -129,10 +204,17 @@ def _email_equality_merges(store, home=None) -> int:
 
     Query is self-contained (not entities_for_resolution(), which doesn't expose
     email_addr) — deliberately scoped to this module per the task's file list.
+
+    B4a cross-layer guard: same org<->org rule as _deterministic_merges — unless
+    curator=True, a group with 2+ org-origin rows is skipped (contributed
+    upstream instead); a group with any org row always forces that org row to
+    survive, unconditionally — rule 2 does not depend on curator (see
+    _org_survivor).
     """
     home_str = str(home) if home is not None else str(config.app_dir())
     if not config.write_time_dedup_enabled(home_str):
         return 0
+    origins = _origin_map(store)
     with store._connect() as conn:
         rows = conn.execute(
             "SELECT id, name, email_addr, mentions FROM entities "
@@ -150,7 +232,12 @@ def _email_equality_merges(store, home=None) -> int:
             continue
         if is_role_address(_email):
             continue  # shared/role inbox — distinct people, never identity-merge (C1)
-        survivor = max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+        org_count = sum(1 for m in members if origins.get(m["id"]) == "org")
+        if not curator and org_count >= 2:
+            _emit_merge_candidates(store, members, origins, home=home)   # B4a rule 1
+            continue
+        survivor = (_org_survivor(members, origins)
+                    or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
                 store.merge_entities(m["id"], survivor["id"], method="email")
@@ -305,7 +392,8 @@ def write_time_dedup_check(name: str, entity_type: str,
     return None
 
 
-def resolve_entities(store, client=None, *, max_adjudications: int = 200, home=None) -> dict:
+def resolve_entities(store, client=None, *, max_adjudications: int = 200, home=None,
+                     curator: bool = False) -> dict:
     """Resolve duplicate entities (deterministic tier only; §9A).
 
     The LLM-adjudication tier is removed — spool merge_review handles it. Fuzzy
@@ -315,8 +403,12 @@ def resolve_entities(store, client=None, *, max_adjudications: int = 200, home=N
     _email_equality_merges (Task 5.3) — email merging can still catch entities
     that survived name-based merging as distinct (different names, same inbox).
     Both counts are summed into auto_merges.
+
+    curator=True is the B4a bypass: only org_curate.run (dedupping the org layer
+    itself) should pass it. Local (curator=False, the default) callers never
+    merge two org-origin rows into each other.
     """
-    auto = _deterministic_merges(store)
-    auto += _email_equality_merges(store, home=home)
+    auto = _deterministic_merges(store, home=home, curator=curator)
+    auto += _email_equality_merges(store, home=home, curator=curator)
     return {"mode": "deterministic", "auto_merges": auto, "llm_merges": 0,
             "llm_calls": 0, "kept_distinct": 0}

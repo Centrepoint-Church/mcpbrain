@@ -1657,26 +1657,105 @@ class Daemon:
     # -- Org-baseline cadences (Phase 0 stubs; bodies land in subsystem B) ----
 
     def _run_org_contrib_upload(self) -> dict | None:
-        """Upload pending org_contrib_outbox rows to the fleet folder.
-        Phase 0: no-op stub — subsystem B implements the body."""
+        """Collect allowlisted deltas since the watermark and upload the outbox
+        to the fleet folder. Both steps run here because Phase B may not add a
+        drain-path hook — collect_from_drain stays reusable for a future one."""
         if not self._is_due("_org_contrib_upload_interval_s", "_last_org_contrib_upload"):
             return None
-        return None
+        now = self._clock()
+        try:
+            from mcpbrain import org_contrib
+            from mcpbrain import config as _config
+            home = str(_config.app_dir())
+            if not _config.org_contrib_enabled(home):
+                self._last_org_contrib_upload = now
+                return {"skipped": "disabled"}
+            pin = _config.fleet_pin(home)
+            if not pin.is_pinned:
+                self._last_org_contrib_upload = now
+                return {"skipped": "unpinned"}
+            # FleetStorage is built by subsystem A (mcpbrain/fleet_storage.py). Guarded
+            # import keeps B build-independent of A pre-convergence; the Drive service
+            # lives in the services dict (ensure_services), not on self.
+            try:
+                from mcpbrain import fleet_storage
+                fs = fleet_storage.fleet_folder_storage(
+                    home, drive_service=self.ensure_services().get("drive_service"))
+            except ImportError:
+                fs = None
+            if fs is None:
+                self._last_org_contrib_upload = now
+                return {"skipped": "no_fleet_storage"}
+            email = _config.owner_email(home)
+            delta, wm = org_contrib._delta_since_watermark(self._store)
+            n = org_contrib.collect_from_drain(self._store, delta, pin, email)
+            self._store.set_meta("org_contrib_hwm", str(wm["hwm"]))
+            self._store.set_meta("org_contrib_ts", wm["ts"])
+            up = org_contrib.upload_pending(self._store, fs, email)
+            log.info("org_contrib: collected=%d uploaded=%d", n, up["uploaded"])
+        except Exception as exc:  # noqa: BLE001 — a cadence must never crash the loop
+            log.warning("org_contrib pass failed: %s", exc, exc_info=True)
+            return {"org_contrib": False, "error": str(exc)}
+        self._last_org_contrib_upload = now
+        return {"collected": n, **up}
 
     def _run_org_import(self) -> dict | None:
-        """Import a newer org-graph snapshot into origin='org' rows.
-        Phase 0: no-op stub — subsystem B implements the body."""
+        """Import a newer org-graph snapshot into origin='org' rows."""
         if not self._is_due("_org_import_interval_s", "_last_org_import"):
             return None
-        return None
+        now = self._clock()
+        try:
+            from mcpbrain import org_import
+            from mcpbrain import config as _config
+            home = str(_config.app_dir())
+            if not _config.org_import_enabled(home):
+                self._last_org_import = now
+                return {"skipped": "disabled"}
+            try:
+                from mcpbrain import fleet_storage
+                fs = fleet_storage.fleet_folder_storage(
+                    home, drive_service=self.ensure_services().get("drive_service"))
+            except ImportError:
+                fs = None
+            if fs is None:
+                self._last_org_import = now
+                return {"skipped": "no_fleet_storage"}
+            res = org_import.import_snapshot(self._store, fs)
+            log.info("org_import: %s", res)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("org_import pass failed: %s", exc, exc_info=True)
+            return {"org_import": False, "error": str(exc)}
+        self._last_org_import = now
+        return res
 
     def _run_org_curate(self) -> dict | None:
-        """Curator-only: ingest contributions, adjudicate, publish a snapshot.
-        Phase 0: no-op stub — subsystem B implements the body (and gates on
-        config.is_org_curator inside it)."""
+        """Curator-only: ingest contributions, adjudicate, publish a snapshot."""
         if not self._is_due("_org_curate_interval_s", "_last_org_curate"):
             return None
-        return None
+        now = self._clock()
+        try:
+            from mcpbrain import org_curate
+            from mcpbrain import config as _config
+            home = str(_config.app_dir())
+            if not _config.is_org_curator(home):
+                self._last_org_curate = now
+                return {"skipped": "not_curator"}
+            try:
+                from mcpbrain import fleet_storage
+                fs = fleet_storage.fleet_folder_storage(
+                    home, drive_service=self.ensure_services().get("drive_service"))
+            except ImportError:
+                fs = None
+            if fs is None:
+                self._last_org_curate = now
+                return {"skipped": "no_fleet_storage"}
+            res = org_curate.run(self._store, fs, home)
+            log.info("org_curate: %s", {k: res[k] for k in ("version", "ingested") if k in res})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("org_curate pass failed: %s", exc, exc_info=True)
+            return {"org_curate": False, "error": str(exc)}
+        self._last_org_curate = now
+        return res
 
     # -- periodic graph lint ------------------------------------------------
 
