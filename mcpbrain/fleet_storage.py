@@ -86,6 +86,11 @@ class DriveFleetStorage:
                 fields="id", supportsAllDrives=True,
             ).execute()
             fid = self._find_child(parent_id, name, folder=True)
+            if fid is None:
+                raise RuntimeError(
+                    f"DriveFleetStorage: folder {name!r} under parent {parent_id!r} "
+                    f"was created but not found on re-resolve (Drive eventual consistency?)"
+                )
         self._folder_cache[key] = fid
         return fid
 
