@@ -1795,7 +1795,15 @@ class Daemon:
                 self._last_org_curate = now
                 return {"skipped": "no_fleet_storage"}
             res = org_curate.run(self._store, fs, home)
-            log.info("org_curate: %s", {k: res[k] for k in ("version", "ingested") if k in res})
+            # Stash fuzzy-merge pairs as an enrich-spool block (mirrors _run_review):
+            # a subagent judges them and drain -> apply_org_merge_answers applies the
+            # merges on push. Async because there is no synchronous LLM client.
+            units = res.pop("adjudication_units", [])
+            if units:
+                self._pending_blocks["org_merge_review"] = units
+            log.info("org_curate: %s",
+                     {**{k: res[k] for k in ("version", "ingested") if k in res},
+                      "merge_units": len(units)})
         except Exception as exc:  # noqa: BLE001
             log.warning("org_curate pass failed: %s", exc, exc_info=True)
             return {"org_curate": False, "error": str(exc)}
