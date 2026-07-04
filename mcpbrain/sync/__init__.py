@@ -196,6 +196,7 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
     published.
     """
     published = 0
+    failed = 0
     keep_map: dict[str, str] = {}
     for file_id, content_hash in misses:
         keep_map[file_id] = content_hash
@@ -206,8 +207,17 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
                 published += 1
         except Exception as exc:  # noqa: BLE001 — publish is best-effort;
             # a transient failure on one file must not abort the rest of the cycle
+            failed += 1
             log.info("sync: publish_file skipped for drive %s file %s: %s",
                      drive_id, file_id, exc)
+    # A SYSTEMATIC failure (every attempted publish failed — e.g. a missing
+    # drive.file write scope or an uncreatable cache folder) means the cache is
+    # silently not populating for the whole fleet. Surface it at WARNING once per
+    # drive, not buried in per-file info noise.
+    if failed and published == 0 and failed == len(misses):
+        log.warning("sync: ALL %d shared-cache publishes failed for drive %s — "
+                    "cache is not populating (check drive.file scope / cache folder access)",
+                    failed, drive_id)
     if keep_map:
         try:
             ingest_cache.gc_superseded_batch(fs, drive_id, keep_map, pin)

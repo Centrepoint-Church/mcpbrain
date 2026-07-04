@@ -97,7 +97,10 @@ def _source_kind(store, doc_id: str) -> str:
             st = (json.loads(r["metadata"]) or {}).get("source_type", "") or ""
         except (ValueError, TypeError):
             st = ""
-    return {"gmail": "email", "drive": "drive", "calendar": "calendar"}.get(st, "email")
+    # Honest labelling: an unrecognised/absent source_type becomes "unknown", not
+    # a silent mislabel as "email" (which would misattribute provenance for any
+    # new source type). source_kind is a coarse provenance label only, never gated.
+    return {"gmail": "email", "drive": "drive", "calendar": "calendar"}.get(st, "unknown")
 
 
 def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str) -> int:
@@ -166,11 +169,22 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
 
     if not records:
         return 0
+    inserted = 0
     with store._connect() as db:
+        # Dedup against still-pending outbox rows: the boundary-second (>=)
+        # watermark re-scan can re-derive an identical record on the next cycle;
+        # the curator's staging UNIQUE absorbs it, but skipping it here keeps the
+        # contributor's outbox and uploaded JSONL free of duplicate Drive traffic.
+        pending = {r["record"] for r in db.execute(
+            "SELECT record FROM org_contrib_outbox WHERE uploaded_at=''").fetchall()}
         for rec in records:
-            db.execute("INSERT INTO org_contrib_outbox(record) VALUES(?)",
-                       (json.dumps(rec.to_dict(), sort_keys=True),))
-    return len(records)
+            blob = json.dumps(rec.to_dict(), sort_keys=True)
+            if blob in pending:
+                continue
+            db.execute("INSERT INTO org_contrib_outbox(record) VALUES(?)", (blob,))
+            pending.add(blob)
+            inserted += 1
+    return inserted
 
 
 def upload_pending(store, fleet_storage: FleetStorage, contributor_email: str) -> dict:
