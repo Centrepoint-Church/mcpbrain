@@ -70,15 +70,25 @@ def test_emit_merge_candidates_uses_passed_home_not_live_app_dir(tmp_path, monke
     monkeypatch.setattr(config, "app_dir", lambda: unpinned_home)
     pinned_home = tmp_path / "pinned-home"
     pinned_home.mkdir()
-    config.write_config(str(pinned_home), {"org_config": {"org_pin": {"fleet_secret": "s3cret"}}})
+    config.write_config(str(pinned_home), {"owner_email": "alice@pinned.org",
+                                           "org_config": {"org_pin": {"fleet_secret": "s3cret"}}})
     s = _store(tmp_path)
     with s._connect() as db:                          # two org rows, same canonical name
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) VALUES('acme','Acme','org','org',5)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) VALUES('acme-inc','Acme','org','org',2)")
     resolve.resolve_entities(s, home=str(pinned_home))   # local (curator=False)
     with s._connect() as db:
-        n = db.execute("SELECT COUNT(*) c FROM org_contrib_outbox").fetchone()["c"]
-    assert n > 0   # emitted using the passed pinned_home, not the unpinned app_dir()
+        rows = db.execute("SELECT record FROM org_contrib_outbox").fetchall()
+    assert len(rows) == 1   # emitted using the passed pinned_home, not the unpinned app_dir()
+    from mcpbrain.org_contracts import ContributionRecord, source_ref
+    import json
+    rec = ContributionRecord.from_dict(json.loads(rows[0]["record"]))  # round-trips cleanly
+    assert rec.claim == {"kind": "merge_candidate", "a": "acme", "b": "acme-inc"}
+    assert rec.contributor_email == "alice@pinned.org"   # from pinned_home's config, not app_dir()
+    assert rec.source_kind == "local"
+    # HMAC-SHA256 over the pinned_home's own fleet_secret, not the raw id pair —
+    # confirms the emitted claim contains no plaintext identifier.
+    assert rec.source_ref == source_ref("s3cret", "acme|acme-inc")
 
 
 def test_upsert_never_overwrites_org_skeleton(tmp_path):
