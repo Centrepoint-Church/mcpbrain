@@ -108,28 +108,38 @@ def _stamp_origin(store, *, entity_ids=(), relation_ids=()) -> None:
             db.execute("UPDATE entity_relations SET origin='org' WHERE id=?", (rid,))
 
 
-def _apply_org_skeleton(store, entity_id, aggregated_claim, claim_id) -> None:
-    """Authoritative skeleton write for a materialised org entity.
+def _apply_org_skeleton(store, entity_id, aggregated_claim) -> None:
+    """Authoritative org/email_addr write for a materialised org entity.
 
     graph_write.upsert_entity's B4a rule-3 guard exists to stop LOCAL writes
     from overwriting an org row's skeleton — but it can't distinguish "a
     local write" from "the curator's own re-materialise", so once an entity
     is first promoted to origin='org', every SUBSEQUENT _materialise run's
-    upsert_entity call silently drops any skeleton change (a later-arriving
-    email, a job-change org update). The curator IS the authority for the
-    org layer, so this writes the current best-known aggregate (built from
-    ALL staged claims, not just new ones — org_contrib_staging accumulates
-    permanently) directly, bypassing that guard entirely. Confined to this
-    module; the shared guard other writers rely on is untouched. Blank
-    fields in the aggregate are skipped rather than written, so this can
-    only add/update skeleton knowledge, never blank out a value some
-    earlier claim established."""
-    updates = {"name": aggregated_claim.get("name") or claim_id,
-               "type": aggregated_claim.get("type") or "person"}
+    upsert_entity call silently drops any org/email_addr change (a
+    later-arriving email, a job-change org update). The curator IS the
+    authority for the org layer, so this writes the current best-known
+    aggregate (built from ALL staged claims, not just new ones —
+    org_contrib_staging accumulates permanently) directly, bypassing that
+    guard entirely. Confined to this module; the shared guard other writers
+    rely on is untouched.
+
+    Deliberately scoped to org/email_addr only — NOT name/type. Unlike
+    org/email_addr, upsert_entity's existing-row branches never overwrite
+    name/type after creation for ANY caller (org or local), so there is no
+    equivalent gap to close there; overwriting them here would instead
+    UNDO upsert_entity's own canonicalisation (canonical_org, strip_title)
+    and could flip-flop a name across id-dedup boundaries where `entity_id`
+    (the real, possibly-deduped store id) differs from what this claim_id's
+    own name would naively produce. Blank org/email_addr in the aggregate
+    are skipped rather than written, so this can only add/update skeleton
+    knowledge, never blank out a value some earlier claim established."""
+    updates = {}
     if aggregated_claim.get("org"):
         updates["org"] = aggregated_claim["org"]
     if aggregated_claim.get("email_addr"):
         updates["email_addr"] = aggregated_claim["email_addr"]
+    if not updates:
+        return
     set_clause = ", ".join(f"{k}=?" for k in updates)
     with store._connect() as db:
         db.execute(f"UPDATE entities SET {set_clause} WHERE id=?",
@@ -227,7 +237,7 @@ def _materialise(store, pin_allowlist=None) -> dict:
             continue
         id_map[claim_id] = got
         _stamp_origin(store, entity_ids=[got])
-        _apply_org_skeleton(store, got, e, claim_id)
+        _apply_org_skeleton(store, got, e)
         n_ent += 1
 
     n_rel = 0
