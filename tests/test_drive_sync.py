@@ -30,7 +30,7 @@ class _Changes:
         # are string integers ("1", "2", …) that index directly into _pages.
         self._initial_cursor = initial_cursor  # set by FakeDriveService
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, **_kw):          # accept driveId/supportsAllDrives
         return _Req({"startPageToken": self._start})
 
     def list(self, **kw):
@@ -66,6 +66,14 @@ class _Files:
         return _Req({"files": self._file_list})
 
 
+class _Drives:
+    def __init__(self, drives=None):
+        self._drives = drives or []
+
+    def list(self, **_kw):
+        return _Req({"drives": self._drives})
+
+
 class FakeDriveService:
     def __init__(self, **kw):
         # initial_cursor is the pageToken the first delta call will carry.
@@ -80,12 +88,16 @@ class FakeDriveService:
             kw.get("export_raises"),
             kw.get("file_list"),
         )
+        self._drives = _Drives(kw.get("shared_drives"))
 
     def changes(self):
         return self._changes
 
     def files(self):
         return self._files
+
+    def drives(self):
+        return self._drives
 
 
 # ---------------------------------------------------------------------------
