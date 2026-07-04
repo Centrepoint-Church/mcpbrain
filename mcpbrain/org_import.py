@@ -37,6 +37,7 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 
 from mcpbrain.org_contracts import SnapshotManifest, Tombstone
 from mcpbrain.resolve import canonical_key, is_role_address, _token_set_ratio, _tokens
@@ -239,7 +240,12 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         if target is None and not is_role_address(em):
             org_toks = _tokens(e.get("name", ""))
             org_key = canonical_key(e.get("name", ""))
-            org_aliases = {a.strip().lower() for a in (e.get("aliases") or "").split(",") if a.strip()}
+            # Accept BOTH comma- and pipe-delimited aliases: store.merge_entities
+            # pipe-joins ("A|B") while extraction writes comma-joined, so splitting
+            # on comma alone silently missed alias matches for any entity that had
+            # been through a prior merge (a real slug-drift reconciliation gap).
+            org_aliases = {a.strip().lower()
+                           for a in re.split(r"[|,]", e.get("aliases") or "") if a.strip()}
             matches = []
             for l in local:
                 if l["id"] == org_id or l["type"] != e.get("type", "person"):
