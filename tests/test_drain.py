@@ -266,6 +266,30 @@ def test_drain_marks_chunks_enriched(store, home):
     assert _enriched_count(store, ["d-a"]) == {"d-a": 1}
 
 
+def test_drain_persists_enrich_payload_for_drive_docs_only(store, home):
+    # A#4: after a successful apply, the validated extraction is cached against
+    # each SHARED-DRIVE doc_id (prefix "gdrive-") so a later cache artifact can
+    # carry it and importers skip re-running Haiku. Email doc_ids never get a
+    # payload row — email content isn't shared/cached the same way.
+    thread_id = "t-mixed"
+    _seed_chunk(store, "gdrive-F1-0", thread_id, message_id="msg-drive")
+    _seed_chunk(store, "gmail-m1-body", thread_id, message_id="msg-mail")
+    env = _envelope(thread_id, messages=[
+        {"message_id": "msg-drive", "sender": "Joel <joel@example.org>",
+         "date": "2026-04-18", "labels": "INBOX", "subject": "Subject"},
+        {"message_id": "msg-mail", "sender": "Joel <joel@example.org>",
+         "date": "2026-04-18", "labels": "INBOX", "subject": "Subject"},
+    ])
+    _write_inbox(home, "batch.json", _batch("batch-mixed", [env]))
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert summary["applied"] == 1
+    assert store.get_enrich_payload("gdrive-F1-0") is not None
+    assert store.get_enrich_payload("gmail-m1-body") is None
+
+
 def test_drain_apply_failure_isolated_no_mark(store, home):
     # Thread A applies + marks; thread B's apply raises -> B not marked, file kept.
     _seed_chunk(store, "d-a", "t-a")
