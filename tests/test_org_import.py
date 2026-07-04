@@ -359,6 +359,42 @@ def test_restore_does_not_move_observation_added_after_the_merge(tmp_path):
     assert generic_notes == {"native-post-merge"}     # native-to-target flesh stays put
 
 
+def test_restore_precision_survives_same_day_post_merge_observation(tmp_path):
+    """The observation-restore boundary is an exact set of migrated
+    entity_observations.id, not a date/timestamp comparison — so a native
+    observation added to the merge target on the SAME calendar day as the
+    repoint (org_repoint_log.at is a full timestamp; entity_observations
+    lacks one) must still be correctly excluded from restore. A date-only
+    valid_from<=at comparison would have wrongly included it, since a
+    same-day date string is lexicographically a prefix of (and therefore
+    "less than") that day's full timestamp."""
+    import datetime as _dt
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    _publish(fs, [_ent("joel-old", "Joel Old"), _ent("joel-generic", "Joel Generic")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:                         # pre-merge flesh, dated today too
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('joel-old','note','pre-merge','local',?)", (today,))
+    _publish(fs, [_ent("joel-generic", "Joel Generic")], [], version=2,
+             tombstones=[Tombstone(entity_id="joel-old", merged_into="joel-generic")])
+    org_import.import_snapshot(s, fs)                # repoint happens "now" — org_repoint_log.at is today
+    with s._connect() as db:                         # native observation added the SAME day, after the merge
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('joel-generic','note','native-same-day','local',?)", (today,))
+    _publish(fs, [_ent("joel-old", "Joel Old"), _ent("joel-generic", "Joel Generic")], [], version=3)
+    org_import.import_snapshot(s, fs)                # curator splits joel-old back out
+    with s._connect() as db:
+        old_notes = {r["value"] for r in db.execute(
+            "SELECT value FROM entity_observations WHERE entity_id='joel-old'").fetchall()}
+        generic_notes = {r["value"] for r in db.execute(
+            "SELECT value FROM entity_observations WHERE entity_id='joel-generic'").fetchall()}
+    assert old_notes == {"pre-merge"}
+    assert generic_notes == {"native-same-day"}      # not pulled onto joel-old despite matching dates
+
+
 def test_ambiguous_name_only_pair_left_for_fuzzy_queue(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
