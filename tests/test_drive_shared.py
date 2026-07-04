@@ -128,3 +128,42 @@ def test_sync_shared_drive_removal_purges_local_and_artifact(tmp_path):
     sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
     assert s.get_chunk("gdrive-FID-0") is None
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
+
+
+def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
+    s = _store(tmp_path)
+    s.set_cursor("drive:D1", "100")
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"body text here"})
+    storages = {}
+
+    def factory(drive_id):
+        storages.setdefault(drive_id, LocalDirFleetStorage(tmp_path / drive_id))
+        return storages[drive_id]
+
+    out = sync_shared_drives(svc, s, pin=PIN, storage_factory=factory)
+    assert set(out) >= {"D1"}
+    assert out["D1"]["processed"] == 1
+    assert out["D1"]["storage"] is storages["D1"]
+    assert out["_revoked"] == []
+
+
+def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "GONE"}, [0.0]*4)
+    # seed the counter as if GONE was seen and has been absent (threshold-1) times
+    ingest_cache.note_drive_presence(s, ["GONE"], threshold=2)  # GONE present, counter=0
+    ingest_cache.note_drive_presence(s, [], threshold=2)        # GONE absent, counter=1
+    svc = FakeDriveService(shared_drives=[])         # GONE no longer listed
+    out = sync_shared_drives(svc, s, pin=PIN,
+                             storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
+                             absence_threshold=2)
+    assert out["_revoked"] == ["GONE"]
+    assert s.doc_ids_for_drive("GONE") == []
+
+
+from mcpbrain.sync.drive import sync_shared_drives   # noqa: E402  (import after helpers)
