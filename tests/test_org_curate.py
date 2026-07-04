@@ -448,3 +448,51 @@ def test_run_second_publish_bumps_version(tmp_path):
     v1 = org_curate.run(s, fs, str(tmp_path))["version"]
     v2 = org_curate.run(s, fs, str(tmp_path))["version"]
     assert (v1, v2) == (1, 2)
+
+
+def test_run_applies_real_adjudication_verdict_end_to_end(tmp_path, monkeypatch):
+    """org_curate.run's adjudicate()/_apply_merge_verdicts wiring is normally
+    only unit-tested in isolation (adjudicate() always returns [] in this
+    phase, so a non-empty verdict list never actually flows through run()'s
+    real orchestration). Monkeypatch adjudicate to return a real 'merge'
+    verdict for a genuine fuzzy candidate pair and confirm run() applies it
+    end-to-end, through the real config-derived cap, not just when
+    _apply_merge_verdicts is called directly in a unit test."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:                          # a genuine fuzzy candidate pair
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel','Joel','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
+    pair_id = "|".join(sorted(("joel", "joel-chelliah")))
+    monkeypatch.setattr(org_curate, "adjudicate",
+                        lambda units, home=None: [{"pair_id": pair_id, "verdict": "merge"}])
+    summary = org_curate.run(s, fs, str(tmp_path))
+    assert summary["adjudicated"]["merged"] == 1
+    survivors = [e for e in (s.get_entity("joel"), s.get_entity("joel-chelliah")) if e]
+    assert len(survivors) == 1
+
+
+def test_run_cap_blocks_a_real_merge_verdict(tmp_path, monkeypatch):
+    """The config-derived cap threaded into run() must actually block a real
+    'merge' verdict end-to-end, not just in _apply_merge_verdicts' own unit
+    tests (which call it directly with a hardcoded cap, never exercising
+    config.review_max_apply_per_run's wiring through run())."""
+    from mcpbrain import config
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel','Joel','person','org',1)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person','org',5)")
+    pair_id = "|".join(sorted(("joel", "joel-chelliah")))
+    monkeypatch.setattr(org_curate, "adjudicate",
+                        lambda units, home=None: [{"pair_id": pair_id, "verdict": "merge"}])
+    monkeypatch.setattr(config, "review_max_apply_per_run", lambda h: 0)
+    summary = org_curate.run(s, fs, str(tmp_path))
+    assert summary["adjudicated"]["capped"] == 1 and summary["adjudicated"]["merged"] == 0
+    assert s.get_entity("joel") is not None and s.get_entity("joel-chelliah") is not None
