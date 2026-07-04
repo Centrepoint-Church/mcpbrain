@@ -186,7 +186,12 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
         embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
         enrich=enrich or {}, published_by=published_by,
         published_at=datetime.now(timezone.utc).isoformat())
-    data = gzip.compress(json.dumps(art.to_dict()).encode("utf-8"))
+    # sort_keys makes the "byte-identical artifacts" guarantee actually true:
+    # plain json.dumps preserves dict insertion order, so two publishers whose
+    # extractors happen to build metadata keys in different orders would
+    # otherwise emit different bytes for logically-identical content.
+    data = gzip.compress(
+        json.dumps(art.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8"))
     fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin), data)
     try:
         gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
