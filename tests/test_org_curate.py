@@ -160,3 +160,43 @@ def test_mentioned_with_two_sources_materialises(tmp_path):
     with s._connect() as db:
         assert db.execute("SELECT COUNT(*) c FROM entity_relations "
                           "WHERE relation='mentioned_with'").fetchone()["c"] == 1
+
+
+def test_adjudicate_default_is_all_pending(tmp_path):
+    assert org_curate.adjudicate([{"pair_id": "a|b"}]) == []
+
+
+def test_apply_merge_verdict_merges_only_on_merge(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name in (("joel-c", "Joel C"), ("joel-chelliah", "Joel Chelliah")):
+            db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                       "VALUES(?,?,'person','org',1)", (eid, name))
+    res = org_curate._apply_merge_verdicts(
+        s, [{"pair_id": "joel-c|joel-chelliah", "verdict": "merge", "canonical": "Joel Chelliah"}],
+        cap=10)
+    assert res["merged"] == 1
+    assert s.get_entity("joel-c") is None or s.get_entity("joel-chelliah") is None
+
+
+def test_apply_merge_verdict_pending_is_noop(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid in ("a", "b"):
+            db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                       "VALUES(?,?,'person','org',1)", (eid, eid))
+    res = org_curate._apply_merge_verdicts(s, [{"pair_id": "a|b", "verdict": "pending"}], cap=10)
+    assert res["pending"] == 1 and res["merged"] == 0
+    assert s.get_entity("a") is not None and s.get_entity("b") is not None
+
+
+def test_apply_merge_verdict_role_address_guarded(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('office-a','Office','person','office@x.org','org')")
+        db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
+                   "VALUES('office-b','Office B','person','office@y.org','org')")
+    res = org_curate._apply_merge_verdicts(
+        s, [{"pair_id": "office-a|office-b", "verdict": "merge"}], cap=10)
+    assert res["guarded"] == 1 and res["merged"] == 0
