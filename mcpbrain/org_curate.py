@@ -21,7 +21,7 @@ import gzip
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mcpbrain import config, graph_write, orgs, resolve
 from mcpbrain.org_contracts import ContributionRecord, SnapshotManifest, Tombstone
@@ -412,10 +412,19 @@ def _snapshot_lines(store, home) -> list[str]:
     return lines
 
 
+# How far back org-winner merges are still republished as tombstones. Bounds
+# tombstones.jsonl growth (otherwise unbounded: every publish would
+# republish the FULL org-merge history forever) while staying safe for any
+# consumer importing at least this often — see _tombstones' docstring for
+# what happens to a consumer that falls further behind than this.
+_TOMBSTONE_RETENTION_DAYS = 180
+
+
 def _tombstones(store) -> list[Tombstone]:
-    """Every merged-away id whose WINNER is currently an org-layer row becomes
-    a tombstone pointing at that winner, so a consumer re-import never
-    resurrects the loser id (spec B3.4/B5.4).
+    """Merged-away ids whose WINNER is currently an org-layer row, merged
+    within the last _TOMBSTONE_RETENTION_DAYS, become tombstones pointing at
+    that winner, so a consumer re-import never resurrects the loser id
+    (spec B3.4/B5.4).
 
     Scoped to org-winner merges only — NOT every row in entity_merge_log. A
     curator install is a normal member machine too: its daily
@@ -426,12 +435,32 @@ def _tombstones(store) -> list[Tombstone]:
     curator's private local contacts' name-derived ids into the fleet-wide
     tombstones.jsonl file — a second egress channel that bypasses the entire
     fail-closed contribution edge (org_contrib.collect_from_drain) built
-    specifically to prevent exactly that kind of leak."""
+    specifically to prevent exactly that kind of leak.
+
+    Retention bound: without one, _tombstones() re-serialises the org
+    layer's ENTIRE merge history into tombstones.jsonl on every single daily
+    publish, forever — unbounded growth in publish size and consumer-side
+    processing cost. Only the underlying PUBLISHED list is bounded here;
+    entity_merge_log itself (used elsewhere, well beyond org tombstones) is
+    untouched, as is each consumer's own local org_repoint_log (so
+    curator-SPLIT recovery via _restore_from_repoint_log, which reads a
+    CONSUMER's own local log populated when THAT consumer processed a
+    repoint, is unaffected by this bound). A consumer that hasn't
+    successfully imported in longer than the retention window will simply
+    miss the clean repoint for an aged-out merge and fall through to
+    import_snapshot's normal wholesale-replace demote-if-attached fallback
+    instead (the SAME degradation already accepted for a tombstone with no
+    valid merge target) — not data loss, just a less clean outcome for a
+    consumer already badly behind the fleet's daily cadence.
+    """
     with store._connect() as db:
         org_winners = {r["id"] for r in db.execute(
             "SELECT id FROM entities WHERE origin='org'").fetchall()}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_TOMBSTONE_RETENTION_DAYS)
+             ).strftime("%Y-%m-%d %H:%M:%S")
     return [Tombstone(entity_id=m["loser_id"], merged_into=m["winner_id"])
-            for m in store.list_entity_merges() if m["winner_id"] in org_winners]
+            for m in store.list_entity_merges()
+            if m["winner_id"] in org_winners and (m["at"] or "") >= cutoff]
 
 
 def _publish(store, fleet_storage, home) -> SnapshotManifest:
