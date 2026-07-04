@@ -18,8 +18,10 @@ the store, then advancing the cursor only after all upserts complete.
 
 import hashlib
 import logging
+import uuid
 
 from mcpbrain.chunking import chunk_text, content_hash
+from mcpbrain.org_contracts import DRIVE_ID_META_KEY
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
     extract_text_from_pdf,
@@ -90,12 +92,16 @@ def _fetch_text(service, file_meta: dict) -> str | None:
     mime = file_meta.get("mimeType", "")
     if mime in _EXPORT:
         raw = service.files().export(
-            fileId=file_meta["id"], mimeType=_EXPORT[mime]
+            fileId=file_meta["id"], mimeType=_EXPORT[mime], supportsAllDrives=True
         ).execute()
     elif mime in _DOWNLOAD_TEXT:
-        raw = service.files().get_media(fileId=file_meta["id"]).execute()
+        raw = service.files().get_media(
+            fileId=file_meta["id"], supportsAllDrives=True
+        ).execute()
     elif mime in _DOWNLOAD_BINARY:
-        raw = service.files().get_media(fileId=file_meta["id"]).execute()
+        raw = service.files().get_media(
+            fileId=file_meta["id"], supportsAllDrives=True
+        ).execute()
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
         return _DOWNLOAD_BINARY[mime](data)
     else:
@@ -142,7 +148,6 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None) -> 
         "confidence": confidence,
     }
     if drive_id:
-        from mcpbrain.org_contracts import DRIVE_ID_META_KEY
         base_meta[DRIVE_ID_META_KEY] = drive_id
 
     out = []
@@ -178,12 +183,78 @@ def _file_content_hash(file_meta: dict) -> str:
     """A cross-user-stable file-VERSION id, computable from Changes metadata alone
     (so the cache read path can key on it before extraction). Binary files carry a
     Drive md5Checksum; Google-native files (Docs/Sheets/Slides) do not, so we hash
-    the monotonic `version` + modifiedTime, which is identical across installs."""
+    the monotonic `version` + modifiedTime, which is identical across installs.
+
+    If BOTH md5Checksum and version/modifiedTime are missing/empty, there is no
+    usable version signal at all — hashing the empty pair would produce a
+    constant ("|") that never changes, meaning the file's cache entry would
+    never invalidate even after the file's content changes (permanent silent
+    staleness). Given this function's signature (no cache/store access, no
+    way to signal "uncacheable" to callers without changing every call site),
+    the safest choice is to force a perpetual cache miss instead: fold in a
+    fresh random nonce so the returned hash can never match any previously
+    (or subsequently) cached hash for this file, including one from a prior
+    call with the exact same degenerate metadata. Callers keep working
+    unchanged — they just always treat this file as changed and re-extract
+    it, which is wasteful but never silently stale.
+    """
     md5 = file_meta.get("md5Checksum")
     if md5:
         return md5
-    raw = f"{file_meta.get('version', '')}|{file_meta.get('modifiedTime', '')}"
+    version = file_meta.get("version") or ""
+    modified = file_meta.get("modifiedTime") or ""
+    if not version and not modified:
+        fid = file_meta.get("id", "<unknown>")
+        log.info(
+            "drive: file %s has no md5Checksum, version, or modifiedTime — "
+            "content hash cannot be computed; forcing a permanent cache miss "
+            "for this file instead of a degenerate constant hash", fid,
+        )
+        raw = f"{fid}|uncacheable|{uuid.uuid4().hex}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+    raw = f"{version}|{modified}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_first_extract_one(
+    service, store, fleet_storage, drive_id, fmeta, pin,
+) -> tuple[bool, tuple[str, str] | None]:
+    """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
+    (sync_shared_drive) and backfill (backfill_shared_drive) loops.
+
+    Sequence: compute the content-version hash; try the ingest cache; on a miss
+    fetch the text, RE-CHECK the cache immediately before the expensive path
+    (herd-race shrink, spec §A2 — another daemon may have just published while
+    we were fetching), then normalise + upsert.
+
+    Returns (processed, miss):
+      - processed is True when the file counted as processed — either a cache
+        hit or a successful local extraction that yielded at least one chunk;
+        False when skipped (unsupported/empty text, or no chunks produced).
+      - miss is (file_id, content_hash) when we extracted locally and the
+        caller must publish the artifact after embedding; None otherwise
+        (cache hit or skip — nothing new to publish).
+
+    Exceptions propagate; callers that need per-file isolation wrap the call.
+    """
+    from mcpbrain import ingest_cache
+
+    fid = fmeta["id"]
+    content_h = _file_content_hash(fmeta)
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+        return True, None
+    text = _fetch_text(service, fmeta)
+    if not text:
+        return False, None
+    # Re-check right before extraction: another daemon may have just published.
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+        return True, None
+    chunks = normalise_drive(fmeta, text, drive_id=drive_id)
+    if not chunks:
+        return False, None
+    for c in chunks:
+        store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    return True, (fid, content_h)
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +361,20 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
 
     page_token = cursor
     new_start = None
-    pending: list[dict] = []
-    removed_ids: list[str] = []
-    live_ids: set[str] = set()
+    # Collapse the whole delta into ONE ordered, deduplicated view keyed by
+    # fileId. A fileId can legitimately recur across pages (or within one page):
+    # edited then re-edited, changed then removed, or removed then restored.
+    # Drive emits changes in chronological order, so the LAST event for a file
+    # is its true state at the cursor endpoint. We keep only that last event,
+    # moving it to the end (pop + reinsert) so the processing order also
+    # reflects the latest event. Consequences:
+    #   * the same fileId appearing twice is fetched/extracted/published ONCE;
+    #   * change-then-removal collapses to a removal (file purged, not
+    #     re-extracted); removal-then-change collapses to a change (file
+    #     extracted, not purged) — either way we converge on the file's actual
+    #     final state rather than replaying every intermediate event.
+    # Each value is {"removed": bool, "fmeta": dict | None}.
+    events: dict[str, dict] = {}
     while True:
         resp = service.changes().list(
             pageToken=page_token,
@@ -304,46 +386,52 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
             fields=_CHANGES_FIELDS,
         ).execute()
         for ch in resp.get("changes", []):
-            fid = ch.get("fileId")
             if ch.get("removed"):
-                if fid:
-                    removed_ids.append(fid)
+                fid = ch.get("fileId")
+                if not fid:
+                    continue
+                events.pop(fid, None)
+                events[fid] = {"removed": True, "fmeta": None}
                 continue
             fmeta = ch.get("file") or {}
-            if not fmeta.get("id"):
+            fid = fmeta.get("id")
+            if not fid:
                 continue
-            live_ids.add(fmeta["id"])
-            pending.append(fmeta)
+            events.pop(fid, None)
+            events[fid] = {"removed": False, "fmeta": fmeta}
         new_start = resp.get("newStartPageToken", new_start)
         nxt = resp.get("nextPageToken")
         if not nxt:
             break
         page_token = nxt
 
+    live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
+
     processed = 0
     miss: list[tuple[str, str]] = []
-    for fmeta in pending:
-        fid = fmeta["id"]
-        content_h = _file_content_hash(fmeta)
-        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-            processed += 1
+    for fid, ev in events.items():
+        if ev["removed"]:
             continue
-        text = _fetch_text(service, fmeta)
-        if not text:
+        try:
+            did_process, file_miss = _cache_first_extract_one(
+                service, store, fleet_storage, drive_id, ev["fmeta"], pin)
+            if did_process:
+                processed += 1
+            if file_miss:
+                miss.append(file_miss)
+        except Exception as exc:  # noqa: BLE001 — isolate one file's failure
+            # Without this, one poison file (corrupt doc, transient export
+            # error, decode failure) would propagate up to sync_shared_drives'
+            # per-drive handler, which skips the WHOLE DRIVE for the cycle
+            # WITHOUT advancing the cursor — so the same poison file would be
+            # re-fetched and re-fail forever, permanently blocking the drive.
+            log.warning("drive: extraction failed for file %s in drive %s: %s",
+                        fid, drive_id, exc)
             continue
-        # Re-check right before extraction: another daemon may have just published.
-        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-            processed += 1
-            continue
-        chunks = normalise_drive(fmeta, text, drive_id=drive_id)
-        if not chunks:
-            continue
-        for c in chunks:
-            store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
-        miss.append((fid, content_h))
-        processed += 1
 
-    for fid in removed_ids:
+    for fid, ev in events.items():
+        if not ev["removed"]:
+            continue
         doc_ids = store.doc_ids_for_file(fid)
         if doc_ids:
             store.invalidate_local_relations_for_docs(doc_ids)
@@ -360,19 +448,20 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
 
 def sync_shared_drives(service, store, *, pin, storage_factory,
                        absence_threshold: int = 3) -> dict:
-    """Enumerate all Shared Drives, sync each cache-first, run the consecutive-
-    absence revocation counter, and opportunistically sweep dead artifacts.
+    """Enumerate all Shared Drives, sync each cache-first, and run the
+    consecutive-absence revocation counter.
 
     `storage_factory(drive_id) -> FleetStorage` builds a drive-scoped transport
     (prod: DriveFleetStorage; tests: LocalDirFleetStorage). Per-drive failures are
     isolated so one broken drive never aborts the others. Returns
     {drive_id: {'processed','miss','storage'}} plus {'_revoked': [ids]}. The
     caller publishes each drive's misses after embedding (see run_sync_cycle).
+
+    Deliberately does NOT sweep the ingest cache off each cycle's delta — see
+    the note inline below.
     """
-    import logging as _logging
     from mcpbrain import ingest_cache
 
-    log = _logging.getLogger(__name__)
     out: dict = {}
     present: list[str] = []
     for d in list_shared_drives(service):
@@ -380,18 +469,24 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
         if not drive_id:
             continue
         present.append(drive_id)
+        drive_name = d.get("name") or "<unnamed>"
         fs = storage_factory(drive_id)
         try:
             res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
-            log.warning("shared-drive sync failed for %s (skipped): %s", drive_id, exc)
+            log.warning("shared-drive sync failed for %s (%s) (skipped): %s",
+                        drive_name, drive_id, exc)
             continue
         out[drive_id] = {"processed": res["processed"], "miss": res["miss"], "storage": fs}
-        # Opportunistic sweep of artifacts whose file id vanished from the drive.
-        try:
-            ingest_cache.sweep_drive(fs, res["live_file_ids"])
-        except Exception as exc:  # noqa: BLE001 — sweep is best-effort
-            log.info("drive: sweep skipped for %s: %s", drive_id, exc)
+        # NOTE: deliberately no sweep_drive() call here. A per-cycle delta
+        # (changes.list since the last cursor) only ever contains files that
+        # changed since last time — never a complete listing of the drive's
+        # files — so it can never be used as the "live" set for a correct
+        # sweep. Explicit removal (changes.list's removed events, handled in
+        # sync_shared_drive via remove_file_artifacts) and version-churn GC
+        # (gc_superseded) already cover cleanup correctly. A genuine full-
+        # drive sweep would need a complete, explicitly-full-enumeration-
+        # driven pass — out of scope for this per-cycle delta loop.
     revoked = ingest_cache.note_drive_presence(
         store, present, threshold=absence_threshold)["purged"]
     out["_revoked"] = revoked
@@ -441,8 +536,6 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
     import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
     Returns {'processed', 'miss': [(file_id, content_hash)]}."""
-    from mcpbrain import ingest_cache
-
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
@@ -462,24 +555,12 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 return {"processed": processed, "miss": miss}
-            fid = f["id"]
-            content_h = _file_content_hash(f)
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+            did_process, file_miss = _cache_first_extract_one(
+                service, store, fleet_storage, drive_id, f, pin)
+            if did_process:
                 processed += 1
-                continue
-            text = _fetch_text(service, f)
-            if not text:
-                continue
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-                processed += 1
-                continue
-            chunks = normalise_drive(f, text, drive_id=drive_id)
-            if not chunks:
-                continue
-            for ch in chunks:
-                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-            miss.append((fid, content_h))
-            processed += 1
+            if file_miss:
+                miss.append(file_miss)
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
