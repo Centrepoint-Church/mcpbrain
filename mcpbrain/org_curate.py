@@ -190,8 +190,14 @@ def _materialise(store, pin_allowlist=None) -> dict:
     fleet has pinned (org_contracts.FleetPin.relation_allowlist); any other
     relation type is dropped without affecting the relations/pending counts.
 
-    Supersessions: a claim's latest (max) valid_to is applied to the
-    materialised relation row after upsert.
+    Supersessions: the valid_to from whichever staged claim has the most
+    recent valid_from is applied to the materialised relation row — not the
+    max valid_to ever staged, so a later claim reasserting the fact as
+    ongoing (valid_to="") correctly overrides an earlier claim's reported end
+    date. Applied only after ALL relation triples for this pass have been
+    upserted (two-pass), and only onto a row graph_write's own cross-triple
+    singleton-supersession left still current — a row already retired by
+    that mechanism is never overwritten with a contributed value.
 
     Returns {"entities": n, "relations": n, "pending": n}.
     """
@@ -216,16 +222,26 @@ def _materialise(store, pin_allowlist=None) -> dict:
                 continue
             key = (a, relation, b)
             agg = relation_claims.setdefault(key, {"srefs": set(), "contribs": set(),
-                                                   "valid_from": "", "valid_to": "", "conf": 0.0})
+                                                   "valid_from": "", "conf": 0.0,
+                                                   "latest_vf": "", "latest_vf_valid_to": ""})
             agg["srefs"].add(r["source_ref"])
             agg["contribs"].add(r["contributor_email"])
             agg["conf"] = max(agg["conf"], float(r["confidence"] or 1.0))
             vf = r["valid_from"] or ""
             if vf and (not agg["valid_from"] or vf < agg["valid_from"]):
                 agg["valid_from"] = vf
+            # Track valid_to from whichever claim has the MOST RECENT valid_from,
+            # not the max valid_to ever seen: a later claim reasserting the fact
+            # as ongoing (valid_to="") must correctly override an earlier claim's
+            # reported end date, rather than an old end-date claim sticking
+            # forever once contributed (the original max-ever approach could
+            # never "un-supersede" a relation once any contributor had reported
+            # any end date for it, even after a newer contribution said it was
+            # still current).
             vt = r["valid_to"] or ""
-            if vt > agg["valid_to"]:
-                agg["valid_to"] = vt
+            if vf >= agg["latest_vf"]:
+                agg["latest_vf"] = vf
+                agg["latest_vf_valid_to"] = vt
 
     id_map: dict = {}   # claim-id -> real store entity id
     n_ent = 0
@@ -240,8 +256,17 @@ def _materialise(store, pin_allowlist=None) -> dict:
         _apply_org_skeleton(store, got, e)
         n_ent += 1
 
+    # Pass 1: upsert every relation triple first, letting graph_write's own
+    # cross-triple singleton-supersession cascade fully settle (e.g. a newer
+    # "works_at beta" upsert retiring an older "works_at acme" row) BEFORE any
+    # contributed valid_to is applied. Deferring the valid_to write to pass 2
+    # avoids an ordering bug: applying a triple's own contributed valid_to
+    # immediately (interleaved with pass 1) could be silently overwritten
+    # moments later by upsert_relation's OWN supersession of that same row,
+    # triggered by a *different* triple processed afterward in the same run.
     n_rel = 0
     pending = 0
+    contributed_valid_to: list[tuple[int, str]] = []   # (rid, valid_to) to apply in pass 2
     for (a, relation, b), agg in relation_claims.items():
         if pin_allowlist is not None and relation not in pin_allowlist:
             continue
@@ -258,10 +283,21 @@ def _materialise(store, pin_allowlist=None) -> dict:
             continue
         _stamp_origin(store, relation_ids=[rid])
         n_rel += 1
-        if agg["valid_to"]:
-            with store._connect() as db:
-                db.execute("UPDATE entity_relations SET valid_to=? WHERE id=?",
-                           (agg["valid_to"], rid))
+        if agg["latest_vf_valid_to"]:
+            contributed_valid_to.append((rid, agg["latest_vf_valid_to"]))
+
+    # Pass 2: apply each triple's own contributed end-date ONLY if graph_write's
+    # supersession cascade above left that row still current (valid_to blank).
+    # If something else already retired it via the natural cross-triple
+    # mechanism, that decision is based on comparing actual dated facts and is
+    # trusted over blindly stomping it with a possibly-stale contributed value.
+    if contributed_valid_to:
+        with store._connect() as db:
+            for rid, valid_to in contributed_valid_to:
+                db.execute(
+                    "UPDATE entity_relations SET valid_to=? "
+                    "WHERE id=? AND (valid_to IS NULL OR valid_to='')",
+                    (valid_to, rid))
     return {"entities": n_ent, "relations": n_rel, "pending": pending}
 
 
