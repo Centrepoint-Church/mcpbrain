@@ -90,12 +90,16 @@ def _fetch_text(service, file_meta: dict) -> str | None:
     mime = file_meta.get("mimeType", "")
     if mime in _EXPORT:
         raw = service.files().export(
-            fileId=file_meta["id"], mimeType=_EXPORT[mime]
+            fileId=file_meta["id"], mimeType=_EXPORT[mime], supportsAllDrives=True
         ).execute()
     elif mime in _DOWNLOAD_TEXT:
-        raw = service.files().get_media(fileId=file_meta["id"]).execute()
+        raw = service.files().get_media(
+            fileId=file_meta["id"], supportsAllDrives=True
+        ).execute()
     elif mime in _DOWNLOAD_BINARY:
-        raw = service.files().get_media(fileId=file_meta["id"]).execute()
+        raw = service.files().get_media(
+            fileId=file_meta["id"], supportsAllDrives=True
+        ).execute()
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
         return _DOWNLOAD_BINARY[mime](data)
     else:
