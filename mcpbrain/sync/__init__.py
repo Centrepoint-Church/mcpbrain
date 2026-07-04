@@ -85,21 +85,36 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     storage_factory=lambda d: drive_cache_storage(drive_service, d))
                 # Embed the misses, THEN publish them (publish reads vectors back).
                 result["embedded"] += index_pending(store, embedder, home=home)
+                # config.owner_email can return "" when unconfigured. Rather than
+                # stamp published artifacts with an empty published_by, skip
+                # publishing this cycle — files are still synced/embedded locally
+                # either way, so nothing is lost, just not shared to the fleet yet.
+                # Matches the codebase's existing precedent for a required-but-
+                # unconfigured identity field (config.is_configured gates
+                # enrichment entirely rather than substituting a placeholder).
+                # Logged once per cycle here, not once per file/drive.
                 published_by = config.owner_email(home)
+                if not published_by:
+                    log.warning(
+                        "sync: owner_email unconfigured; shared-drive artifacts "
+                        "will not be published to the fleet cache this cycle "
+                        "(files still synced and embedded locally)")
                 per_drive = {}
                 for drive_id, info in sd.items():
                     if drive_id == "_revoked":
                         continue
                     fs = info["storage"]
-                    for file_id, content_hash in info["miss"]:
-                        try:
-                            ingest_cache.publish_file(
-                                store, fs, drive_id, file_id, content_hash, pin,
-                                published_by=published_by)
-                        except Exception as exc:  # noqa: BLE001 — publish is best-effort;
-                            # a transient failure on one file must not abort the rest of the cycle
-                            log.info("sync: publish_file skipped for drive %s file %s: %s",
-                                     drive_id, file_id, exc)
+                    if published_by:
+                        for file_id, content_hash in info["miss"]:
+                            try:
+                                ingest_cache.publish_file(
+                                    store, fs, drive_id, file_id, content_hash, pin,
+                                    published_by=published_by)
+                            except Exception as exc:  # noqa: BLE001 — publish is
+                                # best-effort; a transient failure on one file must
+                                # not abort the rest of the cycle
+                                log.info("sync: publish_file skipped for drive %s file %s: %s",
+                                         drive_id, file_id, exc)
                     per_drive[drive_id] = info["processed"]
                 result["shared_drives"] = per_drive
                 result["revoked_drives"] = sd.get("_revoked", [])
