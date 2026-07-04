@@ -130,6 +130,24 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
             "ingest_cache: store write failed importing artifact for %s "
             "(NOT a cache-corruption signal): %s", art.file_id, exc)
         return False
+    # A#4: apply the cached enrichment so the importer's graph gets this doc's
+    # entities/relations without re-running Haiku. Validate through the SAME
+    # guards drain uses before apply — never apply a peer's payload raw.
+    extraction = (art.enrich or {}).get("extraction") if mark_enriched else None
+    if extraction:
+        try:
+            from mcpbrain import contract, graph_write, config as _config
+            clean, _ = contract.sanitize_batch({"extractions": [extraction]})
+            cand = (clean.get("extractions") or [extraction])[0]
+            if not contract.validate_extraction(cand):      # [] == valid
+                if _config.schema_grounding_enabled(str(_config.app_dir())):
+                    from mcpbrain.drain import _grounding_filter
+                    cand, _ = _grounding_filter(cand)
+                doc_ids = [f"gdrive-{art.file_id}-{c.idx}" for c in art.chunks]
+                graph_write.apply(store, cand, doc_ids=doc_ids)   # self-resolves owner/home
+        except Exception as exc:  # noqa: BLE001 — apply failure must not fail the import
+            log.info("ingest_cache: cached-enrichment apply skipped for %s: %s",
+                     art.file_id, exc)
     return True
 
 
