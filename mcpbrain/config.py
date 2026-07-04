@@ -841,6 +841,17 @@ def ingest_cache_enabled(home) -> bool:
     return bool(read_config(home).get("ingest_cache", True))
 
 
+def ingest_cache_revocation_threshold(home) -> int:
+    """Consecutive sync cycles a Shared Drive must be absent before its cached
+    content is auto-purged as revoked (spec §A3). Default 5 (conservative — this
+    gates a destructive, hard-to-recover deletion). Configurable via
+    config['ingest_cache_revocation_threshold']. Minimum 2."""
+    try:
+        return max(2, int(read_config(home).get("ingest_cache_revocation_threshold", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
 def fleet_pin(home):
     """Typed view of the fleet-wide pin staged under config['org_config']['org_pin']
     by fleet.merge_org_config. Absent or malformed fields (a hand-edited config.json
