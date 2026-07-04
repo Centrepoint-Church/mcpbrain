@@ -118,6 +118,36 @@ def _remove_org_entity(db, entity_id) -> None:
     db.execute("DELETE FROM entities WHERE id=?", (entity_id,))
 
 
+def _resolve_tombstone_chains(tombstones: list[Tombstone]) -> list[Tombstone]:
+    """Collapse transitive merge chains (A->B, B->C) into direct pointers
+    (A->C) before any tombstone is applied.
+
+    Because org_curate._tombstones() republishes the full entity_merge_log
+    history on every publish, a single snapshot can carry both links of a
+    chain formed by two separate curator merges over time. Applying them as
+    given makes the outcome depend on which link the processing loop happens
+    to reach first: if B->C runs before A->B, then by the time A->B is
+    processed B (its merge target) has ALREADY been removed, so the
+    org='org'-gated check correctly refuses to repoint into a dead target —
+    but the fallback then DEMOTES A instead of consolidating it onto C,
+    stranding A's local flesh on an orphaned duplicate rather than the node
+    it actually belongs on. Pre-resolving every entity_id to its ultimate,
+    non-tombstoned target makes the result identical regardless of list
+    order, and keeps org_repoint_log's entries consistent with where the
+    data actually landed (so a later _restore_from_repoint_log lookup for
+    the ORIGINAL id still finds its way to the correct final survivor)."""
+    chain = {t.entity_id: t.merged_into for t in tombstones if t.merged_into}
+    resolved = []
+    for t in tombstones:
+        target = t.merged_into
+        seen = {t.entity_id}
+        while target in chain and target not in seen:
+            seen.add(target)
+            target = chain[target]
+        resolved.append(Tombstone(entity_id=t.entity_id, merged_into=target))
+    return resolved
+
+
 def _log_repoint(store, from_id, to_id, version, reason) -> None:
     with store._connect() as db:
         db.execute(
@@ -292,6 +322,7 @@ def import_snapshot(store, fleet_storage) -> dict:
     raw_tombs = fleet_storage.get_bytes(TOMBSTONES_PATH) or b""
     tombstones = [Tombstone.from_dict(json.loads(x))
                   for x in raw_tombs.decode("utf-8").splitlines() if x.strip()]
+    tombstones = _resolve_tombstone_chains(tombstones)
 
     snapshot_entity_ids = {e["id"] for e in entities}
     snapshot_relation_keys = {(r["entity_a"], r["relation"], r["entity_b"]) for r in relations}
