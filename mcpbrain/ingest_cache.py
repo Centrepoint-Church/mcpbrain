@@ -192,7 +192,8 @@ def collect_chunks(store, file_id) -> list[CacheChunk]:
 # -- write path -------------------------------------------------------------
 
 def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            *, enrich=None, published_by="", contextual_retrieval: bool = False) -> None:
+            *, enrich=None, published_by="", contextual_retrieval: bool = False,
+            skip_gc: bool = False) -> None:
     """Write the gzip-JSON CacheArtifact for `chunks` (a sequence of CacheChunk),
     then best-effort GC older/stale artifacts for this file. No-op when unpinned
     or chunks is empty. Content-hash keying makes concurrent publishers idempotent
@@ -204,7 +205,14 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     fields or pipeline_fingerprint) so _import_artifact can detect a pipeline
     mismatch on the read side. Defaults False so existing callers are
     unaffected; real wiring of the actual per-install value happens
-    elsewhere."""
+    elsewhere.
+
+    `skip_gc`, when True, skips the internal single-file `gc_superseded` call
+    after the artifact is written. Default False preserves today's exact
+    behaviour for every existing caller. Set True when the caller is about to
+    (or already has) run `gc_superseded_batch` itself over the whole set of
+    files being published this cycle — the per-file listing this call would
+    otherwise do is then pure redundant O(n) work on top of that O(1) batch."""
     if not pin.is_pinned or not chunks:
         return
     chunks = tuple(chunks)
@@ -224,23 +232,28 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     data = gzip.compress(
         json.dumps(art.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8"))
     fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin), data)
-    try:
-        gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
-    except Exception as exc:  # noqa: BLE001 — GC failure must not fail the publish
-        log.info("ingest_cache: gc_superseded skipped for %s: %s", file_id, exc)
+    if not skip_gc:
+        try:
+            gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
+        except Exception as exc:  # noqa: BLE001 — GC failure must not fail the publish
+            log.info("ingest_cache: gc_superseded skipped for %s: %s", file_id, exc)
 
 
 def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
-                 *, enrich=None, published_by="", contextual_retrieval: bool = False) -> bool:
+                 *, enrich=None, published_by="", contextual_retrieval: bool = False,
+                 skip_gc: bool = False) -> bool:
     """Collect a locally-embedded file's chunks from the store and publish them.
-    Returns True if an artifact was written."""
+    Returns True if an artifact was written.
+
+    `skip_gc` is forwarded to `publish` — see its docstring."""
     if not pin.is_pinned:
         return False
     chunks = collect_chunks(store, file_id)
     if not chunks:
         return False
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            enrich=enrich, published_by=published_by, contextual_retrieval=contextual_retrieval)
+            enrich=enrich, published_by=published_by,
+            contextual_retrieval=contextual_retrieval, skip_gc=skip_gc)
     return True
 
 

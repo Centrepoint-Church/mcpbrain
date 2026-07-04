@@ -753,3 +753,66 @@ def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
     assert "drives=1" in msg
     assert "published=1" in msg
     assert "revoked=none" in msg
+
+
+def test_publish_drive_misses_lists_cache_folder_once_not_once_per_file(tmp_path):
+    """_publish_drive_misses (mcpbrain/sync/__init__.py) publishes each miss via
+    publish_file, then runs ONE batched gc_superseded_batch over the whole
+    drive's keep_map. Before skip_gc was threaded through publish_file's
+    internal gc_superseded call, that per-file GC still ran on every publish
+    (each doing its own full cache-folder listing) IN ADDITION to the new
+    batched call — net result MORE listings per cycle (N+1), not fewer, even
+    though gc_superseded_batch itself is O(1). This test proves the actual
+    fix: with skip_gc=True wired through the publish loop, publishing many
+    misses for one drive followed by the batched GC now issues exactly ONE
+    cache-folder listing overall, not one per file."""
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import FleetPin
+    from mcpbrain.store import Store
+    from mcpbrain.sync import _publish_drive_misses
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+
+    class _ListPathsSpyFleetStorage:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.list_paths_calls = 0
+
+        def list_paths(self, prefix):
+            self.list_paths_calls += 1
+            return self.wrapped.list_paths(prefix)
+
+        def put_bytes(self, path, data):
+            return self.wrapped.put_bytes(path, data)
+
+        def get_bytes(self, path):
+            return self.wrapped.get_bytes(path)
+
+        def delete(self, path):
+            return self.wrapped.delete(path)
+
+    pin = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+                   enrich_logic_floor=1, fleet_secret="s3cret")
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    file_ids = [f"FID{i}" for i in range(5)]
+    for fid in file_ids:
+        store.import_cached_chunk(
+            f"gdrive-{fid}-0", "text", "c0",
+            {"source_type": "gdrive", "file_id": fid, "chunk_index": 0},
+            [0.0, 1.0, 2.0, 3.0])
+
+    real_fs = LocalDirFleetStorage(tmp_path / "drv")
+    fs = _ListPathsSpyFleetStorage(real_fs)
+    misses = [(fid, f"vhash-{fid}") for fid in file_ids]
+
+    published = _publish_drive_misses(store, ingest_cache, fs, "D1", misses, pin, "me@x.org")
+
+    assert published == len(file_ids)
+    # The whole pass — 5 publishes + 1 batched GC — must list the cache
+    # folder exactly ONCE. Before the fix this was 1 (batch) + 5 (per-file
+    # gc_superseded, still unconditionally called inside publish) == 6.
+    assert fs.list_paths_calls == 1
+
+    names = {p.rsplit("/", 1)[-1] for p in real_fs.list_paths(ingest_cache.CACHE_DIR + "/")}
+    for fid in file_ids:
+        assert any(n.startswith(f"{fid}.") for n in names), f"missing artifact for {fid}"
