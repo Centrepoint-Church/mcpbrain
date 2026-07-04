@@ -39,6 +39,42 @@ def _outbox(store):
                 for r in db.execute("SELECT record FROM org_contrib_outbox ORDER BY id").fetchall()]
 
 
+def test_private_annotation_in_name_is_cleaned_before_contribution(tmp_path):
+    s = _store(tmp_path)
+    d = _delta()
+    d["entities"]["joel"]["name"] = "Joel Chelliah (my divorce lawyer)"
+    d["entities"]["joel"]["aliases"] = "JC,Joel (do not trust),ping me at joel@x"
+    org_contrib.collect_from_drain(s, d, _pin(), "alice@x.org")
+    ent = [r for r in _outbox(s) if r["claim"]["kind"] == "entity"
+           and r["claim"]["id"] == "joel"][0]["claim"]
+    assert ent["name"] == "Joel Chelliah"                 # annotation stripped
+    # only clean name-like alias tokens survive; free-text / email-ish dropped
+    aliases = ent["aliases"].split(",") if ent["aliases"] else []
+    assert "JC" in aliases
+    assert all("(" not in a and "@" not in a for a in aliases)
+    blob = json.dumps(_outbox(s))
+    assert "divorce" not in blob and "do not trust" not in blob
+
+
+def test_person_without_email_identity_is_not_contributed(tmp_path):
+    """Decision: a person's name/aliases leave the machine only when anchored to
+    their own email identity. No email -> the person AND the relation touching
+    them are dropped (fail closed)."""
+    s = _store(tmp_path)
+    d = _delta(a_email="")                                # joel has no email
+    n = org_contrib.collect_from_drain(s, d, _pin(), "alice@x.org")
+    assert n == 0                                         # whole relation dropped
+    assert _outbox(s) == []
+
+
+def test_org_endpoint_without_email_still_contributes(tmp_path):
+    """org/project endpoints are taxonomy-canonical and don't require an email;
+    a person↔org edge with an emailed person still ships."""
+    s = _store(tmp_path)
+    n = org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org")
+    assert n == 3                                         # acme (org, no email) is fine
+
+
 def test_allowlisted_relation_contributes_edge_and_both_endpoints(tmp_path):
     s = _store(tmp_path)
     n = org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org")
