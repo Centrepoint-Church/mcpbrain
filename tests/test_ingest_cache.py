@@ -44,6 +44,39 @@ def test_try_import_hit_imports_chunks_and_stamps_drive_id(tmp_path):
     assert struct.pack("<4f", *back) == struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
 
 
+class _RaisingGetBytesFleetStorage:
+    """FleetStorage double whose get_bytes() raises a real I/O-style error,
+    simulating a Drive API failure (not a None/corrupt-bytes cache miss)."""
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+
+    def list_paths(self, prefix):
+        return self.wrapped.list_paths(prefix)
+
+    def put_bytes(self, path, data):
+        return self.wrapped.put_bytes(path, data)
+
+    def get_bytes(self, path):
+        raise ConnectionError("simulated Drive API failure")
+
+    def delete(self, path):
+        return self.wrapped.delete(path)
+
+
+def test_try_import_get_bytes_raising_falls_back_not_raises(tmp_path):
+    """_load's fleet_storage.get_bytes() call must be guarded: every other
+    fetch in this module treats failure as 'return None, log at info', but an
+    unguarded get_bytes() exception would propagate out of try_import and (per
+    sync/drive.py's per-drive handler) skip the WHOLE REMAINING FILE LIST for
+    that drive that cycle — violating the module's never-raise contract."""
+    s = _store(tmp_path)
+    real_fs = LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(real_fs, "FID", "vhash1")
+    fs = _RaisingGetBytesFleetStorage(real_fs)
+    # must not raise; must fall back to a cache miss (False)
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+
+
 def test_try_import_miss_returns_false(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
@@ -185,6 +218,134 @@ def test_try_import_hand_planted_pipeline_mismatch_inner_field(tmp_path):
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fname}", gzip.compress(json.dumps(art_dict).encode()))
     # Should detect pipeline mismatch and return False
     assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
+
+
+def test_publish_is_byte_identical_regardless_of_metadata_key_order(tmp_path):
+    """Two publishers whose extractors build metadata dict keys in different
+    insertion orders must produce IDENTICAL gzip-decompressed bytes for
+    logically-equal content — publish() must serialize with sort_keys so the
+    module's documented byte-identical-artifacts guarantee actually holds."""
+    import gzip
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    fs_a = LocalDirFleetStorage(tmp_path / "drv_a")
+    fs_b = LocalDirFleetStorage(tmp_path / "drv_b")
+    frozen = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    chunk_a = CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                        metadata={"file_id": "FID", "chunk_index": 0, "source_type": "gdrive"})
+    chunk_b = CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                        metadata={"source_type": "gdrive", "chunk_index": 0, "file_id": "FID"})
+
+    with patch("mcpbrain.ingest_cache.datetime") as mock_dt:
+        mock_dt.now.return_value = frozen
+        ingest_cache.publish(None, fs_a, "D1", "FID", "vhash1", (chunk_a,), PIN,
+                             enrich={"b": 1, "a": 2}, published_by="p@x.org")
+        ingest_cache.publish(None, fs_b, "D1", "FID", "vhash1", (chunk_b,), PIN,
+                             enrich={"a": 2, "b": 1}, published_by="p@x.org")
+
+    path = ingest_cache._artifact_path("FID", "vhash1", PIN)
+    bytes_a = gzip.decompress(fs_a.get_bytes(path))
+    bytes_b = gzip.decompress(fs_b.get_bytes(path))
+    assert bytes_a == bytes_b
+
+
+def test_import_atomic_mid_artifact_corruption_writes_zero_chunks(tmp_path):
+    """A mid-artifact corrupt vector (chunk 2 of 3) must result in NOTHING
+    written to the store — not a partial 2-of-3 import. Regression for the
+    non-atomic per-chunk-transaction bug in _import_artifact."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    chunks = (
+        CacheChunk(idx=0, text="t0", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                  metadata={"file_id": "FID", "chunk_index": 0}),
+        CacheChunk(idx=1, text="t1", embedding_b64=_b64([0.5, 0.6, 0.7, 0.8]),
+                  metadata={"file_id": "FID", "chunk_index": 1}),
+        # wrong dim (3 floats, not 4) -> _decode_vec raises ValueError
+        CacheChunk(idx=2, text="t2", embedding_b64=_b64([0.9, 1.0, 1.1]),
+                  metadata={"file_id": "FID", "chunk_index": 2}),
+    )
+    _write_artifact(fs, "FID", "vhash1", chunks=chunks)
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+    assert s.get_chunk("gdrive-FID-0") is None
+    assert s.get_chunk("gdrive-FID-1") is None
+    assert s.get_chunk("gdrive-FID-2") is None
+
+
+def test_import_artifact_store_write_failure_logged_as_warning_not_info(tmp_path, caplog):
+    """A genuine store-write failure (disk full, locked db, ...) during the
+    atomic import must be logged at WARNING with a distinguishable message —
+    not treated identically to a corrupt-artifact info-log — so an operator
+    can tell the two failure classes apart. Still returns False (fail-safe
+    contract: never raise into the caller)."""
+    import logging
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(fs, "FID", "vhash1")
+
+    def boom(rows):
+        raise RuntimeError("disk full")
+    s.import_cached_chunks = boom
+
+    with caplog.at_level(logging.INFO, logger="mcpbrain.ingest_cache"):
+        assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING-level log for the store-write failure"
+    assert "NOT a cache-corruption signal" in warnings[0].message
+    # and it must not ALSO be logged at info as a generic corrupt-artifact fallback
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert not any("corrupt artifact" in r.message for r in infos)
+
+
+def test_publish_stamps_contextual_retrieval_and_matching_flag_imports(tmp_path):
+    """publish_file threads contextual_retrieval into the artifact's enrich
+    block; try_import with the SAME flag value must succeed."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ok = ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=True)
+    assert ok
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=True) is True
+
+
+def test_try_import_contextual_retrieval_mismatch_falls_back(tmp_path):
+    """A LOCAL install with contextual-retrieval OFF must not import an
+    artifact published by an install with it ON — the flag materially
+    changes the embedding vector and is not covered by pipeline_fingerprint."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN, contextual_retrieval=True)
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=False) is False
+
+
+def test_try_import_contextual_retrieval_default_none_is_backward_compatible(tmp_path):
+    """Existing callers that don't pass contextual_retrieval (None = don't
+    check) must keep working exactly as before, regardless of what flag value
+    the artifact was published with."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN, contextual_retrieval=True)
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN) is True
+
+
+def test_publish_default_contextual_retrieval_is_false_backward_compatible(tmp_path):
+    """Existing publish_file callers that don't pass contextual_retrieval must
+    keep stamping the same effective default (False) — no behavior change."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    assert ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN) is True
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=False) is True
 
 
 def test_collect_chunks_is_drive_neutral(tmp_path):

@@ -69,10 +69,19 @@ def _encode_vec(vector) -> str:
 
 # -- read path --------------------------------------------------------------
 
-def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
-    """Import a validated artifact's chunks into the store. Returns False on any
-    per-chunk corruption (whole-file fallback) — never a partial import commit
-    beyond what has already been written; callers treat False as a cache miss."""
+def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
+                     contextual_retrieval: bool | None = None) -> bool:
+    """Import a validated artifact's chunks into the store, atomically.
+
+    All chunk vectors are decoded/validated UP FRONT, before anything is
+    written; if any chunk is corrupt this returns False having written
+    NOTHING (never a partial import). Once every chunk validates, all rows
+    are written in a single store transaction (Store.import_cached_chunks)
+    so the artifact lands completely or not at all. Callers treat False as
+    a cache miss (fall back to local extraction).
+
+    `contextual_retrieval`, when not None, must match the artifact's stamped
+    enrich["contextual_retrieval"] flag (when present) — see try_import."""
     if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
             or art.chunker_version != pin.chunker_version
             or int(art.dim) != int(store.dim)):
@@ -81,10 +90,22 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
         # Guard enrich field access; if malformed (e.g. string instead of dict),
         # fall back rather than raise.
         logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
+        # The Q6 contextual-retrieval prefix materially changes the embedding
+        # vector and is NOT part of pipeline_fingerprint (embed_model/dim/
+        # chunker_version only). Two installs sharing an org_pin but differing
+        # on this LOCAL config flag could otherwise import an artifact carrying
+        # a semantically different vector under the "cache hit is bit-identical
+        # to local embedding" guarantee. contextual_retrieval=None (the default)
+        # means "don't check, accept as before" for backward compatibility.
+        if contextual_retrieval is not None and art.enrich:
+            art_cr = art.enrich.get("contextual_retrieval")
+            if art_cr is not None and bool(art_cr) != bool(contextual_retrieval):
+                return False
         # Skip local re-enrichment only when the cached enrichment is at least as new
         # as BOTH the fleet floor and this install's own logic version.
         mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
                                                             int(ENRICH_LOGIC_VERSION))
+        rows = []
         for cc in art.chunks:
             try:
                 vector = _decode_vec(cc.embedding_b64, int(art.dim))
@@ -94,17 +115,34 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
             meta = dict(cc.metadata or {})
             meta[DRIVE_ID_META_KEY] = drive_id
             doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
-            store.import_cached_chunk(
-                doc_id, cc.text, _text_hash(cc.text), meta, vector,
-                enriched=mark_enriched, enriched_version=logic_v if mark_enriched else 0)
+            rows.append({
+                "doc_id": doc_id, "text": cc.text, "content_hash": _text_hash(cc.text),
+                "metadata": meta, "vector": vector, "enriched": mark_enriched,
+                "enriched_version": logic_v if mark_enriched else 0,
+            })
     except Exception:
         log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
+        return False
+    try:
+        store.import_cached_chunks(rows)
+    except Exception as exc:  # noqa: BLE001 — real infra failure, not cache corruption
+        log.warning(
+            "ingest_cache: store write failed importing artifact for %s "
+            "(NOT a cache-corruption signal): %s", art.file_id, exc)
         return False
     return True
 
 
 def _load(fleet_storage, path) -> CacheArtifact | None:
-    data = fleet_storage.get_bytes(path)
+    try:
+        data = fleet_storage.get_bytes(path)
+    except Exception as exc:  # noqa: BLE001 — a real storage I/O error (not a
+        # None/corrupt-bytes cache miss) must still fail safe: this module's
+        # contract is "never raise into the sync loop" for every fetch, and an
+        # unguarded exception here would propagate out of try_import and skip
+        # the whole remaining file list for the drive that cycle.
+        log.info("ingest_cache: get_bytes failed for %s (fallback to local): %s", path, exc)
+        return None
     if data is None:
         return None
     try:
@@ -114,11 +152,17 @@ def _load(fleet_storage, path) -> CacheArtifact | None:
         return None
 
 
-def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin) -> bool:
+def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
+               *, contextual_retrieval: bool | None = None) -> bool:
     """Cache-first import for one shared-drive file version. Returns True iff the
     artifact was found, validated, and imported; False => caller extracts locally.
 
-    `content_hash` is the Drive file-version id (NOT the text hash)."""
+    `content_hash` is the Drive file-version id (NOT the text hash).
+
+    `contextual_retrieval`, when passed, must match the artifact's stamped
+    contextual-retrieval flag (see publish); a mismatch is treated as a
+    pipeline mismatch and falls back to False. Default None = don't check
+    (backward compatible with callers unaware of the flag)."""
     if not pin.is_pinned:
         return False
     art = _load(fleet_storage, _artifact_path(file_id, content_hash, pin))
@@ -126,7 +170,7 @@ def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin) -> bo
         return False
     if art.file_id != file_id or art.content_hash != content_hash:
         return False
-    return _import_artifact(store, drive_id, art, pin)
+    return _import_artifact(store, drive_id, art, pin, contextual_retrieval=contextual_retrieval)
 
 
 def collect_chunks(store, file_id) -> list[CacheChunk]:
@@ -148,22 +192,37 @@ def collect_chunks(store, file_id) -> list[CacheChunk]:
 # -- write path -------------------------------------------------------------
 
 def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            *, enrich=None, published_by="") -> None:
+            *, enrich=None, published_by="", contextual_retrieval: bool = False) -> None:
     """Write the gzip-JSON CacheArtifact for `chunks` (a sequence of CacheChunk),
     then best-effort GC older/stale artifacts for this file. No-op when unpinned
     or chunks is empty. Content-hash keying makes concurrent publishers idempotent
-    (byte-equivalent artifacts, last-write-wins is harmless)."""
+    (byte-equivalent artifacts, last-write-wins is harmless).
+
+    `contextual_retrieval` reflects whether the Q6 contextual-retrieval prefix
+    was enabled for the install doing the publishing. It is stamped into the
+    artifact's free-form `enrich` dict (not part of the frozen CacheArtifact
+    fields or pipeline_fingerprint) so _import_artifact can detect a pipeline
+    mismatch on the read side. Defaults False so existing callers are
+    unaffected; real wiring of the actual per-install value happens
+    elsewhere."""
     if not pin.is_pinned or not chunks:
         return
     chunks = tuple(chunks)
     extraction_method = (chunks[0].metadata or {}).get("extraction_method", "")
+    enrich_block = dict(enrich or {})
+    enrich_block["contextual_retrieval"] = contextual_retrieval
     art = CacheArtifact(
         file_id=file_id, content_hash=content_hash,
         extraction_method=extraction_method, chunker_version=pin.chunker_version,
         embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
-        enrich=enrich or {}, published_by=published_by,
+        enrich=enrich_block, published_by=published_by,
         published_at=datetime.now(timezone.utc).isoformat())
-    data = gzip.compress(json.dumps(art.to_dict()).encode("utf-8"))
+    # sort_keys makes the "byte-identical artifacts" guarantee actually true:
+    # plain json.dumps preserves dict insertion order, so two publishers whose
+    # extractors happen to build metadata keys in different orders would
+    # otherwise emit different bytes for logically-identical content.
+    data = gzip.compress(
+        json.dumps(art.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8"))
     fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin), data)
     try:
         gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
@@ -172,7 +231,7 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
 
 
 def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
-                 *, enrich=None, published_by="") -> bool:
+                 *, enrich=None, published_by="", contextual_retrieval: bool = False) -> bool:
     """Collect a locally-embedded file's chunks from the store and publish them.
     Returns True if an artifact was written."""
     if not pin.is_pinned:
@@ -181,11 +240,23 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     if not chunks:
         return False
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
-            enrich=enrich, published_by=published_by)
+            enrich=enrich, published_by=published_by, contextual_retrieval=contextual_retrieval)
     return True
 
 
 # -- GC / lifecycle ---------------------------------------------------------
+
+def _safe_delete(fleet_storage, path) -> bool:
+    """Delete `path`, swallowing any exception (fail-safe: a delete failure
+    must never abort the caller's GC/sweep/removal loop). Returns True if the
+    delete succeeded, False (and logs at info) if it raised."""
+    try:
+        fleet_storage.delete(path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.info("ingest_cache: failed to delete %s: %s", path, exc)
+        return False
+
 
 def _cache_names(fleet_storage):
     for path in fleet_storage.list_paths(CACHE_DIR + "/"):
@@ -200,7 +271,11 @@ def _cache_names(fleet_storage):
 def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> int:
     """Delete artifacts for `file_id` with the current pipeline fingerprint whose
     content hash differs from keep_content_hash. Artifacts from other pipelines
-    coexist (never GC'd — see spec A2 version-skew guarantee). Returns count."""
+    coexist (never GC'd — see spec A2 version-skew guarantee). Returns count.
+
+    Single-file signature — frozen, other subsystems call this directly. Lists
+    the whole cache folder once per call; a publish loop over many files should
+    prefer gc_superseded_batch to avoid an O(n^2) Drive-API listing cost."""
     keep12 = keep_content_hash[:12]
     cur_pf8 = _pf8(pin)
     removed = 0
@@ -210,11 +285,31 @@ def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> i
         # Only GC same-pipeline artifacts with stale content hashes;
         # leave artifacts from other pipelines alone (they coexist).
         if pf8 == cur_pf8 and h12 != keep12:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
+    return removed
+
+
+def gc_superseded_batch(fleet_storage, drive_id, keep_map: dict[str, str], pin) -> int:
+    """Batch form of gc_superseded: GC stale same-pipeline artifacts for MANY
+    files in one cache-folder listing instead of one listing per file.
+
+    `keep_map` is {file_id: keep_content_hash}. Applies the identical
+    per-file "same pipeline + stale content hash -> delete" rule as
+    gc_superseded to every (file_id, keep_hash) pair, but calls
+    _cache_names/list_paths exactly ONCE regardless of how many files are in
+    the batch. Returns the total count removed across the whole batch.
+    """
+    keep12_by_fid = {fid: h[:12] for fid, h in keep_map.items()}
+    cur_pf8 = _pf8(pin)
+    removed = 0
+    for path, (fid, h12, pf8) in _cache_names(fleet_storage):
+        keep12 = keep12_by_fid.get(fid)
+        if keep12 is None:
+            continue
+        if pf8 == cur_pf8 and h12 != keep12:
+            if _safe_delete(fleet_storage, path):
+                removed += 1
     return removed
 
 
@@ -225,11 +320,8 @@ def sweep_drive(fleet_storage, live_file_ids) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid not in live:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 
@@ -239,11 +331,8 @@ def remove_file_artifacts(fleet_storage, file_id) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid == file_id:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 
@@ -286,8 +375,11 @@ def purge_drive(store, drive_id) -> dict:
     doc_ids = store.doc_ids_for_drive(drive_id)
     invalidated = store.invalidate_local_relations_for_docs(doc_ids)
     deleted = store.delete_chunks(doc_ids)
-    log.info("ingest_cache: purged drive %s — %d chunks, %d relations invalidated",
-             drive_id, deleted, invalidated)
+    # warning, not info: purging a drive's entire cached content because access
+    # was revoked is exactly the kind of event an operator needs to see without
+    # hunting through info-level noise.
+    log.warning("ingest_cache: purged drive %s — %d chunks, %d relations invalidated",
+                drive_id, deleted, invalidated)
     return {"drive_id": drive_id, "docs": len(doc_ids),
             "chunks_deleted": deleted, "relations_invalidated": invalidated}
 
@@ -325,9 +417,15 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
         except (ValueError, TypeError):
             n = 1
         if n >= threshold:
+            log.warning(
+                "ingest_cache: drive %s absent for %d consecutive cycles "
+                "(threshold %d) — purging as revoked", d, n, threshold)
             purge_drive(store, d)
             purged.append(d)
-            store.set_meta(_absence_key(d), "0")
+            # The drive is being forgotten (removed from `known` below), so its
+            # absence counter must be deleted, not reset to "0" — otherwise it
+            # accumulates forever as an orphan meta row.
+            store.delete_meta(_absence_key(d))
         else:
             store.set_meta(_absence_key(d), str(n))
     known -= set(purged)
