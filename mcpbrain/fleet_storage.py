@@ -142,7 +142,16 @@ class DriveFleetStorage:
         return raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
 
     def list_paths(self, prefix: str) -> list[str]:
-        # Walk the subtree from root, building '/'-relative file paths, then filter.
+        # Resolve the prefix's leading folder path first (targeted per-segment
+        # lookups via _resolve_parent/_find_child), then walk only that subtree
+        # instead of the whole drive. See fix note in the code review for why:
+        # walking from self._root unconditionally made every publish/cache-miss
+        # and sync-cycle sweep pay for a full-drive listing.
+        folder_parts = [p for p in prefix.split("/")[:-1] if p]
+        root = self._resolve_parent(folder_parts, create=False)
+        if root is None:
+            return []
+        rel_prefix = "/".join(folder_parts) + "/" if folder_parts else ""
         out: list[str] = []
 
         def _walk(parent_id: str, rel: str):
@@ -164,7 +173,7 @@ class DriveFleetStorage:
                 if not page_token:
                     break
 
-        _walk(self._root, "")
+        _walk(root, rel_prefix)
         return sorted(p for p in out if p.startswith(prefix))
 
     def delete(self, path: str) -> None:
