@@ -70,9 +70,14 @@ def _encode_vec(vector) -> str:
 # -- read path --------------------------------------------------------------
 
 def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
-    """Import a validated artifact's chunks into the store. Returns False on any
-    per-chunk corruption (whole-file fallback) — never a partial import commit
-    beyond what has already been written; callers treat False as a cache miss."""
+    """Import a validated artifact's chunks into the store, atomically.
+
+    All chunk vectors are decoded/validated UP FRONT, before anything is
+    written; if any chunk is corrupt this returns False having written
+    NOTHING (never a partial import). Once every chunk validates, all rows
+    are written in a single store transaction (Store.import_cached_chunks)
+    so the artifact lands completely or not at all. Callers treat False as
+    a cache miss (fall back to local extraction)."""
     if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
             or art.chunker_version != pin.chunker_version
             or int(art.dim) != int(store.dim)):
@@ -85,6 +90,7 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
         # as BOTH the fleet floor and this install's own logic version.
         mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
                                                             int(ENRICH_LOGIC_VERSION))
+        rows = []
         for cc in art.chunks:
             try:
                 vector = _decode_vec(cc.embedding_b64, int(art.dim))
@@ -94,11 +100,20 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin) -> bool:
             meta = dict(cc.metadata or {})
             meta[DRIVE_ID_META_KEY] = drive_id
             doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
-            store.import_cached_chunk(
-                doc_id, cc.text, _text_hash(cc.text), meta, vector,
-                enriched=mark_enriched, enriched_version=logic_v if mark_enriched else 0)
+            rows.append({
+                "doc_id": doc_id, "text": cc.text, "content_hash": _text_hash(cc.text),
+                "metadata": meta, "vector": vector, "enriched": mark_enriched,
+                "enriched_version": logic_v if mark_enriched else 0,
+            })
     except Exception:
         log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
+        return False
+    try:
+        store.import_cached_chunks(rows)
+    except Exception as exc:  # noqa: BLE001 — real infra failure, not cache corruption
+        log.warning(
+            "ingest_cache: store write failed importing artifact for %s "
+            "(NOT a cache-corruption signal): %s", art.file_id, exc)
         return False
     return True
 

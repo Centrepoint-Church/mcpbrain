@@ -1263,6 +1263,33 @@ class Store:
                        "SELECT rowid, text FROM chunks WHERE rowid=?", (rowid,))
             db.execute("UPDATE chunks SET embedded=1 WHERE rowid=?", (rowid,))
 
+    @staticmethod
+    def _write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
+                                *, enriched=False, enriched_version=0) -> None:
+        """Write one cached chunk row + its vec_chunks/fts_chunks mirrors against
+        an already-open connection `db`. Shared by import_cached_chunk (one row,
+        one transaction) and import_cached_chunks (many rows, one transaction)."""
+        row = db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+        if row:
+            rowid = row["rowid"]
+            db.execute(
+                "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=1,"
+                "enriched=?,enriched_version=? WHERE rowid=?",
+                (text, content_hash, json.dumps(metadata),
+                 1 if enriched else 0, enriched_version, rowid))
+        else:
+            cur = db.execute(
+                "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded,"
+                "enriched,enriched_version) VALUES(?,?,?,?,1,?,?)",
+                (doc_id, text, content_hash, json.dumps(metadata),
+                 1 if enriched else 0, enriched_version))
+            rowid = cur.lastrowid
+        db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
+        db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
+                   (rowid, sqlite_vec.serialize_float32(list(vector))))
+        db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
+        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, text))
+
     def import_cached_chunk(self, doc_id, text, content_hash, metadata, vector,
                             *, enriched=False, enriched_version=0) -> bool:
         """Insert (or replace) a chunk plus its vector + FTS mirror from a cache
@@ -1275,27 +1302,30 @@ class Store:
         fts_chunks stores the RAW text (mirrors write_embedding). Returns True.
         """
         with self._connect() as db:
-            row = db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
-            if row:
-                rowid = row["rowid"]
-                db.execute(
-                    "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=1,"
-                    "enriched=?,enriched_version=? WHERE rowid=?",
-                    (text, content_hash, json.dumps(metadata),
-                     1 if enriched else 0, enriched_version, rowid))
-            else:
-                cur = db.execute(
-                    "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded,"
-                    "enriched,enriched_version) VALUES(?,?,?,?,1,?,?)",
-                    (doc_id, text, content_hash, json.dumps(metadata),
-                     1 if enriched else 0, enriched_version))
-                rowid = cur.lastrowid
-            db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
-            db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
-                       (rowid, sqlite_vec.serialize_float32(list(vector))))
-            db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
-            db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, text))
+            self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
+                                         enriched=enriched, enriched_version=enriched_version)
             return True
+
+    def import_cached_chunks(self, rows: list[dict]) -> bool:
+        """Atomically import many cached chunks in ONE transaction.
+
+        Each row is {doc_id, text, content_hash, metadata, vector, enriched,
+        enriched_version}. All rows are written under a single `_connect()`
+        (commit-or-rollback as one unit) so a whole artifact either lands
+        completely or not at all — unlike calling import_cached_chunk per row,
+        where each call is its own transaction and a failure partway through
+        an artifact would leave a partial, silently-truncated import committed.
+        Returns True (raises if the connection/write itself fails; callers that
+        need fail-safe behaviour catch around this call — see ingest_cache).
+        """
+        with self._connect() as db:
+            for row in rows:
+                self._write_cached_chunk_row(
+                    db, row["doc_id"], row["text"], row["content_hash"],
+                    row["metadata"], row["vector"],
+                    enriched=row.get("enriched", False),
+                    enriched_version=row.get("enriched_version", 0))
+        return True
 
     def embedding_for_doc(self, doc_id: str) -> list[float] | None:
         """Return the stored embedding for doc_id as a list[float], or None.
