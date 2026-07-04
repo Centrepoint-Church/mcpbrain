@@ -22,6 +22,18 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 ENRICH_LOGIC_VERSION = 1
 
 
+def _like_escape(value: str) -> str:
+    """Escape '%', '_' and the escape char itself for a LIKE pattern.
+
+    Google Drive file ids legitimately contain '_' (a SQL LIKE single-char
+    wildcard) with no escaping of their own, so any `doc_id LIKE 'gdrive-<id>-%'`
+    query built by interpolating a raw file_id can over-match a sibling file
+    (e.g. file_id 'F_1' matching doc_ids for file 'FA1'). Callers must pair
+    this with `ESCAPE '\\'` in the SQL.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _fts_match_query(query: str) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -1074,6 +1086,60 @@ class Store:
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", rowids)
             return len(rowids)
 
+    def doc_ids_for_drive(self, drive_id: str) -> list[str]:
+        """Chunk doc_ids whose metadata drive_id matches (see DRIVE_ID_META_KEY)."""
+        with self._connect() as db:
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.drive_id')=?",
+                (drive_id,)).fetchall()]
+
+    def doc_ids_for_file(self, file_id: str) -> list[str]:
+        """Chunk doc_ids for one Drive file (gdrive-<file_id>-*)."""
+        with self._connect() as db:
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
+                (f"gdrive-{_like_escape(file_id)}-%",)).fetchall()]
+
+    def delete_chunks(self, doc_ids) -> int:
+        """Delete the given chunk rows and their vec_chunks/fts_chunks mirrors
+        (keyed on rowid, mirroring delete_calendar_chunks_after). Graph rows are
+        NOT touched here — invalidation is a separate, bitemporal step. Returns
+        the number of chunk rows deleted."""
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return 0
+        with self._connect() as db:
+            qs = ",".join("?" * len(doc_ids))
+            rowids = [r["rowid"] for r in db.execute(
+                f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
+            if not rowids:
+                return 0
+            ph = ",".join("?" * len(rowids))
+            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            return len(rowids)
+
+    def invalidate_local_relations_for_docs(self, doc_ids, *,
+                                            reason: str = "drive_revoked",
+                                            at: str | None = None) -> int:
+        """Bitemporally invalidate origin='local' relations whose source_doc_id is
+        in doc_ids and are not already invalidated. Sets invalidated_at (UTC ISO)
+        and superseded_reason. origin='org' rows are never touched — layer 1 is
+        curator-owned and safe-by-construction (spec A3). Returns rows changed."""
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return 0
+        at = at or datetime.now(timezone.utc).isoformat()
+        qs = ",".join("?" * len(doc_ids))
+        with self._connect() as db:
+            cur = db.execute(
+                f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
+                f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
+                f"AND COALESCE(origin,'local')='local'",
+                (at, reason, *doc_ids))
+            return cur.rowcount
+
     def chunk_count(self) -> int:
         """Total number of rows in the chunks table."""
         with self._connect() as db:
@@ -1197,6 +1263,112 @@ class Store:
                        "SELECT rowid, text FROM chunks WHERE rowid=?", (rowid,))
             db.execute("UPDATE chunks SET embedded=1 WHERE rowid=?", (rowid,))
 
+    @staticmethod
+    def _write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
+                                *, enriched=False, enriched_version=0) -> None:
+        """Write one cached chunk row + its vec_chunks/fts_chunks mirrors against
+        an already-open connection `db`. Shared by import_cached_chunk (one row,
+        one transaction) and import_cached_chunks (many rows, one transaction)."""
+        row = db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+        if row:
+            rowid = row["rowid"]
+            db.execute(
+                "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=1,"
+                "enriched=?,enriched_version=? WHERE rowid=?",
+                (text, content_hash, json.dumps(metadata),
+                 1 if enriched else 0, enriched_version, rowid))
+        else:
+            cur = db.execute(
+                "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded,"
+                "enriched,enriched_version) VALUES(?,?,?,?,1,?,?)",
+                (doc_id, text, content_hash, json.dumps(metadata),
+                 1 if enriched else 0, enriched_version))
+            rowid = cur.lastrowid
+        db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
+        db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
+                   (rowid, sqlite_vec.serialize_float32(list(vector))))
+        db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
+        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, text))
+
+    def import_cached_chunk(self, doc_id, text, content_hash, metadata, vector,
+                            *, enriched=False, enriched_version=0) -> bool:
+        """Insert (or replace) a chunk plus its vector + FTS mirror from a cache
+        artifact, in one transaction. Sets embedded=1 (the vector is supplied, so
+        the chunk must NOT re-queue for embedding) and marks enriched when the
+        artifact's enrich block cleared the version gates (see ingest_cache).
+
+        The vector is the publisher's already-contextual-prefixed passage vector;
+        it is stored verbatim so a cache hit is bit-identical to local embedding.
+        fts_chunks stores the RAW text (mirrors write_embedding). Returns True.
+        """
+        with self._connect() as db:
+            self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
+                                         enriched=enriched, enriched_version=enriched_version)
+            return True
+
+    def import_cached_chunks(self, rows: list[dict]) -> bool:
+        """Atomically import many cached chunks in ONE transaction.
+
+        Each row is {doc_id, text, content_hash, metadata, vector, enriched,
+        enriched_version}. All rows are written under a single `_connect()`
+        (commit-or-rollback as one unit) so a whole artifact either lands
+        completely or not at all — unlike calling import_cached_chunk per row,
+        where each call is its own transaction and a failure partway through
+        an artifact would leave a partial, silently-truncated import committed.
+        Returns True (raises if the connection/write itself fails; callers that
+        need fail-safe behaviour catch around this call — see ingest_cache).
+        """
+        with self._connect() as db:
+            for row in rows:
+                self._write_cached_chunk_row(
+                    db, row["doc_id"], row["text"], row["content_hash"],
+                    row["metadata"], row["vector"],
+                    enriched=row.get("enriched", False),
+                    enriched_version=row.get("enriched_version", 0))
+        return True
+
+    def embedding_for_doc(self, doc_id: str) -> list[float] | None:
+        """Return the stored embedding for doc_id as a list[float], or None.
+
+        sqlite-vec vec0 stores the raw little-endian float32 payload; selecting
+        the column returns those bytes, which we unpack. Used by the ingest cache
+        to serialise a locally-embedded chunk into a shareable artifact.
+        """
+        import struct
+        with self._connect() as db:
+            r = db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+            if not r:
+                return None
+            v = db.execute("SELECT embedding FROM vec_chunks WHERE rowid=?",
+                           (r["rowid"],)).fetchone()
+            if not v or v["embedding"] is None:
+                return None
+            raw = v["embedding"]
+            if isinstance(raw, str):        # some builds surface JSON text
+                return [float(x) for x in json.loads(raw)]
+            n = len(raw) // 4
+            return list(struct.unpack(f"<{n}f", raw))
+
+    def chunks_for_file(self, file_id: str) -> list[dict]:
+        """All gdrive-<file_id>-<i> chunks as {doc_id,text,content_hash,metadata,idx},
+        ordered by chunk index. Used to build a cache artifact from local state.
+
+        Ordering authority is the Python `.sort(key=idx)` below (chunk_index is
+        the logical order; rowid is mere insertion order, which can diverge on
+        re-import) — so the SQL query intentionally does not ORDER BY anything."""
+        like = f"gdrive-{_like_escape(file_id)}-%"
+        out = []
+        with self._connect() as db:
+            for r in db.execute(
+                "SELECT doc_id,text,content_hash,metadata FROM chunks "
+                "WHERE doc_id LIKE ? ESCAPE '\\'", (like,)):
+                meta = json.loads(r["metadata"])
+                out.append({"doc_id": r["doc_id"], "text": r["text"],
+                            "content_hash": r["content_hash"], "metadata": meta,
+                            "idx": int(meta.get("chunk_index", 0))})
+        out.sort(key=lambda c: c["idx"])
+        return out
+
     def vec_knn(self, query_vec: list[float], k: int) -> list[tuple[str, float]]:
         with self._connect() as db:
             cur = db.execute(
@@ -1318,6 +1490,11 @@ class Store:
         with self._connect() as db:
             r = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
             return r["v"] if r else None
+
+    def delete_meta(self, k: str) -> None:
+        """Delete the row for key k. No-op (does not raise) if absent."""
+        with self._connect() as db:
+            db.execute("DELETE FROM meta WHERE k=?", (k,))
 
     # --- enrichment graph writers (Task 4.2) ------------------------------
 
