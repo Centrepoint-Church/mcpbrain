@@ -197,6 +197,70 @@ def test_sync_shared_drive_isolates_per_file_extraction_failure(tmp_path, caplog
     assert any(rec.levelname == "WARNING" for rec in caplog.records)
 
 
+def test_sync_shared_drive_dedups_repeated_fileid_in_one_delta(tmp_path):
+    """The same fileId appearing twice within one delta (edited then re-edited)
+    must be fetched/extracted/published exactly ONCE — not twice. The delta is
+    collapsed to one ordered, deduplicated view keyed by fileId before any
+    extraction happens."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID"), _gdoc_change("FID")],
+                "newStartPageToken": "101"}],
+        exports={"FID": b"the quick brown fox jumps"})
+    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 1
+    assert len(out["miss"]) == 1 and out["miss"][0][0] == "FID"
+    # export() invoked once despite the fileId appearing twice in the delta
+    assert svc._files.export_calls.get("FID") == 1
+    assert s.get_chunk("gdrive-FID-0") is not None
+
+
+def test_sync_shared_drive_change_then_removal_collapses_to_removal(tmp_path):
+    """A change followed by a removal of the SAME file within one delta resolves
+    to the file's final state at the cursor endpoint: REMOVED. Reasoning: Drive
+    emits changes chronologically, so the last event (removal) is the truth; the
+    file must NOT be extracted (no fetch, no chunk, no miss to publish) and any
+    prior local copy + artifact is purged."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    # seed a prior local chunk + artifact so we can prove the removal purges it
+    s.import_cached_chunk("gdrive-FID-0", "old body", "c",
+                          {"file_id": "FID", "drive_id": "D1"}, [0.0]*4)
+    ingest_cache.publish_file(s, fs, "D1", "FID", "vX", PIN)
+    s.set_cursor("drive:D1", "100")
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID"),
+                            {"fileId": "FID", "removed": True}],
+                "newStartPageToken": "101"}],
+        exports={"FID": b"MUST NOT be extracted"})
+    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 0 and out["miss"] == []
+    assert svc._files.export_calls.get("FID") is None      # never fetched
+    assert s.get_chunk("gdrive-FID-0") is None             # purged
+    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
+
+
+def test_sync_shared_drive_removal_then_change_collapses_to_change(tmp_path):
+    """Reverse ordering: a removal followed by a later change of the SAME file
+    (deleted then restored + edited) resolves to the final state: CHANGED. The
+    file is extracted normally and NOT purged."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": [{"fileId": "FID", "removed": True},
+                            _gdoc_change("FID")],
+                "newStartPageToken": "101"}],
+        exports={"FID": b"the quick brown fox jumps"})
+    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 1
+    assert len(out["miss"]) == 1 and out["miss"][0][0] == "FID"
+    assert svc._files.export_calls.get("FID") == 1
+    assert s.get_chunk("gdrive-FID-0") is not None
+
+
 def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
     """A per-cycle delta only ever contains the files that changed since the
     last cursor — it is never a complete file listing. sync_shared_drives must

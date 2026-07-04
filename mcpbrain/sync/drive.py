@@ -361,9 +361,20 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
 
     page_token = cursor
     new_start = None
-    pending: list[dict] = []
-    removed_ids: list[str] = []
-    live_ids: set[str] = set()
+    # Collapse the whole delta into ONE ordered, deduplicated view keyed by
+    # fileId. A fileId can legitimately recur across pages (or within one page):
+    # edited then re-edited, changed then removed, or removed then restored.
+    # Drive emits changes in chronological order, so the LAST event for a file
+    # is its true state at the cursor endpoint. We keep only that last event,
+    # moving it to the end (pop + reinsert) so the processing order also
+    # reflects the latest event. Consequences:
+    #   * the same fileId appearing twice is fetched/extracted/published ONCE;
+    #   * change-then-removal collapses to a removal (file purged, not
+    #     re-extracted); removal-then-change collapses to a change (file
+    #     extracted, not purged) — either way we converge on the file's actual
+    #     final state rather than replaying every intermediate event.
+    # Each value is {"removed": bool, "fmeta": dict | None}.
+    events: dict[str, dict] = {}
     while True:
         resp = service.changes().list(
             pageToken=page_token,
@@ -375,29 +386,35 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
             fields=_CHANGES_FIELDS,
         ).execute()
         for ch in resp.get("changes", []):
-            fid = ch.get("fileId")
             if ch.get("removed"):
-                if fid:
-                    removed_ids.append(fid)
+                fid = ch.get("fileId")
+                if not fid:
+                    continue
+                events.pop(fid, None)
+                events[fid] = {"removed": True, "fmeta": None}
                 continue
             fmeta = ch.get("file") or {}
-            if not fmeta.get("id"):
+            fid = fmeta.get("id")
+            if not fid:
                 continue
-            live_ids.add(fmeta["id"])
-            pending.append(fmeta)
+            events.pop(fid, None)
+            events[fid] = {"removed": False, "fmeta": fmeta}
         new_start = resp.get("newStartPageToken", new_start)
         nxt = resp.get("nextPageToken")
         if not nxt:
             break
         page_token = nxt
 
+    live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
+
     processed = 0
     miss: list[tuple[str, str]] = []
-    for fmeta in pending:
-        fid = fmeta["id"]
+    for fid, ev in events.items():
+        if ev["removed"]:
+            continue
         try:
             did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, fmeta, pin)
+                service, store, fleet_storage, drive_id, ev["fmeta"], pin)
             if did_process:
                 processed += 1
             if file_miss:
@@ -412,7 +429,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
                         fid, drive_id, exc)
             continue
 
-    for fid in removed_ids:
+    for fid, ev in events.items():
+        if not ev["removed"]:
+            continue
         doc_ids = store.doc_ids_for_file(fid)
         if doc_ids:
             store.invalidate_local_relations_for_docs(doc_ids)
