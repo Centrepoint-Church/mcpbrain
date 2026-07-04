@@ -514,3 +514,62 @@ def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
         assert not any(n.startswith("FID1.") for n in basenames), (
             f"FID1 publish should have failed (and been skipped) in drive {drive_id}"
         )
+
+
+def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(tmp_path, emb):
+    """If sync_shared_drives ITSELF raises (e.g. list_shared_drives during a
+    Drive-API outage) — not just an individual publish_file — the whole
+    shared-drive block must be caught: gmail sync (which ran BEFORE the
+    shared-drive block) must have already completed and been embedded, and
+    run_sync_cycle must still return normally with its other expected keys
+    (not raise), rather than aborting the whole cycle including the
+    subsequent progressive-backfill step."""
+    from mcpbrain import config
+    from tests.test_drive_sync import FakeDriveService as RealDriveFakeService
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": emb.dim, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=emb.dim)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    msg_m1 = plain_msg(
+        "m1", "Finance Budget Forecast", "finance@example.com",
+        "Annual budget review and quarterly expenditure forecast for the finance team.")
+    gmail_pages = [_make_page(["m1"], history_id="1005")]
+    fake_gmail = FakeGmailService(profile_hid="1000", pages=gmail_pages, messages={"m1": msg_m1})
+
+    # A Drive service whose OWN sync_drive bootstrap works fine (no cursor set
+    # yet -> just stores a startPageToken and returns 0); the failure under
+    # test is entirely inside the shared-drive orchestrator, monkeypatched below.
+    # (Uses the fuller fake from test_drive_sync, which implements changes()
+    # .getStartPageToken() — the local module-level FakeDriveService in this
+    # file is the simpler Gmail-focused fixture and doesn't.)
+    fake_drive = RealDriveFakeService(pages=[{"changes": []}])
+
+    from mcpbrain.sync import drive as drivemod
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated Drive-API outage in list_shared_drives")
+
+    orig = drivemod.sync_shared_drives
+    drivemod.sync_shared_drives = _boom
+    try:
+        res = run_sync_cycle(
+            store, emb, gmail_service=fake_gmail, drive_service=fake_drive, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    # The cycle returned normally — no exception propagated out of run_sync_cycle —
+    # and the work that ran before AND after the failed shared-drive block
+    # (gmail sync/embed, the My-Drive progressive-backfill step) completed.
+    assert res["gmail"] == 1
+    assert res["embedded"] >= 1
+    assert "backfill" in res
+    # The shared-drive block's own keys were never populated (it failed before
+    # producing a result), but that failure itself never reached the caller.
+    assert "shared_drives" not in res
+    assert "revoked_drives" not in res
