@@ -344,8 +344,11 @@ def purge_drive(store, drive_id) -> dict:
     doc_ids = store.doc_ids_for_drive(drive_id)
     invalidated = store.invalidate_local_relations_for_docs(doc_ids)
     deleted = store.delete_chunks(doc_ids)
-    log.info("ingest_cache: purged drive %s — %d chunks, %d relations invalidated",
-             drive_id, deleted, invalidated)
+    # warning, not info: purging a drive's entire cached content because access
+    # was revoked is exactly the kind of event an operator needs to see without
+    # hunting through info-level noise.
+    log.warning("ingest_cache: purged drive %s — %d chunks, %d relations invalidated",
+                drive_id, deleted, invalidated)
     return {"drive_id": drive_id, "docs": len(doc_ids),
             "chunks_deleted": deleted, "relations_invalidated": invalidated}
 
@@ -383,6 +386,9 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
         except (ValueError, TypeError):
             n = 1
         if n >= threshold:
+            log.warning(
+                "ingest_cache: drive %s absent for %d consecutive cycles "
+                "(threshold %d) — purging as revoked", d, n, threshold)
             purge_drive(store, d)
             purged.append(d)
             # The drive is being forgotten (removed from `known` below), so its
