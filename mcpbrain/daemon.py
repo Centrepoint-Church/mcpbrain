@@ -587,6 +587,11 @@ class Daemon:
         # signals run_one to yield its write cycle while the backfill is live.
         self._backfill_active = threading.Event()
         self._backfill_lock = threading.Lock()
+        # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
+        # can fire on an HTTP thread while the loop thread independently bootstraps
+        # the same cycle — two concurrent import_snapshot transactions into one
+        # store would race and lost-update the resume marker.
+        self._bootstrap_lock = threading.Lock()
         # Baseline bootstrap (subsystem C): import the org snapshot + shared-drive
         # ingest caches once, before the first sync. In-process latch; the on-disk
         # marker (onboarding.run_bootstrap) makes it idempotent across restarts.
@@ -994,18 +999,25 @@ class Daemon:
             return None
         if not force and not onboarding.should_bootstrap(home):
             return None
-        if services is None:
-            services = self.ensure_services()
-        try:
-            result = onboarding.run_bootstrap(
-                home, self._store,
-                drive_service=services.get("drive_service"), force=force)
-        except Exception as exc:  # noqa: BLE001 — bootstrap must never break sync
-            log.warning("baseline bootstrap failed: %s", exc, exc_info=True)
-            return {"status": "error", "error": str(exc)}
-        if result.get("status") == "done":
-            self._baseline_bootstrap_done = True
-        return result
+        # Serialise the loop thread and the force/control-API path: run_bootstrap
+        # is a single-writer transaction + resume-marker read/write, not
+        # concurrency-safe. Re-check the latch inside the lock (double-checked) so
+        # a waiter that blocked behind a just-finished run doesn't redo the work.
+        with self._bootstrap_lock:
+            if not force and self._baseline_bootstrap_done:
+                return None
+            if services is None:
+                services = self.ensure_services()
+            try:
+                result = onboarding.run_bootstrap(
+                    home, self._store,
+                    drive_service=services.get("drive_service"), force=force)
+            except Exception as exc:  # noqa: BLE001 — bootstrap must never break sync
+                log.warning("baseline bootstrap failed: %s", exc, exc_info=True)
+                return {"status": "error", "error": str(exc)}
+            if result.get("status") == "done":
+                self._baseline_bootstrap_done = True
+            return result
 
     # -- wake / stop --------------------------------------------------------
 
