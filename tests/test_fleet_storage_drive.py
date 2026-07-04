@@ -278,6 +278,60 @@ def test_fake_drive_withholds_next_page_token_when_fields_omits_it():
     assert "nextPageToken" not in resp      # but withheld since fields= didn't ask for it
 
 
+def test_list_paths_only_walks_the_resolved_subtree():
+    # Proves the efficiency fix: list_paths(".mcpbrain-cache/") must resolve
+    # the cache folder first and walk ONLY that subtree, never descending
+    # into a large sibling "decoy" subtree living at the drive root. Before
+    # the fix, list_paths always walked from self._root, so the decoy
+    # folder's id would show up as a queried parent.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes(".mcpbrain-cache/A.mbc.gz", b"a")
+    fs.put_bytes(".mcpbrain-cache/B.mbc.gz", b"b")
+
+    # A separate, large decoy subtree at the drive root, NOT under
+    # .mcpbrain-cache/.
+    decoy_id = drive.create(
+        body={"name": "decoy", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
+    ).execute()["id"]
+    for i in range(50):
+        drive.create(
+            body={"name": f"decoy{i}.bin", "parents": [decoy_id]},
+        ).execute()
+
+    queried_parents = []
+    real_list = drive.list
+
+    def tracking_list(q=None, **kw):
+        import re
+        m = re.search(r"'([^']+)' in parents", q or "")
+        if m:
+            queried_parents.append(m.group(1))
+        return real_list(q=q, **kw)
+
+    drive.list = tracking_list
+
+    result = fs.list_paths(".mcpbrain-cache/")
+
+    assert result == [".mcpbrain-cache/A.mbc.gz", ".mcpbrain-cache/B.mbc.gz"]
+    assert decoy_id not in queried_parents
+
+
+def test_list_paths_empty_prefix_still_walks_everything():
+    # prefix="" must still behave like the old always-walk-from-root code:
+    # folder_parts is [], _resolve_parent([], create=False) returns self._root
+    # immediately, and everything under root (including files outside any
+    # named subfolder) is returned.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes(".mcpbrain-cache/A.mbc.gz", b"a")
+    fs.put_bytes("other/x.bin", b"x")
+    drive.create(body={"name": "top.bin", "parents": ["ROOT"]}).execute()
+    assert fs.list_paths("") == sorted(
+        [".mcpbrain-cache/A.mbc.gz", "other/x.bin", "top.bin"]
+    )
+
+
 def test_drive_cache_storage_roots_at_drive_and_uses_cache_prefix(tmp_path):
     from mcpbrain import fleet_storage, ingest_cache
     drive = FakeDrive()
