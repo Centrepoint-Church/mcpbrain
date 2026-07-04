@@ -143,11 +143,11 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
                 if _config.schema_grounding_enabled(str(_config.app_dir())):
                     from mcpbrain.drain import _grounding_filter
                     cand, _ = _grounding_filter(cand)
-                doc_ids = [f"gdrive-{art.file_id}-{c.idx}" for c in art.chunks]
+                doc_ids = [f"gdrive-{art.file_id}-{int(c.idx)}" for c in art.chunks]
                 graph_write.apply(store, cand, doc_ids=doc_ids)   # self-resolves owner/home
         except Exception as exc:  # noqa: BLE001 — apply failure must not fail the import
             log.info("ingest_cache: cached-enrichment apply skipped for %s: %s",
-                     art.file_id, exc)
+                     art.file_id, exc, exc_info=True)
     return True
 
 

@@ -55,7 +55,10 @@ class CacheArtifact:
 
     @classmethod
     def from_dict(cls, d: dict) -> "CacheArtifact":
-        chunks = tuple(CacheChunk(**c) for c in d.get("chunks", []))
+        chunks = tuple(CacheChunk(idx=int(c["idx"]), text=c.get("text"),
+                                  embedding_b64=c.get("embedding_b64"),
+                                  metadata=c.get("metadata"))
+                       for c in d.get("chunks", []))
         return cls(
             file_id=d["file_id"], content_hash=d["content_hash"],
             extraction_method=d.get("extraction_method", ""),
