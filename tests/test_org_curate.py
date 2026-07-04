@@ -73,6 +73,22 @@ def test_ingest_skips_malformed_lines_but_ingests_rest(tmp_path):
     assert result == {"batches": 1, "ingested": 1}
 
 
+def test_ingest_skips_undecodable_batch_but_ingests_other_contributors(tmp_path):
+    """One corrupt/non-UTF-8 batch file must not abort the whole run — every
+    other contributor's batch in the same pass still lands."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    fs.put_bytes("contrib/alice@x.org/1.jsonl", b"\xff\xfe not valid utf-8 \x80\x81")
+    good = _rec({"kind": "entity", "id": "sam", "name": "Sam", "type": "person",
+                 "org": "", "email_addr": "", "aliases": ""}, email="bob@x.org")
+    _write_batch(fs, "contrib/bob@x.org/1.jsonl", [good])
+    result = org_curate._ingest(s, fs)
+    assert result == {"batches": 1, "ingested": 1}
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"] == 1
+
+
 def test_ingest_distinguishes_claims_with_same_source_ref(tmp_path):
     """UNIQUE is (contributor_email, source_ref, claim) — two different claims
     from the same source_ref/contributor must both land, not collide."""
