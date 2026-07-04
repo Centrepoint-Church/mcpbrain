@@ -84,10 +84,17 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 from mcpbrain.sync.drive import sync_shared_drives
                 from mcpbrain.fleet_storage import drive_cache_storage
                 from mcpbrain import ingest_cache
+                # CR (Q6 contextual-retrieval prefix) materially changes the
+                # embedding vector and is a LOCAL flag not in pipeline_fingerprint,
+                # so it must be threaded to both the import guard and the publish
+                # stamp — otherwise a CR-on install could import a CR-off install's
+                # vectors (or vice-versa) as if interchangeable.
+                cr = config.contextual_retrieval_enabled(home)
                 sd = sync_shared_drives(
                     drive_service, store, pin=pin,
                     storage_factory=lambda d: drive_cache_storage(drive_service, d),
-                    absence_threshold=config.ingest_cache_revocation_threshold(home))
+                    absence_threshold=config.ingest_cache_revocation_threshold(home),
+                    contextual_retrieval=cr)
                 # Embed the misses, THEN publish them (publish reads vectors back).
                 result["embedded"] += index_pending(store, embedder, home=home)
                 # config.owner_email can return "" when unconfigured. Rather than
@@ -115,7 +122,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     drives_fs[drive_id] = fs
                     if published_by:
                         total_published += _publish_drive_misses(
-                            store, ingest_cache, fs, drive_id, info["miss"], pin, published_by)
+                            store, ingest_cache, fs, drive_id, info["miss"], pin, published_by,
+                            contextual_retrieval=cr)
                     per_drive[drive_id] = info["processed"]
                     total_files += info["processed"]
                 result["shared_drives"] = per_drive
@@ -128,7 +136,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # the pin (which the live delta sync above already covers).
                 # Reuses this cycle's storage instances — no second
                 # storage_factory call.
-                bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs)
+                bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
+                                                    contextual_retrieval=cr)
                 if any(r["processed"] for r in bf_sd.values()):
                     result["embedded"] += index_pending(store, embedder, home=home)
                 backfill_counts: dict[str, int] = {}
@@ -138,7 +147,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     total_files += res["processed"]
                     if published_by:
                         total_published += _publish_drive_misses(
-                            store, ingest_cache, fs, drive_id, res["miss"], pin, published_by)
+                            store, ingest_cache, fs, drive_id, res["miss"], pin, published_by,
+                            contextual_retrieval=cr)
                 result["shared_drives_backfill"] = backfill_counts
 
                 # One line per pass, matching daemon.py's cadence-log convention
@@ -167,7 +177,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     return result
 
 
-def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, published_by) -> int:
+def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, published_by,
+                          *, contextual_retrieval: bool = False) -> int:
     """Publish each (file_id, content_hash) miss for one drive to the shared
     cache, isolating per-file failures — a transient error on one file must
     not abort the rest of that drive's misses or any other drive's — then
@@ -190,7 +201,8 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
         keep_map[file_id] = content_hash
         try:
             if ingest_cache.publish_file(store, fs, drive_id, file_id, content_hash, pin,
-                                          published_by=published_by, skip_gc=True):
+                                          published_by=published_by, skip_gc=True,
+                                          contextual_retrieval=contextual_retrieval):
                 published += 1
         except Exception as exc:  # noqa: BLE001 — publish is best-effort;
             # a transient failure on one file must not abort the rest of the cycle
@@ -324,6 +336,7 @@ def _shared_drive_backfill_step(
     max_per_source: int = _BACKFILL_MAX_PER_SOURCE,
     stop_after_empty_windows: int = _STOP_AFTER_EMPTY_WINDOWS,
     now: datetime | None = None,
+    contextual_retrieval: bool = False,
 ) -> dict:
     """One backfill window per pinned Shared Drive, walking newest -> oldest.
 
@@ -377,6 +390,7 @@ def _shared_drive_backfill_step(
                 fleet_storage=fs, pin=pin,
                 modified_before=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 max_files=max_per_source,
+                contextual_retrieval=contextual_retrieval,
             )
         except Exception:  # noqa: BLE001 — one drive's failure must not stall others
             out[drive_id] = {"processed": 0, "miss": []}

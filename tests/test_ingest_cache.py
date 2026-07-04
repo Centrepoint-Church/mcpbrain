@@ -44,6 +44,37 @@ def test_try_import_hit_imports_chunks_and_stamps_drive_id(tmp_path):
     assert struct.pack("<4f", *back) == struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
 
 
+def test_try_import_rejects_contextual_retrieval_mismatch(tmp_path):
+    """CR materially changes the vector and isn't in the pipeline fingerprint, so
+    an artifact embedded with CR on must NOT be imported by a CR-off install
+    (and vice-versa). The guard makes it a cache miss -> local fallback."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    _write_artifact(fs, "FID", "vhash1", enrich={"contextual_retrieval": True})
+    # CR-off importer must reject the CR-on artifact.
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=False) is False
+    assert s.get_chunk("gdrive-FID-0") is None
+    # Matching CR imports fine.
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=True) is True
+
+
+def test_publish_stamps_real_contextual_retrieval_flag(tmp_path):
+    """publish_file must stamp the artifact with the publisher's REAL CR setting,
+    not a hardcoded default, or the guard above compares against a wrong stamp."""
+    import gzip, json
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.import_cached_chunk("gdrive-FID-0", "hi", "c0",
+                          {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ok = ingest_cache.publish_file(s, fs, "D1", "FID", "vhash1", PIN,
+                                   published_by="p@x.org", contextual_retrieval=True)
+    assert ok
+    fname = artifact_filename("FID", "vhash1", "bge-small", 4, "v1")
+    art = CacheArtifact.from_dict(json.loads(gzip.decompress(
+        fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{fname}"))))
+    assert art.enrich.get("contextual_retrieval") is True
+
+
 class _RaisingGetBytesFleetStorage:
     """FleetStorage double whose get_bytes() raises a real I/O-style error,
     simulating a Drive API failure (not a None/corrupt-bytes cache miss)."""

@@ -222,6 +222,7 @@ def _file_content_hash(file_meta: dict) -> str:
 
 def _cache_first_extract_one(
     service, store, fleet_storage, drive_id, fmeta, pin,
+    *, contextual_retrieval: bool = False,
 ) -> tuple[bool, tuple[str, str] | None]:
     """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
     (sync_shared_drive) and backfill (backfill_shared_drive) loops.
@@ -245,13 +246,15 @@ def _cache_first_extract_one(
 
     fid = fmeta["id"]
     content_h = _file_content_hash(fmeta)
-    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
+                               contextual_retrieval=contextual_retrieval):
         return True, None
     text = _fetch_text(service, fmeta)
     if not text:
         return False, None
     # Re-check right before extraction: another daemon may have just published.
-    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
+                               contextual_retrieval=contextual_retrieval):
         return True, None
     chunks = normalise_drive(fmeta, text, drive_id=drive_id)
     if not chunks:
@@ -339,7 +342,8 @@ def sync_drive(service, store, source: str = "drive") -> int:
     return processed
 
 
-def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
+def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
+                      contextual_retrieval: bool = False) -> dict:
     """Incremental sync for ONE Shared Drive via the Changes API, cache-first.
 
     Cursor key is 'drive:<driveId>' in sync_cursors. First run stores
@@ -418,7 +422,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
             continue
         try:
             did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, ev["fmeta"], pin)
+                service, store, fleet_storage, drive_id, ev["fmeta"], pin,
+                contextual_retrieval=contextual_retrieval)
             if did_process:
                 processed += 1
             if file_miss:
@@ -451,7 +456,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
 
 
 def sync_shared_drives(service, store, *, pin, storage_factory,
-                       absence_threshold: int = 3) -> dict:
+                       absence_threshold: int = 3,
+                       contextual_retrieval: bool = False) -> dict:
     """Enumerate all Shared Drives, sync each cache-first, and run the
     consecutive-absence revocation counter.
 
@@ -476,7 +482,8 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
         drive_name = d.get("name") or "<unnamed>"
         fs = storage_factory(drive_id)
         try:
-            res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin)
+            res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin,
+                                    contextual_retrieval=contextual_retrieval)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
             log.warning("shared-drive sync failed for %s (%s) (skipped): %s",
                         drive_name, drive_id, exc)
@@ -535,7 +542,7 @@ def backfill_drive(service, store, modified_after: str,
 
 def backfill_shared_drive(service, store, drive_id, modified_after, *,
                           fleet_storage, pin, modified_before=None,
-                          max_files=None) -> dict:
+                          max_files=None, contextual_retrieval: bool = False) -> dict:
     """One-shot bounded backfill for ONE Shared Drive (files.list, driveId-scoped),
     cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
     import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
@@ -560,7 +567,8 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
             if max_files is not None and processed >= max_files:
                 return {"processed": processed, "miss": miss}
             did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, f, pin)
+                service, store, fleet_storage, drive_id, f, pin,
+                contextual_retrieval=contextual_retrieval)
             if did_process:
                 processed += 1
             if file_miss:
