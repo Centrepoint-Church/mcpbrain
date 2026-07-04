@@ -356,3 +356,11 @@ def test_delta_since_watermark_hwm_reflects_fetched_rows_not_a_later_insert(tmp_
     rels2 = {(r["entity_a"], r["relation"], r["entity_b"]) for r in delta2["relations"]}
     assert ("joel", "mentioned_with", "beta") in rels2
     assert wm2["hwm"] == rid2
+
+
+def test_freetext_alias_note_is_dropped(tmp_path):
+    from mcpbrain import org_contrib
+    assert org_contrib._is_name_like("my private note") is False
+    assert org_contrib._is_name_like("JC") is True
+    assert org_contrib._is_name_like("Joel Chelliah") is True
+    assert org_contrib._safe_aliases("JC, my private note") == "JC"

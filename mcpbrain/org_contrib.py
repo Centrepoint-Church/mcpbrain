@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 # contributed (fail-safe), mirroring resolve._NAME_MERGEABLE_TYPES.
 _LAYER1_ENTITY_TYPES = frozenset({"person", "org", "project"})
 
+# Lowercase particles allowed inside a proper name ("van Gogh", "de la Cruz").
+_NAME_PARTICLES = frozenset({"van","von","de","del","della","der","den","di","da","la","le","du","bin","al","mac","mc"})
+
 
 def _clean_name(name: str) -> str:
     """Strip private free-text annotations from a name/alias before it can leave
@@ -40,7 +43,12 @@ def _is_name_like(token: str) -> bool:
     t = token.strip()
     if not t or len(t) > 40 or any(c in t for c in "()[]{}<>@\n\t"):
         return False
-    return all(c.isalpha() or c in " .,'-" for c in t)
+    if not all(c.isalpha() or c in " .,'-" for c in t):
+        return False
+    words = [w for w in t.replace(".", " ").replace(",", " ").split() if w]
+    if not words:
+        return False
+    return all(w[0].isupper() or w.lower() in _NAME_PARTICLES for w in words)
 
 
 def _safe_aliases(aliases: str) -> str:
