@@ -9,13 +9,27 @@ Tombstones re-point local references onto merge survivors so a stale import
 can't resurrect a merged-away node; a tombstone with no valid merge target
 falls back to the same demote-if-attached rule as wholesale-replace.
 
-Everything (upsert + wholesale-replace + tombstones + version bump) happens
-inside ONE transaction via a single `store._connect()` handle. Reads/writes
-inside that transaction MUST go through that same `db` handle — calling
-store convenience methods (which each open their own connection) from inside
-an open write transaction would self-deadlock against SQLite's single-writer
-lock (or silently read pre-transaction state under WAL). origin='local' rows
-are never touched, at any step.
+Before any of that, slug-drift reconciliation (_reconcile_slug_drift) folds
+existing LOCAL entities into their incoming org twin — on a shared,
+non-role email or an unambiguous alias/name-token match — so a curator
+re-keying/renaming a node doesn't strand the user's local observations on an
+orphaned duplicate; the org id always survives. Each such merge, and every
+tombstone repoint, is logged to org_repoint_log so a later curator SPLIT can
+be recovered by _restore_from_repoint_log, which re-attaches local flesh from
+the merge target back onto a resurrected id.
+
+Everything from step (1) on (upsert + wholesale-replace + tombstones +
+version bump) happens inside ONE transaction via a single `store._connect()`
+handle. Reads/writes inside that transaction MUST go through that same `db`
+handle — calling store convenience methods (which each open their own
+connection) from inside an open write transaction would self-deadlock
+against SQLite's single-writer lock (or silently read pre-transaction state
+under WAL). The slug-drift/restore step runs BEFORE that transaction opens
+for exactly this reason: it calls store.merge_entities/get_entity, which
+manage their own connections. origin='local' rows are never touched, at any
+step, except to be merged (never deleted outright) into their org twin by
+slug-drift reconciliation — the one intentional exception, and even then the
+local row's flesh is carried forward onto the survivor, never dropped.
 """
 from __future__ import annotations
 
@@ -25,6 +39,7 @@ import json
 import logging
 
 from mcpbrain.org_contracts import SnapshotManifest, Tombstone
+from mcpbrain.resolve import canonical_key, is_role_address, _token_set_ratio, _tokens
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +118,127 @@ def _remove_org_entity(db, entity_id) -> None:
     db.execute("DELETE FROM entities WHERE id=?", (entity_id,))
 
 
+def _log_repoint(store, from_id, to_id, version, reason) -> None:
+    with store._connect() as db:
+        db.execute(
+            "INSERT INTO org_repoint_log(from_entity_id,to_entity_id,snapshot_version,reason) "
+            "VALUES(?,?,?,?)", (from_id, to_id, version, reason))
+
+
+def _reconcile_slug_drift(store, entities, version) -> int:
+    """Reconcile incoming org entities against existing LOCAL entities whose id
+    drifted from the org slug (curator renamed/re-keyed the same real-world
+    identity). The LOCAL variant merges INTO the org node — the org id always
+    survives (spec B4a rule 2) — so local observations/relations don't end up
+    stranded on an orphaned duplicate once the org id lands separately.
+
+    Two match strategies, both required to be unambiguous (exactly one
+    candidate) before auto-merging:
+      (a) shared, non-empty, non-role email address — deterministic identity.
+      (b) same type + (canonical-key match, OR local name is an org-supplied
+          alias, OR token-set similarity >= 0.8) — a fuzzy but still
+          same-type, high-confidence name match.
+    A local row sharing the incoming id itself is a plain id collision (the
+    upsert step already guards that case), not a drift candidate, and is
+    excluded here. Anything else — role-address pairs, or an ambiguous
+    (multiple-candidate or weak) name-only match — is left untouched for the
+    local fuzzy-review queue; auto-merging an ambiguous pair risks folding two
+    distinct people together, which is unrecoverable without curator help.
+    Each merge is logged to org_repoint_log (reason='slug_drift') so a later
+    curator SPLIT can restore the local flesh (see _restore_from_repoint_log).
+    """
+    with store._connect() as db:
+        local = [dict(r) for r in db.execute(
+            "SELECT id,name,type,email_addr,aliases FROM entities WHERE origin='local'").fetchall()]
+    local_by_email = {}
+    for l in local:
+        em = (l.get("email_addr") or "").strip().lower()
+        if em and not is_role_address(em):
+            local_by_email.setdefault(em, []).append(l)
+
+    merged = 0
+    for e in entities:
+        org_id = e["id"]
+        target = None
+
+        # (a) email-equality — deterministic, role-address guarded.
+        em = (e.get("email_addr") or "").strip().lower()
+        if em and not is_role_address(em):
+            cands = [l for l in local_by_email.get(em, []) if l["id"] != org_id]
+            if len(cands) == 1:
+                target = cands[0]
+
+        # (b) alias / canonical-key / token-set match, same type only.
+        if target is None:
+            org_toks = _tokens(e.get("name", ""))
+            org_key = canonical_key(e.get("name", ""))
+            org_aliases = {a.strip().lower() for a in (e.get("aliases") or "").split(",") if a.strip()}
+            matches = []
+            for l in local:
+                if l["id"] == org_id or l["type"] != e.get("type", "person"):
+                    continue
+                if is_role_address(l.get("email_addr") or ""):
+                    continue
+                lk = canonical_key(l["name"])
+                lname = l["name"].strip().lower()
+                if lk and lk == org_key:
+                    matches.append(l)
+                elif lname in org_aliases:
+                    matches.append(l)
+                elif _token_set_ratio(org_toks, _tokens(l["name"])) >= 0.8:
+                    matches.append(l)
+            if len(matches) == 1:            # single unambiguous match only
+                target = matches[0]
+
+        if target is not None and store.get_entity(org_id) is not None:
+            # Local merges INTO org (org id survives — B4a rule 2). The org row
+            # must already be materialised (import_snapshot stubs it before
+            # calling this) for merge_entities to have a winner to fold into.
+            store.merge_entities(target["id"], org_id, method="slug_drift")
+            _log_repoint(store, target["id"], org_id, version, "slug_drift")
+            merged += 1
+    return merged
+
+
+def _restore_from_repoint_log(store, entities) -> int:
+    """Curator-SPLIT recovery (spec B4a rule 4): when a snapshot re-introduces
+    an id that an earlier repoint (tombstone OR slug-drift merge) had folded
+    away, re-materialise the resurrected node and move the local flesh that
+    had landed on the merge target back onto it, via the same
+    _repoint_local_refs helper the tombstone step uses (just with from/to
+    swapped). Must run BEFORE the generic org-id stub step, since that stub
+    would otherwise pre-create the resurrected id and make it look
+    already-present here.
+
+    Caveat: entity_observations carry no per-row provenance, so once a merge
+    has happened there is no way to tell which of the target's observations
+    originated on the resurrected node versus natively on the target — this
+    moves ALL of them back, which is a strict improvement over permanently
+    stranding the resurrected node's flesh (the pre-Task-9 behaviour), but can
+    over-restore an observation that was always native to the target. Adding
+    per-observation provenance is a schema change, out of scope here.
+    """
+    incoming = {e["id"]: e for e in entities}
+    restored = 0
+    with store._connect() as db:
+        logs = [dict(r) for r in db.execute(
+            "SELECT from_entity_id, to_entity_id FROM org_repoint_log").fetchall()]
+        for lg in logs:
+            resurrected, target = lg["from_entity_id"], lg["to_entity_id"]
+            if resurrected not in incoming:
+                continue
+            if db.execute("SELECT 1 FROM entities WHERE id=?", (resurrected,)).fetchone() is not None:
+                continue  # already present (either never removed, or already restored)
+            e = incoming[resurrected]
+            db.execute(
+                "INSERT INTO entities(id,name,type,origin,first_seen,last_seen) "
+                "VALUES(?,?,?, 'org', '', '')",
+                (resurrected, e.get("name", ""), e.get("type", "person")))
+            _repoint_local_refs(db, target, resurrected)
+            restored += 1
+    return restored
+
+
 def import_snapshot(store, fleet_storage) -> dict:
     """See module docstring. Signature + status vocabulary frozen — consumed by C onboarding too."""
     raw_manifest = fleet_storage.get_bytes(MANIFEST_PATH)
@@ -127,6 +263,27 @@ def import_snapshot(store, fleet_storage) -> dict:
     snapshot_entity_ids = {e["id"] for e in entities}
     snapshot_relation_keys = {(r["entity_a"], r["relation"], r["entity_b"]) for r in relations}
     demoted = tombstoned = 0
+
+    # (0) Slug-drift reconciliation + curator-split restore (spec B4/B4a),
+    # each its OWN sequence of short transactions, run BEFORE the single big
+    # transaction below. store.merge_entities/get_entity open their own
+    # connection, so they must never be called from inside that transaction's
+    # `with store._connect() as db:` block (self-deadlock / stale-WAL-read
+    # risk — see module docstring); running them here, before that block
+    # opens, is what keeps this safe.
+    #
+    # Order matters: restore MUST run before the generic org-id stub below,
+    # or the stub's blanket INSERT OR IGNORE would pre-create a resurrected
+    # id and make it look already-present to the restore check. Reconcile
+    # runs after stubbing so merge_entities always has a materialised org
+    # winner to fold the local loser into.
+    restored = _restore_from_repoint_log(store, entities)
+    with store._connect() as db:
+        for e in entities:                          # stub org ids so reconcile can merge into them
+            db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin,first_seen,last_seen) "
+                       "VALUES(?,?,?, 'org', '', '')",
+                       (e["id"], e.get("name", ""), e.get("type", "person")))
+    reconciled = _reconcile_slug_drift(store, entities, manifest.version)
 
     with store._connect() as db:
         # (1) Upsert snapshot entities as origin='org'. A same-id row already
@@ -232,4 +389,5 @@ def import_snapshot(store, fleet_storage) -> dict:
 
     return {"status": "imported", "version": manifest.version,
             "entities": len(entities), "relations": len(relations),
-            "tombstoned": tombstoned, "demoted": demoted}
+            "tombstoned": tombstoned, "demoted": demoted,
+            "reconciled": reconciled, "restored": restored}
