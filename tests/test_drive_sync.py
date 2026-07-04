@@ -58,11 +58,10 @@ class _Files:
         self.export_calls: dict[str, int] = {}
         self.get_media_calls: dict[str, int] = {}
 
-    def export(self, fileId, mimeType, supportsAllDrives=None):
-        assert supportsAllDrives is True, (
-            "export() must pass supportsAllDrives=True — required by the real "
-            "Drive v3 API for files inside a Shared Drive"
-        )
+    def export(self, fileId, mimeType):
+        # Mirror the real Drive v3 API: files.export does NOT accept
+        # supportsAllDrives. Passing it would raise TypeError here (as in prod),
+        # so this signature guards against the kwarg being re-added.
         self.export_calls[fileId] = self.export_calls.get(fileId, 0) + 1
         if fileId in self._raise:
             return _Req(raise_exc=self._raise[fileId])

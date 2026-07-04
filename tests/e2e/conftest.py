@@ -64,10 +64,10 @@ class _DriveFiles:
             return _Req({"files": self._page1, "nextPageToken": "DRIVE_P2"})
         return _Req({"files": self._page2})
 
-    def export(self, fileId, mimeType, **_kw):   # accept supportsAllDrives
+    def export(self, fileId, mimeType):          # real export takes no supportsAllDrives
         return _Req(self._content[fileId])
 
-    def get_media(self, fileId, **_kw):          # accept supportsAllDrives
+    def get_media(self, fileId, **_kw):          # get_media DOES accept supportsAllDrives
         return _Req(self._content[fileId])
 
 

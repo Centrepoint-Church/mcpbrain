@@ -91,8 +91,12 @@ def _fetch_text(service, file_meta: dict) -> str | None:
     """
     mime = file_meta.get("mimeType", "")
     if mime in _EXPORT:
+        # NB: files.export does NOT accept supportsAllDrives (unlike get/get_media/
+        # list) — it is not in the Drive v3 discovery doc for export, so passing it
+        # raises TypeError at call-build time. Shared-drive Google-native docs export
+        # fine by fileId alone.
         raw = service.files().export(
-            fileId=file_meta["id"], mimeType=_EXPORT[mime], supportsAllDrives=True
+            fileId=file_meta["id"], mimeType=_EXPORT[mime]
         ).execute()
     elif mime in _DOWNLOAD_TEXT:
         raw = service.files().get_media(
