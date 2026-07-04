@@ -102,3 +102,61 @@ def test_ingest_distinguishes_claims_with_same_source_ref(tmp_path):
     _write_batch(fs, "contrib/alice@x.org/1.jsonl", [r1, r2])
     result = org_curate._ingest(s, fs)
     assert result == {"batches": 1, "ingested": 2}
+
+
+def _stage(store, recs):
+    with store._connect() as db:
+        for r in recs:
+            db.execute(
+                "INSERT OR IGNORE INTO org_contrib_staging"
+                "(contributor_email, source_ref, claim, confidence, valid_from, valid_to, source_kind)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (r.contributor_email, r.source_ref, json.dumps(r.claim, sort_keys=True),
+                 r.confidence, r.valid_from, r.valid_to, r.source_kind))
+
+
+def test_materialise_writes_org_rows(tmp_path):
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "joel", "name": "Joel Chelliah", "type": "person",
+              "org": "Acme", "email_addr": "joel@acme.org", "aliases": ""}),
+        _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "acme"}),
+    ])
+    res = org_curate._materialise(s)
+    assert res["entities"] >= 2 and res["relations"] == 1
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entities WHERE origin='org'").fetchone()["c"] >= 2
+        assert db.execute("SELECT COUNT(*) c FROM entity_relations WHERE origin='org'").fetchone()["c"] == 1
+
+
+def test_mentioned_with_singleton_stays_pending(tmp_path):
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person", "org": "",
+              "email_addr": "", "aliases": ""}),
+        _rec({"kind": "entity", "id": "mary", "name": "Mary", "type": "person", "org": "",
+              "email_addr": "", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "mentioned_with", "entity_b": "mary"}),
+    ])
+    res = org_curate._materialise(s)
+    assert res["pending"] >= 1
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entity_relations "
+                          "WHERE relation='mentioned_with'").fetchone()["c"] == 0
+
+
+def test_mentioned_with_two_sources_materialises(tmp_path):
+    s = _store(tmp_path)
+    ents = [_rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person", "org": "",
+                  "email_addr": "", "aliases": ""}, sref="r1"),
+            _rec({"kind": "entity", "id": "mary", "name": "Mary", "type": "person", "org": "",
+                  "email_addr": "", "aliases": ""}, sref="r1")]
+    rel = {"kind": "relation", "entity_a": "joel", "relation": "mentioned_with", "entity_b": "mary"}
+    _stage(s, ents + [_rec(rel, sref="r1", email="a@x.org"),
+                      _rec(rel, sref="r2", email="b@x.org")])
+    res = org_curate._materialise(s)
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entity_relations "
+                          "WHERE relation='mentioned_with'").fetchone()["c"] == 1
