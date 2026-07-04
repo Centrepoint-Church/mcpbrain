@@ -328,24 +328,34 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
     miss: list[tuple[str, str]] = []
     for fmeta in pending:
         fid = fmeta["id"]
-        content_h = _file_content_hash(fmeta)
-        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+        try:
+            content_h = _file_content_hash(fmeta)
+            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+                processed += 1
+                continue
+            text = _fetch_text(service, fmeta)
+            if not text:
+                continue
+            # Re-check right before extraction: another daemon may have just published.
+            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+                processed += 1
+                continue
+            chunks = normalise_drive(fmeta, text, drive_id=drive_id)
+            if not chunks:
+                continue
+            for c in chunks:
+                store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+            miss.append((fid, content_h))
             processed += 1
+        except Exception as exc:  # noqa: BLE001 — isolate one file's failure
+            # Without this, one poison file (corrupt doc, transient export
+            # error, decode failure) would propagate up to sync_shared_drives'
+            # per-drive handler, which skips the WHOLE DRIVE for the cycle
+            # WITHOUT advancing the cursor — so the same poison file would be
+            # re-fetched and re-fail forever, permanently blocking the drive.
+            log.warning("drive: extraction failed for file %s in drive %s: %s",
+                        fid, drive_id, exc)
             continue
-        text = _fetch_text(service, fmeta)
-        if not text:
-            continue
-        # Re-check right before extraction: another daemon may have just published.
-        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-            processed += 1
-            continue
-        chunks = normalise_drive(fmeta, text, drive_id=drive_id)
-        if not chunks:
-            continue
-        for c in chunks:
-            store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
-        miss.append((fid, content_h))
-        processed += 1
 
     for fid in removed_ids:
         doc_ids = store.doc_ids_for_file(fid)

@@ -151,6 +151,33 @@ def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
     assert out["_revoked"] == []
 
 
+def test_sync_shared_drive_isolates_per_file_extraction_failure(tmp_path, caplog):
+    """One poison file raising during fetch/extract must not abort the whole
+    drive's cycle: the good file still gets processed and the cursor still
+    advances (so the poison file isn't retried forever, blocking the drive)."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{
+            "changes": [_gdoc_change("BAD"), _gdoc_change("GOOD")],
+            "newStartPageToken": "101",
+        }],
+        exports={"GOOD": b"good file content here"},
+        export_raises={"BAD": RuntimeError("corrupt export")},
+    )
+    with caplog.at_level("WARNING"):
+        out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+
+    assert out["processed"] == 1
+    assert s.get_chunk("gdrive-GOOD-0") is not None
+    assert s.get_chunk("gdrive-BAD-0") is None
+    # Cursor still advances — the poison file must not block the drive forever.
+    assert s.get_cursor("drive:D1") == "101"
+    assert any("BAD" in rec.message for rec in caplog.records)
+    assert any(rec.levelname == "WARNING" for rec in caplog.records)
+
+
 def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
     """A per-cycle delta only ever contains the files that changed since the
     last cursor — it is never a complete file listing. sync_shared_drives must
