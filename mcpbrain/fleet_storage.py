@@ -6,8 +6,11 @@ Drive (root = driveId) for the in-drive `.mcpbrain-cache/`; B/C use it over the
 fleet folder — both only ever through the FleetStorage protocol.
 
 All Drive calls set supportsAllDrives=True (Shared Drives require it), matching the
-mechanism backup.py / fleet.py already rely on. googleapiclient is imported lazily
-so importing this module does not require the SDK.
+mechanism backup.py / fleet.py already rely on, and run through _exec(), which
+activates the client library's exponential backoff (num_retries=5) on transient
+5xx/429/quota errors and logs a warning if a call still ultimately fails — this is
+the sole production transport for an unattended daemon feature. googleapiclient is
+imported lazily so importing this module does not require the SDK.
 """
 from __future__ import annotations
 
@@ -38,6 +41,17 @@ class DriveFleetStorage:
 
     # -- Drive primitives ------------------------------------------------
 
+    def _exec(self, request, *, context: str):
+        """Run a Drive API request with the client library's retry/backoff
+        activated (num_retries=5) for transient 5xx/429/quota errors. Logs a
+        warning (rather than failing silently) when a call still ultimately
+        raises after those retries are exhausted."""
+        try:
+            return request.execute(num_retries=5)
+        except Exception:
+            log.warning("fleet_storage: Drive operation failed (%s)", context, exc_info=True)
+            raise
+
     def _find_child(self, parent_id: str, name: str, *, folder: bool):
         q = (f"name = '{_q_escape(name)}' and '{parent_id}' in parents "
              f"and trashed = false")
@@ -46,11 +60,14 @@ class DriveFleetStorage:
         matches = []
         page_token = None
         while True:
-            resp = self._svc.files().list(
-                q=q, fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
-                pageSize=100, supportsAllDrives=True,
-                includeItemsFromAllDrives=True, pageToken=page_token,
-            ).execute()
+            resp = self._exec(
+                self._svc.files().list(
+                    q=q, fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
+                    pageSize=100, supportsAllDrives=True,
+                    includeItemsFromAllDrives=True, pageToken=page_token,
+                ),
+                context=f"list children of {parent_id!r} named {name!r}",
+            )
             matches.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -81,10 +98,13 @@ class DriveFleetStorage:
             return self._folder_cache[key]
         fid = self._find_child(parent_id, name, folder=True)
         if fid is None:
-            self._svc.files().create(
-                body={"name": name, "mimeType": _FOLDER_MIME, "parents": [parent_id]},
-                fields="id", supportsAllDrives=True,
-            ).execute()
+            self._exec(
+                self._svc.files().create(
+                    body={"name": name, "mimeType": _FOLDER_MIME, "parents": [parent_id]},
+                    fields="id", supportsAllDrives=True,
+                ),
+                context=f"create folder {name!r} under {parent_id!r}",
+            )
             fid = self._find_child(parent_id, name, folder=True)
             if fid is None:
                 raise RuntimeError(
@@ -121,14 +141,20 @@ class DriveFleetStorage:
         media = MediaInMemoryUpload(data, mimetype="application/octet-stream")
         existing = self._find_child(parent, leaf, folder=False)
         if existing:
-            self._svc.files().update(
-                fileId=existing, media_body=media, supportsAllDrives=True,
-            ).execute()
+            self._exec(
+                self._svc.files().update(
+                    fileId=existing, media_body=media, supportsAllDrives=True,
+                ),
+                context=f"update leaf {leaf!r} under {parent!r}",
+            )
         else:
-            self._svc.files().create(
-                body={"name": leaf, "parents": [parent]},
-                media_body=media, fields="id", supportsAllDrives=True,
-            ).execute()
+            self._exec(
+                self._svc.files().create(
+                    body={"name": leaf, "parents": [parent]},
+                    media_body=media, fields="id", supportsAllDrives=True,
+                ),
+                context=f"create leaf {leaf!r} under {parent!r}",
+            )
 
     def get_bytes(self, path: str) -> bytes | None:
         parent, leaf = self._resolve_file(path, create_parents=False)
@@ -137,8 +163,10 @@ class DriveFleetStorage:
         fid = self._find_child(parent, leaf, folder=False)
         if fid is None:
             return None
-        raw = self._svc.files().get_media(
-            fileId=fid, supportsAllDrives=True).execute()
+        raw = self._exec(
+            self._svc.files().get_media(fileId=fid, supportsAllDrives=True),
+            context=f"get_media {path!r}",
+        )
         return raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
 
     def list_paths(self, prefix: str) -> list[str]:
@@ -157,12 +185,15 @@ class DriveFleetStorage:
         def _walk(parent_id: str, rel: str):
             page_token = None
             while True:
-                resp = self._svc.files().list(
-                    q=f"'{parent_id}' in parents and trashed = false",
-                    fields="nextPageToken, files(id,name,mimeType)", pageSize=1000,
-                    supportsAllDrives=True, includeItemsFromAllDrives=True,
-                    pageToken=page_token,
-                ).execute()
+                resp = self._exec(
+                    self._svc.files().list(
+                        q=f"'{parent_id}' in parents and trashed = false",
+                        fields="nextPageToken, files(id,name,mimeType)", pageSize=1000,
+                        supportsAllDrives=True, includeItemsFromAllDrives=True,
+                        pageToken=page_token,
+                    ),
+                    context=f"list children of {parent_id!r} (walk)",
+                )
                 for f in resp.get("files", []):
                     child_rel = f"{rel}{f['name']}"
                     if f.get("mimeType") == _FOLDER_MIME:
@@ -183,7 +214,10 @@ class DriveFleetStorage:
         fid = self._find_child(parent, leaf, folder=False)
         if fid is None:
             return
-        self._svc.files().delete(fileId=fid, supportsAllDrives=True).execute()
+        self._exec(
+            self._svc.files().delete(fileId=fid, supportsAllDrives=True),
+            context=f"delete {path!r}",
+        )
 
 
 # -- factories (the storage instances B and C acquire) ----------------------

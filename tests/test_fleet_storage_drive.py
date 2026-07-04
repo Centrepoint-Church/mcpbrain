@@ -342,3 +342,35 @@ def test_drive_cache_storage_roots_at_drive_and_uses_cache_prefix(tmp_path):
     assert fs.get_bytes(f"{ingest_cache.CACHE_DIR}/FID.h.pf.mbc.gz") == b"payload"
     names = [n["name"] for n in drive.nodes.values()]
     assert ingest_cache.CACHE_DIR in names          # exactly one cache folder, at the root
+
+
+# -- Finding 1: retry/backoff on every Drive call ----------------------------
+
+def test_all_execute_calls_activate_num_retries():
+    # Every .execute() this module issues must pass num_retries=5 so the
+    # client library's exponential backoff kicks in on transient 5xx/429/
+    # quota errors — this is the sole production transport for an
+    # unattended daemon. Assert against the fake's recorded kwargs rather
+    # than just "it still works", since a bare .execute() would pass this
+    # suite too.
+    drive = FakeDrive()
+    seen_num_retries = []
+    real_req_execute = _Req.execute
+
+    def tracking_execute(self, **kw):
+        seen_num_retries.append(kw.get("num_retries"))
+        return real_req_execute(self, **kw)
+
+    _Req.execute = tracking_execute
+    try:
+        fs = DriveFleetStorage(drive, "ROOT")
+        fs.put_bytes("a/b.bin", b"one")     # create leaf + create folder
+        fs.put_bytes("a/b.bin", b"two")     # update leaf
+        fs.get_bytes("a/b.bin")             # get_media
+        fs.list_paths("a/")                 # walk list
+        fs.delete("a/b.bin")                # delete
+    finally:
+        _Req.execute = real_req_execute
+
+    assert seen_num_retries, "expected at least one tracked .execute() call"
+    assert all(n == 5 for n in seen_num_retries), seen_num_retries
