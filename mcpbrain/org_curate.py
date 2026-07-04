@@ -54,16 +54,31 @@ def _ingest(store, fleet_storage) -> dict:
     lines are logged and skipped rather than aborting the whole batch; an
     undecodable batch file is logged and skipped rather than aborting the
     whole run — one bad contributor must never block every other
-    contributor's batch in the same cadence pass.
+    contributor's batch in the same cadence pass. A FleetStorage I/O error
+    (list_paths or get_bytes raising — a real Drive backend can legitimately
+    throw transiently) is treated the same way: log and continue rather than
+    letting it propagate and abort ingestion of every OTHER contributor's
+    already-enumerated batch.
 
     Returns {"batches": n, "ingested": rows_new}.
     """
     batches = 0
     ingested = 0
-    for path in fleet_storage.list_paths("contrib/"):
+    try:
+        paths = fleet_storage.list_paths("contrib/")
+    except Exception as exc:  # noqa: BLE001 — one storage hiccup must not crash the cadence
+        log.warning("curate: fleet_storage.list_paths failed, aborting this ingest pass: %s",
+                    exc, exc_info=True)
+        return {"batches": 0, "ingested": 0}
+    for path in paths:
         if not path.endswith(".jsonl"):
             continue
-        blob = fleet_storage.get_bytes(path)
+        try:
+            blob = fleet_storage.get_bytes(path)
+        except Exception as exc:  # noqa: BLE001 — one bad path must not abort every other one
+            log.warning("curate: fleet_storage.get_bytes failed for %s, skipping: %s",
+                        path, exc, exc_info=True)
+            continue
         if not blob:
             continue
         try:

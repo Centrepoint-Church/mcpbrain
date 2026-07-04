@@ -90,6 +90,48 @@ def test_ingest_skips_undecodable_batch_but_ingests_other_contributors(tmp_path)
         assert db.execute("SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"] == 1
 
 
+class _FlakyGetBytesFleetStorage:
+    """Wraps a real FleetStorage, raising on get_bytes for one chosen path —
+    simulates a transient I/O error a real Drive-backed FleetStorage could
+    legitimately throw for a single object while the rest are fine."""
+
+    def __init__(self, inner, fail_path):
+        self._inner = inner
+        self._fail_path = fail_path
+
+    def list_paths(self, prefix):
+        return self._inner.list_paths(prefix)
+
+    def get_bytes(self, path):
+        if path == self._fail_path:
+            raise ConnectionError("simulated transient fleet storage I/O error")
+        return self._inner.get_bytes(path)
+
+    def put_bytes(self, path, data):
+        return self._inner.put_bytes(path, data)
+
+    def delete(self, path):
+        return self._inner.delete(path)
+
+
+def test_ingest_skips_path_whose_get_bytes_raises_but_ingests_other_contributors(tmp_path):
+    """A FleetStorage implementation raising on get_bytes for one path (a
+    transient I/O error, not a data problem) must not abort ingestion of
+    every other contributor's already-enumerated batch in the same pass."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    inner = LocalDirFleetStorage(tmp_path / "fleet")
+    good = _rec({"kind": "entity", "id": "sam", "name": "Sam", "type": "person",
+                 "org": "", "email_addr": "", "aliases": ""}, email="bob@x.org")
+    _write_batch(inner, "contrib/alice@x.org/1.jsonl", [good])
+    _write_batch(inner, "contrib/bob@x.org/1.jsonl", [good])
+    fs = _FlakyGetBytesFleetStorage(inner, fail_path="contrib/alice@x.org/1.jsonl")
+    s = _store(tmp_path)
+    result = org_curate._ingest(s, fs)
+    assert result == {"batches": 1, "ingested": 1}   # bob's batch still ingested
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"] == 1
+
+
 def test_ingest_distinguishes_claims_with_same_source_ref(tmp_path):
     """UNIQUE is (contributor_email, source_ref, claim) — two different claims
     from the same source_ref/contributor must both land, not collide."""
