@@ -35,10 +35,17 @@ class DriveFleetStorage:
     """A FleetStorage backed by a Google Drive folder subtree."""
 
     def __init__(self, drive_service, folder_or_drive_id: str, *,
+                 root_is_drive: bool = False,
                  ensure_folder_retry_attempts: int = 3,
                  ensure_folder_retry_backoff: float = 0.05):
         self._svc = drive_service
         self._root = folder_or_drive_id
+        # True when folder_or_drive_id is a Shared Drive id
+        # (drive_cache_storage) rather than a plain folder id
+        # (fleet_folder_storage). Scopes list() queries to that drive
+        # (corpora="drive", driveId=...) for correctness/efficiency,
+        # matching sync/drive.py's backfill_shared_drive convention.
+        self._root_is_drive = root_is_drive
         # Bounded retry knobs for _ensure_folder's post-create re-resolve.
         # Overridable so tests don't have to wait out real backoff.
         self._ensure_folder_retry_attempts = max(1, ensure_folder_retry_attempts)
@@ -59,6 +66,11 @@ class DriveFleetStorage:
             log.warning("fleet_storage: Drive operation failed (%s)", context, exc_info=True)
             raise
 
+    def _drive_scope_kwargs(self) -> dict:
+        if self._root_is_drive:
+            return {"corpora": "drive", "driveId": self._root}
+        return {}
+
     def _find_child(self, parent_id: str, name: str, *, folder: bool,
                      reap_duplicates: bool = False):
         q = (f"name = '{_q_escape(name)}' and '{parent_id}' in parents "
@@ -73,6 +85,7 @@ class DriveFleetStorage:
                     q=q, fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
                     pageSize=100, supportsAllDrives=True,
                     includeItemsFromAllDrives=True, pageToken=page_token,
+                    **self._drive_scope_kwargs(),
                 ),
                 context=f"list children of {parent_id!r} named {name!r}",
             )
@@ -299,7 +312,7 @@ class DriveFleetStorage:
                         q=f"'{parent_id}' in parents and trashed = false",
                         fields="nextPageToken, files(id,name,mimeType)", pageSize=1000,
                         supportsAllDrives=True, includeItemsFromAllDrives=True,
-                        pageToken=page_token,
+                        pageToken=page_token, **self._drive_scope_kwargs(),
                     ),
                     context=f"list children of {parent_id!r} (walk)",
                 )
@@ -354,5 +367,6 @@ def drive_cache_storage(drive_service, drive_id):
     """FleetStorage for one Shared Drive's ingest cache (read/publish; C's per-drive
     bootstrap_drive). Rooted at the SHARED DRIVE ROOT — ingest_cache addresses the
     `.mcpbrain-cache/` subfolder via its CACHE_DIR path prefix, so rooting here (not
-    at the cache folder) is required to avoid a doubled prefix."""
-    return DriveFleetStorage(drive_service, drive_id)
+    at the cache folder) is required to avoid a doubled prefix. root_is_drive=True
+    scopes its Drive queries to this Shared Drive (corpora/driveId)."""
+    return DriveFleetStorage(drive_service, drive_id, root_is_drive=True)
