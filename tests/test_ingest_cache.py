@@ -297,6 +297,57 @@ def test_import_artifact_store_write_failure_logged_as_warning_not_info(tmp_path
     assert not any("corrupt artifact" in r.message for r in infos)
 
 
+def test_publish_stamps_contextual_retrieval_and_matching_flag_imports(tmp_path):
+    """publish_file threads contextual_retrieval into the artifact's enrich
+    block; try_import with the SAME flag value must succeed."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ok = ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=True)
+    assert ok
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=True) is True
+
+
+def test_try_import_contextual_retrieval_mismatch_falls_back(tmp_path):
+    """A LOCAL install with contextual-retrieval OFF must not import an
+    artifact published by an install with it ON — the flag materially
+    changes the embedding vector and is not covered by pipeline_fingerprint."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN, contextual_retrieval=True)
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=False) is False
+
+
+def test_try_import_contextual_retrieval_default_none_is_backward_compatible(tmp_path):
+    """Existing callers that don't pass contextual_retrieval (None = don't
+    check) must keep working exactly as before, regardless of what flag value
+    the artifact was published with."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN, contextual_retrieval=True)
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN) is True
+
+
+def test_publish_default_contextual_retrieval_is_false_backward_compatible(tmp_path):
+    """Existing publish_file callers that don't pass contextual_retrieval must
+    keep stamping the same effective default (False) — no behavior change."""
+    src, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    src.import_cached_chunk("gdrive-FID-0", "hello", "c0",
+                            {"file_id": "FID", "chunk_index": 0}, [0.1, 0.2, 0.3, 0.4])
+    assert ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", PIN) is True
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", PIN,
+                                   contextual_retrieval=False) is True
+
+
 def test_collect_chunks_is_drive_neutral(tmp_path):
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-FID-0", "hello", "c0",
