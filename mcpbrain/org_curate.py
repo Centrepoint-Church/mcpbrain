@@ -8,9 +8,11 @@ what determinism can't settle on STRUCTURAL evidence only (verdict 'pending'
 when it can't decide), and publish a versioned snapshot (manifest written LAST).
 Reversible + capped, per the 0.7.84 brain-review hardening.
 
-This module currently implements the first two pipeline steps: ingest and
-materialise (deterministic merge + corroboration + role-address guards). The
-adjudicate/publish steps are later tasks.
+This module currently implements ingest, materialise (deterministic merge +
+corroboration + role-address guards), and the adjudication seam (fuzzy
+structural-only candidate packets, an injectable adjudicate() defaulting to
+all-pending, and a hardened capped merge applier). The publish step (versioned
+snapshot, manifest written last) is a later task.
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ from datetime import datetime, timezone
 
 from mcpbrain import graph_write
 from mcpbrain.org_contracts import ContributionRecord
-from mcpbrain.resolve import is_role_address
+from mcpbrain.resolve import (_NAME_MERGEABLE_TYPES, _candidate_pairs, _pick_winner,
+                              is_role_address)
 
 log = logging.getLogger(__name__)
 
@@ -213,3 +216,79 @@ def _materialise(store, pin_allowlist=None) -> dict:
                 db.execute("UPDATE entity_relations SET valid_to=? WHERE id=?",
                            (agg["valid_to"], rid))
     return {"entities": n_ent, "relations": n_rel, "pending": pending}
+
+
+def _org_entities(store) -> list[dict]:
+    with store._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT id, name, type, org, email_addr, aliases, mentions "
+            "FROM entities WHERE origin='org' ORDER BY id").fetchall()]
+
+
+def _build_adjudication_units(store) -> list[dict]:
+    """Fuzzy same-type name-pair candidates among org entities, structural-only.
+
+    Reuses resolve._candidate_pairs (blocking + token-set similarity, restricted
+    to _NAME_MERGEABLE_TYPES) — the exact machinery the local fuzzy merge-review
+    queue uses — so this only ever surfaces pairs a merge applier could act on.
+    Each unit carries names/types/emails/aliases only, never message content:
+    the curator adjudicates STRUCTURAL evidence, it never sees claim payloads.
+    """
+    ents = _org_entities(store)
+    units = []
+    for a, b in _candidate_pairs(ents):
+        pair_id = "|".join(sorted((a["id"], b["id"])))
+        units.append({"pair_id": pair_id,
+                      "a": {k: a.get(k, "") for k in ("id", "name", "type", "email_addr", "aliases")},
+                      "b": {k: b.get(k, "") for k in ("id", "name", "type", "email_addr", "aliases")}})
+    return units
+
+
+def adjudicate(units, *, home=None) -> list[dict]:
+    """Adjudication seam (spec B3.3). Default: return no verdicts, so every unit
+    stays 'pending' — the safe default when nothing has wired in a real curator.
+    Tests and a future Haiku-wired curator monkeypatch/replace this to return
+    [{"pair_id", "verdict": "merge"|"pending"|"skip", "canonical"?}, ...]."""
+    return []
+
+
+def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
+    """Apply curator merge verdicts with the 0.7.84 brain-review hardening:
+    re-fetch both entities from the store by their OWN id (never trust a
+    verdict's embedded data), missing -> skip; enforce the _NAME_MERGEABLE_TYPES
+    and role-address guards; cap the number of merges actually applied; and
+    treat anything that isn't strictly "merge" (including "pending") as a
+    no-op. Returns counts: {"merged", "guarded", "capped", "pending", "skipped"}.
+    """
+    result = {"merged": 0, "guarded": 0, "capped": 0, "pending": 0, "skipped": 0}
+    for v in verdicts or []:
+        verdict = v.get("verdict")
+        ids = (v.get("pair_id") or "").split("|")
+        if len(ids) != 2 or not all(ids) or ids[0] == ids[1]:
+            result["skipped"] += 1
+            continue
+        if verdict == "pending":
+            result["pending"] += 1
+            continue
+        if verdict != "merge":
+            result["skipped"] += 1
+            continue
+        a = store.get_entity(ids[0])
+        b = store.get_entity(ids[1])
+        if a is None or b is None:
+            result["skipped"] += 1
+            continue
+        if a["type"] not in _NAME_MERGEABLE_TYPES or b["type"] not in _NAME_MERGEABLE_TYPES:
+            result["guarded"] += 1
+            continue
+        if is_role_address(a.get("email_addr", "")) or is_role_address(b.get("email_addr", "")):
+            result["guarded"] += 1
+            continue
+        if result["merged"] >= cap:
+            result["capped"] += 1
+            continue
+        winner, loser = _pick_winner(a, b)
+        store.merge_entities(loser["id"], winner["id"],
+                             canonical_name=v.get("canonical") or None, method="curator")
+        result["merged"] += 1
+    return result
