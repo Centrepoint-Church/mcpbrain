@@ -17,7 +17,7 @@ _STOP_AFTER_EMPTY_WINDOWS = 4   # 4 × 90d = ~1 year of empty before declaring d
 
 
 def run_sync_cycle(store, embedder, *, gmail_service=None,
-                   calendar_service=None, drive_service=None) -> dict:
+                   calendar_service=None, drive_service=None, home=None) -> dict:
     """Run a sync+embed cycle over whichever services are provided.
 
     For each provided service: run its source delta-sync, then index_pending
@@ -27,6 +27,14 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     delta-sync runs FIRST every cycle so anything new always reaches the store
     before older history is processed. Returns counts: per-source items
     synced, backfill counts, and total chunks embedded this cycle.
+
+    When `drive_service` and `home` are both given AND `config.ingest_cache_enabled(home)`
+    AND `config.fleet_pin(home).is_pinned`, also runs the Shared Drive ingest-cache
+    path (spec §A): `sync_shared_drives`, embed the misses, then `publish_file` each
+    miss now that its vectors exist. Adds `"shared_drives"` (per-drive processed
+    counts) and `"revoked_drives"` to the result. Strictly additive: with `home=None`
+    (every caller before this feature) this block never runs and existing behaviour
+    for gmail/calendar/My-Drive sync is unchanged.
     """
     from mcpbrain.index import index_pending
     from mcpbrain.sync.gmail import sync_gmail
@@ -43,6 +51,35 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     if drive_service is not None:
         result["drive"] = sync_drive(drive_service, store)
         result["embedded"] += index_pending(store, embedder)
+
+    # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
+    # to read config from, the cache enabled, and a fleet pin present. Without a
+    # pin this is a no-op and drive sync behaves exactly as before.
+    if drive_service is not None and home is not None:
+        from mcpbrain import config
+        pin = config.fleet_pin(home)
+        if config.ingest_cache_enabled(home) and pin.is_pinned:
+            from mcpbrain.sync.drive import sync_shared_drives
+            from mcpbrain.fleet_storage import drive_cache_storage
+            from mcpbrain import ingest_cache
+            sd = sync_shared_drives(
+                drive_service, store, pin=pin,
+                storage_factory=lambda d: drive_cache_storage(drive_service, d))
+            # Embed the misses, THEN publish them (publish reads vectors back).
+            result["embedded"] += index_pending(store, embedder)
+            published_by = config.owner_email(home)
+            per_drive = {}
+            for drive_id, info in sd.items():
+                if drive_id == "_revoked":
+                    continue
+                fs = info["storage"]
+                for file_id, content_hash in info["miss"]:
+                    ingest_cache.publish_file(
+                        store, fs, drive_id, file_id, content_hash, pin,
+                        published_by=published_by)
+                per_drive[drive_id] = info["processed"]
+            result["shared_drives"] = per_drive
+            result["revoked_drives"] = sd.get("_revoked", [])
 
     # One backfill step per cycle, AFTER the live deltas. Bounded by
     # max_per_source so a slow cycle never starves new items.
