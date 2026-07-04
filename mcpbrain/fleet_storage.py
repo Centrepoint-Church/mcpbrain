@@ -43,27 +43,49 @@ class DriveFleetStorage:
              f"and trashed = false")
         if folder:
             q += f" and mimeType = '{_FOLDER_MIME}'"
-        resp = self._svc.files().list(
-            q=q, fields="files(id,name,mimeType,modifiedTime)",
-            pageSize=100, supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        files = resp.get("files", [])
-        if not files:
+        matches = []
+        page_token = None
+        while True:
+            resp = self._svc.files().list(
+                q=q, fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
+                pageSize=100, supportsAllDrives=True,
+                includeItemsFromAllDrives=True, pageToken=page_token,
+            ).execute()
+            matches.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        if not matches:
             return None
-        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
-        return files[0]["id"]
+        # Secondary sort key (id) makes the tie-break deterministic across processes
+        # when modifiedTime ties or is missing (see Finding 2's race-mitigation use).
+        matches.sort(key=lambda f: (f.get("modifiedTime", ""), f.get("id", "")), reverse=True)
+        return matches[0]["id"]
 
     def _ensure_folder(self, parent_id: str, name: str) -> str:
+        # Find-then-create is inherently racy: two concurrent instances can both
+        # see no match and both create a folder, producing two duplicates under
+        # the same parent (Drive does not enforce name uniqueness). We don't
+        # trust our own create()'s id — instead we re-resolve via a fresh
+        # _find_child call, which (now that it paginates and applies a fully
+        # deterministic modifiedTime/id tie-break) will see ALL folders with
+        # that name, including one a racing process just created, and every
+        # racing instance converges on the SAME single folder id rather than
+        # each trusting its own possibly-losing create call. This is a
+        # mitigation, not a full fix: a genuinely adversarial two-process race
+        # in the exact same instant can still occasionally observe inconsistent
+        # results due to Drive's eventual consistency, but it turns the common
+        # case from a guaranteed split-brain into convergence.
         key = (parent_id, name)
         if key in self._folder_cache:
             return self._folder_cache[key]
         fid = self._find_child(parent_id, name, folder=True)
         if fid is None:
-            fid = self._svc.files().create(
+            self._svc.files().create(
                 body={"name": name, "mimeType": _FOLDER_MIME, "parents": [parent_id]},
                 fields="id", supportsAllDrives=True,
-            ).execute()["id"]
+            ).execute()
+            fid = self._find_child(parent_id, name, folder=True)
         self._folder_cache[key] = fid
         return fid
 
@@ -119,17 +141,23 @@ class DriveFleetStorage:
         out: list[str] = []
 
         def _walk(parent_id: str, rel: str):
-            resp = self._svc.files().list(
-                q=f"'{parent_id}' in parents and trashed = false",
-                fields="files(id,name,mimeType)", pageSize=1000,
-                supportsAllDrives=True, includeItemsFromAllDrives=True,
-            ).execute()
-            for f in resp.get("files", []):
-                child_rel = f"{rel}{f['name']}"
-                if f.get("mimeType") == _FOLDER_MIME:
-                    _walk(f["id"], child_rel + "/")
-                else:
-                    out.append(child_rel)
+            page_token = None
+            while True:
+                resp = self._svc.files().list(
+                    q=f"'{parent_id}' in parents and trashed = false",
+                    fields="nextPageToken, files(id,name,mimeType)", pageSize=1000,
+                    supportsAllDrives=True, includeItemsFromAllDrives=True,
+                    pageToken=page_token,
+                ).execute()
+                for f in resp.get("files", []):
+                    child_rel = f"{rel}{f['name']}"
+                    if f.get("mimeType") == _FOLDER_MIME:
+                        _walk(f["id"], child_rel + "/")
+                    else:
+                        out.append(child_rel)
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
 
         _walk(self._root, "")
         return sorted(p for p in out if p.startswith(prefix))
