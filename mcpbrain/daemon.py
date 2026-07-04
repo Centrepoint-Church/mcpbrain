@@ -1145,10 +1145,14 @@ class Daemon:
                            synthesis_requests=synthesis_requests,
                            extra_blocks=extra_blocks,
                            **services)
-        cache_counts = (result or {}).get("shared_drive_cache")
-        if cache_counts:
-            self._last_cache_hits = cache_counts.get("hits", 0)
-            self._last_cache_misses = cache_counts.get("misses", 0)
+        # Absent key (fleet unpinned, Drive-API outage caught by the cache
+        # block's own try/except, or drive_service/home not both present)
+        # must reset to 0/0, not leave the prior cycle's counts stale --
+        # status() would otherwise keep reporting a healthy-looking cache
+        # even while shared-drive sync is silently failing.
+        cache_counts = (result or {}).get("shared_drive_cache") or {"hits": 0, "misses": 0}
+        self._last_cache_hits = cache_counts.get("hits", 0)
+        self._last_cache_misses = cache_counts.get("misses", 0)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
         if drained.get("synthesis_written"):
             self._pending_synthesis = []

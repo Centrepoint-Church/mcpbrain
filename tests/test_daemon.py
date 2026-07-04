@@ -984,6 +984,36 @@ def test_status_includes_org_block(tmp_path, monkeypatch):
     assert "cache_hits" in st["org"] and "cache_misses" in st["org"]
 
 
+def test_status_cache_counts_reset_when_shared_drive_block_absent(tmp_path, monkeypatch):
+    """A cycle whose result has no "shared_drive_cache" key (fleet unpinned,
+    a Drive-API outage caught by the block's own try/except, or
+    drive_service/home not both present) must reset the counters to 0/0, not
+    leave the previous cycle's numbers stale in status() -- stale non-zero
+    counts would mask an ongoing shared-drive sync failure as healthy."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    daemon = Daemon(store, emb, enrich_mode="off",
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+
+    # First cycle: shared-drive cache block ran and reported activity.
+    monkeypatch.setattr(
+        daemon_module, "run_cycle",
+        lambda *a, **k: {"shared_drive_cache": {"hits": 7, "misses": 3}})
+    daemon.run_one()
+    st = daemon.status()
+    assert st["org"]["cache_hits"] == 7
+    assert st["org"]["cache_misses"] == 3
+
+    # Second cycle: shared-drive cache block did not run this time (key
+    # absent). status() must report 0/0, not the stale 7/3 from before.
+    monkeypatch.setattr(daemon_module, "run_cycle", lambda *a, **k: {})
+    daemon.run_one()
+    st = daemon.status()
+    assert st["org"]["cache_hits"] == 0
+    assert st["org"]["cache_misses"] == 0
+
+
 def test_maybe_resolve_does_not_exist():
     import inspect
     from mcpbrain.daemon import Daemon
