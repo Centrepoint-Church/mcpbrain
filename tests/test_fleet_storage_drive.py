@@ -391,3 +391,37 @@ def test_get_bytes_raises_on_non_bytes_media_response():
     drive.get_media = bogus_get_media
     with pytest.raises(TypeError):
         fs.get_bytes("a.bin")
+
+
+# -- Finding 8: _find_child's id tie-break, exercised for real --------------
+
+def test_find_child_tie_break_falls_back_to_highest_id_on_identical_modified_time():
+    drive = FakeDrive()
+    ids = []
+    for _ in range(3):
+        resp = drive.create(
+            body={"name": "dup", "mimeType": FOLDER_MIME, "parents": ["P"]},
+            modifiedTime="2024-01-01T00:00:00Z",  # identical on purpose
+        ).execute()
+        ids.append(resp["id"])
+    expected = max(ids)  # single-digit "id<N>" ids sort lexicographically == numerically
+
+    fs_a = DriveFleetStorage(drive, "ROOT")
+    fs_b = DriveFleetStorage(drive, "ROOT")
+    assert fs_a._find_child("P", "dup", folder=True) == expected
+    assert fs_b._find_child("P", "dup", folder=True) == expected
+
+
+def test_find_child_tie_break_falls_back_to_highest_id_when_modified_time_both_empty():
+    drive = FakeDrive()
+    ids = []
+    for _ in range(3):
+        resp = drive.create(
+            body={"name": "dup", "mimeType": FOLDER_MIME, "parents": ["P"]},
+            modifiedTime="",  # both/all empty
+        ).execute()
+        ids.append(resp["id"])
+    expected = max(ids)
+
+    fs = DriveFleetStorage(drive, "ROOT")
+    assert fs._find_child("P", "dup", folder=True) == expected
