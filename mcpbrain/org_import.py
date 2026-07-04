@@ -63,8 +63,20 @@ def _has_local_attachments(db, entity_id) -> bool:
         "SELECT 1 FROM entity_observations WHERE entity_id=? LIMIT 1", (entity_id,)).fetchone() is not None
 
 
-def _entity_exists(db, entity_id) -> bool:
-    return db.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone() is not None
+def _is_org_entity(db, entity_id) -> bool:
+    """True only if entity_id currently names an origin='org' row.
+
+    Entity ids are deterministic name-slugs, so a local extraction and an
+    org-snapshot entity can legitimately collide on id — a locally-created
+    row at that id is never touched by the upsert steps (their WHERE
+    origin != 'local' guard), so it can be sitting there unpromoted when a
+    tombstone naming that same id arrives. Every tombstone-loop identity
+    check MUST go through this (never a plain existence check), or a
+    genuinely local entity that happens to share an id with a tombstoned
+    org id gets repointed-away-from and permanently deleted.
+    """
+    return db.execute(
+        "SELECT 1 FROM entities WHERE id=? AND origin='org'", (entity_id,)).fetchone() is not None
 
 
 def _repoint_local_refs(db, from_id, to_id) -> None:
@@ -161,29 +173,27 @@ def import_snapshot(store, fleet_storage) -> dict:
             if (row["entity_a"], row["relation"], row["entity_b"]) not in snapshot_relation_keys:
                 db.execute("DELETE FROM entity_relations WHERE id=?", (row["id"],))
 
-        # (4) Wholesale-replace, entity level: an org entity absent from the
-        # snapshot is removed — but DEMOTED to origin='local' instead when local
-        # relations/observations are attached, so import never orphans the
-        # user's own knowledge (spec B4).
-        for eid in [row["id"] for row in
-                    db.execute("SELECT id FROM entities WHERE origin='org'").fetchall()]:
-            if eid in snapshot_entity_ids:
-                continue
-            if _has_local_attachments(db, eid):
-                db.execute("UPDATE entities SET origin='local' WHERE id=?", (eid,))
-                demoted += 1
-            else:
-                _remove_org_entity(db, eid)
-
-        # (5) Tombstones: re-point local references onto the merge survivor
+        # (4) Tombstones: re-point local references onto the merge survivor
         # (logged to org_repoint_log so a later curator split can restore local
         # flesh — spec B4a rule 4), then remove the tombstoned node. A
         # tombstone with no valid merge target falls back to the same
-        # demote-if-attached rule as step (4) rather than destroying local data.
+        # demote-if-attached rule as step (5) rather than destroying local data.
+        # This MUST run before step (5)'s generic wholesale-replace: a
+        # tombstoned entity is also "absent from the new snapshot", and step
+        # (5) demoting it first (its only recourse, since it carries no merge
+        # target) would make it origin='local' before this step's org-gated
+        # checks ever see it — silently skipping the repoint the tombstone
+        # specifically asked for. Every identity check here is
+        # origin='org'-gated (_is_org_entity), not a plain existence check: a
+        # tombstoned id can currently belong to an unrelated origin='local' row
+        # (entity ids are deterministic name-slugs, so local/org collisions are
+        # the common case, not an edge case), and such a row must be left
+        # completely untouched, per the "local rows never touched, under any
+        # circumstance" invariant.
         for t in tombstones:
-            if not _entity_exists(db, t.entity_id):
+            if not _is_org_entity(db, t.entity_id):
                 continue
-            if t.merged_into and _entity_exists(db, t.merged_into):
+            if t.merged_into and _is_org_entity(db, t.merged_into):
                 _repoint_local_refs(db, t.entity_id, t.merged_into)
                 db.execute(
                     "INSERT INTO org_repoint_log(from_entity_id, to_entity_id, snapshot_version, reason) "
@@ -197,6 +207,22 @@ def import_snapshot(store, fleet_storage) -> dict:
             else:
                 _remove_org_entity(db, t.entity_id)
                 tombstoned += 1
+
+        # (5) Wholesale-replace, entity level: an org entity absent from the
+        # snapshot is removed — but DEMOTED to origin='local' instead when local
+        # relations/observations are attached, so import never orphans the
+        # user's own knowledge (spec B4). Tombstoned entities were already
+        # handled by step (4) and are gone by now, so this only ever catches
+        # entities that are simply absent, not merged away.
+        for eid in [row["id"] for row in
+                    db.execute("SELECT id FROM entities WHERE origin='org'").fetchall()]:
+            if eid in snapshot_entity_ids:
+                continue
+            if _has_local_attachments(db, eid):
+                db.execute("UPDATE entities SET origin='local' WHERE id=?", (eid,))
+                demoted += 1
+            else:
+                _remove_org_entity(db, eid)
 
         # (6) Version bump, inside the same transaction as the data mutations
         # above: a crash between them must never leave the store thinking it
