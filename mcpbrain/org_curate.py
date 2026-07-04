@@ -25,7 +25,10 @@ def _ingest(store, fleet_storage) -> dict:
 
     Idempotent via the UNIQUE(contributor_email, source_ref, claim) constraint
     on org_contrib_staging: re-ingesting the same batch is a no-op. Malformed
-    lines are logged and skipped rather than aborting the whole batch.
+    lines are logged and skipped rather than aborting the whole batch; an
+    undecodable batch file is logged and skipped rather than aborting the
+    whole run — one bad contributor must never block every other
+    contributor's batch in the same cadence pass.
 
     Returns {"batches": n, "ingested": rows_new}.
     """
@@ -37,9 +40,14 @@ def _ingest(store, fleet_storage) -> dict:
         blob = fleet_storage.get_bytes(path)
         if not blob:
             continue
+        try:
+            text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            log.warning("curate: skipping undecodable contrib batch %s: %s", path, exc)
+            continue
         batches += 1
         with store._connect() as db:
-            for line in blob.decode("utf-8").splitlines():
+            for line in text.splitlines():
                 line = line.strip()
                 if not line:
                     continue
