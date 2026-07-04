@@ -93,6 +93,38 @@ def test_purge_drive_deletes_chunks_and_invalidates_local(tmp_path):
     assert r["invalidated_at"] is not None
 
 
+def test_purge_drive_logs_at_warning_not_info(tmp_path, caplog):
+    """Purging a drive's entire cached content because access was revoked is
+    consequential/destructive — it must be visible at warning, not buried at
+    info level."""
+    import logging
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0] * 4)
+    with caplog.at_level(logging.INFO, logger="mcpbrain.ingest_cache"):
+        ingest_cache.purge_drive(s, "D1")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "purge_drive should log at WARNING"
+    assert "purged drive D1" in warnings[0].message
+
+
+def test_note_drive_presence_logs_warning_when_crossing_absence_threshold(tmp_path, caplog):
+    """The 'why did this happen' operator signal must be logged right at the
+    point a drive crosses the absence threshold, naming the drive id and the
+    threshold — not just inferred from purge_drive's own log line."""
+    import logging
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "D1"}, [0.0] * 4)
+    ingest_cache.note_drive_presence(s, ["D1"], threshold=3)
+    ingest_cache.note_drive_presence(s, [], threshold=3)
+    ingest_cache.note_drive_presence(s, [], threshold=3)
+    with caplog.at_level(logging.INFO, logger="mcpbrain.ingest_cache"):
+        ingest_cache.note_drive_presence(s, [], threshold=3)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("D1" in r.message and "3" in r.message for r in warnings)
+
+
 def test_purge_drive_empty_drive_returns_zeros(tmp_path):
     from mcpbrain import ingest_cache
     s = _store(tmp_path)
