@@ -419,6 +419,21 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
     except (ValueError, TypeError):
         known = set()
     present = set(present_ids)
+
+    # Data-safety guard: a TOTAL disappearance (we knew >=1 drive, now enumerate
+    # zero) is far more likely a transient Drive-API hiccup / scope blip / 200-with-
+    # empty during an incident than every drive being revoked at once. list_shared_
+    # drives returning [] does not raise, so without this it would sail into the
+    # counter and, after `threshold` such glitchy cycles, purge ALL cached content.
+    # Skip counting entirely this cycle: never advance absence toward a destructive
+    # purge on a blanket-empty enumeration. A genuine single-drive revocation still
+    # shows the drive absent while OTHERS remain present, which is counted normally.
+    if not present and known:
+        log.warning("ingest_cache: shared-drive enumeration returned nothing while "
+                    "%d drive(s) were known — treating as a transient glitch, not "
+                    "revocation; absence counters unchanged", len(known))
+        return {"purged": [], "tracked": len(known)}
+
     known |= present
     purged = []
     for d in sorted(known):
