@@ -425,3 +425,52 @@ def test_find_child_tie_break_falls_back_to_highest_id_when_modified_time_both_e
 
     fs = DriveFleetStorage(drive, "ROOT")
     assert fs._find_child("P", "dup", folder=True) == expected
+
+
+# -- Finding 4: _ensure_folder retries the post-create re-resolve -----------
+
+def test_ensure_folder_retries_on_eventual_consistency_then_succeeds():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", ensure_folder_retry_backoff=0)
+    original_find_child = DriveFleetStorage._find_child
+    calls = {"n": 0}
+
+    def flaky_find_child(self, parent_id, name, *, folder):
+        calls["n"] += 1
+        # Call 1 is the genuine pre-create existence check (must see None).
+        # Calls 2 and 3 are forced misses simulating Drive's eventual
+        # consistency lag right after create() returns, even though the
+        # fake already has the folder. Call 4+ is let through for real and
+        # must find it.
+        if calls["n"] in (2, 3):
+            return None
+        return original_find_child(self, parent_id, name, folder=folder)
+
+    fs._find_child = flaky_find_child.__get__(fs, DriveFleetStorage)
+
+    fid = fs._ensure_folder("ROOT", "slow")
+
+    assert fid is not None
+    assert calls["n"] == 4  # 1 initial + 2 forced-miss retries + 1 real success
+
+
+def test_ensure_folder_raises_after_retries_exhausted():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", ensure_folder_retry_attempts=3,
+                            ensure_folder_retry_backoff=0)
+    original_find_child = DriveFleetStorage._find_child
+    calls = {"n": 0}
+
+    def always_missing_after_create(self, parent_id, name, *, folder):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # genuine pre-create existence check
+            return original_find_child(self, parent_id, name, folder=folder)
+        return None  # every post-create resolve attempt "never" becomes visible
+
+    fs._find_child = always_missing_after_create.__get__(fs, DriveFleetStorage)
+
+    with pytest.raises(RuntimeError):
+        fs._ensure_folder("ROOT", "never-visible")
+    # 1 initial check + 3 retry attempts, all forced to miss
+    assert calls["n"] == 4

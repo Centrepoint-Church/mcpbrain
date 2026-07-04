@@ -15,6 +15,7 @@ imported lazily so importing this module does not require the SDK.
 from __future__ import annotations
 
 import logging
+import time
 
 # Re-exported so onboarding/curation code acquires ALL fleet transport (folder
 # storage, per-drive cache storage, and drive enumeration) from one module.
@@ -33,9 +34,15 @@ def _q_escape(name: str) -> str:
 class DriveFleetStorage:
     """A FleetStorage backed by a Google Drive folder subtree."""
 
-    def __init__(self, drive_service, folder_or_drive_id: str):
+    def __init__(self, drive_service, folder_or_drive_id: str, *,
+                 ensure_folder_retry_attempts: int = 3,
+                 ensure_folder_retry_backoff: float = 0.05):
         self._svc = drive_service
         self._root = folder_or_drive_id
+        # Bounded retry knobs for _ensure_folder's post-create re-resolve.
+        # Overridable so tests don't have to wait out real backoff.
+        self._ensure_folder_retry_attempts = max(1, ensure_folder_retry_attempts)
+        self._ensure_folder_retry_backoff = ensure_folder_retry_backoff
         # (parent_id, name) -> folder_id cache to avoid re-listing on every put.
         self._folder_cache: dict[tuple[str, str], str] = {}
 
@@ -92,7 +99,10 @@ class DriveFleetStorage:
         # mitigation, not a full fix: a genuinely adversarial two-process race
         # in the exact same instant can still occasionally observe inconsistent
         # results due to Drive's eventual consistency, but it turns the common
-        # case from a guaranteed split-brain into convergence.
+        # case from a guaranteed split-brain into convergence. The bounded
+        # retry below tolerates the ordinary eventual-consistency lag between
+        # a create() returning and that folder becoming visible to a
+        # subsequent list() — only raising once retries are exhausted.
         key = (parent_id, name)
         if key in self._folder_cache:
             return self._folder_cache[key]
@@ -105,11 +115,30 @@ class DriveFleetStorage:
                 ),
                 context=f"create folder {name!r} under {parent_id!r}",
             )
-            fid = self._find_child(parent_id, name, folder=True)
+            fid = None
+            attempts = self._ensure_folder_retry_attempts
+            for attempt in range(1, attempts + 1):
+                fid = self._find_child(parent_id, name, folder=True)
+                if fid is not None:
+                    break
+                if attempt < attempts:
+                    log.info(
+                        "fleet_storage: folder %r under %r not yet visible after "
+                        "create (attempt %d/%d); retrying after a short "
+                        "eventual-consistency backoff",
+                        name, parent_id, attempt, attempts,
+                    )
+                    time.sleep(self._ensure_folder_retry_backoff)
             if fid is None:
+                log.warning(
+                    "fleet_storage: giving up resolving folder %r under parent "
+                    "%r after %d attempts (Drive eventual consistency?)",
+                    name, parent_id, attempts,
+                )
                 raise RuntimeError(
                     f"DriveFleetStorage: folder {name!r} under parent {parent_id!r} "
-                    f"was created but not found on re-resolve (Drive eventual consistency?)"
+                    f"was created but not found on re-resolve after {attempts} "
+                    f"attempts (Drive eventual consistency?)"
                 )
         self._folder_cache[key] = fid
         return fid
