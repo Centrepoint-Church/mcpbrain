@@ -367,15 +367,14 @@ def run(store, fleet_storage, home) -> dict:
     idempotent (UNIQUE-constrained staging) and publish versions
     monotonically regardless of how much actually changed.
 
-    Deterministic dedup here calls resolve.resolve_entities without a
-    `curator=` kwarg: Task 11 (not yet landed) is what adds an org<->org merge
-    guard gated on that kwarg. Once Task 11 ships, this call should pass
-    `curator=True` so the curator is the one caller allowed to merge org<->org
-    entities during its own pass.
+    Deterministic dedup here calls resolve.resolve_entities with curator=True
+    (Task 11's B4a org<->org merge guard): the curator is the one caller
+    allowed to merge org<->org entities during its own pass — local resolve
+    callers (curator=False, the default) never do.
     """
     ing = _ingest(store, fleet_storage)
     mat = _materialise(store)
-    resolve.resolve_entities(store, home=home)
+    resolve.resolve_entities(store, home=home, curator=True)
     units = _build_adjudication_units(store)
     cap = config.review_max_apply_per_run(home)
     verdicts = adjudicate(units, home=home)

@@ -1794,18 +1794,24 @@ def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
     """Write org onto an existing entity, recency-aware. With a valid_from (the
     email date) it overwrites when org is blank OR the stored org_valid_from is
     blank/older — so a job change in a newer email propagates and backfill order
-    can't pin a stale org. Without a valid_from it falls back to only-if-blank."""
+    can't pin a stale org. Without a valid_from it falls back to only-if-blank.
+
+    B4a rule 3: an org-origin row's skeleton (org/org_valid_from) is never
+    overwritten by a local write — the WHERE clause excludes origin='org' rows
+    regardless of the recency check above."""
     if not org:
         return
     if valid_from:
         conn.execute(
             "UPDATE entities SET org = ?, org_valid_from = ? "
-            "WHERE id = ? AND (COALESCE(org,'') = '' OR COALESCE(org_valid_from,'') = '' "
+            "WHERE id = ? AND COALESCE(origin,'') != 'org' "
+            "AND (COALESCE(org,'') = '' OR COALESCE(org_valid_from,'') = '' "
             "OR org_valid_from < ?)",
             (org, valid_from, entity_id, valid_from))
     else:
         conn.execute(
-            "UPDATE entities SET org = ? WHERE id = ? AND (org = '' OR org IS NULL)",
+            "UPDATE entities SET org = ? WHERE id = ? AND COALESCE(origin,'') != 'org' "
+            "AND (org = '' OR org IS NULL)",
             (org, entity_id))
 
 
@@ -1902,20 +1908,22 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 if name_match:
                     alias_matches = [name_match["id"]]
 
+            # A single alias/name match is treated exactly like a direct id hit
+            # below: re-point eid/existing onto the matched row and fall through,
+            # so it gets the same skeleton guard + notes/alias flesh handling
+            # instead of a separate, more limited (org/last_seen-only) update.
             if len(alias_matches) == 1:
-                winner_id = alias_matches[0]
-                if org:
-                    _set_org_recency(conn, winner_id, org, valid_from)
-                    if entity_type == "person":
-                        _ensure_works_at(conn, winner_id, org)
-                conn.execute(
-                    "UPDATE entities SET last_seen = ? WHERE id = ?",
-                    (today, winner_id))
-                return winner_id
+                eid = alias_matches[0]
+                existing = conn.execute(
+                    "SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
 
         if existing:
+            _is_org = ("origin" in existing.keys() and existing["origin"] == "org")
             updates: dict = {"last_seen": today}
-            if org:
+            # B4a rule 3: local writes never overwrite an org-origin row's
+            # skeleton (org/org_valid_from/email_addr) — only the curator's
+            # import path may do that. Flesh (notes, aliases below) is unaffected.
+            if org and not _is_org:
                 _existing_ovf = (existing["org_valid_from"]
                                  if "org_valid_from" in existing.keys() else "") or ""
                 if not existing["org"]:
@@ -1925,7 +1933,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 elif valid_from and (not _existing_ovf or _existing_ovf < valid_from):
                     updates["org"] = org                      # newer-dated → overwrite stale
                     updates["org_valid_from"] = valid_from
-            if email_addr and not existing["email_addr"]:
+            if email_addr and not existing["email_addr"] and not _is_org:
                 updates["email_addr"] = email_addr
             if notes:
                 existing_notes = existing["notes"] or ""
