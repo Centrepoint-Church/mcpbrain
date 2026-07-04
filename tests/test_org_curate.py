@@ -256,6 +256,29 @@ def test_tombstones_include_org_winner_merges(tmp_path):
     assert tombs[0].entity_id == "acme-inc" and tombs[0].merged_into == "acme"
 
 
+def test_tombstones_drop_merges_older_than_retention_window(tmp_path):
+    """_tombstones() must not republish an org-winner merge forever — without
+    a retention bound, tombstones.jsonl would re-serialise the ENTIRE org
+    merge history on every single daily publish, growing unboundedly. A merge
+    older than the retention window is dropped from the published list (the
+    underlying entity_merge_log row itself is untouched — this only bounds
+    what gets republished)."""
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('acme','Acme','org','org',5)")
+        db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                   "VALUES('acme-inc','Acme Inc','org','org',2)")
+    s.merge_entities("acme-inc", "acme", method="deterministic")
+    with s._connect() as db:                         # backdate the merge well past the window
+        db.execute("UPDATE entity_merge_log SET at='2020-01-01 00:00:00' "
+                   "WHERE winner_id='acme' AND loser_id='acme-inc'")
+    assert org_curate._tombstones(s) == []
+    with s._connect() as db:                         # the underlying log row itself is untouched
+        assert db.execute("SELECT COUNT(*) c FROM entity_merge_log "
+                          "WHERE winner_id='acme'").fetchone()["c"] == 1
+
+
 def test_relation_reasserted_as_ongoing_overrides_earlier_end_date(tmp_path):
     """A later claim (higher valid_from) reasserting a relation as ongoing
     (valid_to="") must override an earlier claim's reported end date — not
