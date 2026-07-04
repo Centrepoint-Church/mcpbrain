@@ -18,6 +18,7 @@ the store, then advancing the cursor only after all upserts complete.
 
 import hashlib
 import logging
+import uuid
 
 from mcpbrain.chunking import chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
@@ -182,11 +183,36 @@ def _file_content_hash(file_meta: dict) -> str:
     """A cross-user-stable file-VERSION id, computable from Changes metadata alone
     (so the cache read path can key on it before extraction). Binary files carry a
     Drive md5Checksum; Google-native files (Docs/Sheets/Slides) do not, so we hash
-    the monotonic `version` + modifiedTime, which is identical across installs."""
+    the monotonic `version` + modifiedTime, which is identical across installs.
+
+    If BOTH md5Checksum and version/modifiedTime are missing/empty, there is no
+    usable version signal at all — hashing the empty pair would produce a
+    constant ("|") that never changes, meaning the file's cache entry would
+    never invalidate even after the file's content changes (permanent silent
+    staleness). Given this function's signature (no cache/store access, no
+    way to signal "uncacheable" to callers without changing every call site),
+    the safest choice is to force a perpetual cache miss instead: fold in a
+    fresh random nonce so the returned hash can never match any previously
+    (or subsequently) cached hash for this file, including one from a prior
+    call with the exact same degenerate metadata. Callers keep working
+    unchanged — they just always treat this file as changed and re-extract
+    it, which is wasteful but never silently stale.
+    """
     md5 = file_meta.get("md5Checksum")
     if md5:
         return md5
-    raw = f"{file_meta.get('version', '')}|{file_meta.get('modifiedTime', '')}"
+    version = file_meta.get("version") or ""
+    modified = file_meta.get("modifiedTime") or ""
+    if not version and not modified:
+        fid = file_meta.get("id", "<unknown>")
+        log.info(
+            "drive: file %s has no md5Checksum, version, or modifiedTime — "
+            "content hash cannot be computed; forcing a permanent cache miss "
+            "for this file instead of a degenerate constant hash", fid,
+        )
+        raw = f"{fid}|uncacheable|{uuid.uuid4().hex}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+    raw = f"{version}|{modified}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
