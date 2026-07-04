@@ -210,6 +210,18 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
 
 # -- GC / lifecycle ---------------------------------------------------------
 
+def _safe_delete(fleet_storage, path) -> bool:
+    """Delete `path`, swallowing any exception (fail-safe: a delete failure
+    must never abort the caller's GC/sweep/removal loop). Returns True if the
+    delete succeeded, False (and logs at info) if it raised."""
+    try:
+        fleet_storage.delete(path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.info("ingest_cache: failed to delete %s: %s", path, exc)
+        return False
+
+
 def _cache_names(fleet_storage):
     for path in fleet_storage.list_paths(CACHE_DIR + "/"):
         name = path.rsplit("/", 1)[-1]
@@ -223,7 +235,11 @@ def _cache_names(fleet_storage):
 def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> int:
     """Delete artifacts for `file_id` with the current pipeline fingerprint whose
     content hash differs from keep_content_hash. Artifacts from other pipelines
-    coexist (never GC'd — see spec A2 version-skew guarantee). Returns count."""
+    coexist (never GC'd — see spec A2 version-skew guarantee). Returns count.
+
+    Single-file signature — frozen, other subsystems call this directly. Lists
+    the whole cache folder once per call; a publish loop over many files should
+    prefer gc_superseded_batch to avoid an O(n^2) Drive-API listing cost."""
     keep12 = keep_content_hash[:12]
     cur_pf8 = _pf8(pin)
     removed = 0
@@ -233,11 +249,31 @@ def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> i
         # Only GC same-pipeline artifacts with stale content hashes;
         # leave artifacts from other pipelines alone (they coexist).
         if pf8 == cur_pf8 and h12 != keep12:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
+    return removed
+
+
+def gc_superseded_batch(fleet_storage, drive_id, keep_map: dict[str, str], pin) -> int:
+    """Batch form of gc_superseded: GC stale same-pipeline artifacts for MANY
+    files in one cache-folder listing instead of one listing per file.
+
+    `keep_map` is {file_id: keep_content_hash}. Applies the identical
+    per-file "same pipeline + stale content hash -> delete" rule as
+    gc_superseded to every (file_id, keep_hash) pair, but calls
+    _cache_names/list_paths exactly ONCE regardless of how many files are in
+    the batch. Returns the total count removed across the whole batch.
+    """
+    keep12_by_fid = {fid: h[:12] for fid, h in keep_map.items()}
+    cur_pf8 = _pf8(pin)
+    removed = 0
+    for path, (fid, h12, pf8) in _cache_names(fleet_storage):
+        keep12 = keep12_by_fid.get(fid)
+        if keep12 is None:
+            continue
+        if pf8 == cur_pf8 and h12 != keep12:
+            if _safe_delete(fleet_storage, path):
+                removed += 1
     return removed
 
 
@@ -248,11 +284,8 @@ def sweep_drive(fleet_storage, live_file_ids) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid not in live:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 
@@ -262,11 +295,8 @@ def remove_file_artifacts(fleet_storage, file_id) -> int:
     removed = 0
     for path, (fid, _h12, _pf8) in _cache_names(fleet_storage):
         if fid == file_id:
-            try:
-                fleet_storage.delete(path)
+            if _safe_delete(fleet_storage, path):
                 removed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.info("ingest_cache: failed to delete %s: %s", path, exc)
     return removed
 
 

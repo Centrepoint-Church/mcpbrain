@@ -71,6 +71,69 @@ def test_gc_superseded_drops_stale_pipeline(tmp_path):
     assert remaining == sorted([stale, cur])
 
 
+class ListPathsSpyFleetStorage:
+    """FleetStorage wrapper that counts list_paths() calls, to prove
+    gc_superseded_batch lists the cache folder exactly once per call
+    regardless of how many files are in the batch."""
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        self.list_paths_calls = 0
+
+    def list_paths(self, prefix):
+        self.list_paths_calls += 1
+        return self.wrapped.list_paths(prefix)
+
+    def put_bytes(self, path, data):
+        return self.wrapped.put_bytes(path, data)
+
+    def get_bytes(self, path):
+        return self.wrapped.get_bytes(path)
+
+    def delete(self, path):
+        return self.wrapped.delete(path)
+
+
+def test_gc_superseded_batch_lists_cache_folder_once_across_many_files(tmp_path):
+    """Seed several files' worth of artifacts (current, stale-hash, and
+    stale-pipeline), call gc_superseded_batch once with a keep_map covering
+    ALL of them, and assert: (1) list_paths is called exactly once (not once
+    per file — the O(n^2) bug this replaces), (2) the correct stale artifacts
+    across the whole batch are removed, (3) current + other-pipeline artifacts
+    survive."""
+    real_fs = LocalDirFleetStorage(tmp_path / "drv")
+    fs = ListPathsSpyFleetStorage(real_fs)
+
+    # File FID: one stale content-hash version + one current version.
+    fid_stale = artifact_filename("FID", "vOLD", PIN.embed_model, PIN.dim, PIN.chunker_version)
+    fid_cur = artifact_filename("FID", "vNEW", PIN.embed_model, PIN.dim, PIN.chunker_version)
+    real_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fid_stale}", b"old")
+    real_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{fid_cur}", b"new")
+
+    # File GID: one stale content-hash version + one current version.
+    gid_stale = artifact_filename("GID", "vOLD", PIN.embed_model, PIN.dim, PIN.chunker_version)
+    gid_cur = artifact_filename("GID", "vNEW", PIN.embed_model, PIN.dim, PIN.chunker_version)
+    real_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{gid_stale}", b"old")
+    real_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{gid_cur}", b"new")
+
+    # File HID: a stale-pipeline artifact (different embed model) must survive
+    # even though its content hash differs from keep_map — other pipelines coexist.
+    hid_other_pipeline = artifact_filename("HID", "vOLD", "old-model", PIN.dim, PIN.chunker_version)
+    real_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{hid_other_pipeline}", b"other-pipeline")
+
+    keep_map = {"FID": "vNEW", "GID": "vNEW"}
+    removed = ingest_cache.gc_superseded_batch(fs, "D1", keep_map, PIN)
+
+    assert fs.list_paths_calls == 1
+    assert removed == 2
+
+    remaining = {p.rsplit("/", 1)[-1] for p in real_fs.list_paths(ingest_cache.CACHE_DIR + "/")}
+    assert fid_stale not in remaining
+    assert gid_stale not in remaining
+    assert fid_cur in remaining
+    assert gid_cur in remaining
+    assert hid_other_pipeline in remaining   # other-pipeline artifact survives
+
+
 def test_sweep_and_remove_file_artifacts(tmp_path):
     fs = LocalDirFleetStorage(tmp_path / "drv")
     for fid in ("A", "B", "C"):
