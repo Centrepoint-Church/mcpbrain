@@ -27,11 +27,13 @@ Produce exactly one extraction per thread in `threads`. Read each message's
 {"batch_id": "batch-...",
  "extractions": [ <one extraction envelope per thread> ],
  "merge_answers": [ <one answer per merge_review pair, or []> ],
+ "org_merge_review": [ <one answer per org_merge_review pair, only if pending.json carries them> ],
  "synthesis": [ <one answer per synthesis request, only if pending.json carries them> ]}
 ```
 
-`merge_answers` and `synthesis` are present only when `pending.json` carries a
-`merge_review` or `synthesis` block respectively; otherwise omit them or use `[]`.
+`merge_answers`, `org_merge_review`, and `synthesis` are present only when
+`pending.json` carries a `merge_review`, `org_merge_review`, or `synthesis` block
+respectively; otherwise omit them or use `[]`.
 
 If a thread carries `part` and `of` keys (a long thread split across parts),
 still emit one extraction for that part; the daemon regroups parts by
@@ -243,6 +245,24 @@ string. Guidance:
 - When unsure, answer `false`.
 
 When `merge_review` is empty or absent, `merge_answers` is `[]`.
+
+## Org merge-review rules (curator only)
+
+`pending.json` may carry an `org_merge_review` list — candidate duplicate pairs
+in the shared ORG graph (only present on the org-curator install). Each item is
+structural only: `{"pair_id", "a": {id, name, type, email_addr, aliases}, "b": {…}}`
+— there is no message content. Decide whether `a` and `b` are the SAME real-world
+entity. Emit one answer per pair into `org_merge_review` (NOTE: the answer key is
+`org_merge_review`, matching the block key, NOT `merge_answers`):
+
+```json
+{"pair_id": "a-id|b-id", "same": true, "canonical": "Samuel Lee"}
+```
+
+Same guidance as ordinary merge-review, plus: two DIFFERENT non-empty
+`email_addr` values are strong evidence the entities are DISTINCT (answer
+`false`). Use `pair_id` verbatim; when `same` is false, `canonical` is `""`. When
+unsure, answer `false`. When `org_merge_review` is empty or absent, emit `[]`.
 
 ## Orphan-entity review rules
 
