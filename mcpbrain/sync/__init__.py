@@ -175,13 +175,13 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
     O(n) per-file listing `publish_file`'s own internal `gc_superseded` call
     would otherwise do for each file individually.
 
-    `publish_file`/`publish` have no parameter to skip their internal per-file
-    GC (least-invasive composition chosen over reaching into Bundle 1's file to
-    add one), so that per-file GC still also runs on every publish; it is now
-    largely redundant with this batched call but harmless — same delete rule,
-    idempotent, and it lists a folder that (for files this batch just handled)
-    typically has nothing stale left to find. Returns the count of misses
-    successfully published.
+    `publish_file`/`publish` take `skip_gc=True` here so their internal
+    per-file `gc_superseded` call is skipped entirely for every file in this
+    loop — the batched call below already covers exactly the same keep set
+    (same delete rule, one listing for the whole drive instead of one per
+    file), so the per-file GC would otherwise be pure redundant O(n) work on
+    top of the O(1) batch. Returns the count of misses successfully
+    published.
     """
     published = 0
     keep_map: dict[str, str] = {}
@@ -189,7 +189,7 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
         keep_map[file_id] = content_hash
         try:
             if ingest_cache.publish_file(store, fs, drive_id, file_id, content_hash, pin,
-                                          published_by=published_by):
+                                          published_by=published_by, skip_gc=True):
                 published += 1
         except Exception as exc:  # noqa: BLE001 — publish is best-effort;
             # a transient failure on one file must not abort the rest of the cycle
