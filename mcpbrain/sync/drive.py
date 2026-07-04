@@ -21,6 +21,7 @@ import logging
 import uuid
 
 from mcpbrain.chunking import chunk_text, content_hash
+from mcpbrain.org_contracts import DRIVE_ID_META_KEY
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
     extract_text_from_pdf,
@@ -147,7 +148,6 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None) -> 
         "confidence": confidence,
     }
     if drive_id:
-        from mcpbrain.org_contracts import DRIVE_ID_META_KEY
         base_meta[DRIVE_ID_META_KEY] = drive_id
 
     out = []
@@ -421,11 +421,13 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
         if not drive_id:
             continue
         present.append(drive_id)
+        drive_name = d.get("name") or "<unnamed>"
         fs = storage_factory(drive_id)
         try:
             res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
-            log.warning("shared-drive sync failed for %s (skipped): %s", drive_id, exc)
+            log.warning("shared-drive sync failed for %s (%s) (skipped): %s",
+                        drive_name, drive_id, exc)
             continue
         out[drive_id] = {"processed": res["processed"], "miss": res["miss"], "storage": fs}
         # NOTE: deliberately no sweep_drive() call here. A per-cycle delta
