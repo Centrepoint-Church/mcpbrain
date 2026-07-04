@@ -84,6 +84,11 @@ class ControlClient:
     def cancel_enrich_backfill(self) -> dict:
         return self._request("/api/enrich-backfill/cancel", method="POST")
 
+    def bootstrap_baseline(self) -> dict:
+        """POST /api/bootstrap-baseline — import the org snapshot + shared-drive
+        ingest caches (re-runnable; idempotent daemon-side)."""
+        return self._request("/api/bootstrap-baseline", method="POST")
+
     def wizard_url(self) -> str:
         """The local setup-page URL, or '' if the daemon is not running."""
         try:

@@ -219,7 +219,7 @@ def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_pa
                             "records", {"repo_dir": repo_dir, **kw}) or repo_dir)
 
     repairs = doctor._default_repairs(str(tmp_path), "darwin", "/usr/local/bin/mcpbrain")
-    assert set(repairs) == {"daemon", "agent", "records", "embedder"}
+    assert set(repairs) == {"daemon", "agent", "records", "embedder", "baseline"}
 
     # Invoking each closure must dispatch to the real function with valid kwargs
     # (a TypeError here is exactly the production-only failure we're guarding).
