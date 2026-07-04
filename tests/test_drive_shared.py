@@ -183,3 +183,25 @@ def test_backfill_shared_drive_cache_first(tmp_path):
     assert s.get_chunk("gdrive-FID-0")["metadata"]["drive_id"] == "D1"
     # cursor untouched
     assert s.get_cursor("drive:D1") is None
+
+
+def test_backfill_shared_drive_cache_hit_skips_extraction(tmp_path):
+    from mcpbrain.sync.drive import backfill_shared_drive
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    # pre-publish an artifact for FID's current version so try_import hits
+    src = _store(tmp_path, "src.sqlite3")
+    src.import_cached_chunk("gdrive-FID-0", "cached body", "c0",
+                            {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}, [0.5]*4)
+    fm = {"id": "FID", "name": "Doc", "mimeType": "text/plain",
+          "modifiedTime": "2026-05-01T10:00:00Z", "md5Checksum": "abc",
+          "owners": [{"displayName": "X"}]}
+    from mcpbrain.sync.drive import _file_content_hash
+    ch = _file_content_hash(fm)
+    ingest_cache.publish_file(src, fs, "D1", "FID", ch, PIN)
+    svc = FakeDriveService(
+        file_list=[fm],
+        media={"FID": b"DIFFERENT - must NOT be extracted"})
+    out = backfill_shared_drive(svc, s, "D1", "2020-01-01T00:00:00Z",
+                                fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 1 and out["miss"] == []          # imported from cache
+    assert s.get_chunk("gdrive-FID-0")["text"] == "cached body"  # not the export bytes
