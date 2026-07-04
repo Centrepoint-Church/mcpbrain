@@ -105,16 +105,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                         continue
                     fs = info["storage"]
                     if published_by:
-                        for file_id, content_hash in info["miss"]:
-                            try:
-                                ingest_cache.publish_file(
-                                    store, fs, drive_id, file_id, content_hash, pin,
-                                    published_by=published_by)
-                            except Exception as exc:  # noqa: BLE001 — publish is
-                                # best-effort; a transient failure on one file must
-                                # not abort the rest of the cycle
-                                log.info("sync: publish_file skipped for drive %s file %s: %s",
-                                         drive_id, file_id, exc)
+                        _publish_drive_misses(
+                            store, ingest_cache, fs, drive_id, info["miss"], pin, published_by)
                     per_drive[drive_id] = info["processed"]
                 result["shared_drives"] = per_drive
                 result["revoked_drives"] = sd.get("_revoked", [])
@@ -135,6 +127,43 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
         result["embedded"] += index_pending(store, embedder, home=home)
     return result
+
+
+def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, published_by) -> int:
+    """Publish each (file_id, content_hash) miss for one drive to the shared
+    cache, isolating per-file failures — a transient error on one file must
+    not abort the rest of that drive's misses or any other drive's — then
+    batch-GC superseded same-pipeline artifacts for the WHOLE miss set in ONE
+    cache-folder listing (`ingest_cache.gc_superseded_batch`) instead of the
+    O(n) per-file listing `publish_file`'s own internal `gc_superseded` call
+    would otherwise do for each file individually.
+
+    `publish_file`/`publish` have no parameter to skip their internal per-file
+    GC (least-invasive composition chosen over reaching into Bundle 1's file to
+    add one), so that per-file GC still also runs on every publish; it is now
+    largely redundant with this batched call but harmless — same delete rule,
+    idempotent, and it lists a folder that (for files this batch just handled)
+    typically has nothing stale left to find. Returns the count of misses
+    successfully published.
+    """
+    published = 0
+    keep_map: dict[str, str] = {}
+    for file_id, content_hash in misses:
+        keep_map[file_id] = content_hash
+        try:
+            if ingest_cache.publish_file(store, fs, drive_id, file_id, content_hash, pin,
+                                          published_by=published_by):
+                published += 1
+        except Exception as exc:  # noqa: BLE001 — publish is best-effort;
+            # a transient failure on one file must not abort the rest of the cycle
+            log.info("sync: publish_file skipped for drive %s file %s: %s",
+                     drive_id, file_id, exc)
+    if keep_map:
+        try:
+            ingest_cache.gc_superseded_batch(fs, drive_id, keep_map, pin)
+        except Exception as exc:  # noqa: BLE001 — GC failure must not fail publish
+            log.info("sync: batched GC skipped for drive %s: %s", drive_id, exc)
+    return published
 
 
 def _floor_dt(store, key: str, default: datetime) -> datetime:
