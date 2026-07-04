@@ -221,41 +221,66 @@ def test_ensure_folder_race_converges_to_one_folder():
     # same name lands concurrently (with a later modifiedTime), producing a
     # genuine duplicate under the same parent *before* fs_a's own create()
     # call returns — exactly the interleaving that makes Drive's lack of
-    # name-uniqueness enforcement dangerous.
+    # name-uniqueness enforcement dangerous. Capture both ids as they're
+    # minted (rather than scanning drive.nodes afterwards) because
+    # _ensure_folder now opportunistically reaps the loser, so only one of
+    # the two will still be present in drive.nodes once it returns.
     real_create = drive.create
+    ids = {}
 
     def racy_create(body=None, media_body=None, fields=None, supportsAllDrives=None,
                      modifiedTime=""):
-        if body.get("name") == "shared" and not racy_create.fired:
-            racy_create.fired = True
-            real_create(
+        if body.get("name") == "shared" and "racer_id" not in ids:
+            racer_resp = real_create(
                 body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
                 modifiedTime="2099-01-01T00:00:00Z",
             ).execute()
-        return real_create(body=body, media_body=media_body, fields=fields,
-                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime)
-    racy_create.fired = False
+            ids["racer_id"] = racer_resp["id"]
+        resp = real_create(body=body, media_body=media_body, fields=fields,
+                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime).execute()
+        ids["own_id"] = resp["id"]
+        return _Req(lambda: resp)
     drive.create = racy_create
 
     fid_a = fs_a._ensure_folder("ROOT", "shared")
 
-    dups = [n for n in drive.nodes.values()
-            if n["name"] == "shared" and n["mimeType"] == FOLDER_MIME]
-    assert len(dups) == 2  # the race really did create two duplicates
-    winner = max(dups, key=lambda n: n["modifiedTime"])
-    loser = next(n for n in dups if n["id"] != winner["id"])
-
     # fs_a must NOT have blindly trusted its own (losing) create() call's id
-    # — it has to re-resolve and land on the deterministic tie-break winner,
-    # the same one any other instance would independently compute.
-    assert fid_a == winner["id"]
-    assert fid_a != loser["id"]
+    # — it has to re-resolve and land on the deterministic tie-break winner
+    # (the racer's folder has the later modifiedTime), the same one any
+    # other instance would independently compute.
+    assert fid_a == ids["racer_id"]
+    assert fid_a != ids["own_id"]
 
     # A second, independent instance (fresh folder cache) resolving the same
     # now-ambiguous name afterwards must converge on the SAME id — no
     # split-brain where different instances write into different duplicates.
     fid_b = fs_b._ensure_folder("ROOT", "shared")
-    assert fid_b == fid_a == winner["id"]
+    assert fid_b == fid_a == ids["racer_id"]
+
+
+def test_ensure_folder_reaps_orphaned_duplicate():
+    # Simulates a race's aftermath: two duplicate "shared" folders already
+    # exist under the same parent (e.g. left by an earlier out-of-band race)
+    # before this instance ever looks. _ensure_folder must both converge on
+    # the deterministic winner AND opportunistically delete the loser rather
+    # than leaving it behind forever.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+
+    loser_id = drive.create(
+        body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
+        modifiedTime="2020-01-01T00:00:00Z",
+    ).execute()["id"]
+    winner_id = drive.create(
+        body={"name": "shared", "mimeType": FOLDER_MIME, "parents": ["ROOT"]},
+        modifiedTime="2099-01-01T00:00:00Z",
+    ).execute()["id"]
+
+    fid = fs._ensure_folder("ROOT", "shared")
+
+    assert fid == winner_id
+    assert winner_id in drive.nodes
+    assert loser_id not in drive.nodes  # opportunistically reaped
 
 
 def test_fake_drive_withholds_next_page_token_when_fields_omits_it():
@@ -435,7 +460,7 @@ def test_ensure_folder_retries_on_eventual_consistency_then_succeeds():
     original_find_child = DriveFleetStorage._find_child
     calls = {"n": 0}
 
-    def flaky_find_child(self, parent_id, name, *, folder):
+    def flaky_find_child(self, parent_id, name, *, folder, reap_duplicates=False):
         calls["n"] += 1
         # Call 1 is the genuine pre-create existence check (must see None).
         # Calls 2 and 3 are forced misses simulating Drive's eventual
@@ -444,7 +469,8 @@ def test_ensure_folder_retries_on_eventual_consistency_then_succeeds():
         # must find it.
         if calls["n"] in (2, 3):
             return None
-        return original_find_child(self, parent_id, name, folder=folder)
+        return original_find_child(self, parent_id, name, folder=folder,
+                                    reap_duplicates=reap_duplicates)
 
     fs._find_child = flaky_find_child.__get__(fs, DriveFleetStorage)
 
@@ -461,11 +487,12 @@ def test_ensure_folder_raises_after_retries_exhausted():
     original_find_child = DriveFleetStorage._find_child
     calls = {"n": 0}
 
-    def always_missing_after_create(self, parent_id, name, *, folder):
+    def always_missing_after_create(self, parent_id, name, *, folder, reap_duplicates=False):
         calls["n"] += 1
         if calls["n"] == 1:
             # genuine pre-create existence check
-            return original_find_child(self, parent_id, name, folder=folder)
+            return original_find_child(self, parent_id, name, folder=folder,
+                                        reap_duplicates=reap_duplicates)
         return None  # every post-create resolve attempt "never" becomes visible
 
     fs._find_child = always_missing_after_create.__get__(fs, DriveFleetStorage)

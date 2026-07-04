@@ -59,7 +59,8 @@ class DriveFleetStorage:
             log.warning("fleet_storage: Drive operation failed (%s)", context, exc_info=True)
             raise
 
-    def _find_child(self, parent_id: str, name: str, *, folder: bool):
+    def _find_child(self, parent_id: str, name: str, *, folder: bool,
+                     reap_duplicates: bool = False):
         q = (f"name = '{_q_escape(name)}' and '{parent_id}' in parents "
              f"and trashed = false")
         if folder:
@@ -84,7 +85,31 @@ class DriveFleetStorage:
         # Secondary sort key (id) makes the tie-break deterministic across processes
         # when modifiedTime ties or is missing (see Finding 2's race-mitigation use).
         matches.sort(key=lambda f: (f.get("modifiedTime", ""), f.get("id", "")), reverse=True)
-        return matches[0]["id"]
+        winner = matches[0]
+        if reap_duplicates and folder and len(matches) > 1:
+            # Only called from _ensure_folder's own resolution (never from
+            # read paths like get_bytes/list_paths, where deleting things on
+            # a read would be surprising). A resolved race — or any other
+            # source of accidental duplicate folders — otherwise leaves the
+            # loser(s) behind in the drive forever. Best-effort: must never
+            # raise.
+            for dup in matches[1:]:
+                try:
+                    self._svc.files().delete(
+                        fileId=dup["id"], supportsAllDrives=True).execute(num_retries=5)
+                except Exception as exc:
+                    log.info(
+                        "fleet_storage: best-effort cleanup of orphaned duplicate "
+                        "folder %r (id=%s) under parent %r failed (leaving it): %s",
+                        name, dup["id"], parent_id, exc,
+                    )
+                else:
+                    log.info(
+                        "fleet_storage: reaped orphaned duplicate folder %r "
+                        "(id=%s) under parent %r; kept winner id=%s",
+                        name, dup["id"], parent_id, winner["id"],
+                    )
+        return winner["id"]
 
     def _ensure_folder(self, parent_id: str, name: str) -> str:
         # Find-then-create is inherently racy: two concurrent instances can both
@@ -103,10 +128,12 @@ class DriveFleetStorage:
         # retry below tolerates the ordinary eventual-consistency lag between
         # a create() returning and that folder becoming visible to a
         # subsequent list() — only raising once retries are exhausted.
+        # reap_duplicates=True opportunistically deletes the losing
+        # duplicate(s) a resolved race leaves behind.
         key = (parent_id, name)
         if key in self._folder_cache:
             return self._folder_cache[key]
-        fid = self._find_child(parent_id, name, folder=True)
+        fid = self._find_child(parent_id, name, folder=True, reap_duplicates=True)
         if fid is None:
             self._exec(
                 self._svc.files().create(
@@ -118,7 +145,7 @@ class DriveFleetStorage:
             fid = None
             attempts = self._ensure_folder_retry_attempts
             for attempt in range(1, attempts + 1):
-                fid = self._find_child(parent_id, name, folder=True)
+                fid = self._find_child(parent_id, name, folder=True, reap_duplicates=True)
                 if fid is not None:
                     break
                 if attempt < attempts:
