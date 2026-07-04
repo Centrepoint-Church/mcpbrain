@@ -1491,6 +1491,11 @@ class Store:
             r = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
             return r["v"] if r else None
 
+    def delete_meta(self, k: str) -> None:
+        """Delete the row for key k. No-op (does not raise) if absent."""
+        with self._connect() as db:
+            db.execute("DELETE FROM meta WHERE k=?", (k,))
+
     # --- enrichment graph writers (Task 4.2) ------------------------------
 
     def upsert_entity(self, ent_id, name, entity_type, org="", seen="") -> bool:
