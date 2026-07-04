@@ -257,7 +257,13 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         try:
             res = baseline() or {}
             st = res.get("status", "unknown")
-            glyph = "✅" if st in ("done", "skipped") else "❌"
+            # done/skipped -> ✅. degraded (no transport yet) and pending (curator
+            # hasn't published / fleet_secret not distributed) are expected waiting
+            # states on a fresh install -> ➖, not an actionable fault. Only a hard
+            # error is ❌.
+            glyph = ("✅" if st in ("done", "skipped")
+                     else "❌" if st == "error"
+                     else "➖")
             lines.append(f"{glyph} {'Baseline':<16} bootstrap {st}"
                          + (f" ({res['reason']})" if res.get("reason") else ""))
         except Exception as exc:  # noqa: BLE001 — never fatal
