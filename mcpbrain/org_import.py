@@ -94,6 +94,22 @@ def _is_org_entity(db, entity_id) -> bool:
         "SELECT 1 FROM entities WHERE id=? AND origin='org'", (entity_id,)).fetchone() is not None
 
 
+def _observation_ids(db, entity_id) -> list[int]:
+    """The exact set of entity_observations.id currently on entity_id.
+
+    Used to record EXACTLY which observations migrate in a repoint (see
+    _restore_from_repoint_log), rather than an approximate boundary: a moved
+    observation keeps its own original id (assigned when IT was created, not
+    when it moved), so a moved id can legitimately be lower OR higher than
+    whatever was already on the target — an id-range or date/timestamp
+    boundary can't reliably separate "migrated" from "always native to the
+    target" for that reason. Recording the precise id set avoids the
+    ambiguity entirely, using only the existing autoincrementing PK — no
+    schema change."""
+    return [r["id"] for r in db.execute(
+        "SELECT id FROM entity_observations WHERE entity_id=?", (entity_id,)).fetchall()]
+
+
 def _repoint_local_refs(db, from_id, to_id) -> None:
     """Re-point local relations/observations from a tombstoned id onto its survivor.
 
@@ -261,11 +277,16 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         # materialised; local_id is re-verified in case something upstream
         # already touched it. Only log/count a repoint that actually happens.
         if store.get_entity(local_id) is not None and store.get_entity(org_id) is not None:
+            # Captured BEFORE merge_entities moves local_id's observations
+            # onto org_id — the exact set migrating in THIS merge.
+            with store._connect() as db:
+                migrated_obs = _observation_ids(db, local_id)
             # Local merges INTO org (org id survives — B4a rule 2). The org row
             # must already be materialised (import_snapshot stubs it before
             # calling this) for merge_entities to have a winner to fold into.
             store.merge_entities(local_id, org_id, method="slug_drift")
-            _log_repoint(store, local_id, org_id, version, "slug_drift")
+            obs_tag = ",".join(str(i) for i in migrated_obs)
+            _log_repoint(store, local_id, org_id, version, f"slug_drift:obs={obs_tag}")
             merged += 1
     return merged
 
@@ -280,32 +301,32 @@ def _restore_from_repoint_log(store, entities) -> int:
     would otherwise pre-create the resurrected id and make it look
     already-present here.
 
-    Bounded observation restore: entity_observations carry no per-row
-    provenance, so once a merge has happened there is no way to tell which of
-    the target's observations originated on the resurrected node versus
-    natively on the target. Restoring ALL of them (the naive approach) can
-    move back an observation that was always native to the target, added
-    well after the original merge. Since org_repoint_log already stamps the
-    merge time (`at`, default CURRENT_TIMESTAMP) and entity_observations
-    already carries `valid_from`, this restores only observations recorded
-    at-or-before the original repoint — anything the target accrued
-    natively AFTER the merge stays put. This is an approximation where
-    `valid_from` is date-only and `at` is a full timestamp (a same-day
-    observation compares as "at or before" a same-day repoint), not exact
-    provenance, but is a real improvement over unconditionally moving
-    everything; true per-row provenance would be a schema change, out of
-    scope here. Local relations carry no such accumulation-ambiguity (a
-    relation is a single fact, not an append-only log of a person's
-    knowledge, and the unique-triple constraint prevents duplication), so
-    they are still moved back wholesale.
+    Exact observation restore: entity_observations carry no per-row
+    provenance column, so once a merge has happened there is no INHERENT way
+    to tell which of the target's observations originated on the resurrected
+    node versus natively on the target. Restoring ALL of them (the naive
+    approach) would move back an observation that was always native to the
+    target, added well after the original merge. Instead, the repoint step
+    that performed the original merge recorded the EXACT set of
+    entity_observations.id that migrated in `reason` (e.g.
+    "tombstone:obs=12,17,19" or "slug_drift:obs=") — an autoincrementing PK
+    the moved rows keep regardless of which entity they currently sit on, so
+    membership in that recorded set is precise, not an approximation. Only
+    those specific ids move back here; anything the target accrued natively
+    (including via a DIFFERENT, later repoint) is correctly left alone. No
+    schema change: the id set rides in the existing `reason` TEXT column.
+    Local relations carry no such accumulation-ambiguity (a relation is a
+    single fact, not an append-only log of a person's knowledge, and the
+    unique-triple constraint prevents duplication), so they are still moved
+    back wholesale.
     """
     incoming = {e["id"]: e for e in entities}
     restored = 0
     with store._connect() as db:
         logs = [dict(r) for r in db.execute(
-            "SELECT from_entity_id, to_entity_id, at FROM org_repoint_log").fetchall()]
+            "SELECT from_entity_id, to_entity_id, reason FROM org_repoint_log").fetchall()]
         for lg in logs:
-            resurrected, target, repoint_at = lg["from_entity_id"], lg["to_entity_id"], lg["at"]
+            resurrected, target, reason = lg["from_entity_id"], lg["to_entity_id"], lg["reason"] or ""
             if resurrected not in incoming:
                 continue
             if db.execute("SELECT 1 FROM entities WHERE id=?", (resurrected,)).fetchone() is not None:
@@ -321,9 +342,16 @@ def _restore_from_repoint_log(store, entities) -> int:
                        (resurrected, target))
             db.execute("DELETE FROM entity_relations WHERE (entity_a=? OR entity_b=?) AND origin='local'",
                        (target, target))
-            db.execute("UPDATE entity_observations SET entity_id=? "
-                       "WHERE entity_id=? AND (valid_from IS NULL OR valid_from='' OR valid_from<=?)",
-                       (resurrected, target, repoint_at))
+            obs_ids = []
+            if "obs=" in reason:
+                tag = reason.split("obs=", 1)[1]
+                obs_ids = [int(x) for x in tag.split(",") if x.strip().isdigit()]
+            if obs_ids:
+                placeholders = ",".join("?" * len(obs_ids))
+                db.execute(
+                    f"UPDATE entity_observations SET entity_id=? "
+                    f"WHERE entity_id=? AND id IN ({placeholders})",
+                    [resurrected, target] + obs_ids)
             restored += 1
     return restored
 
@@ -441,11 +469,16 @@ def import_snapshot(store, fleet_storage) -> dict:
             if not _is_org_entity(db, t.entity_id):
                 continue
             if t.merged_into and _is_org_entity(db, t.merged_into):
+                # Captured BEFORE the repoint moves these observations onto
+                # merged_into — the exact set migrating in THIS repoint, so a
+                # later restore knows precisely which ones to move back.
+                migrated_obs = _observation_ids(db, t.entity_id)
                 _repoint_local_refs(db, t.entity_id, t.merged_into)
+                obs_tag = ",".join(str(i) for i in migrated_obs)
                 db.execute(
                     "INSERT INTO org_repoint_log(from_entity_id, to_entity_id, snapshot_version, reason) "
                     "VALUES(?,?,?,?)",
-                    (t.entity_id, t.merged_into, manifest.version, "tombstone"))
+                    (t.entity_id, t.merged_into, manifest.version, f"tombstone:obs={obs_tag}"))
                 _remove_org_entity(db, t.entity_id)
                 tombstoned += 1
             elif _has_local_attachments(db, t.entity_id):
