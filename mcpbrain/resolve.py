@@ -91,26 +91,40 @@ def _origin_map(store) -> dict:
 
 
 def _org_survivor(members, origins):
-    """B4a rule 2: when a group mixes local + org rows, the org row must survive
-    (the import would otherwise resurrect the org node with local flesh stranded).
-    Returns the forced survivor, or None to fall back to the mentions rule."""
+    """B4a rule 2: whenever a group contains at least one org row, an org row
+    must survive — never a local one (the import would otherwise resurrect the
+    org node with local flesh stranded). This applies UNIVERSALLY, including
+    during the curator's own dedup pass: curator=True only controls whether
+    org<->org groups are merged at all (rule 1) — it must never also disable
+    who survives once a merge happens (rule 2), since a curator install is a
+    normal member machine too and can have its own local duplicates collide
+    with an org row in the same canonical-key/email group. When 2+ org rows
+    are present (only reachable when curator=True, since a non-curator group
+    with org_count>=2 is skipped upstream by the org<->org guard), the
+    highest-mentions org row wins — a local row never outranks any org row.
+    Returns the forced survivor, or None when the group is purely local."""
     org_members = [m for m in members if origins.get(m["id"]) == "org"]
-    if len(org_members) == 1:
-        return org_members[0]
-    return None
+    if not org_members:
+        return None
+    return max(org_members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
 
 
-def _emit_merge_candidates(store, members, origins) -> None:
+def _emit_merge_candidates(store, members, origins, home=None) -> None:
     """A local pass found two ORG rows it thinks are duplicates. Local must not
     merge them (the next import would resurrect them); instead contribute the
     pair upstream as a merge-candidate signal for the curator (spec B4a rule 1).
     Best-effort: no fleet pin configured, or any error, means this silently
-    no-ops — a missing signal must never break local resolution."""
+    no-ops — a missing signal must never break local resolution.
+
+    home must be the SAME home the caller resolved (threaded through, not
+    re-derived): a caller for a non-default store/home must never silently
+    fall back to reading a different machine's live fleet-pin config to
+    decide whether to emit."""
     try:
         import json
         from mcpbrain import config as _config
         from mcpbrain.org_contracts import ContributionRecord, source_ref
-        home = str(_config.app_dir())
+        home = str(home) if home is not None else str(_config.app_dir())
         pin = _config.fleet_pin(home)
         if not pin.is_pinned:
             return
@@ -130,7 +144,7 @@ def _emit_merge_candidates(store, members, origins) -> None:
         log.debug("resolve: merge-candidate emit failed", exc_info=True)
 
 
-def _deterministic_merges(store, *, curator: bool = False) -> int:
+def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
     """Merge same-type, canonical-key-identical entities into the highest-mentions
     survivor. Returns the number of merges applied. Safe (no LLM).
 
@@ -140,8 +154,10 @@ def _deterministic_merges(store, *, curator: bool = False) -> int:
 
     B4a cross-layer guard: unless curator=True, a group with 2+ org-origin rows
     is never merged locally (that's the curator's job on the org layer — a local
-    merge would just be resurrected by the next import); a group mixing local +
-    exactly one org row still merges, but the org row is forced to survive."""
+    merge would just be resurrected by the next import); a group with any org
+    row always forces that org row (highest-mentions org row, if several) to
+    survive, unconditionally — rule 2 does not depend on curator (see
+    _org_survivor)."""
     ents = store.entities_for_resolution()
     origins = _origin_map(store)
     groups = {}   # (type, canonical_key) -> [entity dicts]
@@ -158,13 +174,13 @@ def _deterministic_merges(store, *, curator: bool = False) -> int:
             continue
         org_count = sum(1 for m in members if origins.get(m["id"]) == "org")
         if not curator and org_count >= 2:
-            _emit_merge_candidates(store, members, origins)   # B4a rule 1
+            _emit_merge_candidates(store, members, origins, home=home)   # B4a rule 1
             continue
-        forced = None if curator else _org_survivor(members, origins)
         # id is the final tiebreaker so equal-mentions, equal-name-length groups
         # pick a deterministic survivor. entities_for_resolution() ORDERs BY id, so
         # group membership order is stable too, making the whole merge reproducible.
-        survivor = forced or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+        survivor = (_org_survivor(members, origins)
+                    or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
@@ -191,7 +207,9 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
 
     B4a cross-layer guard: same org<->org rule as _deterministic_merges — unless
     curator=True, a group with 2+ org-origin rows is skipped (contributed
-    upstream instead), and a mixed group forces the org row to survive.
+    upstream instead); a group with any org row always forces that org row to
+    survive, unconditionally — rule 2 does not depend on curator (see
+    _org_survivor).
     """
     home_str = str(home) if home is not None else str(config.app_dir())
     if not config.write_time_dedup_enabled(home_str):
@@ -216,10 +234,10 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
             continue  # shared/role inbox — distinct people, never identity-merge (C1)
         org_count = sum(1 for m in members if origins.get(m["id"]) == "org")
         if not curator and org_count >= 2:
-            _emit_merge_candidates(store, members, origins)   # B4a rule 1
+            _emit_merge_candidates(store, members, origins, home=home)   # B4a rule 1
             continue
-        forced = None if curator else _org_survivor(members, origins)
-        survivor = forced or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"]))
+        survivor = (_org_survivor(members, origins)
+                    or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
                 store.merge_entities(m["id"], survivor["id"], method="email")
@@ -390,7 +408,7 @@ def resolve_entities(store, client=None, *, max_adjudications: int = 200, home=N
     itself) should pass it. Local (curator=False, the default) callers never
     merge two org-origin rows into each other.
     """
-    auto = _deterministic_merges(store, curator=curator)
+    auto = _deterministic_merges(store, home=home, curator=curator)
     auto += _email_equality_merges(store, home=home, curator=curator)
     return {"mode": "deterministic", "auto_merges": auto, "llm_merges": 0,
             "llm_calls": 0, "kept_distinct": 0}
