@@ -167,3 +167,19 @@ def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
 
 
 from mcpbrain.sync.drive import sync_shared_drives   # noqa: E402  (import after helpers)
+
+
+def test_backfill_shared_drive_cache_first(tmp_path):
+    from mcpbrain.sync.drive import backfill_shared_drive
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    fm = {"id": "FID", "name": "Doc", "mimeType": "text/plain",
+          "modifiedTime": "2026-05-01T10:00:00Z", "md5Checksum": "abc",
+          "owners": [{"displayName": "X"}]}
+    svc = FakeDriveService(file_list=[fm], media={"FID": b"backfilled body text"})
+    out = backfill_shared_drive(svc, s, "D1", "2020-01-01T00:00:00Z",
+                                fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 1
+    assert out["miss"] == [("FID", "abc")]           # md5 is the content-version id
+    assert s.get_chunk("gdrive-FID-0")["metadata"]["drive_id"] == "D1"
+    # cursor untouched
+    assert s.get_cursor("drive:D1") is None

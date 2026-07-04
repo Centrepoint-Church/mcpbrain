@@ -432,3 +432,55 @@ def backfill_drive(service, store, modified_after: str,
         if not page_token:
             break
     return processed
+
+
+def backfill_shared_drive(service, store, drive_id, modified_after, *,
+                          fleet_storage, pin, modified_before=None,
+                          max_files=None) -> dict:
+    """One-shot bounded backfill for ONE Shared Drive (files.list, driveId-scoped),
+    cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
+    import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
+    Returns {'processed', 'miss': [(file_id, content_hash)]}."""
+    from mcpbrain import ingest_cache
+
+    q = f"modifiedTime > '{modified_after}'"
+    if modified_before:
+        q += f" and modifiedTime < '{modified_before}'"
+    fields = ("nextPageToken, files(id,name,mimeType,modifiedTime,owners,"
+              "md5Checksum,version,size)")
+    page_token, processed = None, 0
+    miss: list[tuple[str, str]] = []
+    while True:
+        params = {
+            "q": q, "fields": fields, "pageSize": 100,
+            "driveId": drive_id, "corpora": "drive",
+            "includeItemsFromAllDrives": True, "supportsAllDrives": True,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = service.files().list(**params).execute()
+        for f in resp.get("files", []):
+            if max_files is not None and processed >= max_files:
+                return {"processed": processed, "miss": miss}
+            fid = f["id"]
+            content_h = _file_content_hash(f)
+            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+                processed += 1
+                continue
+            text = _fetch_text(service, f)
+            if not text:
+                continue
+            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+                processed += 1
+                continue
+            chunks = normalise_drive(f, text, drive_id=drive_id)
+            if not chunks:
+                continue
+            for ch in chunks:
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            miss.append((fid, content_h))
+            processed += 1
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return {"processed": processed, "miss": miss}
