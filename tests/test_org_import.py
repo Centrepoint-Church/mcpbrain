@@ -210,6 +210,37 @@ def test_tombstone_repoints_local_references(tmp_path):
     assert row["entity_b"] == "joel-chelliah"       # local ref re-pointed to the survivor
 
 
+def test_transitive_tombstone_chain_resolves_regardless_of_list_order(tmp_path):
+    """org_curate._tombstones() republishes full merge history every publish,
+    so a single snapshot can carry both links of a chain formed by two
+    separate curator merges (A merged into B, then later B merged into C).
+    Applying them in the given order must not matter: if B->C happens to be
+    processed before A->B, B is already gone by the time A->B is reached,
+    and the correct behavior is still to land A's local flesh on C — not
+    strand it via a demote fallback because the immediate target vanished."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _publish(fs, [_ent("a", "A"), _ent("b", "B")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:                         # local flesh attached to A
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('doc','Doc','document','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin) "
+                   "VALUES('doc','mentioned_with','a','local')")
+    # Tombstones listed in the order that exposes the bug: the SECOND link of
+    # the chain (b->c) appears BEFORE the first (a->b).
+    _publish(fs, [_ent("c", "C")], [], version=2,
+             tombstones=[Tombstone(entity_id="b", merged_into="c"),
+                        Tombstone(entity_id="a", merged_into="b")])
+    org_import.import_snapshot(s, fs)
+    assert s.get_entity("a") is None and s.get_entity("b") is None
+    c = s.get_entity("c")
+    assert c is not None and c["origin"] == "org"    # C survives, not demoted
+    with s._connect() as db:
+        row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
+    assert row["entity_b"] == "c"                    # A's flesh landed on the true final target
+
+
 def test_slug_drift_email_equality_merges_local_into_org(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
