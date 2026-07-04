@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from mcpbrain.org_contracts import ContributionRecord, FleetPin, FleetStorage, source_ref
@@ -22,6 +23,53 @@ log = logging.getLogger(__name__)
 # Layer-1 entity types (spec B1). Fixed allowlist — a new/unknown type is never
 # contributed (fail-safe), mirroring resolve._NAME_MERGEABLE_TYPES.
 _LAYER1_ENTITY_TYPES = frozenset({"person", "org", "project"})
+
+
+def _clean_name(name: str) -> str:
+    """Strip private free-text annotations from a name/alias before it can leave
+    the machine: parentheticals, brackets, and text after a note separator.
+    'Bob Smith (my divorce lawyer)' -> 'Bob Smith'; 'Jane - re: lawsuit' -> 'Jane'."""
+    n = re.split(r"[(\[]", name, 1)[0]
+    n = re.split(r"\s[-–—/;:]\s", n, 1)[0]
+    return " ".join(n.split()).strip()
+
+
+def _is_name_like(token: str) -> bool:
+    """A token is a shareable name variant only if it looks like a name — not a
+    free-text note. Rejects brackets, @, digits-as-notes, and over-long strings."""
+    t = token.strip()
+    if not t or len(t) > 40 or any(c in t for c in "()[]{}<>@\n\t"):
+        return False
+    return all(c.isalpha() or c in " .,'-" for c in t)
+
+
+def _safe_aliases(aliases: str) -> str:
+    """Keep only name-like alias tokens (cleaned), dropping free-text. Accepts the
+    store's comma- OR pipe-delimited alias strings (merge_entities pipe-joins)."""
+    toks = [a for a in re.split(r"[|,]", aliases or "") if a.strip()]
+    keep = [_clean_name(t) for t in toks if _is_name_like(t)]
+    return ",".join(dict.fromkeys(k for k in keep if k))
+
+
+def _safe_entity_claim(e: dict) -> dict | None:
+    """Build the redacted, identity-anchored entity claim, or None to drop it
+    (which also drops any relation touching it — fail closed). Decision: a
+    PERSON's name/aliases leave the machine only when anchored to their own
+    email identity (the deterministic, non-annotated id); without an email we
+    cannot vouch the name isn't a private annotation, so the person is not
+    contributed. org/project names are taxonomy/slug-canonical and are cleaned."""
+    etype = e.get("type", "")
+    if etype not in _LAYER1_ENTITY_TYPES:
+        return None
+    email = (e.get("email_addr") or "").strip()
+    if etype == "person" and (not email or is_role_address(email)):
+        return None
+    name = _clean_name(e.get("name", "") or "")
+    if not name:
+        return None
+    return {"kind": "entity", "id": e["id"], "name": name, "type": etype,
+            "org": e.get("org", "") or "", "email_addr": email,
+            "aliases": _safe_aliases(e.get("aliases", "") or "")}
 
 
 def _is_cold(store, doc_id: str) -> bool:
@@ -92,17 +140,21 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
             continue                               # role inbox never keys a person (0.7.77)
         if (a.get("origin") or "local") != "local" or (b.get("origin") or "local") != "local":
             continue
+        # Redact + identity-anchor both endpoints. If either can't be safely
+        # contributed (e.g. a person without an email identity), drop the whole
+        # relation — fail closed, never ship a half-anchored edge.
+        claim_a = _safe_entity_claim(a)
+        claim_b = _safe_entity_claim(b)
+        if claim_a is None or claim_b is None:
+            continue
         sref = source_ref(pin.fleet_secret, doc_id)
         skind = _source_kind(store, doc_id)
         vfrom = rel.get("valid_from") or ""
         raw_conf = rel.get("confidence")
         confidence = 1.0 if raw_conf is None else float(raw_conf)
-        for e in (a, b):
+        for claim in (claim_a, claim_b):
             _emit(ContributionRecord(
-                claim={"kind": "entity", "id": e["id"], "name": e.get("name", ""),
-                       "type": e.get("type", ""), "org": e.get("org", "") or "",
-                       "email_addr": e.get("email_addr", "") or "",
-                       "aliases": e.get("aliases", "") or ""},
+                claim=claim,
                 confidence=1.0, valid_from=vfrom,
                 contributor_email=contributor_email, source_kind=skind, source_ref=sref))
         _emit(ContributionRecord(
