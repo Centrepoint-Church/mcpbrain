@@ -1117,6 +1117,10 @@ class Store:
         if not doc_ids:
             return 0
         with self._connect() as db:
+            # Clean up enrich_payloads for the requested doc_ids UNCONDITIONALLY,
+            # even if no chunk rows exist (e.g. payload orphaned after chunk deletion).
+            db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
+                           [(d,) for d in doc_ids])
             qs = ",".join("?" * len(doc_ids))
             rowids = [r["rowid"] for r in db.execute(
                 f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
@@ -1126,8 +1130,6 @@ class Store:
             db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
-            db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
-                           [(d,) for d in doc_ids])
             return len(rowids)
 
     def invalidate_local_relations_for_docs(self, doc_ids, *,
