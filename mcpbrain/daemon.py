@@ -596,6 +596,11 @@ class Daemon:
         # ingest caches once, before the first sync. In-process latch; the on-disk
         # marker (onboarding.run_bootstrap) makes it idempotent across restarts.
         self._baseline_bootstrap_done = False
+        # Shared-drive ingest-cache hit/miss counts from the most recent cycle
+        # (spec Task 5, observability). Stashed in run_one from run_cycle's
+        # "shared_drive_cache" result key; surfaced via status()'s "org" block.
+        self._last_cache_hits = 0
+        self._last_cache_misses = 0
 
     # -- service resolution -------------------------------------------------
 
@@ -708,6 +713,27 @@ class Daemon:
         connections = probes.all_connections(str(app_dir()), self._store)
         from mcpbrain.sync import backfill_progress
         backfill = backfill_progress(self._store)
+        # Org-baseline observability (spec Task 5): shared-drive ingest-cache
+        # hit/miss counts from the most recent cycle, plus curator queue depth
+        # (pending contributions + suppressed-merge pairs). Best-effort — a
+        # missing table/meta key degrades to zeros rather than failing the
+        # status poll.
+        org = {
+            "cache_hits": self._last_cache_hits,
+            "cache_misses": self._last_cache_misses,
+            "curator_version": 0,
+            "contrib_staged": 0,
+            "merge_suppressed": 0,
+        }
+        try:
+            from mcpbrain import org_curate
+            with self._store._connect() as db:
+                org["curator_version"] = int(self._store.get_meta("org_curator_version") or 0)
+                org["contrib_staged"] = db.execute(
+                    "SELECT COUNT(*) c FROM org_contrib_staging").fetchone()["c"]
+            org["merge_suppressed"] = len(org_curate._suppressed_pairs(self._store))
+        except Exception as exc:  # noqa: BLE001 — status must never raise
+            log.debug("status: org block degraded: %s", exc)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -722,6 +748,7 @@ class Daemon:
             "is_configured": config.is_configured(str(app_dir())),
             "connections": connections,
             "backfill": backfill,
+            "org": org,
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
@@ -1118,6 +1145,10 @@ class Daemon:
                            synthesis_requests=synthesis_requests,
                            extra_blocks=extra_blocks,
                            **services)
+        cache_counts = (result or {}).get("shared_drive_cache")
+        if cache_counts:
+            self._last_cache_hits = cache_counts.get("hits", 0)
+            self._last_cache_misses = cache_counts.get("misses", 0)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
         if drained.get("synthesis_written"):
             self._pending_synthesis = []

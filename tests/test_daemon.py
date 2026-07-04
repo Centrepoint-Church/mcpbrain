@@ -959,6 +959,31 @@ def test_status_includes_is_configured(tmp_path, monkeypatch):
     assert isinstance(s["is_configured"], bool)
 
 
+def test_status_includes_org_block(tmp_path, monkeypatch):
+    """status() surfaces cache hit/miss counts + curator queue depth (spec
+    Task 5, observability) so /api/status exposes them without needing direct
+    store access. Must degrade gracefully but here we seed real data and
+    expect real counts."""
+    from mcpbrain import org_curate
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    store.set_meta("org_curator_version", "3")
+    with store._connect() as db:
+        db.execute(
+            "INSERT INTO org_contrib_staging(contributor_email, source_ref, claim) "
+            "VALUES ('a@x.org', 'ref1', 'claim1')")
+    org_curate._suppress_pair(store, "a|b")
+
+    emb = FakeEmbedder()
+    d = Daemon(store, emb, enrich_mode="off")
+    st = d.status()
+    assert st["org"]["curator_version"] == 3
+    assert st["org"]["contrib_staged"] == 1
+    assert st["org"]["merge_suppressed"] == 1
+    assert "cache_hits" in st["org"] and "cache_misses" in st["org"]
+
+
 def test_maybe_resolve_does_not_exist():
     import inspect
     from mcpbrain.daemon import Daemon
