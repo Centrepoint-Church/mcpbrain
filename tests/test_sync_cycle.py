@@ -50,7 +50,7 @@ class _DriveFiles:
     def __init__(self, exports=None):
         self._exports = exports or {}
 
-    def export(self, fileId, mimeType):
+    def export(self, fileId, mimeType, **_kw):
         return _DriveReq(self._exports.get(fileId, b""))
 
 
