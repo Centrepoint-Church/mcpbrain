@@ -244,6 +244,18 @@ def test_search_escapes_like_wildcards(tmp_path):
     assert hits == {"50% off"}   # % matched literally, not as a wildcard
 
 
+def test_graph_canvas_nodes_include_origin(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "g.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,degree,origin) VALUES('a','Alice','person',9,'local')")
+        db.execute("INSERT INTO entities(id,name,type,degree,origin) VALUES('b','Acme','org',9,'org')")
+    canvas = graph_view.graph_canvas(s, min_conn=1)
+    by_id = {n["id"]: n for n in canvas["nodes"]}
+    assert by_id["a"]["origin"] == "local"
+    assert by_id["b"]["origin"] == "org"
+
+
 def test_search_excludes_suppressed(tmp_path):
     p = tmp_path / "ss.sqlite3"
     with sqlite3.connect(str(p)) as db:
