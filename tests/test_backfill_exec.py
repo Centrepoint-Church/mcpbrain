@@ -162,10 +162,10 @@ class _FilesListFake:
                 idx = 0
         return _DriveReq(self._pages[idx])
 
-    def export(self, fileId, mimeType):
+    def export(self, fileId, mimeType, **_kw):
         raise AssertionError("export() called on _FilesListFake")
 
-    def get_media(self, fileId):
+    def get_media(self, fileId, **_kw):
         raise AssertionError("get_media() called on _FilesListFake")
 
 
@@ -180,10 +180,10 @@ class _FilesFull:
     def list(self, **kw):
         return self._list_fake.list(**kw)
 
-    def export(self, fileId, mimeType):
+    def export(self, fileId, mimeType, **_kw):
         return _DriveReq(self._exports.get(fileId, b""))
 
-    def get_media(self, fileId):
+    def get_media(self, fileId, **_kw):
         return _DriveReq(self._media.get(fileId, b""))
 
 
