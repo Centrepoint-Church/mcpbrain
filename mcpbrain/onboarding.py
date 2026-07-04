@@ -54,31 +54,42 @@ def _fleet_folder_id(home) -> str:
 
 
 def _default_make_fleet_storage(home, drive_service):
-    """Build the prod FleetStorage over Google Drive (subsystem A's
-    DriveFleetStorage). Degrades to None when there is no drive service, no
-    fleet folder, or A is not built yet. Phase D wires the real symbol."""
+    """Build the prod fleet-FOLDER FleetStorage (subsystem A's factory) for the
+    org-graph snapshot. Degrades to None with no drive service, no fleet folder,
+    or if A is not importable."""
     if drive_service is None:
         return None
     try:
-        from mcpbrain.ingest_cache import DriveFleetStorage  # subsystem A
+        from mcpbrain.fleet_storage import fleet_folder_storage  # subsystem A
     except ImportError:
         return None
-    folder_id = _fleet_folder_id(home)
-    if not folder_id:
-        return None
-    return DriveFleetStorage(drive_service, folder_id)
+    return fleet_folder_storage(home, drive_service)
+
+
+def _default_make_drive_storage(drive_service):
+    """Return a factory building a per-shared-drive cache FleetStorage (rooted at
+    that drive's `.mcpbrain-cache/`) — this is what `bootstrap_drive` reads, NOT
+    the fleet-folder storage. Degrades to a None-returning factory if A is
+    unavailable or there is no drive service."""
+    if drive_service is None:
+        return lambda drive_id: None
+    try:
+        from mcpbrain.fleet_storage import drive_cache_storage  # subsystem A
+    except ImportError:
+        return lambda drive_id: None
+    return lambda drive_id: drive_cache_storage(drive_service, drive_id)
 
 
 def _default_enumerate_drives(drive_service) -> list[str]:
-    """Enumerate accessible shared-drive ids (subsystem A). Degrades to [] with
-    no service or before A is built. Phase D wires the real enumeration."""
+    """Enumerate accessible shared-drive ids (subsystem A returns dicts with id
+    + name; map to ids). Degrades to [] with no service or if A is unavailable."""
     if drive_service is None:
         return []
     try:
-        from mcpbrain.ingest_cache import list_shared_drive_ids  # subsystem A
+        from mcpbrain.fleet_storage import list_shared_drives  # subsystem A (re-export)
     except ImportError:
         return []
-    return list(list_shared_drive_ids(drive_service))
+    return [d["id"] for d in list_shared_drives(drive_service) if d.get("id")]
 
 
 # -- orchestrator (pure; no config, no I/O beyond the injected callables) ---
@@ -90,10 +101,17 @@ _DRIVE_OK = {"ok"}
 def bootstrap_baseline(store, fleet_storage, drives, pin, *,
                        import_snapshot=_default_import_snapshot,
                        bootstrap_drive=_default_bootstrap_drive,
+                       make_drive_storage=None,
                        done_drive_ids=(), snapshot_done=False) -> dict:
     """Import the org snapshot then each drive's ingest cache. Ordering is a
     contract: snapshot first. Degrades cleanly (no transport / no pin / no
-    snapshot / a bad drive) and resumes (done_drive_ids / snapshot_done)."""
+    snapshot / a bad drive) and resumes (done_drive_ids / snapshot_done).
+
+    `fleet_storage` is the fleet-FOLDER storage (holds the org-graph snapshot).
+    Per-drive ingest cache lives in each shared drive's own `.mcpbrain-cache/`,
+    so `make_drive_storage(drive_id) -> FleetStorage | None` supplies the right
+    storage for `bootstrap_drive`. When None (e.g. fake-injecting tests), the
+    fleet-folder storage is reused as a fallback."""
     done = set(done_drive_ids)
     errors: list[str] = []
     result = {"snapshot": {}, "drives": {}, "snapshot_done": bool(snapshot_done),
@@ -127,8 +145,12 @@ def bootstrap_baseline(store, fleet_storage, drives, pin, *,
         if not pin.is_pinned:
             result["drives"][drive_id] = {"status": "skipped", "reason": "no_pin"}
             continue
+        drive_fs = make_drive_storage(drive_id) if make_drive_storage else fleet_storage
+        if drive_fs is None:
+            result["drives"][drive_id] = {"status": "skipped", "reason": "no_drive_storage"}
+            continue
         try:
-            detail = bootstrap_drive(store, fleet_storage, drive_id, pin) or {}
+            detail = bootstrap_drive(store, drive_fs, drive_id, pin) or {}
             status = detail.get("status", "ok")
             result["drives"][drive_id] = {"status": status, "detail": detail}
             result["cache_hits"] += int(detail.get("cache_hits", 0) or 0)
@@ -189,6 +211,7 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
                   import_snapshot=_default_import_snapshot,
                   bootstrap_drive=_default_bootstrap_drive,
                   make_fleet_storage=_default_make_fleet_storage,
+                  make_drive_storage=None,
                   enumerate_drives=_default_enumerate_drives) -> dict:
     """Resolve inputs from config/services, enforce the idempotence marker, run
     the orchestrator, persist resume state. Returns the summary tagged with a
@@ -210,12 +233,18 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
         fleet_storage = make_fleet_storage(home, drive_service)
     if drives is None:
         drives = enumerate_drives(drive_service) if cache_on else []
+    # Build the per-drive cache-storage factory only on the real path (a Drive
+    # service is present). When callers inject fleet_storage directly without a
+    # service, leave it None so bootstrap_baseline falls back to that storage.
+    if make_drive_storage is None and drive_service is not None:
+        make_drive_storage = _default_make_drive_storage(drive_service)
 
     prev_done = set(marker.get("done_drive_ids") or [])
     prev_snapshot = bool(marker.get("snapshot_done"))
     summary = bootstrap_baseline(
         store, fleet_storage, list(drives), pin,
         import_snapshot=import_snapshot, bootstrap_drive=bootstrap_drive,
+        make_drive_storage=make_drive_storage,
         done_drive_ids=prev_done,
         # If import is off, treat the snapshot as already handled (skip it).
         snapshot_done=prev_snapshot or not import_on)
