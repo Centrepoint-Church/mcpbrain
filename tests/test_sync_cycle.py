@@ -435,3 +435,83 @@ def test_run_sync_cycle_no_pin_skips_shared_drives(tmp_path):
     svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
     res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
     assert "shared_drives" not in res      # gated off without a pin
+
+
+def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
+    """A publish_file failure for one miss must not abort the rest of the cycle:
+    other misses (same drive AND a second drive) still get published, and
+    run_sync_cycle returns normally with shared_drives reflecting success."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import ingest_cache
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
+    # Pre-seed cursors for both drives so both hit the SAME fake changes page
+    # on this cycle (the fake service routes any pageToken == initial_cursor
+    # to page index 0), each seeing a two-file miss batch.
+    store.set_cursor("drive:D1", "100")
+    store.set_cursor("drive:D2", "100")
+
+    from mcpbrain.sync import drive as drivemod
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fsmap = {}
+    orig_sync_shared_drives = drivemod.sync_shared_drives
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3):
+        return orig_sync_shared_drives(
+            service, s, pin=pin,
+            storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+            absence_threshold=absence_threshold)
+    drivemod.sync_shared_drives = _patched
+
+    # Fail publish_file only for FID1, on every drive; FID2 must still succeed,
+    # in the SAME drive (after FID1) and in the SECOND drive.
+    orig_publish_file = ingest_cache.publish_file
+    def _flaky_publish_file(store, fs, drive_id, file_id, content_hash, pin, **kw):
+        if file_id == "FID1":
+            raise RuntimeError("simulated transient Drive API error")
+        return orig_publish_file(store, fs, drive_id, file_id, content_hash, pin, **kw)
+    ingest_cache.publish_file = _flaky_publish_file
+
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}, {"id": "D2", "name": "Legal"}],
+            initial_cursor="100",
+            pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
+                    "newStartPageToken": "101"}],
+            exports={"FID1": b"shared drive body one", "FID2": b"shared drive body two"})
+        # (a) must return normally — no exception propagates out of run_sync_cycle.
+        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig_sync_shared_drives
+        ingest_cache.publish_file = orig_publish_file
+
+    # (b) shared_drives still reflects successful local processing for both drives,
+    # despite FID1's publish failure in each.
+    assert res["shared_drives"]["D1"] == 2
+    assert res["shared_drives"]["D2"] == 2
+
+    # (c) the OTHER miss — FID2 — was published in both the same drive (D1, after
+    # FID1's failure) and the second drive (D2) despite FID1 failing everywhere.
+    for drive_id in ("D1", "D2"):
+        names = fsmap[drive_id].list_paths(ingest_cache.CACHE_DIR + "/")
+        basenames = [n.rsplit("/", 1)[-1] for n in names]
+        assert any(n.startswith("FID2.") for n in basenames), (
+            f"expected FID2 artifact published in drive {drive_id}, got {basenames}"
+        )
+        assert not any(n.startswith("FID1.") for n in basenames), (
+            f"FID1 publish should have failed (and been skipped) in drive {drive_id}"
+        )

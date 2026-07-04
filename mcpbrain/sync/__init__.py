@@ -1,4 +1,7 @@
+import logging
 from datetime import datetime, timedelta, timezone
+
+log = logging.getLogger(__name__)
 
 
 # Progressive-backfill defaults. Tuned so backfill drains without blocking the
@@ -74,9 +77,14 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     continue
                 fs = info["storage"]
                 for file_id, content_hash in info["miss"]:
-                    ingest_cache.publish_file(
-                        store, fs, drive_id, file_id, content_hash, pin,
-                        published_by=published_by)
+                    try:
+                        ingest_cache.publish_file(
+                            store, fs, drive_id, file_id, content_hash, pin,
+                            published_by=published_by)
+                    except Exception as exc:  # noqa: BLE001 — publish is best-effort;
+                        # a transient failure on one file must not abort the rest of the cycle
+                        log.info("sync: publish_file skipped for drive %s file %s: %s",
+                                 drive_id, file_id, exc)
                 per_drive[drive_id] = info["processed"]
             result["shared_drives"] = per_drive
             result["revoked_drives"] = sd.get("_revoked", [])
