@@ -156,6 +156,33 @@ def test_rematerialise_updates_org_skeleton_with_new_info(tmp_path):
     assert dana["email_addr"] == "dana@acme.org" and dana["org"] == "Acme"
 
 
+def _by_name(store, name):
+    with store._connect() as db:
+        row = db.execute("SELECT * FROM entities WHERE name=?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def test_rematerialise_never_reverts_name_canonicalisation(tmp_path):
+    """_apply_org_skeleton must only touch org/email_addr, never name/type —
+    upsert_entity canonicalises name on first materialise (e.g. stripping an
+    honorific), and a later re-materialise updating email must not revert
+    that canonicalisation back to the raw claim string."""
+    s = _store(tmp_path)
+    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Dana Okafor",
+                     "type": "person", "org": "", "email_addr": "", "aliases": ""})])
+    org_curate._materialise(s)
+    dana = _by_name(s, "Dana Okafor")               # title stripped by upsert_entity
+    assert dana is not None and dana["origin"] == "org"
+    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Dana Okafor",
+                     "type": "person", "org": "Acme", "email_addr": "dana@acme.org",
+                     "aliases": ""}, sref="ref2")])
+    org_curate._materialise(s)
+    dana = _by_name(s, "Dana Okafor")                # still stripped, not reverted
+    assert dana is not None
+    assert _by_name(s, "Dr. Dana Okafor") is None    # never reverted to the raw claim string
+    assert dana["email_addr"] == "dana@acme.org"       # org/email still updated
+
+
 def test_tombstones_exclude_purely_local_merges(tmp_path):
     """A curator's own ordinary local-dedup merge (both sides origin='local')
     must never be published as a tombstone — publishing it would leak the
