@@ -198,15 +198,18 @@ def _cache_names(fleet_storage):
 
 
 def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> int:
-    """Delete artifacts for `file_id` whose content hash differs from
-    keep_content_hash OR whose pipeline fingerprint is stale. Returns count."""
+    """Delete artifacts for `file_id` with the current pipeline fingerprint whose
+    content hash differs from keep_content_hash. Artifacts from other pipelines
+    coexist (never GC'd — see spec A2 version-skew guarantee). Returns count."""
     keep12 = keep_content_hash[:12]
     cur_pf8 = _pf8(pin)
     removed = 0
     for path, (fid, h12, pf8) in _cache_names(fleet_storage):
         if fid != file_id:
             continue
-        if h12 != keep12 or pf8 != cur_pf8:
+        # Only GC same-pipeline artifacts with stale content hashes;
+        # leave artifacts from other pipelines alone (they coexist).
+        if pf8 == cur_pf8 and h12 != keep12:
             try:
                 fleet_storage.delete(path)
                 removed += 1
