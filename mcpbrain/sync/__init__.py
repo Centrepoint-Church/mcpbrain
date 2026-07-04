@@ -86,7 +86,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 from mcpbrain import ingest_cache
                 sd = sync_shared_drives(
                     drive_service, store, pin=pin,
-                    storage_factory=lambda d: drive_cache_storage(drive_service, d))
+                    storage_factory=lambda d: drive_cache_storage(drive_service, d),
+                    absence_threshold=config.ingest_cache_revocation_threshold(home))
                 # Embed the misses, THEN publish them (publish reads vectors back).
                 result["embedded"] += index_pending(store, embedder, home=home)
                 # config.owner_email can return "" when unconfigured. Rather than
