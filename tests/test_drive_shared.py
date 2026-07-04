@@ -261,6 +261,33 @@ def test_sync_shared_drive_removal_then_change_collapses_to_change(tmp_path):
     assert s.get_chunk("gdrive-FID-0") is not None
 
 
+def test_sync_shared_drive_herd_race_recheck_import_hits(tmp_path, monkeypatch):
+    """Herd-race re-check branch: the FIRST try_import (before fetch) misses, but
+    the SECOND (after fetch, right before extraction) HITS because a concurrent
+    daemon published the artifact while we were fetching. The file must count as
+    a cache hit (processed, nothing new to publish) and NOT be extracted
+    locally."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+    calls = {"n": 0}
+
+    def fake_try_import(*_a, **_k):
+        calls["n"] += 1
+        return calls["n"] >= 2          # first call miss, second (+) hit
+
+    monkeypatch.setattr(ingest_cache, "try_import", fake_try_import)
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"the quick brown fox jumps"})
+    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    assert out["processed"] == 1
+    assert out["miss"] == []                      # re-check hit → nothing to publish
+    assert calls["n"] == 2                        # both try_import calls exercised
+    assert svc._files.export_calls.get("FID") == 1  # fetch happened before the hit
+    assert s.get_chunk("gdrive-FID-0") is None    # no local extraction occurred
+
+
 def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
     """A per-cycle delta only ever contains the files that changed since the
     last cursor — it is never a complete file listing. sync_shared_drives must
