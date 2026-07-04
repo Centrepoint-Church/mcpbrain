@@ -1,7 +1,9 @@
 """DriveFleetStorage against an in-memory Drive double (no network)."""
 import itertools
 
+import httplib2
 import pytest
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
 from mcpbrain.fleet_storage import DriveFleetStorage
@@ -33,6 +35,18 @@ class FakeDrive:
     def create(self, body=None, media_body=None, fields=None, supportsAllDrives=None,
                modifiedTime=""):
         def _do():
+            # Simulate Drive rejecting a create whose parent no longer
+            # exists (e.g. deleted out-of-band since a caller cached its
+            # id) -- but only for parents that look like ids this fake
+            # itself minted ("id<N>"), so the literal root ids the tests
+            # use ("ROOT", "P", "D1", "FLEETFOLDER", ...) are never
+            # mistaken for a stale reference.
+            for parent in body.get("parents", []):
+                if parent.startswith("id") and parent not in self.nodes:
+                    raise HttpError(
+                        httplib2.Response({"status": 404}),
+                        f"File not found: {parent}".encode(),
+                    )
             nid = next(self._ids)
             self.nodes[nid] = {
                 "id": nid, "name": body["name"],
@@ -443,6 +457,48 @@ def test_put_bytes_race_converges_to_one_winning_file():
     # modifiedTime/id tie-break, rather than either racer's own view.
     assert fs_a.get_bytes("new.bin") == winner["data"]
     assert fs_b.get_bytes("new.bin") == winner["data"]
+
+
+# -- Finding 3: stale _folder_cache entries self-heal ------------------------
+
+def test_put_bytes_self_heals_from_stale_folder_cache():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes("a/b/c.bin", b"first")
+
+    b_folder = next(n for n in drive.nodes.values()
+                     if n["name"] == "b" and n["mimeType"] == FOLDER_MIME)
+    stale_id = b_folder["id"]
+    assert stale_id in fs._folder_cache.values()  # sanity: really cached
+
+    # Simulate the cached folder being deleted out-of-band (an admin, or
+    # another cleanup process, removes it without this instance's
+    # knowledge).
+    del drive.nodes[stale_id]
+
+    # A write into the same nested path must self-heal: evict the stale
+    # cache entry, re-resolve/re-create "b" fresh, and succeed rather than
+    # raising.
+    fs.put_bytes("a/b/c2.bin", b"second")
+
+    assert fs.get_bytes("a/b/c2.bin") == b"second"
+    assert stale_id not in fs._folder_cache.values()  # cache now points elsewhere
+
+
+def test_put_bytes_reraises_when_failure_is_not_a_stale_cache_issue():
+    # If the HttpError isn't attributable to a cached folder id (e.g. the
+    # leaf's parent is the root itself, which is never cached), there is
+    # nothing to evict and retry -- the error must propagate rather than
+    # being swallowed.
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+
+    def failing_create(**kw):
+        raise HttpError(httplib2.Response({"status": 500}), b"boom")
+
+    drive.create = failing_create
+    with pytest.raises(HttpError):
+        fs.put_bytes("top.bin", b"x")  # parent is "ROOT", never a cache value
 
 
 # -- Finding 6: get_bytes surfaces a non-bytes media response as an error --
