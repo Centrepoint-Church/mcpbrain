@@ -151,6 +151,25 @@ def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
     assert out["_revoked"] == []
 
 
+def test_file_content_hash_degenerate_metadata_forces_cache_miss(caplog):
+    """When BOTH md5Checksum and version/modifiedTime are absent, the function
+    must not degrade to a constant hash (sha256("|")) — that would mean the
+    file's cache entry NEVER invalidates even after the file changes
+    (permanent silent staleness). Instead it must force a perpetual cache
+    miss: successive calls for the SAME degenerate metadata must produce
+    DIFFERENT hashes (so a hash computed this cycle can never match one
+    stored from a previous cycle, including for this very file)."""
+    meta = {"id": "NOVERSION"}
+    with caplog.at_level("INFO"):
+        h1 = _file_content_hash(meta)
+        h2 = _file_content_hash(meta)
+    assert h1 != h2
+    import hashlib as _hashlib
+    assert h1 != _hashlib.sha256(b"|").hexdigest()
+    assert h2 != _hashlib.sha256(b"|").hexdigest()
+    assert any("NOVERSION" in rec.message for rec in caplog.records)
+
+
 def test_sync_shared_drive_isolates_per_file_extraction_failure(tmp_path, caplog):
     """One poison file raising during fetch/extract must not abort the whole
     drive's cycle: the good file still gets processed and the cursor still
