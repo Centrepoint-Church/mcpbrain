@@ -33,9 +33,13 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
 
     When `drive_service` and `home` are both given AND `config.ingest_cache_enabled(home)`
     AND `config.fleet_pin(home).is_pinned`, also runs the Shared Drive ingest-cache
-    path (spec §A): `sync_shared_drives`, embed the misses, then `publish_file` each
-    miss now that its vectors exist. Adds `"shared_drives"` (per-drive processed
-    counts) and `"revoked_drives"` to the result.
+    path (spec §A): `sync_shared_drives` for the live delta, one progressive-
+    backfill window per pinned drive via `backfill_shared_drive` (so a newly-
+    pinned drive's PRE-EXISTING documents get ingested too, not just files
+    touched after the pin), embed the misses from both, then `publish_file` each
+    miss (batch-GC'd per drive) now that its vectors exist. Adds
+    `"shared_drives"` (per-drive live-processed counts), `"shared_drives_backfill"`
+    (per-drive backfill-processed counts), and `"revoked_drives"` to the result.
 
     Strictly additive AND non-fatal: with `home=None` (every caller before this
     feature) this block never runs and existing behaviour for gmail/calendar/
@@ -100,16 +104,36 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                         "will not be published to the fleet cache this cycle "
                         "(files still synced and embedded locally)")
                 per_drive = {}
+                drives_fs: dict[str, object] = {}
                 for drive_id, info in sd.items():
                     if drive_id == "_revoked":
                         continue
                     fs = info["storage"]
+                    drives_fs[drive_id] = fs
                     if published_by:
                         _publish_drive_misses(
                             store, ingest_cache, fs, drive_id, info["miss"], pin, published_by)
                     per_drive[drive_id] = info["processed"]
                 result["shared_drives"] = per_drive
                 result["revoked_drives"] = sd.get("_revoked", [])
+
+                # One progressive-backfill window per pinned drive so a newly-
+                # pinned drive's PRE-EXISTING documents (everything before the
+                # pin) eventually get ingested too, not just files touched after
+                # the pin (which the live delta sync above already covers).
+                # Reuses this cycle's storage instances — no second
+                # storage_factory call.
+                bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs)
+                if any(r["processed"] for r in bf_sd.values()):
+                    result["embedded"] += index_pending(store, embedder, home=home)
+                backfill_counts: dict[str, int] = {}
+                for drive_id, res in bf_sd.items():
+                    fs = drives_fs[drive_id]
+                    backfill_counts[drive_id] = res["processed"]
+                    if published_by:
+                        _publish_drive_misses(
+                            store, ingest_cache, fs, drive_id, res["miss"], pin, published_by)
+                result["shared_drives_backfill"] = backfill_counts
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
             # abort the rest of the cycle (pre-existing sync + the subsequent
             # backfill step must run whether or not this succeeds)
@@ -280,6 +304,78 @@ def progressive_backfill_step(
     return result
 
 
+def _shared_drive_backfill_step(
+    store, drive_service, pin, drives: dict,
+    *, window_days: int = _BACKFILL_WINDOW_DAYS,
+    max_per_source: int = _BACKFILL_MAX_PER_SOURCE,
+    stop_after_empty_windows: int = _STOP_AFTER_EMPTY_WINDOWS,
+    now: datetime | None = None,
+) -> dict:
+    """One backfill window per pinned Shared Drive, walking newest -> oldest.
+
+    Mirrors `progressive_backfill_step`'s per-source floor-cursor mechanism (see
+    its docstring for the full rationale) but keyed PER-DRIVE —
+    `drive:<id>_backfill_until` / `drive:<id>_backfill_empty` — so N shared
+    drives backfill independently of each other and of the My-Drive backfill.
+    `drives` is `{drive_id: fleet_storage}`, reusing the storage instances
+    `sync_shared_drives` already built this cycle via `storage_factory` (no
+    second factory call, no extra Drive-API auth round-trip). A drive whose
+    window raises is isolated (its floor cursor is left untouched so the next
+    cycle retries it) and never stalls the others. Returns `{drive_id:
+    {"processed": int, "miss": [(file_id, content_hash), ...]}}`.
+
+    Design note: this is a parallel, per-drive-keyed SIBLING to
+    `progressive_backfill_step` rather than a generalisation of it. The
+    existing function's single-source-per-key shape (one `drive_backfill_until`
+    cursor for the one My-Drive source) doesn't cleanly parametrise over an
+    arbitrary, dynamic set of Shared Drives without a larger signature/cursor-
+    key redesign, so this reuses the exact same windowing constants and
+    floor-cursor idiom in a dedicated function instead — the smallest change
+    that is still a real, correct, per-drive-windowed periodic backfill (not a
+    stub), wired into `run_sync_cycle`'s shared-drive block (and therefore
+    into every daemon cycle) as its actual production caller.
+    """
+    from mcpbrain.sync.drive import backfill_shared_drive
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    def _empty_count(key: str) -> int:
+        raw = store.get_cursor(key)
+        try:
+            return int(raw) if raw else 0
+        except ValueError:
+            return 0
+
+    out: dict = {}
+    for drive_id, fs in drives.items():
+        floor_key = f"drive:{drive_id}_backfill_until"
+        empty_key = f"drive:{drive_id}_backfill_empty"
+        if _empty_count(empty_key) >= stop_after_empty_windows:
+            out[drive_id] = {"processed": 0, "miss": []}
+            continue
+        end = _floor_dt(store, floor_key, default=now)
+        start = end - timedelta(days=window_days)
+        try:
+            res = backfill_shared_drive(
+                drive_service, store, drive_id,
+                start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                fleet_storage=fs, pin=pin,
+                modified_before=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                max_files=max_per_source,
+            )
+        except Exception:  # noqa: BLE001 — one drive's failure must not stall others
+            out[drive_id] = {"processed": 0, "miss": []}
+            continue
+        store.set_cursor(floor_key, start.isoformat())
+        # Reset the empty counter on any hit; otherwise increment so a long
+        # empty tail eventually trips the done state (mirrors _step above).
+        if res["processed"] > 0:
+            store.set_cursor(empty_key, "0")
+        else:
+            store.set_cursor(empty_key, str(_empty_count(empty_key) + 1))
+        out[drive_id] = res
+    return out
 
 
 def backfill_progress(store) -> dict:
