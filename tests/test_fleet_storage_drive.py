@@ -2,6 +2,7 @@
 import itertools
 
 import pytest
+from googleapiclient.http import MediaInMemoryUpload
 
 from mcpbrain.fleet_storage import DriveFleetStorage
 from mcpbrain.org_contracts import FleetStorage
@@ -401,6 +402,47 @@ def test_all_execute_calls_activate_num_retries():
 
     assert seen_num_retries, "expected at least one tracked .execute() call"
     assert all(n == 5 for n in seen_num_retries), seen_num_retries
+
+
+# -- Finding 2: leaf-blob creation is race-hardened like folder creation ----
+
+def test_put_bytes_race_converges_to_one_winning_file():
+    drive = FakeDrive()
+    fs_a = DriveFleetStorage(drive, "ROOT")
+    fs_b = DriveFleetStorage(drive, "ROOT")
+
+    # Simulate two installs racing to publish the same brand-new leaf path:
+    # while fs_a's create() call for "new.bin" is in flight, a second
+    # process's create() call for the same name lands concurrently (with a
+    # later modifiedTime) -- Drive enforces no name uniqueness, so both
+    # succeed, producing a genuine duplicate blob.
+    real_create = drive.create
+
+    def racy_create(body=None, media_body=None, fields=None, supportsAllDrives=None,
+                     modifiedTime=""):
+        if body.get("name") == "new.bin" and not racy_create.fired:
+            racy_create.fired = True
+            real_create(
+                body={"name": "new.bin", "parents": ["ROOT"]},
+                media_body=MediaInMemoryUpload(b"from-race", mimetype="application/octet-stream"),
+                modifiedTime="2099-01-01T00:00:00Z",
+            ).execute()
+        return real_create(body=body, media_body=media_body, fields=fields,
+                            supportsAllDrives=supportsAllDrives, modifiedTime=modifiedTime)
+    racy_create.fired = False
+    drive.create = racy_create
+
+    fs_a.put_bytes("new.bin", b"from-a")
+
+    dups = [n for n in drive.nodes.values() if n["name"] == "new.bin"]
+    assert len(dups) == 2  # the race really did create two duplicate blobs
+    winner = max(dups, key=lambda n: n["modifiedTime"])
+
+    # Every subsequent reader -- a fresh instance, or fs_a itself -- converges
+    # on the SAME winning blob's content via _find_child's deterministic
+    # modifiedTime/id tie-break, rather than either racer's own view.
+    assert fs_a.get_bytes("new.bin") == winner["data"]
+    assert fs_b.get_bytes("new.bin") == winner["data"]
 
 
 # -- Finding 6: get_bytes surfaces a non-bytes media response as an error --
