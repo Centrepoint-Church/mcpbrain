@@ -256,17 +256,17 @@ class DriveFleetStorage:
             ),
             context=f"create leaf {leaf!r} under {parent!r}",
         )
-        # Race-harden like _ensure_folder: two concurrent publishers can both
-        # see existing is None and both create a same-named leaf blob (Drive
-        # enforces no name uniqueness). We don't trust our own create()'s id
-        # for anything -- put_bytes returns None regardless -- but we
-        # re-resolve via a fresh _find_child call so every racing instance,
-        # and every future reader (get_bytes/list_paths), independently
-        # computes the SAME deterministic winner (modifiedTime desc, then id
-        # desc) rather than depending on which racer happened to run last.
-        # Unlike folders, the loser blob is not reaped here -- reaping is
+        # Unlike _ensure_folder, there's no write-time re-resolve here, and
+        # none is needed: two concurrent publishers can both see existing is
+        # None and both create a same-named leaf blob (Drive enforces no name
+        # uniqueness), but put_bytes returns None regardless, and no leaf-id
+        # cache exists to converge. Every reader (get_bytes/list_paths) calls
+        # _find_child independently and applies its deterministic tie-break
+        # (modifiedTime desc, then id desc), so all readers land on the SAME
+        # winner on their own -- convergence is entirely _find_child's read-
+        # time job, not something a create-time lookup here could add to.
+        # Unlike folders, the loser blob is also not reaped -- reaping is
         # scoped to folders only.
-        self._find_child(parent, leaf, folder=False)
 
     def get_bytes(self, path: str) -> bytes | None:
         parent, leaf = self._resolve_file(path, create_parents=False)
