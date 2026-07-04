@@ -58,14 +58,17 @@ def test_publish_gcs_superseded_content_versions(tmp_path):
 def test_gc_superseded_drops_stale_pipeline(tmp_path):
     fs = LocalDirFleetStorage(tmp_path / "drv")
     # a stale-pipeline artifact (different embed model => different pf8)
+    # must NOT be deleted (version-skew guarantee: pipelines coexist)
     stale = artifact_filename("FID", "vhash1", "old-model", 4, "v1")
     cur = artifact_filename("FID", "vhash1", PIN.embed_model, PIN.dim, PIN.chunker_version)
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{stale}", b"x")
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{cur}", b"y")
     removed = ingest_cache.gc_superseded(fs, "D1", "FID", "vhash1", PIN)
-    assert removed == 1
-    remaining = [p.rsplit("/", 1)[-1] for p in fs.list_paths(ingest_cache.CACHE_DIR + "/")]
-    assert remaining == [cur]
+    # gc_superseded only removes same-pipeline artifacts with stale content hashes;
+    # stale-pipeline artifacts coexist (see spec A2 version-skew guarantee)
+    assert removed == 0
+    remaining = sorted([p.rsplit("/", 1)[-1] for p in fs.list_paths(ingest_cache.CACHE_DIR + "/")])
+    assert remaining == sorted([stale, cur])
 
 
 def test_sweep_and_remove_file_artifacts(tmp_path):
