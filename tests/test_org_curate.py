@@ -174,6 +174,20 @@ def test_materialise_writes_org_rows(tmp_path):
         assert db.execute("SELECT COUNT(*) c FROM entity_relations WHERE origin='org'").fetchone()["c"] == 1
 
 
+def test_corroboration_is_echo_safe_and_mentioned_with_needs_two_contributors():
+    # Cache-echo: many contributors, ONE source doc (same HMAC) -> not corroborated
+    # for a strict type (would otherwise inflate imported org data's own support).
+    echo = {"srefs": {"H1"}, "contribs": {"x@a.org", "y@a.org", "z@a.org"}}
+    assert org_curate._corroborated("mentioned_with", echo) is False
+    # One person's two mailbox docs: 2 srefs but 1 contributor -> not enough for
+    # the sensitive co-occurrence type.
+    one_mailbox = {"srefs": {"H1", "H2"}, "contribs": {"x@a.org"}}
+    assert org_curate._corroborated("mentioned_with", one_mailbox) is False
+    # Genuinely independent: 2 sources AND 2 contributors -> corroborated.
+    indep = {"srefs": {"H1", "H2"}, "contribs": {"x@a.org", "y@a.org"}}
+    assert org_curate._corroborated("mentioned_with", indep) is True
+
+
 def test_curator_backstop_drops_non_allowlisted_relation(tmp_path):
     """A tampered/older-version contribution carrying a non-allowlisted relation
     (and its endpoints) must NOT materialise into the org graph, even though it
