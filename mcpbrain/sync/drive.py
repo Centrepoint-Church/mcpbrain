@@ -216,6 +216,47 @@ def _file_content_hash(file_meta: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _cache_first_extract_one(
+    service, store, fleet_storage, drive_id, fmeta, pin,
+) -> tuple[bool, tuple[str, str] | None]:
+    """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
+    (sync_shared_drive) and backfill (backfill_shared_drive) loops.
+
+    Sequence: compute the content-version hash; try the ingest cache; on a miss
+    fetch the text, RE-CHECK the cache immediately before the expensive path
+    (herd-race shrink, spec §A2 — another daemon may have just published while
+    we were fetching), then normalise + upsert.
+
+    Returns (processed, miss):
+      - processed is True when the file counted as processed — either a cache
+        hit or a successful local extraction that yielded at least one chunk;
+        False when skipped (unsupported/empty text, or no chunks produced).
+      - miss is (file_id, content_hash) when we extracted locally and the
+        caller must publish the artifact after embedding; None otherwise
+        (cache hit or skip — nothing new to publish).
+
+    Exceptions propagate; callers that need per-file isolation wrap the call.
+    """
+    from mcpbrain import ingest_cache
+
+    fid = fmeta["id"]
+    content_h = _file_content_hash(fmeta)
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+        return True, None
+    text = _fetch_text(service, fmeta)
+    if not text:
+        return False, None
+    # Re-check right before extraction: another daemon may have just published.
+    if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+        return True, None
+    chunks = normalise_drive(fmeta, text, drive_id=drive_id)
+    if not chunks:
+        return False, None
+    for c in chunks:
+        store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    return True, (fid, content_h)
+
+
 # ---------------------------------------------------------------------------
 # Sync entry point
 # ---------------------------------------------------------------------------
@@ -355,24 +396,12 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
     for fmeta in pending:
         fid = fmeta["id"]
         try:
-            content_h = _file_content_hash(fmeta)
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+            did_process, file_miss = _cache_first_extract_one(
+                service, store, fleet_storage, drive_id, fmeta, pin)
+            if did_process:
                 processed += 1
-                continue
-            text = _fetch_text(service, fmeta)
-            if not text:
-                continue
-            # Re-check right before extraction: another daemon may have just published.
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-                processed += 1
-                continue
-            chunks = normalise_drive(fmeta, text, drive_id=drive_id)
-            if not chunks:
-                continue
-            for c in chunks:
-                store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
-            miss.append((fid, content_h))
-            processed += 1
+            if file_miss:
+                miss.append(file_miss)
         except Exception as exc:  # noqa: BLE001 — isolate one file's failure
             # Without this, one poison file (corrupt doc, transient export
             # error, decode failure) would propagate up to sync_shared_drives'
@@ -488,8 +517,6 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
     import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
     Returns {'processed', 'miss': [(file_id, content_hash)]}."""
-    from mcpbrain import ingest_cache
-
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
@@ -509,24 +536,12 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 return {"processed": processed, "miss": miss}
-            fid = f["id"]
-            content_h = _file_content_hash(f)
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+            did_process, file_miss = _cache_first_extract_one(
+                service, store, fleet_storage, drive_id, f, pin)
+            if did_process:
                 processed += 1
-                continue
-            text = _fetch_text(service, f)
-            if not text:
-                continue
-            if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
-                processed += 1
-                continue
-            chunks = normalise_drive(f, text, drive_id=drive_id)
-            if not chunks:
-                continue
-            for ch in chunks:
-                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-            miss.append((fid, content_h))
-            processed += 1
+            if file_miss:
+                miss.append(file_miss)
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
