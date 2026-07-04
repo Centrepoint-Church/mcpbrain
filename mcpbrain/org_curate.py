@@ -108,6 +108,34 @@ def _stamp_origin(store, *, entity_ids=(), relation_ids=()) -> None:
             db.execute("UPDATE entity_relations SET origin='org' WHERE id=?", (rid,))
 
 
+def _apply_org_skeleton(store, entity_id, aggregated_claim, claim_id) -> None:
+    """Authoritative skeleton write for a materialised org entity.
+
+    graph_write.upsert_entity's B4a rule-3 guard exists to stop LOCAL writes
+    from overwriting an org row's skeleton — but it can't distinguish "a
+    local write" from "the curator's own re-materialise", so once an entity
+    is first promoted to origin='org', every SUBSEQUENT _materialise run's
+    upsert_entity call silently drops any skeleton change (a later-arriving
+    email, a job-change org update). The curator IS the authority for the
+    org layer, so this writes the current best-known aggregate (built from
+    ALL staged claims, not just new ones — org_contrib_staging accumulates
+    permanently) directly, bypassing that guard entirely. Confined to this
+    module; the shared guard other writers rely on is untouched. Blank
+    fields in the aggregate are skipped rather than written, so this can
+    only add/update skeleton knowledge, never blank out a value some
+    earlier claim established."""
+    updates = {"name": aggregated_claim.get("name") or claim_id,
+               "type": aggregated_claim.get("type") or "person"}
+    if aggregated_claim.get("org"):
+        updates["org"] = aggregated_claim["org"]
+    if aggregated_claim.get("email_addr"):
+        updates["email_addr"] = aggregated_claim["email_addr"]
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    with store._connect() as db:
+        db.execute(f"UPDATE entities SET {set_clause} WHERE id=?",
+                   list(updates.values()) + [entity_id])
+
+
 def _corroborated(relation: str, agg: dict) -> bool:
     """Corroboration rule (spec B3.2): a claim is corroborated by >=2 distinct
     source_ref OR >=2 distinct contributor_email — except relations in
@@ -199,6 +227,7 @@ def _materialise(store, pin_allowlist=None) -> dict:
             continue
         id_map[claim_id] = got
         _stamp_origin(store, entity_ids=[got])
+        _apply_org_skeleton(store, got, e, claim_id)
         n_ent += 1
 
     n_rel = 0
@@ -323,10 +352,25 @@ def _snapshot_lines(store, home) -> list[str]:
 
 
 def _tombstones(store) -> list[Tombstone]:
-    """Every merged-away id becomes a tombstone pointing at its winner, so a
-    consumer re-import never resurrects a loser id (spec B3.4/B5.4)."""
+    """Every merged-away id whose WINNER is currently an org-layer row becomes
+    a tombstone pointing at that winner, so a consumer re-import never
+    resurrects the loser id (spec B3.4/B5.4).
+
+    Scoped to org-winner merges only — NOT every row in entity_merge_log. A
+    curator install is a normal member machine too: its daily
+    resolve_entities(curator=False) local-dedup cadence runs exactly like
+    every other install's and merges the curator's own purely-local
+    duplicates, logging them to the same entity_merge_log. Entity ids are
+    name-derived slugs, so publishing those merges unfiltered would leak the
+    curator's private local contacts' name-derived ids into the fleet-wide
+    tombstones.jsonl file — a second egress channel that bypasses the entire
+    fail-closed contribution edge (org_contrib.collect_from_drain) built
+    specifically to prevent exactly that kind of leak."""
+    with store._connect() as db:
+        org_winners = {r["id"] for r in db.execute(
+            "SELECT id FROM entities WHERE origin='org'").fetchall()}
     return [Tombstone(entity_id=m["loser_id"], merged_into=m["winner_id"])
-            for m in store.list_entity_merges()]
+            for m in store.list_entity_merges() if m["winner_id"] in org_winners]
 
 
 def _publish(store, fleet_storage, home) -> SnapshotManifest:
