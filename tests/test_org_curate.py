@@ -214,6 +214,66 @@ def test_tombstones_include_org_winner_merges(tmp_path):
     assert tombs[0].entity_id == "acme-inc" and tombs[0].merged_into == "acme"
 
 
+def test_relation_reasserted_as_ongoing_overrides_earlier_end_date(tmp_path):
+    """A later claim (higher valid_from) reasserting a relation as ongoing
+    (valid_to="") must override an earlier claim's reported end date — not
+    accumulate the max valid_to ever staged regardless of which claim is
+    actually the most recent observation."""
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "acme"},
+             valid_from="2026-01-01", valid_to="2026-06-01"),          # early: reports an end date
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "acme"},
+             valid_from="2026-07-01", valid_to="", sref="ref2"),       # later: still ongoing
+    ])
+    org_curate._materialise(s)
+    with s._connect() as db:
+        row = db.execute("SELECT valid_to FROM entity_relations "
+                         "WHERE entity_a='joel' AND relation='works_at' AND entity_b='acme'").fetchone()
+    assert row["valid_to"] in (None, "")     # the later, ongoing claim wins
+
+
+def test_relation_supersession_not_clobbered_by_contributed_valid_to(tmp_path):
+    """When a singleton relation (works_at) is naturally superseded by a newer
+    triple (joel now works_at beta instead of acme), that supersession's own
+    valid_to (the newer job's start date) must survive — a contributed
+    end-date claim for the OLD triple must not overwrite it after the fact,
+    regardless of which triple happens to be processed first."""
+    s = _store(tmp_path)
+    _stage(s, [
+        _rec({"kind": "entity", "id": "joel", "name": "Joel", "type": "person",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
+              "org": "", "email_addr": "", "aliases": ""}),
+        _rec({"kind": "entity", "id": "beta", "name": "Beta", "type": "org",
+              "org": "", "email_addr": "", "aliases": ""}),
+        # beta staged (and therefore processed) BEFORE acme, so upsert_relation's
+        # own supersession fires on acme mid-pass-1, before _materialise's own
+        # contributed-valid_to write for acme ever runs — the exact ordering
+        # that exposed the historical stomping bug (pre-fix: a single-pass,
+        # unconditional write let this contributed value overwrite whatever
+        # upsert_relation had just decided).
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "beta"},
+             valid_from="2026-06-01"),                          # newer job supersedes acme
+        _rec({"kind": "relation", "entity_a": "joel", "relation": "works_at", "entity_b": "acme"},
+             valid_from="2026-01-01", valid_to="2026-03-01", sref="ref2"),   # contributed end date for the OLD job
+    ])
+    org_curate._materialise(s)
+    with s._connect() as db:
+        acme_rel = db.execute("SELECT valid_to FROM entity_relations "
+                              "WHERE entity_a='joel' AND relation='works_at' AND entity_b='acme'").fetchone()
+        beta_rel = db.execute("SELECT valid_to FROM entity_relations "
+                              "WHERE entity_a='joel' AND relation='works_at' AND entity_b='beta'").fetchone()
+    # graph_write's own supersession cascade retires acme at beta's start date —
+    # that decision survives, not the earlier-contributed 2026-03-01.
+    assert acme_rel["valid_to"] == "2026-06-01"
+    assert beta_rel["valid_to"] in (None, "")    # beta is the current job
+
+
 def test_mentioned_with_singleton_stays_pending(tmp_path):
     s = _store(tmp_path)
     _stage(s, [
