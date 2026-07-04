@@ -35,9 +35,15 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     AND `config.fleet_pin(home).is_pinned`, also runs the Shared Drive ingest-cache
     path (spec §A): `sync_shared_drives`, embed the misses, then `publish_file` each
     miss now that its vectors exist. Adds `"shared_drives"` (per-drive processed
-    counts) and `"revoked_drives"` to the result. Strictly additive: with `home=None`
-    (every caller before this feature) this block never runs and existing behaviour
-    for gmail/calendar/My-Drive sync is unchanged.
+    counts) and `"revoked_drives"` to the result.
+
+    Strictly additive AND non-fatal: with `home=None` (every caller before this
+    feature) this block never runs and existing behaviour for gmail/calendar/
+    My-Drive sync is unchanged; and ANY exception raised anywhere inside the
+    whole shared-drive block (including `sync_shared_drives` itself, e.g. a
+    Drive-API outage in `list_shared_drives`) is caught, logged, and skipped for
+    this cycle — it can never abort the gmail/calendar/My-Drive sync that ran
+    before it, nor the backfill step/return that runs after it.
     """
     from mcpbrain.index import index_pending
     from mcpbrain.sync.gmail import sync_gmail
@@ -57,41 +63,50 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
 
     # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
     # to read config from, the cache enabled, and a fleet pin present. Without a
-    # pin this is a no-op and drive sync behaves exactly as before.
+    # pin this is a no-op and drive sync behaves exactly as before. The WHOLE
+    # block is wrapped in try/except so this optional feature can NEVER abort
+    # the cycle — everything above (gmail/calendar/My-Drive) already ran, and
+    # the progressive-backfill step + return below still run regardless of
+    # whether this block succeeds, fails, or is skipped.
     if drive_service is not None and home is not None:
-        from mcpbrain import config
-        # Cheapest check first: ingest_cache_enabled is a single config-dict
-        # read; fleet_pin additionally constructs a FleetPin object, so it's
-        # only built once the cheaper check passes. is_pinned is checked last.
-        ingest_cache_on = config.ingest_cache_enabled(home)
-        pin = config.fleet_pin(home) if ingest_cache_on else None
-        if ingest_cache_on and pin.is_pinned:
-            from mcpbrain.sync.drive import sync_shared_drives
-            from mcpbrain.fleet_storage import drive_cache_storage
-            from mcpbrain import ingest_cache
-            sd = sync_shared_drives(
-                drive_service, store, pin=pin,
-                storage_factory=lambda d: drive_cache_storage(drive_service, d))
-            # Embed the misses, THEN publish them (publish reads vectors back).
-            result["embedded"] += index_pending(store, embedder, home=home)
-            published_by = config.owner_email(home)
-            per_drive = {}
-            for drive_id, info in sd.items():
-                if drive_id == "_revoked":
-                    continue
-                fs = info["storage"]
-                for file_id, content_hash in info["miss"]:
-                    try:
-                        ingest_cache.publish_file(
-                            store, fs, drive_id, file_id, content_hash, pin,
-                            published_by=published_by)
-                    except Exception as exc:  # noqa: BLE001 — publish is best-effort;
-                        # a transient failure on one file must not abort the rest of the cycle
-                        log.info("sync: publish_file skipped for drive %s file %s: %s",
-                                 drive_id, file_id, exc)
-                per_drive[drive_id] = info["processed"]
-            result["shared_drives"] = per_drive
-            result["revoked_drives"] = sd.get("_revoked", [])
+        try:
+            from mcpbrain import config
+            # Cheapest check first: ingest_cache_enabled is a single config-dict
+            # read; fleet_pin additionally constructs a FleetPin object, so it's
+            # only built once the cheaper check passes. is_pinned is checked last.
+            ingest_cache_on = config.ingest_cache_enabled(home)
+            pin = config.fleet_pin(home) if ingest_cache_on else None
+            if ingest_cache_on and pin.is_pinned:
+                from mcpbrain.sync.drive import sync_shared_drives
+                from mcpbrain.fleet_storage import drive_cache_storage
+                from mcpbrain import ingest_cache
+                sd = sync_shared_drives(
+                    drive_service, store, pin=pin,
+                    storage_factory=lambda d: drive_cache_storage(drive_service, d))
+                # Embed the misses, THEN publish them (publish reads vectors back).
+                result["embedded"] += index_pending(store, embedder, home=home)
+                published_by = config.owner_email(home)
+                per_drive = {}
+                for drive_id, info in sd.items():
+                    if drive_id == "_revoked":
+                        continue
+                    fs = info["storage"]
+                    for file_id, content_hash in info["miss"]:
+                        try:
+                            ingest_cache.publish_file(
+                                store, fs, drive_id, file_id, content_hash, pin,
+                                published_by=published_by)
+                        except Exception as exc:  # noqa: BLE001 — publish is best-effort;
+                            # a transient failure on one file must not abort the rest of the cycle
+                            log.info("sync: publish_file skipped for drive %s file %s: %s",
+                                     drive_id, file_id, exc)
+                    per_drive[drive_id] = info["processed"]
+                result["shared_drives"] = per_drive
+                result["revoked_drives"] = sd.get("_revoked", [])
+        except Exception as exc:  # noqa: BLE001 — optional feature; must never
+            # abort the rest of the cycle (pre-existing sync + the subsequent
+            # backfill step must run whether or not this succeeds)
+            log.warning("sync: shared-drive block failed (skipped this cycle): %s", exc)
 
     # One backfill step per cycle, AFTER the live deltas. Bounded by
     # max_per_source so a slow cycle never starves new items.
