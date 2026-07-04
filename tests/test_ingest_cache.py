@@ -524,3 +524,31 @@ def test_bootstrap_drive_prefers_newest_content_version(tmp_path):
     ch = s.get_chunk("gdrive-FID-0")
     assert ch is not None and ch["text"] == "new content here"
     assert ch["metadata"]["drive_id"] == "D1"
+
+
+def test_import_apply_coerces_float_idx_to_int_doc_id(tmp_path):
+    """A peer artifact with a non-int idx (valid JSON, e.g. 0.0) must still apply
+    against the real chunk doc_id (gdrive-FID-0), not gdrive-FID-0.0."""
+    import gzip, json, base64, struct
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import CacheArtifact, CacheChunk, artifact_filename
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
+    extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
+                  "summary": "s", "entities": [{"name": "Joel Chelliah", "type": "person"}],
+                  "relations": [], "actions": [], "topics": [],
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns it"}]}
+    # hand-write the artifact JSON with idx as a float to simulate a peer
+    art = CacheArtifact(file_id="FID", content_hash="vh1", extraction_method="gdocs",
+        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunks=(CacheChunk(idx=0, text="Joel Chelliah owns it", embedding_b64=vec,
+                           metadata={"source_type":"gdrive","file_id":"FID","chunk_index":0}),),
+        enrich={"logic_version": 1, "extraction": extraction},
+        published_by="p@x.org", published_at="2026-07-04")
+    d = art.to_dict(); d["chunks"][0]["idx"] = 0.0        # float idx from a peer
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+                 gzip.compress(json.dumps(d).encode()))
+    assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
+    assert s.get_chunk("gdrive-FID-0") is not None        # int doc_id, not 0.0
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"] >= 1
