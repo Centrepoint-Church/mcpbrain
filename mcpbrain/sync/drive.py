@@ -260,6 +260,100 @@ def sync_drive(service, store, source: str = "drive") -> int:
     return processed
 
 
+def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin) -> dict:
+    """Incremental sync for ONE Shared Drive via the Changes API, cache-first.
+
+    Cursor key is 'drive:<driveId>' in sync_cursors. First run stores
+    getStartPageToken(driveId=...) and returns. Delta runs page through
+    changes.list(driveId=..., corpora='drive', includeItemsFromAllDrives=True).
+    For each non-removed file: try the ingest cache first; on a miss, fetch the
+    text, RE-CHECK the cache immediately before the expensive path (herd-race
+    shrink, spec §A2), then extract + upsert and record the miss so the caller can
+    publish after embedding. Removed files are purged locally and their artifacts
+    deleted. The cursor advances only after every write completes.
+
+    Returns {'processed', 'miss': [(file_id, content_hash)], 'live_file_ids': set}.
+    """
+    from mcpbrain import ingest_cache
+
+    source = f"drive:{drive_id}"
+    cursor = store.get_cursor(source)
+    if cursor is None:
+        tok = service.changes().getStartPageToken(
+            driveId=drive_id, supportsAllDrives=True).execute()["startPageToken"]
+        store.set_cursor(source, str(tok))
+        return {"processed": 0, "miss": [], "live_file_ids": set()}
+
+    page_token = cursor
+    new_start = None
+    pending: list[dict] = []
+    removed_ids: list[str] = []
+    live_ids: set[str] = set()
+    while True:
+        resp = service.changes().list(
+            pageToken=page_token,
+            driveId=drive_id,
+            corpora="drive",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            includeRemoved=True,
+            fields=_CHANGES_FIELDS,
+        ).execute()
+        for ch in resp.get("changes", []):
+            fid = ch.get("fileId")
+            if ch.get("removed"):
+                if fid:
+                    removed_ids.append(fid)
+                continue
+            fmeta = ch.get("file") or {}
+            if not fmeta.get("id"):
+                continue
+            live_ids.add(fmeta["id"])
+            pending.append(fmeta)
+        new_start = resp.get("newStartPageToken", new_start)
+        nxt = resp.get("nextPageToken")
+        if not nxt:
+            break
+        page_token = nxt
+
+    processed = 0
+    miss: list[tuple[str, str]] = []
+    for fmeta in pending:
+        fid = fmeta["id"]
+        content_h = _file_content_hash(fmeta)
+        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+            processed += 1
+            continue
+        text = _fetch_text(service, fmeta)
+        if not text:
+            continue
+        # Re-check right before extraction: another daemon may have just published.
+        if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin):
+            processed += 1
+            continue
+        chunks = normalise_drive(fmeta, text, drive_id=drive_id)
+        if not chunks:
+            continue
+        for c in chunks:
+            store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+        miss.append((fid, content_h))
+        processed += 1
+
+    for fid in removed_ids:
+        doc_ids = store.doc_ids_for_file(fid)
+        if doc_ids:
+            store.invalidate_local_relations_for_docs(doc_ids)
+            store.delete_chunks(doc_ids)
+        try:
+            ingest_cache.remove_file_artifacts(fleet_storage, fid)
+        except Exception:  # noqa: BLE001 — artifact GC is best-effort
+            pass
+
+    if new_start:
+        store.set_cursor(source, str(new_start))
+    return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
+
+
 def backfill_drive(service, store, modified_after: str,
                    modified_before: str | None = None,
                    max_files: int | None = None) -> int:
