@@ -60,8 +60,12 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # pin this is a no-op and drive sync behaves exactly as before.
     if drive_service is not None and home is not None:
         from mcpbrain import config
-        pin = config.fleet_pin(home)
-        if config.ingest_cache_enabled(home) and pin.is_pinned:
+        # Cheapest check first: ingest_cache_enabled is a single config-dict
+        # read; fleet_pin additionally constructs a FleetPin object, so it's
+        # only built once the cheaper check passes. is_pinned is checked last.
+        ingest_cache_on = config.ingest_cache_enabled(home)
+        pin = config.fleet_pin(home) if ingest_cache_on else None
+        if ingest_cache_on and pin.is_pinned:
             from mcpbrain.sync.drive import sync_shared_drives
             from mcpbrain.fleet_storage import drive_cache_storage
             from mcpbrain import ingest_cache
