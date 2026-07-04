@@ -360,6 +360,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         gmail_service=gmail_service,
         calendar_service=calendar_service,
         drive_service=drive_service,
+        home=str(config.app_dir()),
     )
     try:
         drain_caps = drain.drain_captures(store)

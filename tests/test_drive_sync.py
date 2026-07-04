@@ -30,7 +30,7 @@ class _Changes:
         # are string integers ("1", "2", …) that index directly into _pages.
         self._initial_cursor = initial_cursor  # set by FakeDriveService
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, **_kw):          # accept driveId/supportsAllDrives
         return _Req({"startPageToken": self._start})
 
     def list(self, **kw):
@@ -53,17 +53,39 @@ class _Files:
         self._raise = export_raises or {}
         # file_list: list of file metadata dicts returned by files().list()
         self._file_list = file_list or []
+        # Instrumentation for tests that need to assert de-dup: how many times
+        # export()/get_media() was actually called per fileId.
+        self.export_calls: dict[str, int] = {}
+        self.get_media_calls: dict[str, int] = {}
 
-    def export(self, fileId, mimeType):
+    def export(self, fileId, mimeType, supportsAllDrives=None):
+        assert supportsAllDrives is True, (
+            "export() must pass supportsAllDrives=True — required by the real "
+            "Drive v3 API for files inside a Shared Drive"
+        )
+        self.export_calls[fileId] = self.export_calls.get(fileId, 0) + 1
         if fileId in self._raise:
             return _Req(raise_exc=self._raise[fileId])
         return _Req(self._exports.get(fileId, b""))
 
-    def get_media(self, fileId):
+    def get_media(self, fileId, supportsAllDrives=None):
+        assert supportsAllDrives is True, (
+            "get_media() must pass supportsAllDrives=True — required by the real "
+            "Drive v3 API for files inside a Shared Drive"
+        )
+        self.get_media_calls[fileId] = self.get_media_calls.get(fileId, 0) + 1
         return _Req(self._media.get(fileId, b""))
 
     def list(self, **_kw):
         return _Req({"files": self._file_list})
+
+
+class _Drives:
+    def __init__(self, drives=None):
+        self._drives = drives or []
+
+    def list(self, **_kw):
+        return _Req({"drives": self._drives})
 
 
 class FakeDriveService:
@@ -80,12 +102,16 @@ class FakeDriveService:
             kw.get("export_raises"),
             kw.get("file_list"),
         )
+        self._drives = _Drives(kw.get("shared_drives"))
 
     def changes(self):
         return self._changes
 
     def files(self):
         return self._files
+
+    def drives(self):
+        return self._drives
 
 
 # ---------------------------------------------------------------------------

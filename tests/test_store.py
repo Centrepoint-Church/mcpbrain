@@ -144,6 +144,20 @@ def test_set_meta_does_not_touch_dim(tmp_path):
     assert s.get_meta("dim") == "4"
 
 
+def test_delete_meta_removes_row(tmp_path):
+    s = _store(tmp_path)
+    s.set_meta("some_key", "some_value")
+    assert s.get_meta("some_key") == "some_value"
+    s.delete_meta("some_key")
+    assert s.get_meta("some_key") is None
+
+
+def test_delete_meta_absent_key_is_noop(tmp_path):
+    s = _store(tmp_path)
+    s.delete_meta("nonexistent_key")   # must not raise
+    assert s.get_meta("nonexistent_key") is None
+
+
 # --- thread_chunks reader (Task 4.4) -------------------------------------
 
 def test_thread_chunks_returns_matching_thread_only(tmp_path):
