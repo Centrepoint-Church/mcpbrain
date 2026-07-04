@@ -573,3 +573,58 @@ def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(t
     # producing a result), but that failure itself never reached the caller.
     assert "shared_drives" not in res
     assert "revoked_drives" not in res
+
+
+def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured(tmp_path):
+    """A pinned+enabled install with an empty owner_email (config.owner_email
+    can return "" when unconfigured) must not publish artifacts stamped with an
+    empty published_by. Files are still synced/embedded locally; only the
+    fleet-cache publish step is skipped, with a single warning (not one per
+    file)."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import ingest_cache
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    # NOTE: no "owner_email" key at all -> config.owner_email(home) returns "".
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}}})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("drive:D1", "100")
+
+    from mcpbrain.sync import drive as drivemod
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fsmap = {}
+    orig = drivemod.sync_shared_drives
+
+    def _patched(service, s, *, pin, storage_factory, absence_threshold=3):
+        return orig(service, s, pin=pin,
+                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
+                    absence_threshold=absence_threshold)
+    drivemod.sync_shared_drives = _patched
+    try:
+        svc = FakeDriveService(
+            shared_drives=[{"id": "D1", "name": "Ops"}],
+            initial_cursor="100",
+            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+            exports={"FID": b"shared drive body content"})
+        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+    finally:
+        drivemod.sync_shared_drives = orig
+
+    # The file was still synced/processed locally...
+    assert res["shared_drives"]["D1"] == 1
+    # ...but nothing was published to the fleet cache (no owner_email to stamp).
+    names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
+    assert names == [], f"expected no artifacts published without owner_email, got {names}"
