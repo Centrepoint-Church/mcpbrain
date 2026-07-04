@@ -220,6 +220,37 @@ def test_try_import_hand_planted_pipeline_mismatch_inner_field(tmp_path):
     assert ingest_cache.try_import(s, fs, "D1", file_id, content_hash, PIN) is False
 
 
+def test_publish_is_byte_identical_regardless_of_metadata_key_order(tmp_path):
+    """Two publishers whose extractors build metadata dict keys in different
+    insertion orders must produce IDENTICAL gzip-decompressed bytes for
+    logically-equal content — publish() must serialize with sort_keys so the
+    module's documented byte-identical-artifacts guarantee actually holds."""
+    import gzip
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    fs_a = LocalDirFleetStorage(tmp_path / "drv_a")
+    fs_b = LocalDirFleetStorage(tmp_path / "drv_b")
+    frozen = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    chunk_a = CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                        metadata={"file_id": "FID", "chunk_index": 0, "source_type": "gdrive"})
+    chunk_b = CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
+                        metadata={"source_type": "gdrive", "chunk_index": 0, "file_id": "FID"})
+
+    with patch("mcpbrain.ingest_cache.datetime") as mock_dt:
+        mock_dt.now.return_value = frozen
+        ingest_cache.publish(None, fs_a, "D1", "FID", "vhash1", (chunk_a,), PIN,
+                             enrich={"b": 1, "a": 2}, published_by="p@x.org")
+        ingest_cache.publish(None, fs_b, "D1", "FID", "vhash1", (chunk_b,), PIN,
+                             enrich={"a": 2, "b": 1}, published_by="p@x.org")
+
+    path = ingest_cache._artifact_path("FID", "vhash1", PIN)
+    bytes_a = gzip.decompress(fs_a.get_bytes(path))
+    bytes_b = gzip.decompress(fs_b.get_bytes(path))
+    assert bytes_a == bytes_b
+
+
 def test_import_atomic_mid_artifact_corruption_writes_zero_chunks(tmp_path):
     """A mid-artifact corrupt vector (chunk 2 of 3) must result in NOTHING
     written to the store — not a partial 2-of-3 import. Regression for the
