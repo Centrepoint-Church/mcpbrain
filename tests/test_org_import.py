@@ -46,6 +46,40 @@ def test_import_writes_org_rows(tmp_path):
         assert db.execute("SELECT origin FROM entity_relations WHERE entity_a='joel'").fetchone()["origin"] == "org"
 
 
+def test_malformed_entity_aborts_before_any_mutation(tmp_path):
+    """A well-formed gzip whose entity line misses a required key must abort
+    cleanly (status=error) with NO mutation and NO version bump — never a
+    KeyError partway through that strands local data (step-0 merges are
+    irreversible)."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    # Seed a local entity that slug-drift step-0 could otherwise touch.
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('bob','Bob','person','local')")
+    # entity missing 'name' -> malformed.
+    _publish(fs, [{"id": "x", "type": "person", "org": "", "email_addr": "", "aliases": ""}],
+             [], version=1)
+    res = org_import.import_snapshot(s, fs)
+    assert res["status"] == "error" and res["reason"] == "malformed_entity"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entities WHERE origin='org'").fetchone()["c"] == 0
+        assert db.execute("SELECT name FROM entities WHERE id='bob'").fetchone()["name"] == "Bob"
+        assert int(s.get_meta("org_snapshot_version") or 0) == 0
+
+
+def test_malformed_relation_aborts(tmp_path):
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _publish(fs, [_ent("joel", "Joel")],
+             [{"entity_a": "joel", "relation": "", "entity_b": "acme"}], version=1)  # blank relation
+    res = org_import.import_snapshot(s, fs)
+    assert res["status"] == "error" and res["reason"] == "malformed_relation"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entities WHERE origin='org'").fetchone()["c"] == 0
+
+
 def test_not_newer_is_skipped(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
