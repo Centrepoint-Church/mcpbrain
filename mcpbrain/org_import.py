@@ -378,6 +378,35 @@ def import_snapshot(store, fleet_storage) -> dict:
                   for x in raw_tombs.decode("utf-8").splitlines() if x.strip()]
     tombstones = _resolve_tombstone_chains(tombstones)
 
+    # Structural validation BEFORE any mutation. The sha256 check catches
+    # truncation but not a well-formed gzip whose JSON lines miss required keys.
+    # Step 0 below performs IRREVERSIBLE local merges (merge_entities deletes the
+    # local loser); if a later phase then KeyError'd on a malformed row, local
+    # data would be stranded merged into blank org stubs and the daemon would
+    # retry-crash forever. So abort cleanly here — previous org layer intact,
+    # version not bumped — rather than mutate then fail.
+    for e in entities:
+        if not (e.get("id") and e.get("name") and e.get("type")):
+            log.warning("org_import: malformed entity in snapshot v%s (%r); "
+                        "aborting, previous layer intact", manifest.version, e)
+            return {"status": "error", "reason": "malformed_entity"}
+    for r in relations:
+        if not (r.get("entity_a") and r.get("relation") and r.get("entity_b")):
+            log.warning("org_import: malformed relation in snapshot v%s (%r); "
+                        "aborting, previous layer intact", manifest.version, r)
+            return {"status": "error", "reason": "malformed_relation"}
+
+    # TOCTOU guard: the curator writes snapshot, then tombstones, then manifest.
+    # If it republished a newer version between our manifest read and our
+    # tombstones read, we'd be about to apply vN+1 tombstones against vN snapshot
+    # data. Re-read the manifest; if the version moved under us, abort and let the
+    # next cycle import the new version cleanly (nothing mutated yet).
+    recheck = fleet_storage.get_bytes(MANIFEST_PATH)
+    if recheck and SnapshotManifest.from_dict(json.loads(recheck)).version != manifest.version:
+        log.info("org_import: snapshot republished mid-read (v%s->newer); retrying next cycle",
+                 manifest.version)
+        return {"status": "error", "reason": "raced_republish"}
+
     snapshot_entity_ids = {e["id"] for e in entities}
     snapshot_relation_keys = {(r["entity_a"], r["relation"], r["entity_b"]) for r in relations}
     demoted = tombstoned = 0
