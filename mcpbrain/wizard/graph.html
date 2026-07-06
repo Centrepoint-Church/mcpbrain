@@ -79,13 +79,17 @@
 </head>
 <body>
   <header>
+    <a class="back" href="/dashboard">← Dashboard</a>
     <span class="wordmark">mcpbrain</span>
     <span class="eyebrow">Knowledge graph</span>
-    <a class="back" href="/dashboard">← Dashboard</a>
     <span id="count" class="count"></span>
   </header>
   <div class="layout">
     <aside class="filters">
+      <label>Search
+        <input type="text" id="f-search" placeholder="highlight by name" autocomplete="off">
+      </label>
+      <div id="search-status" class="hint"></div>
       <label>Layout
         <select id="f-layout">
           <option value="radial" selected>Radial</option>
@@ -100,9 +104,6 @@
       </label>
       <label>Type
         <select id="f-type"><option value="">All</option></select>
-      </label>
-      <label>Search
-        <input type="text" id="f-search" placeholder="highlight by name" autocomplete="off">
       </label>
       <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · hover for a name · click a node for details · right-click to focus its neighbourhood · double-click empty space to reset.</div>
     </aside>
@@ -127,6 +128,8 @@
 
     const TOP30_FRACTION = 0.30;  // links between two top-30%-connected nodes get flow particles
     const INTRA_COMMUNITY_BOOST = 3;  // same-community links pull harder so clusters emerge
+    const DRAWER_W = 340;  // matches .drawer width — click-to-focus offsets so the node lands in the visible pane
+    const CURVATURE_MAX = 0.3;  // max bend for links that share a node-pair or self-loop; single edges stay straight
 
     const TYPE_TOKEN = { person:"--graph-person", org:"--graph-org", project:"--graph-project",
                          document:"--graph-document", topic:"--graph-topic", meeting:"--graph-meeting" };
@@ -161,6 +164,8 @@
     let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
     let TOP30 = new Set();     // ids of the top-30% most-connected nodes
     let MAXDEG = 1;
+    let NEIGHBORS = new Map(); // id -> Set of directly-linked neighbour ids (hover ring)
+    let hoverRing = new Set(); // hovered node id + its neighbours, refreshed on hover
 
     function recomputeDerived(){
       COMMUNITY = new Map(); let maxd = 0;
@@ -173,6 +178,12 @@
       const ranked = [...CURRENT.nodes].sort((a,b)=>(b.connections||0)-(a.connections||0));
       const cut = Math.ceil(ranked.length * TOP30_FRACTION);
       for (let i=0;i<cut;i++) TOP30.add(ranked[i].id);
+      NEIGHBORS = new Map();
+      for (const l of CURRENT.links){
+        const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+        (NEIGHBORS.get(sid) || NEIGHBORS.set(sid,new Set()).get(sid)).add(tid);
+        (NEIGHBORS.get(tid) || NEIGHBORS.set(tid,new Set()).get(tid)).add(sid);
+      }
     }
 
     // ---- ego (right-click focus) ----
@@ -206,6 +217,40 @@
       if (state.selectedNodeId && (sid===state.selectedNodeId || tid===state.selectedNodeId)) return 4;
       return (TOP30.has(sid) && TOP30.has(tid)) ? 2 : 0;
     }
+    // Deterministic 0..1 hash of a link's endpoints, used to desync particle start
+    // positions — else same-length links would all pulse in unison.
+    function linkKeyHash(l){
+      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+      const s = String(sid) + "|" + String(tid) + "|" + (l.relation||"");
+      let h = 0; for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i)) | 0;
+      return (h >>> 0) / 4294967295;
+    }
+    function linkParticleOffsetFor(l){ return linkKeyHash(l); }
+    // Curve only links that would otherwise overlap: multiple relations between the same
+    // two entities (either direction), or self-loops. Groups get evenly-spaced curvature
+    // (reversed-direction edges flipped to the opposite side); a lone edge stays straight.
+    function assignLinkCurvature(links){
+      const pairGroups = new Map(), selfGroups = new Map();
+      for (const l of links){
+        const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
+        if (sid === tid){ (selfGroups.get(sid) || selfGroups.set(sid,[]).get(sid)).push(l); continue; }
+        const key = String(sid) < String(tid) ? sid+"|"+tid : tid+"|"+sid;
+        (pairGroups.get(key) || pairGroups.set(key,[]).get(key)).push(l);
+      }
+      for (const group of selfGroups.values())
+        group.forEach((l,i)=>{ l.curvature = CURVATURE_MAX * (i+1) / group.length; });
+      for (const group of pairGroups.values()){
+        if (group.length === 1){ group[0].curvature = 0; continue; }
+        const n = group.length, delta = 2*CURVATURE_MAX/(n-1);
+        const firstSid = typeof group[0].source==="object"?group[0].source.id:group[0].source;
+        group.forEach((l,i)=>{
+          const sid = typeof l.source==="object"?l.source.id:l.source;
+          let c = -CURVATURE_MAX + i*delta;
+          if (sid !== firstSid) c *= -1;   // flip reversed-direction edges off the same arc
+          l.curvature = c;
+        });
+      }
+    }
     function sameCommunity(l){
       const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
       return COMMUNITY.get(s) === COMMUNITY.get(t);
@@ -224,6 +269,15 @@
       if (focus) return (sid===focus||tid===focus) ? 1.6 : 0.4;
       return sameCommunity(l) ? 0.3 : 0.6;
     }
+    // Hover spotlight: a ring on the hovered node, and a softer one on its direct neighbours.
+    function nodeRingMode(n){ return hoverRing.has(n.id) ? "before" : undefined; }
+    function drawNodeRing(n, ctx){
+      ctx.save();
+      ctx.beginPath(); ctx.arc(n.x, n.y, (n._r ?? nodeRadius(n)) * 1.5, 0, 2*Math.PI, false);
+      ctx.fillStyle = n.id === state.hoveredNodeId ? palette.linkHot : palette.ring;
+      ctx.globalAlpha = 0.35; ctx.fill();
+      ctx.restore();
+    }
     function drawEgoRings(ctx){
       if (state.mode !== "ego" || !state.egoNodeId) return;
       const ringR = 90; ctx.save(); ctx.strokeStyle = palette.ring; ctx.lineWidth = 1;
@@ -239,14 +293,24 @@
       .backgroundColor(palette.bg).nodeId("id").linkSource("source").linkTarget("target")
       .nodeRelSize(1).nodeVal((n)=>Math.pow(nodeRadius(n),2))
       .nodeColor(nodeColourState).nodeLabel(nodeHoverLabel)
-      .linkColor(linkColourFor).linkWidth(linkWidthFor)
+      .nodeCanvasObjectMode(nodeRingMode).nodeCanvasObject(drawNodeRing)
+      .linkColor(linkColourFor).linkWidth(linkWidthFor).linkCurvature("curvature")
       .linkDirectionalParticles(linkParticlesFor)
       .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
+      .linkDirectionalParticleSpeed(0.004).linkDirectionalParticleOffset(linkParticleOffsetFor)
       .onRenderFramePost((ctx)=> drawEgoRings(ctx))
-      .onNodeHover((node)=>{ state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default"; })
-      .onNodeClick((node)=>{ state.selectedNodeId = node.id; openDrawer(node.id); })
+      .onNodeHover((node)=>{
+        state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default";
+        hoverRing = new Set();
+        if (node){ hoverRing.add(node.id); for (const nb of NEIGHBORS.get(node.id)||[]) hoverRing.add(nb); }
+      })
+      .onNodeClick((node)=>{
+        state.selectedNodeId = node.id; openDrawer(node.id);
+        fg.centerAt(node.x + (DRAWER_W/2)/fg.zoom(), node.y, 600);   // keep node clear of the drawer
+      })
       .onNodeRightClick((node)=> enterEgo(node.id))
       .onBackgroundClick(()=> onBg())
+      .minZoom(0.05).maxZoom(20)
       .warmupTicks(reduce ? 80 : 30).cooldownTime(reduce ? 0 : 4000);
 
     fg.d3Force("charge", d3.forceManyBody().strength(-60).distanceMax(360));
@@ -334,6 +398,7 @@
         $("count").textContent = data.nodes.length+" nodes · "+data.links.length+" links";
         if (!data.nodes.length){ ov.textContent="No entities match these filters."; loading=false; return; }
         for (const n of data.nodes) n._r = nodeRadius(n);
+        assignLinkCurvature(data.links);
         state.mode="map"; state.egoNodeId=null; state.egoHops={};
         recomputeDerived(); applyLayout();
         fg.graphData({ nodes:data.nodes, links:data.links });
@@ -349,9 +414,66 @@
     $("f-org").addEventListener("change", load);
     $("f-type").addEventListener("change", load);
     $("f-layout").addEventListener("change", (e)=>{ state.layout=e.target.value; applyLayout(); fg.d3ReheatSimulation(); reframe(); });
-    let searchT=null;
+    // ---- search: highlight on-screen matches, or fetch-and-jump to an off-screen one ----
+    function setSearchStatus(msg){ const el = $("search-status"); if (el) el.textContent = msg || ""; }
+    // Merges a fetched entity+neighbourhood into the live graph without disturbing
+    // existing node positions: reuses force-graph's own current node/link objects
+    // (per its documented incremental-update pattern) and only appends genuinely new ones.
+    function mergeEgoIntoCurrent(egoNodes, egoLinks){
+      const { nodes: curNodes, links: curLinks } = fg.graphData();
+      const haveNode = new Set(curNodes.map((n)=>n.id));
+      const newNodes = egoNodes.filter((n)=> !haveNode.has(n.id));
+      for (const n of newNodes) n._r = nodeRadius(n);
+      const linkKey = (l)=>{
+        const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
+        return s+"→"+t+"→"+(l.relation||"");
+      };
+      const haveLink = new Set(curLinks.map(linkKey));
+      const newLinks = egoLinks.filter((l)=> !haveLink.has(linkKey(l)));
+      const nodes = curNodes.concat(newNodes), links = curLinks.concat(newLinks);
+      assignLinkCurvature(links);   // recompute across the merged set — a new parallel edge can change existing curvature
+      CURRENT = { nodes, links, communities: CURRENT.communities };
+      recomputeDerived();
+      fg.graphData({ nodes, links });
+      $("count").textContent = nodes.length+" nodes · "+links.length+" links";
+    }
+    async function jumpToEntity(id){
+      try{
+        const r = await fetch("/api/graph/ego?id="+encodeURIComponent(id)+"&hops=1", H);
+        if (!r.ok){ setSearchStatus("Couldn’t load that entity."); return; }
+        const eg = await r.json();
+        mergeEgoIntoCurrent(eg.nodes, eg.links);
+        fg.d3ReheatSimulation();
+        state.selectedNodeId = id;
+        openDrawer(id);
+        setTimeout(()=>{
+          const n = CURRENT.nodes.find((x)=>x.id===id);
+          if (n) fg.centerAt(n.x + (DRAWER_W/2)/fg.zoom(), n.y, 600);
+        }, reduce ? 50 : 300);
+      }catch(e){ setSearchStatus("Couldn’t load that entity."); }
+    }
+    let searchT=null, searchSeq=0;
+    async function runSearch(raw){
+      const term = raw.toLowerCase();
+      state.searchTerm = term; fg.nodeColor(fg.nodeColor());
+      setSearchStatus("");
+      if (!term) return;
+      if (CURRENT.nodes.some((n)=> (n.name||"").toLowerCase().includes(term))) return;
+      const mySeq = ++searchSeq;
+      try{
+        const r = await fetch("/api/graph/search?q="+encodeURIComponent(raw), H);
+        if (!r.ok || mySeq!==searchSeq || state.searchTerm!==term) return;
+        const hits = await r.json();
+        if (mySeq!==searchSeq || state.searchTerm!==term) return;   // user kept typing — drop this stale result
+        if (!hits.length){ setSearchStatus(`No entity matches “${raw}”.`); return; }
+        const hit = hits[0];
+        setSearchStatus(`Found “${hit.name}” outside the current filters — added it to the map.`);
+        await jumpToEntity(hit.id);
+      }catch(e){ setSearchStatus("Search failed."); }
+    }
     $("f-search").addEventListener("input", (e)=>{ clearTimeout(searchT);
-      searchT=setTimeout(()=>{ state.searchTerm=e.target.value.trim().toLowerCase(); fg.nodeColor(fg.nodeColor()); }, 150); });
+      const raw = e.target.value.trim();
+      searchT=setTimeout(()=> runSearch(raw), 220); });
 
     // ---- entity drawer ----
     const dw = $("drawer"), dwBody = $("dw-body");

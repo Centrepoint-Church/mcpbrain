@@ -164,10 +164,40 @@ def test_merge_route_role_inbox_409(tmp_path):
     finally: srv.stop()
 
 
+def test_ego_route(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', first_seen TEXT DEFAULT '', last_seen TEXT DEFAULT '', "
+                   "email_count INTEGER DEFAULT 0, email_addr TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "relation TEXT, entity_b TEXT, strength REAL DEFAULT 1)")
+        db.execute("CREATE TABLE entity_communities(entity_id TEXT, community_id INTEGER, level INTEGER)")
+        db.execute("CREATE TABLE community_summaries(community_id INTEGER, level INTEGER, title TEXT, "
+                   "summary TEXT, member_count INTEGER, key_entities TEXT, updated TEXT)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('e1','Alice','person',1)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('e2','Bob','person',1)")
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,strength) "
+                   "VALUES(0,'e1','knows','e2',4)")
+    srv = ControlServer(_Daemon(), str(tmp_path), store=_Store(p)); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/ego?id=e1&hops=1", srv.token)
+        assert code == 200
+        assert {n["id"] for n in body["nodes"]} == {"e1", "e2"}   # degree 1 — canvas' default min_conn=7 would drop both
+        try:
+            _get(f"http://127.0.0.1:{srv.port}/api/graph/ego?id=nope", srv.token); assert False
+        except urllib.error.HTTPError as e: assert e.code == 404
+        try:
+            _get(f"http://127.0.0.1:{srv.port}/api/graph/ego", srv.token); assert False
+        except urllib.error.HTTPError as e: assert e.code == 400
+    finally: srv.stop()
+
+
 def test_graph_routes_503_without_store(tmp_path):
     srv = ControlServer(_Daemon(), str(tmp_path), store=None); srv.start()
     calls = [("GET", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", None),
              ("GET", f"http://127.0.0.1:{srv.port}/api/graph/search?q=x", None),
+             ("GET", f"http://127.0.0.1:{srv.port}/api/graph/ego?id=x", None),
              ("POST", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", {"org": "Y"}),
              ("POST", f"http://127.0.0.1:{srv.port}/api/graph/merge", {"loser_id": "a", "winner_id": "b"}),
              ("DELETE", f"http://127.0.0.1:{srv.port}/api/graph/entity/x", None)]
