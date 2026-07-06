@@ -173,6 +173,21 @@ class ControlServer:
                     from mcpbrain import graph_view
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
                     return h_json(self, 200, graph_view.search_entities(server.store, q))
+                if self.path.split("?")[0] == "/api/graph/ego":
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    eid = q.get("id", [""])[0]
+                    if not eid:
+                        return h_json(self, 400, {"error": "missing id"})
+                    try:
+                        hops = int(q.get("hops", ["1"])[0])
+                    except (TypeError, ValueError):
+                        hops = 1
+                    result = graph_view.graph_ego(server.store, eid, hops=hops)
+                    if result is None:
+                        return h_json(self, 404, {"error": "not found"})
+                    return h_json(self, 200, result)
                 if self.path == "/api/dashboard/today":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})

@@ -264,3 +264,70 @@ def test_search_excludes_suppressed(tmp_path):
         db.execute("INSERT INTO entities VALUES('a','Alice','person','')")
         db.execute("INSERT INTO entity_suppressions VALUES('a','x','t')")
     assert graph_view.search_entities(_Store(p), "Alice") == []
+
+
+def test_ego_includes_low_degree_entity_and_hop1_neighbour(tmp_path):
+    """graph_canvas(min_conn=7) would drop e3 entirely; graph_ego must still
+    surface it plus its direct neighbour, ignoring the degree floor."""
+    p = tmp_path / "b.sqlite3"
+    _seed(p,
+          entities=[("e1", "Alice", "person", "", 9, ""),
+                    ("e2", "Bob", "person", "", 8, ""),
+                    ("e3", "Low", "person", "", 1, "")],
+          relations=[("e1", "e2", "works_with", 5), ("e2", "e3", "knows", 3)])
+    out = graph_view.graph_ego(_Store(p), "e3", hops=1)
+    assert {n["id"] for n in out["nodes"]} == {"e2", "e3"}
+    assert out["links"] == [{"source": "e2", "target": "e3", "relation": "knows", "strength": 3}]
+
+
+def test_ego_hops_two_reaches_further(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p,
+          entities=[("e1", "Alice", "person", "", 9, ""),
+                    ("e2", "Bob", "person", "", 8, ""),
+                    ("e3", "Low", "person", "", 1, "")],
+          relations=[("e1", "e2", "works_with", 5), ("e2", "e3", "knows", 3)])
+    out = graph_view.graph_ego(_Store(p), "e3", hops=2)
+    assert {n["id"] for n in out["nodes"]} == {"e1", "e2", "e3"}
+
+
+def test_ego_hops_zero_is_just_the_entity(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, entities=[("e1", "Alice", "person", "", 9, ""), ("e2", "Bob", "person", "", 8, "")],
+          relations=[("e1", "e2", "knows", 5)])
+    out = graph_view.graph_ego(_Store(p), "e1", hops=0)
+    assert {n["id"] for n in out["nodes"]} == {"e1"}
+    assert out["links"] == []
+
+
+def test_ego_unknown_entity_is_none(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, entities=[("e1", "Alice", "person", "", 9, "")], relations=[])
+    assert graph_view.graph_ego(_Store(p), "nope") is None
+
+
+def test_ego_suppressed_entity_is_none(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, entities=[("e1", "Alice", "person", "", 9, "")], relations=[], suppressed=["e1"])
+    assert graph_view.graph_ego(_Store(p), "e1") is None
+
+
+def test_ego_without_suppressions_table(tmp_path):
+    """Mirrors test_canvas_without_suppressions_table: real stores predating the
+    suppress/delete feature must still work, not error out."""
+    p = tmp_path / "no_supp.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', first_seen TEXT DEFAULT '', last_seen TEXT DEFAULT '', "
+                   "email_count INTEGER DEFAULT 0, email_addr TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "relation TEXT, entity_b TEXT, strength REAL DEFAULT 1)")
+        db.execute("CREATE TABLE entity_communities(entity_id TEXT, community_id INTEGER, level INTEGER)")
+        db.execute("CREATE TABLE community_summaries(community_id INTEGER, level INTEGER, title TEXT, "
+                   "summary TEXT, member_count INTEGER, key_entities TEXT, updated TEXT)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('e1','Alice','person',1)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('e2','Bob','person',1)")
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,strength) "
+                   "VALUES(0,'e1','knows','e2',4)")
+    out = graph_view.graph_ego(_Store(p), "e1", hops=1)
+    assert {n["id"] for n in out["nodes"]} == {"e1", "e2"}
