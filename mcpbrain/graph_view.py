@@ -151,6 +151,105 @@ def _table_exists(db, name):
                       (name,)).fetchone() is not None
 
 
+def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
+    """One entity plus its N-hop neighbourhood, ignoring the min-connections/org/
+    type filters entirely. Used to jump to a search hit that graph_canvas()'s
+    degree floor would otherwise hide from the map. Returns None if the entity
+    is unknown or suppressed."""
+    hops = max(0, min(3, int(hops)))
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            has_supp = _table_exists(db, "entity_suppressions")
+            if has_supp and db.execute(
+                "SELECT 1 FROM entity_suppressions WHERE entity_id=?", (entity_id,)
+            ).fetchone():
+                return None
+            if db.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone() is None:
+                return None
+
+            seen = {entity_id}
+            frontier = {entity_id}
+            for _ in range(hops):
+                if not frontier or len(seen) >= _MAX_NODES:
+                    break
+                qmarks = ",".join("?" * len(frontier))
+                rows = db.execute(
+                    f"SELECT entity_a, entity_b FROM entity_relations "
+                    f"WHERE COALESCE(strength, 0) > 0 "
+                    f"AND (entity_a IN ({qmarks}) OR entity_b IN ({qmarks}))",
+                    (*frontier, *frontier)).fetchall()
+                nxt = {other for r in rows for other in (r["entity_a"], r["entity_b"])
+                       if other not in seen}
+                seen |= nxt
+                frontier = nxt
+            node_ids = list(seen)[:_MAX_NODES]
+
+            has_origin = any(row["name"] == "origin" for row in db.execute("PRAGMA table_info(entities)"))
+            origin_col = ("COALESCE(e.origin, 'local') AS origin" if has_origin
+                         else "'local' AS origin")
+            supp_join = "LEFT JOIN entity_suppressions s ON s.entity_id = e.id" if has_supp else ""
+            where_supp = "AND s.entity_id IS NULL" if has_supp else ""
+            idmarks = ",".join("?" * len(node_ids))
+            rows = db.execute(f"""
+                SELECT e.id, e.name, e.type, COALESCE(e.org, '') AS org,
+                       COALESCE(e.email_count, 0) AS email_count,
+                       COALESCE(e.email_addr, '') AS email_addr,
+                       COALESCE(e.first_seen, '') AS first_seen,
+                       COALESCE(e.last_seen, '') AS last_seen,
+                       {origin_col},
+                       ec.community_id, cs.title AS community_title,
+                       COALESCE(e.degree, 0) AS degree
+                FROM entities e
+                {supp_join}
+                LEFT JOIN (
+                    SELECT entity_id, MIN(community_id) AS community_id
+                    FROM entity_communities
+                    WHERE level = 0
+                    GROUP BY entity_id
+                ) ec ON ec.entity_id = e.id
+                LEFT JOIN community_summaries cs
+                       ON cs.community_id = ec.community_id AND cs.level = 0
+                WHERE e.id IN ({idmarks}) {where_supp}
+            """, node_ids).fetchall()
+
+            found_ids = {r["id"] for r in rows}
+            nodes = [{
+                "id": r["id"], "name": r["name"], "type": r["type"] or "person",
+                "org": r["org"], "email_count": r["email_count"],
+                "email_addr": r["email_addr"], "connections": r["degree"],
+                "community": r["community_id"],
+                "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                "origin": r["origin"],
+            } for r in rows]
+            if entity_id not in found_ids:
+                return None  # existed above, but excluded here (e.g. race with a suppress)
+
+            links = []
+            for r in db.execute(
+                "SELECT entity_a AS source, entity_b AS target, "
+                "COALESCE(relation, '') AS relation, COALESCE(strength, 1) AS strength "
+                "FROM entity_relations WHERE COALESCE(strength, 0) > 0"
+            ):
+                if r["source"] in found_ids and r["target"] in found_ids:
+                    links.append({"source": r["source"], "target": r["target"],
+                                  "relation": r["relation"], "strength": r["strength"]})
+
+            communities: dict = {}
+            for r in rows:
+                cid = r["community_id"]
+                if cid is not None and str(cid) not in communities:
+                    communities[str(cid)] = r["community_title"] or f"Community {cid}"
+
+            return {"nodes": nodes, "links": links, "communities": communities}
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        log.warning("graph_ego: read failed (%s)", exc)
+        return None
+
+
 def entity_detail(store, entity_id: str) -> dict | None:
     """Full drawer payload for one entity, or None if unknown/suppressed."""
     path = store._path if hasattr(store, "_path") else store.path
