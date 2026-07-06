@@ -53,8 +53,18 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-04):** all four version files **and** the published wheel are at
-  `0.7.89` — source, dist index, and plugin manifests are in step. **0.7.89 ships the complete
+- **Current state (2026-07-06):** all four version files **and** the published wheel are at
+  `0.7.90` — source, dist index, and plugin manifests are in step. **0.7.90 is the org-baseline
+  ACTIVATION release**: it fixes `fleet.merge_org_config` to fall back to
+  `org_defaults.FLEET_FOLDER_ID` when `fleet.folder_id` is unset (the common case) — the
+  prerequisite for the fleet-wide `org_pin` to reach installs at all (it previously early-returned
+  and reached nobody) — plus graph-explorer polish (particle/curvature/hover + search-driven ego
+  jump). With 0.7.90 deployed, the `org_pin` (fleet_secret + embed_model=bge-small, dim=384,
+  chunker_version=v1, enrich_logic_floor=1, default relation allowlist) is distributed via
+  `org-config.json` in the fleet folder, activating the org-baseline on each install's next daemon
+  start. The real-Drive read+write paths were validated live (16 shared drives enumerated;
+  export() confirmed; cache publish/import/apply + curator↔member snapshot + contribution round-trip
+  against real Drive, cleaned up). Earlier: **0.7.89 ships the complete
   org-baseline feature** (org shared graph + personal overlay): shared-drive ingest cache
   (subsystem A), curated org graph — contribution edge / curator / consumer import (B),
   onboarding baseline-bootstrap (C), a full hardening pass, real LLM fuzzy-merge adjudication via
