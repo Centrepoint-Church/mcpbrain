@@ -2,6 +2,7 @@
 
 Usage:
   python bin/consolidate.py topics            # fold the 412 topic variants
+  python bin/consolidate.py observations      # collapse duplicate role/attr observations
   python bin/consolidate.py meetings-reset    # reset meeting-source chunks
   # ... let the daemon drain/re-extract, then:
   python bin/consolidate.py meetings-retire   # fold old meeting nodes into series
@@ -35,7 +36,8 @@ def _backup_db(db_path: Path) -> Path:
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["topics", "meetings-reset", "meetings-retire"])
+    ap.add_argument("phase", choices=["topics", "observations", "relations-decay",
+                                      "meetings-reset", "meetings-retire"])
     ap.add_argument("--home", default=None)
     ns = ap.parse_args(argv)
 
@@ -54,6 +56,12 @@ def main(argv=None):
 
     if ns.phase == "topics":
         print("[consolidate] topics:", consolidate.remap_topics(store, home))
+    elif ns.phase == "observations":
+        from mcpbrain import graph_write
+        print("[consolidate] observations:", graph_write.consolidate_observations(store))
+    elif ns.phase == "relations-decay":
+        from mcpbrain import graph_write
+        print("[consolidate] relations-decay:", graph_write.decay_relations(store))
     elif ns.phase == "meetings-reset":
         out = consolidate.reset_meeting_sources(store)
         snap.write_text(json.dumps(out["pre_ids"]))

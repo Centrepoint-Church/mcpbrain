@@ -173,6 +173,14 @@ class ControlServer:
                     from mcpbrain import graph_view
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
                     return h_json(self, 200, graph_view.search_entities(server.store, q))
+                if self.path.split("?")[0] == "/api/graph/merge/preview":
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    out = graph_view.merge_preview(server.store, q.get("loser", [""])[0], q.get("winner", [""])[0])
+                    if out.get("ok"): return h_json(self, 200, out)
+                    code = 404 if out.get("error") == "not_found" else 409
+                    return h_json(self, code, out)
                 if self.path.split("?")[0] == "/api/graph/ego":
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
                     from mcpbrain import graph_view
@@ -509,7 +517,9 @@ class ControlServer:
             if h.path == "/api/graph/merge":
                 if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
                 from mcpbrain import graph_view
-                out = graph_view.merge_entities(self.store, body.get("loser_id", ""), body.get("winner_id", ""))
+                out = graph_view.merge_entities(self.store, body.get("loser_id", ""),
+                                                body.get("winner_id", ""),
+                                                name_override=body.get("name"))
                 if out.get("ok"): return h_json(h, 200, out)
                 code = 404 if out.get("error") == "not_found" else 409
                 return h_json(h, code, out)

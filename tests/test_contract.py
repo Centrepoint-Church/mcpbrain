@@ -232,14 +232,31 @@ def test_entity_types_include_topic():
     assert "topic" in ENTITY_TYPES
 
 
-def test_relation_types_include_collaborates_with():
+def test_relation_types_is_the_five_model_types():
+    """The model may emit exactly the five types the enrich prompt documents.
+    `attended` is calendar-derived (never model-emitted); `collaborates_with` was
+    a dead synonym of coordinates_with — both are excluded from the model set."""
     from mcpbrain.contract import RELATION_TYPES
-    assert "collaborates_with" in RELATION_TYPES
+    assert RELATION_TYPES == frozenset({
+        "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with"})
+    assert "collaborates_with" not in RELATION_TYPES
+    assert "attended" not in RELATION_TYPES
 
 
-def test_relation_types_include_attended():
+def test_relation_vocab_in_sync():
+    """The two model-relation allowlists must stay identical, and match the five
+    types the enrich prompt tells the model to emit — a guard against future drift
+    like the collaborates_with/attended superset this replaced."""
+    from pathlib import Path
     from mcpbrain.contract import RELATION_TYPES
-    assert "attended" in RELATION_TYPES
+    from mcpbrain.graph_write import VALID_RELATION_TYPES
+    five = {"works_at", "reports_to", "manages", "coordinates_with", "mentioned_with"}
+    assert set(RELATION_TYPES) == set(VALID_RELATION_TYPES) == five
+    prompt = (Path(__file__).resolve().parents[1] / "mcpbrain" / "enrich_prompt.md").read_text()
+    for t in five:
+        assert f"`{t}`" in prompt, f"{t} missing from enrich prompt"
+    # the removed synonym must not reappear as a documented model relation
+    assert "`collaborates_with`" not in prompt
 
 
 # --- Task 7: meeting series_name/occurrence_date entity fields --------------

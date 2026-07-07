@@ -34,7 +34,9 @@ def test_entity_types_has_expected_values():
 
 
 def test_relation_types_has_expected_values():
-    expected = {"works_at", "reports_to", "manages", "coordinates_with", "mentioned_with", "collaborates_with", "attended"}
+    # The five relation types the model may emit (attended is calendar-derived,
+    # collaborates_with was removed as a dead synonym of coordinates_with).
+    expected = {"works_at", "reports_to", "manages", "coordinates_with", "mentioned_with"}
     assert RELATION_TYPES == frozenset(expected)
 
 

@@ -178,8 +178,9 @@ Entities and relations are the part most worth getting right.
     - `coordinates_with` — person collaborates with another person/org/project
     - `mentioned_with` — two entities co-mentioned without a stronger relation
   The system already derives `works_at` deterministically for every message
-  sender from their header email's domain, and `mentioned_with` between every
-  pair of message senders in the thread — do NOT re-emit those; it would only
+  sender from their header email's domain, `mentioned_with` between every
+  pair of message senders in the thread, and `attended` from calendar events —
+  do NOT re-emit those (and never emit `attended` yourself); it would only
   duplicate provenance-backed edges the daemon already writes. What you SHOULD
   still emit:
     - `works_at` — only when the body states an affiliation for someone who is
@@ -191,6 +192,14 @@ Entities and relations are the part most worth getting right.
       NOT both message senders (the system already covers sender-pairs).
   Any other relation type will be silently dropped. Emit only relations the
   text explicitly supports; skip rather than guess.
+- **Relation strength — prefer the specific over the weak.** A relation grows
+  stronger each time it recurs across messages, and the graph ranks and prunes
+  by that strength: a weak one-off `mentioned_with` that is never reinforced is
+  eventually decayed away, while a specific tie that keeps recurring rises to the
+  top. So always emit the MOST specific relation the text supports
+  (`reports_to`/`manages`/`coordinates_with`/`works_at`) rather than settling for
+  `mentioned_with`, and reserve `mentioned_with` for a genuine co-mention with no
+  stronger tie. Do not pad the graph with speculative weak edges.
 - **Observations.** `role` on an entity is a snapshot of their CURRENT title,
   not a dated history — use `observations` for a dated, attributable fact
   about an already-listed entity that a snapshot or a relation can't carry.
@@ -207,6 +216,12 @@ Entities and relations are the part most worth getting right.
   "project_membership", "value": ..., "date": "YYYY-MM-DD"}`. `entity_name`
   must match an entity you already listed in `entities`, verbatim. Emit only
   when the text explicitly supports a dated fact; skip rather than guess.
+  Emit each distinct fact once per extraction — do not repeat the same
+  observation multiple times. Re-stating a fact you have reported before in an
+  earlier thread is fine: the system consolidates identical observations onto a
+  single record and counts the repeats as confirming confidence, so there is no
+  penalty for a fact recurring across threads and no value in restating it within
+  one extraction.
 - **Grounding.** Every entity name and every relation endpoint name must appear
   in the source text (the email/document you are extracting from). Do not
   fabricate names that are not present in the messages. Add a short
