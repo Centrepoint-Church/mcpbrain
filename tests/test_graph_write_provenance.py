@@ -415,6 +415,98 @@ def test_observation_written_and_superseded_by_later_date(tmp_path):
     assert not new_row[1], "the new (CEO) row must be current (no valid_to)"
 
 
+def test_identical_observation_from_many_sources_consolidates(tmp_path):
+    """The 'role x20' fix: the same (entity, attribute, value) reported by many
+    different sources collapses onto ONE active row whose observed_count tracks
+    the confirmations — not 20 rows."""
+    s = _store(tmp_path)
+    _seed_entity(s, "sam")
+    for i in range(20):
+        graph_write.write_observation(s, "sam", "role", "Operations Manager",
+                                      f"source_{i}", f"2026-01-{i+1:02d}", "llm_extraction")
+    with s._connect() as db:
+        rows = db.execute(
+            "SELECT observed_count, last_seen FROM entity_observations "
+            "WHERE entity_id='sam' AND attribute='role' AND valid_to IS NULL").fetchall()
+    assert len(rows) == 1, f"expected one consolidated row, got {len(rows)}"
+    assert rows[0]["observed_count"] == 20
+    assert rows[0]["last_seen"] == "2026-01-20"   # most recent sighting tracked
+
+
+def test_distinct_values_stay_separate(tmp_path):
+    """Consolidation must not fuse genuinely different values — a real role change
+    still produces distinct rows (history), not a bumped count."""
+    s = _store(tmp_path)
+    _seed_entity(s, "sam")
+    graph_write.write_observation(s, "sam", "skill", "Python", "src1", "2026-01-01", "llm_extraction")
+    graph_write.write_observation(s, "sam", "skill", "SQL", "src2", "2026-01-02", "llm_extraction")
+    with s._connect() as db:
+        vals = {r["value"] for r in db.execute(
+            "SELECT value FROM entity_observations WHERE entity_id='sam' AND attribute='skill'")}
+    assert vals == {"Python", "SQL"}
+
+
+def test_consolidate_observations_backfill(tmp_path):
+    """The one-shot backfill collapses pre-existing duplicate rows (written before
+    write-time consolidation) the same way, and is idempotent."""
+    s = _store(tmp_path)
+    _seed_entity(s, "sam")
+    # Simulate legacy bloat: 5 identical active rows, one distinct value.
+    with s._connect() as db:
+        for i in range(5):
+            db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                       "VALUES('sam','role','Ops Manager',?,?)", (f"s{i}", f"2026-02-0{i+1}"))
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
+                   "VALUES('sam','role','Director','sx','2025-01-01')")
+    out = graph_write.consolidate_observations(s)
+    assert out["groups_consolidated"] == 1 and out["rows_removed"] == 4
+    with s._connect() as db:
+        rows = db.execute("SELECT value, observed_count, last_seen FROM entity_observations "
+                          "WHERE entity_id='sam' AND value='Ops Manager'").fetchall()
+        director = db.execute("SELECT COUNT(*) n FROM entity_observations WHERE value='Director'").fetchone()["n"]
+    assert len(rows) == 1 and rows[0]["observed_count"] == 5 and rows[0]["last_seen"] == "2026-02-05"
+    assert director == 1     # distinct value untouched
+    # idempotent: second run finds nothing to do
+    assert graph_write.consolidate_observations(s)["rows_removed"] == 0
+
+
+def test_relation_strength_grows_on_reobservation(tmp_path):
+    """Re-observing a relation bumps strength (a frequency signal), so the graph
+    can weight/rank by it. A one-off stays at 1; a repeated tie climbs."""
+    s = _store(tmp_path)
+    _seed_entity(s, "a", name="A"); _seed_entity(s, "b", name="B")
+    for d in ("2026-01-01", "2026-02-01", "2026-03-01"):
+        graph_write.upsert_relation(s, "a", "works_with", "b", valid_from=d)
+    with s._connect() as db:
+        row = db.execute("SELECT strength FROM entity_relations "
+                         "WHERE entity_a='a' AND relation='works_with' AND entity_b='b'").fetchone()
+    assert row["strength"] == 3   # 1 insert + 2 re-observations
+
+
+def test_decay_relations_culls_stale_weak_only(tmp_path):
+    """decay zeroes strength on weak+stale relations (dropping them from the
+    graph) but leaves strong or recent ones alone."""
+    s = _store(tmp_path)
+    for n in ("a", "b", "c", "d"):
+        _seed_entity(s, n, name=n.upper())
+    with s._connect() as db:
+        # weak + stale -> should decay
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen) "
+                   "VALUES('a','involved_in','b',1,'2023-01-01')")
+        # weak but recent -> keep
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen) "
+                   "VALUES('a','involved_in','c',1,'2026-06-01')")
+        # stale but strong -> keep
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen) "
+                   "VALUES('a','involved_in','d',9,'2023-01-01')")
+    out = graph_write.decay_relations(s, stale_days=365, weak_max=1, as_of="2026-07-01")
+    assert out["relations_decayed"] == 1
+    with s._connect() as db:
+        kept = {r["entity_b"] for r in db.execute(
+            "SELECT entity_b FROM entity_relations WHERE COALESCE(strength,0) > 0")}
+    assert kept == {"c", "d"}   # b (weak+stale) culled; c (recent) + d (strong) survive
+
+
 def test_write_observation_skips_role_guards_for_non_role_attribute():
     """write_observation, called directly (not through apply()), must NOT apply
     the role-specific junk-value/source-rank guards to a non-role attribute.

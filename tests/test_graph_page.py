@@ -56,7 +56,11 @@ def test_graph_html_has_expected_hooks():
                    'id="f-layout"', 'zoomToFit',
                    'id="legend"', '__MCPBRAIN_TOKEN__',
                    'id="drawer"', '/api/graph/entity/', '/api/graph/search',
-                   '/api/graph/merge', 'openDrawer']:
+                   '/api/graph/merge', 'openDrawer',
+                   'id="f-hits"', 'id="f-type"', '/api/graph/ego',
+                   'renderTypeChips', 'obsList',
+                   '/api/graph/merge/preview', 'showMergePreview', 'setHitActive',
+                   'strengthWidth']:
         assert marker in html, f"missing: {marker}"
 
 

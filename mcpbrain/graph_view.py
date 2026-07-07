@@ -282,8 +282,11 @@ def entity_detail(store, entity_id: str) -> dict | None:
                                   "relation": r["relation"], "strength": r["strength"], "direction": "in"})
             obs = []
             if _table_exists(db, "entity_observations"):
+                eo_cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_observations)")}
+                count_col = "COALESCE(observed_count,1) AS observed_count" if "observed_count" in eo_cols else "1 AS observed_count"
+                last_col = "last_seen" if "last_seen" in eo_cols else "NULL AS last_seen"
                 obs = [dict(o) for o in db.execute(
-                    "SELECT attribute, value, valid_from, valid_to, source "
+                    f"SELECT attribute, value, valid_from, valid_to, source, {count_col}, {last_col} "
                     "FROM entity_observations WHERE entity_id=? "
                     "ORDER BY COALESCE(valid_from,'') DESC, id DESC", (entity_id,)).fetchall()]
             return {
@@ -301,7 +304,12 @@ def entity_detail(store, entity_id: str) -> dict | None:
 
 
 def search_entities(store, q: str, limit: int = 10) -> list[dict]:
-    """Name search for the merge type-ahead. [] on blank q; excludes suppressed."""
+    """Ranked entity search for the graph search box + merge type-ahead.
+
+    Matches on name AND aliases (so a merged-away name still finds its survivor),
+    ranked exact > name-prefix > name-contains > alias-only, then by connectivity
+    (degree) so the most important match surfaces first. Returns degree and a
+    `via_alias` flag for display. [] on blank q; excludes suppressed."""
     q = (q or "").strip()
     if not q:
         return []
@@ -309,19 +317,31 @@ def search_entities(store, q: str, limit: int = 10) -> list[dict]:
     try:
         db = _open_ro(Path(path))
         try:
+            ent_cols = {r["name"] for r in db.execute("PRAGMA table_info(entities)")}
+            alias_col = "COALESCE(e.aliases,'')" if "aliases" in ent_cols else "''"
+            degree_col = "COALESCE(e.degree,0)" if "degree" in ent_cols else "0"
             supp = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
                     if _table_exists(db, "entity_suppressions") else "")
             where_supp = "AND s.entity_id IS NULL" if supp else ""
             # Escape LIKE wildcards so a query containing % or _ matches literally.
             qesc = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = db.execute(
-                f"SELECT e.id, e.name, e.type, COALESCE(e.org,'') AS org "
+                f"SELECT e.id, e.name, e.type, COALESCE(e.org,'') AS org, "
+                f"       {degree_col} AS degree, "
+                f"       (lower(e.name) NOT LIKE :contains ESCAPE '\\') AS via_alias, "
+                f"       CASE WHEN lower(e.name) = lower(:exact) THEN 0 "
+                f"            WHEN lower(e.name) LIKE :prefix ESCAPE '\\' THEN 1 "
+                f"            WHEN lower(e.name) LIKE :contains ESCAPE '\\' THEN 2 "
+                f"            ELSE 3 END AS rank "
                 f"FROM entities e {supp} "
-                f"WHERE lower(e.name) LIKE :q ESCAPE '\\' {where_supp} "
-                f"ORDER BY (lower(e.name)=lower(:exact)) DESC, length(e.name) ASC "
+                f"WHERE (lower(e.name) LIKE :contains ESCAPE '\\' "
+                f"       OR lower({alias_col}) LIKE :contains ESCAPE '\\') {where_supp} "
+                f"ORDER BY rank ASC, degree DESC, length(e.name) ASC "
                 f"LIMIT :lim",
-                {"q": f"%{qesc}%", "exact": q, "lim": int(limit)}).fetchall()
-            return [dict(r) for r in rows]
+                {"contains": f"%{qesc}%", "prefix": f"{qesc}%", "exact": q,
+                 "lim": int(limit)}).fetchall()
+            return [{"id": r["id"], "name": r["name"], "type": r["type"], "org": r["org"],
+                     "degree": r["degree"], "via_alias": bool(r["via_alias"])} for r in rows]
         finally:
             db.close()
     except sqlite3.OperationalError as exc:
@@ -350,8 +370,72 @@ def update_entity(store, entity_id: str, *, name=None, org=None,
     return entity_detail(store, entity_id)
 
 
-def merge_entities(store, loser_id: str, winner_id: str) -> dict:
-    """Merge loser into winner, guarded. Refuses self-merge and role-inbox pairs."""
+def _merge_score(entity: dict) -> tuple:
+    """Connectivity rank for choosing a merge survivor: most relations wins,
+    ties broken by mention count. Mirrors ops-brain's degree-first heuristic."""
+    return (entity.get("degree") or 0, entity.get("mentions") or 0)
+
+
+def _is_proper_name(name: str) -> int:
+    return 1 if " " in (name or "").strip() else 0
+
+
+def _best_name(winner: dict, loser: dict) -> str:
+    """Pick the better display name across the two entities, independent of which
+    id survives: prefer a 'proper' full name (has a space), then the longer one,
+    tie to the winner's. So merging never downgrades 'Josh Kemp' to 'J.K.'."""
+    wn, ln = (winner.get("name") or "").strip(), (loser.get("name") or "").strip()
+    if not wn:
+        return ln
+    if not ln:
+        return wn
+    if _is_proper_name(ln) != _is_proper_name(wn):
+        return ln if _is_proper_name(ln) > _is_proper_name(wn) else wn
+    return ln if len(ln) > len(wn) else wn
+
+
+def _best_email(winner: dict, loser: dict) -> str:
+    """Prefer a real (non-empty, non-role) address; the winner's if both real."""
+    from mcpbrain.resolve import is_role_address
+    we, le = (winner.get("email_addr") or "").strip(), (loser.get("email_addr") or "").strip()
+    real = lambda e: bool(e) and not is_role_address(e)
+    if real(we):
+        return we
+    if real(le):
+        return le
+    return we or le
+
+
+def _merge_notes(winner: dict, loser: dict) -> str:
+    """Union of both entities' note lines (winner first), de-duped, nothing lost."""
+    out, seen = [], set()
+    for src in (winner.get("notes") or "", loser.get("notes") or ""):
+        for line in src.split("\n"):
+            key = line.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def _merge_result(winner: dict, loser: dict, name_override: str | None = None) -> dict:
+    """Field-level best-of result of merging loser into winner. Each field is
+    taken from whichever side has the better value, not blindly from the winner."""
+    org = winner.get("org") or ""
+    if org.strip().lower() in ("", "unknown"):
+        org = loser.get("org") or org
+    return {
+        "name": (name_override or "").strip() or _best_name(winner, loser),
+        "type": winner.get("type") or loser.get("type") or "person",
+        "org": org,
+        "email_addr": _best_email(winner, loser),
+        "notes": _merge_notes(winner, loser),
+    }
+
+
+def _orient(store, loser_id: str, winner_id: str):
+    """Shared guard + connectivity orientation for merge/preview. Returns
+    (winner, loser) dicts, or a dict with an error for the caller to return."""
     from mcpbrain.resolve import is_role_address
     if loser_id == winner_id:
         return {"ok": False, "error": "self_merge",
@@ -363,10 +447,52 @@ def merge_entities(store, loser_id: str, winner_id: str) -> dict:
         return {"ok": False, "error": "role_inbox",
                 "message": "One of these is keyed on a shared/role inbox "
                            "(e.g. office@) — merging could fuse distinct people. Refused."}
-    store.merge_entities(loser_id, winner_id)
-    store.record_change("entity_merged", ref_id=winner_id,
-                        summary=f"merged {loser_id} into {winner_id}")
-    return {"ok": True}
+    # Keep the caller's winner unless the loser is STRICTLY more connected.
+    if _merge_score(loser) > _merge_score(winner):
+        winner, loser = loser, winner
+    return winner, loser
+
+
+def merge_preview(store, loser_id: str, winner_id: str) -> dict:
+    """Dry-run a merge: which entity survives + the field-level best-of result,
+    without mutating anything. Lets the UI show the outcome before confirming."""
+    oriented = _orient(store, loser_id, winner_id)
+    if isinstance(oriented, dict):
+        return oriented
+    winner, loser = oriented
+    return {"ok": True,
+            "winner_id": winner["id"], "winner_name": winner["name"],
+            "winner_conn": winner.get("degree") or 0,
+            "loser_id": loser["id"], "loser_name": loser["name"],
+            "loser_conn": loser.get("degree") or 0,
+            "result": _merge_result(winner, loser)}
+
+
+def merge_entities(store, loser_id: str, winner_id: str, name_override: str | None = None) -> dict:
+    """Merge two entities, guarded. Refuses self-merge and role-inbox pairs.
+
+    The survivor is oriented by connectivity (the more-connected node keeps its
+    id + relations), but every FIELD is reconciled best-of across both sides —
+    the better name, a real email over a role/blank one, unioned notes — so
+    nothing worth keeping is dropped. `name_override` lets the user set the final
+    name from the merge preview. Returns the surviving id + resolved fields.
+    """
+    oriented = _orient(store, loser_id, winner_id)
+    if isinstance(oriented, dict):
+        return oriented
+    winner, loser = oriented
+    result = _merge_result(winner, loser, name_override)
+    store.merge_entities(loser["id"], winner["id"], canonical_name=result["name"])
+    # store.merge_entities reconciles name/org/aliases/mentions but not email or
+    # notes — apply the best-of values for those explicitly onto the survivor.
+    if result["email_addr"] and result["email_addr"] != (winner.get("email_addr") or ""):
+        store.set_entity_email(winner["id"], result["email_addr"])
+    if result["notes"] and result["notes"] != (winner.get("notes") or ""):
+        store.set_entity_notes(winner["id"], result["notes"])
+    store.record_change("entity_merged", ref_id=winner["id"],
+                        summary=f"merged {loser['id']} into {winner['id']}")
+    return {"ok": True, "winner_id": winner["id"], "winner_name": result["name"],
+            "loser_id": loser["id"], "loser_name": loser["name"], "result": result}
 
 
 def suppress_entity(store, entity_id: str) -> dict:

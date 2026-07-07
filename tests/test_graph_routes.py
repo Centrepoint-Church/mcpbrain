@@ -50,6 +50,30 @@ def test_canvas_route_returns_nodes(tmp_path):
         srv.stop()
 
 
+def test_canvas_route_multi_type(tmp_path):
+    """Repeated ?type= params union together — the multi-select type-chip contract."""
+    p = tmp_path / "b.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', first_seen TEXT DEFAULT '', last_seen TEXT DEFAULT '', "
+                   "email_count INTEGER DEFAULT 0, email_addr TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "relation TEXT, entity_b TEXT, strength REAL DEFAULT 1)")
+        db.execute("CREATE TABLE entity_communities(entity_id TEXT, community_id INTEGER, level INTEGER)")
+        db.execute("CREATE TABLE community_summaries(community_id INTEGER, level INTEGER, title TEXT, "
+                   "summary TEXT, member_count INTEGER, key_entities TEXT, updated TEXT)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('p','Al','person',9)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('o','Acme','org',9)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('t','Budgets','topic',9)")
+    srv = ControlServer(_Daemon(), str(tmp_path), store=_Store(p)); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/canvas?min_conn=1&type=person&type=org", srv.token)
+        assert code == 200
+        assert {n["id"] for n in body["nodes"]} == {"p", "o"}   # topic excluded, person+org unioned
+    finally:
+        srv.stop()
+
+
 def test_canvas_route_413_when_too_large(tmp_path):
     p = tmp_path / "b.sqlite3"; _seed(p, n_entities=5001)
     srv = ControlServer(_Daemon(), str(tmp_path), store=_Store(p)); srv.start()
@@ -146,6 +170,17 @@ def test_delete_route(tmp_path):
     try:
         code, body = _req(f"http://127.0.0.1:{srv.port}/api/graph/entity/al", srv.token, "DELETE")
         assert code == 200 and body["ok"] is True
+    finally: srv.stop()
+
+def test_merge_preview_route(tmp_path):
+    s = _rw(tmp_path); srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/merge/preview?loser=al&winner=alice", srv.token)
+        assert code == 200 and body["ok"] and "result" in body
+        assert s.get_entity("al") is not None   # preview didn't mutate
+        try:
+            _get(f"http://127.0.0.1:{srv.port}/api/graph/merge/preview?loser=alice&winner=alice", srv.token); assert False
+        except urllib.error.HTTPError as e: assert e.code == 409   # self-merge guard
     finally: srv.stop()
 
 
