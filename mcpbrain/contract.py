@@ -31,12 +31,15 @@ from mcpbrain.chunking import _VALID_CONTENT_TYPES
 # can use 'in' without a function call.
 ENTITY_TYPES: frozenset[str] = frozenset({"person", "org", "project", "meeting", "event", "topic"})
 
-# Closed relation type set. Matches VALID_RELATION_TYPES in graph_write.py; defined
-# here so contract.py can sanitize off-schema relation types before apply() ever
-# sees them — earlier rejection than the apply-time filter.
+# Closed set of the relation types the MODEL may emit — exactly the five the enrich
+# prompt documents. Matches VALID_RELATION_TYPES in graph_write.py; defined here so
+# contract.py can sanitize off-schema relation types before apply() ever sees them —
+# earlier rejection than the apply-time filter. `attended` is NOT here: it is written
+# deterministically from calendar attendees (sync/calendar.py), never by the model.
+# `collaborates_with` was a stray synonym of coordinates_with, written by nothing —
+# removed so the model can't mint a duplicate relation vocabulary.
 RELATION_TYPES: frozenset[str] = frozenset({
     "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
-    "collaborates_with", "attended",
 })
 
 

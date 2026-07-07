@@ -93,6 +93,8 @@ def test_canvas_org_and_type_filters(tmp_path):
           relations=[])
     assert {n["id"] for n in graph_view.graph_canvas(_Store(p), min_conn=1, org="Acme")["nodes"]} == {"e1", "e2"}
     assert {n["id"] for n in graph_view.graph_canvas(_Store(p), min_conn=1, types=["person"])["nodes"]} == {"e1", "e3"}
+    # multi-select: several types union together (the type-chip filter's contract)
+    assert {n["id"] for n in graph_view.graph_canvas(_Store(p), min_conn=1, types=["person","org"])["nodes"]} == {"e1", "e2", "e3"}
 
 
 def test_canvas_communities(tmp_path):
@@ -188,6 +190,28 @@ def test_search_entities(tmp_path):
     ids = {r["id"] for r in graph_view.search_entities(_Store(p), "a")}
     assert "e1" in ids and "e3" in ids          # Alice, Acme
     assert graph_view.search_entities(_Store(p), "") == []
+    assert all("degree" in r for r in graph_view.search_entities(_Store(p), "a"))  # degree returned
+
+def test_search_ranks_exact_then_prefix_then_degree(tmp_path):
+    p = tmp_path / "rank.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', aliases TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("INSERT INTO entities VALUES('c','Big Alexander','person','','',99)")  # contains (not prefix), high degree
+        db.execute("INSERT INTO entities VALUES('b','Alex Jones','person','','',1)")      # prefix 'Alex '
+        db.execute("INSERT INTO entities VALUES('a','Alex','person','','',1)")            # exact
+    order = [r["id"] for r in graph_view.search_entities(_Store(p), "Alex")]
+    assert order[0] == "a"        # exact wins
+    assert order.index("b") < order.index("c")   # prefix beats a higher-degree contains-only match
+
+def test_search_matches_aliases(tmp_path):
+    p = tmp_path / "alias.sqlite3"
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT, "
+                   "org TEXT DEFAULT '', aliases TEXT DEFAULT '', degree INTEGER DEFAULT 0)")
+        db.execute("INSERT INTO entities VALUES('jk','Josh Kemp','person','','J. Kemp|JK',5)")
+    hits = graph_view.search_entities(_Store(p), "J. Kemp")   # old, merged-away name
+    assert hits and hits[0]["id"] == "jk" and hits[0]["via_alias"] is True
 
 
 def _rw_store(tmp_path):
@@ -213,9 +237,66 @@ def test_update_entity_unknown(tmp_path):
 
 def test_merge_ok(tmp_path):
     s = _rw_store(tmp_path)
-    out = graph_view.merge_entities(s, "al", "alice")
+    out = graph_view.merge_entities(s, "al", "alice")   # equal connectivity -> caller's winner honoured
     assert out["ok"] is True
     assert s.get_entity("al") is None and s.get_entity("alice") is not None
+    assert out["winner_id"] == "alice" and out["loser_id"] == "al"
+
+def test_merge_keeps_more_connected_regardless_of_arg_order(tmp_path):
+    """The survivor is the more-connected entity even when it's passed as the
+    loser — picking either side in the UI must not throw away the richer node."""
+    s = _rw_store(tmp_path)
+    with s._connect() as db:
+        db.execute("UPDATE entities SET degree=25 WHERE id='al'")     # 'al' is the hub
+        db.execute("UPDATE entities SET degree=2 WHERE id='alice'")
+    # Caller nominates the small node ('alice') as winner; degree must override.
+    out = graph_view.merge_entities(s, "al", "alice")
+    assert out["ok"] is True
+    assert out["winner_id"] == "al" and out["loser_id"] == "alice"
+    assert s.get_entity("al") is not None and s.get_entity("alice") is None
+    assert "Alice" in (s.get_entity("al")["aliases"] or "").split("|")  # loser name kept as alias
+
+def test_merge_tie_honours_caller_pick(tmp_path):
+    s = _rw_store(tmp_path)
+    with s._connect() as db:
+        db.execute("UPDATE entities SET degree=5 WHERE id IN ('al','alice')")  # equal
+    out = graph_view.merge_entities(s, "alice", "al")   # caller keeps 'al'
+    assert out["winner_id"] == "al" and s.get_entity("alice") is None
+
+def test_merge_field_level_best_of(tmp_path):
+    """Survivor id follows degree, but each field is taken best-of: the fuller
+    name, a real email over a blank one, and unioned notes — nothing dropped."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "m.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        # 'jk' is the hub (more connected) but has the worse name + no email/notes.
+        db.execute("INSERT INTO entities(id,name,type,org,email_addr,notes,degree) "
+                   "VALUES('jk','JK','person','',' ',NULL,20)")
+        db.execute("INSERT INTO entities(id,name,type,org,email_addr,notes,degree) "
+                   "VALUES('josh','Josh Kemp','person','Acme','josh@acme.com','vip client',2)")
+    out = graph_view.merge_entities(s, "josh", "jk")   # caller nominates hub 'jk' as winner
+    assert out["ok"] and out["winner_id"] == "jk"       # hub survives (id stable)
+    kept = s.get_entity("jk")
+    assert kept["name"] == "Josh Kemp"                   # fuller name won, not 'JK'
+    assert kept["email_addr"] == "josh@acme.com"         # real email pulled from loser
+    assert "vip client" in (kept["notes"] or "")         # notes carried over
+    assert kept["org"] == "Acme"                          # non-empty org filled in
+    assert s.get_entity("josh") is None
+
+def test_merge_preview_is_non_mutating(tmp_path):
+    s = _rw_store(tmp_path)
+    with s._connect() as db:
+        db.execute("UPDATE entities SET degree=9 WHERE id='alice'")
+        db.execute("UPDATE entities SET degree=1 WHERE id='al'")
+    p = graph_view.merge_preview(s, "al", "alice")
+    assert p["ok"] and p["winner_id"] == "alice" and p["loser_id"] == "al"
+    assert "name" in p["result"] and "email_addr" in p["result"]
+    assert s.get_entity("al") is not None and s.get_entity("alice") is not None  # nothing changed
+
+def test_merge_name_override(tmp_path):
+    s = _rw_store(tmp_path)
+    out = graph_view.merge_entities(s, "al", "alice", name_override="Alice Cooper")
+    assert out["ok"] and s.get_entity("alice")["name"] == "Alice Cooper"
 
 def test_merge_self_refused(tmp_path):
     s = _rw_store(tmp_path)

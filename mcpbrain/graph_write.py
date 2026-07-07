@@ -302,6 +302,27 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
                 ).fetchone():
                     return
 
+        # Consolidate identical re-observations ACROSS sources: if this exact
+        # (entity, attribute, value) is already current, bump its confirmation
+        # count + last_seen instead of inserting another row. This is why an
+        # entity no longer ends up with 20 identical 'role' rows — the count on
+        # the single row becomes a confidence signal ("confirmed by N sources").
+        dup = conn.execute(
+            "SELECT id, observed_count, last_seen, valid_from FROM entity_observations "
+            "WHERE entity_id = ? AND attribute = ? AND value = ? AND valid_to IS NULL "
+            "AND (invalidated_at IS NULL OR invalidated_at = '') ORDER BY id LIMIT 1",
+            (entity_id, attribute, value),
+        ).fetchone()
+        if dup:
+            cur_last = dup["last_seen"] or dup["valid_from"] or ""
+            new_last = valid_from if valid_from > cur_last else cur_last
+            conn.execute(
+                "UPDATE entity_observations "
+                "SET observed_count = COALESCE(observed_count, 1) + 1, last_seen = ? WHERE id = ?",
+                (new_last, dup["id"]),
+            )
+            return
+
         existing = conn.execute(
             "SELECT value FROM entity_observations "
             "WHERE entity_id = ? AND attribute = ? AND source = ? AND valid_to IS NULL",
@@ -328,9 +349,9 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
         ).fetchone()[0]
         conn.execute(
             "INSERT INTO entity_observations "
-            "(entity_id, attribute, value, source, valid_from, valid_to, confidence_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (entity_id, attribute, value, source, valid_from, newer, confidence),
+            "(entity_id, attribute, value, source, valid_from, valid_to, confidence_source, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (entity_id, attribute, value, source, valid_from, newer, confidence, valid_from),
         )
 
 
@@ -345,6 +366,44 @@ def write_role_observation(store, entity_id: str, title: str, source: str,
     write_observation(store, entity_id, "role", title, source, valid_from, confidence)
 
 
+def consolidate_observations(store) -> dict:
+    """One-shot backfill: collapse pre-existing duplicate observations so stores
+    written before write-time consolidation get the same tidy shape.
+
+    For each (entity_id, attribute, value) group of *current* rows (valid_to
+    NULL, not invalidated), keep the earliest row, set its observed_count to the
+    group size and last_seen to the group's max date, and delete the rest.
+    Historical/retired rows are left untouched. Returns counts. Idempotent."""
+    removed = groups = 0
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT id, entity_id, attribute, value, valid_from, last_seen "
+            "FROM entity_observations "
+            "WHERE valid_to IS NULL AND (invalidated_at IS NULL OR invalidated_at = '') "
+            "ORDER BY entity_id, attribute, value, valid_from, id"
+        ).fetchall()
+        buckets: dict = {}
+        for r in rows:
+            buckets.setdefault((r["entity_id"], r["attribute"], r["value"]), []).append(r)
+        for members in buckets.values():
+            if len(members) < 2:
+                continue
+            groups += 1
+            keep = members[0]
+            last = max((m["last_seen"] or m["valid_from"] or "") for m in members)
+            conn.execute(
+                "UPDATE entity_observations SET observed_count = ?, last_seen = ? WHERE id = ?",
+                (len(members), last, keep["id"]),
+            )
+            loser_ids = [m["id"] for m in members[1:]]
+            conn.executemany(
+                "DELETE FROM entity_observations WHERE id = ?",  # admin-delete-ok
+                [(i,) for i in loser_ids],
+            )
+            removed += len(loser_ids)
+    return {"groups_consolidated": groups, "rows_removed": removed}
+
+
 # ---------------------------------------------------------------------------
 # Bitemporal relation upsert (ported from bitemporal_writer.py + relation_kinds.py)
 # ---------------------------------------------------------------------------
@@ -352,7 +411,7 @@ def write_role_observation(store, entity_id: str, title: str, source: str,
 SINGLETON_RELATIONS = frozenset({"reports_to", "works_at"})
 ACCUMULATING_RELATIONS = frozenset({
     "manages", "coordinates_with", "mentioned_with", "attended", "involved_in",
-    "authored", "instance_of", "collaborates_with",
+    "authored", "instance_of",
 })
 
 CONFIDENCE_BUMP = 0.05
@@ -388,13 +447,44 @@ def _mark_superseded(conn, relation_id, *, valid_to, invalidated_at, reason,
 
 
 def _bump_observation(conn, relation_id, *, last_seen, confidence_delta):
+    # strength counts how many times a relation has been observed — it grows by 1
+    # on every re-observation (confidence saturates at 1.0, so it can't serve as a
+    # frequency signal). This makes strength the weight the graph ranks/culls by:
+    # a relation seen 30× outranks a one-off, and the link cap keeps the strong ones.
     conn.execute(
         "UPDATE entity_relations "
         "SET last_seen = ?, "
-        "    confidence = MIN(1.0, MAX(0.0, COALESCE(confidence, 1.0) + ?)) "
+        "    confidence = MIN(1.0, MAX(0.0, COALESCE(confidence, 1.0) + ?)), "
+        "    strength = COALESCE(strength, 1) + 1 "
         "WHERE id = ?",
         (last_seen, confidence_delta, relation_id),
     )
+
+
+def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
+                    as_of: str | None = None) -> dict:
+    """Tidy stale, low-signal relations so hub nodes stop being hairballs.
+
+    A relation that is BOTH weak (strength <= weak_max, i.e. seen once or twice)
+    AND stale (last_seen older than stale_days) is a one-off co-occurrence that no
+    longer earns a graph edge — its strength is zeroed (so graph_canvas, which
+    keeps only strength > 0, drops it) and it's marked superseded_reason='decayed'.
+    Frequently-seen or recent relations are never touched, however old. Returns a
+    count. Reversible from a DB backup; idempotent (zeroed rows won't re-match)."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc) if as_of is None else datetime.fromisoformat(as_of)
+    cutoff = (now - timedelta(days=int(stale_days))).strftime("%Y-%m-%d")
+    stamp = now.strftime("%Y-%m-%d")
+    with store._connect() as conn:
+        cur = conn.execute(
+            "UPDATE entity_relations "
+            "SET strength = 0, valid_to = COALESCE(valid_to, ?), superseded_reason = 'decayed' "
+            "WHERE COALESCE(strength, 1) > 0 AND COALESCE(strength, 1) <= ? "
+            "AND COALESCE(last_seen, valid_from, '') <> '' "
+            "AND COALESCE(last_seen, valid_from) < ?",
+            (stamp, int(weak_max), cutoff),
+        )
+        return {"relations_decayed": cur.rowcount}
 
 
 def _backfill_provenance_if_empty(conn, relation_id, *, source_doc_id, valid_from):
@@ -539,10 +629,13 @@ SYSTEM_LABELS = {
     "CATEGORY_UPDATES", "CATEGORY_FORUMS",
 }
 
-# Relation types the structural pass accepts. Mirrors RELATION_TYPES in contract.py.
+# Relation types the MODEL may emit — the five the enrich prompt documents.
+# Mirrors RELATION_TYPES in contract.py (kept identical; test_relation_vocab_in_sync
+# guards the pair). `attended` is written only by the deterministic calendar path
+# (sync/calendar.py calls upsert_relation directly, bypassing this filter), so it is
+# not accepted from the model here. `collaborates_with` was a dead synonym, removed.
 VALID_RELATION_TYPES = {
     "works_at", "reports_to", "manages", "coordinates_with", "mentioned_with",
-    "collaborates_with", "attended",
 }
 
 # Endpoint-type constraints for the person-centric relations. The LLM over-applies

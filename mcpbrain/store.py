@@ -433,6 +433,16 @@ class Store:
             # (entity_id, attribute) at once; rank is resolved at read time.
             db.execute("CREATE INDEX IF NOT EXISTS idx_eo_entity_attr "
                        "ON entity_observations(entity_id, attribute) WHERE valid_to IS NULL")
+            # Write-time consolidation columns: identical re-observations of the
+            # same (entity, attribute, value) across sources collapse onto one
+            # active row that counts confirmations (observed_count) and tracks the
+            # most recent sighting (last_seen), instead of a row per source.
+            # ALTER idiom (const defaults only) so populated stores migrate in place.
+            eo_cols = {row["name"] for row in db.execute("PRAGMA table_info(entity_observations)").fetchall()}
+            if "observed_count" not in eo_cols:
+                db.execute("ALTER TABLE entity_observations ADD COLUMN observed_count INTEGER DEFAULT 1")
+            if "last_seen" not in eo_cols:
+                db.execute("ALTER TABLE entity_observations ADD COLUMN last_seen TEXT")
 
             # --- entity merge audit (R4) ----------------------------------
             # IF NOT EXISTS so init() also back-fills the table on existing stores.
