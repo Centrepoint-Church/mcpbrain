@@ -215,6 +215,16 @@ def run_consent_flow(
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(creds.to_json())
     _secure_token_file(token_file)
+    # Refresh the connection-status cache immediately so a successful re-auth
+    # doesn't keep showing a stale "Sign-in expired" (connections.json otherwise
+    # only updates on the daemon's periodic network verify, so the token file is
+    # valid but the UI lags). token_file.parent is the home dir. Lazy import
+    # avoids the probes<->auth import cycle; never let a cache hiccup break auth.
+    try:
+        from mcpbrain import probes
+        probes.refresh_connection_cache(token_file.parent, "google")
+    except Exception:  # noqa: BLE001 — status cache is best-effort
+        pass
     return creds
 
 
