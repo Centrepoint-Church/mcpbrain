@@ -38,6 +38,42 @@ def test_removed_connection_overrides_stale_cache(tmp_path):
     assert probes.all_connections(home)["claude"]["state"] == "not_started"
 
 
+def test_refresh_connection_cache_clears_stale_expired(tmp_path, monkeypatch):
+    # Repro of the re-auth bug: connections.json still says google expired, but a
+    # fresh token makes the live probe 'ok'. all_connections lets the stale cache
+    # win — until refresh_connection_cache() brings it current.
+    home = _home(tmp_path, {})
+    stale = {"google": {"state": "needs_action", "detail": "Sign-in expired — reconnect",
+                        "last_verified": None}}
+    (tmp_path / "connections.json").write_text(json.dumps(stale))
+    monkeypatch.setattr(probes, "probe_google",
+                        lambda h: {"state": "ok", "detail": "Connected", "last_verified": "t"})
+    # Before refresh: stale cache masks the recovered connection.
+    assert probes.all_connections(home)["google"]["state"] == "needs_action"
+    # Refresh writes the live 'ok' into the cache...
+    out = probes.refresh_connection_cache(home, "google")
+    assert out["state"] == "ok"
+    assert json.loads((tmp_path / "connections.json").read_text())["google"]["state"] == "ok"
+    # ...so the status now reflects reality immediately.
+    assert probes.all_connections(home)["google"]["state"] == "ok"
+
+
+def test_refresh_connection_cache_merges_not_clobbers(tmp_path, monkeypatch):
+    # Refreshing one connection must not drop other cached entries.
+    home = _home(tmp_path, {})
+    (tmp_path / "connections.json").write_text(json.dumps(
+        {"claude": {"state": "ok", "detail": "Verified", "last_verified": "t"}}))
+    monkeypatch.setattr(probes, "probe_google",
+                        lambda h: {"state": "ok", "detail": "Connected", "last_verified": "t"})
+    probes.refresh_connection_cache(home, "google")
+    cache = json.loads((tmp_path / "connections.json").read_text())
+    assert cache["google"]["state"] == "ok" and cache["claude"]["detail"] == "Verified"
+
+
+def test_refresh_connection_cache_unknown_name(tmp_path):
+    assert probes.refresh_connection_cache(_home(tmp_path, {}), "nope") is None
+
+
 # ---------- probe_backup staleness / empty-file tests ----------
 
 _BACKUP_CFG = {"backup": {"dest": "s3://some-bucket"}}
