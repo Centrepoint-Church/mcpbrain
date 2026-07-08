@@ -105,16 +105,22 @@ def _verify_google(home) -> dict:
         return _state("needs_action", "Sign-in expired — reconnect")
 
 
-def verify_connections(home, store=None) -> dict:
-    """Run the expensive (network) checks and cache them to connections.json atomically."""
-    verified = {"google": _verify_google(home)}
+def _write_cache(home, cache: dict) -> None:
+    """Atomically write the connections cache to connections.json."""
     import os
     import tempfile
     p = Path(home) / "connections.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".conn.", suffix=".tmp")
     with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(verified))
+        f.write(json.dumps(cache))
     os.replace(tmp, p)
+
+
+def verify_connections(home, store=None) -> dict:
+    """Run the expensive (network) checks and cache them to connections.json atomically."""
+    verified = {"google": _verify_google(home)}
+    _write_cache(home, verified)
     return verified
 
 
@@ -188,6 +194,18 @@ def _read_cache(home) -> dict:
         return {}
 
 
+# Cheap (no-network) probes, keyed by connection name. Resolved at call time
+# (not captured at import) so tests can monkeypatch an individual probe.
+def _cheap_probes() -> dict:
+    return {
+        "google": probe_google,
+        "claude": probe_claude,
+        "backup": probe_backup,
+        "records": probe_records,
+        "enrichment": probe_enrichment,
+    }
+
+
 def all_connections(home, store=None) -> dict:
     """All connection probes keyed by name. `store` reserved for future probes.
 
@@ -196,15 +214,9 @@ def all_connections(home, store=None) -> dict:
     immediately when a connection is removed (not_started).
     """
     cached = _read_cache(home)
-    cheap = {
-        "google": probe_google(home),
-        "claude": probe_claude(home),
-        "backup": probe_backup(home),
-        "records": probe_records(home),
-        "enrichment": probe_enrichment(home),
-    }
     out = {}
-    for name, live in cheap.items():
+    for name, probe in _cheap_probes().items():
+        live = probe(home)
         c = cached.get(name)
         # Verified cache wins when the connection is still live (not not_started).
         # If the live probe returns not_started the connection was removed, so the
@@ -214,3 +226,24 @@ def all_connections(home, store=None) -> dict:
         else:
             out[name] = live
     return out
+
+
+def refresh_connection_cache(home, name: str = "google") -> dict | None:
+    """Immediately update one connection's cached status from its cheap local
+    probe, merged into connections.json.
+
+    all_connections() lets a cached entry win over the live probe while the
+    connection is up (the network 'Verified' result is richer than the cheap
+    'Connected' one). That overlay means a stale 'Sign-in expired' cache keeps
+    masking a just-completed re-auth until the next network verify runs. Calling
+    this right after writing a new token brings the cache current at once (as
+    'Connected'); the periodic verify later upgrades it to 'Verified'. No
+    network, so it is safe to call inline in an OAuth callback. Returns the new
+    entry, or None for an unknown name."""
+    probe = _cheap_probes().get(name)
+    if probe is None:
+        return None
+    cache = _read_cache(home)
+    cache[name] = probe(home)
+    _write_cache(home, cache)
+    return cache[name]

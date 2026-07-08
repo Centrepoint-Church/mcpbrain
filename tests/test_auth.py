@@ -168,6 +168,10 @@ def test_run_consent_flow_writes_token(tmp_path, monkeypatch):
     assert isinstance(creds, FakeCreds)
     assert token_file.exists()
     assert token_file.read_text() == expected_json
+    # The connection-status cache is refreshed inline so a fresh sign-in isn't
+    # masked by a stale "expired" entry: connections.json now carries google.
+    conn = json.loads((token_file.parent / "connections.json").read_text())
+    assert "google" in conn
 
 
 # ---------------------------------------------------------------------------

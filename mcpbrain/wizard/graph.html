@@ -112,8 +112,8 @@
       <div id="search-status" class="hint"></div>
       <label>Layout
         <select id="f-layout">
-          <option value="radial" selected>Radial</option>
-          <option value="emergent">Emergent</option>
+          <option value="emergent" selected>Emergent</option>
+          <option value="radial">Radial</option>
         </select>
       </label>
       <label>Min connections <span class="deg-val" id="deg-val">7</span>
@@ -180,7 +180,7 @@
     }
 
     const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
-                    egoDepth:1, egoHops:{}, layout:"radial", searchTerm:"", types:new Set() };
+                    egoDepth:1, egoHops:{}, layout:"emergent", searchTerm:"", types:new Set() };
     let CURRENT = { nodes:[], links:[], communities:{} };
     let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
     let TOP30 = new Set();     // ids of the top-30% most-connected nodes
@@ -323,7 +323,7 @@
       .linkColor(linkColourFor).linkWidth(linkWidthFor).linkCurvature("curvature")
       .linkDirectionalParticles(linkParticlesFor)
       .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
-      .linkDirectionalParticleSpeed(0.004).linkDirectionalParticleOffset(linkParticleOffsetFor)
+      .linkDirectionalParticleSpeed(0.002).linkDirectionalParticleOffset(linkParticleOffsetFor)
       .onRenderFramePost((ctx)=> drawEgoRings(ctx))
       .onNodeHover((node)=>{
         state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default";
@@ -337,7 +337,12 @@
       .onNodeRightClick((node)=> enterEgo(node.id))
       .onBackgroundClick(()=> onBg())
       .minZoom(0.05).maxZoom(20)
-      .warmupTicks(reduce ? 80 : 30).cooldownTime(reduce ? 0 : 4000);
+      // Calmer startup: run more layout ticks OFF-SCREEN (warmupTicks) so the
+      // graph is already largely settled on first paint, and stop the on-screen
+      // simulation sooner (cooldownTime) so it doesn't keep drifting.
+      .warmupTicks(reduce ? 150 : 120).cooldownTime(reduce ? 0 : 2000)
+      // Extra damping so nodes ease into place instead of overshooting/bouncing.
+      .d3VelocityDecay(0.6);
 
     fg.d3Force("charge", d3.forceManyBody().strength(-60).distanceMax(360));
     fg.d3Force("collide", d3.forceCollide().radius((n)=>(n._r ?? nodeRadius(n)) + 2));
@@ -346,7 +351,7 @@
       const s=(l.source.connections)||1, t=(l.target.connections)||1, base = 0.1/Math.min(s,t);
       return sameCommunity(l) ? base*INTRA_COMMUNITY_BOOST : base;   // communities coalesce organically
     });
-    fg.d3AlphaDecay(0.02);
+    fg.d3AlphaDecay(0.04);   // cool the simulation down faster → shorter settle
 
     // Emergent: charge + community-boosted links + a gentle centring pull (no positional grouping).
     // Radial: pull each node to a ring by degree — hubs centre, leaves outer.
