@@ -90,10 +90,22 @@ def _verify_clickup(home) -> dict:
 
 
 def _verify_google(home) -> dict:
-    """Real Google check: attempt a token refresh (network)."""
+    """Real Google check: attempt a token refresh (network).
+
+    Distinguishes a GENUINE auth failure from a TRANSIENT network one so a
+    momentary blip can't leave a sticky false "Sign-in expired":
+      - RefreshError (invalid_grant — the refresh token is revoked/expired):
+        real → downgrade to needs_action.
+      - any other error (offline, timeout, rate-limit, DNS): transient → fall
+        back to the cheap local probe (`base`), which is 'Connected' when the
+        token is locally valid, rather than stamping 'expired'.
+    Only verifies when the local token already looks ok; a locally-broken token
+    (needs_action / not_started) is returned as-is without a pointless network call.
+    """
     base = probe_google(home)
-    if base["state"] == "not_started":
+    if base["state"] != "ok":
         return base
+    from google.auth.exceptions import RefreshError
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
@@ -101,8 +113,10 @@ def _verify_google(home) -> dict:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         return _state("ok", "Verified", last_verified=_now_iso())
-    except Exception:  # noqa: BLE001
+    except RefreshError:
         return _state("needs_action", "Sign-in expired — reconnect")
+    except Exception:  # noqa: BLE001 — transient (network/timeout/rate-limit): keep local state
+        return base
 
 
 def _write_cache(home, cache: dict) -> None:
