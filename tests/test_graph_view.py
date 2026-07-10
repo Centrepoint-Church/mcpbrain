@@ -298,6 +298,35 @@ def test_merge_name_override(tmp_path):
     out = graph_view.merge_entities(s, "al", "alice", name_override="Alice Cooper")
     assert out["ok"] and s.get_entity("alice")["name"] == "Alice Cooper"
 
+def test_merge_of_suppressed_loser_keeps_winner_visible(tmp_path):
+    """Merging a suppressed (hidden) junk duplicate into a real, visible winner
+    must NOT hide the winner — the survivor keeps its own visibility, and the
+    loser's now-dangling suppression row is cleaned up."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "sup.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('a','Al','person',2)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('b','Alan','person',9)")
+    s.suppress_entity("a", reason="test")                 # loser 'a' is hidden
+    out = graph_view.merge_entities(s, "a", "b")          # b (degree 9) survives
+    assert out["winner_id"] == "b"
+    with s._connect() as db:
+        rows = [r[0] for r in db.execute("SELECT entity_id FROM entity_suppressions")]
+    assert rows == []                                     # winner stays visible; loser row cleaned up
+
+def test_merge_preserves_a_suppressed_winner(tmp_path):
+    """If the WINNER itself was suppressed, it stays suppressed after merge."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "sup2.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('a','Al','person',2)")
+        db.execute("INSERT INTO entities(id,name,type,degree) VALUES('b','Alan','person',9)")
+    s.suppress_entity("b", reason="test")                 # winner 'b' is hidden
+    graph_view.merge_entities(s, "a", "b")                # b survives, still hidden
+    with s._connect() as db:
+        rows = [r[0] for r in db.execute("SELECT entity_id FROM entity_suppressions")]
+    assert rows == ["b"]
+
 def test_merge_self_refused(tmp_path):
     s = _rw_store(tmp_path)
     out = graph_view.merge_entities(s, "alice", "alice")

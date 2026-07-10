@@ -1707,6 +1707,14 @@ class Store:
             db.execute("UPDATE OR IGNORE email_entities SET entity_id=? WHERE entity_id=?",
                        (winner_id, loser_id))
             db.execute("DELETE FROM email_entities WHERE entity_id=?", (loser_id,))  # admin-delete-ok
+            # Clean up the loser's suppression row (if any) so it doesn't dangle
+            # against a deleted id. Deliberately NOT repointed to the winner: the
+            # survivor keeps its OWN visibility — merging a hidden junk duplicate
+            # into a real, visible entity must not hide the real entity. Guarded so
+            # stores predating the suppression feature don't error.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='entity_suppressions'").fetchone():
+                db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (loser_id,))  # admin-delete-ok
 
             new_org = win["org"] if win["org"] not in ("", "unknown") else loser["org"]
             new_type = win["type"] if win["type"] != "unknown" else loser["type"]
@@ -1806,6 +1814,47 @@ class Store:
                 f"UPDATE actions SET status = ?, resolved_by = ?, resolved_at = ?, "
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
             return cur.rowcount
+
+    def archive_stale_actions(self, *, cutoff_days: int = 120, as_of: str | None = None,
+                              dry_run: bool = False) -> dict:
+        """Archive (never delete) stale, UNDATED open actions older than cutoff_days.
+
+        Reversible: an eligible action's status flips to 'auto_archived' with
+        resolved_by='ttl' — reopen it any time via set_action_status. Deliberately
+        conservative about what ages out; an action is eligible only if it is:
+          - still 'open';
+          - of KNOWN age captured before the cutoff (empty/NULL created_at is
+            treated as unknown age and left alone, never archived);
+          - UNDATED — has no deadline at all. Any dated commitment is left
+            untouched, whether future (upcoming) or past (overdue) — an overdue
+            task is a high-signal follow-up, not stale noise;
+          - not currently snoozed to a future date (a deferred task resurfaces on
+            its snooze date; it must not be archived out from under that).
+        Idempotent (only touches 'open' rows). `as_of` (ISO) is for tests.
+        Returns {'archived': n} (or {'candidates': n, 'ids': [...]} for dry_run)."""
+        now = (datetime.now(timezone.utc) if as_of is None
+               else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
+        cutoff = (now - timedelta(days=int(cutoff_days))).strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")   # match set_action_status's ISO format
+        where = ("status = 'open' "
+                 "AND COALESCE(created_at, '') != '' "
+                 "AND substr(created_at, 1, 10) < :cutoff "
+                 "AND COALESCE(deadline, '') = '' "
+                 "AND (COALESCE(snoozed_until, '') = '' OR substr(snoozed_until, 1, 10) < :today)")
+        params = {"cutoff": cutoff, "today": today}
+        with self._connect() as db:
+            ids = [r["id"] for r in db.execute(
+                f"SELECT id FROM actions WHERE {where}", params).fetchall()]
+            if dry_run:
+                return {"candidates": len(ids), "ids": ids[:20]}
+            if not ids:
+                return {"archived": 0}
+            db.execute(
+                f"UPDATE actions SET status = 'auto_archived', resolved_by = 'ttl', "
+                f"resolved_at = :stamp, updated_at = :stamp WHERE {where}",
+                {**params, "stamp": stamp})
+            return {"archived": len(ids)}
 
     def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "") -> bool:
         """Set owner/owner_entity_id on one action. Returns True if a row was actually updated.
