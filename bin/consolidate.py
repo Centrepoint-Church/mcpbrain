@@ -37,7 +37,7 @@ def _backup_db(db_path: Path) -> Path:
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("phase", choices=["topics", "observations", "relations-decay",
-                                      "meetings-reset", "meetings-retire"])
+                                      "actions-ttl", "meetings-reset", "meetings-retire"])
     ap.add_argument("--home", default=None)
     ns = ap.parse_args(argv)
 
@@ -62,6 +62,8 @@ def main(argv=None):
     elif ns.phase == "relations-decay":
         from mcpbrain import graph_write
         print("[consolidate] relations-decay:", graph_write.decay_relations(store))
+    elif ns.phase == "actions-ttl":
+        print("[consolidate] actions-ttl:", store.archive_stale_actions())
     elif ns.phase == "meetings-reset":
         out = consolidate.reset_meeting_sources(store)
         snap.write_text(json.dumps(out["pre_ids"]))

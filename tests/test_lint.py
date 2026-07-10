@@ -306,6 +306,17 @@ def test_build_report_ok_when_clean(tmp_path):
     assert "No findings" in report
 
 
+def test_build_report_has_derived_quality_rates(tmp_path):
+    """Stats block reports an orphan rate + duplicate-org variant count, not just
+    raw totals — the quality-scorecard addition."""
+    s = _store(tmp_path)
+    _add_entity(s, "orphan1", "Nobody", org="", email_count=0)   # orphan: no emails, no relations
+    with s._connect() as db:
+        report = build_report(db)
+    assert "Orphan entities:" in report and "% of entities" in report
+    assert "Duplicate-org variants:" in report
+
+
 # ---------------------------------------------------------------------------
 # Sub-task 2.2 — run() records proactive findings
 # ---------------------------------------------------------------------------

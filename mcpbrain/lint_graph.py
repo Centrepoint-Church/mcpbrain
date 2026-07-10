@@ -83,6 +83,30 @@ def check_orphan_entities(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def count_orphan_entities(conn) -> int:
+    """Total orphan-entity count (same predicate as check_orphan_entities, but
+    uncapped). The stats scorecard needs the true count — reusing the LIMIT-50
+    list would cap the reported orphan rate at 50 and read falsely healthy."""
+    has_supp = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='entity_suppressions'"
+    ).fetchone() is not None
+    supp_join = ("LEFT JOIN entity_suppressions s ON s.entity_id = e.id"
+                 if has_supp else "")
+    supp_filter = "AND s.entity_id IS NULL" if has_supp else ""
+    return conn.execute(f"""
+        SELECT COUNT(*) FROM entities e
+        {supp_join}
+        WHERE e.email_count = 0
+          AND e.type != 'meeting'
+          {supp_filter}
+          AND NOT EXISTS (
+              SELECT 1 FROM entity_relations
+              WHERE entity_a = e.id OR entity_b = e.id
+          )
+    """).fetchone()[0]
+
+
 def check_ownerless_actions(conn) -> list[dict]:
     """Action items with no clear owner.
 
@@ -225,6 +249,16 @@ def build_report(conn) -> str:
     lines.append(f"- Actions: {stats['total_actions']}")
     lines.append(f"- Relationships: {stats['total_relations']}")
     lines.append(f"- Communities: {stats['total_communities']}")
+    # Derived data-quality rates: orphan rate (entities with no emails and no
+    # relations) and org-variant count. Cheap health signals on top of the raw
+    # totals so the report reads as a quality scorecard, not just a census.
+    # Use the UNCAPPED orphan count (the check_orphan_entities list is LIMIT 50),
+    # and compute the duplicate-org scan ONCE — it's reused by the section below.
+    n_orphans = count_orphan_entities(conn)
+    dup_org_rows = check_duplicate_orgs(conn)
+    total_ent = stats["total_entities"] or 1
+    lines.append(f"- Orphan entities: {n_orphans} ({100 * n_orphans / total_ent:.1f}% of entities)")
+    lines.append(f"- Duplicate-org variants: {len(dup_org_rows)}")
     if stats["by_type"]:
         type_str = ", ".join(f"{t}: {c}" for t, c in stats["by_type"].items())
         lines.append(f"- By type: {type_str}")
@@ -293,7 +327,7 @@ def build_report(conn) -> str:
 
     section(
         "Duplicate org variants",
-        check_duplicate_orgs(conn),
+        dup_org_rows,   # reuse the single scan computed for the stats header
         lambda rows: [
             f"- `{r['variant_org']}` ({r['entity_count']} entities) — "
             f"likely `{r['canonical_org']}` (score {r['score']})"
