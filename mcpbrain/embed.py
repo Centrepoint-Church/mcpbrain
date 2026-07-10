@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 _BGE_Q = "Represent this sentence for searching relevant passages: "
 _ORG_SENTINELS = frozenset(("unknown", "external", ""))
 
@@ -111,7 +113,14 @@ class _LocalEmbedder:
         return list(map(float, next(self._model.query_embed([self._qp + text]))))
 
 
+@lru_cache(maxsize=None)
 def get_embedder(kind: str = "bge-small"):
+    # Memoised: the embedder holds an immutable ONNX model (a few seconds to load
+    # from disk), and every caller wants the same weights for a given `kind`.
+    # Loading once per process — instead of on every call — is a big speedup for
+    # the daemon and especially the test suite, with no behavioural change (the
+    # model is stateless). lru_cache does not cache the ValueError path, so an
+    # unknown kind still raises every time.
     if kind == "bge-small":
         return _LocalEmbedder("BAAI/bge-small-en-v1.5", 384, _BGE_Q)
     raise ValueError(f"unknown embedder {kind!r}")

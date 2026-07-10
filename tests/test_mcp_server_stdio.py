@@ -67,6 +67,10 @@ async def _run_session(home: Path):
         "PATH": os.environ.get("PATH", ""),
         "MCPBRAIN_HOME": str(home),
         "PYTHONPATH": str(PRODUCT_ROOT),
+        # Point the spawned server at the shared model cache (the session fixture
+        # pins this) so it reuses the already-downloaded bge weights instead of
+        # re-downloading into the tmp MCPBRAIN_HOME on every run.
+        "FASTEMBED_CACHE_PATH": os.environ.get("FASTEMBED_CACHE_PATH", ""),
     }
 
     params = StdioServerParameters(
