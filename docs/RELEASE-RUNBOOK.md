@@ -21,8 +21,8 @@ whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goe
   at user scope (see `docs/ARCHITECTURE.md` for why). The `bin/` shims remain only
   as a documented manual fallback.
 
-Local clones used for publishing live at `~/Documents/GitHub/mcpbrain-dist` and
-`~/Documents/GitHub/mcpbrain-plugin`, both with `origin` = the Centrepoint-Church
+Local clones used for publishing live at `~/GitHub/mcpbrain-dist` and
+`~/GitHub/mcpbrain-plugin`, both with `origin` = the Centrepoint-Church
 repos. **Always confirm the remote is the org** before pushing
 (`git -C <clone> remote get-url origin`) — older runbooks referenced a personal
 `itsjoshuakemp` org that is no longer used.
@@ -56,7 +56,7 @@ machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
 
 ## 1. Cut a new release (each time) — THE CORE PROCEDURE
 
-From the source repo (`~/Documents/GitHub/mcpbrain`), on `main`, with a clean tree:
+From the source repo (`~/GitHub/mcpbrain`), on `main`, with a clean tree:
 
 ### 1a. Bump the version in all FOUR sources of truth (keep them equal)
 
@@ -75,9 +75,9 @@ git add -A && git commit -m "chore(release): bump to <version>" && git push orig
 ### 1b. Build + publish the wheel to `mcpbrain-dist`
 
 ```bash
-git -C ~/Documents/GitHub/mcpbrain-dist remote get-url origin   # MUST be Centrepoint-Church/mcpbrain-dist
-git -C ~/Documents/GitHub/mcpbrain-dist pull --ff-only
-uv run python bin/release.py --dist ~/Documents/GitHub/mcpbrain-dist
+git -C ~/GitHub/mcpbrain-dist remote get-url origin   # MUST be Centrepoint-Church/mcpbrain-dist
+git -C ~/GitHub/mcpbrain-dist pull --ff-only
+uv run python bin/release.py --dist ~/GitHub/mcpbrain-dist
 ```
 
 **⚠️ Stale-wheel gotcha:** `bin/release.py` copies every `mcpbrain-*.whl` it finds in
@@ -86,10 +86,10 @@ old version reappears unless you purge it from **both** places, then regenerate:
 
 ```bash
 rm -f dist/mcpbrain-<OLD>-py3-none-any.whl                                  # source build dir
-rm -f ~/Documents/GitHub/mcpbrain-dist/simple/mcpbrain/mcpbrain-<OLD>-py3-none-any.whl
-uv run python bin/release.py --dist ~/Documents/GitHub/mcpbrain-dist        # regenerate index
-ls ~/Documents/GitHub/mcpbrain-dist/simple/mcpbrain/                        # expect ONLY the new wheel
-cd ~/Documents/GitHub/mcpbrain-dist && git add -A \
+rm -f ~/GitHub/mcpbrain-dist/simple/mcpbrain/mcpbrain-<OLD>-py3-none-any.whl
+uv run python bin/release.py --dist ~/GitHub/mcpbrain-dist        # regenerate index
+ls ~/GitHub/mcpbrain-dist/simple/mcpbrain/                        # expect ONLY the new wheel
+cd ~/GitHub/mcpbrain-dist && git add -A \
   && git commit -m "release: mcpbrain <version>" && git push origin main
 ```
 
@@ -103,13 +103,13 @@ Mirror the source `plugin/` tracked tree into the plugin repo. Use `git archive`
 cruft by construction):
 
 ```bash
-git -C ~/Documents/GitHub/mcpbrain-plugin remote get-url origin   # MUST be Centrepoint-Church/mcpbrain-plugin
-git -C ~/Documents/GitHub/mcpbrain-plugin pull --ff-only
+git -C ~/GitHub/mcpbrain-plugin remote get-url origin   # MUST be Centrepoint-Church/mcpbrain-plugin
+git -C ~/GitHub/mcpbrain-plugin pull --ff-only
 TMP=$(mktemp -d)
 git archive HEAD:plugin | tar -x -C "$TMP"
-rsync -a --delete --exclude='.git' --exclude='.DS_Store' "$TMP"/ ~/Documents/GitHub/mcpbrain-plugin/
+rsync -a --delete --exclude='.git' --exclude='.DS_Store' "$TMP"/ ~/GitHub/mcpbrain-plugin/
 rm -rf "$TMP"
-cd ~/Documents/GitHub/mcpbrain-plugin
+cd ~/GitHub/mcpbrain-plugin
 git status --short          # expect only intended changes; NO .DS_Store, NO ' 2' dirs
 git add -A && git commit -m "release <version>: <one-line summary>" && git push origin main
 ```
@@ -212,16 +212,14 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 add a regression assertion. **Record results here. Do not roll out to Windows until
 this gate passes.**
 
-## ⚠️ Environment hazard — iCloud conflict-copies
+## Environment note — repos live outside iCloud
 
-Both publishing clones live under `~/Documents/GitHub` (iCloud-synced). Heavy
-concurrent file writes can make iCloud create untracked `… 2.py` / `… 2.md` /
-`… 2/` conflict-copies and stray `.DS_Store` files. They pollute `git status` and
-(for `tests/* 2.py`) inflate the test count. The `git archive` plugin-sync in 1c is
-immune (tracked files only), but sweep the source tree before committing there:
+All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`
+tree). This removes the class of iCloud conflict-copy artifacts (`… 2.py` /
+`… 2.md` / `… 2/`) and `.DS_Store` churn that previously polluted `git status` and
+inflated the test count. If you ever see such stray files reappear, sweep the
+source tree before committing:
 
 ```bash
 find . -not -path './.git/*' \( -name '* 2' -o -name '* 2.*' -o -name '.DS_Store' \) -exec rm -rf {} +
 ```
-
-(Consider moving the repos out of iCloud, or adding the patterns to a global gitignore.)
