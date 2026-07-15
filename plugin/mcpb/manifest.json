@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "mcpbrain",
+  "version": "0.7.94",
+  "description": "Your mcpbrain memory (brain_* tools) in Claude Desktop.",
+  "author": { "name": "Centrepoint Church" },
+  "server": {
+    "type": "uv",
+    "entry_point": "mcpbrain",
+    "mcp_config": {
+      "command": "uvx",
+      "args": ["--from", "mcpbrain", "mcpbrain", "mcp-server"]
+    }
+  }
+}
