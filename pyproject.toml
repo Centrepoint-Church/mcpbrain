@@ -4,7 +4,6 @@ version = "0.7.94"
 requires-python = ">=3.12"
 dependencies = [
   "sqlite-vec>=0.1.6",
-  "fastembed>=0.3",
   "mcp>=1.2",
   "numpy>=1.26",
   "nameparser>=1.1",       # HumanName title-stripping in graph_write.strip_title
@@ -44,6 +43,7 @@ mcpbrain = "mcpbrain.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8", "pyyaml>=6"]
+daemon = ["fastembed>=0.3"]
 
 [build-system]
 requires = ["setuptools>=68"]
