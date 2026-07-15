@@ -20,7 +20,7 @@ irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex
 mcpbrain doctor
 ```
 
-On Windows this reviews the machine (architecture, Python, VC++ runtime, uv, Task Scheduler) and installs the correct arch-native version of anything missing, then verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
+On macOS, `mcpbrain setup` registers a launchd login agent, writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard. On Windows, `install.ps1` reviews the machine (architecture, Python, VC++ runtime, uv, Task Scheduler) and installs the correct arch-native version of anything missing, then verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
 
 **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
 Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the
