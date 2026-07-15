@@ -22,14 +22,17 @@ def _flag_value(args, flag):
 def test_win_shim_content_runs_subcommand_hidden_and_sets_home():
     vbs = agents._win_shim_content(
         mcpbrain_bin=r"C:\Program Files\mcpbrain\mcpbrain.exe",
-        home=r"C:\Users\Jo Smith\mcpbrain", subcommand="daemon")
+        home=r"C:\Users\Jo Smith\mcpbrain", subcommand="daemon",
+        python_bin=r"C:\py\pythonw.exe")
     # Env exported in-process (handles custom + spaced home) — no registry, no `set "VAR="`.
     assert r'"MCPBRAIN_HOME") = "C:\Users\Jo Smith\mcpbrain"' in vbs
     # Window style 0 = hidden; the daemon's git/uv children inherit the hidden console.
     assert ", 0, " in vbs or ", 0," in vbs
-    # Binary quoted as one token via VBScript doubled-quotes; subcommand present.
-    assert '""C:\\Program Files\\mcpbrain\\mcpbrain.exe""' in vbs
-    assert "daemon" in vbs
+    # Signed interpreter (module form) quoted as one token via VBScript doubled-quotes;
+    # subcommand present. The unsigned mcpbrain.exe trampoline must NOT be invoked.
+    assert '""C:\\py\\pythonw.exe""' in vbs
+    assert "-m mcpbrain daemon" in vbs
+    assert "mcpbrain.exe daemon" not in vbs
 
 
 def test_daemon_schtasks_runs_shim_via_wscript():
@@ -49,7 +52,8 @@ def test_cadence_and_beacon_shims_carry_home():
         assert _flag_value(a, "/tr").lower().startswith("wscript")
     # The shim content for a cadence carries MCPBRAIN_HOME + the right subcommand.
     vbs = agents._win_shim_content(mcpbrain_bin=r"C:\T\mcpbrain.exe",
-                                   home=r"C:\Users\jo\mcpbrain", subcommand="records-prune")
+                                   home=r"C:\Users\jo\mcpbrain", subcommand="records-prune",
+                                   python_bin=r"C:\py\pythonw.exe")
     assert "MCPBRAIN_HOME" in vbs and "records-prune" in vbs
 
 
@@ -92,11 +96,13 @@ def test_health_schtasks_args_well_formed():
 
 
 def test_shim_content_quotes_binary_with_spaces():
-    # Binary with spaces is handled inside the shim via VBScript double-quote doubling.
+    # Signed interpreter path with spaces is handled inside the shim via VBScript
+    # double-quote doubling (the shim runs python_bin, not mcpbrain_bin).
     vbs = agents._win_shim_content(
         mcpbrain_bin=r"C:\Program Files\mcpbrain\mcpbrain.exe",
-        home=r"C:\Users\jo\mcpbrain", subcommand="records-prune")
-    assert '""C:\\Program Files\\mcpbrain\\mcpbrain.exe""' in vbs
+        home=r"C:\Users\jo\mcpbrain", subcommand="records-prune",
+        python_bin=r"C:\Program Files\Python\pythonw.exe")
+    assert '""C:\\Program Files\\Python\\pythonw.exe""' in vbs
 
 
 # ---------------------------------------------------------------------------
