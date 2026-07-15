@@ -139,6 +139,15 @@
     </div>
   </section>
 
+  <section id="step-model" class="card">
+    <h2><span class="num">3</span>Search model</h2>
+    <p class="desc">A small on-device embedding model (~130&nbsp;MB) powers search. It downloads once and stays on this machine.</p>
+    <div class="row">
+      <button class="primary" id="model-btn" onclick="ensureModel()">Download model</button>
+      <span id="model-state" class="badge idle">Checking…</span>
+    </div>
+  </section>
+
   <section id="step-projects" class="card">
     <h2><span class="num">4</span>You're set up</h2>
     <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created back in the Claude Code session that installed mcpbrain — as <b>Local</b> scheduled tasks. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
@@ -306,6 +315,29 @@ async function pollAuth(armed){
 }
 
 
+async function refreshModel(){
+  try{
+    const j = await (await fetch("/api/model/status", H)).json();
+    const btn = $("model-btn");
+    if(j.cached){
+      badge("model-state", "Ready", "ok"); btn.disabled = true;
+    }else if(j.downloading){
+      badge("model-state", "Downloading…", "wait"); btn.disabled = true;
+      setTimeout(refreshModel, 2000);
+    }else if(j.error){
+      // No dedicated "error" badge kind exists (only ok/wait/idle) — "wait" is
+      // the same amber used for other failed-action states in this file.
+      badge("model-state", "Failed: " + j.error, "wait"); btn.disabled = false;
+    }else{
+      badge("model-state", "Not downloaded", "idle"); btn.disabled = false;
+    }
+  }catch(e){ /* daemon momentarily unreachable; leave state as-is */ }
+}
+async function ensureModel(){
+  try{ await P("/api/model/ensure"); }catch(e){}
+  setTimeout(refreshModel, 500);
+}
+
 function renderStatus(j){
   $("st-count").textContent = (j.chunk_count != null) ? j.chunk_count : "—";
   $("st-enriched").textContent = (j.enriched_count != null) ? j.enriched_count : "—";
@@ -445,6 +477,7 @@ async function refresh(){
   setTimeout(refresh, 3000);
 }
 refresh();
+refreshModel();
 
 // Populate the timezone dropdown, then prefill the whole form from saved config.
 async function populateTimezones(selected){

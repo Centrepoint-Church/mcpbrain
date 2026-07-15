@@ -102,6 +102,8 @@ class ControlServer:
                     return server._serve_vendor(self, m.group(1) if m else "")
                 if not self._auth_ok(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
+                if self.path == "/api/model/status":
+                    return h_json(self, 200, server.daemon.model_status())
                 if self.path == "/api/core":
                     # B2: return the always-injected core block for prompt_recall.py
                     if server.store is None:
@@ -325,6 +327,8 @@ class ControlServer:
                 # backfill fan-out uses this to advance to the next batch in seconds
                 # instead of waiting out the normal interval.
                 d.sync_now(); return h_json(h, 200, {"woken": True})
+            if h.path == "/api/model/ensure":
+                d.ensure_model(); return h_json(h, 202, {"started": True})
             if h.path == "/api/recall":
                 # Semantic recall for the UserPromptSubmit hook. Loopback +
                 # bearer-token gated like every other handler here. Empty query
