@@ -290,13 +290,35 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     return (1 if need_action else 0), message
 
 
+def _true_os_arch() -> str:
+    """Best-effort native OS architecture, even when the running interpreter is
+    itself emulated (e.g. an x64 Python launched via WOW64 on an ARM64 Windows
+    box reports AMD64 from platform.machine() same as the OS would report).
+
+    Windows: PROCESSOR_ARCHITEW6432 is set by WOW64 ONLY when the current
+    process is emulated, and holds the true native arch (e.g. "ARM64") in
+    that case; PROCESSOR_ARCHITECTURE is the native arch when not emulated.
+    Non-Windows: fall back to platform.machine() — Rosetta detection on macOS
+    is out of scope for this fix.
+    """
+    import os
+    import platform
+
+    if os.name == "nt":
+        return (os.environ.get("PROCESSOR_ARCHITEW6432")
+                or os.environ.get("PROCESSOR_ARCHITECTURE")
+                or platform.machine())
+    return platform.machine()
+
+
 def arch_line(os_arch: str | None = None) -> str:
     """One doctor line: OS arch vs interpreter arch. os_arch defaults to the
-    interpreter's own (they always match off-Windows); on Windows the installer
-    passes the true OSArchitecture so an emulated x64 interpreter is flagged."""
+    TRUE OS architecture (via _true_os_arch, which sees through WOW64
+    emulation on Windows) so an emulated x64 interpreter running on an
+    ARM64 OS is flagged instead of always comparing a value to itself."""
     import platform
     machine = platform.machine()          # 'ARM64' / 'AMD64'
-    os_arch = os_arch or machine
+    os_arch = os_arch if os_arch is not None else _true_os_arch()
     norm = {"arm64": "ARM64", "amd64": "X64", "x64": "X64"}
     agree = norm.get(os_arch.lower(), os_arch) == norm.get(machine.lower(), machine)
     state = "ok" if agree else "MISMATCH (emulated interpreter?)"
