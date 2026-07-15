@@ -769,7 +769,6 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "dateparser" },
-    { name = "fastembed" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
@@ -793,6 +792,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+daemon = [
+    { name = "fastembed" },
+]
 dev = [
     { name = "pytest" },
     { name = "pyyaml" },
@@ -811,7 +813,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "dateparser", specifier = ">=1.4" },
-    { name = "fastembed", specifier = ">=0.3" },
+    { name = "fastembed", marker = "extra == 'daemon'", specifier = ">=0.3" },
     { name = "google-api-python-client", specifier = ">=2" },
     { name = "google-auth", specifier = ">=2" },
     { name = "google-auth-httplib2", specifier = ">=0.1" },
@@ -836,7 +838,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "daemon"]
 
 [package.metadata.requires-dev]
 dev = [
