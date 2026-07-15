@@ -201,3 +201,32 @@ def test_embed_voyage_module_not_importable():
     import pytest
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("mcpbrain.embed_voyage")
+
+
+# ---------------------------------------------------------------------------
+# embedder_dim tests (no model loading required)
+# ---------------------------------------------------------------------------
+
+def test_embedder_dim_bge_small_is_384():
+    from mcpbrain.embed import embedder_dim
+    assert embedder_dim("bge-small") == 384
+
+
+def test_embedder_dim_unknown_raises():
+    import pytest
+    from mcpbrain.embed import embedder_dim
+    with pytest.raises(ValueError):
+        embedder_dim("nope")
+
+
+def test_embedder_dim_does_not_import_onnxruntime():
+    # Drop any already-imported native modules, then import embed fresh and call
+    # embedder_dim; it must not pull onnxruntime/fastembed.
+    import sys
+    import importlib
+    for name in [m for m in sys.modules if m == "fastembed" or m.startswith("onnxruntime")]:
+        del sys.modules[name]
+    sys.modules.pop("mcpbrain.embed", None)
+    embed = importlib.import_module("mcpbrain.embed")
+    embed.embedder_dim("bge-small")
+    assert not any(m == "fastembed" or m.startswith("onnxruntime") for m in sys.modules)

@@ -3,6 +3,21 @@ from functools import lru_cache
 _BGE_Q = "Represent this sentence for searching relevant passages: "
 _ORG_SENTINELS = frozenset(("unknown", "external", ""))
 
+_EMBEDDER_DIMS = {"bge-small": 384}
+
+
+def embedder_dim(kind: str = "bge-small") -> int:
+    """Return the vector dimension for an embedder *kind* without loading it.
+
+    The daemon needs the dim to open the Store, but loading the ONNX model just
+    to read a constant would force onnxruntime at startup — the exact thing the
+    lazy-embedder work removes. Keep this a pure dict lookup (no fastembed import).
+    """
+    try:
+        return _EMBEDDER_DIMS[kind]
+    except KeyError:
+        raise ValueError(f"unknown embedder {kind!r}")
+
 
 # ---------------------------------------------------------------------------
 # Contextual prefix — prepended to PASSAGES only, never to queries.
