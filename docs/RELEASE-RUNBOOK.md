@@ -58,12 +58,13 @@ machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
 
 From the source repo (`~/GitHub/mcpbrain`), on `main`, with a clean tree:
 
-### 1a. Bump the version in all FOUR sources of truth (keep them equal)
+### 1a. Bump the version in all FIVE sources of truth (keep them equal)
 
 - `pyproject.toml` → `[project] version`
 - `mcpbrain/__init__.py` → `__version__`
 - `plugin/.claude-plugin/plugin.json` → `version`
 - `plugin/.claude-plugin/marketplace.json` → `plugins[0].version`
+- `plugin/mcpb/manifest.json` → `version`
 
 ```bash
 uv run pytest tests/test_version.py tests/test_plugin_manifest.py -q   # version semver + manifest sane
@@ -95,6 +96,21 @@ cd ~/GitHub/mcpbrain-dist && git add -A \
 
 `update.py` picks the highest PEP 440 version, so multiple wheels are *functionally*
 fine — but keep the index to the current wheel for clarity.
+
+### 1b.1 Publish install.ps1 and .mcpb to dist repo
+
+The Windows installer script and `.mcpb` plugin package must also be published:
+
+```bash
+cp plugin/scripts/install.ps1 ~/GitHub/mcpbrain-dist/
+npx @anthropic-ai/mcpb pack plugin/mcpb
+cp mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/
+cd ~/GitHub/mcpbrain-dist
+git add install.ps1 mcpbrain-<version>.mcpb \
+  && git commit -m "release: mcpbrain <version> (install.ps1 + .mcpb)" && git push origin main
+```
+
+Both files are now served at `https://centrepoint-church.github.io/mcpbrain-dist/`.
 
 ### 1c. Sync the plugin assets to `mcpbrain-plugin`
 
@@ -172,7 +188,49 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
   `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
   `mcpbrain restore` round-trips a snapshot.
 
-## 5. Windows clean-machine validation (HARD GATE — must pass before Windows rollout)
+## 5. Windows QA (pre-ship) — Hardware & installer validation
+
+Test the `install.ps1` script and `.mcpb` plugin on real hardware before wider Windows rollout. Do this once per release cycle with a **non-author** `@centrepoint.church` account.
+
+- [ ] **ARM64 native box (clean install)**
+  - Download `install.ps1` from `https://centrepoint-church.github.io/mcpbrain-dist/install.ps1`
+  - Run `irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex` from a clean Windows install (no mcpbrain present)
+  - Confirm native ARM64 Python and ARM64 VC redist are installed
+  - `mcpbrain doctor` reports `arch=ARM64` (matches native machine)
+  - Embedder loads without translation overhead
+  - Wizard launches and model-download step reaches "Ready"
+
+- [ ] **x64 native box (clean install)**
+  - Same as ARM64 box above, but confirm `arch=X64` reported in `mcpbrain doctor`
+
+- [ ] **Policy-blocked box (Task Scheduler disabled)**
+  - Simulate or test on a machine where Task Scheduler is blocked (Group Policy)
+  - `install.ps1` detects the block and falls through to Startup-shortcut mechanism
+  - Daemon runs at next user logon (check Task Manager → Startup tab or registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`)
+
+- [ ] **`.mcpb` plugin installation (cross-platform)**
+  - Download `mcpbrain-<version>.mcpb` from `https://centrepoint-church.github.io/mcpbrain-dist/`
+  - Install in Claude Desktop (drag-drop or install dialog)
+  - Windows: `brain_search` works and returns results with `score` field
+  - macOS: repeat the test (`.mcpb` must work on both platforms)
+
+**Record results below. Do not roll out Windows until all items pass.**
+
+| Test | Result |
+|------|--------|
+| ARM64 arch match | |
+| ARM64 embedder load | |
+| ARM64 wizard ready | |
+| x64 arch match | |
+| x64 embedder load | |
+| x64 wizard ready | |
+| Policy-blocked fallback | |
+| .mcpb installs on Windows | |
+| .mcpb installs on macOS | |
+| brain_search Windows | |
+| brain_search macOS | |
+
+## 6. Windows desktop validation (HARD GATE — must pass before Windows rollout)
 
 The schtasks generators are unit-tested (`tests/test_agents_windows_xplat.py`) but
 the live desktop flow has had **zero** real-machine testing. Run once on a clean
