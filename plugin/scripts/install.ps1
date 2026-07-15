@@ -85,14 +85,21 @@ function Install-VcRedist { param([string]$Arch)
   Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.$a.exe" -OutFile $f
   Start-Process $f -ArgumentList '/install','/quiet','/norestart' -Wait
 }
+function Get-PythonArchStrings {
+  # Returns @{ Winget = <'x64'|'arm64'>; File = <'amd64'|'arm64'> } for the OS arch.
+  # winget --architecture accepts x64/arm64 (NOT amd64); python.org filenames use amd64/arm64.
+  param([string]$OsArch)
+  if ($OsArch -eq 'Arm64') { return @{ Winget = 'arm64'; File = 'arm64' } }
+  return @{ Winget = 'x64'; File = 'amd64' }
+}
 function Install-Python { param([string]$Arch)
-  $a = if ($Arch -eq 'Arm64') { 'arm64' } else { 'amd64' }
+  $m = Get-PythonArchStrings -OsArch $Arch
   if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id Python.Python.3.12 --architecture $a --scope user --silent `
+    winget install --id Python.Python.3.12 --architecture $m.Winget --scope user --silent `
       --accept-package-agreements --accept-source-agreements
   } else {
-    $exe = "$env:TEMP\python-$PY_VERSION-$a.exe"
-    Invoke-WebRequest "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-$a.exe" -OutFile $exe
+    $exe = "$env:TEMP\python-$PY_VERSION-$($m.File).exe"
+    Invoke-WebRequest "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-$($m.File).exe" -OutFile $exe
     Start-Process $exe -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=0','Include_launcher=1' -Wait
   }
 }

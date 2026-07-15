@@ -26,3 +26,17 @@ Describe "Get-InstallPlan" {
     $plan | Should -Not -Contain 'persistence-schtasks'
   }
 }
+
+Describe "Get-PythonArchStrings" {
+  It "maps X64 to winget 'x64' (not 'amd64') and file 'amd64'" {
+    $m = Get-PythonArchStrings -OsArch 'X64'
+    $m.Winget | Should -Be 'x64'
+    $m.Winget | Should -Not -Be 'amd64'
+    $m.File | Should -Be 'amd64'
+  }
+  It "maps Arm64 to winget 'arm64' and file 'arm64'" {
+    $m = Get-PythonArchStrings -OsArch 'Arm64'
+    $m.Winget | Should -Be 'arm64'
+    $m.File | Should -Be 'arm64'
+  }
+}
