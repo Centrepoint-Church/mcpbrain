@@ -3,7 +3,7 @@ from pathlib import Path
 
 from mcpbrain import config
 
-from mcpbrain.retrieval import annotate_action_freshness, hybrid_search
+from mcpbrain.retrieval import annotate_action_freshness
 
 _log = logging.getLogger("mcpbrain.mcp_server")
 
@@ -80,10 +80,10 @@ async def read_context_resource(uri) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def make_brain_search(store, embedder):
+def make_brain_search(client):
     async def brain_search(query: str, limit: int = 10) -> list[dict]:
         try:
-            return hybrid_search(store, embedder, query, limit)
+            return client.recall(query, limit)
         except Exception:
             _log.exception("brain_search failed for query %r", query)
             return []
@@ -755,11 +755,12 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     from mcp import types
     from mcpbrain import config
     from mcpbrain.store import Store
-    from mcpbrain.embed import get_embedder
-    emb = get_embedder("bge-small")
-    _store_path, _store_dim = config.store_path(), emb.dim
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.control_client import ControlClient
+    _store_path, _store_dim = config.store_path(), embedder_dim("bge-small")
     store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
-    search = make_brain_search(store, emb)
+    client = ControlClient()
+    search = make_brain_search(client)
     context = make_brain_context(store)
     actions = make_brain_actions(store)
     graph = make_brain_graph(store)
