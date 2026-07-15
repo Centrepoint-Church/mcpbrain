@@ -16,42 +16,24 @@ mcpbrain setup
 
 *Windows (PowerShell):*
 ```powershell
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-}
-uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force
-mcpbrain setup
+irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex
+mcpbrain doctor
 ```
 
-`mcpbrain setup` registers the background agent (launchd on macOS, schtasks on Windows),
-writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
+On Windows this reviews the machine (architecture, Python, VC++ runtime, uv, Task Scheduler) and installs the correct arch-native version of anything missing, then verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
 
 **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
 Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the
 wizard restores my brain if a backup already exists for my account, or turns on encrypted
 backup if it's a fresh start. Do not run any restore or bootstrap command yourself.
 
-**3. Connect to Claude Desktop (do this before the tasks).** Run these to register the
-`brain_*` tools. This quits and reopens Claude, so this session ends — start a new Claude
-Code session afterward to finish:
+**3. Connect to Claude Desktop (one click).** Install the mcpbrain Desktop
+Extension: download `mcpbrain.mcpb` from
+https://centrepoint-church.github.io/mcpbrain-dist/mcpbrain.mcpb and double-click
+it, or in Claude Desktop → Settings → Extensions → Install from file. This wires
+the `brain_*` tools with no config edit and no quit/reopen.
 
-*macOS:*
-```bash
-osascript -e 'tell application "Claude" to quit'
-sleep 3
-mcpbrain connect
-open -a Claude
-```
-
-*Windows (PowerShell):*
-```powershell
-taskkill /IM Claude.exe /F 2>$null; Start-Sleep 3
-mcpbrain connect
-Start-Process "$env:LOCALAPPDATA\Programs\Claude\Claude.exe"
-```
-
-After Claude reopens, the `brain_*` tools (including `brain_routine`) are connected. If a
-tool call still says the daemon isn't connected, repeat this step.
+If your Claude Desktop build has no Extensions pane, run `mcpbrain connect` (quit Claude first, then reopen) as the manual equivalent.
 
 **Note for Windows:** the daemon runs with a **hidden console** — no visible window at
 logon is expected, not a failure. Verify it is running with:
