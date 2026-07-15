@@ -101,21 +101,65 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
                           home=home, keep_alive="crashonly")
 
 
-def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str) -> str:
-    """A .vbs that runs `mcpbrain <subcommand>` with a hidden console.
-
-    Window style 0 hides the console; the daemon's child git/uv processes inherit
-    that hidden console, so nothing flashes. MCPBRAIN_HOME is set in-process so a
-    custom/spaced home works without touching the registry. VBScript escapes a
-    double-quote by doubling it.
+def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str,
+                      python_bin: str) -> str:
+    """A .vbs that runs `pythonw.exe -m mcpbrain <subcommand>` with a hidden
+    console. Using the signed interpreter (not the mcpbrain.exe trampoline) keeps
+    the persistent daemon off the unsigned launcher, so AppLocker's default
+    'allow signed binaries' rules can permit it. Window style 0 hides the console;
+    VBScript escapes a double-quote by doubling it.
     """
-    bin_q = '""' + mcpbrain_bin + '""'       # ""C:\path\mcpbrain.exe""
+    py_q = '""' + python_bin + '""'
     home_esc = home.replace('"', '""')
     return (
         'Set sh = CreateObject("WScript.Shell")\r\n'
         f'sh.Environment("PROCESS")("MCPBRAIN_HOME") = "{home_esc}"\r\n'
-        f'sh.Run "{bin_q} {subcommand}", 0, False\r\n'
+        f'sh.Run "{py_q} -m mcpbrain {subcommand}", 0, False\r\n'
     )
+
+
+def _win_pythonw_for(mcpbrain_bin: str) -> str:  # pragma: no cover
+    """The pythonw.exe that runs the installed mcpbrain (uv tool venv Scripts/),
+    falling back to a PATH 'pythonw' if not found beside the launcher."""
+    import shutil
+    cand = Path(mcpbrain_bin).with_name("pythonw.exe")
+    if cand.exists():
+        return str(cand)
+    return shutil.which("pythonw") or "pythonw.exe"
+
+
+def win_persistence_mechanism(probe: bool | None = None) -> str:
+    """Return the run-at-logon mechanism for Windows: 'schtasks' if Task
+    Scheduler is usable, else 'startup' (Startup-folder shortcut).
+
+    probe=True/False injects a known scheduler-availability result (tests /
+    preflight). probe=None probes now via _scheduler_available()."""
+    available = _scheduler_available() if probe is None else probe
+    return "schtasks" if available else "startup"
+
+
+def _scheduler_available() -> bool:  # pragma: no cover — touches schtasks
+    """True if we can create+delete a task. Access-denied (policy block) → False."""
+    probe_name = "mcpbrain-probe"
+    try:
+        r = subprocess.run(["schtasks", "/create", "/tn", probe_name, "/sc", "onlogon",
+                            "/tr", "cmd /c exit", "/f"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return False
+        subprocess.run(["schtasks", "/delete", "/tn", probe_name, "/f"],
+                       capture_output=True, text=True)
+        return True
+    except OSError:
+        return False
+
+
+def startup_shortcut_target(*, python_bin: str, shim_path) -> tuple[str, str]:
+    """(-> wscript.exe path, arguments) for a Startup-folder .lnk that runs the
+    hidden-console shim. Pure so it is unit-testable."""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    wscript = str(Path(system_root) / "System32" / "wscript.exe")
+    return wscript, f'"{shim_path}"'
 
 
 def _win_shim_path(home: str, task_name: str) -> Path:
@@ -229,12 +273,29 @@ def _restart_launchd() -> None:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    python_bin = _win_pythonw_for(mcpbrain_bin)
     shim_path = _win_shim_path(home, _TASK_NAME)
     shim_path.parent.mkdir(parents=True, exist_ok=True)
-    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home, subcommand="daemon"))
+    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
+                                           subcommand="daemon", python_bin=python_bin))
     log.info("wrote Windows shim %s", shim_path)
-    subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
-    log.info("Windows scheduled task '%s' created", _TASK_NAME)
+    if win_persistence_mechanism() == "schtasks":
+        subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
+        log.info("Windows scheduled task '%s' created", _TASK_NAME)
+    else:
+        _install_startup_shortcut(_TASK_NAME, python_bin=python_bin, shim_path=shim_path)
+        log.info("Task Scheduler blocked; installed Startup-folder shortcut for '%s'", _TASK_NAME)
+
+
+def _install_startup_shortcut(task_name, *, python_bin, shim_path) -> None:  # pragma: no cover
+    wscript, args = startup_shortcut_target(python_bin=python_bin, shim_path=shim_path)
+    lnk = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / \
+          "Programs" / "Startup" / f"{task_name}.lnk"
+    ps = (f"$s=New-Object -ComObject WScript.Shell;"
+          f"$sc=$s.CreateShortcut('{lnk}');$sc.TargetPath='{wscript}';"
+          f"$sc.Arguments='{args}';$sc.Save()")
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
+    subprocess.run([wscript, str(shim_path)], check=False)   # start now
 
 
 def _uninstall_schtasks(home: str | None = None) -> None:  # pragma: no cover
@@ -291,9 +352,11 @@ def _uninstall_launchd_tray() -> None:  # pragma: no cover
 
 
 def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
+    python_bin = _win_pythonw_for(mcpbrain_bin)
     shim_path = _win_shim_path(home, _TRAY_TASK_NAME)
     shim_path.parent.mkdir(parents=True, exist_ok=True)
-    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home, subcommand="tray"))
+    shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
+                                           subcommand="tray", python_bin=python_bin))
     subprocess.run(schtasks_tray_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
     log.info("Windows scheduled task '%s' created", _TRAY_TASK_NAME)
 
@@ -550,9 +613,10 @@ def _install_cadences_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # prag
     if _fleet_configured(home):
         cadences.append(("mcpbrain-fleet-beacon", "fleet-report --beacon",
                          lambda: fleet_beacon_schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home)))
+    python_bin = _win_pythonw_for(mcpbrain_bin)
     for task_name, subcommand, args_fn in cadences:
         shim_path = _win_shim_path(home, task_name)
         shim_path.parent.mkdir(parents=True, exist_ok=True)
         shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
-                                               subcommand=subcommand))
+                                               subcommand=subcommand, python_bin=python_bin))
         subprocess.run(args_fn(), check=True)
