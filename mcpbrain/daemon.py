@@ -446,7 +446,6 @@ class Daemon:
         """Start a background thread that builds the embedder (downloading the
         bge-small weights on first use). Idempotent: a second call while a
         download is in flight is a no-op."""
-        import threading
         if getattr(self, "_model_downloading", False):
             return
 
