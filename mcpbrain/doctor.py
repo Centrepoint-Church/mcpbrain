@@ -269,6 +269,8 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         except Exception as exc:  # noqa: BLE001 — never fatal
             lines.append(f"➖ {'Baseline':<16} skipped ({exc})")
 
+    lines.append(arch_line())
+
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
     enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
@@ -286,6 +288,19 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     summary = f"{fixed} fixed automatically, {need_action} need your action (see ↑)."
     message = "\n".join([header, "", *lines, "", summary])
     return (1 if need_action else 0), message
+
+
+def arch_line(os_arch: str | None = None) -> str:
+    """One doctor line: OS arch vs interpreter arch. os_arch defaults to the
+    interpreter's own (they always match off-Windows); on Windows the installer
+    passes the true OSArchitecture so an emulated x64 interpreter is flagged."""
+    import platform
+    machine = platform.machine()          # 'ARM64' / 'AMD64'
+    os_arch = os_arch or machine
+    norm = {"arm64": "ARM64", "amd64": "X64", "x64": "X64"}
+    agree = norm.get(os_arch.lower(), os_arch) == norm.get(machine.lower(), machine)
+    state = "ok" if agree else "MISMATCH (emulated interpreter?)"
+    return f"{'ok' if agree else '⚠️'} {'Architecture':<16} OS={os_arch} interpreter={machine} → {state}"
 
 
 def _agent_installed(home, platform) -> bool:
