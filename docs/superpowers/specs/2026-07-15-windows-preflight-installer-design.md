@@ -47,8 +47,10 @@ into the **wizard**, which is made to always start.
   unsigned frozen daemon `.exe`.) The `pythonw -m mcpbrain` shim (above) keeps
   the persistent daemon on the signed interpreter, removing the last unsigned exe
   from the run-at-logon path.
-- macOS path is unchanged (it is not the problem); it stays inline in the
-  command.
+- macOS **install** path is unchanged (it is not the problem); it stays inline in
+  the command. (The `.mcpb` connect step is cross-platform and *does* improve the
+  macOS connect flow — that's intentional; only the daemon-install script is
+  macOS-untouched.)
 
 ## Architecture
 
@@ -59,19 +61,24 @@ decision logic is testable without touching a real machine:
 - **Plan** — *pure* function `(probe results) → ordered action list`. Unit-testable.
 - **Apply** — execute actions, then **re-probe each** to confirm it is now correct.
 
-Four artifacts:
+Five artifacts:
 
 1. **`plugin/scripts/install.ps1`** — the preflight installer (probe/plan/apply).
    Source of truth in this repo; published to the dist GitHub Pages at release.
 2. **`/mcpbrain:install` command** (`plugin/commands/install.md`) — thin
    orchestrator on Windows: run `install.ps1`, then `mcpbrain doctor` to validate,
-   then guide the four Local tasks + run-on-startup. macOS block unchanged.
+   install the `.mcpb` extension (one-click connect, replacing the manual
+   config-write + quit/reopen dance), then guide the four Local tasks +
+   run-on-startup. macOS block unchanged.
 3. **`mcpbrain/agents.py`** — Startup-folder-shortcut persistence becomes a
    **first-class mechanism**, selected by a Task Scheduler availability probe
    (not a pasted fallback).
 4. **`mcpbrain/daemon.py` + `control_api.py` + `wizard/index.html`** —
    **lazy embedder**: control server starts before the model loads; the wizard
    owns the weights download with progress + clear errors.
+5. **`mcpbrain/mcp_server.py` (thin client) + `.mcpb` bridge** — the MCP server
+   stops owning a store/embedder and becomes a pure control-API shim with **no
+   native deps**, packaged as a one-click Claude Desktop Extension.
 
 ### install.ps1 — review → plan → action matrix
 
@@ -154,6 +161,49 @@ base interpreter's `pythonw.exe` directly.)
   Retry button. Setup is not "done" until the model is cached, but the daemon
   and wizard are alive throughout.
 
+### MCP bridge (thin client) + `.mcpb` Desktop Extension
+
+**Why.** Today `mcp_server.py` opens its own `Store` and constructs the
+`embedder` (onnxruntime) in-process — `brain_search` embeds locally, the other
+read tools query SQLite directly, and only writes go through the daemon (via
+`write_capture`'s file queue). That means (a) the Claude Desktop connection
+depends on onnxruntime loading, and (b) there are two consumers of the store
+schema. Both block a clean one-click connect.
+
+**A — thin client (best-implementation, not a half-route).** Make the daemon the
+**single owner** of the store + embedder, and reduce `mcp_server.py` to a pure
+**control-API shim** that holds no store handle and imports **no native deps**:
+
+- New daemon read endpoints mirroring each read tool (search already exists as
+  `/api/recall`, which embeds server-side): `/api/context` (profile / communities),
+  `/api/graph`, `/api/actions`, `/api/proactive`, `/api/read`, `/api/draft/context`,
+  `/api/draft/save`. Corresponding `control_client.py` methods.
+- `brain_*` tools call those endpoints and shape the JSON. Writes keep the
+  existing `write_capture` queue (already daemon-mediated, pure-Python).
+- **Dependency isolation:** move `fastembed`/`onnxruntime` into an optional
+  dependency group used only by the daemon path; `mcp_server.py` and
+  `control_client.py` import nothing native. Add a test asserting
+  `import mcpbrain.mcp_server` pulls in no onnxruntime.
+- Benefit stack: connection no longer waits on the model; single source of truth
+  for the schema; composes with the lazy embedder; and the shim becomes small
+  enough to bundle.
+
+**B — `.mcpb` Desktop Extension (one-click connect).** Package the thin shim as
+an `.mcpb` bundle (`manifest.json` + the pure-Python server) so connecting the
+`brain_*` tools to Claude Desktop is **double-click → Install**, cross-platform
+and identical on macOS/Windows — replacing the current `mcpbrain connect` +
+quit-and-reopen dance (`install.md` step 3, which kills the user's session
+mid-install). The bridge locates the daemon exactly as `control_client` does
+(control_port/control_token under `app_dir`), so no `user_config` secrets are
+needed. Built from `plugin/mcpb/` via the `@anthropic-ai/mcpb` toolchain
+(`mcpb pack`) at release; published alongside the wheel.
+
+**Two-artifact model (explicit):** the heavy native **daemon** is still
+script-installed (`install.ps1` / macOS block) — `.mcpb` cannot portably bundle
+onnxruntime and does not run a persistent syncing process. `.mcpb` covers only
+the **Claude Desktop connection**. Install order: daemon first (script), then
+`.mcpb`.
+
 ### doctor validation additions
 
 - Add an explicit **architecture** line (OS arch + interpreter `platform.machine()`
@@ -164,12 +214,15 @@ base interpreter's `pythonw.exe` directly.)
 ### Distribution / release integration
 
 - `install.ps1` source lives at `plugin/scripts/install.ps1`.
-- Release runbook gains a step: publish `install.ps1` to the dist Pages
-  (`centrepoint-church.github.io/mcpbrain-dist/`) alongside the wheel index.
+- Release runbook gains steps: publish `install.ps1` **and the built `.mcpb`**
+  to the dist Pages (`centrepoint-church.github.io/mcpbrain-dist/`) alongside the
+  wheel index; run `mcpb pack` on `plugin/mcpb/`.
 - `/mcpbrain:install` Windows block becomes:
   `irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex`
-  → `mcpbrain doctor` → guide four Local tasks → run-on-startup.
-- Version files unchanged in count; `install.ps1` is not a version source.
+  → `mcpbrain doctor` → install `.mcpb` → guide four Local tasks → run-on-startup.
+- The `.mcpb` manifest `version` becomes a version source to keep in step with
+  the wheel/plugin manifests (add to the release runbook's version-file list).
+- Otherwise `install.ps1` is not a version source.
 
 ## Testing
 
@@ -182,8 +235,13 @@ base interpreter's `pythonw.exe` directly.)
 - **daemon lazy embedder:** test that the control server starts and `/api/status`
   responds when the embedder cannot load; test `embedder_dim` returns 384 without
   constructing onnxruntime; test periodic-pass guard swallows a model-load error.
+- **MCP thin client:** contract test each `brain_*` tool's output against its new
+  daemon endpoint (parity with today's in-process behaviour); assert
+  `import mcpbrain.mcp_server` imports **no** onnxruntime/fastembed (guards the
+  `.mcpb`-bundlable property against regression).
 - **install.ps1 apply / real hardware:** cannot be unit-tested from macOS; validate
   manually on an ARM64 box and an x64 box (documented in the plan's manual-QA step).
+  Same for the `.mcpb` double-click install on macOS + Windows Claude Desktop.
 
 ## Files touched
 
@@ -192,10 +250,15 @@ base interpreter's `pythonw.exe` directly.)
 - `mcpbrain/agents.py` (scheduler probe + Startup-shortcut mechanism)
 - `mcpbrain/embed.py` (`embedder_dim`)
 - `mcpbrain/daemon.py` (lazy embedder; guarded first-use)
-- `mcpbrain/control_api.py` (`/api/model/*` endpoints)
+- `mcpbrain/control_api.py` (`/api/model/*` + new read endpoints: context, graph,
+  actions, proactive, read, draft/context, draft/save)
+- `mcpbrain/control_client.py` (methods for the new read endpoints)
+- `mcpbrain/mcp_server.py` (thin control-API client; drop in-process store/embedder)
+- `pyproject.toml` (move fastembed/onnxruntime to a daemon-only optional group)
+- `plugin/mcpb/` (new: `manifest.json` + bundled thin server for the `.mcpb`)
 - `mcpbrain/wizard/index.html` (search-model step)
 - `mcpbrain/doctor.py` (arch line)
-- `docs/RELEASE-RUNBOOK.md` (publish install.ps1 step)
+- `docs/RELEASE-RUNBOOK.md` (publish install.ps1 + `.mcpb`; `.mcpb` version file)
 
 ## Open risks
 
@@ -214,3 +277,14 @@ base interpreter's `pythonw.exe` directly.)
 - **Startup-shortcut cadences:** prune/health don't fire as scheduled tasks under
   the Startup mechanism; they rely on the in-daemon opportunistic path. Acceptable,
   documented.
+- **`.mcpb` vs the org marketplace plugin — coexistence (resolve in plan).** The
+  marketplace plugin already provides agents/skills/hooks/commands, and today the
+  `brain_*` MCP tools are wired via the desktop-config entry. The `.mcpb` is a
+  third registration mechanism; confirm it supersedes the desktop-config write
+  cleanly and doesn't double-register the server alongside the marketplace plugin.
+  Needs a quick check against current Claude Desktop `.mcpb` docs during planning.
+- **`.mcpb` Python support maturity.** Anthropic's guidance favours Node.js and
+  flags Python bundling of compiled deps as hard — mitigated here because our
+  bridge is pure-Python (`server.type = "uv"`, no native deps). Validate the
+  pure-Python bridge packs and runs on both OSes before relying on it; the
+  script-based `mcpbrain connect` remains the mechanism until that's confirmed.
