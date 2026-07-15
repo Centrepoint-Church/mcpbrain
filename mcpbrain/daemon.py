@@ -423,6 +423,16 @@ class Daemon:
     on _wake.wait(interval_s) so pause/sync_now/stop are responsive.
     """
 
+    @property
+    def _embedder(self):
+        # Every internal reader uses self._embedder; routing them through this
+        # property makes construction lazy with zero call-site changes.
+        if self._embedder_obj is None:
+            if self._embedder_factory is None:
+                raise RuntimeError("embedder unavailable (model not loaded yet)")
+            self._embedder_obj = self._embedder_factory()
+        return self._embedder_obj
+
     def __init__(self, store, embedder, *, services: dict | None = None,
                  interval_s: float = 300.0,
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
@@ -440,7 +450,11 @@ class Daemon:
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
-        self._embedder = embedder
+        # Lazy embedder: hold the instance (may be None) in a backing field and
+        # build on first use via _embedder_factory. Keeps the control server /
+        # wizard reachable even before the model is downloaded.
+        self._embedder_obj = embedder
+        self._embedder_factory = None
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
         # Enrichment source: spool | gemini | off. Defaults to "off" so a
         # newly-constructed daemon enriches nothing until explicitly configured.
@@ -783,7 +797,13 @@ class Daemon:
         signal. On-topic queries then get the normal hybrid ranking.
         """
         try:
-            qv = self._embedder.embed_query(query)
+            try:
+                qv = self._embedder.embed_query(query)
+            except RuntimeError:
+                # Model not downloaded yet (lazy embedder). Recall degrades to empty
+                # rather than crashing the control-API caller; the wizard drives the
+                # download and recall works once it's cached.
+                return []
             knn = self._store.vec_knn(qv, max(limit * 2, 8))
             if not knn or knn[0][1] > config.recall_max_distance(str(app_dir())):
                 return []  # nothing close enough -> off-topic -> inject nothing
@@ -2144,8 +2164,14 @@ class Daemon:
                             exc, exc_info=True)
             # Re-embed the whole corpus once if the embedding backend changed
             # since the last run. No-op (and silent) when the marker matches.
-            # Runs against the restored data (see above).
-            self.migrate_embed_backend()
+            # Runs against the restored data (see above). Guarded: the lazy
+            # embedder may not be built yet (model still downloading), in
+            # which case migration is skipped rather than crashing startup —
+            # the guarded run_one() loop below will retry each cycle.
+            try:
+                self.migrate_embed_backend()
+            except RuntimeError:
+                log.info("embed-backend migrate skipped: model not loaded yet")
             # Resolve services once at startup so they are available from the
             # first cycle, regardless of pause state. ensure_services() is
             # idempotent: the subsequent call inside run_one() becomes a no-op.
@@ -2391,10 +2417,15 @@ def main(argv=None) -> None:
     cycle (--once) or the interval loop. Google services auto-build from the
     user's token inside the daemon (services=None); a missing token degrades to
     no sync rather than crashing — authorise via `python -m mcpbrain.auth`.
+
+    The embedder itself is built lazily (see `Daemon._embedder`): only its
+    dimension (`embedder_dim`, a fixed constant — no onnxruntime import) is
+    needed up front to size the store, so the control server / setup wizard
+    can start and become reachable even before the model is downloaded.
     """
     import argparse
 
-    from mcpbrain.embed import get_embedder
+    from mcpbrain.embed import embedder_dim, get_embedder
     from mcpbrain.store import Store
 
     ap = argparse.ArgumentParser(prog="mcpbrain.daemon")
@@ -2404,14 +2435,14 @@ def main(argv=None) -> None:
 
     _configure_logging()
 
-    emb = get_embedder("bge-small")
-    store = Store(config.store_path(), dim=emb.dim)
+    dim = embedder_dim("bge-small")
+    store = Store(config.store_path(), dim=dim)
     store.init()
     _maybe_merge_org_config(str(config.app_dir()))
     enrich_mode = config.enrich_mode(str(config.app_dir()))
     backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
     cadences = _cadences_from_config(str(config.app_dir()))
-    daemon = Daemon(store, emb, interval_s=args.interval,
+    daemon = Daemon(store, embedder=None, interval_s=args.interval,
                     enrich_mode=enrich_mode,
                     backup=backup_cfg, backup_interval_s=backup_interval,
                     communities_interval_s=cadences["communities_interval_s"],
@@ -2424,6 +2455,9 @@ def main(argv=None) -> None:
                     stale_reextract_interval_s=cadences["stale_reextract_interval_s"],
                     auto_update_interval_s=cadences["auto_update_interval_s"],
                     verify_interval_s=cadences["verify_interval_s"])
+    # Lazy embedder: the real model loads on first use of self._embedder
+    # (e.g. inside run_one()/search()), not here — see Daemon._embedder.
+    daemon._embedder_factory = lambda: get_embedder("bge-small")
     # S2/Q4/B3/B5/B4/B6 cadences: not constructor params; wire after construction.
     daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
