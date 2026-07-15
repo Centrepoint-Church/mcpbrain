@@ -433,6 +433,36 @@ class Daemon:
             self._embedder_obj = self._embedder_factory()
         return self._embedder_obj
 
+    def model_status(self) -> dict:
+        """Search-model state for the wizard: cached on disk / downloading / last error."""
+        from mcpbrain.embed import model_weights_cached
+        return {
+            "cached": bool(model_weights_cached()),
+            "downloading": bool(getattr(self, "_model_downloading", False)),
+            "error": getattr(self, "_model_error", None),
+        }
+
+    def ensure_model(self) -> None:
+        """Start a background thread that builds the embedder (downloading the
+        bge-small weights on first use). Idempotent: a second call while a
+        download is in flight is a no-op."""
+        import threading
+        if getattr(self, "_model_downloading", False):
+            return
+
+        def _run():
+            try:
+                self._embedder.embed_query("warm")   # forces fastembed download+load
+                self._model_error = None
+            except Exception as exc:  # noqa: BLE001 — surface to the wizard, don't crash
+                self._model_error = str(exc)
+            finally:
+                self._model_downloading = False
+
+        self._model_downloading = True
+        self._model_error = None
+        threading.Thread(target=_run, daemon=True).start()
+
     def __init__(self, store, embedder, *, services: dict | None = None,
                  interval_s: float = 300.0,
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
@@ -455,6 +485,8 @@ class Daemon:
         # wizard reachable even before the model is downloaded.
         self._embedder_obj = embedder
         self._embedder_factory = None
+        self._model_downloading = False
+        self._model_error = None
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
         # Enrichment source: spool | gemini | off. Defaults to "off" so a
         # newly-constructed daemon enriches nothing until explicitly configured.

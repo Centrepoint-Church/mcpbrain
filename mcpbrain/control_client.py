@@ -89,6 +89,12 @@ class ControlClient:
         ingest caches (re-runnable; idempotent daemon-side)."""
         return self._request("/api/bootstrap-baseline", method="POST")
 
+    def model_status(self) -> dict:
+        return self._request("/api/model/status")
+
+    def ensure_model(self) -> dict:
+        return self._request("/api/model/ensure", method="POST")
+
     def wizard_url(self) -> str:
         """The local setup-page URL, or '' if the daemon is not running."""
         try:
