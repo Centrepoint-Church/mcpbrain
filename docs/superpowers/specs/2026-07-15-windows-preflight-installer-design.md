@@ -40,8 +40,13 @@ into the **wizard**, which is made to always start.
 
 - No frozen/bundled native installer (PyInstaller/Nuitka/MSI) — explicitly
   rejected in favour of the hardened script.
-- No code-signing / AppLocker/WDAC story. On machines that block unsigned
-  executables entirely, this is an out-of-scope hard wall.
+- No code-signing certificate. We do **not** ship or author a compiled
+  executable — our code runs as Python source under the signed PSF interpreter,
+  so there is no mcpbrain-authored unsigned binary. (This is a reason the script
+  route beats the bundled-installer route, which *would* have introduced an
+  unsigned frozen daemon `.exe`.) The `pythonw -m mcpbrain` shim (above) keeps
+  the persistent daemon on the signed interpreter, removing the last unsigned exe
+  from the run-at-logon path.
 - macOS path is unchanged (it is not the problem); it stays inline in the
   command.
 
@@ -112,6 +117,21 @@ Today `install_agent(win32)` always calls `schtasks`. Change:
   cadences also run opportunistically inside the daemon loop.
 - `doctor` repair and `mcpbrain setup` both inherit this automatically.
 
+**Shim runs under the signed interpreter (no unsigned exe on the persistent
+path).** The hidden-console VBS shim currently launches `mcpbrain.exe <sub>` —
+the `uv`/`pip`-generated launcher trampoline, which is effectively unsigned.
+Change `_win_shim_content` to launch **`pythonw.exe -m mcpbrain <sub>`** using
+the tool venv's `pythonw.exe` — a signature-preserving copy of the signed base
+interpreter — resolved next to the installed interpreter (extend the
+`_mcpbrain_bin`-style resolution to also locate `pythonw.exe`). The persistent
+run-at-logon daemon then never invokes an unsigned executable, so AppLocker's
+default "allow signed binaries" rules can permit it without a code-signing cert.
+The `schtasks` action string gets the same treatment. In-session one-shots
+(`setup`/`connect`) still use the `mcpbrain` launcher — attended, not the
+persistent surface. (QA item: confirm the uv tool-venv `pythonw.exe` retains the
+PSF Authenticode signature; if uv trampolines it instead of copying, resolve the
+base interpreter's `pythonw.exe` directly.)
+
 ### Lazy embedder + wizard-owned model download
 
 **daemon.py:**
@@ -179,8 +199,15 @@ Today `install_agent(win32)` always calls `schtasks`. Change:
 
 ## Open risks
 
-- **Managed-machine execution blocks** (AppLocker/WDAC on unsigned binaries) are
-  out of scope; if hit, no script change helps — needs signing (deferred).
+- **Strict exe-allowlisting (AppLocker/WDAC).** We ship no unsigned binary of our
+  own, and the `pythonw -m mcpbrain` shim keeps the daemon on the signed
+  interpreter. The residual unsigned executables are toolchain-generated —
+  `mcpbrain.exe` (the uv/pip launcher, used only for attended one-shots) and
+  `uv.exe` — plus the in-session install itself. A machine that allowlists
+  individual executables would also block uv, the Python installer, and most dev
+  tooling, so this is a locked-endpoint policy, not something our packaging
+  introduces. Note: Task-Scheduler blocking (Intune/MDM, as seen on the ARM box)
+  does **not** imply exe-allowlisting — they are separate policies.
 - **winget absence / manifest gaps on older ARM builds** → python.org `.exe`
   path is the deterministic install (not a user-facing fallback; chosen when the
   probe finds no winget).
