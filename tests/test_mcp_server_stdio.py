@@ -1,13 +1,17 @@
-"""Task 3.3 — MCP-as-spawned-process stdio integration test.
+"""Task 3.3 / Task 4 — MCP-as-spawned-process stdio integration test.
 
-Proves Claude Desktop can spawn `python -m mcpbrain.mcp_server` over stdio
-against a live store: real subprocess, real MCP transport (no mocking),
-real bge embedder seeding the store. Issues `initialize`, lists tools, and
-calls `brain_search`, asserting the seeded chunk comes back.
+Proves Claude Desktop can spawn `python -m mcpbrain.mcp_server` over stdio:
+real subprocess, real MCP transport (no mocking). Issues `initialize`, lists
+tools, and calls `brain_search`.
 
-Slow: the spawned subprocess loads the bge model from a cold start (~3-3.5 min),
-even when the model is already cached on disk. Marked @pytest.mark.slow so
-`pytest -m "not slow"` skips it; it still runs in the default suite.
+Task 4 routed brain_search through the daemon's loopback control API instead
+of an in-process embedder (mcp_server.py must import no fastembed/onnxruntime
+so it can ship as a native-dep-free Desktop Extension). So this test starts a
+real ControlServer, backed by a lightweight fake daemon, in the same
+MCPBRAIN_HOME the spawned subprocess reads its control_port/control_token
+from — proving the full round trip (subprocess -> stdio -> brain_search ->
+HTTP loopback -> daemon.search) without loading any embedding model. This also
+makes the test fast: no bge cold start, so it no longer needs @pytest.mark.slow.
 """
 
 import asyncio
@@ -17,34 +21,22 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
+from mcpbrain.control_api import ControlServer
 
 # Product root = the dir holding the `mcpbrain` package (tests/ -> parent).
 PRODUCT_ROOT = Path(__file__).resolve().parent.parent
 
+SEEDED_DOC_ID = "d-budget-stdio"
 
-def _seed_store(home: Path) -> str:
-    """Build a real store under `home` and index one recognisable chunk.
 
-    Returns the doc_id of the seeded chunk. Uses the REAL bge embedder so the
-    vector dim matches what the spawned server will load.
-    """
-    from mcpbrain.embed import get_embedder
-    from mcpbrain.index import index_pending
-    from mcpbrain.store import Store
+class _FakeDaemon:
+    """Minimal daemon stand-in: only `.search()` is reachable, via the
+    control API's /api/recall handler, which is all ControlClient.recall()
+    (and therefore brain_search) calls through."""
 
-    emb = get_embedder("bge-small")
-    store = Store(home / "brain.sqlite3", dim=emb.dim)
-    store.init()
-    doc_id = "d-budget-stdio"
-    store.upsert_chunk(
-        doc_id,
-        "the annual budget review for Acme",
-        "h-budget-stdio",
-        {"source_type": "gmail"},
-    )
-    index_pending(store, emb)  # populate vec + fts so search works
-    return doc_id
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        return ([{"doc_id": SEEDED_DOC_ID, "score": 1.0,
+                  "text": "the annual budget review for Acme"}] if query else [])
 
 
 async def _run_session(home: Path):
@@ -57,20 +49,14 @@ async def _run_session(home: Path):
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     # Explicit minimal env: don't leak developer credentials into the
-    # subprocess, and keep the test reproducible. HOME is required so the
-    # spawned bge load finds its cached HF model under HOME/.cache (otherwise
-    # it would re-download). A raw subprocess does NOT inherit pyproject's
-    # pythonpath, so PYTHONPATH must carry the product root for `-m
-    # mcpbrain.mcp_server` to import.
+    # subprocess, and keep the test reproducible. A raw subprocess does NOT
+    # inherit pyproject's pythonpath, so PYTHONPATH must carry the product
+    # root for `-m mcpbrain.mcp_server` to import.
     env = {
         "HOME": os.environ.get("HOME", ""),
         "PATH": os.environ.get("PATH", ""),
         "MCPBRAIN_HOME": str(home),
         "PYTHONPATH": str(PRODUCT_ROOT),
-        # Point the spawned server at the shared model cache (the session fixture
-        # pins this) so it reuses the already-downloaded bge weights instead of
-        # re-downloading into the tmp MCPBRAIN_HOME on every run.
-        "FASTEMBED_CACHE_PATH": os.environ.get("FASTEMBED_CACHE_PATH", ""),
     }
 
     params = StdioServerParameters(
@@ -79,8 +65,7 @@ async def _run_session(home: Path):
         env=env,
     )
 
-    # Generous read timeout: the subprocess loads bge on first request.
-    timeout = _dt.timedelta(seconds=60)
+    timeout = _dt.timedelta(seconds=15)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
@@ -101,19 +86,23 @@ async def _run_session(home: Path):
             return tool_names, payload
 
 
-@pytest.mark.slow
 def test_stdio_spawn_initialize_and_brain_search(tmp_path):
     home = tmp_path / "mcpbrain_home"
     home.mkdir()
-    seeded_doc_id = _seed_store(home)
 
-    tool_names, payload = asyncio.run(_run_session(home))
+    daemon = _FakeDaemon()
+    srv = ControlServer(daemon, home=str(home))
+    srv.start()
+    try:
+        tool_names, payload = asyncio.run(_run_session(home))
+    finally:
+        srv.stop()
 
     # initialize + tools list
     assert {"brain_search", "brain_read", "brain_context", "brain_graph", "brain_actions"} <= tool_names
 
-    # brain_search over the live store finds the seeded chunk
+    # brain_search round-tripped through the real control API to the fake daemon
     assert isinstance(payload, list)
-    assert any(r.get("doc_id") == seeded_doc_id for r in payload), (
-        f"expected {seeded_doc_id} in {payload}"
+    assert any(r.get("doc_id") == SEEDED_DOC_ID for r in payload), (
+        f"expected {SEEDED_DOC_ID} in {payload}"
     )

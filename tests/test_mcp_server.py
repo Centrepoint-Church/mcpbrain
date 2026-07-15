@@ -2,36 +2,43 @@ import asyncio
 import logging
 from unittest.mock import patch
 from mcpbrain.store import Store
-from mcpbrain.index import index_pending
 from mcpbrain.mcp_server import make_brain_search
-from tests.test_retrieval import FakeEmbedder
+
+
+class FakeControlClient:
+    """Stand-in for ControlClient.recall(), used to test make_brain_search's
+    thin passthrough without a real daemon (brain_search now routes recall
+    through the daemon's /api/recall, not an in-process embedder)."""
+
+    def __init__(self, results=None, error=None):
+        self._results = results if results is not None else []
+        self._error = error
+
+    def recall(self, query, limit=10):
+        if self._error is not None:
+            raise self._error
+        return self._results
 
 
 def test_brain_search_tool_returns_results(tmp_path):
-    s = Store(tmp_path / "b.sqlite3", dim=4)
-    s.init()
-    s.upsert_chunk("d-budget", "the annual budget review", "h1", {})
-    index_pending(s, FakeEmbedder())
-    tool = make_brain_search(s, FakeEmbedder())
+    client = FakeControlClient(results=[{"doc_id": "d-budget", "text": "the annual budget review"}])
+    tool = make_brain_search(client)
     out = asyncio.run(tool("money planning", 5))
     assert any(r["doc_id"] == "d-budget" for r in out)
 
 
 def test_brain_search_clean_error_when_empty(tmp_path):
-    s = Store(tmp_path / "b.sqlite3", dim=4)
-    s.init()
-    tool = make_brain_search(s, FakeEmbedder())
+    client = FakeControlClient(results=[])
+    tool = make_brain_search(client)
     out = asyncio.run(tool("anything", 5))
     assert out == []  # empty, not an exception
 
 
 def test_brain_search_logs_on_failure(tmp_path, caplog):
-    s = Store(tmp_path / "b.sqlite3", dim=4)
-    s.init()
-    tool = make_brain_search(s, FakeEmbedder())
+    client = FakeControlClient(error=RuntimeError("boom"))
+    tool = make_brain_search(client)
     with caplog.at_level(logging.ERROR, logger="mcpbrain.mcp_server"):
-        with patch("mcpbrain.mcp_server.hybrid_search", side_effect=RuntimeError("boom")):
-            out = asyncio.run(tool("anything", 5))
+        out = asyncio.run(tool("anything", 5))
     assert out == []
     assert any("brain_search failed" in r.message for r in caplog.records)
 

@@ -41,12 +41,13 @@ class ControlClient:
             raise DaemonUnavailable("control port/token not found") from exc
         return f"http://127.0.0.1:{port}", token
 
-    def _request(self, path: str, method: str = "GET"):
+    def _request(self, path: str, method: str = "GET", body: dict | None = None):
         base, token = self._endpoint()
         req = urllib.request.Request(base + path, method=method)
         req.add_header("Authorization", f"Bearer {token}")
         if method == "POST":
-            req.data = b"{}"
+            req.add_header("Content-Type", "application/json")
+            req.data = json.dumps(body or {}).encode()
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read()
@@ -63,6 +64,15 @@ class ControlClient:
 
     def status(self) -> dict:
         return self._request("/api/status")
+
+    def recall(self, query: str, limit: int = 10) -> list[dict]:
+        """Semantic search via the daemon (embeds server-side). [] if daemon down."""
+        try:
+            r = self._request("/api/recall", method="POST",
+                              body={"query": query, "limit": limit})
+        except DaemonUnavailable:
+            return []
+        return r.get("results", [])
 
     def pause(self) -> dict:
         return self._request("/api/pause", method="POST")
