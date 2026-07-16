@@ -106,7 +106,10 @@ def update_from_index(index_url: str) -> int:
         # without this on a machine whose default Python is <3.12.)
         "--python", "3.12",
         "--index", f"mcpbrain={index_url}",
-        "mcpbrain", "--upgrade", "--reinstall-package", "mcpbrain",
+        # Install spec carries the [daemon] extra (pulls in fastembed/onnxruntime):
+        # the daemon needs it to embed. --reinstall-package still takes the bare
+        # package name — extras aren't a separate installed package.
+        "mcpbrain[daemon]", "--upgrade", "--reinstall-package", "mcpbrain",
     ])
     if rc != 0:
         print("Update failed (uv tool install):\n" + out.strip(), file=sys.stderr)

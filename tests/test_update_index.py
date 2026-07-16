@@ -26,7 +26,12 @@ def test_update_from_index_runs_uv_then_restart(monkeypatch):
     uv_cmd = calls["run"][0]
     assert "uv" in uv_cmd[0] and "tool" in uv_cmd and "install" in uv_cmd
     assert any("mcpbrain=" in c for c in uv_cmd)        # --index mcpbrain=<url>
-    assert "mcpbrain" in uv_cmd and "--upgrade" in uv_cmd
+    # Install spec must carry the [daemon] extra so the daemon keeps fastembed
+    # (onnxruntime) after an auto-update — plain "mcpbrain" would silently drop it.
+    assert "mcpbrain[daemon]" in uv_cmd and "--upgrade" in uv_cmd
+    # --reinstall-package takes the bare package name (extras aren't a separate
+    # installed package) — it must stay "mcpbrain", not the extras spec.
+    assert uv_cmd[uv_cmd.index("--reinstall-package") + 1] == "mcpbrain"
     # Pin the interpreter so uv provisions Python 3.12 (mcpbrain requires >=3.12);
     # without this the install fails on a machine whose default Python is <3.12.
     assert "--python" in uv_cmd and "3.12" in uv_cmd
