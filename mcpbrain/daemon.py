@@ -2162,6 +2162,17 @@ class Daemon:
         self._store.set_meta("embed_backend", backend)
         return count
 
+    def _migrate_embed_backend_safe(self) -> None:
+        """Re-embed on a backend change, but never let a not-ready/undownloadable
+        model stop the daemon from starting its loop. RuntimeError = embedder has
+        no factory (lazy, not built); any other exception = model build/download
+        failed (e.g. offline). Both degrade to 'skip migrate, continue' — recall
+        stays best-effort until the model is available; the loop still runs."""
+        try:
+            self.migrate_embed_backend()
+        except Exception as exc:  # noqa: BLE001 — must not stop the daemon starting
+            log.info("embed-backend migrate skipped (model not ready): %s", exc)
+
     def run(self) -> None:
         """Acquire the single-writer lock and loop until stopped.
 
@@ -2196,13 +2207,12 @@ class Daemon:
             # Re-embed the whole corpus once if the embedding backend changed
             # since the last run. No-op (and silent) when the marker matches.
             # Runs against the restored data (see above). Guarded: the lazy
-            # embedder may not be built yet (model still downloading), in
-            # which case migration is skipped rather than crashing startup —
-            # the guarded run_one() loop below will retry each cycle.
-            try:
-                self.migrate_embed_backend()
-            except RuntimeError:
-                log.info("embed-backend migrate skipped: model not loaded yet")
+            # embedder may not be built yet (model still downloading), or
+            # building it may fail outright (e.g. offline, model download
+            # unreachable) — either way migration is skipped rather than
+            # crashing startup; the guarded run_one() loop below will retry
+            # each cycle.
+            self._migrate_embed_backend_safe()
             # Resolve services once at startup so they are available from the
             # first cycle, regardless of pause state. ensure_services() is
             # idempotent: the subsequent call inside run_one() becomes a no-op.
