@@ -37,7 +37,7 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    settings (see step 2 below) — ideally **required/default** so it auto-installs.
 2. The colleague pastes the `plugin/INSTALL.md` prompt into a **Claude Code
    (Desktop)** session. It installs uv if missing, then:
-   `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force`,
+   `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" "mcpbrain[daemon]" --force`,
    and runs `mcpbrain setup`.
 3. `mcpbrain setup` registers the login agent (launchd/schtasks), **connects the
    brain to Claude Desktop** by writing `mcpbrain` into the Desktop MCP config
