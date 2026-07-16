@@ -25,10 +25,11 @@ running `uv tool install` only affects *this* machine.
 `docs/DISTRIBUTION.md` is the *why*. Follow the runbook. The things that are easy to get
 wrong and MUST be right:
 
-- **Version lives in FOUR files, keep them equal:** `pyproject.toml`, `mcpbrain/__init__.py`,
-  `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`.
-  The two plugin manifests are the marketplace's version and are **easy to forget** —
-  bumping only `__init__.py`/`pyproject.toml` ships a wrong plugin version. (`uv.lock`'s
+- **Version lives in FIVE files, keep them equal:** `pyproject.toml`, `mcpbrain/__init__.py`,
+  `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`,
+  `plugin/mcpb/manifest.json`. The plugin manifests are the marketplace's version and the
+  `.mcpb` manifest is the Desktop Extension's version — all **easy to forget**; bumping only
+  `__init__.py`/`pyproject.toml` ships a wrong plugin/extension version. (`uv.lock`'s
   mcpbrain entry is also kept in step but isn't a marketplace source-of-truth.)
 - Release = push `mcpbrain` source → `python bin/release.py --dist ../mcpbrain-dist` then
   commit+push `mcpbrain-dist` (mind the stale-wheel gotcha in the runbook) → sync `plugin/`
@@ -53,9 +54,27 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-06):** all four version files **and** the published wheel are at
-  `0.7.90` — source, dist index, and plugin manifests are in step. **0.7.90 is the org-baseline
-  ACTIVATION release**: it fixes `fleet.merge_org_config` to fall back to
+- **Current state (2026-07-16):** all **five** version files **and** the published wheel are at
+  `0.7.95` — source, dist index (which now also serves `install.ps1` and `mcpbrain-0.7.95.mcpb`),
+  and plugin manifests are in step. **0.7.95 is the Windows preflight-installer release**: a
+  review-then-install `plugin/scripts/install.ps1` (arch-native probe → pure `Get-InstallPlan` →
+  apply: installs the correct ARM64/x64 native Python + matching VC++ redist + uv +
+  `mcpbrain[daemon]`, **rejecting** a present-but-wrong-arch Python/redist rather than carrying it
+  over); a **lazy embedder** so the daemon's control server + setup wizard start *before* the
+  ~130 MB bge-small model loads, with the wizard owning the download (`/api/model/status|ensure`);
+  the MCP server refactored into a **native-dep-free** control-API client (`brain_search` → daemon
+  `/api/recall`) so it ships as a one-click **`.mcpb`** Desktop Extension, with
+  `fastembed`/`onnxruntime` moved to a `[daemon]`-only optional dep — **the auto-updater
+  `update.py` must (and now does) reinstall `mcpbrain[daemon]`**, the release-blocking gotcha that
+  would otherwise strip the embedder from every install on next auto-update; `agents.py` gains a
+  Task-Scheduler-availability probe that picks `schtasks` or a first-class Startup-folder-shortcut,
+  and the run-at-logon shim now launches the **signed** `pythonw -m mcpbrain` (not the unsigned
+  `mcpbrain.exe` trampoline); plus a `doctor` architecture line (WOW64 `PROCESSOR_ARCHITEW6432`
+  emulation detection). Gates green at release (full suite 2345 passed, ruff clean). **HARDWARE QA
+  GATE UNMET (runbook §5/§6):** `install.ps1` + `.mcpb` are NOT yet validated on real ARM64/x64/
+  policy-blocked Windows or a non-author mac — existing installs only auto-update the fully-tested
+  daemon wheel (safe), but **do not onboard Windows users until that gate passes.** Earlier:
+  **0.7.90 was the org-baseline ACTIVATION release**: it fixes `fleet.merge_org_config` to fall back to
   `org_defaults.FLEET_FOLDER_ID` when `fleet.folder_id` is unset (the common case) — the
   prerequisite for the fleet-wide `org_pin` to reach installs at all (it previously early-returned
   and reached nobody) — plus graph-explorer polish (particle/curvature/hover + search-driven ego
