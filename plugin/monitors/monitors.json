@@ -1,7 +1,0 @@
-[
-  {
-    "name": "mcpbrain-health",
-    "command": "${CLAUDE_PLUGIN_ROOT}/bin/mcpbrain-monitor",
-    "description": "Daemon and enrichment health"
-  }
-]

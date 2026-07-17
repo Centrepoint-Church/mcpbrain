@@ -11,7 +11,7 @@ running `uv tool install` only affects *this* machine.
 |---|---|---|
 | **mcpbrain** (this repo) | Python package (`mcpbrain/`), plugin source assets (`plugin/`), routines (`mcpbrain/routines/`), tests | source of truth; not installed directly |
 | **mcpbrain-dist** (`../mcpbrain-dist`) | PEP 503 wheel index on GitHub Pages (`centrepoint-church.github.io/mcpbrain-dist/simple/`) | `uv tool install --index` pulls the wheel; installed daemons **auto-update daily** from here (`update.py`) |
-| **mcpbrain-plugin** (`../mcpbrain-plugin`) | Public Claude Code plugin (agents/skills/hooks/commands/monitors + `.claude-plugin/`), mirrored from this repo's `plugin/` | org **plugin marketplace** (Claude Team/Enterprise settings) |
+| **mcpbrain-plugin** (`../mcpbrain-plugin`) | Public Claude Code plugin (agents/skills/hooks/commands + `.claude-plugin/` + `mcpb/`), mirrored from this repo's `plugin/` | org **plugin marketplace** (Claude Team/Enterprise settings) |
 
 ## CRITICAL: local work ≠ shipped to users
 
@@ -54,9 +54,15 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-16):** all **five** version files **and** the published wheel are at
-  `0.7.95` — source, dist index (which now also serves `install.ps1` and `mcpbrain-0.7.95.mcpb`),
-  and plugin manifests are in step. **0.7.95 is the Windows preflight-installer release**: a
+- **Current state (2026-07-17):** all **five** version files **and** the published wheel are at
+  `0.7.96` — source, dist index (which now also serves `install.ps1` and `mcpbrain-0.7.96.mcpb`),
+  and plugin manifests are in step. **0.7.96 removes the plugin's top-level `bin/`** — the
+  `bin/mcpbrain-{mcp,monitor}` shims and the `monitors/` health monitor: claude.ai-hosted plugins
+  **fail marketplace validation** with a top-level `bin/` (executables must be declared via
+  hooks/commands/mcpServers, and are invisible on the admin approval surface). The unreferenced
+  MCP shim was dead (connector is a `mcpbrain setup` config write), and the health monitor is
+  covered by `mcpbrain doctor`; a `test_no_toplevel_bin_dir` guard prevents regressions.
+  Otherwise **0.7.96 is 0.7.95's Windows preflight-installer release**: a
   review-then-install `plugin/scripts/install.ps1` (arch-native probe → pure `Get-InstallPlan` →
   apply: installs the correct ARM64/x64 native Python + matching VC++ redist + uv +
   `mcpbrain[daemon]`, **rejecting** a present-but-wrong-arch Python/redist rather than carrying it

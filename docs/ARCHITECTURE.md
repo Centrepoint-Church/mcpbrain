@@ -44,9 +44,12 @@ Setup merges this entry in (preserving any other servers, idempotent):
 ```
 
 The plugin's `plugin/.mcp.json` deliberately bundles **no** MCP server
-(`"mcpServers": {}`); it ships only skills/hooks/monitors. The
-`plugin/bin/mcpbrain-mcp` + `mcpbrain-monitor` shims remain only as a documented
-manual fallback.
+(`"mcpServers": {}`); it ships skills/hooks/commands (and the `.mcpb` bridge
+source). It ships **no top-level `bin/`** — claude.ai-hosted plugins fail
+marketplace validation if they do — so the former `plugin/bin/mcpbrain-{mcp,
+monitor}` shims and the `monitors/` health monitor were removed in 0.7.96
+(`mcpbrain doctor` covers health on demand; the connector is a `mcpbrain setup`
+config write, not a shim).
 
 **Why a config write instead of a bundled plugin server or `claude mcp add`:**
 

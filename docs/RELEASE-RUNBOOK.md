@@ -15,11 +15,14 @@ whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goe
   shipped `update.py` `DEFAULT_INDEX_URL` pulls from, so a published bump
   auto-updates installed daemons within ~a day.
 - **`Centrepoint-Church/mcpbrain-plugin`** — public plugin assets (skills, hooks,
-  monitors, `.claude-plugin/{plugin,marketplace}.json`). Distributed to staff
+  commands, `.claude-plugin/{plugin,marketplace}.json`, `mcpb/`). Distributed to staff
   through the org **plugin marketplace**. Note: the plugin's `.mcp.json` bundles
   **no** MCP server — the `mcpbrain` connector is registered by `mcpbrain setup`
-  at user scope (see `docs/ARCHITECTURE.md` for why). The `bin/` shims remain only
-  as a documented manual fallback.
+  at user scope (see `docs/ARCHITECTURE.md` for why). The plugin ships **no
+  top-level `bin/`** — claude.ai-hosted plugins fail validation if they do
+  (executables must be declared via hooks/commands/mcpServers), so the old
+  `bin/mcpbrain-{mcp,monitor}` shims and the `monitors/` health monitor were
+  removed in 0.7.96; `mcpbrain doctor` covers health on demand.
 
 Local clones used for publishing live at `~/GitHub/mcpbrain-dist` and
 `~/GitHub/mcpbrain-plugin`, both with `origin` = the Centrepoint-Church
