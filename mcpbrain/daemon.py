@@ -2476,6 +2476,14 @@ def main(argv=None) -> None:
 
     _configure_logging()
 
+    if sys.platform == "win32":
+        _vc = config.app_dir() / "vcruntime"
+        if _vc.is_dir():
+            try:
+                os.add_dll_directory(str(_vc))   # harmless no-op if empty
+            except OSError:
+                pass
+
     dim = embedder_dim("bge-small")
     store = Store(config.store_path(), dim=dim)
     store.init()
