@@ -1,5 +1,5 @@
-import io, sys
-from mcpbrain import doctor
+import io
+import sys
 
 def test_doctor_report_encodes_under_cp1252(monkeypatch):
     # A doctor report full of ✅/⚠️/➖ must not crash on a legacy-codepage console.
