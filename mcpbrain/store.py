@@ -2209,6 +2209,13 @@ class Store:
         that were extracted — a late-arriving or dropped message is not in the
         extraction, so its chunk stays enriched=0 and re-queues next cycle.
 
+        Drive docs are the third case: reassemble_thread keys them on file_id, so
+        the extraction's message_id is a file_id. Drive chunks carry no
+        message_id and their doc_id is gdrive-<file_id>-<idx> (never the bare
+        file_id), so an id matching a chunk's metadata.file_id resolves to every
+        chunk of that document. file_ids (~33-char base64) don't collide with
+        email message/thread ids, so this branch only fires for real Drive ids.
+
         Returns doc_ids ordered by the chunk rowid for stable output.
         """
         ids = [m for m in (message_ids or []) if m]
@@ -2219,10 +2226,11 @@ class Store:
             rows = db.execute(
                 f"SELECT doc_id FROM chunks "
                 f"WHERE json_extract(metadata, '$.message_id') IN ({ph}) "
+                f"   OR json_extract(metadata, '$.file_id') IN ({ph}) "
                 f"   OR (json_extract(metadata, '$.message_id') IS NULL "
                 f"       AND doc_id IN ({ph})) "
                 f"ORDER BY rowid",
-                ids + ids,
+                ids + ids + ids,
             ).fetchall()
         return [r["doc_id"] for r in rows]
 
