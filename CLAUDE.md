@@ -54,32 +54,38 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-17):** all **five** version files **and** the published wheel are at
-  `0.7.96` — source, dist index (which now also serves `install.ps1` and `mcpbrain-0.7.96.mcpb`),
-  and plugin manifests are in step. **0.7.96 removes the plugin's top-level `bin/`** — the
-  `bin/mcpbrain-{mcp,monitor}` shims and the `monitors/` health monitor: claude.ai-hosted plugins
-  **fail marketplace validation** with a top-level `bin/` (executables must be declared via
-  hooks/commands/mcpServers, and are invisible on the admin approval surface). The unreferenced
-  MCP shim was dead (connector is a `mcpbrain setup` config write), and the health monitor is
-  covered by `mcpbrain doctor`; a `test_no_toplevel_bin_dir` guard prevents regressions.
-  Otherwise **0.7.96 is 0.7.95's Windows preflight-installer release**: a
-  review-then-install `plugin/scripts/install.ps1` (arch-native probe → pure `Get-InstallPlan` →
-  apply: installs the correct ARM64/x64 native Python + matching VC++ redist + uv +
-  `mcpbrain[daemon]`, **rejecting** a present-but-wrong-arch Python/redist rather than carrying it
-  over); a **lazy embedder** so the daemon's control server + setup wizard start *before* the
-  ~130 MB bge-small model loads, with the wizard owning the download (`/api/model/status|ensure`);
-  the MCP server refactored into a **native-dep-free** control-API client (`brain_search` → daemon
-  `/api/recall`) so it ships as a one-click **`.mcpb`** Desktop Extension, with
-  `fastembed`/`onnxruntime` moved to a `[daemon]`-only optional dep — **the auto-updater
-  `update.py` must (and now does) reinstall `mcpbrain[daemon]`**, the release-blocking gotcha that
-  would otherwise strip the embedder from every install on next auto-update; `agents.py` gains a
-  Task-Scheduler-availability probe that picks `schtasks` or a first-class Startup-folder-shortcut,
-  and the run-at-logon shim now launches the **signed** `pythonw -m mcpbrain` (not the unsigned
-  `mcpbrain.exe` trampoline); plus a `doctor` architecture line (WOW64 `PROCESSOR_ARCHITEW6432`
-  emulation detection). Gates green at release (full suite 2345 passed, ruff clean). **HARDWARE QA
-  GATE UNMET (runbook §5/§6):** `install.ps1` + `.mcpb` are NOT yet validated on real ARM64/x64/
-  policy-blocked Windows or a non-author mac — existing installs only auto-update the fully-tested
-  daemon wheel (safe), but **do not onboard Windows users until that gate passes.** Earlier:
+- **Current state (2026-07-21):** all **five** version files **and** the published wheel are at
+  `0.7.97` — source, dist index (which also serves `install.ps1` + versioned & unversioned
+  `mcpbrain.mcpb`), and plugin manifests are in step. **0.7.97 is the Windows install rework
+  (use-the-platform)** — it corrects a misdiagnosis at the root of the 0.7.95/0.7.96 Windows work.
+  A real Windows-on-ARM install proved: (a) **native ARM64 is not viable** — `sqlite-vec`,
+  `cryptography`, `pymupdf`, `leidenalg` ship **no `win_arm64` wheels** (so the 0.7.95 arch-native
+  `install.ps1` failed outright); (b) **uv already installs x86_64 CPython by default on ARM64**
+  and Windows runs it transparently under Prism emulation; (c) the original "onnxruntime crashes
+  under emulation" was a **missing x64 `MSVCP140_1.dll`** (likely from installing the ARM64 redist
+  first → version-skip), NOT an emulation incompatibility. So the installer now **uses the
+  platform**: slim `install.ps1` = ensure uv → ensure the **x64** VC++ redist (x64 ONLY, never
+  arm64) → `uv tool install --python <x64-pin> "mcpbrain[daemon]"` → `mcpbrain setup` (no
+  arch-detection, no Python provisioning). Plus the downstream fixes a real ARM64 install exposed:
+  the run-at-logon shim reverted to the **absolute `mcpbrain.exe`** (the 0.7.96 signed-`pythonw`
+  shim resolved a bare `pythonw` not on PATH → daemon never started at login); `cli.py` forces
+  **UTF-8 stdio** (doctor's `✅/⚠️` glyphs crashed cp1252 Windows consoles); a durable
+  **`mcpbrain/vcruntime.py`** safety net (`app_dir()/vcruntime` on the DLL search path via
+  `add_search_dir`, populated from an MS-signed x64 copy by a `doctor` repair — survives reinstalls)
+  as a fallback if the redist ever leaves onnxruntime unable to load; `doctor.arch_line` now reads
+  x64-on-ARM64 as **"emulated — expected"**; the tray gains the Startup-shortcut fallback; the
+  `mcpbrain.maintenance` import is optional (no wheel-install warning). Gates green at release
+  (full suite passed, ruff clean). **HARDWARE QA GATE STILL OPEN (runbook §5):** 0.7.97 is published
+  (safe — existing installs auto-update only the daemon wheel; `install.ps1`/`.mcpb` are opt-in,
+  used only when someone runs a Windows install), but the reworked installer is **not yet validated
+  on a real ARM64/x64 Windows box — do NOT onboard Windows users until that QA passes.** Two
+  deferred Minors: uninstall doesn't remove the Startup `.lnk` (cosmetic); a Rosetta arch case is
+  undetected on mac (documented). Earlier: **0.7.95/0.7.96 were the (now-superseded) arch-native
+  Windows preflight-installer releases** — 0.7.96 also removed the plugin's top-level `bin/` (shims
+  + `monitors/`) that **fails claude.ai marketplace validation** (a `test_no_toplevel_bin_dir` guard
+  prevents regressions; that removal STANDS). The lazy embedder, wizard-owned model download,
+  `[daemon]` optional dep + `update.py` reinstalling `mcpbrain[daemon]`, and the `.mcpb` bridge from
+  that line all **remain**; only the native-ARM64 install strategy was replaced. Earlier:
   **0.7.90 was the org-baseline ACTIVATION release**: it fixes `fleet.merge_org_config` to fall back to
   `org_defaults.FLEET_FOLDER_ID` when `fleet.folder_id` is unset (the common case) — the
   prerequisite for the fleet-wide `org_pin` to reach installs at all (it previously early-returned
