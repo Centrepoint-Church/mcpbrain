@@ -45,3 +45,18 @@ def test_arch_line_detects_windows_emulation_via_true_os_arch(monkeypatch):
     line = doctor.arch_line()
     assert "emulated" in line.lower()
     assert "mismatch" not in line.lower()
+
+
+def test_true_os_arch_reports_arm64_under_rosetta(monkeypatch):
+    # An x86_64 interpreter translated by Rosetta on Apple Silicon: the true OS
+    # arch is arm64, so arch_line should read "emulated — expected", not a mismatch.
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(doctor, "_is_rosetta_translated", lambda: True)
+    assert doctor._true_os_arch() == "arm64"
+
+
+def test_true_os_arch_native_when_not_translated(monkeypatch):
+    import platform
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(doctor, "_is_rosetta_translated", lambda: False)
+    assert doctor._true_os_arch() == platform.machine()
