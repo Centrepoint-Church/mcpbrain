@@ -38,3 +38,11 @@ def test_tray_uses_startup_when_scheduler_blocked(monkeypatch):
     monkeypatch.setattr("pathlib.Path.mkdir", lambda self, *a, **k: None)
     agents._install_schtasks_tray(mcpbrain_bin=r"C:\bin\mcpbrain.exe", home=r"C:\home")
     assert "mcpbrain-tray" in calls.get("startup", [])
+
+
+def test_startup_shortcut_path_uses_appdata_startup_folder(monkeypatch):
+    monkeypatch.setenv("APPDATA", r"C:\Users\j\AppData\Roaming")
+    p = agents._startup_shortcut_path("mcpbrain")
+    assert p.name == "mcpbrain.lnk"
+    assert p.parent.name == "Startup"
+    assert "AppData\\Roaming" in str(p) or "AppData/Roaming" in str(p)

@@ -148,6 +148,15 @@ def startup_shortcut_target(*, shim_path) -> tuple[str, str]:
     return wscript, f'"{shim_path}"'
 
 
+def _startup_shortcut_path(task_name: str) -> Path:
+    """Path to a task's Startup-folder `.lnk` (the scheduler-blocked fallback).
+    Pure — unit-testable by setting APPDATA. Used by both install and uninstall so
+    the shortcut is created and removed at the same location."""
+    appdata = os.environ.get("APPDATA", "")
+    return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / f"{task_name}.lnk")
+
+
 def _win_shim_path(home: str, task_name: str) -> Path:
     return Path(home) / _WIN_SHIM_DIR / f"{task_name}.vbs"
 
@@ -274,8 +283,7 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
 
 def _install_startup_shortcut(task_name, *, shim_path) -> None:  # pragma: no cover
     wscript, args = startup_shortcut_target(shim_path=shim_path)
-    lnk = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / \
-          "Programs" / "Startup" / f"{task_name}.lnk"
+    lnk = _startup_shortcut_path(task_name)
     ps = (f"$s=New-Object -ComObject WScript.Shell;"
           f"$sc=$s.CreateShortcut('{lnk}');$sc.TargetPath='{wscript}';"
           f"$sc.Arguments='{args}';$sc.Save()")
@@ -286,6 +294,9 @@ def _install_startup_shortcut(task_name, *, shim_path) -> None:  # pragma: no co
 def _uninstall_schtasks(home: str | None = None) -> None:  # pragma: no cover
     subprocess.run(["schtasks", "/delete", "/tn", _TASK_NAME, "/f"], check=False)
     log.info("Windows scheduled task '%s' deleted", _TASK_NAME)
+    # Also remove the Startup-folder .lnk (the scheduler-blocked fallback), so an
+    # uninstall doesn't leave a dangling shortcut pointing at a deleted shim.
+    _startup_shortcut_path(_TASK_NAME).unlink(missing_ok=True)
     if home is not None:
         _win_shim_path(home, _TASK_NAME).unlink(missing_ok=True)
 
@@ -352,6 +363,7 @@ def _install_schtasks_tray(*, mcpbrain_bin: str, home: str) -> None:  # pragma: 
 def _uninstall_schtasks_tray() -> None:  # pragma: no cover
     subprocess.run(["schtasks", "/delete", "/tn", _TRAY_TASK_NAME, "/f"], check=False)
     log.info("Windows scheduled task '%s' deleted", _TRAY_TASK_NAME)
+    _startup_shortcut_path(_TRAY_TASK_NAME).unlink(missing_ok=True)   # clean the Startup fallback .lnk
 
 
 # -- best-effort tray restarts (called by restart_agent; never fatal) --------

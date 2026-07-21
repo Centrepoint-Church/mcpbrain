@@ -312,17 +312,35 @@ def _true_os_arch() -> str:
     Windows: PROCESSOR_ARCHITEW6432 is set by WOW64 ONLY when the current
     process is emulated, and holds the true native arch (e.g. "ARM64") in
     that case; PROCESSOR_ARCHITECTURE is the native arch when not emulated.
-    Non-Windows: fall back to platform.machine() — Rosetta detection on macOS
-    is out of scope for this fix.
+    macOS: an x86_64 interpreter under Rosetta on Apple Silicon reports
+    "x86_64" from platform.machine(); `sysctl.proc_translated == 1` means the
+    process is translated, so the true hardware arch is arm64.
+    Other: platform.machine().
     """
     import os
     import platform
+    import sys
 
     if os.name == "nt":
         return (os.environ.get("PROCESSOR_ARCHITEW6432")
                 or os.environ.get("PROCESSOR_ARCHITECTURE")
                 or platform.machine())
+    if sys.platform == "darwin" and _is_rosetta_translated():
+        return "arm64"
     return platform.machine()
+
+
+def _is_rosetta_translated() -> bool:
+    """True iff this process runs under Rosetta 2 (translated x86_64 on Apple
+    Silicon). `sysctl.proc_translated` is 1 when translated, 0 native, absent on
+    Intel Macs. Best-effort — any error means 'not translated'."""
+    import subprocess
+    try:
+        out = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"],
+                             capture_output=True, text=True, timeout=2)
+        return out.returncode == 0 and out.stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 _ARCH_NORM = {"arm64": "ARM64", "aarch64": "ARM64", "amd64": "X64", "x64": "X64", "x86_64": "X64"}
