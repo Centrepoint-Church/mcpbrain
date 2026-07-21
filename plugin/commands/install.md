@@ -23,7 +23,7 @@ mcpbrain doctor
 
 (Note: The installer makes system changes — installing uv, the x64 VC++ runtime, autostart configuration, and Claude Desktop config — so it requires approval to run and is incompatible with restricted/managed execution policies.)
 
-On macOS, `mcpbrain setup` registers a launchd login agent, writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard. On Windows, `install.ps1` reviews the machine (architecture, Python, VC++ runtime, uv, Task Scheduler) and installs the correct arch-native version of anything missing, then verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
+On macOS, `mcpbrain setup` registers a launchd login agent, writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard. On Windows, `install.ps1` ensures uv and the **x64** Visual C++ runtime are present, then installs mcpbrain with an x64 Python — which runs natively on x64 machines and under Windows' transparent emulation on ARM64 (native-ARM64 isn't viable: several dependencies ship no ARM64 Windows wheels) — and verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
 
 **2. Finish the wizard.** Tell me to complete the browser wizard that just opened:
 Google sign-in, my identity, and timezone. **Backup and recovery are automatic** — the
