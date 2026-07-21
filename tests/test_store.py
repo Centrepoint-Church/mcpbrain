@@ -48,6 +48,33 @@ def test_wal_enabled_and_readonly_rejects_writes(tmp_path):
         ro.upsert_chunk("d2", "y", "h2", {})  # read-only connection cannot write
 
 
+# --- doc_ids_for_messages: Drive file_id resolution ----------------------
+
+def test_doc_ids_for_messages_resolves_drive_file_id(tmp_path):
+    """A Drive doc's message identity is its file_id: reassemble_thread emits
+    message_id=file_id, but Drive chunks carry no metadata.message_id and their
+    doc_id is gdrive-<file_id>-<idx>. doc_ids_for_messages must bridge file_id
+    back to every chunk of that file (rowid order), so drain can mark them."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    fid = "1Tj2fbHCq5CN5d4uAZXjE0Is3zptIbu1P"
+    for i in range(3):
+        s.upsert_chunk(f"gdrive-{fid}-{i}", f"page {i}", f"h{i}",
+                       {"source_type": "gdrive", "file_id": fid, "chunk_index": i})
+    assert s.doc_ids_for_messages([fid]) == [
+        f"gdrive-{fid}-0", f"gdrive-{fid}-1", f"gdrive-{fid}-2"]
+
+
+def test_doc_ids_for_messages_email_and_doc_id_paths_unaffected(tmp_path):
+    """Regression guard: resolution by metadata.message_id and the message_id-is-
+    NULL doc_id fallback still work after the file_id branch is added."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gmail-x-body-0", "hi", "he",
+                   {"source_type": "gmail", "message_id": "msg-x"})
+    s.upsert_chunk("bare-doc-0", "yo", "hb", {"source_type": "note"})
+    assert s.doc_ids_for_messages(["msg-x"]) == ["gmail-x-body-0"]
+    assert s.doc_ids_for_messages(["bare-doc-0"]) == ["bare-doc-0"]
+
+
 # --- graph tables (Task 4.2) ---------------------------------------------
 
 def _store(tmp_path):

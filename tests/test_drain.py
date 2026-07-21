@@ -266,6 +266,32 @@ def test_drain_marks_chunks_enriched(store, home):
     assert _enriched_count(store, ["d-a"]) == {"d-a": 1}
 
 
+def test_drain_applies_and_marks_drive_doc_by_file_id(store, home):
+    # Real Drive shape: chunks carry metadata.file_id, NO message_id, and doc_id
+    # gdrive-<file_id>-<idx>. reassemble_thread emits the extraction's message_id
+    # as the bare file_id. drain must resolve file_id -> every chunk of the doc,
+    # apply once, and mark them all enriched (previously "matched no chunk").
+    fid = "1Tj2fbHCq5CN5d4uAZXjE0Is3zptIbu1P"
+    doc_ids = [f"gdrive-{fid}-{i}" for i in range(3)]
+    for i, did in enumerate(doc_ids):
+        store.upsert_chunk(did, f"page {i}", f"hash-{did}",
+                           {"source_type": "gdrive", "file_id": fid, "chunk_index": i})
+    env = _envelope(fid, messages=[
+        {"message_id": fid, "sender": "", "date": "2026-06-16",
+         "labels": "", "subject": "The New Testament in Its World"},
+    ])
+    _write_inbox(home, "batch.json", _batch("batch-drive", [env]))
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert summary["applied"] == 1
+    assert summary.get("skipped", 0) == 0
+    assert len(app.calls) == 1
+    assert set(app.calls[0]["doc_ids"]) == set(doc_ids)
+    assert _enriched_count(store, doc_ids) == {d: 1 for d in doc_ids}
+
+
 def test_drain_persists_enrich_payload_for_drive_docs_only(store, home):
     # A#4: after a successful apply, the validated extraction is cached against
     # each SHARED-DRIVE doc_id (prefix "gdrive-") so a later cache artifact can
