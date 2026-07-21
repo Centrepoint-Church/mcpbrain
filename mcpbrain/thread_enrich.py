@@ -45,14 +45,24 @@ class ThreadBatch:
 
 
 def _group_key(chunk: dict) -> str:
-    """Grouping key for a chunk: thread_id, else message_id, else doc_id.
+    """Grouping key for a chunk: thread_id, else file_id, else message_id, else
+    doc_id.
 
     A chunk with no thread_id is a standalone message (or an un-threaded doc),
     so it forms its own singleton group keyed on message_id; with neither, the
     doc_id is the last-resort unique key.
+
+    Drive docs carry a file_id but no message_id and split across many chunks
+    (doc_id gdrive-<file_id>-<idx>). Keying them on file_id groups the whole
+    document into one batch — matching reassemble_thread, which also groups
+    Drive chunks by file_id — so the batch's message_id (=file_id, emitted by
+    reassemble_thread) resolves back to exactly this batch's chunks via
+    store.doc_ids_for_messages. Keying on doc_id instead made each chunk its own
+    batch whose message_id (file_id) matched no chunk, so drain never applied it.
     """
     meta = chunk.get("metadata") or {}
-    return meta.get("thread_id") or meta.get("message_id") or chunk["doc_id"]
+    return (meta.get("thread_id") or meta.get("file_id")
+            or meta.get("message_id") or chunk["doc_id"])
 
 
 def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:

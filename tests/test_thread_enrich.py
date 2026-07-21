@@ -54,6 +54,38 @@ def test_group_unenriched_by_thread(tmp_path):
     assert all("metadata" in c for c in by_id["thread-A"].chunks)
 
 
+def _seed_drive(store, doc_id, *, file_id, text="body", chunk_index=0):
+    """Insert one unenriched Drive chunk: file_id set, no message_id/thread_id
+    (mirrors real Drive chunk metadata)."""
+    meta = {
+        "source_type": "gdrive",
+        "file_id": file_id,
+        "content_subtype": "prose",
+        "chunk_index": chunk_index,
+    }
+    store.upsert_chunk(doc_id, text, f"hash-{doc_id}", meta)
+
+
+def test_group_drive_chunks_by_file_id(tmp_path):
+    store = _store(tmp_path)
+    # Three chunks of ONE Drive file (no thread_id/message_id) + one email thread.
+    fid = "1Tj2fbHCq5CN5d4uAZXjE0Is3zptIbu1P"
+    _seed_drive(store, f"gdrive-{fid}-0", file_id=fid, chunk_index=0)
+    _seed_drive(store, f"gdrive-{fid}-1", file_id=fid, chunk_index=1)
+    _seed_drive(store, f"gdrive-{fid}-2", file_id=fid, chunk_index=2)
+    _seed(store, "gmail-a-body-0", thread_id="thread-A", message_id="a", chunk_index=0)
+
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+
+    by_id = {b.thread_id: b for b in batches}
+    # The whole Drive doc is ONE batch keyed on file_id, not three per-chunk ones.
+    assert fid in by_id
+    assert set(by_id[fid].doc_ids) == {
+        f"gdrive-{fid}-0", f"gdrive-{fid}-1", f"gdrive-{fid}-2"}
+    # Email grouping is untouched.
+    assert "thread-A" in by_id
+
+
 def test_group_missing_thread_id_falls_back_to_message_then_doc(tmp_path):
     store = _store(tmp_path)
     # No thread_id, but a message_id -> singleton keyed on message_id.
