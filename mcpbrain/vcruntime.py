@@ -51,6 +51,20 @@ def ensure_vcruntime_dlls(app_dir: str) -> list[str]:
     return copied
 
 
+def add_search_dir(app_dir: str) -> None:
+    """Add <app_dir>/vcruntime to the process's native-DLL search path on Windows
+    (so the bundled x64 VC++ runtime is found). No-op off-Windows / if absent."""
+    import sys
+    if sys.platform != "win32":
+        return
+    d = Path(app_dir) / "vcruntime"
+    if d.is_dir():
+        try:
+            os.add_dll_directory(str(d))
+        except OSError:
+            pass
+
+
 def _find_x64(root: Path, name: str):  # pragma: no cover — filesystem walk
     if not root.is_dir():
         return None

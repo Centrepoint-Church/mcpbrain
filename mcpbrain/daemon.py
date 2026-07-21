@@ -2476,13 +2476,8 @@ def main(argv=None) -> None:
 
     _configure_logging()
 
-    if sys.platform == "win32":
-        _vc = config.app_dir() / "vcruntime"
-        if _vc.is_dir():
-            try:
-                os.add_dll_directory(str(_vc))   # harmless no-op if empty
-            except OSError:
-                pass
+    from mcpbrain import vcruntime
+    vcruntime.add_search_dir(str(config.app_dir()))
 
     dim = embedder_dim("bge-small")
     store = Store(config.store_path(), dim=dim)
