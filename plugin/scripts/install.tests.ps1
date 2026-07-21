@@ -2,41 +2,27 @@
 BeforeAll { . "$PSScriptRoot/install.ps1" -DotSourceOnly }
 
 Describe "Get-InstallPlan" {
-  It "installs arch-native python + vc redist on a bare ARM box" {
-    $plan = Get-InstallPlan @{ OsArch='Arm64'; PythonOk=$false; UvOk=$false; VcRedistOk=$false; SchedulerOk=$true }
-    $plan | Should -Contain 'install-python-arm64'
-    $plan | Should -Contain 'install-vcredist-arm64'
-    $plan | Should -Contain 'install-uv'
-    $plan | Should -Contain 'install-mcpbrain'
+  It "installs uv + x64 redist when both missing, always installs mcpbrain" {
+    $p = Get-InstallPlan @{ UvOk=$false; VcRedistX64Ok=$false; SchedulerOk=$true }
+    $p | Should -Contain 'install-uv'
+    $p | Should -Contain 'install-vcredist-x64'
+    $p | Should -Contain 'install-mcpbrain'
+    $p | Should -Contain 'persistence-schtasks'
   }
-  It "rejects a wrong-arch python (PythonOk false) and installs the right one" {
-    # x64 python present on ARM ⇒ PythonOk=$false by the probe's arch check
-    $plan = Get-InstallPlan @{ OsArch='Arm64'; PythonOk=$false; UvOk=$true; VcRedistOk=$true; SchedulerOk=$true }
-    $plan | Should -Contain 'install-python-arm64'
+  It "is near-noop when uv + redist already present (still installs mcpbrain --force)" {
+    $p = Get-InstallPlan @{ UvOk=$true; VcRedistX64Ok=$true; SchedulerOk=$true }
+    $p | Should -Not -Contain 'install-uv'
+    $p | Should -Not -Contain 'install-vcredist-x64'
+    $p | Should -Contain 'install-mcpbrain'
   }
-  It "is a near-noop when everything correct is already present" {
-    $plan = Get-InstallPlan @{ OsArch='X64'; PythonOk=$true; UvOk=$true; VcRedistOk=$true; SchedulerOk=$true }
-    $plan | Should -Not -Contain 'install-python-x64'
-    $plan | Should -Not -Contain 'install-vcredist-x64'
-    $plan | Should -Contain 'install-mcpbrain'   # always (re)install the wheel with --force
+  It "never plans an ARM64 redist" {
+    $p = Get-InstallPlan @{ UvOk=$true; VcRedistX64Ok=$false; SchedulerOk=$true }
+    ($p -join ' ') | Should -Not -Match 'arm64'
+    $p | Should -Contain 'install-vcredist-x64'
   }
   It "chooses the startup mechanism when the scheduler is blocked" {
-    $plan = Get-InstallPlan @{ OsArch='X64'; PythonOk=$true; UvOk=$true; VcRedistOk=$true; SchedulerOk=$false }
-    $plan | Should -Contain 'persistence-startup'
-    $plan | Should -Not -Contain 'persistence-schtasks'
-  }
-}
-
-Describe "Get-PythonArchStrings" {
-  It "maps X64 to winget 'x64' (not 'amd64') and file 'amd64'" {
-    $m = Get-PythonArchStrings -OsArch 'X64'
-    $m.Winget | Should -Be 'x64'
-    $m.Winget | Should -Not -Be 'amd64'
-    $m.File | Should -Be 'amd64'
-  }
-  It "maps Arm64 to winget 'arm64' and file 'arm64'" {
-    $m = Get-PythonArchStrings -OsArch 'Arm64'
-    $m.Winget | Should -Be 'arm64'
-    $m.File | Should -Be 'arm64'
+    $p = Get-InstallPlan @{ UvOk=$true; VcRedistX64Ok=$true; SchedulerOk=$false }
+    $p | Should -Contain 'persistence-startup'
+    $p | Should -Not -Contain 'persistence-schtasks'
   }
 }
