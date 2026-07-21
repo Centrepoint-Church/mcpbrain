@@ -198,16 +198,20 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
 
 **Architecture note:** Windows uses **x64 Python under emulation on ARM64** machines. Native ARM64 wheels are not available for sqlite-vec, cryptography, pymupdf, and leidenalg, so the installer probes the machine, detects ARM64, and provisions the x64 Python runtime + VC++ runtime. The daemon runs with emulation overhead but no translation via Rosetta. Confirm `mcpbrain doctor` reports the correct architecture (`ARM64` vs. `X64`).
 
-- [ ] **ARM64 native box (clean install)**
+- [ ] **ARM64 box — x64-under-emulation (clean install)**
   - Download `install.ps1` from `https://centrepoint-church.github.io/mcpbrain-dist/install.ps1`
-  - Run `irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex` from a clean Windows install (no mcpbrain present)
-  - Confirm native ARM64 Python and ARM64 VC redist are installed
-  - `mcpbrain doctor` reports `arch=ARM64` (matches native machine)
-  - Embedder loads without translation overhead
+  - Run it from a clean Windows install (no mcpbrain present):
+    ```powershell
+    irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
+    & "$env:TEMP\mcpbrain-install.ps1"
+    ```
+  - Confirm `install.ps1` (via uv) installs an **x64** Python + the **x64** VC++ redist — not native ARM64 (native-ARM64 isn't viable: several dependencies ship no ARM64 Windows wheels)
+  - `mcpbrain doctor` reports OS=ARM64 / interpreter=win-amd64 → **"emulated — expected"** (a match, not a fault)
+  - Embedder loads under Windows' transparent emulation — translation overhead is **expected**, not absent
   - Wizard launches and model-download step reaches "Ready"
 
 - [ ] **x64 native box (clean install)**
-  - Same as ARM64 box above, but confirm `arch=X64` reported in `mcpbrain doctor`
+  - Same as ARM64 box above, but the x64 Python/VC++ redist run natively (no emulation) and `mcpbrain doctor` reports `arch=X64` (matches native machine)
 
 - [ ] **Policy-blocked box (Task Scheduler disabled)**
   - Simulate or test on a machine where Task Scheduler is blocked (Group Policy)
