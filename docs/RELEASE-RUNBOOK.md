@@ -108,12 +108,13 @@ The Windows installer script and `.mcpb` plugin package must also be published:
 cp plugin/scripts/install.ps1 ~/GitHub/mcpbrain-dist/
 npx @anthropic-ai/mcpb pack plugin/mcpb
 cp mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/
+cp ~/GitHub/mcpbrain-dist/mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/mcpbrain.mcpb
 cd ~/GitHub/mcpbrain-dist
-git add install.ps1 mcpbrain-<version>.mcpb \
+git add install.ps1 mcpbrain-<version>.mcpb mcpbrain.mcpb \
   && git commit -m "release: mcpbrain <version> (install.ps1 + .mcpb)" && git push origin main
 ```
 
-Both files are now served at `https://centrepoint-church.github.io/mcpbrain-dist/`.
+Both the versioned and unversioned `.mcpb` are now served at `https://centrepoint-church.github.io/mcpbrain-dist/`. The unversioned URL `mcpbrain.mcpb` ensures install instructions remain stable across releases.
 
 ### 1c. Sync the plugin assets to `mcpbrain-plugin`
 
@@ -191,9 +192,11 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
   `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
   `mcpbrain restore` round-trips a snapshot.
 
-## 5. Windows QA (pre-ship) — Hardware & installer validation
+## 5. Windows QA (MANDATORY pre-ship gate) — Hardware & installer validation
 
-Test the `install.ps1` script and `.mcpb` plugin on real hardware before wider Windows rollout. Do this once per release cycle with a **non-author** `@centrepoint.church` account.
+**Do not ship the Windows path without passing this gate.** Test the `install.ps1` script and `.mcpb` plugin on real hardware before wider Windows rollout. Do this once per release cycle with a **non-author** `@centrepoint.church` account.
+
+**Architecture note:** Windows uses **x64 Python under emulation on ARM64** machines. Native ARM64 wheels are not available for sqlite-vec, cryptography, pymupdf, and leidenalg, so the installer probes the machine, detects ARM64, and provisions the x64 Python runtime + VC++ runtime. The daemon runs with emulation overhead but no translation via Rosetta. Confirm `mcpbrain doctor` reports the correct architecture (`ARM64` vs. `X64`).
 
 - [ ] **ARM64 native box (clean install)**
   - Download `install.ps1` from `https://centrepoint-church.github.io/mcpbrain-dist/install.ps1`

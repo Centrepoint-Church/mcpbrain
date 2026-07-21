@@ -16,9 +16,12 @@ mcpbrain setup
 
 *Windows (PowerShell):*
 ```powershell
-irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 | iex
+irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
+& "$env:TEMP\mcpbrain-install.ps1"
 mcpbrain doctor
 ```
+
+(Note: The installer makes system changes — installing uv, the x64 VC++ runtime, autostart configuration, and Claude Desktop config — so it requires approval to run and is incompatible with restricted/managed execution policies.)
 
 On macOS, `mcpbrain setup` registers a launchd login agent, writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard. On Windows, `install.ps1` reviews the machine (architecture, Python, VC++ runtime, uv, Task Scheduler) and installs the correct arch-native version of anything missing, then verifies with `mcpbrain doctor`. The installer registers the background agent (schtasks on Windows), writes the `mcpbrain` MCP server into Claude Desktop's config, and opens a browser wizard.
 
