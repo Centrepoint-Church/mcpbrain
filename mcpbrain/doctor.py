@@ -90,6 +90,16 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         # Warming the embedder forces fastembed to (re-)download the weights into
         # the persistent cache dir and verifies onnxruntime can actually load them.
         # Idempotent: a no-op when the weights are already present. Needs network.
+        #
+        # On Windows-ARM, x64 onnxruntime/sqlite-vec run under emulation and need
+        # the x64 VC++ runtime. The primary fix is the clean x64 vc_redist
+        # installed by install.ps1; this is the last-resort safety net — copy the
+        # required DLLs from an MS-signed x64 copy on the machine into
+        # app_dir()/vcruntime (which daemon.py adds to the DLL search path and
+        # which survives package reinstalls) before retrying the warm-up.
+        if sys.platform == "win32":
+            from mcpbrain import vcruntime
+            vcruntime.ensure_vcruntime_dlls(str(home))
         from mcpbrain.embed import get_embedder
         get_embedder().embed_query("warm")
 
@@ -311,18 +321,43 @@ def _true_os_arch() -> str:
     return platform.machine()
 
 
+_ARCH_NORM = {"arm64": "ARM64", "aarch64": "ARM64", "amd64": "X64", "x64": "X64", "x86_64": "X64"}
+
+
 def arch_line(os_arch: str | None = None) -> str:
-    """One doctor line: OS arch vs interpreter arch. os_arch defaults to the
-    TRUE OS architecture (via _true_os_arch, which sees through WOW64
-    emulation on Windows) so an emulated x64 interpreter running on an
-    ARM64 OS is flagged instead of always comparing a value to itself."""
-    import platform
-    machine = platform.machine()          # 'ARM64' / 'AMD64'
+    """One doctor line: OS arch vs interpreter wheel platform. os_arch defaults
+    to the TRUE OS architecture (via _true_os_arch, which sees through WOW64
+    emulation on Windows).
+
+    An x64 interpreter running on an ARM64 OS is EXPECTED (that's exactly the
+    emulated path Task 1/4 harden, not a fault, on Windows via WOW64 or on
+    macOS via Rosetta) — reported as ok/"emulated — expected" rather than a
+    MISMATCH. Any other disagreement between OS arch and interpreter arch
+    (e.g. a genuinely broken pairing) is still flagged, preserving the
+    original mismatch-detection this function existed for.
+
+    Uses sysconfig.get_platform() rather than platform.machine() for the
+    interpreter side: platform.machine() reflects the OS's reported machine
+    type (which WOW64/Rosetta can mask), while sysconfig.get_platform()
+    reflects the actual wheel/ABI the running interpreter was built for
+    (e.g. 'win-amd64', 'macosx-14.0-arm64', 'linux-x86_64') — the thing that
+    actually determines whether emulation is in play."""
+    import sysconfig
+
     os_arch = os_arch if os_arch is not None else _true_os_arch()
-    norm = {"arm64": "ARM64", "amd64": "X64", "x64": "X64"}
-    agree = norm.get(os_arch.lower(), os_arch) == norm.get(machine.lower(), machine)
-    state = "ok" if agree else "MISMATCH (emulated interpreter?)"
-    return f"{'ok' if agree else '⚠️'} {'Architecture':<16} OS={os_arch} interpreter={machine} → {state}"
+    interp = sysconfig.get_platform()          # e.g. 'win-amd64', 'macosx-14.0-arm64'
+    interp_arch = interp.rsplit("-", 1)[-1]
+    os_n = _ARCH_NORM.get(os_arch.lower(), os_arch.upper())
+    interp_n = _ARCH_NORM.get(interp_arch.lower(), interp_arch.upper())
+    emulated = os_n == "ARM64" and interp_n == "X64"
+    agree = os_n == interp_n
+    if emulated:
+        glyph, state = "✅", "emulated — expected"
+    elif agree:
+        glyph, state = "✅", "ok"
+    else:
+        glyph, state = "⚠️", "MISMATCH (emulated interpreter?)"
+    return f"{glyph} {'Architecture':<16} OS={os_arch} interpreter={interp} → {state}"
 
 
 def _agent_installed(home, platform) -> bool:
