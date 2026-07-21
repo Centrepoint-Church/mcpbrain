@@ -95,11 +95,15 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         # the x64 VC++ runtime. The primary fix is the clean x64 vc_redist
         # installed by install.ps1; this is the last-resort safety net — copy the
         # required DLLs from an MS-signed x64 copy on the machine into
-        # app_dir()/vcruntime (which daemon.py adds to the DLL search path and
-        # which survives package reinstalls) before retrying the warm-up.
+        # app_dir()/vcruntime (a location that survives package reinstalls), then
+        # add that dir to THIS process's DLL search path (daemon.py does the same
+        # on its own startup via the shared helper) before retrying the warm-up —
+        # otherwise the freshly-copied DLLs aren't visible until the next daemon
+        # restart.
         if sys.platform == "win32":
             from mcpbrain import vcruntime
             vcruntime.ensure_vcruntime_dlls(str(home))
+            vcruntime.add_search_dir(str(home))
         from mcpbrain.embed import get_embedder
         get_embedder().embed_query("warm")
 
@@ -330,9 +334,10 @@ def arch_line(os_arch: str | None = None) -> str:
     emulation on Windows).
 
     An x64 interpreter running on an ARM64 OS is EXPECTED (that's exactly the
-    emulated path Task 1/4 harden, not a fault, on Windows via WOW64 or on
-    macOS via Rosetta) — reported as ok/"emulated — expected" rather than a
-    MISMATCH. Any other disagreement between OS arch and interpreter arch
+    emulated path Task 1/4 harden on Windows via WOW64, not a fault) —
+    reported as ok/"emulated — expected" rather than a MISMATCH. (macOS
+    Rosetta emulation is not covered — _true_os_arch has no macOS-specific
+    detection.) Any other disagreement between OS arch and interpreter arch
     (e.g. a genuinely broken pairing) is still flagged, preserving the
     original mismatch-detection this function existed for.
 

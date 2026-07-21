@@ -1,3 +1,5 @@
+import sys
+
 from mcpbrain import vcruntime
 
 
@@ -27,3 +29,13 @@ def test_ensure_copies_only_x64_from_search(tmp_path, monkeypatch):
     copied = vcruntime.ensure_vcruntime_dlls(str(app))
     assert "MSVCP140_1.dll" in copied
     assert (app / "vcruntime" / "MSVCP140_1.dll").exists()
+
+
+def test_add_search_dir_is_noop_off_windows(tmp_path, monkeypatch):
+    # Off-Windows this must do nothing (no os.add_dll_directory call, no raise),
+    # regardless of whether <app_dir>/vcruntime exists.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    vcruntime.add_search_dir(str(tmp_path))  # dir absent — must not raise
+
+    vcdir = tmp_path / "vcruntime"; vcdir.mkdir()
+    vcruntime.add_search_dir(str(tmp_path))  # dir present — still a no-op, must not raise
