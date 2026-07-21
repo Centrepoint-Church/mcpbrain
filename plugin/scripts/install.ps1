@@ -2,39 +2,23 @@
 param([switch]$DotSourceOnly)
 
 $INDEX = "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/"
-$PY_VERSION = "3.12.10"   # pinned; update in one place
+# Force an x64 CPython so uv pulls the x64 wheels (all deps ship x64; several ship
+# NO win_arm64). x64 runs natively on x64 and under Prism emulation on ARM64.
+$PY_REQUEST = "cpython-3.12-windows-x86_64"
 
-function Get-OsArch {
-  return [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-}
+function Get-OsArch { [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
 
-function Test-PythonArch {
-  # Returns $true only if a Python 3.12 whose platform.machine() matches the OS
-  # arch is available. A wrong-arch python (e.g. x64 on ARM) returns $false so
-  # the plan installs the right one instead of carrying it over.
-  param([string]$OsArch)
-  $want = if ($OsArch -eq 'Arm64') { 'ARM64' } else { 'AMD64' }
-  foreach ($cand in @(
-      "$env:LOCALAPPDATA\Programs\Python\Python312-arm64\python.exe",
-      "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe")) {
-    if (Test-Path $cand) {
-      $m = & $cand -c "import platform;print(platform.machine())" 2>$null
-      if ($m -and $m.Trim().ToUpper() -eq $want) { return $true }
-    }
-  }
-  return $false
-}
-
-function Test-VcRedist {
-  param([string]$OsArch)
-  $arch = if ($OsArch -eq 'Arm64') { 'arm64' } else { 'x64' }
-  $key = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$arch"
-  try { return ((Get-ItemProperty $key -ErrorAction Stop).Installed -eq 1) } catch { return $false }
+function Test-VcRedistX64 {
+  # x64 VC++ runtime present? (never checks/installs the arm64 redist — installing
+  # arm64 first poisons the x64 MSVCP140_1.dll via the installer's version-skip.)
+  try {
+    return ((Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction Stop).Installed -eq 1)
+  } catch { return $false }
 }
 
 function Test-Scheduler {
   try {
-    $r = schtasks /create /tn "mcpbrain-probe" /sc onlogon /tr "cmd /c exit" /f 2>&1
+    schtasks /create /tn "mcpbrain-probe" /sc onlogon /tr "cmd /c exit" /f 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { return $false }
     schtasks /delete /tn "mcpbrain-probe" /f 2>&1 | Out-Null
     return $true
@@ -42,85 +26,54 @@ function Test-Scheduler {
 }
 
 function Probe-Machine {
-  $osArch = Get-OsArch
   return @{
-    OsArch      = $osArch
-    PythonOk    = (Test-PythonArch -OsArch $osArch)
-    UvOk        = [bool](Get-Command uv -ErrorAction SilentlyContinue)
-    VcRedistOk  = (Test-VcRedist -OsArch $osArch)
-    SchedulerOk = (Test-Scheduler)
+    OsArch         = (Get-OsArch)                                   # informational
+    UvOk           = [bool](Get-Command uv -ErrorAction SilentlyContinue)
+    VcRedistX64Ok  = (Test-VcRedistX64)
+    SchedulerOk    = (Test-Scheduler)
   }
 }
 
 function Get-InstallPlan {
-  # PURE: probe hashtable -> ordered action list. No side effects.
+  # PURE: probe hashtable -> ordered action list. No side effects, no arch branching.
   param([hashtable]$probe)
-  $arch = if ($probe.OsArch -eq 'Arm64') { 'arm64' } else { 'x64' }
   $plan = @()
-  if (-not $probe.VcRedistOk) { $plan += "install-vcredist-$arch" }
-  if (-not $probe.PythonOk)   { $plan += "install-python-$arch" }
-  if (-not $probe.UvOk)       { $plan += "install-uv" }
+  if (-not $probe.UvOk)          { $plan += "install-uv" }
+  if (-not $probe.VcRedistX64Ok) { $plan += "install-vcredist-x64" }
   $plan += "install-mcpbrain"                       # always, with --force
   $plan += if ($probe.SchedulerOk) { "persistence-schtasks" } else { "persistence-startup" }
   return $plan
 }
 
 function Invoke-InstallPlan {
-  param([array]$plan, [hashtable]$probe)
+  param([array]$plan)
   foreach ($action in $plan) {
-    switch -Wildcard ($action) {
-      "install-vcredist-*" { Install-VcRedist -Arch $probe.OsArch }
-      "install-python-*"   { Install-Python  -Arch $probe.OsArch }
-      "install-uv"         { Install-Uv }
-      "install-mcpbrain"   { Install-Mcpbrain }
-      "persistence-*"      { }   # handled by `mcpbrain setup` via agents.py mechanism probe
+    switch ($action) {
+      "install-uv"            { Install-Uv }
+      "install-vcredist-x64"  { Install-VcRedistX64 }
+      "install-mcpbrain"      { Install-Mcpbrain }
+      default { }   # persistence-* handled by `mcpbrain setup` (agents.py mechanism probe)
     }
   }
 }
 
-# --- side-effecting installers (see spec §matrix) ---------------------------
-function Install-VcRedist { param([string]$Arch)
-  $a = if ($Arch -eq 'Arm64') { 'arm64' } else { 'x64' }
-  $f = "$env:TEMP\vc_redist.$a.exe"
-  Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.$a.exe" -OutFile $f
-  Start-Process $f -ArgumentList '/install','/quiet','/norestart' -Wait
-}
-function Get-PythonArchStrings {
-  # Returns @{ Winget = <'x64'|'arm64'>; File = <'amd64'|'arm64'> } for the OS arch.
-  # winget --architecture accepts x64/arm64 (NOT amd64); python.org filenames use amd64/arm64.
-  param([string]$OsArch)
-  if ($OsArch -eq 'Arm64') { return @{ Winget = 'arm64'; File = 'arm64' } }
-  return @{ Winget = 'x64'; File = 'amd64' }
-}
-function Install-Python { param([string]$Arch)
-  $m = Get-PythonArchStrings -OsArch $Arch
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id Python.Python.3.12 --architecture $m.Winget --scope user --silent `
-      --accept-package-agreements --accept-source-agreements
-  } else {
-    $exe = "$env:TEMP\python-$PY_VERSION-$($m.File).exe"
-    Invoke-WebRequest "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-$($m.File).exe" -OutFile $exe
-    Start-Process $exe -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=0','Include_launcher=1' -Wait
-  }
-}
 function Install-Uv {
   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
   $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 }
-function Get-NativePython { param([string]$Arch)
-  $want = if ($Arch -eq 'Arm64') { 'ARM64' } else { 'AMD64' }
-  foreach ($c in @("$env:LOCALAPPDATA\Programs\Python\Python312-arm64\python.exe",
-                   "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe")) {
-    if (Test-Path $c) {
-      $m = & $c -c "import platform;print(platform.machine())" 2>$null
-      if ($m -and $m.Trim().ToUpper() -eq $want) { return $c }
-    }
-  }
-  throw "No native $want Python 3.12 found after install. Install it from python.org (attended, so UAC can be accepted) and re-run."
+
+function Install-VcRedistX64 {
+  $f = "$env:TEMP\vc_redist.x64.exe"
+  Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $f
+  Start-Process $f -ArgumentList '/install','/quiet','/norestart' -Wait
 }
+
 function Install-Mcpbrain {
-  $py = Get-NativePython -Arch (Get-OsArch)
-  uv tool install --python "$py" --index $INDEX "mcpbrain[daemon]" --force
+  # uv provisions the x64 CPython (its default on ARM64; pinned here for future-proofing).
+  # If uv rejects the qualified request, fall back to the bare version (x64 on ARM64 today).
+  $ok = $false
+  try { uv tool install --python $PY_REQUEST --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
+  if (-not $ok) { uv tool install --python 3.12 --index $INDEX "mcpbrain[daemon]" --force }
 }
 
 if (-not $DotSourceOnly) {
@@ -128,6 +81,6 @@ if (-not $DotSourceOnly) {
   Write-Host "Machine review: $($probe | Out-String)"
   $plan = Get-InstallPlan $probe
   Write-Host "Plan: $($plan -join ', ')"
-  Invoke-InstallPlan -plan $plan -probe $probe
+  Invoke-InstallPlan -plan $plan
   mcpbrain setup
 }
