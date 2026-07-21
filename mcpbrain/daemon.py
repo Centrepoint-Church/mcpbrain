@@ -1117,13 +1117,24 @@ class Daemon:
     def _graph_cleanup_once(self) -> None:
         """One-shot graph hygiene on upgrade: drop self-loops + type-invalid
         relations and fold org-tag drift left by pre-0.7.34 enrichment. Guarded by a
-        meta flag so it runs at most once per install. Best-effort; never raises."""
+        meta flag so it runs at most once per install. Best-effort; never raises.
+
+        The mcpbrain.maintenance subpackage is dev-only tooling excluded from the
+        wheel (pyproject `exclude = ["mcpbrain.maintenance*"]`), so a wheel install
+        is expected to miss it; that's flagged done (silently) rather than retried
+        and warned about every cycle."""
         flag = "graph_cleanup_v1"
         try:
             with self._store._connect() as db:
                 if db.execute("SELECT 1 FROM meta WHERE k=?", (flag,)).fetchone():
                     return
-            from mcpbrain.maintenance.graph_cleanup import cleanup_graph
+            try:
+                from mcpbrain.maintenance.graph_cleanup import cleanup_graph  # noqa: F401  (dev-only; excluded from the wheel)
+            except ImportError:
+                log.debug("maintenance module not installed (expected in a wheel install); skipping graph cleanup")
+                with self._store._connect() as db:
+                    db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
+                return
             counts = cleanup_graph(self._store)
             with self._store._connect() as db:
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
@@ -1134,13 +1145,22 @@ class Daemon:
     def _graph_recompute_once(self) -> None:
         """One-shot recency recompute on upgrade: make the newest-dated
         works_at/reports_to current per entity, correcting facts that backfill
-        applied out of chronological order. Meta-flagged; best-effort."""
+        applied out of chronological order. Meta-flagged; best-effort.
+
+        See _graph_cleanup_once: a missing mcpbrain.maintenance (wheel install)
+        is expected and flagged done at debug level, not warned about."""
         flag = "singleton_recompute_v1"
         try:
             with self._store._connect() as db:
                 if db.execute("SELECT 1 FROM meta WHERE k=?", (flag,)).fetchone():
                     return
-            from mcpbrain.maintenance.graph_cleanup import recompute_singletons
+            try:
+                from mcpbrain.maintenance.graph_cleanup import recompute_singletons  # noqa: F401  (dev-only; excluded from the wheel)
+            except ImportError:
+                log.debug("maintenance module not installed (expected in a wheel install); skipping singleton recompute")
+                with self._store._connect() as db:
+                    db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
+                return
             counts = recompute_singletons(self._store)
             with self._store._connect() as db:
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
