@@ -3,6 +3,16 @@ import sys
 from mcpbrain.daemon import main as _daemon_main
 from mcpbrain.auth import main as _auth_main
 
+def _ensure_utf8_stdio() -> None:
+    """Windows consoles default to a legacy codepage (cp1252) that can't encode the
+    doctor report's ✅/⚠️ glyphs → UnicodeEncodeError. Reconfigure stdio to UTF-8
+    (errors='replace' so it degrades instead of crashing). No-op where unsupported."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
 def _mcp_main():
     from mcpbrain.mcp_server import main as m; m()
 def _setup_main(argv):    from mcpbrain.setup import main as m; m(argv)
@@ -15,6 +25,7 @@ def _home_main():
     print(str(app_dir()))
 
 def main(argv=None):
+    _ensure_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(prog="mcpbrain")
     sub = p.add_subparsers(dest="cmd", required=True)
