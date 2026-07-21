@@ -27,6 +27,5 @@ def test_schtasks_tray_args_also_embeds_home():
 def test_schtasks_args_shim_content_has_home_and_subcommand():
     # The shim content (not /tr) is where MCPBRAIN_HOME and the subcommand live.
     vbs = agents._win_shim_content(
-        mcpbrain_bin=r"C:\mcpbrain.exe", home=r"C:\h", subcommand="daemon",
-        python_bin=r"C:\py\pythonw.exe")
+        mcpbrain_bin=r"C:\mcpbrain.exe", home=r"C:\h", subcommand="daemon")
     assert "MCPBRAIN_HOME" in vbs and "daemon" in vbs
