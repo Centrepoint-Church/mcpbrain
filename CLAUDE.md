@@ -54,9 +54,28 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-21):** all **five** version files **and** the published wheel are at
-  `0.7.97` — source, dist index (which also serves `install.ps1` + versioned & unversioned
-  `mcpbrain.mcpb`), and plugin manifests are in step. **0.7.97 is the Windows install rework
+- **Current state (2026-07-21):** the **five** version files (+ `uv.lock`) are bumped to `0.7.98`
+  in **source only (local `main`, not pushed)**; the **published wheel, dist index, and plugin
+  marketplace remain at `0.7.97`** — **0.7.98 is NOT released.** 0.7.98 bundles two post-0.7.97
+  fixes from concurrent sessions:
+  **(1) Drive-doc enrichment matching (fix)** — Drive documents were effectively **never enriched
+  into the graph** via the thread-enrich drain path: `_group_key` (batching), `reassemble_thread`,
+  and `store.doc_ids_for_messages` disagreed on a Drive chunk's identity, so the extraction's
+  `message_id` (= `file_id`) matched no chunk and drain skipped **every** Drive apply (95% of 11,782
+  "matched no chunk" warnings on the live store; ~85k Drive chunks stuck `enriched=0`, re-queuing and
+  burning Haiku). Fixed by aligning all three on **`file_id` as the Drive doc's identity** (whole doc
+  = one thread): `_group_key` groups Drive chunks by `file_id`, and `doc_ids_for_messages` resolves
+  an id matching a chunk's `metadata.file_id` to every chunk of that file (email/`doc_id` resolution
+  unchanged). Verified read-only on the live store (the 2,303-chunk PDF now resolves file_id→all its
+  chunks). **Fix-forward — no chunk had hit the give-up cap, so no remediation.** Spec:
+  `docs/superpowers/specs/2026-07-21-drive-enrichment-match-design.md`.
+  **(2) the two 0.7.97-review deferred Windows Minors, now FIXED** — uninstall removes the
+  Startup-folder `.lnk` (shared `_startup_shortcut_path`); `doctor._true_os_arch` detects Rosetta 2
+  (`sysctl.proc_translated`) so an x86_64 interpreter on Apple Silicon reads OS arch as arm64 →
+  `arch_line = "emulated — expected"`. **Still to do before release:** full suite + gold-eval gate
+  (per runbook), then the release steps. The **Windows HARDWARE QA GATE from 0.7.97 remains OPEN**
+  (see below) — do NOT onboard Windows users until it passes.
+  **0.7.97 (last released) is the Windows install rework
   (use-the-platform)** — it corrects a misdiagnosis at the root of the 0.7.95/0.7.96 Windows work.
   A real Windows-on-ARM install proved: (a) **native ARM64 is not viable** — `sqlite-vec`,
   `cryptography`, `pymupdf`, `leidenalg` ship **no `win_arm64` wheels** (so the 0.7.95 arch-native
@@ -78,9 +97,9 @@ wrong and MUST be right:
   (full suite passed, ruff clean). **HARDWARE QA GATE STILL OPEN (runbook §5):** 0.7.97 is published
   (safe — existing installs auto-update only the daemon wheel; `install.ps1`/`.mcpb` are opt-in,
   used only when someone runs a Windows install), but the reworked installer is **not yet validated
-  on a real ARM64/x64 Windows box — do NOT onboard Windows users until that QA passes.** Two
-  deferred Minors: uninstall doesn't remove the Startup `.lnk` (cosmetic); a Rosetta arch case is
-  undetected on mac (documented). Earlier: **0.7.95/0.7.96 were the (now-superseded) arch-native
+  on a real ARM64/x64 Windows box — do NOT onboard Windows users until that QA passes.** (The two
+  deferred review Minors that were noted here are now **fixed in 0.7.98**, above.) Earlier:
+  **0.7.95/0.7.96 were the (now-superseded) arch-native
   Windows preflight-installer releases** — 0.7.96 also removed the plugin's top-level `bin/` (shims
   + `monitors/`) that **fails claude.ai marketplace validation** (a `test_no_toplevel_bin_dir` guard
   prevents regressions; that removal STANDS). The lazy embedder, wizard-owned model download,
