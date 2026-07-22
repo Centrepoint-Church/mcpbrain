@@ -4,7 +4,6 @@ from tests.test_fleet_storage_drive import FakeDrive
 from mcpbrain.fleet_storage import DriveFleetStorage
 
 relocate = importlib.import_module("bin.relocate_ingest_cache")
-FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def _seed_in_drive_cache(drive, drive_id, n):
@@ -51,3 +50,19 @@ def test_dry_run_does_not_delete(monkeypatch, capsys):
     assert rc == 0
     assert relocate.scan(drive)            # still there
     assert "Dry-run" in capsys.readouterr().out
+
+
+def test_home_is_threaded_into_token_path(monkeypatch, tmp_path):
+    from pathlib import Path
+    import mcpbrain.auth as auth
+    captured = {}
+
+    def _fake_bgs(*a, token_file=None, **k):
+        captured["token_file"] = token_file
+        return {"drive_service": FakeDrive()}
+
+    monkeypatch.setattr(auth, "build_google_services", _fake_bgs)
+    monkeypatch.setattr(relocate, "list_shared_drives", lambda svc: [])
+    rc = relocate.main(["--home", str(tmp_path)])
+    assert rc == 0
+    assert captured["token_file"] == Path(str(tmp_path)) / "google_token.json"

@@ -27,9 +27,15 @@ _FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def _drive_service(home):
+    from pathlib import Path
     from mcpbrain import auth
-    creds = auth.load_credentials()
-    return auth.build_service("drive", "v3", creds)
+    services = auth.build_google_services(token_file=Path(home) / "google_token.json")
+    svc = services.get("drive_service")
+    if svc is None:
+        raise SystemExit(
+            "No Drive access in the stored token — run `mcpbrain setup` "
+            "(or check --home).")
+    return svc
 
 
 def _find_cache_folder(service, drive_id):
