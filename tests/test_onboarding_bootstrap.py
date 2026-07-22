@@ -209,15 +209,18 @@ def test_default_enumerate_drives_maps_ids(monkeypatch):
     assert onboarding._default_enumerate_drives(object()) == ["D1", "D2"]
 
 
-def test_default_make_drive_storage_builds_per_drive(monkeypatch):
-    from mcpbrain import fleet_storage
-    seen = []
-    monkeypatch.setattr(fleet_storage, "drive_cache_storage",
-                        lambda svc, drive_id: ("cache", drive_id))
-    factory = onboarding._default_make_drive_storage(object())
-    assert factory("D7") == ("cache", "D7")
+def test_default_make_drive_storage_central_by_default(tmp_path):
+    from mcpbrain import fleet_storage, org_defaults
+    factory = onboarding._default_make_drive_storage(str(tmp_path), object())
+    fs = factory("D7")
+    # central: rooted at the fleet folder, namespaced by source drive id
+    assert fs._root == org_defaults.FLEET_FOLDER_ID
+    assert fs._base_parts == ["ingest-cache", "D7"]
+
+
+def test_default_make_drive_storage_none_without_service(tmp_path):
     # No drive service -> a factory that yields None (degrade, don't crash).
-    assert onboarding._default_make_drive_storage(None)("D7") is None
+    assert onboarding._default_make_drive_storage(str(tmp_path), None)("D7") is None
 
 
 def test_bootstrap_uses_per_drive_storage_not_fleet_folder(tmp_path):
