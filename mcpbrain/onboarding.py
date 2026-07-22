@@ -67,18 +67,18 @@ def _default_make_fleet_storage(home, drive_service):
     return fleet_folder_storage(home, drive_service)
 
 
-def _default_make_drive_storage(drive_service):
-    """Return a factory building a per-shared-drive cache FleetStorage (rooted at
-    that drive's `.mcpbrain-cache/`) — this is what `bootstrap_drive` reads, NOT
-    the fleet-folder storage. Degrades to a None-returning factory if A is
-    unavailable or there is no drive service."""
+def _default_make_drive_storage(home, drive_service):
+    """Return a factory building a per-source-drive cache FleetStorage — this is
+    what `bootstrap_drive` reads. Central (fleet-folder-rooted) by default via
+    cache_storage_factory, or in-drive when ingest_cache_central is off. Degrades
+    to a None-returning factory if A is unavailable or there is no drive service."""
     if drive_service is None:
         return lambda drive_id: None
     try:
-        from mcpbrain.fleet_storage import drive_cache_storage  # subsystem A
+        from mcpbrain.fleet_storage import cache_storage_factory  # subsystem A
     except ImportError:
         return lambda drive_id: None
-    return lambda drive_id: drive_cache_storage(drive_service, drive_id)
+    return cache_storage_factory(home, drive_service)
 
 
 def _default_enumerate_drives(drive_service) -> list[str]:
@@ -245,7 +245,7 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
     # service is present). When callers inject fleet_storage directly without a
     # service, leave it None so bootstrap_baseline falls back to that storage.
     if make_drive_storage is None and drive_service is not None:
-        make_drive_storage = _default_make_drive_storage(drive_service)
+        make_drive_storage = _default_make_drive_storage(home, drive_service)
 
     prev_done = set(marker.get("done_drive_ids") or [])
     prev_snapshot = bool(marker.get("snapshot_done"))
