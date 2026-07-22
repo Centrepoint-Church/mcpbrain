@@ -350,20 +350,21 @@ class DriveFleetStorage:
 
 # -- factories (the storage instances B and C acquire) ----------------------
 
-def fleet_folder_storage(home, drive_service=None):
-    """FleetStorage over the fleet FOLDER (spec: fleet folder / org-graph / contrib).
+def fleet_folder_id(home) -> str | None:
+    """The fleet folder id used to root fleet-folder + centralized-cache storage:
+    config fleet.folder_id, else the baked-in org default. None only if neither
+    resolves (in practice the org default is always set)."""
+    from mcpbrain import config, org_defaults
+    fleet = config.read_config(home).get("fleet") or {}
+    return fleet.get("folder_id") or org_defaults.FLEET_FOLDER_ID or None
 
-    This is the instance B's org cadences (contrib upload, curate, snapshot
-    publish) and C's snapshot-import call — distinct from the per-shared-drive
-    cache storages. Root is the configured fleet folder id, falling back to the
-    bundled org default. Returns None when there is no drive_service or no folder
-    id resolves (caller then runs fully local — existing degradation behaviour).
-    """
+
+def fleet_folder_storage(home, drive_service=None):
+    """FleetStorage over the fleet FOLDER (org-graph snapshot / contrib). Returns
+    None when there is no drive_service or no folder id resolves."""
     if drive_service is None:
         return None
-    from mcpbrain import config, org_defaults
-    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id") \
-        or org_defaults.FLEET_FOLDER_ID
+    folder_id = fleet_folder_id(home)
     if not folder_id:
         return None
     return DriveFleetStorage(drive_service, folder_id)
@@ -376,3 +377,26 @@ def drive_cache_storage(drive_service, drive_id):
     at the cache folder) is required to avoid a doubled prefix. root_is_drive=True
     scopes its Drive queries to this Shared Drive (corpora/driveId)."""
     return DriveFleetStorage(drive_service, drive_id, root_is_drive=True)
+
+
+def centralized_cache_storage(drive_service, fleet_folder_id_, source_drive_id):
+    """FleetStorage for one Shared Drive's ingest cache, stored CENTRALLY under the
+    fleet folder at ingest-cache/<source_drive_id>/. ingest_cache addresses the
+    .mcpbrain-cache/ subfolder via CACHE_DIR, so the physical path becomes
+    <fleet_folder>/ingest-cache/<source_drive_id>/.mcpbrain-cache/<file>. Rooted at
+    the fleet FOLDER (root_is_drive=False, like fleet_folder_storage)."""
+    return DriveFleetStorage(drive_service, fleet_folder_id_,
+                             base_path=f"ingest-cache/{source_drive_id}")
+
+
+def cache_storage_factory(home, drive_service):
+    """Return storage_factory(source_drive_id) -> FleetStorage for the ingest cache.
+    Central (fleet-folder-rooted) when config.ingest_cache_central is on AND a fleet
+    folder resolves; otherwise the legacy in-drive storage (drive_cache_storage).
+    Safe degradation: an unresolvable fleet folder falls back to in-drive."""
+    from mcpbrain import config
+    if config.ingest_cache_central(home):
+        ffid = fleet_folder_id(home)
+        if ffid:
+            return lambda d: centralized_cache_storage(drive_service, ffid, d)
+    return lambda d: drive_cache_storage(drive_service, d)
