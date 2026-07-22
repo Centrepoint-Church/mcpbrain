@@ -54,3 +54,45 @@ def expand_parent(store, group: dict, *, window_n: int, short_doc_max_chunks: in
         return _JOIN.join(c["text"] for c in kept)
     # bare chunk: no parent context available
     return ""
+
+
+def _attach_metadata(store, hits: list[dict]) -> list[dict]:
+    out = []
+    for h in hits:
+        c = store.get_chunk(h["doc_id"])
+        out.append({**h, "metadata": (c or {}).get("metadata", {})})
+    return out
+
+
+def _head_tail(items: list) -> list:
+    """Reorder by rank so the top passages sit at head AND tail (lost-in-the-middle)."""
+    if len(items) <= 2:
+        return items
+    head, tail = [], []
+    for i, it in enumerate(items):
+        (head if i % 2 == 0 else tail).append(it)
+    return head + tail[::-1]
+
+
+def expand_hits(store, hits: list[dict], *, window_n: int = 3,
+                short_doc_max_chunks: int = 15, max_parents: int = 5,
+                token_budget: int = 6000) -> list[dict]:
+    if not hits:
+        return hits
+    with_meta = _attach_metadata(store, hits)
+    groups = group_by_parent(with_meta)[:max_parents]
+    by_doc = {h["doc_id"]: h for h in hits}
+    expanded, used = [], 0
+    for g in groups:
+        text = expand_parent(store, g, window_n=window_n,
+                             short_doc_max_chunks=short_doc_max_chunks)
+        if not text:
+            text = by_doc[g["rep_doc_id"]].get("text", "")
+        cost = len(text) // 4  # ~4 chars/token
+        if expanded and used + cost > token_budget:
+            continue  # budget exhausted; drop this (lower-ranked) parent
+        used += cost
+        base = by_doc[g["rep_doc_id"]]
+        expanded.append({"doc_id": base["doc_id"], "score": base.get("score", 0.0),
+                         "distance": base.get("distance", 0.0), "text": text})
+    return _head_tail(expanded)
