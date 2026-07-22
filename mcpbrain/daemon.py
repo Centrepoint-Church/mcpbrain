@@ -892,6 +892,16 @@ class Daemon:
             result_hits = filter_by_sufficiency(query, result_hits, home=str(app_dir()))
         except Exception:  # noqa: BLE001 — gate must never break recall
             pass
+        # Expansion runs LAST (after ranking/rerank/sufficiency): small-to-big
+        # context stitching. Behind a flag (default OFF); degrades to the
+        # unexpanded hits on any error — recall must never raise.
+        if config.retrieval_expand_enabled(home):
+            try:
+                from mcpbrain.retrieval_expand import expand_hits
+                result_hits = expand_hits(self._store, result_hits,
+                                          **config.expand_params(home))
+            except Exception:  # noqa: BLE001
+                log.warning("recall expansion failed for %r", query, exc_info=True)
         return result_hits
 
     def _resolve_google_account(self, token_file) -> str:
