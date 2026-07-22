@@ -222,7 +222,7 @@ def write_beacon(home, drive_service) -> None:
 # (_cadences_from_config), so a bad value can only disable a cadence — it cannot
 # exfiltrate data or misdirect sync/tasks. Extend this set deliberately, never
 # by default.
-_ALLOWLIST = frozenset({"cadences", "org_pin"})
+_ALLOWLIST = frozenset({"cadences", "org_pin", "flags"})
 
 # The managed config block org-config is staged into. It is REPLACED wholesale
 # on every daemon startup (config.write_config is a shallow merge), so removing a

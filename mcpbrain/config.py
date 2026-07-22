@@ -485,10 +485,22 @@ def contextual_retrieval_enabled(home) -> bool:
     return bool(read_config(home).get("contextual_retrieval", True))
 
 
+def fleet_flag(home, name, default=False):
+    """A feature flag resolvable fleet-wide. Precedence: the org-config overlay
+    (config['org_config']['flags'][name], staged by fleet.merge_org_config from
+    org-config.json — org wins so a fleet enable reaches everyone) → the user's
+    top-level config[name] → default."""
+    cfg = read_config(home)
+    overlay = (cfg.get("org_config") or {}).get("flags") or {}
+    if name in overlay:
+        return overlay[name]
+    return cfg.get(name, default)
+
+
 def retrieval_expand_enabled(home) -> bool:
-    """Whether small-to-big expansion enriches the UserPromptSubmit injection path
-    (prompt_recall). Never affects brain_search's flat list. Default OFF."""
-    return bool(read_config(home).get("retrieval_expand", False))
+    """Whether injection-path expansion runs. Fleet-flippable via
+    org-config.json {"flags": {"retrieval_expand": true}}. Default OFF."""
+    return bool(fleet_flag(home, "retrieval_expand", False))
 
 
 def expand_params(home) -> dict:
