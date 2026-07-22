@@ -254,6 +254,15 @@ def _token_overlap_rerank(query: str, results: list[dict]) -> list[dict]:
     return [r for _, r in reranked]
 
 
+def _cross_encoder_rerank(query: str, results: list[dict], reranker) -> list[dict]:
+    """Reorder fused results by a cross-encoder's (query, passage) scores."""
+    if not results:
+        return results
+    scores = reranker.rerank(query, [r.get("text", "") for r in results])
+    ranked = sorted(zip(scores, results), key=lambda t: -t[0])
+    return [r for _, r in ranked]
+
+
 # ---------------------------------------------------------------------------
 # Main route() entry point
 # ---------------------------------------------------------------------------
