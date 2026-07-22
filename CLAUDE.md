@@ -54,8 +54,32 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.99`,
-  **released** (source + dist wheel + plugin marketplace). **0.7.99 is the shared-drive
+- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.100`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.100 is the recall-quality
+  retrieval work.** Two levers shipped, one behind a flag; two others were built, gated on the
+  live store, and **reverted** (the gate did its job). What ships:
+  **(C) contextual BM25** — `embed.contextual_prefix` is now folded into the **FTS/keyword arm**
+  too (not just embeddings), completing the existing default-ON `contextual_retrieval` feature;
+  a bounded `store.reindex_fts_batch` backfill (wired into `index_pending`, FTS-only, no re-embed)
+  brings existing rows up. Validated: gold holds recall@10 0.750 / MRR 0.514.
+  **(A) injection-only small-to-big expansion** (`retrieval_expand`, **default OFF**) — enriches
+  ONLY the UserPromptSubmit auto-RAG path (`prompt_recall`), NEVER `brain_search`'s flat candidate
+  list. Consumer-split: `daemon.search(…, expand=False)` calls `retrieval_expand.maybe_expand`
+  (no-op unless `expand=True` AND the flag is on); `/api/recall` reads `expand` from the body;
+  `brain_search` never sets it; `prompt_recall` sets it and uses larger formatting caps
+  (1500/4000 vs the flat 200/1200) so stitched context isn't re-truncated. Deterministic gates:
+  brain_search gold UNCHANGED (0.750/0.514), injection context 632→2469 avg chars within the
+  4000-char cap. **`retrieval_expand` ships OFF** — flip it per-machine to eyeball injected
+  context on/off before any fleet-wide enable.
+  **REVERTED after gating (do NOT resurrect without new evidence):** a **cross-encoder reranker**
+  (fastembed MS-MARCO MiniLM) genuinely ranked this personal email/Drive corpus WORSE than the
+  existing three-axis RRF (MRR 0.514→0.354 with a loaded model) — dropped; and a **first
+  expansion attempt wired into `daemon.search` for all consumers** cratered `brain_search`
+  recall@10 (0.750→0.300) by capping the candidate list — that mis-wiring is what (A)'s
+  consumer-split fixes. Specs/plans: `docs/superpowers/specs/2026-07-22-recall-quality-expansion-design.md`,
+  `…/2026-07-22-expansion-injection-followup.md`, `docs/superpowers/plans/2026-07-22-expansion-injection-only.md`.
+  The **Windows HARDWARE QA GATE from 0.7.97 remains OPEN** — do NOT onboard Windows users until it passes.
+  **0.7.99 (released) is the shared-drive
   ingest-cache CENTRALIZATION**: `.mcpbrain-cache/` no longer lands in every team drive's root —
   each source drive's cache is now stored centrally at `<fleet folder>/ingest-cache/<source_drive_id>/.mcpbrain-cache/`
   (inside the MCPBrain Backups shared drive). Achieved WITHOUT touching `ingest_cache.py`: a new
