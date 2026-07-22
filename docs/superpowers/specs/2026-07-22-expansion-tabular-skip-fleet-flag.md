@@ -15,7 +15,17 @@ low-value. And it can't be enabled fleet-wide: `org-config.json`'s allowlist is
 
 Two changes, one release, then flip on fleet-wide.
 
-## Change 1 — skip expansion for tabular/cold parents
+> **UPDATE (post-validation): Change 1 was DROPPED, not shipped.** The rep-chunk
+> skip proved unreliable and net-negative in validation: `cold` wrongly skipped a
+> prose email whose top chunk was a cold fragment (losing the good hits); untagged
+> tabular files were missed; and the skip suppressed tabular content (rosters,
+> calendars) that is often the actual answer for tabular queries. Expansion is
+> bounded (4k cap) and `brain_search` never expands, so tabular expansion is
+> low-harm — a reliable skip wasn't worth the machinery. **Shipped = Change 2
+> (fleet-flippable flag) + expansion with no skip.** The below is retained for
+> the record.
+
+## Change 1 — skip expansion for tabular/cold parents (DROPPED — see note above)
 
 Signal (from the live store): gdrive chunks carry `content_subtype` (`table` 15,855 /
 `prose` 7,000 / none), and the salience gate cold-marks tabular/low-signal docs
