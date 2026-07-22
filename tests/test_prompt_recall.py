@@ -167,3 +167,48 @@ def test_quoteback_ignores_short_snippets(tmp_path):
     state = {"injected": {"d1": "ok sure yes"}, "used": []}
     tp = _transcript(tmp_path, "ok sure yes indeed absolutely certainly")
     assert pr._detect_quoteback(str(tmp_path), tp, state, "s1") == []
+
+
+# --- expansion (retrieval_expand) --------------------------------------------
+
+def test_format_context_expanded_keeps_larger_context():
+    long_text = "sentence. " * 200  # ~2000 chars — a stitched parent
+    results = [{"doc_id": "d1", "score": 1.0, "text": long_text}]
+    block, injected = pr._format_context(results, set(), expanded=True)
+    assert len(injected["d1"]) > pr._SNIPPET          # not truncated to the flat 200-char cap
+    assert len(block) <= pr._EXPANDED_MAX_TOTAL + 100  # bounded by the expanded budget
+
+
+def test_format_context_flat_unchanged():
+    results = [{"doc_id": "d1", "score": 1.0, "text": "x" * 999}]
+    block, injected = pr._format_context(results, set(), expanded=False)
+    assert len(injected["d1"]) <= pr._SNIPPET          # flat path still 200-char capped
+
+
+def test_recall_requests_expand_when_flag_on(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps({"retrieval_expand": True}))
+    (tmp_path / "control_port").write_text("9999")
+    (tmp_path / "control_token").write_text("tok")
+    captured = {}
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"results": []}).encode()
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResp()
+
+    monkeypatch.setattr(pr.urllib.request, "urlopen", _fake_urlopen)
+    pr._recall(str(tmp_path), "some query")
+    assert captured["body"]["expand"] is True
+
+    (tmp_path / "config.json").write_text(json.dumps({"retrieval_expand": False}))
+    pr._recall(str(tmp_path), "some query")
+    assert captured["body"]["expand"] is False
