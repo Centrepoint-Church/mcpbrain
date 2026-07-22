@@ -34,7 +34,7 @@ class _FakeDaemon:
     control API's /api/recall handler, which is all ControlClient.recall()
     (and therefore brain_search) calls through."""
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    def search(self, query: str, limit: int = 5, *, expand: bool = False) -> list[dict]:
         return ([{"doc_id": SEEDED_DOC_ID, "score": 1.0,
                   "text": "the annual budget review for Acme"}] if query else [])
 
