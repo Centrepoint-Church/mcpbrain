@@ -1275,14 +1275,26 @@ class Store:
         self.write_embedding(r["rowid"], vector)
         return True
 
+    def _fts_text(self, text: str, metadata: dict) -> str:
+        """FTS-indexed text: contextual prefix + body when contextual_retrieval is
+        on (mirrors the embed side), else raw body. Keeps the chunks.text column
+        and all returned text RAW — only the FTS mirror is contextualised."""
+        from mcpbrain import config
+        from mcpbrain.embed import contextual_prefix
+        if config.contextual_retrieval_enabled(str(config.app_dir())):
+            return contextual_prefix(metadata) + text
+        return text
+
     def write_embedding(self, rowid: int, vector: list[float]) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
             db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
                        (rowid, sqlite_vec.serialize_float32(vector)))
+            row = db.execute("SELECT text, metadata FROM chunks WHERE rowid=?",
+                             (rowid,)).fetchone()
+            fts_text = self._fts_text(row["text"], json.loads(row["metadata"]))
             db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
-            db.execute("INSERT INTO fts_chunks(rowid, text) "
-                       "SELECT rowid, text FROM chunks WHERE rowid=?", (rowid,))
+            db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, fts_text))
             db.execute("UPDATE chunks SET embedded=1 WHERE rowid=?", (rowid,))
 
     @staticmethod
@@ -1310,7 +1322,13 @@ class Store:
         db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
                    (rowid, sqlite_vec.serialize_float32(list(vector))))
         db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
-        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, text))
+        # NOTE: _write_cached_chunk_row is a @staticmethod (no self); build the
+        # contextual FTS text inline to match write_embedding.
+        from mcpbrain import config as _config
+        from mcpbrain.embed import contextual_prefix as _cp
+        _fts = (_cp(metadata) + text) if _config.contextual_retrieval_enabled(
+            str(_config.app_dir())) else text
+        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, _fts))
 
     def import_cached_chunk(self, doc_id, text, content_hash, metadata, vector,
                             *, enriched=False, enriched_version=0) -> bool:
@@ -1321,7 +1339,8 @@ class Store:
 
         The vector is the publisher's already-contextual-prefixed passage vector;
         it is stored verbatim so a cache hit is bit-identical to local embedding.
-        fts_chunks stores the RAW text (mirrors write_embedding). Returns True.
+        fts_chunks mirrors write_embedding: contextual-prefixed when
+        contextual_retrieval is enabled, else raw text. Returns True.
         """
         with self._connect() as db:
             self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
