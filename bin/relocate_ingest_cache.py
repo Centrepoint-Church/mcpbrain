@@ -27,7 +27,6 @@ _FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def _drive_service(home):
-    from pathlib import Path
     from mcpbrain import auth
     services = auth.build_google_services(token_file=Path(home) / "google_token.json")
     svc = services.get("drive_service")
@@ -74,12 +73,14 @@ def scan(service):
         name = d.get("name") or "<unnamed>"
         try:
             fid = _find_cache_folder(service, did)
+            if not fid:
+                continue
+            count = _count_children(service, fid)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
             print(f"  ! {name} ({did}): scan failed: {exc}")
             continue
-        if fid:
-            out.append({"drive_id": did, "drive_name": name,
-                        "folder_id": fid, "count": _count_children(service, fid)})
+        out.append({"drive_id": did, "drive_name": name,
+                    "folder_id": fid, "count": count})
     return out
 
 

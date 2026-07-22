@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Callable
 
 # Re-exported so onboarding/curation code acquires ALL fleet transport (folder
 # storage, per-drive cache storage, and drive enumeration) from one module.
@@ -360,8 +361,13 @@ def fleet_folder_id(home) -> str | None:
 
 
 def fleet_folder_storage(home, drive_service=None):
-    """FleetStorage over the fleet FOLDER (org-graph snapshot / contrib). Returns
-    None when there is no drive_service or no folder id resolves."""
+    """FleetStorage over the fleet FOLDER (spec: fleet folder / org-graph / contrib).
+
+    This is the instance B's org cadences (contrib upload, curate, snapshot
+    publish) and C's snapshot-import call — distinct from the per-shared-drive
+    cache storages. Root is the configured fleet folder id (via fleet_folder_id),
+    falling back to the bundled org default. Returns None when there is no
+    drive_service or no folder id resolves (caller then runs fully local)."""
     if drive_service is None:
         return None
     folder_id = fleet_folder_id(home)
@@ -379,7 +385,7 @@ def drive_cache_storage(drive_service, drive_id):
     return DriveFleetStorage(drive_service, drive_id, root_is_drive=True)
 
 
-def centralized_cache_storage(drive_service, fleet_folder_id_, source_drive_id):
+def centralized_cache_storage(drive_service, fleet_folder_id_, source_drive_id) -> DriveFleetStorage:
     """FleetStorage for one Shared Drive's ingest cache, stored CENTRALLY under the
     fleet folder at ingest-cache/<source_drive_id>/. ingest_cache addresses the
     .mcpbrain-cache/ subfolder via CACHE_DIR, so the physical path becomes
@@ -389,7 +395,7 @@ def centralized_cache_storage(drive_service, fleet_folder_id_, source_drive_id):
                              base_path=f"ingest-cache/{source_drive_id}")
 
 
-def cache_storage_factory(home, drive_service):
+def cache_storage_factory(home, drive_service) -> Callable[[str], DriveFleetStorage]:
     """Return storage_factory(source_drive_id) -> FleetStorage for the ingest cache.
     Central (fleet-folder-rooted) when config.ingest_cache_central is on AND a fleet
     folder resolves; otherwise the legacy in-drive storage (drive_cache_storage).
