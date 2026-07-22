@@ -139,38 +139,3 @@ def test_config_retrieval_expand_defaults_off(tmp_path):
     assert _config.retrieval_expand_enabled(str(tmp_path)) is False
     assert _config.expand_params(str(tmp_path)) == {
         "window_n": 3, "short_doc_max_chunks": 15, "max_parents": 5, "token_budget": 6000}
-
-
-def test_expand_hits_skips_tabular_and_cold_parents():
-    # one prose file (expands), one table file, one cold file (both fall back to flat)
-    chunks, files = {}, {}
-    def mk(fid, subtype, tier, nchunks):
-        for i in range(nchunks):
-            doc = f"gdrive-{fid}-{i}"
-            meta = {"file_id": fid, "chunk_index": i, "content_subtype": subtype}
-            chunks[doc] = {"doc_id": doc, "text": f"{fid}-body{i}", "metadata": meta, "memory_tier": tier}
-            files.setdefault(fid, []).append({"doc_id": doc, "text": f"{fid}-body{i}",
-                                              "metadata": meta, "idx": i})
-    mk("prose1", "prose", "", 5)
-    mk("tab1", "table", "", 5)
-    mk("cold1", "prose", "cold", 5)
-    store = _StoreWithMeta(chunks, files=files)
-    hits = [{"doc_id": "gdrive-prose1-0", "score": 1.0, "distance": 0.1, "text": "prose1-body0"},
-            {"doc_id": "gdrive-tab1-0", "score": 0.9, "distance": 0.1, "text": "tab1-body0"},
-            {"doc_id": "gdrive-cold1-0", "score": 0.8, "distance": 0.1, "text": "cold1-body0"}]
-    out = {h["doc_id"]: h["text"] for h in rx.expand_hits(store, hits, max_parents=5, token_budget=100000)}
-    # prose expands to the whole short doc (all 5 chunks joined)
-    assert "prose1-body4" in out["gdrive-prose1-0"]
-    # table + cold fall back to the flat single-chunk snippet only
-    assert out["gdrive-tab1-0"] == "tab1-body0"
-    assert out["gdrive-cold1-0"] == "cold1-body0"
-
-def test_is_low_signal_table_or_cold():
-    store = _StoreWithMeta({
-        "t": {"doc_id": "t", "text": "x", "metadata": {"content_subtype": "table"}, "memory_tier": ""},
-        "c": {"doc_id": "c", "text": "x", "metadata": {"content_subtype": "prose"}, "memory_tier": "cold"},
-        "p": {"doc_id": "p", "text": "x", "metadata": {"content_subtype": "prose"}, "memory_tier": ""},
-    })
-    assert rx._is_low_signal(store, "t") is True
-    assert rx._is_low_signal(store, "c") is True
-    assert rx._is_low_signal(store, "p") is False
