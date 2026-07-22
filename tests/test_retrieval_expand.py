@@ -26,6 +26,14 @@ class _FakeStore:
     def chunks_for_file(self, fid):
         return self._files.get(fid, [])
 
+
+class _StoreWithMeta(_FakeStore):
+    def __init__(self, chunks, **kw):
+        super().__init__(**kw)
+        self._chunks = chunks
+    def get_chunk(self, doc_id):
+        return self._chunks.get(doc_id)
+
 def test_expand_thread_stuffs_whole_thread_in_date_order():
     store = _FakeStore(threads={"t1": [
         {"doc_id": "m2", "text": "second", "metadata": {"date": "2026-02-02"}},
@@ -49,3 +57,35 @@ def test_expand_large_file_span_stitches_window_only():
     out = rx.expand_parent(_FakeStore(files=files), g, window_n=2, short_doc_max_chunks=15)
     # window ±2 around idx 10 => 8,9,10,11,12
     assert out == "p8\n\np9\n\np10\n\np11\n\np12"
+
+
+def test_expand_hits_caps_parents_and_orders_head_tail():
+    # 3 distinct short files; max_parents=2 keeps the top 2 by rank
+    chunks, files = {}, {}
+    hits = []
+    for i, fid in enumerate(["fa", "fb", "fc"]):
+        doc = f"gdrive-{fid}-0"
+        meta = {"file_id": fid, "chunk_index": 0}
+        chunks[doc] = {"doc_id": doc, "text": fid, "metadata": meta, "memory_tier": ""}
+        files[fid] = [{"doc_id": doc, "text": fid, "metadata": meta, "idx": 0}]
+        hits.append({"doc_id": doc, "score": 1.0 - i * 0.1, "distance": 0.1, "text": fid})
+    store = _StoreWithMeta(chunks, files=files)
+    out = rx.expand_hits(store, hits, max_parents=2, token_budget=10_000)
+    assert len(out) == 2
+    assert {h["doc_id"] for h in out} == {"gdrive-fa-0", "gdrive-fb-0"}
+
+
+def test_expand_hits_respects_token_budget_dropping_lowest_rank():
+    chunks, files = {}, {}
+    hits = []
+    for i, fid in enumerate(["fa", "fb"]):
+        doc = f"gdrive-{fid}-0"
+        meta = {"file_id": fid, "chunk_index": 0}
+        big = "x" * 400
+        chunks[doc] = {"doc_id": doc, "text": big, "metadata": meta, "memory_tier": ""}
+        files[fid] = [{"doc_id": doc, "text": big, "metadata": meta, "idx": 0}]
+        hits.append({"doc_id": doc, "score": 1.0 - i, "distance": 0.1, "text": big})
+    store = _StoreWithMeta(chunks, files=files)
+    # budget ~100 tokens ≈ 400 chars: only the top parent fits
+    out = rx.expand_hits(store, hits, max_parents=5, token_budget=100)
+    assert [h["doc_id"] for h in out] == ["gdrive-fa-0"]
