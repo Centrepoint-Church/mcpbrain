@@ -474,6 +474,12 @@ def retrieval_expand_enabled(home) -> bool:
     return bool(read_config(home).get("retrieval_expand", False))
 
 
+def rerank_model(home) -> str:
+    """Rerank backend: a fastembed cross-encoder model name, or 'lexical' for the
+    pure-python token-overlap fallback. Default: MiniLM-L-6 cross-encoder."""
+    return str(read_config(home).get("rerank_model", "Xenova/ms-marco-MiniLM-L-6-v2"))
+
+
 def expand_params(home) -> dict:
     """Expansion tunables (config 'expand_*'); defaults from the 2026-07-22 spec."""
     c = read_config(home)
