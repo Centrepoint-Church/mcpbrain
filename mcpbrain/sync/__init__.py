@@ -82,7 +82,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             pin = config.fleet_pin(home) if ingest_cache_on else None
             if ingest_cache_on and pin.is_pinned:
                 from mcpbrain.sync.drive import sync_shared_drives
-                from mcpbrain.fleet_storage import drive_cache_storage
+                from mcpbrain.fleet_storage import cache_storage_factory
                 from mcpbrain import ingest_cache
                 # CR (Q6 contextual-retrieval prefix) materially changes the
                 # embedding vector and is a LOCAL flag not in pipeline_fingerprint,
@@ -92,7 +92,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 cr = config.contextual_retrieval_enabled(home)
                 sd = sync_shared_drives(
                     drive_service, store, pin=pin,
-                    storage_factory=lambda d: drive_cache_storage(drive_service, d),
+                    storage_factory=cache_storage_factory(home, drive_service),
                     absence_threshold=config.ingest_cache_revocation_threshold(home),
                     contextual_retrieval=cr)
                 # Embed the misses, THEN publish them (publish reads vectors back).

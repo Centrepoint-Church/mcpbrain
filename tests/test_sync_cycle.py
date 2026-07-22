@@ -419,6 +419,47 @@ def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
     assert any(n.rsplit("/", 1)[-1].startswith("FID.") for n in names)
 
 
+def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
+    from mcpbrain import config, org_defaults
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain.sync import drive as drivemod
+    from tests.test_drive_sync import FakeDriveService
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[1.0, 2.0, 3.0, 4.0] for _ in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
+
+    captured = {}
+
+    def _spy(service, s, *, pin, storage_factory, absence_threshold=3,
+             contextual_retrieval=False):
+        captured["fs"] = storage_factory("D1")
+        return {"_revoked": []}
+
+    monkeypatch.setattr(drivemod, "sync_shared_drives", _spy)
+    # Stub the post-block progressive backfill so the minimal FakeDriveService
+    # (no pages/exports seeded) can't trip it — this test only cares which
+    # storage the shared-drive block hands to sync_shared_drives.
+    import mcpbrain.sync as syncmod
+    monkeypatch.setattr(syncmod, "progressive_backfill_step", lambda *a, **k: {})
+    svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
+    run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+
+    assert captured["fs"]._root == org_defaults.FLEET_FOLDER_ID
+    assert captured["fs"]._base_parts == ["ingest-cache", "D1"]
+
+
 def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path):
     """The cycle result must surface shared-drive cache hit/miss counts so
     they can be exposed via daemon.status() (observability). One file is
