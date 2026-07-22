@@ -469,6 +469,22 @@ def retrieval_rerank_enabled(home) -> bool:
     return bool(read_config(home).get("retrieval_rerank", False))
 
 
+def retrieval_expand_enabled(home) -> bool:
+    """Whether read-side small-to-big expansion runs in daemon.search (default OFF)."""
+    return bool(read_config(home).get("retrieval_expand", False))
+
+
+def expand_params(home) -> dict:
+    """Expansion tunables (config 'expand_*'); defaults from the 2026-07-22 spec."""
+    c = read_config(home)
+    return {
+        "window_n": int(c.get("expand_window_n", 3)),
+        "short_doc_max_chunks": int(c.get("expand_short_doc_max_chunks", 15)),
+        "max_parents": int(c.get("expand_max_parents", 5)),
+        "token_budget": int(c.get("expand_token_budget", 6000)),
+    }
+
+
 def contextual_retrieval_enabled(home) -> bool:
     """Whether the Q6 contextual-retrieval prefix is prepended at embed time.
 

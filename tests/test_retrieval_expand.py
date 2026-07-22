@@ -1,5 +1,14 @@
 from mcpbrain import retrieval_expand as rx
 
+
+def test_retrieval_expand_defaults_off(tmp_path):
+    from mcpbrain import config
+    assert config.retrieval_expand_enabled(str(tmp_path)) is False
+    p = config.expand_params(str(tmp_path))
+    assert p == {"window_n": 3, "short_doc_max_chunks": 15,
+                 "max_parents": 5, "token_budget": 6000}
+
+
 def test_parent_key_prefers_thread_then_file_then_doc():
     assert rx.parent_key({"thread_id": "t1", "file_id": "f1"}, "d0") == ("thread", "t1")
     assert rx.parent_key({"file_id": "f1", "chunk_index": 7}, "gdrive-f1-7") == ("file", "f1")
