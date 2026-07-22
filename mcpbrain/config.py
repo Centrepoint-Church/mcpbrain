@@ -456,39 +456,17 @@ def crag_min_score(home) -> float:
 
 
 def retrieval_rerank_enabled(home) -> bool:
-    """Whether the rerank stage in query_router.route() is active.
+    """Whether Q6 lexical (token-overlap) rerank is active.
 
-    The backend is selected by `rerank_model(home)`: the default is a fastembed
-    cross-encoder (ms-marco-MiniLM-L-6-v2, loaded daemon-side via embed.get_reranker),
-    with `"lexical"` selecting the lightweight pure-Python token-overlap fallback
-    (no model). Gate it on the gold-set measurement
+    NOTE: this is a lightweight LEXICAL reranker (query↔chunk token overlap),
+    NOT a cross-encoder — it adds little over the RRF keyword arm and may not
+    beat plain hybrid_search. A true cross-encoder is the deferred upgrade (needs
+    a model dep we don't bundle). Gate it on the gold-set measurement
     (test_q6_route_does_not_regress_recall_on_gold): only enable if it helps on
     real data; keep off otherwise.
     Default: False — safe rollout. Enable via config 'retrieval_rerank': true.
     """
     return bool(read_config(home).get("retrieval_rerank", False))
-
-
-def retrieval_expand_enabled(home) -> bool:
-    """Whether read-side small-to-big expansion runs in daemon.search (default OFF)."""
-    return bool(read_config(home).get("retrieval_expand", False))
-
-
-def rerank_model(home) -> str:
-    """Rerank backend: a fastembed cross-encoder model name, or 'lexical' for the
-    pure-python token-overlap fallback. Default: MiniLM-L-6 cross-encoder."""
-    return str(read_config(home).get("rerank_model", "Xenova/ms-marco-MiniLM-L-6-v2"))
-
-
-def expand_params(home) -> dict:
-    """Expansion tunables (config 'expand_*'); defaults from the 2026-07-22 spec."""
-    c = read_config(home)
-    return {
-        "window_n": int(c.get("expand_window_n", 3)),
-        "short_doc_max_chunks": int(c.get("expand_short_doc_max_chunks", 15)),
-        "max_parents": int(c.get("expand_max_parents", 5)),
-        "token_budget": int(c.get("expand_token_budget", 6000)),
-    }
 
 
 def contextual_retrieval_enabled(home) -> bool:
