@@ -77,6 +77,7 @@ def _head_tail(items: list) -> list:
 def expand_hits(store, hits: list[dict], *, window_n: int = 3,
                 short_doc_max_chunks: int = 15, max_parents: int = 5,
                 token_budget: int = 6000) -> list[dict]:
+    """Attach metadata, group by parent, cap to max_parents, expand each, enforce token budget, order head-and-tail."""
     if not hits:
         return hits
     with_meta = _attach_metadata(store, hits)
