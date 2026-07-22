@@ -841,6 +841,14 @@ def ingest_cache_enabled(home) -> bool:
     return bool(read_config(home).get("ingest_cache", True))
 
 
+def ingest_cache_central(home) -> bool:
+    """Store the shared-drive ingest cache CENTRALLY under the fleet folder
+    (inside the Backups drive) instead of in each source drive's own
+    .mcpbrain-cache/. Default True. Org-config-flippable via org-config.json.
+    Falls back to in-drive automatically if no fleet folder resolves."""
+    return bool(read_config(home).get("ingest_cache_central", True))
+
+
 def ingest_cache_revocation_threshold(home) -> int:
     """Consecutive sync cycles a Shared Drive must be absent before its cached
     content is auto-purged as revoked (spec §A3). Default 5 (conservative — this
