@@ -64,19 +64,6 @@ def _attach_metadata(store, hits: list[dict]) -> list[dict]:
     return out
 
 
-def _is_low_signal(store, doc_id) -> bool:
-    """True for parents not worth stitching: tabular content (CSV-wall risk) or
-    cold-tier (salience-gated low signal). Such parents keep their flat snippet."""
-    try:
-        c = store.get_chunk(doc_id)
-    except Exception:  # noqa: BLE001
-        return False
-    if not c:
-        return False
-    meta = c.get("metadata") or {}
-    return meta.get("content_subtype") == "table" or c.get("memory_tier") == "cold"
-
-
 def _head_tail(items: list) -> list:
     """Reorder by rank so the top passages sit at head AND tail (lost-in-the-middle)."""
     if len(items) <= 2:
@@ -98,13 +85,10 @@ def expand_hits(store, hits: list[dict], *, window_n: int = 3,
     by_doc = {h["doc_id"]: h for h in hits}
     expanded, used = [], 0
     for g in groups:
-        if _is_low_signal(store, g["rep_doc_id"]):
-            text = by_doc[g["rep_doc_id"]].get("text", "")   # tabular/cold: keep flat snippet
-        else:
-            text = expand_parent(store, g, window_n=window_n,
-                                 short_doc_max_chunks=short_doc_max_chunks)
-            if not text:
-                text = by_doc[g["rep_doc_id"]].get("text", "")
+        text = expand_parent(store, g, window_n=window_n,
+                             short_doc_max_chunks=short_doc_max_chunks)
+        if not text:
+            text = by_doc[g["rep_doc_id"]].get("text", "")
         cost = len(text) // 4  # ~4 chars/token
         if expanded and used + cost > token_budget:
             continue  # budget exhausted; drop this (lower-ranked) parent
