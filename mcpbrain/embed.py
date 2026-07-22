@@ -139,3 +139,21 @@ def get_embedder(kind: str = "bge-small"):
     if kind == "bge-small":
         return _LocalEmbedder("BAAI/bge-small-en-v1.5", 384, _BGE_Q)
     raise ValueError(f"unknown embedder {kind!r}")
+
+
+class _LocalReranker:
+    def __init__(self, model_name: str):
+        from fastembed.rerank.cross_encoder import TextCrossEncoder  # lazy
+        self._model = TextCrossEncoder(model_name=model_name, cache_dir=_model_cache_dir())
+
+    def rerank(self, query: str, passages: list[str]) -> list[float]:
+        if not passages:
+            return []
+        return [float(s) for s in self._model.rerank(query, list(passages))]
+
+
+@lru_cache(maxsize=None)
+def get_reranker(model_name: str = "Xenova/ms-marco-MiniLM-L-6-v2"):
+    """Memoised cross-encoder reranker (fastembed). Daemon-only — never import
+    from the MCP server. Model is lazy-downloaded on first use (~80 MB)."""
+    return _LocalReranker(model_name)
