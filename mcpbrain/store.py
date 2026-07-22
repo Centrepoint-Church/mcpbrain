@@ -108,6 +108,10 @@ def _base_cal_event_id(value: str) -> str:
 
 
 class Store:
+    # Phase C: bump when the FTS contextual-text format changes so
+    # reindex_fts_batch() knows which embedded chunks are stale.
+    FTS_CONTEXT_VERSION = 1
+
     def __init__(self, path: Path, dim: int, read_only: bool = False):
         self.path = Path(path)
         self.dim = dim
@@ -735,6 +739,9 @@ class Store:
                 db.execute("ALTER TABLE chunks ADD COLUMN memory_tier TEXT DEFAULT ''")
             if "memory_type" not in ch_cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN memory_type TEXT DEFAULT 'episodic'")
+            # --- Phase C: FTS contextual-reindex marker (bounded backfill) -----
+            if "fts_context_version" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN fts_context_version INTEGER DEFAULT 0")
 
             # --- B5 decay: strength + last_accessed on chunk_quality (Phase 2) -
             cq_cols = {row["name"] for row in
@@ -1284,6 +1291,32 @@ class Store:
         if config.contextual_retrieval_enabled(str(config.app_dir())):
             return contextual_prefix(metadata) + text
         return text
+
+    def reindex_fts_batch(self, cap: int = 5000) -> int:
+        """Rebuild the FTS row (contextual text) for up to `cap` embedded chunks
+        whose fts_context_version is behind. Resumable; no re-embed. Returns count.
+
+        Phase C backfill: C1 taught _fts_text() to prepend the contextual prefix,
+        but existing (already-embedded) chunks' fts_chunks rows were written
+        before that change and still hold raw text. This drains them in bounded
+        batches — safe to call repeatedly (e.g. once per index_pending cycle)
+        until every embedded chunk is caught up.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT rowid, text, metadata FROM chunks "
+                "WHERE embedded=1 AND COALESCE(fts_context_version,0) < ? LIMIT ?",
+                (self.FTS_CONTEXT_VERSION, cap)).fetchall()
+            n = 0
+            for r in rows:
+                fts_text = self._fts_text(r["text"], json.loads(r["metadata"]))
+                db.execute("DELETE FROM fts_chunks WHERE rowid=?", (r["rowid"],))
+                db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)",
+                           (r["rowid"], fts_text))
+                db.execute("UPDATE chunks SET fts_context_version=? WHERE rowid=?",
+                           (self.FTS_CONTEXT_VERSION, r["rowid"]))
+                n += 1
+            return n
 
     def write_embedding(self, rowid: int, vector: list[float]) -> None:
         with self._connect() as db:

@@ -20,3 +20,20 @@ def test_fts_indexes_contextual_prefix_when_enabled(tmp_path, monkeypatch):
 def _rowid(store, doc_id):
     with store._connect() as db:
         return db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()["rowid"]
+
+
+def test_reindex_fts_batch_refreshes_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr("mcpbrain.config.contextual_retrieval_enabled", lambda home: True)
+    s = _store(tmp_path)
+    s.upsert_chunk("gdrive-F2-0", "rota rows", "h", {"source_type": "gdrive",
+                   "file_name": "Master Rosters"})
+    rid = _rowid(s, "gdrive-F2-0")
+    # simulate a legacy raw-text FTS row (pre-Phase-C)
+    with s._connect() as db:
+        db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rid,))
+        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rid, "rota rows"))
+        db.execute("UPDATE chunks SET embedded=1 WHERE rowid=?", (rid,))
+    assert "gdrive-F2-0" not in [d for d, _ in s.fts_search("Master Rosters", 5)]
+    n = s.reindex_fts_batch(cap=100)
+    assert n >= 1
+    assert "gdrive-F2-0" in [d for d, _ in s.fts_search("Master Rosters", 5)]
