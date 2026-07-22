@@ -36,7 +36,8 @@ class FakeDaemon:
     def start_auth(self):
         self.auth = True
 
-    def search(self, query, limit=5):
+    def search(self, query, limit=5, *, expand=False):
+        self.last_expand = expand
         return ([{"doc_id": "d1", "score": 1.0, "text": f"hit for {query}"}]
                 if query else [])
 
@@ -91,6 +92,25 @@ def test_recall_endpoint(tmp_path):
         assert "launch team" in data["results"][0]["text"]
         r2 = _post(base + "/api/recall", srv.token, {"query": "  "})
         assert json.loads(r2.read())["results"] == []
+    finally:
+        srv.stop()
+
+
+def test_recall_endpoint_forwards_expand(tmp_path):
+    """POST /api/recall forwards the 'expand' body flag to daemon.search(), and
+    defaults to False when the caller omits it — brain_search stays flat and
+    only callers that explicitly ask for expansion (e.g. an injection path) get
+    it."""
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        _post(base + "/api/recall", srv.token, {"query": "x", "expand": True})
+        assert d.last_expand is True
+
+        _post(base + "/api/recall", srv.token, {"query": "x"})
+        assert d.last_expand is False
     finally:
         srv.stop()
 
