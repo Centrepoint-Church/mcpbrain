@@ -814,7 +814,7 @@ class Daemon:
             "project_instructions": config.render_project_instructions(cfg),
         }
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    def search(self, query: str, limit: int = 5, *, expand: bool = False) -> list[dict]:
         """Semantic recall for the UserPromptSubmit hook (via /api/recall).
 
         Read-only and best-effort: returns compact {doc_id, score, distance,
@@ -892,7 +892,11 @@ class Daemon:
             result_hits = filter_by_sufficiency(query, result_hits, home=str(app_dir()))
         except Exception:  # noqa: BLE001 — gate must never break recall
             pass
-        return result_hits
+        from mcpbrain.retrieval_expand import maybe_expand
+        try:
+            return maybe_expand(self._store, result_hits, home=home, expand=expand)
+        except Exception:  # noqa: BLE001 — recall must never raise
+            return result_hits
 
     def _resolve_google_account(self, token_file) -> str:
         """Return the connected Google account email, resolving lazily.

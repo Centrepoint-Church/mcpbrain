@@ -335,7 +335,8 @@ class ControlServer:
                 # short-circuits to no results.
                 q = (body.get("query") or "").strip()
                 limit = min(int(body.get("limit") or 5), 10)
-                results = d.search(q, limit) if q else []
+                expand = bool(body.get("expand"))
+                results = d.search(q, limit, expand=expand) if q else []
                 # Log exposure events for injected chunks (S2 feedback signal).
                 if results and self.store is not None:
                     session_id = (body.get("session_id") or "").strip()
