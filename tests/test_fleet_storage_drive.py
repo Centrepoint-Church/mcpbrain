@@ -703,3 +703,47 @@ def test_base_path_read_miss_when_base_absent():
     fs = DriveFleetStorage(FakeDrive(), "ROOT", base_path="ingest-cache/D1")
     assert fs.get_bytes(".mcpbrain-cache/nope.mbc.gz") is None
     assert fs.list_paths(".mcpbrain-cache/") == []
+
+
+# -- New tests for Task 2 --
+
+def test_ingest_cache_central_defaults_true(tmp_path):
+    from mcpbrain import config
+    assert config.ingest_cache_central(str(tmp_path)) is True
+    config.write_config(str(tmp_path), {"ingest_cache_central": False})
+    assert config.ingest_cache_central(str(tmp_path)) is False
+
+
+def test_fleet_folder_id_prefers_config_then_default(tmp_path):
+    from mcpbrain import config, fleet_storage, org_defaults
+    assert fleet_storage.fleet_folder_id(str(tmp_path)) == org_defaults.FLEET_FOLDER_ID
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FF"}})
+    assert fleet_storage.fleet_folder_id(str(tmp_path)) == "FF"
+
+
+def test_centralized_cache_storage_roots_at_fleet_folder_with_base_path(tmp_path):
+    from mcpbrain import fleet_storage, ingest_cache
+    drive = FakeDrive()
+    fs = fleet_storage.centralized_cache_storage(drive, "FF", "D1")
+    assert fs._root == "FF"
+    assert fs._root_is_drive is False          # folder root, not a drive root
+    assert fs._base_parts == ["ingest-cache", "D1"]
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/FID.h.pf.mbc.gz", b"p")
+    names = {n["name"] for n in drive.nodes.values()}
+    assert {"ingest-cache", "D1", ingest_cache.CACHE_DIR} <= names
+
+
+def test_cache_storage_factory_central_when_flag_on(tmp_path):
+    from mcpbrain import config, fleet_storage
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FF"}})
+    factory = fleet_storage.cache_storage_factory(str(tmp_path), FakeDrive())
+    fs = factory("D1")
+    assert fs._root == "FF" and fs._base_parts == ["ingest-cache", "D1"]
+
+
+def test_cache_storage_factory_in_drive_when_flag_off(tmp_path):
+    from mcpbrain import config, fleet_storage
+    config.write_config(str(tmp_path), {"ingest_cache_central": False})
+    factory = fleet_storage.cache_storage_factory(str(tmp_path), FakeDrive())
+    fs = factory("D1")
+    assert fs._root == "D1" and fs._root_is_drive is True and fs._base_parts == []
