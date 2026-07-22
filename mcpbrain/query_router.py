@@ -263,6 +263,21 @@ def _cross_encoder_rerank(query: str, results: list[dict], reranker) -> list[dic
     return [r for _, r in ranked]
 
 
+def _apply_rerank(query: str, results: list[dict], *, home: str) -> list[dict]:
+    """Rerank backend selector: cross-encoder (default) or lexical fallback.
+    Degrades to the input order on any error — recall must never raise."""
+    from mcpbrain import config
+    model = config.rerank_model(home)
+    if model == "lexical":
+        return _token_overlap_rerank(query, results)
+    try:
+        from mcpbrain.embed import get_reranker
+        return _cross_encoder_rerank(query, results, get_reranker(model))
+    except Exception:  # noqa: BLE001 — model missing/not-downloaded, etc.
+        log.warning("cross-encoder rerank unavailable (%s); lexical fallback", model)
+        return _token_overlap_rerank(query, results)
+
+
 # ---------------------------------------------------------------------------
 # Main route() entry point
 # ---------------------------------------------------------------------------
@@ -334,10 +349,10 @@ def route(store, embedder, query: str, limit: int, *,
         except Exception:  # noqa: BLE001
             pass
 
-    # ---- token-overlap rerank ------------------------------------------
+    # ---- rerank (cross-encoder default, lexical fallback) ---------------
     if config.retrieval_rerank_enabled(home):
         try:
-            results = _token_overlap_rerank(query, results)
+            results = _apply_rerank(query, results, home=home)
         except Exception:  # noqa: BLE001
             pass
 
