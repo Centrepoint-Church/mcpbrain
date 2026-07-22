@@ -146,6 +146,26 @@ curl -fsS https://centrepoint-church.github.io/mcpbrain-dist/simple/mcpbrain/ \
 
 GitHub Pages can lag ~1 min. Installed daemons auto-update on their next ~daily check.
 
+### 1e. (0.7.99 one-shot) Relocate legacy in-drive ingest-cache folders
+
+0.7.99 moved the shared-drive ingest cache out of every team drive's root and into
+`<fleet folder>/ingest-cache/<source_drive_id>/.mcpbrain-cache/` (inside the MCPBrain
+Backups drive). New installs write only to the central location; the old per-team-drive
+`.mcpbrain-cache/` folders become dead clutter.
+
+**Run once, and ONLY AFTER the whole fleet has auto-updated to ≥0.7.99** (give it ~a day
+past the dist publish, and confirm each colleague's daemon has updated). An install still
+on ≤0.7.98 will recreate the in-drive folder on its next sync, so premature cleanup churns.
+
+```bash
+python bin/relocate_ingest_cache.py                  # dry-run: report the legacy footprint
+python bin/relocate_ingest_cache.py --delete-legacy  # actually remove them (after fleet updated)
+```
+
+Deletion is safe: the central location re-publishes any still-live doc on its next
+cache-miss (regeneration is cheap; no copy step). Per-drive isolation — one drive's
+failure never aborts the rest.
+
 ---
 
 ## 2. Org marketplace deployment (admin console — not scriptable)
