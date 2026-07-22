@@ -54,10 +54,23 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-21):** the **five** version files (+ `uv.lock`) are bumped to `0.7.98`
-  in **source only (local `main`, not pushed)**; the **published wheel, dist index, and plugin
-  marketplace remain at `0.7.97`** — **0.7.98 is NOT released.** 0.7.98 bundles two post-0.7.97
-  fixes from concurrent sessions:
+- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.99`,
+  **released** (source + dist wheel + plugin marketplace). **0.7.99 is the shared-drive
+  ingest-cache CENTRALIZATION**: `.mcpbrain-cache/` no longer lands in every team drive's root —
+  each source drive's cache is now stored centrally at `<fleet folder>/ingest-cache/<source_drive_id>/.mcpbrain-cache/`
+  (inside the MCPBrain Backups shared drive). Achieved WITHOUT touching `ingest_cache.py`: a new
+  `DriveFleetStorage(base_path=…)` prefix + `fleet_storage.cache_storage_factory` (rooted at the
+  fleet folder via `centralized_cache_storage`) that both call sites (`sync/__init__.py`,
+  `onboarding.py`) route through; per-drive scoping (GC/revocation/bootstrap) preserved because each
+  drive keeps its own `base_path` subfolder. Flag `ingest_cache_central` (default **ON**,
+  org-config-flippable) with automatic in-drive fallback if no fleet folder resolves. One-shot
+  cleanup `bin/relocate_ingest_cache.py` (dry-run default, `--delete-legacy`) removes the legacy
+  in-drive folders — **run once, only AFTER the fleet has auto-updated to ≥0.7.99** (runbook §1e).
+  Spec/plan: `docs/superpowers/specs/2026-07-22-centralize-ingest-cache-design.md` /
+  `docs/superpowers/plans/2026-07-22-centralize-ingest-cache.md`. Follow-up (out of scope, flagged):
+  the escrow keys live in the all-members-readable fleet folder — worth locking down. The **Windows
+  HARDWARE QA GATE from 0.7.97 remains OPEN** (see below) — do NOT onboard Windows users until it passes.
+  **0.7.98 (released) bundled two post-0.7.97 fixes from concurrent sessions:**
   **(1) Drive-doc enrichment matching (fix)** — Drive documents were effectively **never enriched
   into the graph** via the thread-enrich drain path: `_group_key` (batching), `reassemble_thread`,
   and `store.doc_ids_for_messages` disagreed on a Drive chunk's identity, so the extraction's
@@ -72,10 +85,8 @@ wrong and MUST be right:
   **(2) the two 0.7.97-review deferred Windows Minors, now FIXED** — uninstall removes the
   Startup-folder `.lnk` (shared `_startup_shortcut_path`); `doctor._true_os_arch` detects Rosetta 2
   (`sysctl.proc_translated`) so an x86_64 interpreter on Apple Silicon reads OS arch as arm64 →
-  `arch_line = "emulated — expected"`. **Still to do before release:** full suite + gold-eval gate
-  (per runbook), then the release steps. The **Windows HARDWARE QA GATE from 0.7.97 remains OPEN**
-  (see below) — do NOT onboard Windows users until it passes.
-  **0.7.97 (last released) is the Windows install rework
+  `arch_line = "emulated — expected"`.
+  **0.7.97 was the Windows install rework
   (use-the-platform)** — it corrects a misdiagnosis at the root of the 0.7.95/0.7.96 Windows work.
   A real Windows-on-ARM install proved: (a) **native ARM64 is not viable** — `sqlite-vec`,
   `cryptography`, `pymupdf`, `leidenalg` ship **no `win_arm64` wheels** (so the 0.7.95 arch-native
