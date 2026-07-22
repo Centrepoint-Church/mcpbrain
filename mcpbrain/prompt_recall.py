@@ -31,6 +31,8 @@ _LIMIT = 4              # max hits requested from the daemon
 _KEEP = 3              # max hits actually injected
 _SNIPPET = 200         # max chars per injected snippet
 _MAX_TOTAL = 1200      # hard cap on total injected chars
+_EXPANDED_SNIPPET = 1500     # per-item cap when expansion is active (stitched context)
+_EXPANDED_MAX_TOTAL = 4000   # total cap for the expanded injection block
 _TIMEOUT_S = 1.2       # fail-open latency budget for the loopback call
 _MIN_PROMPT = 12       # skip trivially short prompts
 _REL_FLOOR = 0.55      # keep hits scoring >= this fraction of the top hit
@@ -70,7 +72,8 @@ def _recall(home: str, query: str) -> list[dict]:
         token = (Path(home) / "control_token").read_text().strip()
     except OSError:
         return []
-    payload = json.dumps({"query": query, "limit": _LIMIT}).encode()
+    expand = config.retrieval_expand_enabled(home)
+    payload = json.dumps({"query": query, "limit": _LIMIT, "expand": expand}).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/recall",
         data=payload, method="POST",
@@ -214,7 +217,7 @@ def _detect_quoteback(home: str, transcript_path: str, state: dict,
     return newly
 
 
-def _format_context(results: list[dict], seen: set) -> tuple[str, dict]:
+def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -> tuple[str, dict]:
     """Filter, de-dup and cap recall hits into an injectable block.
 
     Keeps hits within _REL_FLOOR of the top score (intra-query, so the top is
@@ -222,9 +225,16 @@ def _format_context(results: list[dict], seen: set) -> tuple[str, dict]:
     drops doc_ids already injected this session, caps count/snippet/total chars.
     Returns ("", {}) when nothing survives, else (block, {doc_id: snippet}).
     The snippet map is persisted so quote-back can later score what was shown.
+
+    When `expanded` is True (the daemon stitched richer parent context), the
+    per-item and total caps widen from _SNIPPET/_MAX_TOTAL to
+    _EXPANDED_SNIPPET/_EXPANDED_MAX_TOTAL — everything else (rel floor, dedup,
+    _KEEP, header) is unchanged.
     """
     if not results:
         return "", {}
+    snip_cap = _EXPANDED_SNIPPET if expanded else _SNIPPET
+    total_cap = _EXPANDED_MAX_TOTAL if expanded else _MAX_TOTAL
     top = max((float(r.get("score") or 0.0) for r in results), default=0.0)
     floor = top * _REL_FLOOR
     lines: list[str] = []
@@ -238,10 +248,10 @@ def _format_context(results: list[dict], seen: set) -> tuple[str, dict]:
             continue
         if float(r.get("score") or 0.0) < floor:
             continue
-        snippet = " ".join((r.get("text") or "").split())[:_SNIPPET].strip()
+        snippet = " ".join((r.get("text") or "").split())[:snip_cap].strip()
         if not snippet:
             continue
-        if total + len(snippet) > _MAX_TOTAL:
+        if total + len(snippet) > total_cap:
             break
         lines.append(f"- {snippet}")
         injected[doc_id] = snippet
@@ -326,7 +336,8 @@ def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
     # B2: prepend always-injected core block (tiered_memory flag guards internally)
     core_block = _get_core_block(home)
 
-    block, injected = _format_context(results, seen)
+    expanded = config.retrieval_expand_enabled(home)
+    block, injected = _format_context(results, seen, expanded=expanded)
 
     # Build final context: core block first (always fresh), then recall hits
     parts = [p for p in (core_block, block) if p]
