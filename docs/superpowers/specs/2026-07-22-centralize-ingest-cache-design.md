@@ -36,31 +36,56 @@ confidentiality change is understood and intended.
 Move the cache **without touching `ingest_cache.py`**. The per-drive scoping comes
 entirely from where the `fleet_storage` object is rooted plus the fixed `CACHE_DIR`
 prefix. So we change only *what storage each drive is handed*: a storage rooted in the
-Backups drive under a per-source-drive subfolder.
+**fleet folder** under a per-source-drive subfolder.
 
 Each source drive still gets its **own** storage instance (its own subfolder), so
 `list_paths(CACHE_DIR + "/")`, `gc_superseded`, `bootstrap_drive`, `sweep_drive`,
 `remove_file_artifacts`, and revocation all keep working unchanged — they simply resolve
 to a different physical location.
 
+### Confirmed Drive structure (2026-07-22)
+
+The org's entire mcpbrain footprint already lives inside **one** shared drive:
+
+```
+MCPBrain Backups   (shared drive, 0AFag_8UMW6GaUk9PVA)
+├── mcpbrain-fleet          (1CI_oP…)  == org_defaults.FLEET_FOLDER_ID
+│   ├── mcpbrain-escrow      (1lSu2k…) == org_defaults.ESCROW_FOLDER_ID  (escrow keys)
+│   ├── contrib              (1ipnEj…)                                   (org contributions)
+│   └── <snapshot / tombstones / manifest / <email>.json / status.html> (org-graph + beacons)
+└── joshua-kemp             (1Qgr__…)                                    (per-user backup snapshots)
+```
+
+So the fleet folder is **not** a separate location — it's a folder inside the Backups
+drive. Rooting the cache at the fleet folder therefore keeps everything mcpbrain writes
+inside the single "MCPBrain Backups" drive, and lets us reuse the existing
+`fleet_folder_storage` resolution (which already resolves `fleet.folder_id` or falls back
+to the baked-in `org_defaults.FLEET_FOLDER_ID`, org-config-aware and already deployed) —
+**no separate drive-id derivation is needed.**
+
 ### Resulting layout
 
 ```
 MCPBrain Backups (shared drive)/
-├── mcpbrain-escrow/                       ← existing (backups + escrow keys)
-└── ingest-cache/                          ← NEW top-level folder
-    ├── <source_drive_A_id>/.mcpbrain-cache/<file_id>.<hash>.<pf8>.mbc.gz
-    └── <source_drive_B_id>/.mcpbrain-cache/<file_id>.<hash>.<pf8>.mbc.gz
+└── mcpbrain-fleet/                        ← existing FLEET_FOLDER_ID
+    ├── mcpbrain-escrow/                   ← existing (escrow keys)
+    ├── contrib/                           ← existing (org contributions)
+    ├── snapshot / manifest / status.html  ← existing (org-graph + beacons)
+    └── ingest-cache/                      ← NEW, alongside the other org data
+        └── <source_drive_id>/.mcpbrain-cache/<file_id>.<hash>.<pf8>.mbc.gz
 ```
 
-Team drives get **zero** mcpbrain folders going forward.
+Team drives get **zero** mcpbrain folders going forward; the cache sits next to the other
+org artifacts under `mcpbrain-fleet/`.
 
 ### Rejected alternatives
 
 - **B — leave in-drive, rename + drop a README.** Doesn't remove the folder from team
   drives (Drive can't hide dotfolders); fails the goal.
-- **C — target the org *fleet folder* instead of the Backups drive.** Mechanically
-  identical to A; the Backups drive was specifically requested.
+- **A-root — root at the Backups shared-drive ROOT** (sibling to `mcpbrain-fleet`) instead
+  of inside the fleet folder. Works, but requires deriving the drive id from the escrow
+  folder's `driveId` and scatters mcpbrain data across two top-level entries. Rooting at
+  the fleet folder is simpler (reuses existing resolution) and co-locates all org data.
 
 ## Components
 
@@ -83,33 +108,29 @@ if rooted at `<root>/<base_path>`.
 `base_path=""` (default) is a no-op — existing `fleet_folder_storage` /
 `drive_cache_storage` callers are unaffected.
 
-### 2. Backups-drive resolver (`mcpbrain/backup.py`)
+### 2. Fleet-folder id resolution (reuse — no new resolver)
 
-`backups_drive_id(home, drive_service, store) -> str | None`:
-
-- Resolve the escrow **folder** id via the existing single source of truth
-  `restore._escrow_folder(home)` (prefers `fleet.escrow_folder_id`, else
-  `org_defaults.ESCROW_FOLDER_ID`).
-- Resolve the folder's containing shared drive:
-  `drive_service.files().get(fileId=<escrow_folder_id>, fields="driveId",
-  supportsAllDrives=True)["driveId"]`.
-- **Memoize** in the store `meta` table keyed by the escrow folder id (same lightweight
-  meta pattern `note_drive_presence` uses) so it's a one-time API call, not per-cycle.
-- Return `None` on any failure (no escrow folder, no `driveId`, API error) → caller falls
-  back to in-drive storage (safe degradation).
+No new drive-id derivation is needed. The fleet folder id is already resolved by the same
+logic `fleet_folder_storage` uses (`mcpbrain/fleet_storage.py:347-363`):
+`config.read_config(home)["fleet"]["folder_id"]` if set, else `org_defaults.FLEET_FOLDER_ID`.
+Factor that lookup into a tiny helper `_fleet_folder_id(home) -> str | None` (returns
+`None` only if neither resolves — the caller then falls back to in-drive storage). This is
+org-config-aware and already deployed, so no memoization or extra API call is required.
 
 ### 3. Centralized cache factory (`mcpbrain/fleet_storage.py`)
 
-`centralized_cache_storage(drive_service, backups_drive_id, source_drive_id)`:
+`centralized_cache_storage(drive_service, fleet_folder_id, source_drive_id)`:
 
 ```python
 return DriveFleetStorage(
-    drive_service, backups_drive_id, root_is_drive=True,
-    base_path=f"ingest-cache/{source_drive_id}",
+    drive_service, fleet_folder_id, base_path=f"ingest-cache/{source_drive_id}",
 )
 ```
 
-Keep `drive_cache_storage` (in-drive) as-is for the fallback path.
+Root is the **fleet folder** (a plain folder id → `root_is_drive=False`, exactly as
+`fleet_folder_storage` already operates), so its `_find_child` queries are parent-scoped —
+no `corpora="drive"` scoping needed. Keep `drive_cache_storage` (in-drive) as-is for the
+fallback path.
 
 ### 4. Config flag (`mcpbrain/config.py`)
 
@@ -122,11 +143,11 @@ without a code change.
 A single shared helper builds the storage_factory both call sites use:
 
 ```python
-def _cache_storage_factory(home, drive_service, store):
+def _cache_storage_factory(home, drive_service):
     if config.ingest_cache_central(home):
-        bdid = backup.backups_drive_id(home, drive_service, store)
-        if bdid:
-            return lambda d: centralized_cache_storage(drive_service, bdid, d)
+        ffid = _fleet_folder_id(home)
+        if ffid:
+            return lambda d: centralized_cache_storage(drive_service, ffid, d)
     return lambda d: drive_cache_storage(drive_service, d)   # in-drive fallback
 ```
 
@@ -160,8 +181,9 @@ fleet has updated).
 
 ## Error handling / degradation
 
-- Backups drive can't be resolved → `_cache_storage_factory` returns the in-drive factory;
-  everything works exactly as today. No hard failure.
+- Fleet folder id can't be resolved (`_fleet_folder_id` returns `None`) →
+  `_cache_storage_factory` returns the in-drive factory; everything works exactly as today.
+  No hard failure. (In practice it always resolves via the baked-in org default.)
 - `ingest_cache_central` off → in-drive, as today.
 - Mixed-version fleet during rollout: old installs read/write in-drive, new installs
   read/write central. Each reads only its own location, so a doc may be extracted twice
@@ -180,21 +202,22 @@ Scope runs to edited + directly-impacted files (Josh runs the full suite himself
 - `tests/test_ingest_cache_*` (`roundtrip`, `lifecycle`, `revocation`): re-run against a
   `base_path`-rooted storage to prove publish → import → GC → revocation are unaffected by
   relocation (they should already pass unchanged since `ingest_cache.py` is untouched).
-- `tests/test_backup.py` (or new `test_backups_drive_id`): `backups_drive_id` resolves via
-  escrow folder `driveId`, memoizes in meta, returns `None` on failure.
+- `_fleet_folder_id`: resolves `fleet.folder_id` when set, else `org_defaults.FLEET_FOLDER_ID`;
+  returns `None` only when neither resolves.
 - `tests/test_sync_cycle.py` / `tests/test_onboarding_bootstrap.py`: `_cache_storage_factory`
-  picks central when a Backups drive resolves and the flag is on; falls back to in-drive
-  otherwise.
+  picks central (fleet-folder-rooted) when the flag is on and a fleet folder resolves; falls
+  back to in-drive when the flag is off or no fleet folder resolves.
 - New `tests/test_relocate_ingest_cache.py`: dry-run reports; `--delete-legacy` deletes
   top-level `.mcpbrain-cache` per drive with per-drive isolation.
 
 ## Follow-up (non-blocking, flagged during design)
 
-The Backups drive also holds `mcpbrain-escrow/<user>.key` — the admin recovery keys that
-decrypt each user's backup. Since **all team members can open that drive**, anyone could
-read those keys and decrypt anyone's backup. This predates this change but is worth
-locking down (restrict the `mcpbrain-escrow/` folder's permissions to admins). Tracked
-here as a follow-up, not part of this work.
+`mcpbrain-fleet/mcpbrain-escrow/<user>.key` holds the admin recovery keys that decrypt each
+user's backup. Since **all team members can open the Backups drive** (and the fleet folder,
+which they must, for contrib/snapshot), anyone could read those keys and decrypt anyone's
+backup. This predates this change but is worth locking down (restrict the `mcpbrain-escrow/`
+folder to admins — folder-level permissions inside a shared drive, if the org's sharing
+settings allow it). Tracked here as a follow-up, not part of this work.
 
 ## Out of scope
 
