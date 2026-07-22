@@ -89,3 +89,22 @@ def test_expand_hits_respects_token_budget_dropping_lowest_rank():
     # budget ~100 tokens ≈ 400 chars: only the top parent fits
     out = rx.expand_hits(store, hits, max_parents=5, token_budget=100)
     assert [h["doc_id"] for h in out] == ["gdrive-fa-0"]
+
+
+def test_expand_hits_orders_head_tail_with_five_parents():
+    # Test head-tail reordering with 5 distinct files (≥3 items triggers reordering)
+    chunks, files = {}, {}
+    hits = []
+    for i, fid in enumerate(["fa", "fb", "fc", "fd", "fe"]):
+        doc = f"gdrive-{fid}-0"
+        meta = {"file_id": fid, "chunk_index": 0}
+        chunks[doc] = {"doc_id": doc, "text": fid, "metadata": meta, "memory_tier": ""}
+        files[fid] = [{"doc_id": doc, "text": fid, "metadata": meta, "idx": 0}]
+        hits.append({"doc_id": doc, "score": 1.0 - i * 0.1, "distance": 0.1, "text": fid})
+    store = _StoreWithMeta(chunks, files=files)
+    out = rx.expand_hits(store, hits, max_parents=5, token_budget=10_000)
+    # _head_tail puts even-index items (0,2,4→fa,fc,fe) in head, odd (1,3→fb,fd) in tail reversed
+    # Expected: head + tail[::-1] = [fa,fc,fe,fd,fb]
+    assert [h["doc_id"] for h in out] == [
+        "gdrive-fa-0", "gdrive-fc-0", "gdrive-fe-0", "gdrive-fd-0", "gdrive-fb-0"
+    ]
