@@ -37,15 +37,24 @@ def _drive_service(home):
     return svc
 
 
-def _find_cache_folder(service, drive_id):
-    resp = service.files().list(
-        q=(f"name = '{CACHE_DIR}' and '{drive_id}' in parents and trashed = false "
-           f"and mimeType = '{_FOLDER_MIME}'"),
-        corpora="drive", driveId=drive_id,
-        includeItemsFromAllDrives=True, supportsAllDrives=True,
-        fields="files(id,name)").execute()
-    files = resp.get("files", [])
-    return files[0]["id"] if files else None
+def _find_cache_folders(service, drive_id):
+    """ALL top-level .mcpbrain-cache/ folder ids under the drive root. Drive does
+    not enforce name uniqueness, so a drive can hold more than one same-named
+    folder (a resolved _ensure_folder race, etc.) — return every match, not just
+    the first, so a single pass fully cleans the drive. Paginated."""
+    ids, token = [], None
+    while True:
+        resp = service.files().list(
+            q=(f"name = '{CACHE_DIR}' and '{drive_id}' in parents and trashed = false "
+               f"and mimeType = '{_FOLDER_MIME}'"),
+            corpora="drive", driveId=drive_id,
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            fields="nextPageToken, files(id)", pageSize=100, pageToken=token).execute()
+        ids.extend(f["id"] for f in resp.get("files", []))
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return ids
 
 
 def _count_children(service, folder_id):
@@ -63,8 +72,11 @@ def _count_children(service, folder_id):
 
 
 def scan(service):
-    """Return [{'drive_id','drive_name','folder_id','count'}] for drives that have
-    a top-level .mcpbrain-cache/ folder. Per-drive failures are isolated."""
+    """Return [{'drive_id','drive_name','folder_ids','count'}] for drives that have
+    at least one top-level .mcpbrain-cache/ folder. `folder_ids` lists EVERY such
+    folder (duplicates included) and `count` sums children across all of them, so
+    the report and a subsequent delete both cover duplicates. Per-drive failures
+    are isolated."""
     out = []
     for d in list_shared_drives(service):
         did = d.get("id")
@@ -72,32 +84,37 @@ def scan(service):
             continue
         name = d.get("name") or "<unnamed>"
         try:
-            fid = _find_cache_folder(service, did)
-            if not fid:
+            fids = _find_cache_folders(service, did)
+            if not fids:
                 continue
-            count = _count_children(service, fid)
+            count = sum(_count_children(service, fid) for fid in fids)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
             print(f"  ! {name} ({did}): scan failed: {exc}")
             continue
         out.append({"drive_id": did, "drive_name": name,
-                    "folder_id": fid, "count": count})
+                    "folder_ids": fids, "count": count})
     return out
 
 
 def delete_legacy(service, entries):
-    """Delete each entry's .mcpbrain-cache/ folder (and its contents). Per-drive
-    isolation; returns the number of folders deleted."""
+    """Delete EVERY .mcpbrain-cache/ folder (and its contents) for each entry,
+    duplicates included. Per-folder isolation so one failed delete never aborts the
+    rest. Returns the number of FOLDERS deleted."""
     deleted = 0
     for e in entries:
-        try:
-            service.files().delete(
-                fileId=e["folder_id"], supportsAllDrives=True).execute()
-        except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
-            print(f"  ! {e['drive_name']} ({e['drive_id']}): delete failed: {exc}")
-            continue
-        deleted += 1
-        print(f"  ✓ deleted {CACHE_DIR}/ from {e['drive_name']} "
-              f"({e['drive_id']}) — {e['count']} artifact(s)")
+        drive_deleted = 0
+        for fid in e["folder_ids"]:
+            try:
+                service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+            except Exception as exc:  # noqa: BLE001 — isolate one folder's failure
+                print(f"  ! {e['drive_name']} ({e['drive_id']}): delete failed: {exc}")
+                continue
+            deleted += 1
+            drive_deleted += 1
+        if drive_deleted:
+            dup = f" across {drive_deleted} folders" if drive_deleted > 1 else ""
+            print(f"  ✓ deleted {CACHE_DIR}/ from {e['drive_name']} "
+                  f"({e['drive_id']}) — {e['count']} artifact(s){dup}")
     return deleted
 
 
@@ -117,7 +134,8 @@ def main(argv=None):
 
     print(f"Found legacy cache in {len(entries)} drive(s):")
     for e in entries:
-        print(f"  - {e['drive_name']} ({e['drive_id']}): {e['count']} artifact(s)")
+        dup = f", {len(e['folder_ids'])} folders" if len(e["folder_ids"]) > 1 else ""
+        print(f"  - {e['drive_name']} ({e['drive_id']}): {e['count']} artifact(s){dup}")
 
     if not ns.delete_legacy:
         print("\nDry-run. Re-run with --delete-legacy to remove them "
