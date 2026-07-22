@@ -54,8 +54,22 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.100`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.100 is the recall-quality
+- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.101`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.101 makes `retrieval_expand`
+  fleet-flippable** and enables it fleet-wide. New generic mechanism: `org-config.json`'s
+  allowlist gains `"flags"`, and `config.fleet_flag(home, name, default)` resolves any feature
+  flag by precedence **org overlay (`org_config.flags[name]`, org wins) → top-level config →
+  default**; `retrieval_expand_enabled` delegates to it. So enabling org-wide is
+  `org-config.json = {"flags": {"retrieval_expand": true}}` (staged into `config['org_config']
+  ['flags']` on each install's next daemon start). Any future feature flag is fleet-flippable the
+  same way. A **tabular/cold expansion-skip was built and reverted**: the rep-chunk signal was
+  unreliable (cold false-positived a prose email → lost hits; untagged tabular missed) and it
+  suppressed roster/calendar tables that are often the actual answer; expansion is bounded (4k
+  cap) and `brain_search` never expands, so tabular expansion is low-harm — no skip shipped.
+  Spec/plan: `docs/superpowers/specs/2026-07-22-expansion-tabular-skip-fleet-flag.md`,
+  `docs/superpowers/plans/2026-07-22-expansion-tabular-skip-fleet-flag.md`. The **Windows
+  HARDWARE QA GATE from 0.7.97 remains OPEN.**
+  **0.7.100 (released) is the recall-quality
   retrieval work.** Two levers shipped, one behind a flag; two others were built, gated on the
   live store, and **reverted** (the gate did its job). What ships:
   **(C) contextual BM25** — `embed.contextual_prefix` is now folded into the **FTS/keyword arm**
