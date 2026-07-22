@@ -28,3 +28,29 @@ def group_by_parent(hits: list[dict]) -> list[dict]:
         if idx is not None:
             g["hit_indices"].append(int(idx))
     return sorted(groups.values(), key=lambda g: g["rank"])
+
+
+_JOIN = "\n\n"
+
+
+def _by_date(chunks: list[dict]) -> list[dict]:
+    return sorted(chunks, key=lambda c: (c.get("metadata") or {}).get("date", "") or "")
+
+
+def expand_parent(store, group: dict, *, window_n: int, short_doc_max_chunks: int) -> str:
+    kind, key = group["kind"], group["key"]
+    if kind == "thread":
+        chunks = _by_date(store.thread_chunks(key))
+        return _JOIN.join(c["text"] for c in chunks)
+    if kind == "file":
+        chunks = store.chunks_for_file(key)  # already sorted by idx
+        if len(chunks) <= short_doc_max_chunks:
+            return _JOIN.join(c["text"] for c in chunks)
+        # large file: contiguous span-stitch around each hit index
+        wanted: set[int] = set()
+        for hi in group["hit_indices"]:
+            wanted.update(range(hi - window_n, hi + window_n + 1))
+        kept = [c for c in chunks if c["idx"] in wanted]
+        return _JOIN.join(c["text"] for c in kept)
+    # bare chunk: no parent context available
+    return ""
