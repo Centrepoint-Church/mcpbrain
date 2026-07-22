@@ -1,4 +1,5 @@
 from mcpbrain import retrieval_expand as rx
+from mcpbrain import config as _config
 
 def test_parent_key_prefers_thread_then_file_then_doc():
     assert rx.parent_key({"thread_id": "t1", "file_id": "f1"}, "d0") == ("thread", "t1")
@@ -108,3 +109,33 @@ def test_expand_hits_orders_head_tail_with_five_parents():
     assert [h["doc_id"] for h in out] == [
         "gdrive-fa-0", "gdrive-fc-0", "gdrive-fe-0", "gdrive-fd-0", "gdrive-fb-0"
     ]
+
+
+def test_maybe_expand_passthrough_when_expand_false(monkeypatch, tmp_path):
+    monkeypatch.setattr(_config, "retrieval_expand_enabled", lambda home: True)
+    hits = [{"doc_id": "d1", "score": 1.0, "distance": 0.1, "text": "x"}]
+    assert rx.maybe_expand(_StoreWithMeta({}), hits, home=str(tmp_path), expand=False) is hits
+
+
+def test_maybe_expand_passthrough_when_flag_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(_config, "retrieval_expand_enabled", lambda home: False)
+    hits = [{"doc_id": "d1", "score": 1.0, "distance": 0.1, "text": "x"}]
+    assert rx.maybe_expand(_StoreWithMeta({}), hits, home=str(tmp_path), expand=True) is hits
+
+
+def test_maybe_expand_stitches_when_both_on(monkeypatch, tmp_path):
+    monkeypatch.setattr(_config, "retrieval_expand_enabled", lambda home: True)
+    doc = "gdrive-f1-0"
+    meta = {"file_id": "f1", "chunk_index": 0}
+    chunks = {doc: {"doc_id": doc, "text": "page0", "metadata": meta, "memory_tier": ""}}
+    files = {"f1": [{"doc_id": doc, "text": "page0", "metadata": meta, "idx": 0}]}
+    store = _StoreWithMeta(chunks, files=files)
+    hits = [{"doc_id": doc, "score": 1.0, "distance": 0.1, "text": "page0"}]
+    out = rx.maybe_expand(store, hits, home=str(tmp_path), expand=True)
+    assert out and out[0]["doc_id"] == doc  # went through expand_hits (grouped by file)
+
+
+def test_config_retrieval_expand_defaults_off(tmp_path):
+    assert _config.retrieval_expand_enabled(str(tmp_path)) is False
+    assert _config.expand_params(str(tmp_path)) == {
+        "window_n": 3, "short_doc_max_chunks": 15, "max_parents": 5, "token_budget": 6000}

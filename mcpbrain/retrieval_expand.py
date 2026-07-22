@@ -97,3 +97,18 @@ def expand_hits(store, hits: list[dict], *, window_n: int = 3,
         expanded.append({"doc_id": base["doc_id"], "score": base.get("score", 0.0),
                          "distance": base.get("distance", 0.0), "text": text})
     return _head_tail(expanded)
+
+
+def maybe_expand(store, hits, *, home, expand):
+    """Apply small-to-big expansion ONLY when a consumer asks (expand=True) AND
+    the retrieval_expand flag is on. brain_search never sets expand → flat hits.
+    Degrades to the input hits on any error — recall must never raise."""
+    if not expand:
+        return hits
+    from mcpbrain import config
+    if not config.retrieval_expand_enabled(home):
+        return hits
+    try:
+        return expand_hits(store, hits, **config.expand_params(home))
+    except Exception:  # noqa: BLE001
+        return hits
