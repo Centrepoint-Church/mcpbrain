@@ -13,9 +13,12 @@ returning the top-k **individual chunks** as isolated fragments. Two known gaps:
    fragment alone — not the surrounding pages, nor a grouped view of the file.
    Chunks carry `file_id`/`thread_id`/`chunk_index` (the parent pointer) but
    retrieval never uses it.
-2. **Context-blind scoring.** Each chunk is embedded/indexed without its document
-   context, so a page that never repeats the document's title scores poorly on
-   title-ish queries.
+2. **Context-blind *keyword* scoring.** Contextual *embeddings* already exist and
+   ship ON (`index_pending` prepends `embed.contextual_prefix` behind the
+   `contextual_retrieval` flag — gold-validated +0.10 recall@10 / +0.175 MRR,
+   2026-06-24). But `write_embedding` indexes **FTS from raw `text`**, so the
+   keyword/BM25 arm is still context-blind — a page that never repeats its
+   document title won't match a title-ish keyword query.
 
 Web research (LangChain parent-document, LlamaIndex sentence-window /
 auto-merging, Anthropic Contextual Retrieval, Elastic RRF/MMR, Pinecone
@@ -97,23 +100,31 @@ small chunks** (before Phase A expansion).
   `ms-marco-MiniLM-L-6-v2`; `"lexical"` selects the no-model fallback;
   `bge-reranker-base` available for a quality/size trade).
 
-## Phase C — deterministic contextual indexing (no LLM)
+## Phase C — contextual BM25 (complete the existing contextual-retrieval feature)
 
-Make scoring context-aware without an LLM: embed the chunk **prefixed with
-already-known structural context**, but store/return the clean original.
+**Already built (do not re-implement):** contextual *embeddings* + the
+embed/display split. `index_pending` and `store.embed_and_write` embed
+`embed.contextual_prefix(metadata) + text` while the `text` column (returned to
+callers) stays raw. Gated by the existing `contextual_retrieval` flag (default
+ON), gold-validated +0.10 recall@10 / +0.175 MRR (2026-06-24). `contextual_prefix`
+already handles gmail/gdrive/calendar (sender, subject, `file_name`,
+`folder_path`, `org`, dates) and is correctly passage-only.
 
-- **Embed/display split**: embed `"[title | subject | section | sender | date]\n
-  {text}"`; the returned/displayed text stays `text`. Context fields come from
-  existing chunk metadata (`file_name`, `subject`, `sender`, nearest heading,
-  `date`).
-- **Contextual BM25**: fold the same prefix into the FTS arm so keyword matching
-  is context-aware too.
-- **Backfill**: one-time bounded **re-embed + re-FTS-index** of affected chunks
-  via an embed-logic-version bump, reusing the existing `reflow_outdated_chunks`
-  cap (throttled, resumable). No LLM pass; cost is local embedding compute only.
+**The gap:** `store.write_embedding` (and the cached-chunk write path) populate
+`fts_chunks` from **raw `text`**, so the keyword arm never sees the prefix.
 
-Flag: `contextual_indexing` (default OFF). Implementation note: keep the
-embed-text derivation pure and unit-testable, decoupled from the embed loop.
+Phase C = **contextualize the FTS arm too**, under the *same* `contextual_retrieval`
+flag (no new flag — this completes the existing feature):
+- In the FTS-write sites (`write_embedding`, `_write_cached_chunk_row`), index
+  `contextual_prefix(metadata) + text` into `fts_chunks` when
+  `contextual_retrieval` is on, instead of raw `text`. The `text` column and all
+  returned text stay raw (unchanged).
+- **Backfill: FTS re-index only — NO re-embed** (embeddings are already
+  contextual). Re-run the FTS insert for embedded chunks in bounded batches
+  (resumable), so existing rows pick up the contextual BM25 text.
+
+This is much smaller than a full contextual-indexing build: no embed/display
+split to add (exists), no re-embed backfill, no new flag.
 
 ## Evaluation (per phase — gate before proceeding)
 
