@@ -29,6 +29,27 @@ def test_scan_finds_only_drives_with_cache(monkeypatch):
     assert entries[0]["count"] == 3
 
 
+def test_scan_isolates_count_failure(monkeypatch):
+    drive = FakeDrive()
+    _seed_in_drive_cache(drive, "D1", 1)
+    _seed_in_drive_cache(drive, "D2", 2)
+    _patch_drives(monkeypatch, [{"id": "D1", "name": "Ops"}, {"id": "D2", "name": "HR"}])
+    real_count = relocate._count_children
+    calls = {"n": 0}
+
+    def flaky_count(service, folder_id):
+        calls["n"] += 1
+        if calls["n"] == 1:                 # first drive's count blows up
+            raise RuntimeError("transient 5xx")
+        return real_count(service, folder_id)
+
+    monkeypatch.setattr(relocate, "_count_children", flaky_count)
+    entries = relocate.scan(drive)
+    # D1 aborted in isolation; D2 still reported
+    assert [e["drive_id"] for e in entries] == ["D2"]
+    assert entries[0]["count"] == 2
+
+
 def test_delete_legacy_removes_the_folder(monkeypatch):
     drive = FakeDrive()
     _seed_in_drive_cache(drive, "D1", 2)
