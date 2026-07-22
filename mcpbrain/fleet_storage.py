@@ -36,6 +36,7 @@ class DriveFleetStorage:
 
     def __init__(self, drive_service, folder_or_drive_id: str, *,
                  root_is_drive: bool = False,
+                 base_path: str = "",
                  ensure_folder_retry_attempts: int = 3,
                  ensure_folder_retry_backoff: float = 0.05):
         self._svc = drive_service
@@ -46,6 +47,11 @@ class DriveFleetStorage:
         # (corpora="drive", driveId=...) for correctness/efficiency,
         # matching sync/drive.py's backfill_shared_drive convention.
         self._root_is_drive = root_is_drive
+        # Folder path prepended to EVERY resolved path, so this instance behaves
+        # as if rooted at <root>/<base_path>. list_paths builds returned paths
+        # from the caller's prefix (not a root-walk), so base_path never leaks
+        # into results — no explicit strip needed.
+        self._base_parts = [p for p in base_path.split("/") if p]
         # Bounded retry knobs for _ensure_folder's post-create re-resolve.
         # Overridable so tests don't have to wait out real backoff.
         self._ensure_folder_retry_attempts = max(1, ensure_folder_retry_attempts)
@@ -185,7 +191,7 @@ class DriveFleetStorage:
 
     def _resolve_parent(self, components: list[str], *, create: bool):
         parent = self._root
-        for comp in components:
+        for comp in self._base_parts + list(components):
             if create:
                 parent = self._ensure_folder(parent, comp)
             else:

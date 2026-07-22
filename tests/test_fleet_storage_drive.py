@@ -655,3 +655,51 @@ def test_fleet_folder_storage_leaves_root_is_drive_false(tmp_path):
     config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEETFOLDER"}})
     fs = fleet_storage.fleet_folder_storage(str(tmp_path), drive_service=FakeDrive())
     assert fs._root_is_drive is False
+
+
+# -- base_path prepending ---------------------------------------------------
+
+
+def test_base_path_prepends_on_put_and_get():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", base_path="ingest-cache/D1")
+    fs.put_bytes(".mcpbrain-cache/FID.h.pf.mbc.gz", b"payload")
+    assert fs.get_bytes(".mcpbrain-cache/FID.h.pf.mbc.gz") == b"payload"
+    # physical tree: ROOT > ingest-cache > D1 > .mcpbrain-cache > FID...
+    names = {n["name"] for n in drive.nodes.values()}
+    assert {"ingest-cache", "D1", ".mcpbrain-cache", "FID.h.pf.mbc.gz"} <= names
+
+
+def test_base_path_list_paths_returns_caller_relative():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT", base_path="ingest-cache/D1")
+    fs.put_bytes(".mcpbrain-cache/A.mbc.gz", b"a")
+    fs.put_bytes(".mcpbrain-cache/B.mbc.gz", b"b")
+    # base_path must NOT appear in returned paths
+    assert fs.list_paths(".mcpbrain-cache/") == [
+        ".mcpbrain-cache/A.mbc.gz", ".mcpbrain-cache/B.mbc.gz"]
+
+
+def test_base_path_isolates_two_source_drives():
+    drive = FakeDrive()
+    fa = DriveFleetStorage(drive, "ROOT", base_path="ingest-cache/A")
+    fb = DriveFleetStorage(drive, "ROOT", base_path="ingest-cache/B")
+    fa.put_bytes(".mcpbrain-cache/x.mbc.gz", b"a")
+    fb.put_bytes(".mcpbrain-cache/x.mbc.gz", b"b")
+    assert fa.get_bytes(".mcpbrain-cache/x.mbc.gz") == b"a"
+    assert fb.get_bytes(".mcpbrain-cache/x.mbc.gz") == b"b"
+    assert fa.list_paths(".mcpbrain-cache/") == [".mcpbrain-cache/x.mbc.gz"]
+
+
+def test_base_path_default_is_noop():
+    drive = FakeDrive()
+    fs = DriveFleetStorage(drive, "ROOT")
+    fs.put_bytes(".mcpbrain-cache/x.mbc.gz", b"p")
+    assert "ingest-cache" not in {n["name"] for n in drive.nodes.values()}
+    assert fs.get_bytes(".mcpbrain-cache/x.mbc.gz") == b"p"
+
+
+def test_base_path_read_miss_when_base_absent():
+    fs = DriveFleetStorage(FakeDrive(), "ROOT", base_path="ingest-cache/D1")
+    assert fs.get_bytes(".mcpbrain-cache/nope.mbc.gz") is None
+    assert fs.list_paths(".mcpbrain-cache/") == []
