@@ -61,6 +61,35 @@ def test_delete_legacy_removes_the_folder(monkeypatch):
     assert relocate.scan(drive) == []
 
 
+def test_scan_and_delete_handle_duplicate_folders(monkeypatch):
+    # Drive allows two same-named folders under one parent (a resolved
+    # _ensure_folder race). The cleanup must find and delete BOTH in one pass,
+    # and sum their children — the Centrepoint Care case that survived the
+    # first-match-only version.
+    drive = FakeDrive()
+
+    def _mk(k):
+        fid = drive.create(body={"name": ".mcpbrain-cache",
+                                 "mimeType": relocate._FOLDER_MIME,
+                                 "parents": ["D1"]}).execute()["id"]
+        for i in range(k):
+            drive.create(body={"name": f"F{i}.mbc.gz", "parents": [fid]}).execute()
+        return fid
+
+    _mk(2)
+    _mk(3)
+    _patch_drives(monkeypatch, [{"id": "D1", "name": "Ops"}])
+
+    entries = relocate.scan(drive)
+    assert len(entries) == 1
+    assert len(entries[0]["folder_ids"]) == 2          # both duplicates found
+    assert entries[0]["count"] == 5                    # 2 + 3 summed across both
+
+    deleted = relocate.delete_legacy(drive, entries)
+    assert deleted == 2                                 # both folders removed
+    assert relocate.scan(drive) == []                  # drive fully clean in one pass
+
+
 def test_dry_run_does_not_delete(monkeypatch, capsys):
     drive = FakeDrive()
     _seed_in_drive_cache(drive, "D1", 1)
