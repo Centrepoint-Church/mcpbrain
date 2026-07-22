@@ -220,7 +220,9 @@ def write_beacon(home, drive_service) -> None:
 # than block-list. `cadences` is the one surface an admin legitimately pushes
 # org-wide, and the daemon already range-validates every cadence value
 # (_cadences_from_config), so a bad value can only disable a cadence — it cannot
-# exfiltrate data or misdirect sync/tasks. Extend this set deliberately, never
+# exfiltrate data or misdirect sync/tasks. `org_pin` carries the typed org baseline;
+# `flags` carries fleet-flippable feature booleans (config.fleet_flag), a fixed-name
+# scalar surface — not free-form key injection. Extend this set deliberately, never
 # by default.
 _ALLOWLIST = frozenset({"cadences", "org_pin", "flags"})
 
