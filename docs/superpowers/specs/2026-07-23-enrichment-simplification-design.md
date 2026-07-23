@@ -34,19 +34,19 @@ unit is done by **string-matching the worker's reply** against
 - brittle (a coordinator/worker/tool three-way prose contract), and
 - the reason the two files drift (the live 15-vs-10 wave doc bug).
 
-### Measured constraint
-`brain_enrich_units` hands out up to `_UNITS_BATCH_DEFAULT = 30` units/call = 30
-subagents/wave. The 15-wave cap implies up to 450 subagents, but a session tops out
-around **200 subagents**, reached at wave ~7. So:
-- the 15-wave cap is unreachable and effectively dead;
-- backfill's "until dry" is *also* bounded by the same ~200 ceiling — within one
-  session hourly and backfill enrich the same ~200 units and stop for the same
-  reason. Backfill's only real distinction was "meant to be re-run."
+### Why no run cap is needed
+`brain_enrich_units` hands out up to `_UNITS_BATCH_DEFAULT = 30` units/call, and a
+coordinator session naturally exhausts its own subagent capacity long before the old
+"15 waves" would be reached. So the wave cap was never the binding constraint — the
+session itself bounds a single run. There is no value in re-encoding that ceiling as
+an explicit cap: the loop just runs until the queue is empty, and if a run ends with
+work still pending (because the session ran out first), you re-run. Neither a wave
+count nor a subagent budget is articulated anywhere.
 
 ### Design
-**One loop, queue-driven, budget-bounded.** The canonical loop lives in
-`mcpbrain/routines/enrich.md` (served to the hourly scheduled task via the
-`brain_routine` tool). It is the *only* enrichment orchestration prompt.
+**One loop, queue-driven.** The canonical loop lives in `mcpbrain/routines/enrich.md`
+(served to the hourly scheduled task via the `brain_routine` tool). It is the *only*
+enrichment orchestration prompt.
 
 - **Done-ness = queue state, not reply text.** A successfully pushed unit is
   drained and its unit file deleted, so it stops appearing from
@@ -54,16 +54,18 @@ around **200 subagents**, reached at wave ~7. So:
 - **Retry by re-listing.** After dispatching a wave, call `brain_enrich_advance`
   (drains pushed results → deletes those units), then call `brain_enrich_units`
   again. Anything still returned is not-yet-done (never pushed, or lease expired)
-  → re-dispatch. The coordinator keeps a per-`unit_id` **dispatch counter** and
-  gives up on a unit after **K = 3** dispatches (counting IDs — no prose parsing).
-- **Single terminator: queue empty OR subagent budget spent.** Stop when
-  `brain_enrich_units` returns `{"empty": true}` (natural end) or the coordinator
-  has dispatched ~**180** subagents (headroom under the ~200 ceiling for retries).
-  The wave-count concept is removed entirely.
+  → re-dispatch.
+- **Terminator: queue empty.** Stop when `brain_enrich_units` returns
+  `{"empty": true}`. No wave cap, no subagent budget — the session's own capacity
+  ends an over-large run implicitly. The wave-count concept is removed entirely.
+- **Poison-unit guard (per-unit only).** So one unit whose worker keeps derailing
+  can't starve the rest of a run, the coordinator keeps a per-`unit_id` dispatch
+  counter and stops re-dispatching an individual unit after **K = 3** attempts
+  (counting IDs — no prose parsing). This is local poison handling, not a run-length
+  cap.
 - **Backfill = re-run the routine.** For a backlog larger than one session, run the
-  routine again (or let the next hourly run continue at ~200 units/hour). The
-  routine's final report states how many units remain pending so the operator knows
-  whether to re-run.
+  routine again (or let the next hourly run continue). The routine's final report
+  states how many units remain pending so the operator knows whether to re-run.
 
 ### `brain_enrich_push` validation stays
 The push schema checks (reject non-list / empty `extractions` with no block answer)
@@ -72,7 +74,7 @@ match. They remain unchanged — they are the only thing preventing a derailed
 subagent from silently draining a unit with zero extractions.
 
 ### Files
-- **Rewrite** `mcpbrain/routines/enrich.md` → single budget-bounded, queue-driven loop.
+- **Rewrite** `mcpbrain/routines/enrich.md` → single queue-driven loop.
 - **Delete** `plugin/skills/mcpbrain-backfill/` entirely.
 - **Update** references to the deleted skill: `plugin/agents/enrich-batch.md:9`
   ("the hourly enrich routine and the backfill skill" → "the enrich routine"),
@@ -165,10 +167,9 @@ caching layer (YAGNI).
 TDD per change. Tests are scoped to edited + directly-impacted files (the operator
 runs the full suite separately). Specifically:
 - **A:** remove/replace tests asserting the reply string contract
-  (`test_plugin_assets`, `test_mcp_enrich_meeting_tools` as applicable); add a test
-  that the routine loop is documented as queue-driven + budget-bounded; assert the
+  (`test_plugin_assets`, `test_mcp_enrich_meeting_tools` as applicable); assert the
   backfill skill directory is gone (mirrors the existing `test_no_toplevel_bin_dir`
-  guard style).
+  guard style). No test should assert any wave count or subagent budget.
 - **#1:** test that `brain_enrich_pull(with_rules=false)` omits `rules` and
   `with_rules=true`/default includes them; assert the tool schema declares
   `with_rules`.
