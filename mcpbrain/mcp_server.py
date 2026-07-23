@@ -864,6 +864,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     enrich_pull = make_brain_enrich_pull(home)
     enrich_push = make_brain_enrich_push(home)
     enrich_advance = make_brain_enrich_advance(home)
+    enrich_claim = make_brain_enrich_claim(home)
+    enrich_pending = make_brain_enrich_pending(home)
     meetings_today = make_brain_meetings_today(store, home)
     meeting_pack_get = make_brain_meeting_pack_get(store)
     meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
@@ -1184,6 +1186,20 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
+                name="brain_enrich_claim",
+                description="Atomically lease ONE enrichment unit and return its payload (kind + threads/items + context) in a single call — units+pull folded. For the enrich-batch drain loop: call it, extract per your system-prompt rules, brain_enrich_push, and repeat until it returns {\"empty\": true}. Concurrent drainers never get the same unit. Rules are omitted by default (they're in your prompt); pass with_rules=true only for a self-contained caller.",
+                inputSchema={"type": "object", "properties": {
+                    "with_rules": {"type": "boolean",
+                                   "description": "inline the full extraction rules (default false; "
+                                                  "enrich-batch workers carry them in their prompt)"},
+                }},
+            ),
+            types.Tool(
+                name="brain_enrich_pending",
+                description="Count enrichment units still waiting (not under a live lease), WITHOUT claiming any. The coordinator calls this to decide whether to spawn another drainer wave: {\"pending\": N}. pending==0 means the queue is drained.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
                 name="brain_meetings_today",
                 description="Today's calendar events, each with has_pack. Use in the meeting-packs task instead of curl /api/dashboard/today.",
                 inputSchema={"type": "object", "properties": {}},
@@ -1336,6 +1352,12 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_advance":
             out = await enrich_advance()
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_claim":
+            out = await enrich_claim(with_rules=arguments.get("with_rules", False))
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_enrich_pending":
+            out = await enrich_pending()
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_meetings_today":
             out = await meetings_today()
