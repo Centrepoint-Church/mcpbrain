@@ -505,6 +505,24 @@ def _units_batch() -> int:
         return _UNITS_BATCH_DEFAULT
 
 
+_UNITS_PER_DRAINER_DEFAULT = 5  # max units one enrich-batch drainer processes before exiting
+
+
+def _units_per_drainer() -> int:
+    """Max units a single enrich-batch drainer processes per spawn (K).
+
+    Bounds a looping drainer's context growth (it accumulates each unit's bodies)
+    while amortising subagent cold-start over several units. K=1 reproduces the old
+    one-subagent-per-unit behaviour. Override with MCPBRAIN_ENRICH_UNITS_PER_DRAINER.
+    """
+    import os
+    try:
+        return max(1, int(os.environ.get("MCPBRAIN_ENRICH_UNITS_PER_DRAINER",
+                                         _UNITS_PER_DRAINER_DEFAULT)))
+    except (TypeError, ValueError):
+        return _UNITS_PER_DRAINER_DEFAULT
+
+
 def _units_dir(home):
     from pathlib import Path
     return Path(home) / "enrich_queue" / "units"
