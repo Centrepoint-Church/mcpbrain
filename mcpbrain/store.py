@@ -145,6 +145,30 @@ class Store:
                 doc_id TEXT UNIQUE, text TEXT, content_hash TEXT,
                 metadata TEXT, embedded INTEGER DEFAULT 0,
                 enriched INTEGER DEFAULT 0)""")
+            # Expression indexes on the metadata JSON paths that doc_ids_for_messages
+            # (called once per extraction by drain) filters on. Without them each
+            # call is a full `SCAN chunks` — ~1.4s on the ~108k-chunk live store, so
+            # a backlogged drain cycle spends ~24 min scanning and starves the
+            # control-API recall threads (GIL + DB), timing out brain_search/actions.
+            # The expressions must match doc_ids_for_messages' json_extract() paths
+            # byte-for-byte or the planner won't use the index.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_msgid "
+                       "ON chunks(json_extract(metadata,'$.message_id'))")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fileid "
+                       "ON chunks(json_extract(metadata,'$.file_id'))")
+            # thread_chunks (recall small-to-big expansion via retrieval_expand,
+            # plus the stale-action / stale-reextract passes) filters chunks by
+            # metadata.thread_id — a full SCAN (~4.3s on the live store) without
+            # this index; a single-equality predicate, so the index alone fixes it.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_threadid "
+                       "ON chunks(json_extract(metadata,'$.thread_id'))")
+            # inbound_chunks_since (the waiting-on sweep, every cycle) range-filters
+            # on COALESCE(date,date_iso); index the SAME expression so the range
+            # plans as a SEARCH (~2.9s SCAN -> ~tens of ms). Expression must match
+            # inbound_chunks_since's date_expr byte-for-byte.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_inbound_date ON chunks("
+                       "COALESCE(json_extract(metadata,'$.date'),"
+                       "json_extract(metadata,'$.date_iso')))")
             db.execute(f"""CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
                 USING vec0(embedding float[{self.dim}])""")
             db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks
@@ -1468,6 +1492,19 @@ class Store:
             n = len(raw) // 4
             return list(struct.unpack(f"<{n}f", raw))
 
+    @staticmethod
+    def _chunks_for_file_query() -> str:
+        """SQL for chunks_for_file. Filters on metadata.file_id (index-backed by
+        idx_chunks_fileid), NOT `doc_id LIKE 'gdrive-<id>-%' ESCAPE` — specifying
+        ESCAPE disables SQLite's LIKE-to-index optimisation, forcing a full
+        `SCAN chunks` (~432ms on the live store). A Drive chunk's doc_id is
+        gdrive-<file_id>-<i> AND it carries metadata.file_id=<file_id> (the same
+        identity doc_ids_for_messages resolves on), so the two are equivalent
+        (verified 0 mismatches over 200 live file_ids, incl. base64url ids with
+        LIKE metacharacters)."""
+        return ("SELECT doc_id,text,content_hash,metadata FROM chunks "
+                "WHERE json_extract(metadata,'$.file_id')=?")
+
     def chunks_for_file(self, file_id: str) -> list[dict]:
         """All gdrive-<file_id>-<i> chunks as {doc_id,text,content_hash,metadata,idx},
         ordered by chunk index. Used to build a cache artifact from local state.
@@ -1475,12 +1512,9 @@ class Store:
         Ordering authority is the Python `.sort(key=idx)` below (chunk_index is
         the logical order; rowid is mere insertion order, which can diverge on
         re-import) — so the SQL query intentionally does not ORDER BY anything."""
-        like = f"gdrive-{_like_escape(file_id)}-%"
         out = []
         with self._connect() as db:
-            for r in db.execute(
-                "SELECT doc_id,text,content_hash,metadata FROM chunks "
-                "WHERE doc_id LIKE ? ESCAPE '\\'", (like,)):
+            for r in db.execute(self._chunks_for_file_query(), (file_id,)):
                 meta = json.loads(r["metadata"])
                 out.append({"doc_id": r["doc_id"], "text": r["text"],
                             "content_hash": r["content_hash"], "metadata": meta,
@@ -2318,18 +2352,35 @@ class Store:
         ids = [m for m in (message_ids or []) if m]
         if not ids:
             return []
-        ph = ",".join("?" * len(ids))
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT doc_id FROM chunks "
-                f"WHERE json_extract(metadata, '$.message_id') IN ({ph}) "
-                f"   OR json_extract(metadata, '$.file_id') IN ({ph}) "
-                f"   OR (json_extract(metadata, '$.message_id') IS NULL "
-                f"       AND doc_id IN ({ph})) "
-                f"ORDER BY rowid",
-                ids + ids + ids,
-            ).fetchall()
+            rows = db.execute(self._doc_ids_query(len(ids)),
+                              ids + ids + ids).fetchall()
         return [r["doc_id"] for r in rows]
+
+    @staticmethod
+    def _doc_ids_query(n: int) -> str:
+        """SQL for doc_ids_for_messages resolving ``n`` ids per path.
+
+        A UNION of three single-path SELECTs, NOT one SELECT with an OR: SQLite
+        will not union expression-indexes (idx_chunks_msgid/idx_chunks_fileid)
+        across an OR, so the OR form plans as a full `SCAN chunks` — ~1.4s per
+        call on the ~108k-chunk live store. Each UNION arm filters on a single
+        indexed path so it plans as an index SEARCH. Params bind as ids*3
+        (message_id, file_id, then the doc_id fallback). Ordered by rowid for the
+        stable output drain relies on; UNION also dedups a chunk that matches two
+        arms."""
+        ph = ",".join("?" * n)
+        return (
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE json_extract(metadata,'$.message_id') IN ({ph}) "
+            f"UNION "
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE json_extract(metadata,'$.file_id') IN ({ph}) "
+            f"UNION "
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE json_extract(metadata,'$.message_id') IS NULL "
+            f"  AND doc_id IN ({ph}) "
+            f"ORDER BY rowid")
 
     def meeting_source_doc_ids(self) -> list[str]:
         """Doc_ids of chunks that produced any type='meeting' entity.
