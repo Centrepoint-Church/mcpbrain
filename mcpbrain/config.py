@@ -485,16 +485,56 @@ def contextual_retrieval_enabled(home) -> bool:
     return bool(read_config(home).get("contextual_retrieval", True))
 
 
+def _coerce_bool(value, default):
+    """Coerce a fleet-flag value to a real bool.
+
+    Accepts an actual bool, the strings "true"/"false" (any case, surrounding
+    whitespace ignored), and the ints 1/0. Flag values ultimately come from
+    org-config.json (an org-admin-controlled JSON file relayed through Drive)
+    or a hand-edited local config.json — anything else is malformed input, so
+    it falls back to *default* with a warning rather than propagating a
+    truthy/falsy-but-wrong Python value (e.g. a non-empty garbage string is
+    truthy, which would silently enable a flag the admin meant to leave off).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+    elif isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    log.warning("fleet flag: unrecognized value %r; using default %r", value, default)
+    return default
+
+
 def fleet_flag(home, name, default=False):
-    """A feature flag resolvable fleet-wide. Precedence: the org-config overlay
-    (config['org_config']['flags'][name], staged by fleet.merge_org_config from
-    org-config.json — org wins so a fleet enable reaches everyone) → the user's
-    top-level config[name] → default."""
+    """A feature flag resolvable fleet-wide, with a local emergency kill-switch.
+
+    Precedence:
+    1. An explicit LOCAL top-level ``config[name] is False`` wins outright —
+       the emergency kill-switch: an install can always shut a flag off for
+       itself even if the fleet has turned it on for everyone.
+    2. Else the ORG overlay value (``config['org_config']['flags'][name]``,
+       staged by ``fleet.merge_org_config`` from org-config.json) — org wins
+       over the local value so a fleet-wide enable reaches everyone.
+    3. Else the local value.
+    4. Else *default*.
+
+    All resolved values are coerced via ``_coerce_bool`` (real bool /
+    "true"/"false" / 1/0; anything else degrades to *default* + a warning).
+    """
     cfg = read_config(home)
+    local_raw = cfg.get(name, default)
+    local = _coerce_bool(local_raw, default)
+    if name in cfg and local is False:
+        return False  # local explicit False = kill-switch, wins unconditionally
     overlay = (cfg.get("org_config") or {}).get("flags") or {}
     if name in overlay:
-        return overlay[name]
-    return cfg.get(name, default)
+        return _coerce_bool(overlay[name], default)
+    return local
 
 
 def retrieval_expand_enabled(home) -> bool:
