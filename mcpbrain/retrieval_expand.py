@@ -1,5 +1,5 @@
 """Read-side small-to-big expansion for recall. Pure functions over ranked hits
-+ a store; called last in daemon.search (after ranking/rerank/sufficiency) so
++ a store; called last in daemon.search (after ranking/rerank) so
 expansion never blunts the reranker or triggers lost-in-the-middle."""
 
 

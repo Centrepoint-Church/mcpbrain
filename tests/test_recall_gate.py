@@ -101,3 +101,22 @@ def test_hybrid_search_reuses_query_vec(monkeypatch):
 
     out = retrieval.hybrid_search(_Store(), _Emb(), "q", 5, query_vec=[0.0, 0.0, 0.0, 0.0])
     assert out == []
+
+
+def test_sufficiency_gate_removed(tmp_path, monkeypatch):
+    """The LLM sufficiency gate was removed (0.7.106): it spawned the `claude`
+    CLI (~6s cold-start) on every recall to filter hits the downstream LLM
+    already filters, was never in the gold-eval harness, and duplicated the
+    cheap recall_max_distance gate. Guard that it stays gone — the module, the
+    config helper, and any daemon.search call.  d.search must return the ranked
+    hits directly, with no LLM sub-processing."""
+    with pytest.raises(ModuleNotFoundError):
+        __import__("mcpbrain.sufficiency")
+    assert not hasattr(config, "sufficiency_gate_enabled")
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    d = _daemon(tmp_path, knn=[("d1", 0.62)])
+    monkeypatch.setattr(daemon_mod, "hybrid_search",
+                        lambda *a, **k: [{"doc_id": "d1", "score": 1.0, "text": "hit"}])
+    # Ranked hits are returned directly — no LLM gate between search and result.
+    assert [h["doc_id"] for h in d.search("on topic")] == ["d1"]
