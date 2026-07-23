@@ -2,18 +2,17 @@
 
 This is the plan's acceptance test. It exercises the real prepare assembly,
 contract, drain and graph_write.apply over a seeded store. The only stand-in is
-the extractor session itself: 6.1 uses a stub extractor helper, 6.2 uses the
-real extractor_driver.run_extractor with a monkeypatched run_claude. Nothing
-here touches Claude, Gemini or the network.
+the extractor session itself: both 6.1 and 6.2 use a stub extractor helper.
+Nothing here touches Claude, Gemini or the network.
 
 prepare.prepare() (which wrote pending.json via _write_pending()) was deleted —
 production enrichment uses prepare_units()/write_units() (immutable work units
-under enrich_queue/units/), never a single pending.json. stub_extractor and
-extractor_driver.run_extractor still speak the pending.json dialect (neither
-was in scope for this deletion), so _prepare_and_write_pending below composes
-the same still-real group -> filter_noise -> build_pending pipeline
-prepare_units() uses and writes pending.json itself, purely as test glue to
-keep feeding them.
+under enrich_queue/units/), never a single pending.json. Only the stub
+extractor still speaks the pending.json test-glue dialect now (the other
+consumer, the old Nexus-side driver, was itself deleted as dead code), so
+_prepare_and_write_pending below composes the same still-real
+group -> filter_noise -> build_pending pipeline prepare_units() uses and
+writes pending.json itself, purely as test glue to keep feeding it.
 
 The 6.1/6.2 tests monkeypatch prepare's indirection seams
 (_group_unenriched_threads, _reassemble_thread, the context builders,
@@ -41,8 +40,8 @@ def _prepare_and_write_pending(store, home, *, thread_cap, char_budget,
     """Test-only stand-in for the deleted prepare.prepare(): compose the still-
     real group -> filter_noise -> build_pending pipeline (identical to what
     prepare_units() does, minus the unit-queue write) and write pending.json
-    directly, so the stub extractor / real extractor_driver (both of which read
-    pending.json) still have something to consume."""
+    directly, so the stub extractor (which reads pending.json) still has
+    something to consume."""
     batches = prepare._group_unenriched_threads(store, thread_cap=thread_cap)
     kept = prepare._filter_noise(store, batches)[:thread_cap]
     if not kept:
@@ -279,7 +278,7 @@ def test_round_trip_with_merge_answers(store, home, monkeypatch):
     assert ents_before_drain >= 2
 
 
-# --- 6.2: round trip through the real extractor_driver ---------------------
+# --- 6.2: real Phase-1 round trip with the stub extractor ------------------
 
 
 def _seed_real_chunk(store, doc_id, thread_id, message_id, *, sender, subject,
@@ -352,38 +351,3 @@ def test_real_phase1_round_trip(store, home, monkeypatch):
     assert summary["marked"] == 1
     assert not (home / "enrich_inbox" / inbox_path.name).exists()
     pending_path.unlink(missing_ok=True)  # drain does not consume pending.json
-
-
-def test_integration_driver_round_trip(store, home, monkeypatch):
-    """Same round trip as 6.1, but the inbox file is produced by the real
-    extractor_driver.run_extractor with a monkeypatched run_claude that returns
-    the fixture-derived batch JSON. Proves the driver wiring end to end without
-    a live Claude."""
-    from mcpbrain.maintenance import extractor_driver
-
-    batches, messages_by_thread = _two_thread_setup(store)
-    _patch_prepare_seams(monkeypatch, batches, messages_by_thread)
-
-    ents_before = _entity_count(store)
-    rels_before = _relation_count(store)
-
-    _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
-                               resolution_due=False)
-
-    # Fake run_claude: parse the pending payload off the end of the prompt and
-    # build the same batch the stub extractor would, returning it as JSON text.
-    def fake_run_claude(prompt, *, model=None, timeout=None):
-        pending_text = prompt.split("=== pending.json ===")[-1]
-        pending = json.loads(pending_text)
-        return json.dumps(stub_extractor.build_batch(pending))
-
-    inbox_path = extractor_driver.run_extractor(home=home, run_claude=fake_run_claude)
-    assert inbox_path is not None
-
-    summary = drain.drain(store, home=home, apply=graph_write.apply)
-
-    assert _entity_count(store) > ents_before
-    assert _relation_count(store) > rels_before
-    assert _enriched_count(store, ["d-alpha", "d-beta"]) == {"d-alpha": 1, "d-beta": 1}
-    assert summary["applied"] == 2
-    assert not (home / "enrich_inbox" / Path(inbox_path).name).exists()

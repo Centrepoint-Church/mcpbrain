@@ -6,7 +6,7 @@ stub stands in for that session offline. It reads the same pending.json, emits
 one fixture-shaped envelope per pending thread (keyed to the real thread_id and
 message provenance so drain's store.thread_chunks recovers the right doc_ids),
 answers any merge_review pairs with same=true, and writes the inbox file
-atomically the way extractor_driver._write_inbox does.
+atomically (see _write_inbox below).
 
 It is a test helper, not part of the package. Output is shaped to pass
 contract.validate_batch_file.
@@ -79,7 +79,7 @@ def build_batch(pending: dict) -> dict:
 
 
 def _write_inbox(home_dir: Path, batch: dict) -> Path:
-    """Write the inbox batch file atomically, mirroring extractor_driver."""
+    """Write the inbox batch file atomically (write-tmp then os.replace)."""
     inbox_dir = home_dir / "enrich_inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)
     target = inbox_dir / f"{batch['batch_id']}.json"
