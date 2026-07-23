@@ -185,6 +185,25 @@ def test_format_context_flat_unchanged():
     assert len(injected["d1"]) <= pr._SNIPPET          # flat path still 200-char capped
 
 
+def test_format_context_expanded_keeps_second_best_parent():
+    # Regression for the drop bug: expand_hits' _head_tail ordering puts the
+    # 2nd-best parent LAST for a 3-parent set ([rank0, rank2, rank1]). The old
+    # _format_context re-truncated under _EXPANDED_MAX_TOTAL, silently dropping
+    # whatever landed last in that reordered sequence — i.e. the 2nd-best
+    # parent, keeping only 1st + 3rd. Three parents whose combined size exceeds
+    # the old total cap must now all survive (expand_hits already bound them to
+    # its own char_budget upstream; _format_context must trust that, not re-cap).
+    big = "sentence. " * 300  # ~3000 chars each; 3x exceeds _EXPANDED_MAX_TOTAL (4000)
+    results = [
+        {"doc_id": "rank0", "score": 1.0, "text": big},
+        {"doc_id": "rank2", "score": 0.8, "text": big},
+        {"doc_id": "rank1", "score": 0.9, "text": big},  # 2nd-best, last in head-tail order
+    ]
+    block, injected = pr._format_context(results, set(), expanded=True)
+    assert {"rank0", "rank1", "rank2"} == set(injected)
+    assert "rank1" in block or injected.get("rank1")  # sanity: present at all
+
+
 def test_recall_requests_expand_when_flag_on(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"retrieval_expand": True}))
     (tmp_path / "control_port").write_text("9999")
