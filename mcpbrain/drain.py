@@ -51,6 +51,22 @@ log = logging.getLogger(__name__)
 _EMPTY_ATTEMPT_CAP = 3
 
 
+def _give_up_or_bump(store, doc_ids, summary) -> None:
+    """Bump the empty-attempt counter for these chunks; once it reaches
+    _EMPTY_ATTEMPT_CAP, consume them (mark_enriched) so a genuinely
+    un-extractable doc stops re-queuing forever. Best-effort — bookkeeping must
+    never break a drain run."""
+    if not doc_ids:
+        return
+    try:
+        attempts = store.bump_enrich_attempts(doc_ids)
+        if attempts >= _EMPTY_ATTEMPT_CAP:
+            store.mark_enriched(doc_ids)
+            summary["gave_up"] = summary.get("gave_up", 0) + 1
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
+        log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
+
+
 def _name_grounded(name: str, source_lower: str) -> bool:
     """True if an extracted name is plausibly grounded in the source text.
 
@@ -365,20 +381,10 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 # then re-extract every cycle forever. After _EMPTY_ATTEMPT_CAP
                 # tries, consume the chunks so the loop terminates (transient
                 # extractor failures still get their retries first).
-                try:
-                    _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
-                             if m.get("message_id")]
-                    _dids = store.doc_ids_for_messages(_mids) if _mids else []
-                    if _dids:
-                        attempts = store.bump_enrich_attempts(_dids)
-                        if attempts >= _EMPTY_ATTEMPT_CAP:
-                            store.mark_enriched(_dids)
-                            summary["gave_up"] = summary.get("gave_up", 0) + 1
-                            log.info("drain: giving up on thread %s after %d empty "
-                                     "attempts; consuming %d chunk(s)",
-                                     extraction.get("thread_id", "?"), attempts, len(_dids))
-                except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
-                    log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
+                _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
+                         if m.get("message_id")]
+                _dids = store.doc_ids_for_messages(_mids) if _mids else []
+                _give_up_or_bump(store, _dids, summary)
                 continue
             thread_id = extraction["thread_id"]
             # Org drift gate: canonicalise; coerce an unconfigured org to
@@ -432,14 +438,7 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                               for msgs in unit_messages_by_thread.values()
                               for m in msgs if m.get("message_id")]
                 _unit_dids = store.doc_ids_for_messages(_unit_mids) if _unit_mids else []
-                if _unit_dids:
-                    try:
-                        attempts = store.bump_enrich_attempts(_unit_dids)
-                        if attempts >= _EMPTY_ATTEMPT_CAP:
-                            store.mark_enriched(_unit_dids)
-                            summary["gave_up"] = summary.get("gave_up", 0) + 1
-                    except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
-                        log.debug("drain: unit-cap bookkeeping failed: %s", exc)
+                _give_up_or_bump(store, _unit_dids, summary)
                 log.warning("drain: thread %s extraction matched no chunk in %s; "
                             "skipping apply and bumping the unit's attempt cap",
                             thread_id, path.name)
