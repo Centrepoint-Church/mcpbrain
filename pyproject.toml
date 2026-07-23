@@ -1,6 +1,6 @@
 [project]
 name = "mcpbrain"
-version = "0.7.102"
+version = "0.7.103"
 requires-python = ">=3.12"
 dependencies = [
   "sqlite-vec>=0.1.6",
