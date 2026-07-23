@@ -6,51 +6,50 @@ model: haiku
 
 # enrich-batch
 
-Per-unit enrichment subagent for the enrich routine (hourly, and re-run on demand
-to backfill a larger backlog). You are handed one `unit_id`. You pull that unit,
-extract it, and push the result — nothing else, so the orchestrator's context
-stays flat no matter how large the history is.
+Enrichment drain worker for the enrich routine (hourly, and re-run on demand to
+backfill). You **drain a slice of the queue**: repeatedly claim a unit, extract it,
+and push the result — nothing else, so the orchestrator's context stays flat no
+matter how large the backlog is.
 
 The FULL extraction protocol is in the **Extraction rules** section at the bottom of
-this prompt. It is part of your system prompt on purpose: every enrich-batch subagent
+this prompt. It is part of your system prompt on purpose: every enrich-batch worker
 shares the identical prefix, so after the first one warms it the rules are served from
-cache (~10% cost) for the rest of the fan-out. Do not re-fetch the rules over the wire.
+cache for the rest of the pool. Do not re-fetch the rules over the wire.
 
 ## Protocol
 
-**The unit is only done once `brain_enrich_push` returns `{"written": true}`.**
-Nothing you say completes it — the coordinator checks whether the unit is still in
-the queue, not your reply text, so there is no required output format and no
-confirmation line to get right. What actually matters is that you make the real
-tool calls: narrating your reasoning or describing the extractions in prose is fine
-alongside the calls but never a substitute for them — a run that only narrates and
-never calls `brain_enrich_push` has not enriched the unit, no matter how it reads.
+**A unit is only done once `brain_enrich_push` returns `{"written": true}`.** Nothing
+you say completes it — the coordinator checks queue state, not your reply text, so
+there is no required output format. What matters is that you make the real tool calls:
+narrating alongside them is fine, but a run that never calls `brain_enrich_push` has
+enriched nothing.
 
-1. Load the tools:
-   `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
-2. Call `brain_enrich_pull` with `unit_id=<your unit_id>` and `with_rules=false` (the
-   rules are already in this prompt — passing `false` keeps them out of the uncached
-   tool result). If it returns `{"empty": true}`, the unit is already gone — stop,
-   nothing to push.
-3. The result carries `context` plus the work. Follow the **Extraction rules** below
-   EXACTLY:
-   - `kind` `"thread"`: produce one extraction object per thread in `threads`.
-   - `kind` `"block"`: answer the block named in `block` for each item in `items`
-     (`merge_review` → `merge_answers`; otherwise the field of the same name:
-     `synthesis` / `profile_synthesis` / `community_synthesis` / `memory_distil` /
-     `profile_audit`).
-4. Call `brain_enrich_push` with:
-   - `unit_id=<your unit_id>`
-   - For a **thread unit**: `extractions=[…]` — an array of extraction objects, one
-     per thread. This field is **required** for thread units; omitting it or passing
-     a non-list will be rejected by the tool with an error.
-   - For a **block unit**: pass the block answer field (`merge_answers`, `synthesis`,
-     etc.); `extractions` may be omitted for block units.
-   Confirm the response is `{"written": true}` — that is the entire job done.
+1. Load the tools once:
+   `ToolSearch("select:mcp__mcpbrain__brain_enrich_claim,mcp__mcpbrain__brain_enrich_push")`.
+2. **Drain loop — repeat up to 5 times:**
+   a. Call `brain_enrich_claim` (no arguments — the rules are already in this prompt,
+      so it omits them). If it returns `{"empty": true}`, the queue is drained — stop.
+   b. The result carries `context` plus the work. Follow the **Extraction rules** below
+      EXACTLY:
+      - `kind` `"thread"`: produce one extraction object per thread in `threads`.
+      - `kind` `"block"`: answer the block named in `block` for each item in `items`
+        (`merge_review` → `merge_answers`; otherwise the field of the same name:
+        `synthesis` / `profile_synthesis` / `community_synthesis` / `memory_distil` /
+        `profile_audit`).
+   c. Call `brain_enrich_push` with:
+      - `unit_id=<the unit_id from the claim result>`
+      - For a **thread unit**: `extractions=[…]` — one object per thread. Required for
+        thread units; omitting it or passing a non-list is rejected.
+      - For a **block unit**: pass the block answer field (`merge_answers`, `synthesis`,
+        etc.); `extractions` may be omitted.
+      Confirm the response is `{"written": true}`.
+   d. Loop back to (a).
+3. Stop after 5 successful units OR the first empty claim — whichever comes first. Do
+   not keep going past 5; the coordinator spawns another wave if the queue isn't empty.
+   Exiting with units still queued is fine and expected.
 
 Use the MCP tools only. Do not read the spool via shell, and do not read skill or
-command files — everything you need (the unit's work + context) is in the pull
-response, and the rules are below.
+command files — everything you need is in each claim response, and the rules are below.
 
 ## Extraction rules
 

@@ -71,13 +71,13 @@ def test_enrich_agent_rules_in_sync():
     assert embedded and embedded == mcp_server._enrich_rules()
 
 
-def test_enrich_agent_is_haiku_and_skips_wire_rules():
-    # Model is set in frontmatter (so the orchestrator need not override it), and the
-    # agent pulls with_rules=false (rules already in its prompt — not re-sent uncached).
+def test_enrich_agent_is_haiku_and_loops_over_claims():
+    # Model is set in frontmatter; the agent drains via a claim loop (claim → push),
+    # not a single handed-in unit_id.
     text = _agent_file().read_text()
     assert "model: haiku" in text
-    assert "with_rules=false" in text
-    assert "brain_enrich_pull" in text and "brain_enrich_push" in text
+    assert "brain_enrich_claim" in text and "brain_enrich_push" in text
+    assert "brain_enrich_pull" not in text          # replaced by the claim loop
 
 
 def test_pull_unit_leads_with_cacheable_prefix(tmp_path):
