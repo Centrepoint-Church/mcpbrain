@@ -391,14 +391,24 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 # then re-extract every cycle forever. After _EMPTY_ATTEMPT_CAP
                 # tries, consume the chunks so the loop terminates (transient
                 # extractor failures still get their retries first).
-                _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
-                         if m.get("message_id")]
-                _dids = store.doc_ids_for_messages(_mids) if _mids else []
-                gave_up, attempts = _give_up_or_bump(store, _dids, summary)
-                if gave_up:
-                    log.info("drain: giving up on thread %s after %d empty "
-                             "attempts; consuming %d chunk(s)",
-                             extraction.get("thread_id", "?"), attempts, len(_dids))
+                #
+                # The doc_ids resolution is deliberately INSIDE this try, matching
+                # the pre-_give_up_or_bump behaviour: a store lacking/failing
+                # doc_ids_for_messages here must not crash drain(), only skip this
+                # extraction's give-up bookkeeping (regression caught in release
+                # verification — narrowing this to wrap only _give_up_or_bump broke
+                # a real caller whose store didn't implement doc_ids_for_messages).
+                try:
+                    _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
+                             if m.get("message_id")]
+                    _dids = store.doc_ids_for_messages(_mids) if _mids else []
+                    gave_up, attempts = _give_up_or_bump(store, _dids, summary)
+                    if gave_up:
+                        log.info("drain: giving up on thread %s after %d empty "
+                                 "attempts; consuming %d chunk(s)",
+                                 extraction.get("thread_id", "?"), attempts, len(_dids))
+                except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
+                    log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
                 continue
             thread_id = extraction["thread_id"]
             # Org drift gate: canonicalise; coerce an unconfigured org to
