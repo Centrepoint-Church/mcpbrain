@@ -73,3 +73,12 @@ def test_claim_reclaims_a_stale_lease(tmp_path):
     os.utime(stale, (old, old))                      # lease older than TTL
     out = asyncio.run(mcp_server.make_brain_enrich_claim(str(tmp_path))())
     assert out["unit_id"] == "u-a"                   # stale lease reclaimed
+
+
+def test_units_per_drainer_default_and_override(monkeypatch):
+    monkeypatch.delenv("MCPBRAIN_ENRICH_UNITS_PER_DRAINER", raising=False)
+    assert mcp_server._units_per_drainer() == 5
+    monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_PER_DRAINER", "8")
+    assert mcp_server._units_per_drainer() == 8
+    monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_PER_DRAINER", "0")
+    assert mcp_server._units_per_drainer() == 1      # floored
