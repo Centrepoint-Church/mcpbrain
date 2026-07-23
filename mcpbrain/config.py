@@ -686,10 +686,9 @@ def unit_pull_cap(home=None) -> int:
     threads per Haiku call and amortise per-call overhead without hitting Claude
     Code's ~50KB result-persist threshold.
 
-    Config key: 'unit_pull_cap' (int). Default 60_000. Must stay in lockstep with
-    both prepare._UNIT_PULL_CAP (producer side) and mcp_server._PULL_MAX_CHARS
-    (consumer side) — all three are sourced from this accessor so a single config
-    edit propagates to both sides.
+    Config key: 'unit_pull_cap' (int). Default 60_000. Read at call time by
+    prepare.write_units (producer side, via its pull_cap= default), so a config
+    edit takes effect on the next call — no daemon restart needed.
     """
     _home = str(app_dir() if home is None else home)
     try:

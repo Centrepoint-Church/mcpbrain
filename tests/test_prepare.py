@@ -847,21 +847,15 @@ def test_unit_pull_cap_from_config():
         assert config.unit_pull_cap(td) == 80_000
 
 
-def test_prepare_and_server_caps_in_lockstep():
-    # prepare._UNIT_PULL_CAP and mcp_server._PULL_MAX_CHARS must equal the
-    # config.unit_pull_cap() default (60_000) so neither side is stale.
-    from mcpbrain import prepare, mcp_server, config
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        default_cap = config.unit_pull_cap(td)
-    assert prepare._UNIT_PULL_CAP == default_cap, (
-        f"prepare._UNIT_PULL_CAP ({prepare._UNIT_PULL_CAP}) != "
-        f"config.unit_pull_cap() default ({default_cap})"
-    )
-    assert mcp_server._PULL_MAX_CHARS == default_cap, (
-        f"mcp_server._PULL_MAX_CHARS ({mcp_server._PULL_MAX_CHARS}) != "
-        f"config.unit_pull_cap() default ({default_cap})"
-    )
+def test_write_units_reads_cap_at_call_time(tmp_path, monkeypatch):
+    from mcpbrain import prepare, config
+    calls = {"n": 0}
+    def _fake_cap(home=None):
+        calls["n"] += 1
+        return 12_345
+    monkeypatch.setattr(config, "unit_pull_cap", _fake_cap)
+    prepare.write_units({"context": {}, "threads": []}, home=str(tmp_path))
+    assert calls["n"] >= 1, "write_units must read unit_pull_cap at call time, not import"
 
 
 def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
