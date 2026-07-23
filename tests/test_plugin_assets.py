@@ -77,14 +77,13 @@ def test_enrich_batch_agent_exists():
     assert (_PLUGIN / "agents" / "enrich-batch.md").exists()
 
 def test_enrich_batch_is_unit_worker():
-    # The agent is the per-unit work-queue worker: it pulls one unit_id and pushes
-    # that unit via MCP. It now EMBEDS the extraction rules in its system prompt (so
-    # the rules ride a cacheable prefix shared across the fan-out) and pulls with
-    # with_rules=false. The protocol section (above the embedded rules) must still not
-    # shell into the spool.
+    # The agent is the work-queue drain worker: it loops claim -> extract -> push over
+    # a slice of the queue via MCP. It EMBEDS the extraction rules in its system prompt
+    # (so the rules ride a cacheable prefix shared across the pool). The protocol
+    # section (above the embedded rules) must still not shell into the spool.
     b = _read("agents/enrich-batch.md")
-    for token in ("brain_enrich_pull", "brain_enrich_push", "unit_id", "merge_review",
-                  "model: haiku", "with_rules=false"):
+    for token in ("brain_enrich_claim", "brain_enrich_push", "unit_id", "merge_review",
+                  "model: haiku"):
         assert token in b, token
     protocol = b[:b.index("<!-- SHARED-EXTRACTION-RULES:BEGIN -->")]
     assert "pending.json" not in protocol   # no direct spool reads in the protocol
