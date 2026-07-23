@@ -1283,19 +1283,24 @@ class Store:
                 db.execute(f"UPDATE chunks SET enriched=0 WHERE doc_id IN ({qs})", ids)
         return len(ids)
 
-    def embed_doc(self, doc_id: str, embedder) -> bool:
+    def embed_doc(self, doc_id: str, embedder, *, home=None) -> bool:
         """Embed a single chunk by doc_id, in place.
 
         Fetches the chunk's rowid + text, runs embedder.embed_passages on the
-        contextual-prefixed passage (matching the index_pending batch path), and
-        writes the vector via write_embedding (which also flips embedded=1 and
-        refreshes the FTS row). Returns True on success, False if no such chunk.
+        contextual-prefixed passage (matching the index_pending batch path) —
+        gated on contextual_retrieval_enabled(home), same as index_pending, so
+        this path never contextualises a passage the batch path wouldn't have —
+        and writes the vector via write_embedding (which also flips embedded=1
+        and refreshes the FTS row). Returns True on success, False if no such
+        chunk.
 
         Used by graph_write.apply when an embedder is injected so the enriched
         semantic doc is searchable immediately; when no embedder is passed the
         chunk is left at embedded=0 for the daemon's index_pending pass.
         """
+        from mcpbrain import config
         from mcpbrain.embed import contextual_prefix
+        _home = str(home) if home is not None else str(config.app_dir())
         with self._connect() as db:
             r = db.execute(
                 "SELECT rowid, text, metadata FROM chunks WHERE doc_id=?",
@@ -1303,30 +1308,41 @@ class Store:
         if not r:
             return False
         metadata = json.loads(r["metadata"])
-        passage = contextual_prefix(metadata) + r["text"]
+        use_prefix = config.contextual_retrieval_enabled(_home)
+        passage = (contextual_prefix(metadata) + r["text"]) if use_prefix else r["text"]
         vector = embedder.embed_passages([passage])[0]
-        self.write_embedding(r["rowid"], vector)
+        self.write_embedding(r["rowid"], vector, home=_home)
         return True
 
-    def _fts_text(self, text: str, metadata: dict) -> str:
+    @staticmethod
+    def _fts_text(text: str, metadata: dict, *, home=None) -> tuple[str, bool]:
         """FTS-indexed text: contextual prefix + body when contextual_retrieval is
         on (mirrors the embed side), else raw body. Keeps the chunks.text column
-        and all returned text RAW — only the FTS mirror is contextualised."""
+        and all returned text RAW — only the FTS mirror is contextualised.
+
+        Returns (fts_text, applied) — `applied` is True only when the contextual
+        prefix was actually prepended, so callers can stamp fts_context_version
+        accordingly (a raw write under an OFF flag must stay at version 0, not
+        the current version, so it gets picked back up by reindex_fts_batch if
+        the flag later flips ON). `home` is read explicitly (default app_dir())
+        so this reads the same config as the embed side.
+        """
         from mcpbrain import config
         from mcpbrain.embed import contextual_prefix
-        if config.contextual_retrieval_enabled(str(config.app_dir())):
-            return contextual_prefix(metadata) + text
-        return text
+        _home = str(home) if home is not None else str(config.app_dir())
+        if config.contextual_retrieval_enabled(_home):
+            return contextual_prefix(metadata) + text, True
+        return text, False
 
     def reindex_fts_batch(self, cap: int = 5000) -> int:
         """Rebuild the FTS row (contextual text) for up to `cap` embedded chunks
         whose fts_context_version is behind. Resumable; no re-embed. Returns count.
 
-        Phase C backfill: C1 taught _fts_text() to prepend the contextual prefix,
-        but existing (already-embedded) chunks' fts_chunks rows were written
-        before that change and still hold raw text. This drains them in bounded
-        batches — safe to call repeatedly (e.g. once per index_pending cycle)
-        until every embedded chunk is caught up.
+        Selection is unchanged (fts_context_version < FTS_CONTEXT_VERSION); since
+        writers now stamp the version at write time based on whether the prefix
+        was actually applied (see _fts_text), this only ever migrates genuinely
+        stale rows — either legacy pre-Phase-C rows, or rows written while the
+        contextual_retrieval flag was OFF that need to catch up once it flips ON.
         """
         with self._connect() as db:
             rows = db.execute(
@@ -1335,30 +1351,33 @@ class Store:
                 (self.FTS_CONTEXT_VERSION, cap)).fetchall()
             n = 0
             for r in rows:
-                fts_text = self._fts_text(r["text"], json.loads(r["metadata"]))
+                fts_text, applied = self._fts_text(r["text"], json.loads(r["metadata"]))
                 db.execute("DELETE FROM fts_chunks WHERE rowid=?", (r["rowid"],))
                 db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)",
                            (r["rowid"], fts_text))
                 db.execute("UPDATE chunks SET fts_context_version=? WHERE rowid=?",
-                           (self.FTS_CONTEXT_VERSION, r["rowid"]))
+                           (self.FTS_CONTEXT_VERSION if applied else 0, r["rowid"]))
                 n += 1
             return n
 
-    def write_embedding(self, rowid: int, vector: list[float]) -> None:
+    def write_embedding(self, rowid: int, vector: list[float], *, home=None) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
             db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
                        (rowid, sqlite_vec.serialize_float32(vector)))
             row = db.execute("SELECT text, metadata FROM chunks WHERE rowid=?",
                              (rowid,)).fetchone()
-            fts_text = self._fts_text(row["text"], json.loads(row["metadata"]))
+            fts_text, applied = self._fts_text(row["text"], json.loads(row["metadata"]),
+                                                home=home)
             db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
             db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, fts_text))
-            db.execute("UPDATE chunks SET embedded=1 WHERE rowid=?", (rowid,))
+            db.execute(
+                "UPDATE chunks SET embedded=1, fts_context_version=? WHERE rowid=?",
+                (self.FTS_CONTEXT_VERSION if applied else 0, rowid))
 
     @staticmethod
     def _write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
-                                *, enriched=False, enriched_version=0) -> None:
+                                *, enriched=False, enriched_version=0, home=None) -> None:
         """Write one cached chunk row + its vec_chunks/fts_chunks mirrors against
         an already-open connection `db`. Shared by import_cached_chunk (one row,
         one transaction) and import_cached_chunks (many rows, one transaction)."""
@@ -1381,16 +1400,14 @@ class Store:
         db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
                    (rowid, sqlite_vec.serialize_float32(list(vector))))
         db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
-        # NOTE: _write_cached_chunk_row is a @staticmethod (no self); build the
-        # contextual FTS text inline to match write_embedding.
-        from mcpbrain import config as _config
-        from mcpbrain.embed import contextual_prefix as _cp
-        _fts = (_cp(metadata) + text) if _config.contextual_retrieval_enabled(
-            str(_config.app_dir())) else text
-        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, _fts))
+        fts_text, applied = Store._fts_text(text, metadata, home=home)
+        db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, fts_text))
+        db.execute(
+            "UPDATE chunks SET fts_context_version=? WHERE rowid=?",
+            (Store.FTS_CONTEXT_VERSION if applied else 0, rowid))
 
     def import_cached_chunk(self, doc_id, text, content_hash, metadata, vector,
-                            *, enriched=False, enriched_version=0) -> bool:
+                            *, enriched=False, enriched_version=0, home=None) -> bool:
         """Insert (or replace) a chunk plus its vector + FTS mirror from a cache
         artifact, in one transaction. Sets embedded=1 (the vector is supplied, so
         the chunk must NOT re-queue for embedding) and marks enriched when the
@@ -1403,10 +1420,11 @@ class Store:
         """
         with self._connect() as db:
             self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
-                                         enriched=enriched, enriched_version=enriched_version)
+                                         enriched=enriched, enriched_version=enriched_version,
+                                         home=home)
             return True
 
-    def import_cached_chunks(self, rows: list[dict]) -> bool:
+    def import_cached_chunks(self, rows: list[dict], *, home=None) -> bool:
         """Atomically import many cached chunks in ONE transaction.
 
         Each row is {doc_id, text, content_hash, metadata, vector, enriched,
@@ -1424,7 +1442,8 @@ class Store:
                     db, row["doc_id"], row["text"], row["content_hash"],
                     row["metadata"], row["vector"],
                     enriched=row.get("enriched", False),
-                    enriched_version=row.get("enriched_version", 0))
+                    enriched_version=row.get("enriched_version", 0),
+                    home=home)
         return True
 
     def embedding_for_doc(self, doc_id: str) -> list[float] | None:
