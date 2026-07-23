@@ -50,10 +50,10 @@ def test_routine_enrich_describes_fanout(tmp_path):
     assert "haiku" in enrich.lower()                 # extraction subagents run on Haiku
     assert "model: haiku" in enrich.lower()          # model set EXPLICITLY in dispatch
                                                      # (frontmatter alone is not honored)
-    # requeue guard: a non-conforming reply means the unit derailed (no push) and must
-    # be re-dispatched, not counted done.
-    assert "requeue" in enrich.lower()
-    assert "re-dispatch" in enrich.lower() and "derail" in enrich.lower()
+    # queue-driven: done-ness comes from brain_enrich_advance draining the queue, not
+    # from parsing the subagent's reply text.
+    assert "brain_enrich_advance" in enrich
+    assert "empty" in enrich.lower()
 
 
 def _agent_file():

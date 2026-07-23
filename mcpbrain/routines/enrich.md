@@ -1,50 +1,43 @@
-# Brain enrichment (hourly) — work queue
+# Brain enrichment — work queue
 
-Enrich the pending work units through the mcpbrain MCP tools. You are the
-**orchestrator**: you hand each unit to a subagent, so your own context never holds
-the email bodies — only unit IDs and one-line status replies. Self-contained —
+Drain the pending enrichment work units through the mcpbrain MCP tools. You are the
+**orchestrator**: you hand each unit to a fresh subagent, so your own context never
+holds email bodies — only unit ids. You keep NO per-unit state. Self-contained —
 needs no skill or command file.
 
-**Models:** you (the coordinator) run on **Sonnet**. The hourly task runs unattended in
-**Auto permission mode**, and Claude Code scheduled tasks only offer Auto mode on Sonnet —
-a Haiku coordinator would stall on permission prompts and never enrich. The coordinator's
-own work is mechanical and cheap regardless: fan out one subagent per unit, then check each
-reply against a fixed string shape (the requeue guard is a literal check, not a judgement — a
-unit is done IFF its reply matches `unit <unit_id>: <n> <kind>` or `unit <unit_id>: gone`).
-Every `enrich-batch` subagent runs on **Haiku**, set explicitly per dispatch (step 3) — that
-is where the volume, and the cost savings, live.
+**Models:** you (the coordinator) run on **Sonnet** — the scheduled task runs in
+**Auto permission mode**, which Claude Code only offers on Sonnet, so a Haiku
+coordinator would stall on prompts. Every `enrich-batch` subagent runs on **Haiku**,
+set **explicitly per dispatch** (the agent frontmatter is not always honored); that
+is where the volume and the cost savings live.
+
+## Loop
 
 1. Call **`brain_enrich_units`**. If it returns `{"empty": true}`, stop and report
    `DONE: queue empty`.
-2. Otherwise it returns `units` — a list of `{unit_id, kind, block, count}`. Each is
-   one unit of work (a slice of threads, or one block type's items).
-3. For **each unit**, spawn the **`enrich-batch`** subagent (the Task tool,
-   `subagent_type: enrich-batch`, **`model: haiku`**). Set the model **explicitly in
-   the dispatch** — extraction follows the rules well on Haiku and is far cheaper than
-   Sonnet; do not rely on the agent's frontmatter alone, which is not always honored.
-   That agent carries the FULL extraction protocol in its system prompt — so the rules
-   sit in one cacheable prefix shared across the whole fan-out, never in your context.
-   Spawn them in parallel — up to ~12 Task calls in one message, then the next wave.
-   Give each subagent EXACTLY this one-line instruction, substituting the unit's
-   `unit_id` (the agent already knows the protocol — do not repeat it):
+2. Otherwise it returns `units` — a list of `{unit_id, kind, block, count}`. For
+   **each unit**, spawn the **`enrich-batch`** subagent (Task tool,
+   `subagent_type: enrich-batch`, **`model: haiku`** set explicitly). Fan out up to
+   ~12 in parallel per message. Give each subagent EXACTLY this one line, with the
+   unit's `unit_id` substituted (the agent already carries the extraction protocol —
+   do not repeat it):
 
    > Enrich unit `<unit_id>`. Act autonomously; do not ask questions.
 
-4. **Requeue guard.** When the wave's subagents reply, validate each one. A unit is
-   DONE only if its subagent replied with exactly `unit <unit_id>: <n> <kind>` (or
-   `unit <unit_id>: gone`). Any other reply — narration, raw JSON, "saved to …",
-   `ERROR: …`, or silence — means the subagent derailed and did **not** push, so the
-   unit is NOT enriched. Do not count it done. Re-dispatch that same `unit_id` to a
-   fresh enrich-batch subagent (pulling by `unit_id` still works — the unit lives
-   until the daemon drains a successful push). Retry a derailed unit at most **twice**;
-   if it still fails, leave it — its lease expires and a later run re-lists it. Retries
-   happen within the current wave and do not consume the wave budget.
-5. Call **`brain_enrich_units`** again for the next wave. Repeat until it returns
-   `{"empty": true}` **or you have run 15 waves**, whichever comes first — stop at 15
-   even if units remain; the next hourly run (or the backfill skill) continues the
-   rest. This caps a single run's time and cost.
-6. Report: `DONE: <N> units across <W> waves` (note the 10-wave cap if you hit it, and
-   any units left failing after retries).
+3. When the wave's subagents return, **do not parse their replies**. Call
+   **`brain_enrich_advance`** — the daemon drains every pushed result, applies it,
+   and deletes that unit from the queue.
+4. Go back to step 1. A unit that was enriched is gone from the queue; a unit that
+   was NOT (its subagent derailed, or is still running under its lease) simply
+   re-appears on a later list once its 15-minute claim lease expires, and you
+   dispatch it again. Done-ness is queue state, never reply text.
+5. Stop when `brain_enrich_units` returns `{"empty": true}`. There is no wave cap
+   and no subagent limit — if this session runs out of subagent capacity before the
+   queue empties, that is fine: report what remains and the next run (or a re-run)
+   continues. **Backfill is just re-running this routine.**
+6. Report: `DONE: queue empty` or `PARTIAL: units still pending — re-run to continue`.
 
-Never pull unit payloads into your own context — each subagent pulls its own unit.
-Use the MCP tools only; do not read skill/command files or shell into the spool.
+Never pull unit payloads into your own context — each subagent pulls its own unit
+(`brain_enrich_pull(unit_id=…, with_rules=false)`) and pushes its own result
+(`brain_enrich_push(unit_id=…)`). Use the MCP tools only; do not read skill/command
+files or shell into the queue.
