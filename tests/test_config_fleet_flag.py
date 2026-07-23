@@ -76,3 +76,25 @@ def test_fleet_flag_int_1_and_0_coerce(tmp_path):
     assert config.fleet_flag(str(tmp_path), "retrieval_expand", False) is True
     _write(tmp_path, {"org_config": {"flags": {"retrieval_expand": 0}}})
     assert config.fleet_flag(str(tmp_path), "retrieval_expand", True) is False
+
+
+def test_fleet_flag_garbage_local_does_not_kill_org_enable(tmp_path, caplog):
+    # A garbage local value (e.g. a typo'd hand-edit) must NOT be treated as
+    # the kill-switch just because it coerces to a falsy default — only a
+    # RECOGNIZED local False may kill the flag. The org enable must win.
+    _write(tmp_path, {"retrieval_expand": "banana",
+                      "org_config": {"flags": {"retrieval_expand": True}}})
+    with caplog.at_level(logging.WARNING):
+        result = config.fleet_flag(str(tmp_path), "retrieval_expand", False)
+    assert result is True
+    assert any("banana" in r.message for r in caplog.records)
+
+
+def test_fleet_flag_unrecognized_org_value_local_absent_falls_to_default(tmp_path, caplog):
+    # Unrecognized org value + no local override at all -> falls through to
+    # the given default, with a warning (not treated as False).
+    _write(tmp_path, {"org_config": {"flags": {"retrieval_expand": "maybe"}}})
+    with caplog.at_level(logging.WARNING):
+        result = config.fleet_flag(str(tmp_path), "retrieval_expand", True)
+    assert result is True
+    assert any("maybe" in r.message for r in caplog.records)
