@@ -2381,10 +2381,17 @@ def _maybe_merge_org_config(home) -> None:
     Never raises: a missing token or a Drive failure leaves local config intact.
     The daemon NEVER calls an LLM here — this is pure Drive I/O.
     """
-    if not (config.read_config(home).get("fleet") or {}).get("folder_id"):
+    from mcpbrain import fleet, org_defaults
+    # Resolve the fleet folder the same way merge_org_config does: explicit
+    # fleet.folder_id, else the baked-in org default. Guarding on fleet.folder_id
+    # alone (as this did before) early-returned for the common case — it isn't set
+    # at setup — so the fleet org_pin/flags reached nobody, defeating the 0.7.90
+    # fallback in merge_org_config. Only skip when NEITHER resolves (e.g. a fork).
+    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id") \
+        or org_defaults.FLEET_FOLDER_ID
+    if not folder_id:
         return
     try:
-        from mcpbrain import fleet
         svc = _build_drive_service()
         fleet.merge_org_config(home, svc)
     except Exception as exc:  # noqa: BLE001 — org-config is best-effort
