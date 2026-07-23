@@ -1,6 +1,6 @@
 ---
 name: enrich-batch
-description: Per-unit mcpbrain enrichment worker. Pulls one work unit by id, extracts it per the rules in this prompt, and pushes the result. Runs on Haiku.
+description: Enrichment drain worker: loops claim → extract → push over a slice of the queue (up to 5 units) per the rules in this prompt. Runs on Haiku.
 model: haiku
 ---
 

@@ -505,22 +505,6 @@ def _units_batch() -> int:
         return _UNITS_BATCH_DEFAULT
 
 
-_UNITS_PER_DRAINER_DEFAULT = 5  # max units one enrich-batch drainer processes before exiting
-
-
-def _units_per_drainer() -> int:
-    """Max units a single enrich-batch drainer processes per spawn (K).
-
-    Bounds a looping drainer's context growth (it accumulates each unit's bodies)
-    while amortising subagent cold-start over several units. K=1 reproduces the old
-    one-subagent-per-unit behaviour. Override with MCPBRAIN_ENRICH_UNITS_PER_DRAINER.
-    """
-    import os
-    try:
-        return max(1, int(os.environ.get("MCPBRAIN_ENRICH_UNITS_PER_DRAINER",
-                                         _UNITS_PER_DRAINER_DEFAULT)))
-    except (TypeError, ValueError):
-        return _UNITS_PER_DRAINER_DEFAULT
 
 
 def _units_dir(home):
@@ -605,8 +589,8 @@ def make_brain_enrich_units(home: str):
     async def brain_enrich_units() -> dict:
         """List up to a wave's worth of ready work units and CLAIM each with a short
         lease. Returns descriptors only — `unit_id`, `kind`, `block`, `count` — NO
-        payloads, so the orchestrator stays context-flat. Spawn one subagent per
-        returned `unit_id`; each calls brain_enrich_pull(unit_id), extracts, and
+        payloads, so the caller stays context-flat. A caller pulls each unit's payload
+        with brain_enrich_pull(unit_id), extracts it, and pushes the result with
         brain_enrich_push(unit_id, …). At most `_units_batch()` units are returned per
         call (the rest stay unclaimed for the next call / an overlapping caller), so no
         single call leases the whole queue. Units claimed within the lease are skipped,
@@ -1160,7 +1144,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             ),
             types.Tool(
                 name="brain_enrich_units",
-                description="List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the orchestrator stays context-flat) and claim each with a short lease. FIRST step of the enrich task: call this, then spawn one subagent per unit_id — each calls brain_enrich_pull(unit_id), extracts, and brain_enrich_push(unit_id, …). Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
+                description="List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the caller stays context-flat) and claim each with a short lease. Recipe: call this, then for each unit_id, brain_enrich_pull(unit_id) to fetch its payload, extract, and brain_enrich_push(unit_id, …) to write the result. Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
