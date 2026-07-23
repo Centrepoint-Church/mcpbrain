@@ -631,17 +631,6 @@ def _build_context(store, thread_ids) -> dict:
 
 # --- atomic write ----------------------------------------------------------
 
-def _write_pending(data: dict) -> None:
-    """Write pending.json atomically. NOTE: the production daemon no longer uses
-    this — run_cycle calls prepare_units() (the work-queue producer). This + the
-    prepare() wrapper below are retained only as the unit-test harness for
-    build_pending / noise-filtering / merge-review assembly."""
-    queue_dir = config.app_dir() / "enrich_queue"
-    queue_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(queue_dir / "pending.json",
-                  json.dumps(data, indent=2, ensure_ascii=False))
-
-
 def _atomic_write(target, text: str) -> None:
     """Atomic write (temp file + os.replace), creating the parent dir. No stray
     temp on failure."""
@@ -834,28 +823,5 @@ def build_pending(store, batches, *, char_budget: int, now,
         data = attach_synthesis_block(data, synthesis_requests)
     data = attach_extra_blocks(data, extra_blocks)
     return data
-
-
-def prepare(store, *, thread_cap: int, char_budget: int,
-            resolution_due: bool, now=None,
-            synthesis_requests: list | None = None,
-            extra_blocks: dict | None = None) -> dict:
-    """Group → noise-filter → build_pending → write pending.json. RETAINED AS A
-    TEST HARNESS ONLY: production enrichment uses prepare_units() (the work-queue
-    producer). This exercises build_pending + noise-filtering + merge-review in one
-    call for the unit tests; nothing in the daemon calls it."""
-    if now is None:
-        now = datetime.datetime.now(datetime.timezone.utc)
-    batches = _group_unenriched_threads(store, thread_cap=thread_cap)
-    kept = _filter_noise(store, batches)[:thread_cap]
-    if not kept:
-        return {"batch_id": None, "threads": 0, "merge_pairs": 0}
-    data = build_pending(store, kept, char_budget=char_budget, now=now,
-                         resolution_due=resolution_due,
-                         synthesis_requests=synthesis_requests,
-                         extra_blocks=extra_blocks)
-    _write_pending(data)
-    return {"batch_id": data["batch_id"], "threads": len(data["threads"]),
-            "merge_pairs": len(data["merge_review"])}
 
 
