@@ -54,8 +54,26 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.103`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.103 is an adversarial-review
+- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.105`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.105 is a chunk-metadata indexing
+  perf fix.** Recall (`brain_search`/`brain_actions`/`brain_context`) was timing out because the
+  daemon's drain cycle pinned the single process for minutes, starving the control-API threads
+  (GIL + DB contention). Root cause: several `store` queries filter chunks on
+  `json_extract(metadata, …)` with **no matching index → full `SCAN chunks`** over the ~108k-chunk
+  live store. Fixed with four expression indexes created in `init()` (one-time ~7.5s at daemon
+  startup) — on `metadata.$.message_id`, `$.file_id`, `$.thread_id`, and the
+  `COALESCE(date,date_iso)` expr — plus two query rewrites where an index alone wasn't enough:
+  **`doc_ids_for_messages`** `OR`→`UNION` (SQLite won't union expression-indexes across an `OR`, so
+  the `OR` form still planned as `SCAN`; each `UNION` arm is single-path and index-backed), and
+  **`chunks_for_file`** `doc_id LIKE 'gdrive-<id>-%' ESCAPE`→`metadata.$.file_id` match (`ESCAPE`
+  disables the LIKE-to-index optimisation; proven equivalent over 200 live file_ids incl. base64url
+  LIKE-metachar ids). Per-call latency on the live store, verified through the real methods:
+  `doc_ids_for_messages` 2979ms→0.2ms, `thread_chunks` (on the fleet-wide `retrieval_expand` recall
+  path) 4287ms→10ms, `chunks_for_file` 432ms→2.8ms, `inbound_chunks_since` (waiting-on sweep, every
+  cycle) 2882ms→42ms; identical results. TDD'd; 230 impacted tests + ruff clean. Left unindexed
+  deliberately: `email_mentions` (opt-in salience sub-flag OFF; its `text LIKE` isn't indexable),
+  `delete_calendar_chunks_after`/`doc_ids_for_drive` (infrequent maintenance/GC). The **Windows
+  HARDWARE QA GATE from 0.7.97 remains OPEN.** Earlier: **0.7.103 was an adversarial-review
   hardening pass over the recall-quality + fleet work** (4 parallel reviewers → 7 findings + a
   simplicity sweep, each fix TDD'd + reviewed; full suite 2424, gold held 0.750/0.514). Fixes:
   **(expansion)** unified to one char budget owned by `expand_hits` that also bounds the first
