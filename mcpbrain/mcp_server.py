@@ -1063,6 +1063,12 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 inputSchema={"type": "object", "properties": {
                     "unit_id": {"type": "string",
                                 "description": "the unit to fetch (from brain_enrich_units)"},
+                    "with_rules": {"type": "boolean",
+                                   "description": "include the full extraction rules in the "
+                                                  "response (default true). enrich-batch workers "
+                                                  "pass false — they already carry the rules in "
+                                                  "their cached system prompt, so re-sending here "
+                                                  "would pay for them twice."},
                 }, "required": ["unit_id"]},
             ),
             types.Tool(
@@ -1229,7 +1235,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             out = await enrich_units()
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_pull":
-            out = await enrich_pull(unit_id=arguments.get("unit_id", ""))
+            out = await enrich_pull(unit_id=arguments.get("unit_id", ""),
+                                    with_rules=arguments.get("with_rules", True))
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_push":
             # Do NOT coerce extractions=None to [] here — the handler must see None
