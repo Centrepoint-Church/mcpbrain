@@ -244,11 +244,85 @@ def test_read_org_config_present_returns_parsed_dict(tmp_path):
     assert out == {"cadences": {"lint": 900}}
 
 
-def test_read_org_config_download_failure_returns_empty():
+def test_read_org_config_fetch_failure_returns_none():
+    # A raising drive_service is a FETCH failure, not an absent file — these
+    # must be distinguishable so merge_org_config can tell "org-config.json
+    # doesn't exist" (revert the overlay) apart from "Drive hiccuped" (keep
+    # the last-known-good overlay, don't wipe it on a transient blip).
     class _Boom:
         def files(self):
             raise RuntimeError("drive down")
-    assert fleet.read_org_config("FLEET1", _Boom()) == {}
+    assert fleet.read_org_config("FLEET1", _Boom()) is None
+
+
+def test_read_org_config_parse_failure_returns_none():
+    store = {
+        "listed": [{"id": "OCID", "name": "org-config.json"}],
+        "media_bytes": b"{not valid json",
+    }
+    assert fleet.read_org_config("FLEET1", _FakeDrive(store)) is None
+
+
+def test_merge_org_config_keeps_prior_overlay_on_fetch_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {
+        "fleet": {"folder_id": "FLEET1"},
+        "org_config": {"cadences": {"lint": 900}},
+    })
+
+    class _Boom:
+        def files(self):
+            raise RuntimeError("drive down")
+
+    out = fleet.merge_org_config(str(tmp_path), _Boom())
+    # The staged overlay from a prior good fetch must survive a transient
+    # fetch failure unchanged — a network blip must not wipe it.
+    assert out == {"cadences": {"lint": 900}}
+    assert config.read_config(str(tmp_path))["org_config"] == {"cadences": {"lint": 900}}
+
+
+def test_merge_org_config_noop_when_no_folder_resolves(tmp_path, monkeypatch):
+    # merge_org_config owns folder resolution end-to-end (the daemon no longer
+    # pre-derives it): when neither fleet.folder_id nor the baked-in org
+    # default resolves (e.g. a fork with no org folder), it must not touch
+    # Drive or the staged overlay.
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, org_defaults
+    config.write_config(str(tmp_path), {"org_config": {"cadences": {"lint": 900}}})
+    monkeypatch.setattr(org_defaults, "FLEET_FOLDER_ID", "")
+
+    class _Boom:
+        def files(self):
+            raise AssertionError("Drive must not be touched when no folder resolves")
+
+    out = fleet.merge_org_config(str(tmp_path), _Boom())
+    assert out == {"cadences": {"lint": 900}}  # untouched
+    assert config.read_config(str(tmp_path))["org_config"] == {"cadences": {"lint": 900}}
+
+
+def test_merge_org_config_skips_write_when_overlay_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {
+        "fleet": {"folder_id": "FLEET1"},
+        "org_config": {"cadences": {"lint": 900}},
+    })
+    store = {
+        "listed": [{"id": "OCID", "name": "org-config.json"}],
+        "media_bytes": json.dumps({"cadences": {"lint": 900}}).encode(),
+    }
+    calls = {"n": 0}
+    real_write = config.write_config
+
+    def _tracking_write(home, updates):
+        calls["n"] += 1
+        return real_write(home, updates)
+
+    monkeypatch.setattr(config, "write_config", _tracking_write)
+    out = fleet.merge_org_config(str(tmp_path), _FakeDrive(store))
+    assert out == {"cadences": {"lint": 900}}
+    assert calls["n"] == 0  # unchanged overlay -> no write (avoid churn)
 
 
 def test_merge_org_config_stages_allowlisted_into_overlay_and_drops_rest(tmp_path, monkeypatch):
