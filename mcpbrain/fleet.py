@@ -233,24 +233,34 @@ _ALLOWLIST = frozenset({"cadences", "org_pin", "flags"})
 _OVERLAY_KEY = "org_config"
 
 
-def read_org_config(folder_id: str, drive_service) -> dict:
+def read_org_config(folder_id: str, drive_service) -> dict | None:
     """Download and parse ``org-config.json`` from the fleet folder.
 
-    Returns ``{}`` if the file is absent or the download/parse fails. No merge,
-    no allowlist applied here — that is ``merge_org_config``'s job.
+    Returns ``{}`` when the file is genuinely absent (no matching file found,
+    no error), or ``None`` when the fetch/parse itself failed (a Drive error
+    listing/downloading, or malformed JSON). The two are NOT interchangeable
+    to the caller: absence is a legitimate "no org-config yet" state that
+    should revert any staged overlay, while a failure is a transient blip
+    that must not be mistaken for absence — that would wipe a good overlay on
+    a network hiccup. See ``merge_org_config``. No merge, no allowlist applied
+    here — that is ``merge_org_config``'s job.
     """
     try:
         file_id = _find_file_id(drive_service, folder_id, "org-config.json")
-        if not file_id:
-            return {}
+    except Exception as exc:  # noqa: BLE001 — a lookup failure is unknown, not absent
+        log.warning("org-config lookup failed: %s", exc)
+        return None
+    if not file_id:
+        return {}
+    try:
         raw = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         data = json.loads(raw)
         return data if isinstance(data, dict) else {}
     except Exception as exc:  # noqa: BLE001 — org-config is best-effort
-        log.warning("org-config download failed (using local config): %s", exc)
-        return {}
+        log.warning("org-config download/parse failed: %s", exc)
+        return None
 
 
 def merge_org_config(home, drive_service) -> dict:
@@ -264,6 +274,7 @@ def merge_org_config(home, drive_service) -> dict:
     ``config["org_config"]`` at read time. Returns the staged overlay dict.
     """
     from mcpbrain import config, org_defaults
+    current = (config.read_config(home).get(_OVERLAY_KEY) or {})
     # Fall back to the baked-in org fleet folder when the install hasn't set
     # fleet.folder_id explicitly — matching fleet_storage.fleet_folder_storage and
     # onboarding._fleet_folder_id, which both fall back. Without this, an install
@@ -273,14 +284,26 @@ def merge_org_config(home, drive_service) -> dict:
     folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id") \
         or org_defaults.FLEET_FOLDER_ID
     if not folder_id:
-        return {}
+        return current
     org = read_org_config(folder_id, drive_service)
+    if org is None:
+        # Fetch/parse failed (transient Drive blip) — keep the last-known-good
+        # overlay exactly as staged, and do NOT write, so a bad network moment
+        # can't wipe a real org-config down to nothing.
+        log.warning("org-config fetch failed; keeping existing overlay unchanged")
+        return current
     allowed = {k: v for k, v in org.items() if _is_allowed(k)}
     dropped = sorted(k for k in org if not _is_allowed(k))
     if dropped:
         log.info("org-config: ignoring non-allowlisted keys: %s", dropped)
-    # Always write (even when empty) so a cleared/removed org-config.json reverts
-    # the overlay on the next startup rather than leaving stale overrides.
+    if allowed == current:
+        # No change from what's already staged — skip the write. Avoids churn
+        # on every daemon boot/cadence tick, and narrows the window in which a
+        # concurrent read could observe a rewritten-but-identical file as a
+        # "lost update" against another writer.
+        return allowed
+    # Write (even when empty) so a cleared/removed org-config.json reverts the
+    # overlay on the next startup rather than leaving stale overrides.
     config.write_config(home, {_OVERLAY_KEY: allowed})
     if allowed:
         log.info("org-config: staged overlay keys: %s", sorted(allowed))

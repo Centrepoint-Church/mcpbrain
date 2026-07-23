@@ -2376,20 +2376,22 @@ def _build_drive_service():
 
 
 def _maybe_merge_org_config(home) -> None:
-    """If fleet.folder_id is set, merge org-config into local config. Best-effort.
+    """Merge org-config into local config. Best-effort.
 
-    Never raises: a missing token or a Drive failure leaves local config intact.
-    The daemon NEVER calls an LLM here — this is pure Drive I/O.
+    Never raises: a Drive failure leaves local config intact. The daemon
+    NEVER calls an LLM here — this is pure Drive I/O.
+
+    Gated on a stored Google OAuth token: with no credentials there is no
+    Drive access to attempt, so skip before touching auth/Drive at all —
+    this avoids a per-boot "org-config merge skipped" warning on every
+    install that hasn't connected Google yet (the common state before
+    onboarding completes). Folder resolution (explicit fleet.folder_id, else
+    the baked-in org default) is NOT re-derived here — merge_org_config
+    already owns that fallback (0.7.90); re-deriving it here was a redundant
+    duplicate of that logic.
     """
-    from mcpbrain import fleet, org_defaults
-    # Resolve the fleet folder the same way merge_org_config does: explicit
-    # fleet.folder_id, else the baked-in org default. Guarding on fleet.folder_id
-    # alone (as this did before) early-returned for the common case — it isn't set
-    # at setup — so the fleet org_pin/flags reached nobody, defeating the 0.7.90
-    # fallback in merge_org_config. Only skip when NEITHER resolves (e.g. a fork).
-    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id") \
-        or org_defaults.FLEET_FOLDER_ID
-    if not folder_id:
+    from mcpbrain import auth, fleet
+    if not auth.token_path().exists():
         return
     try:
         svc = _build_drive_service()
