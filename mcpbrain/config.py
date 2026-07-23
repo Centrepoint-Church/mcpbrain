@@ -485,16 +485,16 @@ def contextual_retrieval_enabled(home) -> bool:
     return bool(read_config(home).get("contextual_retrieval", True))
 
 
-def _coerce_bool(value, default):
-    """Coerce a fleet-flag value to a real bool.
+def _classify_bool(value):
+    """Classify a raw flag value as recognized True, recognized False, or
+    unrecognized (``None``).
 
-    Accepts an actual bool, the strings "true"/"false" (any case, surrounding
-    whitespace ignored), and the ints 1/0. Flag values ultimately come from
-    org-config.json (an org-admin-controlled JSON file relayed through Drive)
-    or a hand-edited local config.json — anything else is malformed input, so
-    it falls back to *default* with a warning rather than propagating a
-    truthy/falsy-but-wrong Python value (e.g. a non-empty garbage string is
-    truthy, which would silently enable a flag the admin meant to leave off).
+    Recognized-true: an actual ``True``, the string ``"true"`` (any case,
+    surrounding whitespace ignored), or the int ``1``. Recognized-false: an
+    actual ``False``, the string ``"false"``, or the int ``0``. Anything else
+    (garbage strings, floats, ``None``, lists, ...) is unrecognized, so
+    callers can fall through to the next precedence layer instead of
+    silently treating malformed input as false.
     """
     if isinstance(value, bool):
         return value
@@ -504,37 +504,79 @@ def _coerce_bool(value, default):
             return True
         if low == "false":
             return False
-    elif isinstance(value, int) and value in (0, 1):
+        return None
+    if isinstance(value, int) and value in (0, 1):
         return bool(value)
-    log.warning("fleet flag: unrecognized value %r; using default %r", value, default)
-    return default
+    return None
+
+
+def _coerce_bool(value, default):
+    """Coerce a fleet-flag value to a real bool via ``_classify_bool``,
+    falling back to *default* (with a warning) for anything unrecognized.
+
+    Flag values ultimately come from org-config.json (an org-admin-controlled
+    JSON file relayed through Drive) or a hand-edited local config.json —
+    unrecognized input degrades to *default* rather than propagating a
+    truthy/falsy-but-wrong Python value (e.g. a non-empty garbage string is
+    truthy, which would silently enable a flag the admin meant to leave off).
+    """
+    classified = _classify_bool(value)
+    if classified is None:
+        log.warning("fleet flag: unrecognized value %r; using default %r", value, default)
+        return default
+    return classified
 
 
 def fleet_flag(home, name, default=False):
     """A feature flag resolvable fleet-wide, with a local emergency kill-switch.
 
     Precedence:
-    1. An explicit LOCAL top-level ``config[name] is False`` wins outright —
-       the emergency kill-switch: an install can always shut a flag off for
-       itself even if the fleet has turned it on for everyone.
+    1. A RECOGNIZED explicit LOCAL top-level value that classifies as False
+       wins outright — the emergency kill-switch: an install can always shut
+       a flag off for itself even if the fleet has turned it on for
+       everyone. Garbage local input (e.g. a typo'd hand-edit) does NOT
+       count as the kill-switch just because it would coerce to a falsy
+       default — only a *recognized* False does.
     2. Else the ORG overlay value (``config['org_config']['flags'][name]``,
-       staged by ``fleet.merge_org_config`` from org-config.json) — org wins
-       over the local value so a fleet-wide enable reaches everyone.
-    3. Else the local value.
+       staged by ``fleet.merge_org_config`` from org-config.json) if
+       recognized — org wins over the local value so a fleet-wide enable
+       reaches everyone. An unrecognized org value logs a warning and falls
+       through to the next layer instead of being treated as False.
+    3. Else the local value, if recognized. An unrecognized local value logs
+       a warning and falls through to *default* instead of being treated as
+       False.
     4. Else *default*.
-
-    All resolved values are coerced via ``_coerce_bool`` (real bool /
-    "true"/"false" / 1/0; anything else degrades to *default* + a warning).
     """
     cfg = read_config(home)
-    local_raw = cfg.get(name, default)
-    local = _coerce_bool(local_raw, default)
-    if name in cfg and local is False:
-        return False  # local explicit False = kill-switch, wins unconditionally
+    has_local = name in cfg
+    local_classified = None
+    if has_local:
+        local_classified = _classify_bool(cfg[name])
+        if local_classified is None:
+            # Unrecognized local value: warn now (independent of what the
+            # org overlay decides below) — garbage input is never a
+            # kill-switch, so it must not be silently treated as one.
+            log.warning(
+                "fleet flag: unrecognized local value %r for %r; not a kill-switch",
+                cfg[name], name,
+            )
+        elif local_classified is False:
+            return False  # recognized local False = kill-switch, wins unconditionally
+
     overlay = (cfg.get("org_config") or {}).get("flags") or {}
     if name in overlay:
-        return _coerce_bool(overlay[name], default)
-    return local
+        overlay_classified = _classify_bool(overlay[name])
+        if overlay_classified is not None:
+            return overlay_classified
+        log.warning(
+            "fleet flag: unrecognized org value %r for %r; falling through",
+            overlay[name], name,
+        )
+
+    if has_local and local_classified is not None:
+        return local_classified
+
+    return default
 
 
 def retrieval_expand_enabled(home) -> bool:
