@@ -728,6 +728,25 @@ def make_brain_enrich_advance(home: str):
     return brain_enrich_advance
 
 
+def make_brain_enrich_pending(home: str):
+    async def brain_enrich_pending() -> dict:
+        """Count enrichment units not under a live lease, WITHOUT claiming any.
+
+        The coordinator calls this to decide whether to spawn another drainer
+        wave — keeping done-ness a function of queue state, never reply text.
+        Drainers self-serve work via brain_enrich_claim; this only observes.
+        """
+        import time as _time
+        claims, now = _claims_dir(home), _time.time()
+        try:
+            files = sorted(_units_dir(home).glob("*.json"))
+        except OSError:
+            return {"pending": 0}
+        n = sum(1 for f in files if not _lease_is_live(claims / f.stem, now))
+        return {"pending": n}
+    return brain_enrich_pending
+
+
 def make_brain_meetings_today(store, home: str):
     async def brain_meetings_today() -> list:
         """Today's calendar events, each annotated with has_pack. Same data the
