@@ -747,6 +747,39 @@ def make_brain_enrich_pending(home: str):
     return brain_enrich_pending
 
 
+def make_brain_enrich_claim(home: str):
+    async def brain_enrich_claim(with_rules: bool = False) -> dict:
+        """Atomically lease ONE ready unit and return its payload (units + pull,
+        folded into a single call), or {"empty": true} when none is claimable.
+
+        For the enrich-batch drain loop: each drainer calls this repeatedly.
+        with_rules defaults False — the subagent carries the rules in its cached
+        system prompt; a general-purpose caller may pass True to inline them.
+        Lease acquisition is atomic (see _atomic_claim), so N concurrent drainers
+        never take the same unit.
+        """
+        import json as _json
+        import time as _time
+        claims, now = _claims_dir(home), _time.time()
+        try:
+            files = sorted(_units_dir(home).glob("*.json"))
+        except OSError:
+            return {"empty": True}
+        for f in files:
+            uid = f.stem
+            if _lease_is_live(claims / uid, now):
+                continue
+            try:
+                d = _json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue                              # skip garbage without leasing
+            if not _atomic_claim(claims, uid, now):
+                continue                              # lost the race; try the next
+            return _unit_payload(home, d, uid, with_rules)
+        return {"empty": True}
+    return brain_enrich_claim
+
+
 def make_brain_meetings_today(store, home: str):
     async def brain_meetings_today() -> list:
         """Today's calendar events, each annotated with has_pack. Same data the
