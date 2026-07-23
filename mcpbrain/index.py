@@ -1,5 +1,9 @@
 # mcpbrain/index.py
+import logging
+
 from mcpbrain.embed import contextual_prefix
+
+log = logging.getLogger(__name__)
 
 
 def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None) -> int:
@@ -12,11 +16,12 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     PASSAGE-ONLY (embed.contextual_prefix), never applied to the query side. `home`
     selects which config to read (defaults to the app dir).
     """
+    from mcpbrain import config
+    _home = home or str(config.app_dir())
     pending = store.unembedded_chunks()
     done = 0
     if pending:
-        from mcpbrain import config
-        use_prefix = config.contextual_retrieval_enabled(home or str(config.app_dir()))
+        use_prefix = config.contextual_retrieval_enabled(_home)
         for i in range(0, len(pending), batch_size):
             batch = pending[i:i + batch_size]
             texts = [
@@ -25,7 +30,7 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
             ]
             vectors = embedder.embed_passages(texts)
             for c, v in zip(batch, vectors):
-                store.write_embedding(c["rowid"], v)
+                store.write_embedding(c["rowid"], v, home=_home)
                 done += 1
     # Phase C: drain the contextual-BM25 FTS re-index backfill in bounded
     # batches (no re-embed) so existing chunks pick up the C1 contextual
@@ -34,5 +39,5 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     try:
         store.reindex_fts_batch(cap=5000)
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("reindex_fts_batch failed; FTS contextual backfill deferred", exc_info=True)
     return done
