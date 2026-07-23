@@ -631,19 +631,6 @@ def feedback_enabled(home) -> bool:
     return bool(read_config(home).get("feedback", True))
 
 
-def sufficiency_gate_enabled(home) -> bool:
-    """Whether the LLM sufficiency/NLI gate runs before recall injection (S1).
-
-    When True, each batch of recall hits is checked: does this chunk actually
-    help answer the query? Hits classified IRRELEVANT are withheld.
-
-    Default: TRUE (shipped on in 0.7.65 — validated: 0/10 over-abstention on gold
-    queries). Set 'sufficiency_gate': false in config.json to disable. The gate
-    fails open (all hits pass) on CLI absence, timeout, or parse error.
-    """
-    return bool(read_config(home).get("sufficiency_gate", True))
-
-
 def auto_enable_enabled(home) -> bool:
     """Whether the auto-graduation pass may flip data-gated flags ON once ready.
 
