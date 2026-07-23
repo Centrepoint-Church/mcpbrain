@@ -1,4 +1,4 @@
-"""End-to-end spool round trip: pending.json -> extraction -> drain -> graph grew.
+"""End-to-end spool round trip: work units -> extraction -> drain -> graph grew.
 
 This is the plan's acceptance test. It exercises the real prepare assembly,
 contract, drain and graph_write.apply over a seeded store. The only stand-in is
