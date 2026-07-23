@@ -75,6 +75,118 @@ def test_doc_ids_for_messages_email_and_doc_id_paths_unaffected(tmp_path):
     assert s.doc_ids_for_messages(["bare-doc-0"]) == ["bare-doc-0"]
 
 
+def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
+    """doc_ids_for_messages (called per-extraction by drain) resolves chunks by
+    metadata.message_id and metadata.file_id. Without an index on those JSON
+    paths every call is a full `SCAN chunks` (~1.4s on the ~108k-chunk live
+    store), so a drain cycle spends ~24 min scanning and starves recall. init()
+    must create expression indexes matching exactly the json_extract() paths the
+    query uses, so the planner can turn the SCAN into an index SEARCH."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        idx_sql = {
+            row["name"]: (row["sql"] or "")
+            for row in db.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='chunks'").fetchall()
+        }
+    # An index whose expression matches the query's json_extract() path exactly.
+    assert any("json_extract(metadata,'$.message_id')" in s.replace(" ", "")
+               for s in idx_sql.values()), \
+        f"no index on metadata.message_id; have {list(idx_sql)}"
+    assert any("json_extract(metadata,'$.file_id')" in s.replace(" ", "")
+               for s in idx_sql.values()), \
+        f"no index on metadata.file_id; have {list(idx_sql)}"
+
+
+def test_doc_ids_for_messages_query_is_index_backed(tmp_path):
+    """The resolution query must be planned as index SEARCHes, never a full
+    `SCAN chunks`. A single OR across the metadata paths defeats SQLite's
+    index use (it can't union expression-indexes across an OR), so the query is
+    built as a UNION of single-path SELECTs — each independently index-backed.
+    Guards against a regression back to the OR form, which reintroduces the
+    ~1.4s/call full scan that wedged the daemon."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        # Representative distribution (as the live store has): distinct values in
+        # each metadata path so every index is selective, mirroring gmail + Drive
+        # + note chunks. Enough rows that the planner prefers indexes over a scan.
+        for i in range(2000):
+            db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                       "VALUES(?,?,?,?)",
+                       (f"gmail-{i}-body-0", "x", f"h{i}",
+                        f'{{"source_type":"gmail","message_id":"msg-{i}"}}'))
+        for i in range(2000):
+            db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                       "VALUES(?,?,?,?)",
+                       (f"gdrive-F{i}-0", "x", f"hd{i}",
+                        f'{{"source_type":"gdrive","file_id":"F{i}"}}'))
+        for i in range(2000):
+            db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                       "VALUES(?,?,?,?)",
+                       (f"note-{i}", "x", f"hn{i}", '{"source_type":"note"}'))
+        db.execute("ANALYZE")
+        plan = " ".join(
+            tuple(r)[-1] for r in
+            db.execute("EXPLAIN QUERY PLAN " + s._doc_ids_query(1),
+                       ["x", "x", "x"]).fetchall())
+    assert "SCAN chunks" not in plan, f"full scan not eliminated: {plan}"
+    assert "idx_chunks_msgid" in plan and "idx_chunks_fileid" in plan, \
+        f"metadata indexes not used: {plan}"
+
+
+def test_init_indexes_thread_and_date_lookup_paths(tmp_path):
+    """thread_chunks (recall expansion via retrieval_expand + stale passes)
+    filters on metadata.thread_id; inbound_chunks_since (waiting-on, every cycle)
+    range-filters on COALESCE(date,date_iso). Both full-scan the ~108k-chunk live
+    store (~4.3s / ~2.9s) without matching expression indexes."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        have = " ".join(
+            (row["sql"] or "").replace(" ", "")
+            for row in db.execute("SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='chunks'").fetchall())
+    assert "json_extract(metadata,'$.thread_id')" in have, \
+        f"no index on metadata.thread_id: {have}"
+    assert ("json_extract(metadata,'$.date')" in have
+            and "json_extract(metadata,'$.date_iso')" in have), \
+        f"no index on the inbound date expression: {have}"
+
+
+def test_chunks_for_file_query_is_index_backed(tmp_path):
+    """chunks_for_file resolves a Drive file's chunks. The old
+    `doc_id LIKE ... ESCAPE` form disables SQLite's LIKE-index optimisation
+    (full SCAN, ~432ms on the live store); resolving by metadata.file_id instead
+    uses idx_chunks_fileid."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    with s._connect() as db:
+        for i in range(2000):
+            db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                       "VALUES(?,?,?,?)",
+                       (f"gdrive-F{i}-0", "x", f"h{i}",
+                        f'{{"file_id":"F{i}","chunk_index":0}}'))
+        db.execute("ANALYZE")
+        plan = " ".join(
+            tuple(r)[-1] for r in
+            db.execute("EXPLAIN QUERY PLAN " + s._chunks_for_file_query(),
+                       ("F1",)).fetchall())
+    assert "SCAN chunks" not in plan, f"full scan not eliminated: {plan}"
+    assert "idx_chunks_fileid" in plan, f"file_id index not used: {plan}"
+
+
+def test_chunks_for_file_resolves_file_id_with_like_metacharacters(tmp_path):
+    """Regression guard for the file_id rewrite: a base64url file_id can contain
+    '_' or '%' (LIKE metacharacters); resolution must still return every chunk of
+    the file, in chunk_index order."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    fid = "aB_c%dE-f"
+    for i in (2, 0, 1):  # insert out of order; output must be idx-ordered
+        s.upsert_chunk(f"gdrive-{fid}-{i}", f"p{i}", f"h{i}",
+                       {"file_id": fid, "chunk_index": i})
+    assert [c["doc_id"] for c in s.chunks_for_file(fid)] == [
+        f"gdrive-{fid}-{i}" for i in range(3)]
+
+
 # --- graph tables (Task 4.2) ---------------------------------------------
 
 def _store(tmp_path):
