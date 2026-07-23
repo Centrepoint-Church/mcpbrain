@@ -26,7 +26,7 @@ def test_brain_routine_serves_bundled_protocols():
     ri = mcp_server._routine_instructions
     assert ri("does-not-exist") is None
     enrich = ri("enrich")
-    assert enrich and "brain_enrich_units" in enrich and "enrich-batch" in enrich
+    assert enrich and "brain_enrich_pending" in enrich and "enrich-batch" in enrich
     gardener = ri("gardener")
     # Phase 2: GARDENER-PROTECTED block removed; gardener is now hygiene-only with
     # explicit constraints on what it cannot touch and a weekly digest step.
@@ -42,9 +42,10 @@ def test_brain_routine_serves_bundled_protocols():
     assert "brain_gardener_apply" in rg
     assert "asserts_person_role" in rg
 
-def test_routine_enrich_describes_fanout(tmp_path):
+def test_routine_enrich_describes_drainer_pool(tmp_path):
     enrich = mcp_server._routine_instructions("enrich")
-    assert "brain_enrich_units" in enrich
+    assert "brain_enrich_pending" in enrich
+    assert "brain_enrich_claim" in enrich
     assert "enrich-batch" in enrich                  # dispatches the cache-anchored agent
     assert "subagent" in enrich.lower()
     assert "haiku" in enrich.lower()                 # extraction subagents run on Haiku
