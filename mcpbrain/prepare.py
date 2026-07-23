@@ -36,6 +36,7 @@ import re
 import tempfile
 
 from mcpbrain import config, prompt, thread_enrich
+from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
 from mcpbrain.resolve import _candidate_pairs
 
 log = logging.getLogger("mcpbrain.prepare")
@@ -677,7 +678,6 @@ def _atomic_write(target, text: str) -> None:
 # daemon process restarts. write_units accepts pull_cap= so callers can override.
 _UNIT_PULL_CAP = config.unit_pull_cap()
 _UNIT_RULES_RESERVE = 11_000
-from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
 
 
 def _unit_id(kind: str, signature: str) -> str:
