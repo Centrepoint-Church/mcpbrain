@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from mcpbrain import config
+from mcpbrain.enrich_blocks import ANSWER_BLOCKS as _ENRICH_ANSWER_BLOCKS
 
 from mcpbrain.retrieval import annotate_action_freshness
 
@@ -485,12 +486,11 @@ def _routine_instructions(name: str) -> str | None:
 
 
 # The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
-# merge_answers. Each is drained by the daemon from the inbox object under this
-# exact key (see drain.py BLOCK_DRAINERS + synthesise_threads). Without forwarding
-# them, the synthesis/profile/community/memory/audit work the batch requested is
+# merge_answers (_ENRICH_ANSWER_BLOCKS, imported at module top). Each is drained
+# by the daemon from the inbox object under this exact key (see drain.py
+# BLOCK_DRAINERS + synthesise_threads). Without forwarding them, the
+# synthesis/profile/community/memory/audit work the batch requested is
 # silently dropped on the MCP path.
-from mcpbrain.enrich_blocks import ANSWER_BLOCKS as _ENRICH_ANSWER_BLOCKS
-
 
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
 _UNITS_BATCH_DEFAULT = 30  # max units handed out (and claimed) per brain_enrich_units call
