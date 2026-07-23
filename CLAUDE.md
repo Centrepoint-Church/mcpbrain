@@ -54,9 +54,20 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.105`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.105 is a chunk-metadata indexing
-  perf fix.** Recall (`brain_search`/`brain_actions`/`brain_context`) was timing out because the
+- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.106`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.106 removes the LLM sufficiency
+  gate.** The gate (`sufficiency.py`, `daemon.search`) spawned the `claude` CLI as a subprocess on
+  **every** recall (both `brain_search` and UserPromptSubmit auto-injection) to classify each hit
+  relevant/irrelevant — **~6s of pure CLI cold-start per recall**. Removed because it (a) duplicated
+  the downstream LLM (recalled chunks are injected into a prompt the model reads anyway; a
+  permissive "err toward true" pre-filter re-does 6s slower what the consumer does for free), (b)
+  was **never in the gold-eval harness** (the recall@10 0.750 / MRR 0.514 numbers were measured
+  without it; it defaulted ON in a 0.7.65 batch, not on its own evidence), and (c) is redundant with
+  the cheap absolute `recall_max_distance` gate (kept — drops genuinely off-topic queries at zero
+  LLM cost). Deleted `sufficiency.py`, `config.sufficiency_gate_enabled`, the `daemon.search` call,
+  and `test_sufficiency.py`; regression guard in `test_recall_gate`. Recall latency drops ~6s. The
+  **Windows HARDWARE QA GATE from 0.7.97 remains OPEN.** Earlier: **0.7.105 was a chunk-metadata
+  indexing perf fix.** Recall (`brain_search`/`brain_actions`/`brain_context`) was timing out because the
   daemon's drain cycle pinned the single process for minutes, starving the control-API threads
   (GIL + DB contention). Root cause: several `store` queries filter chunks on
   `json_extract(metadata, …)` with **no matching index → full `SCAN chunks`** over the ~108k-chunk
