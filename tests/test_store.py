@@ -767,6 +767,28 @@ def test_reset_enriched(store):
     assert row["enriched"] == 0 and row["enriched_version"] == 0
 
 
+def test_drop_cold_filters_cold_chunks_preserving_order(store):
+    # drain's Drive file-wide resolve can return a mix of hot and cold chunks
+    # (file_id matches are enrich_state-blind); drop_cold is the seam that
+    # filters cold ones out right before apply/mark_enriched so a Drive
+    # extraction only marks the chunks its text actually covered.
+    store.upsert_chunk("d1", "t", "h1", {})
+    store.upsert_chunk("d2", "t", "h2", {})
+    store.upsert_chunk("d3", "t", "h3", {})
+    store.set_enrich_state(["d2"], "cold")
+    assert store.drop_cold(["d1", "d2", "d3"]) == ["d1", "d3"]
+
+
+def test_drop_cold_noop_when_no_cold_chunks(store):
+    store.upsert_chunk("d1", "t", "h1", {})
+    store.upsert_chunk("d2", "t", "h2", {})
+    assert store.drop_cold(["d1", "d2"]) == ["d1", "d2"]
+
+
+def test_drop_cold_empty_input_returns_empty(store):
+    assert store.drop_cold([]) == []
+
+
 def test_meeting_series_for_old_unique_match(store):
     # old bare entity + new series both linked to message m1 -> maps old->series.
     # The series candidate must carry an occurrence observation (M8) to count

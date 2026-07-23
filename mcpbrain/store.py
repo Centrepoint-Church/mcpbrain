@@ -847,6 +847,32 @@ class Store:
                 "UPDATE chunks SET enrich_state=? WHERE doc_id=?",
                 [(state, d) for d in doc_ids])
 
+    def drop_cold(self, doc_ids: list[str]) -> list[str]:
+        """Filter cold chunks out of doc_ids, preserving input order.
+
+        A Drive file-wide resolve (doc_ids_for_messages's file_id branch)
+        returns EVERY chunk of a document, including any the salience gate has
+        since marked enrich_state='cold' -- that match is enrich_state-blind by
+        design. But a Drive extraction's batch text only ever covers the hot
+        (non-cold) chunks should_enrich() queued, so drain calls this right
+        before apply/mark_enriched to consume exactly the chunks it actually
+        extracted. Cold chunks stay enriched=0 (embedded/searchable, gated from
+        graph-extraction) so cold-reversibility holds. Email doc_ids are never
+        cold-gated the same way, so this is a no-op for them.
+        """
+        ids = [d for d in (doc_ids or []) if d]
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT doc_id FROM chunks WHERE doc_id IN ({ph}) "
+                f"AND COALESCE(enrich_state,'') != 'cold'",
+                ids,
+            ).fetchall()
+        hot = {r["doc_id"] for r in rows}
+        return [d for d in ids if d in hot]
+
     def cold_chunk_count(self) -> int:
         """Number of chunks currently in the cold (gated) state."""
         with self._connect() as db:
