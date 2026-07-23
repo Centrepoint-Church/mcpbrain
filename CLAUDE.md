@@ -54,9 +54,27 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.106`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.106 removes the LLM sufficiency
-  gate.** The gate (`sufficiency.py`, `daemon.search`) spawned the `claude` CLI as a subprocess on
+- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.107`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.107 replaces enrichment's
+  one-subagent-per-unit fan-out with a work-stealing drainer pool** — cutting subagent cold-start
+  and coordinator↔subagent comms overhead. Two new MCP tools: **`brain_enrich_claim`** atomically
+  leases ONE unit and returns its payload in a single call (folds `units`+`pull`; `O_CREAT|O_EXCL`
+  lease so concurrent drainers never double-claim a fresh unit, with stale-lease reclaim after the
+  15-min TTL), and **`brain_enrich_pending`** returns a non-claiming `{pending: N}` for the
+  coordinator's loop. The `enrich-batch` subagent now **loops `claim → extract → push` up to 5
+  units** then exits (bounding a drainer's context growth); the `enrich.md` coordinator routine
+  spawns a **pool of 10 Haiku drainers per wave** (`pending` → spawn → `advance` → repeat until
+  `pending: 0`, `PARTIAL` on a no-progress wave) instead of dispatching one subagent per unit. Net:
+  subagent spawns drop O(units)→~O(units/5) (fewer cold-starts + system-prompt/ToolSearch payments =
+  token AND wall-clock), coordinator leaves the per-unit loop. Existing `brain_enrich_units`/`pull`/
+  `push`/`advance` are unchanged (retained for the self-contained general-purpose path); a Task-1
+  refactor factors shared lease/`_unit_payload` helpers (also closing `units`' latent double-lease
+  race). Built subagent-driven + adversarially reviewed (opus final review: READY TO MERGE, no
+  Critical/Important); full suite 2424 pass. A planned `MCPBRAIN_ENRICH_UNITS_PER_DRAINER` env
+  override was **dropped as inert** (an LLM can't read env from prompt text — K stays the "5" literal
+  in the prompt). Spec/plan: `docs/superpowers/specs/2026-07-23-enrich-drainer-pool-design.md`,
+  `docs/superpowers/plans/2026-07-23-enrich-drainer-pool.md`. The **Windows HARDWARE QA GATE from
+  0.7.97 remains OPEN.** Earlier: **0.7.106 removed the LLM sufficiency gate.** The gate (`sufficiency.py`, `daemon.search`) spawned the `claude` CLI as a subprocess on
   **every** recall (both `brain_search` and UserPromptSubmit auto-injection) to classify each hit
   relevant/irrelevant — **~6s of pure CLI cold-start per recall**. Removed because it (a) duplicated
   the downstream LLM (recalled chunks are injected into a prompt the model reads anyway; a
