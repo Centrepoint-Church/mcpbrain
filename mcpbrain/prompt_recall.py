@@ -226,12 +226,17 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
     The snippet map is persisted so quote-back can later score what was shown.
 
     When `expanded` is True (the daemon stitched richer parent context via
-    `expand_hits`), no per-item or total-char re-truncation is applied here —
+    `expand_hits`), NO truncation is re-applied here at all — not per-item
+    chars, not a running total-char cap, and not the `_KEEP` count cap.
     `expand_hits` already selected the set within its own `char_budget` (first
-    parent included) and `_head_tail`-ordered it; re-truncating that ordered
-    set here used to silently drop whichever parent landed last (typically the
-    2nd-best), since the reordering runs before this cap. Only the relevance
-    floor, dedup, and _KEEP count cap still apply for the expanded path.
+    parent included, before ordering) and `max_parents`, then `_head_tail`-
+    ordered it; any truncation applied AFTER that ordering — including a count
+    cap — can drop whichever parent(s) land last in the reordered sequence
+    (typically the 2nd-best, or worse whenever more than a few small parents
+    all fit the budget). So for the expanded path only relevance floor and
+    dedup still apply; the already-bounded, already-ordered set is trusted
+    and emitted in full. The flat path (`expanded=False`) is unchanged:
+    `_KEEP`, `_SNIPPET`, and `_MAX_TOTAL` all still apply.
     """
     if not results:
         return "", {}
@@ -241,7 +246,7 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
     injected: dict = {}
     total = 0
     for r in results:
-        if len(lines) >= _KEEP:
+        if not expanded and len(lines) >= _KEEP:
             break
         doc_id = r.get("doc_id")
         if doc_id in seen:
@@ -254,11 +259,12 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
             snippet = " ".join((r.get("text") or "").split())[:_SNIPPET].strip()
         if not snippet:
             continue
-        if not expanded and total + len(snippet) > _MAX_TOTAL:
-            break
+        if not expanded:
+            if total + len(snippet) > _MAX_TOTAL:
+                break
+            total += len(snippet)
         lines.append(f"- {snippet}")
         injected[doc_id] = snippet
-        total += len(snippet)
     if not lines:
         return "", {}
     return _HEADER + "\n" + "\n".join(lines), injected

@@ -204,6 +204,28 @@ def test_format_context_expanded_keeps_second_best_parent():
     assert "rank1" in block or injected.get("rank1")  # sanity: present at all
 
 
+def test_format_context_expanded_keeps_second_best_with_five_small_parents():
+    # Residual regression: the _KEEP=3 COUNT cap was still applied to the
+    # expanded path AFTER expand_hits' _head_tail reordering. For 5 parents,
+    # _head_tail order is [r0, r2, r4, r3, r1] (rank order in, head-and-tail
+    # out) — the old count cap stopped after 3 items (r0, r2, r4), silently
+    # dropping r3 and, worse, r1 — the 2nd-best parent by rank, now sitting at
+    # the tail. This can happen whenever more than _KEEP small parents all fit
+    # within expand_hits' own char_budget. All 5 must survive: expand_hits
+    # already bounded the set (by max_parents AND char_budget) before
+    # ordering it; _format_context must not re-cap by count either.
+    small = "sentence. " * 30  # ~300 chars, well under any char_budget
+    results = [
+        {"doc_id": "r0", "score": 1.0, "text": small},
+        {"doc_id": "r2", "score": 0.8, "text": small},
+        {"doc_id": "r4", "score": 0.6, "text": small},
+        {"doc_id": "r3", "score": 0.7, "text": small},
+        {"doc_id": "r1", "score": 0.9, "text": small},
+    ]
+    block, injected = pr._format_context(results, set(), expanded=True)
+    assert {"r0", "r1", "r2", "r3", "r4"} == set(injected)
+
+
 def test_recall_requests_expand_when_flag_on(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"retrieval_expand": True}))
     (tmp_path / "control_port").write_text("9999")
