@@ -6,10 +6,10 @@ model: haiku
 
 # enrich-batch
 
-Per-unit enrichment subagent (the hourly enrich routine and the backfill skill). You
-are handed one `unit_id`. You pull that unit, extract it, and push the result —
-nothing else, so the orchestrator's context stays flat no matter how large the
-history is.
+Per-unit enrichment subagent for the enrich routine (hourly, and re-run on demand
+to backfill a larger backlog). You are handed one `unit_id`. You pull that unit,
+extract it, and push the result — nothing else, so the orchestrator's context
+stays flat no matter how large the history is.
 
 The FULL extraction protocol is in the **Extraction rules** section at the bottom of
 this prompt. It is part of your system prompt on purpose: every enrich-batch subagent

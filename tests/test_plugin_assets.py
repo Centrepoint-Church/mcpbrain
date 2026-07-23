@@ -68,8 +68,10 @@ def test_install_doc_points_at_command():
     assert "mcpbrain-cowork-setup" not in b
     assert not (_PLUGIN / "skills" / "mcpbrain-cowork-setup").exists()
 
-def test_backfill_skill_exists():
-    assert (_PLUGIN / "skills" / "mcpbrain-backfill" / "SKILL.md").exists()
+def test_backfill_skill_removed():
+    # Backfill is now just re-running the enrich routine; the separate skill
+    # (with its own copy of the drain loop) is gone.
+    assert not (_PLUGIN / "skills" / "mcpbrain-backfill").exists()
 
 def test_enrich_batch_agent_exists():
     assert (_PLUGIN / "agents" / "enrich-batch.md").exists()
@@ -86,16 +88,6 @@ def test_enrich_batch_is_unit_worker():
         assert token in b, token
     protocol = b[:b.index("<!-- SHARED-EXTRACTION-RULES:BEGIN -->")]
     assert "pending.json" not in protocol   # no direct spool reads in the protocol
-
-def test_backfill_skill_orchestrates_loop():
-    b = _read("skills/mcpbrain-backfill/SKILL.md")
-    assert "enrich-batch" in b                              # dispatches the unit worker
-    assert "brain_enrich_units" in b                        # drains the work-unit queue
-    assert any(w in b.lower() for w in ("loop", "while", "repeat"))
-    assert "queue" in b.lower()
-    # requeue guard: derailed units (no clean status line) get re-dispatched
-    assert "requeue" in b.lower() and "derailed" in b.lower()
-    assert "model: haiku" in b.lower()                      # explicit dispatch model
 
 def test_draft_reply_skill_exists():
     assert (_PLUGIN / "skills" / "mcpbrain-draft-reply" / "SKILL.md").exists()

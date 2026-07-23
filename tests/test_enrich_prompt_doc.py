@@ -158,8 +158,7 @@ def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
     # would stall on permission prompts unattended. Executor subagents stay Haiku.
-    for p in ("mcpbrain/routines/enrich.md",
-              "plugin/skills/mcpbrain-backfill/SKILL.md"):
+    for p in ("mcpbrain/routines/enrich.md",):
         text = Path(p).read_text().lower()
         assert "coordinator" in text and "sonnet" in text
         assert "auto permission mode" in text        # the reason the coordinator is Sonnet
