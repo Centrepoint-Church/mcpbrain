@@ -22,6 +22,9 @@ where the volume and the cost savings live.
 
    > Drain up to 5 enrichment units: loop claim → extract → push until an empty claim or 5 done. Act autonomously; do not ask questions.
 
+   The "5" and the pool size "10" are the defaults; the per-drainer cap is
+   `MCPBRAIN_ENRICH_UNITS_PER_DRAINER` (default 5).
+
    Each drainer claims its own units via `brain_enrich_claim`, so you never hand out
    unit ids and never pull payloads into your own context.
 3. When the wave's drainers return, **do not parse their replies**. Call
