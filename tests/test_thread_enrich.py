@@ -35,6 +35,38 @@ def _seed(store, doc_id, *, text="body", thread_id="", message_id="",
     store.upsert_chunk(doc_id, text, f"hash-{doc_id}", meta)
 
 
+def test_chunk_key_shared_precedence_matches_group_key_and_reassemble():
+    # _group_key and reassemble_thread must not drift on the message-identity
+    # portion of their key precedence (file_id, else message_id, else doc_id --
+    # the part reassemble_thread actually uses). Both now delegate to the one
+    # shared thread_enrich._chunk_key helper, so the three cases below resolve
+    # identically at both call sites. thread_id is intentionally NOT part of
+    # this shared portion: _group_key checks it first at the whole-backlog
+    # (batch-forming) level, but reassemble_thread runs WITHIN an
+    # already-thread-grouped batch, where thread_id is constant across every
+    # message and would wrongly collapse distinct messages into one if applied
+    # there too (see test_reassemble_thread_orders_messages_by_date, where four
+    # chunks share one thread_id but must reassemble into two messages).
+    cases = [
+        ({"file_id": "f1", "message_id": "m1"}, "doc-1", "f1"),  # file_id wins
+        ({"message_id": "m1"}, "doc-1", "m1"),  # message_id wins over doc_id
+        ({}, "doc-1", "doc-1"),  # doc_id fallback
+    ]
+    for meta, doc_id, expected in cases:
+        assert thread_enrich._chunk_key(meta, doc_id) == expected
+
+        # _group_key call site: delegates to the same helper when thread_id is
+        # absent from the chunk's metadata.
+        chunk = {"doc_id": doc_id, "metadata": meta}
+        assert thread_enrich._group_key(chunk) == expected
+
+        # reassemble_thread call site: reassembling a single chunk with this
+        # metadata emits a message keyed the same way.
+        msgs = thread_enrich.reassemble_thread(
+            [{"doc_id": doc_id, "metadata": meta, "text": "x"}])
+        assert msgs[0]["message_id"] == expected
+
+
 def test_group_unenriched_by_thread(tmp_path):
     store = _store(tmp_path)
     # Two threads, two chunks each.

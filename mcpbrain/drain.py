@@ -445,6 +445,15 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                             thread_id, path.name)
                 summary["skipped"] = summary.get("skipped", 0) + 1
                 continue
+            # Fix #2: a Drive file-wide resolve (the file_id branch of
+            # doc_ids_for_messages) returns EVERY chunk of the document, even
+            # ones the salience gate has since marked cold -- but the
+            # extraction's batch text only ever covered the hot chunks
+            # should_enrich() queued. Drop cold chunks here, right before
+            # apply/mark_enriched, so a Drive extraction marks only the chunks
+            # it actually covered (matching the message-precise email path).
+            # No-op for email doc_ids, which aren't cold-gated the same way.
+            doc_ids = store.drop_cold(doc_ids)
             try:
                 # Pass the run-scoped dedup index only when built (flag on) so an
                 # injected/legacy apply that doesn't accept the kwarg is unaffected.

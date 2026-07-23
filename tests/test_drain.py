@@ -292,6 +292,46 @@ def test_drain_applies_and_marks_drive_doc_by_file_id(store, home):
     assert _enriched_count(store, doc_ids) == {d: 1 for d in doc_ids}
 
 
+def test_drain_drops_cold_siblings_from_drive_file_resolve(store, home):
+    # A Drive file with 3 chunks; one is cold-gated (the salience gate skipped
+    # it for graph-extraction -- e.g. tabular/low-signal -- but it stays
+    # embedded/searchable). should_enrich() only ever queued the 2 hot chunks,
+    # so the extraction's batch text covers just those, but
+    # doc_ids_for_messages(file_id) resolves to ALL 3 chunks (the file_id match
+    # is enrich_state-blind by design -- see doc_ids_for_messages). drain must
+    # drop the cold sibling before apply/mark_enriched, or it gets wrongly
+    # flipped to enriched=1 despite never being covered -- breaking
+    # cold-reversibility (a cold chunk should re-enter the backlog if the gate
+    # is later reversed for it).
+    fid = "1Tj2fbHCq5CN5d4uAZXjE0Is3zptIbu1P"
+    hot_ids = [f"gdrive-{fid}-{i}" for i in range(2)]
+    cold_id = f"gdrive-{fid}-2"
+    for i, did in enumerate(hot_ids):
+        store.upsert_chunk(did, f"page {i}", f"hash-{did}",
+                           {"source_type": "gdrive", "file_id": fid, "chunk_index": i})
+    store.upsert_chunk(cold_id, "page 2 (tabular)", f"hash-{cold_id}",
+                       {"source_type": "gdrive", "file_id": fid, "chunk_index": 2})
+    store.set_enrich_state([cold_id], "cold")
+
+    env = _envelope(fid, messages=[
+        {"message_id": fid, "sender": "", "date": "2026-06-16",
+         "labels": "", "subject": "The New Testament in Its World"},
+    ])
+    _write_inbox(home, "batch.json", _batch("batch-drive-cold", [env]))
+
+    app = RecordingApply()
+    summary = drain.drain(store, home=home, apply=app)
+
+    assert summary["applied"] == 1
+    # apply is called with only the hot doc_ids -- the cold sibling is never
+    # forwarded, so it never gets an ungrounded provenance edge either.
+    assert set(app.calls[0]["doc_ids"]) == set(hot_ids)
+    marks = _enriched_count(store, hot_ids + [cold_id])
+    assert marks[hot_ids[0]] == 1
+    assert marks[hot_ids[1]] == 1
+    assert marks[cold_id] == 0  # untouched -- stays reversible
+
+
 def test_drain_persists_enrich_payload_for_drive_docs_only(store, home):
     # A#4: after a successful apply, the validated extraction is cached against
     # each SHARED-DRIVE doc_id (prefix "gdrive-") so a later cache artifact can
