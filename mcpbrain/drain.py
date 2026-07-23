@@ -51,20 +51,30 @@ log = logging.getLogger(__name__)
 _EMPTY_ATTEMPT_CAP = 3
 
 
-def _give_up_or_bump(store, doc_ids, summary) -> None:
+def _give_up_or_bump(store, doc_ids, summary) -> tuple[bool, int | None]:
     """Bump the empty-attempt counter for these chunks; once it reaches
     _EMPTY_ATTEMPT_CAP, consume them (mark_enriched) so a genuinely
     un-extractable doc stops re-queuing forever. Best-effort — bookkeeping must
-    never break a drain run."""
+    never break a drain run.
+
+    Returns (gave_up, attempts): gave_up is True iff the cap was reached this
+    call (and mark_enriched/summary["gave_up"] were applied); attempts is the
+    post-bump attempt count, or None if doc_ids was empty or bookkeeping
+    raised. Callers that need to log on genuine give-up (only the
+    invalid-extraction site does) use this to reproduce the pre-refactor
+    log line without making the other call site start logging too."""
     if not doc_ids:
-        return
+        return False, None
     try:
         attempts = store.bump_enrich_attempts(doc_ids)
         if attempts >= _EMPTY_ATTEMPT_CAP:
             store.mark_enriched(doc_ids)
             summary["gave_up"] = summary.get("gave_up", 0) + 1
+            return True, attempts
+        return False, attempts
     except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
         log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
+        return False, None
 
 
 def _name_grounded(name: str, source_lower: str) -> bool:
@@ -384,7 +394,11 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
                 _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
                          if m.get("message_id")]
                 _dids = store.doc_ids_for_messages(_mids) if _mids else []
-                _give_up_or_bump(store, _dids, summary)
+                gave_up, attempts = _give_up_or_bump(store, _dids, summary)
+                if gave_up:
+                    log.info("drain: giving up on thread %s after %d empty "
+                             "attempts; consuming %d chunk(s)",
+                             extraction.get("thread_id", "?"), attempts, len(_dids))
                 continue
             thread_id = extraction["thread_id"]
             # Org drift gate: canonicalise; coerce an unconfigured org to
