@@ -392,7 +392,7 @@ def test_maybe_synthesise_advances_clock_only_on_success(tmp_path):
 
 def test_pending_synthesis_kept_until_drained(tmp_path):
     """_pending_synthesis survives run_one() until the drain reports synthesis
-    answers. prepare REWRITES pending.json every cycle, so a one-shot attach
+    answers. prepare_units WRITES a fresh unit every cycle, so a one-shot attach
     was overwritten a minute later unless the extractor read the file inside a
     single interval (live 2026-06-05 loss)."""
     store, daemon = _synth_daemon(tmp_path, synthesise_interval_s=3600.0)
@@ -986,7 +986,7 @@ def test_pending_blocks_and_audit_merged_in_run_one(tmp_path):
         return {"enrich": {"mode": "spool", "drain": {}}}
 
     # Two cycles with no block answers drained: re-attached BOTH times
-    # (prepare rewrites pending.json each cycle; a one-shot attach is lost).
+    # (prepare_units writes fresh units each cycle; a one-shot attach is lost).
     with patch("mcpbrain.daemon.run_cycle", side_effect=fake_run_cycle):
         daemon.run_one()
         daemon.run_one()

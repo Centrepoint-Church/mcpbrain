@@ -58,10 +58,10 @@ def test_records_claude_template_present():
 
 def test_maintenance_subpackage_excluded_from_wheel():
     # mcpbrain/maintenance/ holds maintainer-only local-claude backfill tooling
-    # (extractor_driver, extractor_io). It is reachable only
-    # from bin/ scripts and tests, never from the shipped daemon, so pyproject's
-    # packages.find must exclude it. Guard that exclusion is declared (offline,
-    # builds nothing — pairs with the CI wheel-inspection step).
+    # (extractor_driver). It is reachable only from tests, never from the
+    # shipped daemon, so pyproject's packages.find must exclude it. Guard that
+    # exclusion is declared (offline, builds nothing — pairs with the CI
+    # wheel-inspection step).
     import tomllib
 
     repo_root = Path(__file__).resolve().parents[1]
