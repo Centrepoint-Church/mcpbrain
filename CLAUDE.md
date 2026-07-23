@@ -54,8 +54,27 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.102`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.102 fixes the caller-half of the
+- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.103`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.103 is an adversarial-review
+  hardening pass over the recall-quality + fleet work** (4 parallel reviewers → 7 findings + a
+  simplicity sweep, each fix TDD'd + reviewed; full suite 2424, gold held 0.750/0.514). Fixes:
+  **(expansion)** unified to one char budget owned by `expand_hits` that also bounds the first
+  parent, and moved ALL truncation/count-capping before `_head_tail` so the injection consumer no
+  longer front-truncates an ordered set and drops the 2nd-best parent; span-stitch gap marker.
+  **(enrichment)** `drain` now drops `cold` chunks from the Drive file-wide `doc_ids` resolve
+  before apply/mark, so a Drive extraction only marks the hot chunks it actually covered (was
+  over-marking cold siblings → broke cold-reversibility on 127 live files); shared `_chunk_key`.
+  **(contextual BM25)** the `fts_context_version` marker is stamped at write time and encodes
+  whether the prefix was actually applied (raw writes stay v0), so a contextual_retrieval OFF→ON
+  toggle self-corrects and fresh rows aren't reprocessed; `_fts_text` reads the flag from the
+  passed `home`; `embed_doc` flag-gated. **(fleet)** `fleet_flag` coerces values (a string
+  `"false"` no longer force-enables) with a local-kill-switch precedence; `read_org_config`
+  returns `None` on a transient fetch failure so `merge_org_config` KEEPS the staged overlay
+  instead of wiping `org_pin`/`fleet_secret` on a Drive blip, and skips no-op writes; the startup
+  merge is gated on a Google token existing (no per-boot Drive I/O / warning on non-authed
+  installs). Plan: `docs/superpowers/plans/2026-07-23-review-fixes.md`. The **Windows HARDWARE QA
+  GATE from 0.7.97 remains OPEN.**
+  **0.7.102 fixes the caller-half of the
   0.7.90 org-config fallback bug:** `daemon._maybe_merge_org_config` guarded on
   `config['fleet']['folder_id']` and early-returned for the common case (not set at setup), so it
   never called `merge_org_config` — defeating that function's own baked-in `FLEET_FOLDER_ID`
