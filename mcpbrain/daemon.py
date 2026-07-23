@@ -736,17 +736,18 @@ class Daemon:
                     google_name = self._resolve_google_name(creds)
         except Exception as exc:  # noqa: BLE001 — no/invalid token degrades, never crashes
             log.debug("status: Google credentials unavailable: %s", exc)
-        # Spool depth for the cowork extractor wizard step. The on-disk layout
-        # is owned by prepare.py (writes enrich_queue/pending.json) and
-        # extractor_driver.py (writes enrich_inbox/<batch>.json), so we just
-        # count files. Errors degrade to zero rather than failing the status
-        # poll.
+        # Queue depth for the cowork extractor wizard step. Production writes
+        # immutable work units to enrich_queue/units/*.json (prepare_units /
+        # write_units) and the daemon drains pushed results from
+        # enrich_inbox/<unit_id>.json, so we just count files in each. Errors
+        # degrade to zero rather than failing the status poll.
         pending = 0
         inbox = 0
         try:
             home = config.app_dir()
-            if (home / "enrich_queue" / "pending.json").exists():
-                pending = 1
+            units_dir = home / "enrich_queue" / "units"
+            if units_dir.exists():
+                pending = sum(1 for p in units_dir.iterdir() if p.suffix == ".json")
             inbox_dir = home / "enrich_inbox"
             if inbox_dir.exists():
                 inbox = sum(1 for p in inbox_dir.iterdir() if p.suffix == ".json")
@@ -1202,12 +1203,13 @@ class Daemon:
         # tier has been removed (§9A), so there is no longer a cadence to gate on.
         resolution_due = True
         # Stashed synthesis/block requests are RE-ATTACHED every cycle, not
-        # consumed by one: prepare rewrites pending.json each cycle, so a
-        # one-shot attach survives only until the next rewrite (~one interval)
-        # unless the out-of-band extractor happens to read the file in that
-        # window (live 2026-06-05 loss). Each stash is cleared below, once the
-        # drain summary shows its answers actually came back; until then every
-        # rewritten pending.json carries the same requests.
+        # consumed by one: prepare_units() writes a fresh batch of work units
+        # each cycle, so a one-shot attach survives only until the next
+        # production run (~one interval) unless the out-of-band extractor
+        # happens to pull the unit in that window (live 2026-06-05 loss). Each
+        # stash is cleared below, once the drain summary shows its answers
+        # actually came back; until then every freshly-produced batch of units
+        # carries the same requests.
         synthesis_requests = self._pending_synthesis
         merged = {**self._pending_blocks, **self._pending_audit}
         extra_blocks = {k: v for k, v in merged.items() if v} or None

@@ -1,10 +1,11 @@
-"""Prepare step: turn un-enriched email threads into a pending.json spool.
+"""Prepare step: turn un-enriched email threads into content-addressed work units.
 
 The daemon runs this. It takes Phase 1's thread groups, noise-filters them,
 attaches standing context plus each thread's prior context and open actions,
 caps the number of threads, splits over-long threads, and (when resolution is
-due) appends a merge-review block. The result is written atomically to
-MCPBRAIN_HOME/enrich_queue/pending.json for the extractor to read.
+due) appends a merge-review block. The result is written as immutable,
+content-hashed work units (keyed by unit_id) atomically under
+MCPBRAIN_HOME/enrich_queue/units/ for the extractor to pull.
 
 Phase-1 contract this module codes against
 -------------------------------------------
