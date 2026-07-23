@@ -51,18 +51,27 @@ enrichment orchestration prompt.
 - **Done-ness = queue state, not reply text.** A successfully pushed unit is
   drained and its unit file deleted, so it stops appearing from
   `brain_enrich_units`. The coordinator no longer parses worker replies at all.
-- **Retry by re-listing.** After dispatching a wave, call `brain_enrich_advance`
-  (drains pushed results → deletes those units), then call `brain_enrich_units`
-  again. Anything still returned is not-yet-done (never pushed, or lease expired)
-  → re-dispatch.
+- **Retry is paced by the lease, not the coordinator.** After dispatching a wave,
+  call `brain_enrich_advance` (drains pushed results → deletes those units), then
+  call `brain_enrich_units` again. A unit that was just handed out is claimed with a
+  15-min lease and is NOT re-listed until the lease expires, so a derailed/never-
+  pushed unit naturally re-surfaces (and is re-dispatched) at most once per lease
+  window — the lease is the backpressure. The coordinator holds no per-unit state;
+  it just dispatches whatever the next list returns.
 - **Terminator: queue empty.** Stop when `brain_enrich_units` returns
-  `{"empty": true}`. No wave cap, no subagent budget — the session's own capacity
-  ends an over-large run implicitly. The wave-count concept is removed entirely.
-- **Poison-unit guard (per-unit only).** So one unit whose worker keeps derailing
-  can't starve the rest of a run, the coordinator keeps a per-`unit_id` dispatch
-  counter and stops re-dispatching an individual unit after **K = 3** attempts
-  (counting IDs — no prose parsing). This is local poison handling, not a run-length
-  cap.
+  `{"empty": true}`. No wave cap, no subagent budget, no per-unit retry counter —
+  the session's own capacity ends an over-large run implicitly, and the lease paces
+  retries. The wave-count concept is removed entirely.
+- **No coordinator-side poison guard.** A unit whose worker never pushes cannot
+  tight-loop (the lease suppresses it for 15 min between dispatches), so its cost is
+  ~one cheap Haiku dispatch per lease window — negligible. A per-`unit_id` dispatch
+  counter in the coordinator was considered and rejected: it doesn't persist across
+  runs (so doesn't durably resolve an un-pushable unit anyway) and it reintroduces
+  the bookkeeping this redesign removes. Durable poison handling (a per-unit
+  dispatch/expiry counter on the producer side, consumed by the daemon) is noted as
+  a FUTURE item to build only if un-pushable units are observed in practice — the
+  drain-side `_EMPTY_ATTEMPT_CAP` already covers units that push empty/invalid
+  extractions; it does not cover units that never push.
 - **Backfill = re-run the routine.** For a backlog larger than one session, run the
   routine again (or let the next hourly run continue). The routine's final report
   states how many units remain pending so the operator knows whether to re-run.
