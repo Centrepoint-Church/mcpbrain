@@ -515,6 +515,74 @@ def _claims_dir(home):
     return Path(home) / "enrich_queue" / "claims"
 
 
+def _lease_is_live(claim_path, now: float) -> bool:
+    """True iff claim_path exists and its lease has not expired."""
+    try:
+        return claim_path.exists() and now - claim_path.stat().st_mtime < _LEASE_TTL_S
+    except OSError:
+        return False
+
+
+def _atomic_claim(claims_dir, uid: str, now: float) -> bool:
+    """Acquire uid's lease atomically. Returns True iff acquired.
+
+    Exclusive create (O_CREAT|O_EXCL) is atomic across processes on the local
+    store, so two concurrent drainers can never both take the same fresh lease.
+    A stale lease (>= _LEASE_TTL_S old — crashed worker) is reclaimed via utime;
+    that reclaim is the one non-atomic window (two workers could both reclaim the
+    same stale lease → an idempotent double-apply downstream, never corruption).
+    """
+    import os
+    try:
+        claims_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    claim = claims_dir / uid
+    try:
+        fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            if now - claim.stat().st_mtime >= _LEASE_TTL_S:
+                os.utime(str(claim), (now, now))
+                return True
+        except OSError:
+            pass
+        return False
+    except OSError:
+        return False
+
+
+def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
+    """Build the pull/claim response body from a parsed unit dict `d`.
+
+    Rules (byte-stable) lead when included, then context, so a general-purpose
+    caller's serialized prefix stays cacheable; variable per-unit fields trail.
+    """
+    import json as _json
+    from pathlib import Path
+    try:
+        ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
+    except (OSError, ValueError):
+        ctx = {}
+    out = {}
+    if with_rules:
+        out["rules"] = _enrich_rules()
+    out["context"] = ctx
+    out["kind"] = d.get("kind")
+    out["unit_id"] = unit_id
+    if d.get("kind") == "block":
+        out["block"] = d.get("block")
+        out["items"] = d.get("items") or []
+    else:
+        out["threads"] = d.get("threads") or []
+    if len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
+        out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
+                                              "org_domain_map") if k in ctx}
+    return out
+
+
 def make_brain_enrich_units(home: str):
     async def brain_enrich_units() -> dict:
         """List up to a wave's worth of ready work units and CLAIM each with a short
@@ -538,25 +606,18 @@ def make_brain_enrich_units(home: str):
         ready, now = [], _time.time()
         for f in files:
             uid = f.stem
-            claim = claims / uid
-            try:
-                if claim.exists() and now - claim.stat().st_mtime < _LEASE_TTL_S:
-                    continue                          # still leased to another worker
-            except OSError:
-                pass
+            if _lease_is_live(claims / uid, now):
+                continue                              # still leased to another worker
             try:
                 d = _json.loads(f.read_text())
             except (OSError, ValueError):
                 continue                              # skip a half-written/garbage unit
-            try:
-                claims.mkdir(parents=True, exist_ok=True)
-                (claims / uid).touch()                # claim (mtime = now)
-            except OSError:
-                pass
+            if not _atomic_claim(claims, uid, now):
+                continue                              # lost the race to another caller
             ready.append({"unit_id": uid, "kind": d.get("kind"), "block": d.get("block"),
                           "count": len(d.get("threads") or d.get("items") or [])})
             if len(ready) >= batch:
-                break                                 # cap one call to a wave; leave the rest unclaimed
+                break
         return {"units": ready} if ready else {"empty": True}
     return brain_enrich_units
 
@@ -575,40 +636,13 @@ def make_brain_enrich_pull(home: str):
         cacheable prefix — re-sending the rules here, in the uncached tool result,
         would pay for them a second time and defeat the caching."""
         import json as _json
-        from pathlib import Path
         if not unit_id:
             return {"empty": True}
         try:
             d = _json.loads((_units_dir(home) / f"{unit_id}.json").read_text())
         except (OSError, ValueError):
             return {"empty": True}
-        try:
-            ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
-        except (OSError, ValueError):
-            ctx = {}
-        # When rules are sent, they lead (byte-stable across units) then context, so a
-        # general-purpose caller's serialized prefix is reusable; the variable per-unit
-        # fields (unit_id, work) trail. The enrich-batch agent omits them entirely —
-        # its rules live in the cacheable system-prompt prefix instead.
-        out = {}
-        if with_rules:
-            out["rules"] = _enrich_rules()
-        out["context"] = ctx
-        out["kind"] = d.get("kind")
-        out["unit_id"] = unit_id
-        if d.get("kind") == "block":
-            out["block"] = d.get("block")
-            out["items"] = d.get("items") or []
-        else:
-            out["threads"] = d.get("threads") or []
-        # Trim to stay under the RESPONSE consumer limit (not the packing budget):
-        # a with_rules=True pull adds the rules block and can cross ~50KB even when the
-        # unit itself fit the 60k packing cap. Trim context to the few fields an answer
-        # needs so the response never spills to a file the caller must Read back.
-        if len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
-            out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
-                                                  "org_domain_map") if k in ctx}
-        return out
+        return _unit_payload(home, d, unit_id, with_rules)
     return brain_enrich_pull
 
 
