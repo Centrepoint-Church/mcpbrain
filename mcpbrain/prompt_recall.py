@@ -31,8 +31,7 @@ _LIMIT = 4              # max hits requested from the daemon
 _KEEP = 3              # max hits actually injected
 _SNIPPET = 200         # max chars per injected snippet
 _MAX_TOTAL = 1200      # hard cap on total injected chars
-_EXPANDED_SNIPPET = 1500     # per-item cap when expansion is active (stitched context)
-_EXPANDED_MAX_TOTAL = 4000   # total cap for the expanded injection block
+_EXPANDED_MAX_TOTAL = 4000   # daemon-side expand_hits char_budget default (see config.expand_params)
 _TIMEOUT_S = 1.2       # fail-open latency budget for the loopback call
 _MIN_PROMPT = 12       # skip trivially short prompts
 _REL_FLOOR = 0.55      # keep hits scoring >= this fraction of the top hit
@@ -226,15 +225,16 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
     Returns ("", {}) when nothing survives, else (block, {doc_id: snippet}).
     The snippet map is persisted so quote-back can later score what was shown.
 
-    When `expanded` is True (the daemon stitched richer parent context), the
-    per-item and total caps widen from _SNIPPET/_MAX_TOTAL to
-    _EXPANDED_SNIPPET/_EXPANDED_MAX_TOTAL — everything else (rel floor, dedup,
-    _KEEP, header) is unchanged.
+    When `expanded` is True (the daemon stitched richer parent context via
+    `expand_hits`), no per-item or total-char re-truncation is applied here —
+    `expand_hits` already selected the set within its own `char_budget` (first
+    parent included) and `_head_tail`-ordered it; re-truncating that ordered
+    set here used to silently drop whichever parent landed last (typically the
+    2nd-best), since the reordering runs before this cap. Only the relevance
+    floor, dedup, and _KEEP count cap still apply for the expanded path.
     """
     if not results:
         return "", {}
-    snip_cap = _EXPANDED_SNIPPET if expanded else _SNIPPET
-    total_cap = _EXPANDED_MAX_TOTAL if expanded else _MAX_TOTAL
     top = max((float(r.get("score") or 0.0) for r in results), default=0.0)
     floor = top * _REL_FLOOR
     lines: list[str] = []
@@ -248,10 +248,13 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
             continue
         if float(r.get("score") or 0.0) < floor:
             continue
-        snippet = " ".join((r.get("text") or "").split())[:snip_cap].strip()
+        if expanded:
+            snippet = (r.get("text") or "").strip()
+        else:
+            snippet = " ".join((r.get("text") or "").split())[:_SNIPPET].strip()
         if not snippet:
             continue
-        if total + len(snippet) > total_cap:
+        if not expanded and total + len(snippet) > _MAX_TOTAL:
             break
         lines.append(f"- {snippet}")
         injected[doc_id] = snippet

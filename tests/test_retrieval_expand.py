@@ -60,6 +60,18 @@ def test_expand_large_file_span_stitches_window_only():
     assert out == "p8\n\np9\n\np10\n\np11\n\np12"
 
 
+def test_expand_large_file_span_stitch_inserts_gap_marker_for_noncontiguous_runs():
+    # Two hit indices far apart produce two disjoint windows; a gap marker must
+    # separate the runs so the stitched text isn't presented as contiguous.
+    files = {"f1": [{"doc_id": f"gdrive-f1-{i}", "text": f"p{i}",
+                     "metadata": {"chunk_index": i}, "idx": i} for i in range(50)]}
+    g = {"kind": "file", "key": "f1", "hit_indices": [5, 40], "rep_doc_id": "gdrive-f1-5"}
+    out = rx.expand_parent(_FakeStore(files=files), g, window_n=1, short_doc_max_chunks=15)
+    # window ±1 around 5 => 4,5,6; around 40 => 39,40,41; disjoint -> gap marker
+    assert out == "p4\n\np5\n\np6\n\n[…]\n\np39\n\np40\n\np41"
+    assert "[…]" in out
+
+
 def test_expand_hits_caps_parents_and_orders_head_tail():
     # 3 distinct short files; max_parents=2 keeps the top 2 by rank
     chunks, files = {}, {}
@@ -71,25 +83,44 @@ def test_expand_hits_caps_parents_and_orders_head_tail():
         files[fid] = [{"doc_id": doc, "text": fid, "metadata": meta, "idx": 0}]
         hits.append({"doc_id": doc, "score": 1.0 - i * 0.1, "distance": 0.1, "text": fid})
     store = _StoreWithMeta(chunks, files=files)
-    out = rx.expand_hits(store, hits, max_parents=2, token_budget=10_000)
+    out = rx.expand_hits(store, hits, max_parents=2, char_budget=10_000)
     assert len(out) == 2
     assert {h["doc_id"] for h in out} == {"gdrive-fa-0", "gdrive-fb-0"}
 
 
-def test_expand_hits_respects_token_budget_dropping_lowest_rank():
+def test_expand_hits_respects_char_budget_dropping_lowest_rank():
     chunks, files = {}, {}
     hits = []
     for i, fid in enumerate(["fa", "fb"]):
         doc = f"gdrive-{fid}-0"
         meta = {"file_id": fid, "chunk_index": 0}
-        big = "x" * 400
+        big = "x" * 3000
         chunks[doc] = {"doc_id": doc, "text": big, "metadata": meta, "memory_tier": ""}
         files[fid] = [{"doc_id": doc, "text": big, "metadata": meta, "idx": 0}]
         hits.append({"doc_id": doc, "score": 1.0 - i, "distance": 0.1, "text": big})
     store = _StoreWithMeta(chunks, files=files)
-    # budget ~100 tokens ≈ 400 chars: only the top parent fits
-    out = rx.expand_hits(store, hits, max_parents=5, token_budget=100)
+    # budget 4000 chars: first parent (3000) fits; second (3000 more) would push
+    # used to 6000 > budget, so it's dropped entirely (lower-ranked parent).
+    out = rx.expand_hits(store, hits, max_parents=5, char_budget=4000)
     assert [h["doc_id"] for h in out] == ["gdrive-fa-0"]
+
+
+def test_expand_hits_truncates_huge_first_parent_to_char_budget():
+    # Regression: expand_hits used to admit the FIRST accumulated parent whole
+    # regardless of size (the budget check was skipped for an empty
+    # accumulator) — a single huge result (e.g. 27k chars) could reach the
+    # consumer. The first parent must now be bound to char_budget too.
+    chunks, files = {}, {}
+    doc = "gdrive-fa-0"
+    meta = {"file_id": "fa", "chunk_index": 0}
+    huge = "y" * 27_000
+    chunks[doc] = {"doc_id": doc, "text": huge, "metadata": meta, "memory_tier": ""}
+    files["fa"] = [{"doc_id": doc, "text": huge, "metadata": meta, "idx": 0}]
+    hits = [{"doc_id": doc, "score": 1.0, "distance": 0.1, "text": huge}]
+    store = _StoreWithMeta(chunks, files=files)
+    out = rx.expand_hits(store, hits, max_parents=5, char_budget=4000)
+    assert len(out) == 1
+    assert len(out[0]["text"]) == 4000
 
 
 def test_expand_hits_orders_head_tail_with_five_parents():
@@ -103,7 +134,7 @@ def test_expand_hits_orders_head_tail_with_five_parents():
         files[fid] = [{"doc_id": doc, "text": fid, "metadata": meta, "idx": 0}]
         hits.append({"doc_id": doc, "score": 1.0 - i * 0.1, "distance": 0.1, "text": fid})
     store = _StoreWithMeta(chunks, files=files)
-    out = rx.expand_hits(store, hits, max_parents=5, token_budget=10_000)
+    out = rx.expand_hits(store, hits, max_parents=5, char_budget=10_000)
     # _head_tail puts even-index items (0,2,4→fa,fc,fe) in head, odd (1,3→fb,fd) in tail reversed
     # Expected: head + tail[::-1] = [fa,fc,fe,fd,fb]
     assert [h["doc_id"] for h in out] == [
@@ -138,4 +169,4 @@ def test_maybe_expand_stitches_when_both_on(monkeypatch, tmp_path):
 def test_config_retrieval_expand_defaults_off(tmp_path):
     assert _config.retrieval_expand_enabled(str(tmp_path)) is False
     assert _config.expand_params(str(tmp_path)) == {
-        "window_n": 3, "short_doc_max_chunks": 15, "max_parents": 5, "token_budget": 6000}
+        "window_n": 3, "short_doc_max_chunks": 15, "max_parents": 5, "char_budget": 4000}

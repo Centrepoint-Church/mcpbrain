@@ -31,10 +31,25 @@ def group_by_parent(hits: list[dict]) -> list[dict]:
 
 
 _JOIN = "\n\n"
+_GAP = "\n\n[…]\n\n"  # marks a break between non-adjacent span-stitch runs
 
 
 def _by_date(chunks: list[dict]) -> list[dict]:
     return sorted(chunks, key=lambda c: (c.get("metadata") or {}).get("date", "") or "")
+
+
+def _stitch_with_gaps(chunks: list[dict]) -> str:
+    """Join chunks (already sorted by idx) with _JOIN between adjacent indices
+    and a visible _GAP marker between non-adjacent runs, so a window-stitched
+    large file never presents disjoint spans as if they were contiguous."""
+    parts: list[str] = []
+    prev_idx = None
+    for c in chunks:
+        if prev_idx is not None:
+            parts.append(_JOIN if c["idx"] == prev_idx + 1 else _GAP)
+        parts.append(c["text"])
+        prev_idx = c["idx"]
+    return "".join(parts)
 
 
 def expand_parent(store, group: dict, *, window_n: int, short_doc_max_chunks: int) -> str:
@@ -51,7 +66,7 @@ def expand_parent(store, group: dict, *, window_n: int, short_doc_max_chunks: in
         for hi in group["hit_indices"]:
             wanted.update(range(hi - window_n, hi + window_n + 1))
         kept = [c for c in chunks if c["idx"] in wanted]
-        return _JOIN.join(c["text"] for c in kept)
+        return _stitch_with_gaps(kept)
     # bare chunk: no parent context available
     return ""
 
@@ -76,27 +91,38 @@ def _head_tail(items: list) -> list:
 
 def expand_hits(store, hits: list[dict], *, window_n: int = 3,
                 short_doc_max_chunks: int = 15, max_parents: int = 5,
-                token_budget: int = 6000) -> list[dict]:
-    """Attach metadata, group by parent, cap to max_parents, expand each, enforce token budget, order head-and-tail."""
+                char_budget: int = 4000) -> list[dict]:
+    """Attach metadata, group by parent, cap to max_parents, expand each within
+    a single char budget, order head-and-tail LAST.
+
+    Selection happens first, in rank order: each parent's own text is bound to
+    char_budget (so even the FIRST parent is truncated rather than admitted
+    whole — a 27k-char single result is no longer possible), then accumulated
+    until the budget is spent; a lower-ranked parent that no longer fits is
+    dropped. Only once the final set is chosen is it `_head_tail`-reordered,
+    so the consumer (prompt_recall) receives an already-budgeted set it never
+    needs to re-truncate.
+    """
     if not hits:
         return hits
     with_meta = _attach_metadata(store, hits)
     groups = group_by_parent(with_meta)[:max_parents]
     by_doc = {h["doc_id"]: h for h in hits}
-    expanded, used = [], 0
+    results, used = [], 0
     for g in groups:
         text = expand_parent(store, g, window_n=window_n,
                              short_doc_max_chunks=short_doc_max_chunks)
         if not text:
             text = by_doc[g["rep_doc_id"]].get("text", "")
-        cost = len(text) // 4  # ~4 chars/token
-        if expanded and used + cost > token_budget:
+        text = text[:char_budget]  # bind every parent's own text to the budget
+        cost = len(text)
+        if used + cost > char_budget:
             continue  # budget exhausted; drop this (lower-ranked) parent
         used += cost
         base = by_doc[g["rep_doc_id"]]
-        expanded.append({"doc_id": base["doc_id"], "score": base.get("score", 0.0),
-                         "distance": base.get("distance", 0.0), "text": text})
-    return _head_tail(expanded)
+        results.append({"doc_id": base["doc_id"], "score": base.get("score", 0.0),
+                        "distance": base.get("distance", 0.0), "text": text})
+    return _head_tail(results)
 
 
 def maybe_expand(store, hits, *, home, expand):
