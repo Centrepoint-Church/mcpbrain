@@ -668,15 +668,11 @@ def _atomic_write(target, text: str) -> None:
 # consumes them one subagent per unit (see mcp_server.brain_enrich_units / _pull /
 # _push). This replaces the single churning pending.json + read-time manifest.
 
-# Must stay in lockstep with mcp_server._PULL_MAX_CHARS: a unit is sized so its pull
-# (unit work + rules + context) fits the cap. _UNIT_RULES_RESERVE is the room left
-# for the rules block the pull attaches.
-# Sourced from config.unit_pull_cap() — default raised from 40_000 → 60_000 to
-# pack more threads per Haiku call (Task 5.1). This module-level constant mirrors
-# the default so existing callers that pass pull_cap=_UNIT_PULL_CAP remain correct.
-# FROZEN AT IMPORT TIME — a config change to unit_pull_cap is not visible until the
-# daemon process restarts. write_units accepts pull_cap= so callers can override.
-_UNIT_PULL_CAP = config.unit_pull_cap()
+# A unit is sized so its pull (unit work + rules + context) fits the cap.
+# _UNIT_RULES_RESERVE is the room left for the rules block the pull attaches.
+# The cap itself is read from config.unit_pull_cap() AT CALL TIME (not import) so
+# a config change takes effect on the next write_units() call, no daemon restart
+# needed. write_units accepts pull_cap= so callers can still override explicitly.
 _UNIT_RULES_RESERVE = 11_000
 
 
@@ -702,7 +698,7 @@ def _pack_by_size(items, budget, sizer):
         yield cur
 
 
-def write_units(data: dict, *, home=None, pull_cap: int = _UNIT_PULL_CAP,
+def write_units(data: dict, *, home=None, pull_cap=None,
                 window: int = 600) -> dict:
     """Turn a prepared batch dict (threads + optional blocks + context) into
     immutable, pre-sized work-unit files under enrich_queue/units/, plus a shared
@@ -711,6 +707,8 @@ def write_units(data: dict, *, home=None, pull_cap: int = _UNIT_PULL_CAP,
     re-running on the same un-enriched work is idempotent. Honors a window cap
     (backpressure): when the queue already holds >= window undrained units, the
     cycle produces no new ones. Returns a summary."""
+    if pull_cap is None:
+        pull_cap = config.unit_pull_cap(home)
     from pathlib import Path
     queue = (config.app_dir() if home is None else Path(home)) / "enrich_queue"
     units_dir = queue / "units"
