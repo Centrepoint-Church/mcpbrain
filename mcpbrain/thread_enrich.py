@@ -44,6 +44,27 @@ class ThreadBatch:
     chunks: list[dict] = field(default_factory=list)
 
 
+def _chunk_key(meta: dict, doc_id: str) -> str:
+    """Message-identity key shared by _group_key and reassemble_thread: file_id,
+    else message_id, else doc_id.
+
+    This is the portion of the precedence chain that genuinely means the same
+    thing at both call sites — "which message/document does this chunk belong
+    to" — so it lives in one place rather than as separately-maintained
+    fallback chains that could silently drift apart (reassemble_thread used to
+    check file_id first with its own copy of this exact chain).
+
+    thread_id is deliberately NOT part of this shared helper: _group_key checks
+    it itself, one level up, because it answers a different question ("which
+    THREAD does this chunk belong to", for grouping the whole unenriched
+    backlog into per-thread batches). reassemble_thread runs WITHIN an
+    already-thread-grouped batch, where thread_id is constant across every
+    message in a multi-message thread — folding it into this shared key would
+    wrongly collapse those distinct messages into one.
+    """
+    return meta.get("file_id") or meta.get("message_id") or doc_id
+
+
 def _group_key(chunk: dict) -> str:
     """Grouping key for a chunk: thread_id, else file_id, else message_id, else
     doc_id.
@@ -61,8 +82,7 @@ def _group_key(chunk: dict) -> str:
     batch whose message_id (file_id) matched no chunk, so drain never applied it.
     """
     meta = chunk.get("metadata") or {}
-    return (meta.get("thread_id") or meta.get("file_id")
-            or meta.get("message_id") or chunk["doc_id"])
+    return meta.get("thread_id") or _chunk_key(meta, chunk["doc_id"])
 
 
 def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:
@@ -112,12 +132,9 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         meta = chunk.get("metadata") or {}
         # Drive documents carry a file_id but no message_id. Group all chunks
         # of the same document under the file_id so a multi-chunk doc assembles
-        # into one "message" instead of N one-line stubs.
-        file_id = meta.get("file_id")
-        if file_id:
-            mid = file_id
-        else:
-            mid = meta.get("message_id") or chunk["doc_id"]
+        # into one "message" instead of N one-line stubs. Shared with
+        # _group_key via _chunk_key so the two cannot drift on this precedence.
+        mid = _chunk_key(meta, chunk["doc_id"])
         if mid not in by_message:
             by_message[mid] = []
             order.append(mid)
