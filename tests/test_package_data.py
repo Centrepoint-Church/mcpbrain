@@ -36,9 +36,10 @@ def test_shared_oauth_client_present():
 
 
 def test_enrich_prompt_doc_present():
-    # The extractor prompt is read at runtime by extractor_driver.run_extractor
-    # via Path(__file__).with_name. packages.find skips .md, so without the
-    # package-data declaration a clean install has no prompt to feed Claude.
+    # The extractor prompt is the canonical source mcp_server._enrich_rules()
+    # reads (via Path(__file__).with_name) to serve the brain_enrich_pull MCP
+    # tool. packages.find skips .md, so without the package-data declaration a
+    # clean install has no prompt to serve.
     prompt = _pkg_dir() / "enrich_prompt.md"
     assert prompt.is_file(), f"extractor prompt missing at {prompt}"
 
@@ -57,11 +58,11 @@ def test_records_claude_template_present():
 
 
 def test_maintenance_subpackage_excluded_from_wheel():
-    # mcpbrain/maintenance/ holds maintainer-only local-claude backfill tooling
-    # (extractor_driver). It is reachable only from tests, never from the
-    # shipped daemon, so pyproject's packages.find must exclude it. Guard that
-    # exclusion is declared (offline, builds nothing — pairs with the CI
-    # wheel-inspection step).
+    # mcpbrain/maintenance/ holds maintainer-only local backfill/cleanup
+    # tooling (graph_cleanup, salience_backfill). It is reachable only from
+    # tests, never from the shipped daemon, so pyproject's packages.find must
+    # exclude it. Guard that exclusion is declared (offline, builds nothing —
+    # pairs with the CI wheel-inspection step).
     import tomllib
 
     repo_root = Path(__file__).resolve().parents[1]

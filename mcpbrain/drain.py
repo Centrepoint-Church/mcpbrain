@@ -8,9 +8,9 @@ entity resolution, and deletes the file once every part of it succeeded. A
 malformed or contract-violating file is moved to enrich_inbox/bad/ rather than
 crashing the daemon. One bad item never aborts the batch.
 
-Home resolution mirrors prepare.py / extractor_driver.py: spool paths resolve
-under config.app_dir() (which reads MCPBRAIN_HOME), with an optional home=
-override taking precedence.
+Home resolution mirrors prepare.py: spool paths resolve under config.app_dir()
+(which reads MCPBRAIN_HOME), with an optional home= override taking
+precedence.
 
 The apply() seam
 ----------------
