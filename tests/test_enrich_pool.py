@@ -34,3 +34,42 @@ def test_pending_excludes_live_leases(tmp_path):
     claims.mkdir(parents=True, exist_ok=True)
     (claims / "u-a").touch()  # live lease
     assert _pending(tmp_path) == {"pending": 1}
+
+
+def test_claim_returns_one_unit_and_leases_it(tmp_path):
+    _write_unit(tmp_path, "u-a")
+    claim = mcp_server.make_brain_enrich_claim(str(tmp_path))
+    out = asyncio.run(claim())
+    assert out["unit_id"] == "u-a"
+    assert out["kind"] == "thread" and out["threads"]
+    assert "rules" not in out                       # with_rules defaults False
+    assert (tmp_path / "enrich_queue" / "claims" / "u-a").exists()  # leased
+
+
+def test_claim_never_hands_out_the_same_unit_twice(tmp_path):
+    _write_unit(tmp_path, "u-a")
+    _write_unit(tmp_path, "u-b")
+    claim = mcp_server.make_brain_enrich_claim(str(tmp_path))
+    first = asyncio.run(claim())["unit_id"]
+    second = asyncio.run(claim())["unit_id"]
+    assert {first, second} == {"u-a", "u-b"}         # distinct
+    assert asyncio.run(claim()) == {"empty": True}   # drained
+
+
+def test_claim_with_rules_inlines_rules(tmp_path):
+    _write_unit(tmp_path, "u-a")
+    claim = mcp_server.make_brain_enrich_claim(str(tmp_path))
+    out = asyncio.run(claim(with_rules=True))
+    assert out.get("rules") and out["rules"] == mcp_server._enrich_rules()
+
+
+def test_claim_reclaims_a_stale_lease(tmp_path):
+    _write_unit(tmp_path, "u-a")
+    claims = tmp_path / "enrich_queue" / "claims"
+    claims.mkdir(parents=True, exist_ok=True)
+    stale = claims / "u-a"
+    stale.touch()
+    old = time.time() - mcp_server._LEASE_TTL_S - 10
+    os.utime(stale, (old, old))                      # lease older than TTL
+    out = asyncio.run(mcp_server.make_brain_enrich_claim(str(tmp_path))())
+    assert out["unit_id"] == "u-a"                   # stale lease reclaimed
