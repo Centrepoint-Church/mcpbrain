@@ -1,10 +1,19 @@
 """End-to-end spool round trip: pending.json -> extraction -> drain -> graph grew.
 
-This is the plan's acceptance test. It exercises the real prepare, contract,
-drain and graph_write.apply over a seeded store. The only stand-in is the
-extractor session itself: 6.1 uses a stub extractor helper, 6.2 uses the real
-extractor_driver.run_extractor with a monkeypatched run_claude. Nothing here
-touches Claude, Gemini or the network.
+This is the plan's acceptance test. It exercises the real prepare assembly,
+contract, drain and graph_write.apply over a seeded store. The only stand-in is
+the extractor session itself: 6.1 uses a stub extractor helper, 6.2 uses the
+real extractor_driver.run_extractor with a monkeypatched run_claude. Nothing
+here touches Claude, Gemini or the network.
+
+prepare.prepare() (which wrote pending.json via _write_pending()) was deleted —
+production enrichment uses prepare_units()/write_units() (immutable work units
+under enrich_queue/units/), never a single pending.json. stub_extractor and
+extractor_driver.run_extractor still speak the pending.json dialect (neither
+was in scope for this deletion), so _prepare_and_write_pending below composes
+the same still-real group -> filter_noise -> build_pending pipeline
+prepare_units() uses and writes pending.json itself, purely as test glue to
+keep feeding them.
 
 The 6.1/6.2 tests monkeypatch prepare's indirection seams
 (_group_unenriched_threads, _reassemble_thread, the context builders,
@@ -15,6 +24,7 @@ writes entities/relations/email_context, so the "graph grew" assertion is a
 genuine integration signal.
 """
 
+import datetime as _dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +34,28 @@ import pytest
 from mcpbrain import drain, graph_write, prepare
 from mcpbrain.store import Store
 from tests.helpers import stub_extractor
+
+
+def _prepare_and_write_pending(store, home, *, thread_cap, char_budget,
+                               resolution_due):
+    """Test-only stand-in for the deleted prepare.prepare(): compose the still-
+    real group -> filter_noise -> build_pending pipeline (identical to what
+    prepare_units() does, minus the unit-queue write) and write pending.json
+    directly, so the stub extractor / real extractor_driver (both of which read
+    pending.json) still have something to consume."""
+    batches = prepare._group_unenriched_threads(store, thread_cap=thread_cap)
+    kept = prepare._filter_noise(store, batches)[:thread_cap]
+    if not kept:
+        return {"batch_id": None, "threads": 0, "merge_pairs": 0}
+    data = prepare.build_pending(store, kept, char_budget=char_budget,
+                                 now=_dt.datetime.now(_dt.timezone.utc),
+                                 resolution_due=resolution_due)
+    queue_dir = Path(home) / "enrich_queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    (queue_dir / "pending.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False))
+    return {"batch_id": data["batch_id"], "threads": len(data["threads"]),
+            "merge_pairs": len(data["merge_review"])}
 
 
 # --- batch object the prepare seams return --------------------------------
@@ -155,8 +187,8 @@ def test_pending_to_drain_round_trip(store, home, monkeypatch):
     ents_before = _entity_count(store)
     rels_before = _relation_count(store)
 
-    prep = prepare.prepare(store, thread_cap=20, char_budget=24000,
-                           resolution_due=False)
+    prep = _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
+                                      resolution_due=False)
     assert prep["threads"] == 2
     pending_path = home / "enrich_queue" / "pending.json"
     assert pending_path.exists()
@@ -185,7 +217,8 @@ def test_round_trip_idempotent_second_drain_noop(store, home, monkeypatch):
     batches, messages_by_thread = _two_thread_setup(store)
     _patch_prepare_seams(monkeypatch, batches, messages_by_thread)
 
-    prepare.prepare(store, thread_cap=20, char_budget=24000, resolution_due=False)
+    _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
+                               resolution_due=False)
     stub_extractor.run_stub_extractor(home)
     drain.drain(store, home=home, apply=graph_write.apply)
 
@@ -221,8 +254,8 @@ def test_round_trip_with_merge_answers(store, home, monkeypatch):
     # Real _merge_review_block (merge_review_pairs left None).
     _patch_prepare_seams(monkeypatch, batches, messages_by_thread)
 
-    prep = prepare.prepare(store, thread_cap=20, char_budget=24000,
-                           resolution_due=True)
+    prep = _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
+                                      resolution_due=True)
     assert prep["merge_pairs"] >= 1, "the seeded pair should surface for adjudication"
 
     stub_extractor.run_stub_extractor(home)
@@ -288,8 +321,8 @@ def test_real_phase1_round_trip(store, home, monkeypatch):
     rels_before = _relation_count(store)
 
     # Real prepare: no prepare.* seam is patched here.
-    prep = prepare.prepare(store, thread_cap=20, char_budget=24000,
-                           resolution_due=False)
+    prep = _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
+                                      resolution_due=False)
 
     # Only the human thread survives the real noise filter.
     assert prep["threads"] == 1
@@ -334,7 +367,8 @@ def test_integration_driver_round_trip(store, home, monkeypatch):
     ents_before = _entity_count(store)
     rels_before = _relation_count(store)
 
-    prepare.prepare(store, thread_cap=20, char_budget=24000, resolution_due=False)
+    _prepare_and_write_pending(store, home, thread_cap=20, char_budget=24000,
+                               resolution_due=False)
 
     # Fake run_claude: parse the pending payload off the end of the prompt and
     # build the same batch the stub extractor would, returning it as JSON text.

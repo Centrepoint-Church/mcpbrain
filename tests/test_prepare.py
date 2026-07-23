@@ -222,32 +222,10 @@ def test_guard_shop_today_cta_is_noise():
 
 # --- 2.2 noise threads skipped + marked enriched ---------------------------
 
-def test_prepare_skips_noise_threads_and_marks_them(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    noise = FakeBatch("t-noise", ["d-n1"],
-                      [_msg("m1", "noreply@x.com", "2026-06-01", "Newsletter", "x")])
-    good = FakeBatch("t-good", ["d-g1"],
-                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B", "x")])
-    store = FakeStore()
-    monkeypatch.setattr(prepare, "_group_unenriched_threads",
-                        lambda store, **kw: [noise, good])
-    # The noise filter reassembles each batch's chunks into messages, then runs
-    # thread_is_noise on those messages. _stub_reassemble returns the chunks as
-    # message dicts, so the noise lead carries the noreply sender.
-    _stub_reassemble(monkeypatch)
-    _stub_context(monkeypatch)
-
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-
-    data = _read_pending(tmp_path)
-    assert [t["thread_id"] for t in data["threads"]] == ["t-good"]
-    assert ["d-n1"] in store.marked
-
-
 def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     # The work-queue producer: prepare_units groups + builds + writes immutable unit
-    # files + a shared context.json (no pending.json), skipping noise threads.
+    # files + a shared context.json (no pending.json), skipping noise threads and
+    # marking their chunks enriched so they never re-queue.
     import json
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     # This test exercises unit-writing mechanics with stub batches; the salience
@@ -274,7 +252,7 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
     assert summary["units_written"] == len(units) >= 1
     assert (tmp_path / "enrich_queue" / "context.json").exists()
-    # only the non-noise thread is enriched (noise filtered, like prepare())
+    # only the non-noise thread is enriched (noise filtered, like the old prepare())
     tids = set()
     for u in units:
         d = json.loads(u.read_text())
@@ -282,15 +260,18 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
             tids.update(t["thread_id"] for t in d["threads"])
     assert tids == {"t-good"}
     assert not (tmp_path / "enrich_queue" / "pending.json").exists()  # no single spool
+    # the noise thread's chunk was marked enriched by _filter_noise so it never re-queues
+    assert ["d-n1"] in store.marked
 
 
-def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
+def test_filter_noise_runs_on_reassembled_messages(monkeypatch):
     # Realistic Phase-1 flow: raw chunks do NOT carry top-level sender/subject;
     # that data lives inside chunk metadata until reassemble_thread builds the
     # messages envelope. _reassemble_thread is the seam that turns the raw chunks
     # into message dicts. Noise detection must run on those messages, not on the
     # raw chunks (which would expose empty fields and never detect noise).
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    # Exercises _filter_noise directly (the surviving noise-filter primitive
+    # both prepare_units and the old prepare() were built on).
     raw_chunk = {"doc_id": "d-n1", "text": "newsletter body",
                  "metadata": {"thread_id": "t-noise", "sender": "noreply@x.com",
                               "subject": "Newsletter", "date": "2026-06-01"}}
@@ -300,8 +281,6 @@ def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
                        "metadata": {"thread_id": "t-good", "sender": "joel@example.org",
                                     "subject": "Hall B", "date": "2026-06-01"}}])
     store = FakeStore()
-    monkeypatch.setattr(prepare, "_group_unenriched_threads",
-                        lambda store, **kw: [noise, good])
 
     def fake_reassemble(chunks):
         # Build a message-shaped lead from each raw chunk's metadata.
@@ -312,13 +291,10 @@ def test_filter_noise_runs_on_reassembled_messages(tmp_path, monkeypatch):
         ]
 
     monkeypatch.setattr(prepare, "_reassemble_thread", fake_reassemble)
-    _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
+    kept = prepare._filter_noise(store, [noise, good])
 
-    data = _read_pending(tmp_path)
-    assert [t["thread_id"] for t in data["threads"]] == ["t-good"]
+    assert [b.thread_id for b in kept] == ["t-good"]
     assert ["d-n1"] in store.marked
 
 
@@ -472,21 +448,18 @@ def test_prepare_units_trivial_short_circuit_respects_kill_switch(tmp_path, monk
 
 # --- 2.3 thread block shape ------------------------------------------------
 
-def test_prepare_thread_block_shape(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+def test_prepare_thread_block_shape(monkeypatch):
+    # Exercises _thread_block directly — the surviving assembly primitive both
+    # build_pending (and, via it, prepare_units) call for each batch.
     batch = FakeBatch("t-a", ["d-a1"],
                       [_msg("m1", "joel@example.org", "2026-06-01", "Hall B", "body text")])
     store = FakeStore(
         contexts={"t-a": "Prior summary."},
         actions={"t-a": [{"id": 42, "owner": "Sam", "text": "Lodge it.", "deadline": "2026-06-10"}]},
     )
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
-    _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-    t = _read_pending(tmp_path)["threads"][0]
+    t = prepare._thread_block(store, batch)
 
     assert t["thread_id"] == "t-a"
     assert t["prior_thread_context"] == "Prior summary."
@@ -546,31 +519,25 @@ def test_thread_block_org_hint_empty_when_no_messages(monkeypatch):
     assert block["org_hint"] == ""
 
 
-def test_prepare_messages_ordered_by_date(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+def test_prepare_messages_ordered_by_date(monkeypatch):
     batch = FakeBatch("t-a", ["d-a1", "d-a2"], [
         _msg("m2", "a@b.com", "2026-06-02", "Re: x", "second"),
         _msg("m1", "a@b.com", "2026-06-01", "x", "first"),
     ])
     store = FakeStore()
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
-    _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-    msgs = _read_pending(tmp_path)["threads"][0]["messages"]
+    msgs = prepare._thread_block(store, batch)["messages"]
     assert [m["message_id"] for m in msgs] == ["m1", "m2"]
 
 
 # --- 2.4 context + cap + long-thread guard ---------------------------------
 
-def test_prepare_attaches_context(tmp_path, monkeypatch):
+def test_build_pending_attaches_context(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"],
                       [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore()
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
 
     captured = {}
@@ -583,9 +550,9 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "_org_domain_lines",
                         lambda: ["example.org → Acme"])
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-    ctx = _read_pending(tmp_path)["context"]
+    data = prepare.build_pending(store, [batch], char_budget=100000,
+                                 now=_NOW, resolution_due=False)
+    ctx = data["context"]
 
     assert captured["ids"] == ["t-a"]
     assert ctx["known_people"][0]["name"] == "Joel Chelliah"
@@ -594,10 +561,15 @@ def test_prepare_attaches_context(tmp_path, monkeypatch):
     assert ctx["org_domain_map"] == ["example.org → Acme"]
 
 
-def test_prepare_caps_threads(tmp_path, monkeypatch):
+def test_prepare_units_caps_threads(tmp_path, monkeypatch):
+    # Thread-cap enforcement lives in prepare_units (kept = non_trivial[:thread_cap]),
+    # not in build_pending, which assembles whatever batches it is given.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
     batches = [
-        FakeBatch(f"t-{i}", [f"d-{i}"], [_msg(f"m{i}", "a@b.com", "2026-06-01", "x", "body")])
+        FakeBatch(f"t-{i}", [f"d-{i}"],
+                  [_msg(f"m{i}", "a@b.com", "2026-06-01", "x",
+                        "Can you confirm the Hall B booking for Sunday?")])
         for i in range(5)
     ]
     store = FakeStore()
@@ -605,12 +577,12 @@ def test_prepare_caps_threads(tmp_path, monkeypatch):
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=2, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-    assert len(_read_pending(tmp_path)["threads"]) == 2
+    summary = prepare.prepare_units(store, thread_cap=2, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+    assert summary["threads"] == 2
 
 
-def test_prepare_long_thread_guard(tmp_path, monkeypatch):
+def test_build_pending_long_thread_guard(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     big = "x" * 60
     batch = FakeBatch("t-long", ["d-1", "d-2", "d-3"], [
@@ -619,13 +591,12 @@ def test_prepare_long_thread_guard(tmp_path, monkeypatch):
         _msg("m3", "a@b.com", "2026-06-03", "s3", big),
     ])
     store = FakeStore(contexts={"t-long": "Prior."})
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100,
-                    resolution_due=False, now=_NOW)
-    threads = _read_pending(tmp_path)["threads"]
+    data = prepare.build_pending(store, [batch], char_budget=100,
+                                 now=_NOW, resolution_due=False)
+    threads = data["threads"]
 
     assert len(threads) > 1
     assert all(t["thread_id"] == "t-long" for t in threads)
@@ -688,36 +659,34 @@ def test_split_long_thread_carries_org_hint_across_parts():
 
 # --- 2.5 merge-review block ------------------------------------------------
 
-def test_prepare_no_merge_review_when_not_due(tmp_path, monkeypatch):
+def test_build_pending_no_merge_review_when_not_due(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore(entities=[
         {"id": "joel-chelliah", "name": "Joel Chelliah", "type": "person"},
         {"id": "joel-c", "name": "Joel C", "type": "person"},
     ])
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=False, now=_NOW)
-    assert _read_pending(tmp_path)["merge_review"] == []
+    data = prepare.build_pending(store, [batch], char_budget=100000,
+                                 now=_NOW, resolution_due=False)
+    assert data["merge_review"] == []
 
 
-def test_prepare_appends_merge_review_when_due(tmp_path, monkeypatch):
+def test_build_pending_appends_merge_review_when_due(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore(entities=[
         {"id": "joel-chelliah", "name": "Joel Chelliah", "type": "person"},
         {"id": "joel-c", "name": "Joel C", "type": "person"},
     ])
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
 
-    prepare.prepare(store, thread_cap=10, char_budget=100000,
-                    resolution_due=True, now=_NOW)
-    mr = _read_pending(tmp_path)["merge_review"]
+    data = prepare.build_pending(store, [batch], char_budget=100000,
+                                 now=_NOW, resolution_due=True)
+    mr = data["merge_review"]
     assert len(mr) == 1
     pair = mr[0]
     assert pair["pair_id"] == "joel-c|joel-chelliah"
@@ -732,57 +701,35 @@ def test_merge_pair_id_stable():
     assert prepare._merge_pair(a, b)["pair_id"] == "joel-c|joel-chelliah"
 
 
-# --- 2.6 atomic write ------------------------------------------------------
+# --- 2.6 atomic write (now exercised through write_units, see below) -------
+#
+# The old test_prepare_writes_pending_file / test_prepare_overwrites_previous
+# tested _write_pending's single-file pending.json shape and its per-cycle
+# whole-file overwrite semantics. Neither has a surviving equivalent:
+# write_units (the real producer) writes a bounded QUEUE of immutable,
+# content-addressed unit files that ACCUMULATE across cycles rather than being
+# overwritten — the opposite of the old semantics. build_pending's assembled
+# dict shape (batch_id/prepared_at format) is covered by
+# test_build_pending_returns_dict_without_writing below; write_units' actual
+# file-writing mechanics are covered by test_prepare_units_writes_unit_files_and_context
+# above and the test_write_units_* tests below.
 
-def test_prepare_writes_pending_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    batch = FakeBatch("t-a", ["d-a1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
-    store = FakeStore()
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [batch])
-    _stub_reassemble(monkeypatch)
-    _stub_context(monkeypatch)
-
-    summary = prepare.prepare(store, thread_cap=10, char_budget=100000,
-                              resolution_due=False, now=_NOW)
-    data = _read_pending(tmp_path)
-    assert set(data) >= {"batch_id", "prepared_at", "context", "threads", "merge_review"}
-    assert data["batch_id"] == "batch-20260602-093000"
-    assert data["prepared_at"] == "2026-06-02T09:30:00Z"
-    assert summary == {"batch_id": "batch-20260602-093000", "threads": 1, "merge_pairs": 0}
-
-
-def test_prepare_overwrites_previous(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = FakeStore()
-    _stub_reassemble(monkeypatch)
-    _stub_context(monkeypatch)
-
-    b1 = FakeBatch("t-1", ["d-1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [b1])
-    prepare.prepare(store, thread_cap=10, char_budget=100000, resolution_due=False, now=_NOW)
-
-    b2 = FakeBatch("t-2", ["d-2"], [_msg("m2", "a@b.com", "2026-06-01", "x", "body")])
-    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [b2])
-    import datetime as _dt
-    later = _dt.datetime(2026, 6, 2, 10, 0, 0, tzinfo=_dt.timezone.utc)
-    prepare.prepare(store, thread_cap=10, char_budget=100000, resolution_due=False, now=later)
-
-    data = _read_pending(tmp_path)
-    assert [t["thread_id"] for t in data["threads"]] == ["t-2"]
-
-
-def test_prepare_no_unenriched_writes_empty_or_skips(tmp_path, monkeypatch):
+def test_prepare_units_no_unenriched_writes_no_unit_files(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = FakeStore()
     monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: [])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
 
-    summary = prepare.prepare(store, thread_cap=10, char_budget=100000,
-                              resolution_due=False, now=_NOW)
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
     assert summary["threads"] == 0
-    pending = tmp_path / "enrich_queue" / "pending.json"
-    assert not pending.exists()
+    units_dir = tmp_path / "enrich_queue" / "units"
+    units = list(units_dir.glob("*.json")) if units_dir.exists() else []
+    assert units == []
+    # context.json is reference data, refreshed every cycle regardless of work.
+    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    assert not (tmp_path / "enrich_queue" / "pending.json").exists()
 
 
 # --- build_pending: assemble dict without writing --------------------------
@@ -891,9 +838,3 @@ def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
         f"Expected fewer units at high cap ({summary_big['units_written']}) than "
         f"low cap ({summary_small['units_written']})"
     )
-
-
-# --- helpers ---------------------------------------------------------------
-
-def _read_pending(home):
-    return json.loads((home / "enrich_queue" / "pending.json").read_text())
