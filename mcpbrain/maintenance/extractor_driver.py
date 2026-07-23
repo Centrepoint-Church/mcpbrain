@@ -43,8 +43,9 @@ def _read_prompt() -> str:
 
 
 def _write_inbox(home_dir: Path, batch_id: str, batch: dict) -> Path:
-    """Write the inbox batch file atomically (temp + os.replace), mirroring
-    prepare._write_pending. No stray temp on failure. Returns the path.
+    """Write the inbox batch file atomically (temp + os.replace), the same
+    pattern prepare._atomic_write uses. No stray temp on failure. Returns the
+    path.
     """
     inbox_dir = home_dir / "enrich_inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)

@@ -341,11 +341,12 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     Sync each provided source and embed via run_sync_cycle (the tested core),
     then enrich according to enrich_mode:
 
-      - "spool": prepare.prepare writes pending.json from the un-enriched threads,
-        then drain.drain applies whatever the out-of-band extractor session has
-        produced since last cycle. run_cycle does NOT call the extractor itself.
-        resolution_due gates the merge-review block in prepare, so it is appended
-        exactly when the deterministic resolve tier would also fire.
+      - "spool": prepare.prepare_units writes immutable work units to
+        enrich_queue/units/, then drain.drain applies whatever an out-of-band
+        extractor session has pushed to enrich_inbox/ since last cycle.
+        run_cycle does NOT call the extractor itself. resolution_due gates the
+        merge-review block in prepare, so it is appended exactly when the
+        deterministic resolve tier would also fire.
       - "off": skip enrichment entirely.
 
     enrich_mode defaults to "off" (matching config.enrich_mode's default), so a
@@ -487,8 +488,9 @@ class Daemon:
         self._model_downloading = False
         self._model_error = None
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
-        # Enrichment source: spool | gemini | off. Defaults to "off" so a
-        # newly-constructed daemon enriches nothing until explicitly configured.
+        # Enrichment source: "spool" (the per-unit work queue) or "off".
+        # Defaults to "off" so a newly-constructed daemon enriches nothing
+        # until explicitly configured.
         # apply_config re-reads it from config under _config_lock, the same way
         # _enrich_client is re-wired, and run_one snapshots it per cycle.
         self._enrich_mode = enrich_mode
@@ -535,7 +537,7 @@ class Daemon:
         self._last_lint = None
         # Periodic thread synthesis is OFF unless synthesise_interval_s is set.
         # Cadence-gated: builds synthesis requests and stashes them so run_one
-        # can pass them to prepare.prepare() in the next spool cycle.
+        # can pass them to prepare.prepare_units() in the next spool cycle.
         self._synthesise_interval_s: float | None = synthesise_interval_s
         self._last_synthesise = None
         self._pending_synthesis: list = []
@@ -549,7 +551,7 @@ class Daemon:
         self._last_waiting_on = None
         # Periodic block requests (profile_synthesis + community_synthesis + memory_distil)
         # are OFF unless blocks_interval_s is set. Cadence-gated: builds extra_blocks
-        # requests and stashes them so run_one() can pass them to prepare.prepare().
+        # requests and stashes them so run_one() can pass them to prepare.prepare_units().
         self._blocks_interval_s: float | None = blocks_interval_s
         self._last_blocks = None
         self._pending_blocks: dict = {}
