@@ -1,11 +1,14 @@
-"""End-to-end loop: FakeGoogleService -> real sync -> real prepare ->
+"""End-to-end loop: FakeGoogleService -> real sync -> real prepare_units ->
 hand-written enrich_inbox (stubbed Cowork extractor) -> real drain ->
 real graph_write.apply -> graph + dashboard.
 
 Only two things are faked: Google's API (FakeGoogleService) and the Claude
 enrichment step (a hand-authored, contract-valid enrich_inbox file). Everything
-between is the real code path. The non-empty guards make a no-op pipeline fail
-loudly.
+between is the real code path (prepare_units — the work-queue producer real
+daemon cycles call; prepare.prepare()/pending.json were deleted, so the hand
+extraction is built from the immutable work-unit files under
+enrich_queue/units/ instead of a single pending.json). The non-empty guards
+make a no-op pipeline fail loudly.
 """
 import json
 
@@ -34,14 +37,25 @@ def test_gmail_backfill_lands_chunks(e2e_store, fake_google):
     assert hits, "a known fixture phrase must be findable"
 
 
-def test_prepare_spools_pending(e2e_store, fake_google, e2e_home):
+def _read_unit_threads(home):
+    """Collect every thread entry across enrich_queue/units/*.json (kind=="thread")."""
+    threads = []
+    units_dir = home / "enrich_queue" / "units"
+    for u in units_dir.glob("*.json") if units_dir.exists() else []:
+        d = json.loads(u.read_text())
+        if d["kind"] == "thread":
+            threads.extend(d["threads"])
+    return threads
+
+
+def test_prepare_units_spools_work_units(e2e_store, fake_google, e2e_home):
     backfill_gmail(fake_google, e2e_store, after="2026/01/01")
-    summary = prepare.prepare(e2e_store, thread_cap=20, char_budget=24000,
-                              resolution_due=False)
+    summary = prepare.prepare_units(e2e_store, thread_cap=20, char_budget=24000,
+                                    resolution_due=False)
     assert summary["threads"] >= 2, "non-noise fixture threads must spool"
-    pending = json.loads((e2e_home / "enrich_queue" / "pending.json").read_text())
-    tids = {t["thread_id"] for t in pending["threads"]}
-    assert tids, "pending.json must list the synced threads"
+    tids = {t["thread_id"] for t in _read_unit_threads(e2e_home)}
+    assert tids, "unit files must list the synced threads"
+    assert not (e2e_home / "enrich_queue" / "pending.json").exists()
 
 
 def _hand_extraction(thread):
@@ -69,22 +83,24 @@ def _hand_extraction(thread):
 
 
 def _run_full_loop(store, google, home):
-    """Run sync -> prepare -> drain once. Returns (batch dict, drain summary).
+    """Run sync -> prepare_units -> drain once. Returns (batch dict, drain summary).
 
-    Home-consistency note: `prepare` resolves its home from MCPBRAIN_HOME
+    Home-consistency note: `prepare_units` resolves its home from MCPBRAIN_HOME
     (config.app_dir()) while `drain` is given home=str(home) explicitly. The
-    e2e_home fixture sets MCPBRAIN_HOME to that same path, so the pending.json
-    prepare writes is exactly the one drain consumes. If the two ever diverged
-    (the "home split-brain" class of bug), drain would find an empty inbox and
-    summary["applied"] would be 0 — which the assertions below would catch.
+    e2e_home fixture sets MCPBRAIN_HOME to that same path, so the work units
+    prepare_units writes are exactly the ones this hand-written inbox batch is
+    built from. If the two ever diverged (the "home split-brain" class of bug),
+    drain would find an empty inbox and summary["applied"] would be 0 — which
+    the assertions below would catch.
     """
     backfill_gmail(google, store, after="2026/01/01")
-    prepare.prepare(store, thread_cap=20, char_budget=24000, resolution_due=False)
-    pending = json.loads((home / "enrich_queue" / "pending.json").read_text())
-    batch = {"batch_id": pending["batch_id"],
-             "extractions": [_hand_extraction(t) for t in pending["threads"]],
+    prepare.prepare_units(store, thread_cap=20, char_budget=24000, resolution_due=False)
+    threads = _read_unit_threads(home)
+    batch_id = "e2e-hand-batch"
+    batch = {"batch_id": batch_id,
+             "extractions": [_hand_extraction(t) for t in threads],
              "merge_answers": []}
-    (home / "enrich_inbox" / f"{batch['batch_id']}.json").write_text(json.dumps(batch))
+    (home / "enrich_inbox" / f"{batch_id}.json").write_text(json.dumps(batch))
     summary = drain.drain(store, home=str(home), apply=graph_write.apply)
     return batch, summary
 
