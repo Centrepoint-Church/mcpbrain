@@ -18,17 +18,20 @@ cache (~10% cost) for the rest of the fan-out. Do not re-fetch the rules over th
 
 ## Protocol
 
-**Your ONLY output is the `brain_enrich_push` tool call followed by the single
-confirmation line.** Do not narrate your reasoning, do not describe the extractions in
-text, do not summarise what you found. Prose output instead of (or alongside) a real
-tool call causes the unit to be counted as derailed and re-dispatched. The push itself
-is the deliverable — everything else is noise.
+**The unit is only done once `brain_enrich_push` returns `{"written": true}`.**
+Nothing you say completes it — the coordinator checks whether the unit is still in
+the queue, not your reply text, so there is no required output format and no
+confirmation line to get right. What actually matters is that you make the real
+tool calls: narrating your reasoning or describing the extractions in prose is fine
+alongside the calls but never a substitute for them — a run that only narrates and
+never calls `brain_enrich_push` has not enriched the unit, no matter how it reads.
 
 1. Load the tools:
    `ToolSearch("select:mcp__mcpbrain__brain_enrich_pull,mcp__mcpbrain__brain_enrich_push")`.
 2. Call `brain_enrich_pull` with `unit_id=<your unit_id>` and `with_rules=false` (the
    rules are already in this prompt — passing `false` keeps them out of the uncached
-   tool result). If it returns `{"empty": true}`, return exactly `unit <unit_id>: gone`.
+   tool result). If it returns `{"empty": true}`, the unit is already gone — stop,
+   nothing to push.
 3. The result carries `context` plus the work. Follow the **Extraction rules** below
    EXACTLY:
    - `kind` `"thread"`: produce one extraction object per thread in `threads`.
@@ -43,8 +46,7 @@ is the deliverable — everything else is noise.
      a non-list will be rejected by the tool with an error.
    - For a **block unit**: pass the block answer field (`merge_answers`, `synthesis`,
      etc.); `extractions` may be omitted for block units.
-   Confirm the response is `{"written": true}`.
-5. Return ONE line only: `unit <unit_id>: <n> <kind>`, or `ERROR: <reason>`.
+   Confirm the response is `{"written": true}` — that is the entire job done.
 
 Use the MCP tools only. Do not read the spool via shell, and do not read skill or
 command files — everything you need (the unit's work + context) is in the pull
