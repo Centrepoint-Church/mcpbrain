@@ -677,8 +677,7 @@ def _atomic_write(target, text: str) -> None:
 # daemon process restarts. write_units accepts pull_cap= so callers can override.
 _UNIT_PULL_CAP = config.unit_pull_cap()
 _UNIT_RULES_RESERVE = 11_000
-_UNIT_BLOCKS = ("merge_review", "synthesis", "profile_synthesis",
-                "community_synthesis", "memory_distil", "profile_audit")
+from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
 
 
 def _unit_id(kind: str, signature: str) -> str:

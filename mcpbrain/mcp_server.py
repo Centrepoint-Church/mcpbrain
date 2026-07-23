@@ -489,8 +489,7 @@ def _routine_instructions(name: str) -> str | None:
 # exact key (see drain.py BLOCK_DRAINERS + synthesise_threads). Without forwarding
 # them, the synthesis/profile/community/memory/audit work the batch requested is
 # silently dropped on the MCP path.
-_ENRICH_ANSWER_BLOCKS = ("synthesis", "profile_synthesis", "community_synthesis",
-                         "memory_distil", "profile_audit")
+from mcpbrain.enrich_blocks import ANSWER_BLOCKS as _ENRICH_ANSWER_BLOCKS
 
 
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
