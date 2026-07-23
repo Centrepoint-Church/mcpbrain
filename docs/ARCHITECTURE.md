@@ -71,10 +71,12 @@ restart.
 
 `Centrepoint-Church/mcpbrain-plugin` ships the **skills** (`mcpbrain-enrich`,
 `mcpbrain-meeting-packs`, `mcpbrain-gardener`, `mcpbrain-reference-gardener`,
-`mcpbrain-bootstrap`, `mcpbrain-backfill`, `mcpbrain-draft-reply`), hooks,
+`mcpbrain-bootstrap`, `mcpbrain-draft-reply`), hooks,
 monitors, and the `INSTALL.md` prompt. The four recurring skills run as **Local**
 scheduled tasks (Sonnet 4.6 + Auto permission mode) and do their work through the
 `brain_*` MCP tools — so they need no working folder and no filesystem path.
+Backfilling a larger enrichment backlog is not a separate skill — it's just
+re-running the `Brain — enrich (hourly)` task on demand.
 
 ## Distribution & update topology
 
