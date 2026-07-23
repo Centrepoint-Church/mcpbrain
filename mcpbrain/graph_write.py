@@ -1529,7 +1529,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
         # immediate-embed branch below.
         store.mark_enriched([semantic_doc_id])
         if embedder is not None:
-            store.embed_doc(semantic_doc_id, embedder)
+            store.embed_doc(semantic_doc_id, embedder, home=_home)
 
     # ── 6. Thread index (thread_context) ────────────────────────────────────
     # Materialise the per-thread record every enriched thread feeds: subject,
