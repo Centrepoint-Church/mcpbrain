@@ -54,8 +54,20 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-22):** the **five** version files (+ `uv.lock`) are at `0.7.101`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.101 makes `retrieval_expand`
+- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.102`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.102 fixes the caller-half of the
+  0.7.90 org-config fallback bug:** `daemon._maybe_merge_org_config` guarded on
+  `config['fleet']['folder_id']` and early-returned for the common case (not set at setup), so it
+  never called `merge_org_config` — defeating that function's own baked-in `FLEET_FOLDER_ID`
+  fallback. Net effect: the fleet `org_pin` **and** the 0.7.101 fleet feature flags
+  (`retrieval_expand`) **reached nobody** on the common-case install. Now the daemon resolves the
+  folder the same way `merge_org_config` does (explicit → `org_defaults.FLEET_FOLDER_ID`) and only
+  skips when neither resolves. **This is the release that actually makes the fleet-wide
+  `retrieval_expand` enable take effect** — installs pick up the fix via daily wheel auto-update,
+  then stage `org_config.flags` and activate injection expansion on next daemon start. (Verified
+  end-to-end on the author box: merge staged `flags.retrieval_expand=true`, `org_pin` preserved,
+  `retrieval_expand_enabled()` → True.) The **Windows HARDWARE QA GATE from 0.7.97 remains OPEN.**
+  **0.7.101 makes `retrieval_expand`
   fleet-flippable** and enables it fleet-wide. New generic mechanism: `org-config.json`'s
   allowlist gains `"flags"`, and `config.fleet_flag(home, name, default)` resolves any feature
   flag by precedence **org overlay (`org_config.flags[name]`, org wins) → top-level config →
