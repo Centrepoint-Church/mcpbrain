@@ -348,7 +348,10 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
 
     Cursor key is 'drive:<driveId>' in sync_cursors. First run stores
     getStartPageToken(driveId=...) and returns. Delta runs page through
-    changes.list(driveId=..., corpora='drive', includeItemsFromAllDrives=True).
+    changes.list(driveId=..., includeItemsFromAllDrives=True). NOTE:
+    `corpora` is a files.list-only kwarg — changes.list rejects it (TypeError),
+    so it must never be added here (see drive.py:560 for the legitimate
+    files.list use).
     For each non-removed file: try the ingest cache first; on a miss, fetch the
     text, RE-CHECK the cache immediately before the expensive path (herd-race
     shrink, spec §A2), then extract + upsert and record the miss so the caller can
@@ -387,7 +390,6 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
         resp = service.changes().list(
             pageToken=page_token,
             driveId=drive_id,
-            corpora="drive",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             includeRemoved=True,
