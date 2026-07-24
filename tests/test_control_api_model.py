@@ -22,6 +22,17 @@ def test_model_status_reports_cached(monkeypatch):
     assert d.model_status()["cached"] is True
 
 
+def test_model_status_reports_building_during_any_warm(monkeypatch):
+    """An automatic embedder warm (e.g. a sync/enrich cycle touching
+    self._embedder, not just the wizard's ensure_model() button) must also
+    report downloading=True so the wizard isn't blind to it."""
+    monkeypatch.setattr("mcpbrain.embed.model_weights_cached", lambda: False)
+    d = _bare_daemon()
+    d._model_building = True   # NEW flag set around any lazy embedder build
+    st = d.model_status()
+    assert st["downloading"] is True
+
+
 class _ThreadSpy:
     """Stand-in for threading.Thread: records constructor calls and never
     actually runs `target` (start() is a no-op). This lets the tests below
