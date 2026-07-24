@@ -31,6 +31,14 @@ def test_ensure_copies_only_x64_from_search(tmp_path, monkeypatch):
     assert (app / "vcruntime" / "MSVCP140_1.dll").exists()
 
 
+def test_search_dirs_include_clicktorun(monkeypatch):
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    dirs = [str(d) for d in vcruntime._SEARCH_DIRS()]
+    assert any("ClickToRun" in d for d in dirs)
+    assert any("System32" in d for d in dirs)
+
+
 def test_add_search_dir_is_noop_off_windows(tmp_path, monkeypatch):
     # Off-Windows this must do nothing (no os.add_dll_directory call, no raise),
     # regardless of whether <app_dir>/vcruntime exists.

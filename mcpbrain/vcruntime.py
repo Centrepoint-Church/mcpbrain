@@ -30,7 +30,18 @@ def is_x64_pe(path: str) -> bool:
 
 def _SEARCH_DIRS():  # pragma: no cover — real system dirs, monkeypatched in tests
     root = os.environ.get("SystemRoot", r"C:\Windows")
-    return [Path(root) / "System32", Path(root) / "WinSxS"]
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    # System32/WinSxS first (fast, canonical). On ARM64 the x64 MSVCP140_1.dll
+    # can be absent there (redist version-skip); an MS-signed x64 copy commonly
+    # ships with Office ClickToRun and the VC++ / Visual Studio install dirs.
+    return [
+        Path(root) / "System32",
+        Path(root) / "WinSxS",
+        Path(pf) / "Common Files" / "microsoft shared" / "ClickToRun",
+        Path(pf) / "Microsoft Visual Studio",
+        Path(pfx86) / "Microsoft Visual Studio",
+    ]
 
 
 def ensure_vcruntime_dlls(app_dir: str) -> list[str]:

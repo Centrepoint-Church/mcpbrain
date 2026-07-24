@@ -2528,6 +2528,8 @@ def main(argv=None) -> None:
     _configure_logging()
 
     from mcpbrain import vcruntime
+    if sys.platform == "win32":
+        vcruntime.ensure_vcruntime_dlls(str(config.app_dir()))
     vcruntime.add_search_dir(str(config.app_dir()))
 
     dim = embedder_dim("bge-small")
