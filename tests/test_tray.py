@@ -4,6 +4,7 @@ The controller wraps a ControlClient and never imports pystray. run_tray (the
 pystray render layer) is manual-smoke only and not tested here.
 """
 
+import pathlib
 import sys
 
 from mcpbrain.control_client import DaemonUnavailable
@@ -182,3 +183,18 @@ def test_review_count_accessor():
     c = TrayController(FakeClient(open_findings=2))
     c.refresh()
     assert c.review_count() == 2
+
+
+def test_tray_title_within_windows_tooltip_limit():
+    """Windows NOTIFYICONDATA tooltips truncate/reject beyond 127 chars.
+
+    The tray's static pystray Icon(title=...) is a fixed literal ("mcpbrain"),
+    not the dynamic status string — so this guards the literal, not the status
+    text that gets set later via icon.title assignment. Regression guard for
+    any future move to a longer static title.
+    """
+    import re
+
+    src = pathlib.Path("mcpbrain/tray.py").read_text(encoding="utf-8")
+    m = re.search(r'title\s*=\s*"([^"]*)"', src)
+    assert m and len(m.group(1)) <= 127
