@@ -254,9 +254,9 @@ def main(argv=None) -> int:
 
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
-    print("Finish setup in the wizard (Google sign-in, your details). Backup and "
-          "recovery happen automatically. Then create the four Local scheduled tasks "
-          "from this Claude Code session (see the install prompt).")
+    print("Finish setup in the wizard (Google sign-in, your details), then click "
+          "'Connect & restart Claude Desktop' as the LAST step — that loads the brain_* "
+          "tools. Backup and recovery happen automatically.")
     webbrowser.open(url)
     return 0
 

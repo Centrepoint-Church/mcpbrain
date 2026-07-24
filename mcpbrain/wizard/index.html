@@ -148,13 +148,22 @@
     </div>
   </section>
 
+  <section id="step-connect" class="card">
+    <h2><span class="num">4</span>Connect Claude Desktop</h2>
+    <p class="desc">Do this <strong>last</strong>. It restarts Claude Desktop so it loads your brain — any open Claude Desktop chat will close and reopen.</p>
+    <div class="row">
+      <button class="primary" id="connect-btn" onclick="connectDesktop()">Connect &amp; restart Claude Desktop</button>
+      <span id="connect-state" class="badge idle">Ready when you are</span>
+    </div>
+  </section>
+
   <section id="step-projects" class="card">
-    <h2><span class="num">4</span>You're set up</h2>
+    <h2><span class="num">5</span>You're set up</h2>
     <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created back in the Claude Code session that installed mcpbrain — as <b>Local</b> scheduled tasks. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
   </section>
 
   <section id="step-backup" class="card">
-    <h2><span class="num">5</span>Backup &amp; recovery</h2>
+    <h2><span class="num">6</span>Backup &amp; recovery</h2>
     <p class="desc">Automatic. Once you connect Google, mcpbrain either <b>restores your brain</b> if a backup already exists for your account, or <b>turns on encrypted backup</b> if it's a fresh start. Your data never leaves in cleartext — only an admin-escrowed key can restore it. No setting to choose.</p>
     <div class="row">
       <span id="backup-status" class="badge idle">Waiting for Google sign-in…</span>
@@ -174,7 +183,7 @@
   </section>
 
   <section id="step-status" class="card">
-    <h2><span class="num">6</span>Status</h2>
+    <h2><span class="num">7</span>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
     <dl class="status-list">
       <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
@@ -338,6 +347,24 @@ async function refreshModel(){
 async function ensureModel(){
   try{ await P("/api/model/ensure"); }catch(e){}
   setTimeout(refreshModel, 500);
+}
+
+async function connectDesktop(){
+  const btn = $("connect-btn");
+  btn.disabled = true;
+  badge("connect-state", "Restarting…", "wait");
+  try{
+    const r = await P("/api/connect-desktop");
+    if(r && r.relaunched){
+      badge("connect-state", "Restarting Claude Desktop — reopen it to use your brain", "ok");
+    }else{
+      badge("connect-state", (r && r.detail) || "Restart Claude Desktop manually", "wait");
+      btn.disabled = false;
+    }
+  }catch(e){
+    badge("connect-state", "Restart Claude Desktop manually", "wait");
+    btn.disabled = false;
+  }
 }
 
 function renderStatus(j){
