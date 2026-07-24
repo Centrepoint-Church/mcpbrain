@@ -8,6 +8,17 @@
 
 **Tech Stack:** Python 3.12 (x64 under emulation on Windows-ARM64), stdlib `http.server` control API, fastembed/onnxruntime, networkx, PowerShell installer, plain HTML/JS wizard.
 
+## Execution Grouping (6 dispatch units)
+
+Run sequentially (shared worktree; `daemon.py` touched by several) with a review gate between each:
+
+- **G1** — Task 1 + Task 2 + Task 3 (pure source bug fixes)
+- **G2** — Task 4 + Task 6 (daemon/sync robustness)
+- **G3** — Task 5 + Task 7 (zero-touch enrichment + tray)
+- **G4** — Task 8 + Task 9 (Windows install path)
+- **G5** — Task 10 + Task 11 (one-tap Claude Desktop connect)
+- **G6** — Task 12 + Task 13 (communities fallback + local release prep; must run last — T13 depends on all)
+
 ## Global Constraints
 
 - Target version **0.7.108**; bump the **five** version files + `uv.lock` in the release task, keep them equal: `pyproject.toml`, `mcpbrain/__init__.py`, `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`, `plugin/mcpb/manifest.json`.
