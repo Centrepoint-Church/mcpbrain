@@ -995,7 +995,8 @@ def write_config(home, updates) -> dict:
     p = _path(home)
     fd, tmp = tempfile.mkstemp(dir=str(home), prefix=".config.", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)  # explicit: don't rely on mkstemp's default
+        if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
+            os.fchmod(fd, 0o600)   # explicit: don't rely on mkstemp's default
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps(cur, indent=2))
         os.replace(tmp, p)    # atomic; final file inherits the temp's 0600

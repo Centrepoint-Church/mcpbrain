@@ -107,3 +107,11 @@ def test_meeting_series_can_be_disabled(tmp_path):
 def test_topic_consolidation_can_be_disabled(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"topic_consolidation_enabled": False}))
     assert config.topic_consolidation_enabled(str(tmp_path)) is False
+
+
+def test_write_config_without_fchmod(tmp_path, monkeypatch):
+    """On platforms lacking os.fchmod (Windows), write_config must still persist."""
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    config.write_config(str(tmp_path), {"owner_full_name": "Nakia Busby"})
+    got = config.read_config(str(tmp_path))
+    assert got["owner_full_name"] == "Nakia Busby"
