@@ -251,7 +251,7 @@ class ControlServer:
             h.send_response(500); h.send_header("Content-Type","text/plain")
             h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
             return
-        html = p.read_text().replace("__MCPBRAIN_TOKEN__", self.token).encode()
+        html = p.read_text(encoding="utf-8").replace("__MCPBRAIN_TOKEN__", self.token).encode()
         h.send_response(200); h.send_header("Content-Type","text/html")
         h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
 
@@ -262,7 +262,7 @@ class ControlServer:
             h.send_response(500); h.send_header("Content-Type","text/plain")
             h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
             return
-        html = p.read_text().replace("__MCPBRAIN_TOKEN__", self.token).encode()
+        html = p.read_text(encoding="utf-8").replace("__MCPBRAIN_TOKEN__", self.token).encode()
         h.send_response(200); h.send_header("Content-Type","text/html")
         h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
 
@@ -282,7 +282,7 @@ class ControlServer:
             h.send_response(500); h.send_header("Content-Type", "text/plain")
             h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
             return
-        html = p.read_text().replace("__MCPBRAIN_TOKEN__", self.token).encode()
+        html = p.read_text(encoding="utf-8").replace("__MCPBRAIN_TOKEN__", self.token).encode()
         h.send_response(200); h.send_header("Content-Type", "text/html")
         h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
 
