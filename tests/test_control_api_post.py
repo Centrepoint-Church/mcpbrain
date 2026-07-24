@@ -55,6 +55,33 @@ def _post_raw(url, token, raw: bytes):
     return urllib.request.urlopen(req)
 
 
+def test_serve_wizard_reads_utf8(tmp_path, monkeypatch):
+    """Wizard HTML with non-ASCII must be read as UTF-8, not the platform default."""
+    import mcpbrain.control_api as ca
+    # Simulate a cp1252 default decoder to prove encoding= is explicit.
+    real_read_text = ca.Path.read_text
+    calls = {}
+    def spy(self, *a, **k):
+        calls["encoding"] = k.get("encoding")
+        return real_read_text(self, *a, **k)
+    monkeypatch.setattr(ca.Path, "read_text", spy)
+    # Minimal fake handler capturing written bytes
+    class H:
+        def __init__(self): self.buf = b""
+        def send_response(self, *_): pass
+        def send_header(self, *_): pass
+        def end_headers(self): pass
+        class _W:
+            def __init__(self, o): self.o = o
+            def write(self, b): self.o.buf += b
+        @property
+        def wfile(self): return H._W(self)
+    srv = ca.ControlServer.__new__(ca.ControlServer)
+    srv.token = "T"
+    srv._serve_wizard(H())
+    assert calls["encoding"] == "utf-8"
+
+
 def test_post_endpoints(tmp_path):
     d = FakeDaemon()
     srv = ControlServer(d, home=str(tmp_path))
