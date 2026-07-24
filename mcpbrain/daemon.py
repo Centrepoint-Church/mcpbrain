@@ -983,6 +983,15 @@ class Daemon:
         """
         home = str(app_dir())
         config.write_config(home, body)
+        # Zero-touch enrichment: the first time an install becomes configured
+        # (identity + >=1 org saved), turn enrichment on so the daemon starts
+        # spooling the un-enriched backlog. Only auto-flip when the caller didn't
+        # set enrich_mode itself (an explicit "off" is honored) and it's still the
+        # "off" default — so a later save won't re-flip a deliberate choice.
+        if ("enrich_mode" not in body
+                and config.is_configured(home)
+                and config.enrich_mode(home) == "off"):
+            config.write_config(home, {"enrich_mode": "spool"})
         # Build both off-lock (network/IO work), then set all daemon-config
         # mutation under _config_lock so the loop thread never reads a new
         # _backup paired with a stale interval. Keep the lock hold time to
