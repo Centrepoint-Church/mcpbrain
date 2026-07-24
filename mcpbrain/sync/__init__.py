@@ -62,8 +62,11 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         result["calendar"] = sync_calendar(calendar_service, store)
         result["embedded"] += index_pending(store, embedder, home=home)
     if drive_service is not None:
-        result["drive"] = sync_drive(drive_service, store)
-        result["embedded"] += index_pending(store, embedder, home=home)
+        try:
+            result["drive"] = sync_drive(drive_service, store)
+            result["embedded"] += index_pending(store, embedder, home=home)
+        except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
+            log.warning("sync: My-Drive sync failed (cycle continues, retries next cycle): %s", exc)
 
     # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
     # to read config from, the cache enabled, and a fleet pin present. Without a
