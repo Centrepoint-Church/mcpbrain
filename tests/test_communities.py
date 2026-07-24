@@ -234,3 +234,39 @@ def test_run_empty_graph_noop(tmp_path):
     # Tables must be empty.
     assert s.list_communities() == []
     assert s.communities_for(["alpha", "beta"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Windows-emulation fallback — greedy-modularity when igraph/leidenalg unavailable
+# ---------------------------------------------------------------------------
+
+def test_greedy_modularity_fallback_populates(monkeypatch):
+    """When igraph/leidenalg fail to import (e.g. x64 emulation on ARM64),
+    detect_communities must fall back to a networkx greedy-modularity partition
+    instead of returning {"skipped": "leiden unavailable"}."""
+    import builtins
+
+    import networkx as nx
+
+    from mcpbrain import communities
+
+    G = nx.Graph()
+    G.add_edge("a", "b", weight=1)
+    G.add_edge("b", "c", weight=1)
+    G.add_edge("x", "y", weight=1)
+    G.add_edge("y", "z", weight=1)
+
+    # Force the leiden import to fail so the fallback runs.
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name in ("igraph", "leidenalg"):
+            raise ImportError(name)
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    part = communities.detect_communities(G)
+    assert isinstance(part, dict)
+    assert "skipped" not in part
+    assert len(part) >= 1

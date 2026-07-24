@@ -71,10 +71,8 @@ def detect_communities(G: nx.Graph) -> dict:
         import igraph as ig
         import leidenalg
     except ImportError:
-        log.warning("leiden stack unavailable; skipping community detection")
-        # Defensive branch — the shared .venv has igraph/leidenalg.
-        # Do NOT substitute connected-components: it changes membership semantics.
-        return {"skipped": "leiden unavailable"}
+        log.warning("leiden stack unavailable; using networkx greedy-modularity fallback")
+        return _greedy_modularity_partition(G)
 
     # Run on largest connected component for stability.
     largest_cc = max(nx.connected_components(G), key=len)
@@ -106,6 +104,22 @@ def detect_communities(G: nx.Graph) -> dict:
         "detected %d communities across %d entities", n_communities, len(result)
     )
     return result
+
+
+def _greedy_modularity_partition(G) -> dict:
+    """Pure-Python community fallback when igraph/leidenalg can't load (e.g. x64
+    emulation on ARM64). Runs networkx greedy modularity on the largest connected
+    component — a real community algorithm, NOT raw connected-components — and
+    returns the same {node: community_id} contract as the leiden path."""
+    from networkx.algorithms.community import greedy_modularity_communities
+    largest_cc = max(nx.connected_components(G), key=len)
+    sub = G.subgraph(largest_cc)
+    try:
+        comms = greedy_modularity_communities(sub, weight="weight")
+    except Exception as exc:  # noqa: BLE001 — never crash the cadence
+        log.warning("greedy-modularity fallback failed: %s", exc)
+        return {"skipped": "leiden unavailable"}
+    return {node: cid for cid, comm in enumerate(comms) for node in comm}
 
 
 def _save(store, partition: dict) -> None:
