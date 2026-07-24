@@ -30,13 +30,14 @@ Google sign-in, my identity, and timezone. **Backup and recovery are automatic**
 wizard restores my brain if a backup already exists for my account, or turns on encrypted
 backup if it's a fresh start. Do not run any restore or bootstrap command yourself.
 
-**3. Connect to Claude Desktop (one click).** Install the mcpbrain Desktop
-Extension: download `mcpbrain.mcpb` from
-https://centrepoint-church.github.io/mcpbrain-dist/mcpbrain.mcpb and double-click
-it, or in Claude Desktop → Settings → Extensions → Install from file. This wires
-the `brain_*` tools with no config edit and no quit/reopen.
+**3. Connect Claude Desktop (one click).** In the wizard that just opened, click
+**"Connect & restart Claude Desktop"** as the LAST step of the wizard — it writes
+the connector then quits and reopens Claude Desktop so it loads the `brain_*`
+tools. Do this after the wizard's Google/profile/model steps, not before.
 
-If your Claude Desktop build has no Extensions pane, run `mcpbrain connect` (quit Claude first, then reopen) as the manual equivalent.
+If that button can't restart Claude Desktop on your machine (the wizard will say
+so), run `mcpbrain connect` yourself and then quit and reopen Claude Desktop by
+hand.
 
 **Note for Windows:** the daemon runs with a **hidden console** — no visible window at
 logon is expected, not a failure. Verify it is running with:
