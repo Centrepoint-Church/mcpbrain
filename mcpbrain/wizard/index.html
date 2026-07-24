@@ -354,7 +354,7 @@ async function connectDesktop(){
   btn.disabled = true;
   badge("connect-state", "Restarting…", "wait");
   try{
-    const r = await P("/api/connect-desktop");
+    const r = await (await P("/api/connect-desktop")).json();
     if(r && r.relaunched){
       badge("connect-state", "Restarting Claude Desktop — reopen it to use your brain", "ok");
     }else{
