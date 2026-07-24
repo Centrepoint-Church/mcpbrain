@@ -70,10 +70,24 @@ function Install-VcRedistX64 {
 
 function Install-Mcpbrain {
   # uv provisions the x64 CPython (its default on ARM64; pinned here for future-proofing).
-  # If uv rejects the qualified request, fall back to the bare version (x64 on ARM64 today).
   $ok = $false
   try { uv tool install --python $PY_REQUEST --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
-  if (-not $ok) { uv tool install --python 3.12 --index $INDEX "mcpbrain[daemon]" --force }
+  if (-not $ok) { try { uv tool install --python 3.12 --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {} }
+  if (-not $ok) {
+    # uv can fail to finalize the minor-version link on ARM64 even though the x64
+    # interpreter is fully extracted. Install the interpreter, resolve its concrete
+    # python.exe, and install directly against it.
+    uv python install $PY_REQUEST
+    $py = $null
+    try { $py = (uv python find $PY_REQUEST 2>$null) } catch {}
+    if (-not $py) {
+      $base = (uv python dir).Trim()
+      $py = Get-ChildItem "$base\cpython-3.12*x86_64*\python.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if ($py) { uv tool install --python "$py" --index $INDEX "mcpbrain[daemon]" --force }
+    else { throw "Could not resolve an x64 python.exe for the uv-link fallback" }
+  }
 }
 
 if (-not $DotSourceOnly) {
