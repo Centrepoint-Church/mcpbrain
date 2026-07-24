@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import webbrowser
@@ -125,6 +126,19 @@ def _install_tray_best_effort(home: str) -> None:
         )
 
 
+def _start_tray_now(home: str) -> None:
+    """Launch the tray immediately so it appears without waiting for next login.
+    Best-effort — the login agent still starts it at next login regardless."""
+    kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen([_mcpbrain_bin(), "tray"], **kw)
+        print("Menu-bar tray started.")
+    except Exception as exc:  # noqa: BLE001 — optional; never block onboarding
+        print(f"Could not start the tray now ({exc}); it starts at next login.", file=sys.stderr)
+
+
 def _read_port(home: str):
     """Return the int control port from <home>/control_port, or None if absent."""
     p = Path(home) / "control_port"
@@ -229,6 +243,7 @@ def main(argv=None) -> int:
         return 0
 
     _install_tray_best_effort(home)
+    _start_tray_now(home)
 
     try:
         from mcpbrain import agents
