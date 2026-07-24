@@ -427,19 +427,28 @@ class Daemon:
     @property
     def _embedder(self):
         # Every internal reader uses self._embedder; routing them through this
-        # property makes construction lazy with zero call-site changes.
+        # property makes construction lazy with zero call-site changes. This is
+        # also the ONLY lazy-build site (every automatic warm — sync/enrich/
+        # search cycles — goes through it, not just the wizard's ensure_model()
+        # button), so _model_building is set around exactly this span.
         if self._embedder_obj is None:
             if self._embedder_factory is None:
                 raise RuntimeError("embedder unavailable (model not loaded yet)")
-            self._embedder_obj = self._embedder_factory()
+            self._model_building = True
+            try:
+                self._embedder_obj = self._embedder_factory()
+            finally:
+                self._model_building = False
         return self._embedder_obj
 
     def model_status(self) -> dict:
         """Search-model state for the wizard: cached on disk / downloading / last error."""
         from mcpbrain.embed import model_weights_cached
+        building = bool(getattr(self, "_model_downloading", False)
+                        or getattr(self, "_model_building", False))
         return {
             "cached": bool(model_weights_cached()),
-            "downloading": bool(getattr(self, "_model_downloading", False)),
+            "downloading": building,
             "error": getattr(self, "_model_error", None),
         }
 
@@ -486,6 +495,7 @@ class Daemon:
         self._embedder_obj = embedder
         self._embedder_factory = None
         self._model_downloading = False
+        self._model_building = False
         self._model_error = None
         self._enrich_client = enrich_client  # None -> enrichment defers (no-op)
         # Enrichment source: "spool" (the per-unit work queue) or "off".

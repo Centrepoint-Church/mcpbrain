@@ -328,10 +328,12 @@ async function refreshModel(){
       // No dedicated "error" badge kind exists (only ok/wait/idle) — "wait" is
       // the same amber used for other failed-action states in this file.
       badge("model-state", "Failed: " + j.error, "wait"); btn.disabled = false;
+      setTimeout(refreshModel, 4000);
     }else{
       badge("model-state", "Not downloaded", "idle"); btn.disabled = false;
+      setTimeout(refreshModel, 4000);
     }
-  }catch(e){ /* daemon momentarily unreachable; leave state as-is */ }
+  }catch(e){ setTimeout(refreshModel, 4000); }
 }
 async function ensureModel(){
   try{ await P("/api/model/ensure"); }catch(e){}
