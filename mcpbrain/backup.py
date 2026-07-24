@@ -590,7 +590,8 @@ def download_and_restore(bc, store, file_id) -> Path:
     # mkstemp already creates 0600 on most platforms; set it explicitly to stay
     # consistent with the rest of the codebase, which always sets 0600
     # deliberately on private artifacts.
-    os.fchmod(fd, 0o600)
+    if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
+        os.fchmod(fd, 0o600)
     os.close(fd)
     tmp = Path(tmp)
     try:
