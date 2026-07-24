@@ -83,3 +83,34 @@ def test_main_loop_starts_and_stops_control_server(tmp_path, monkeypatch):
 
     # start() -> run() -> stop(), in that exact order.
     assert ctrl.events == ["start", "run", "stop"]
+
+
+def test_apply_config_auto_enables_spool_when_configured(tmp_path, monkeypatch):
+    from mcpbrain import config
+
+    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    d = daemon_module.Daemon.__new__(daemon_module.Daemon)
+    d._config_lock = __import__("threading").Lock()
+    # owner_name + owner_email + a non-blank orgs[].name make is_configured() true.
+    d.apply_config({
+        "owner_name": "Nakia",
+        "owner_email": "n@centrepoint.church",
+        "orgs": [{"name": "Centrepoint Church", "domain": "centrepoint.church"}],
+    })
+    assert config.enrich_mode(str(tmp_path)) == "spool"
+    assert d._enrich_mode == "spool"
+
+
+def test_apply_config_honors_explicit_off(tmp_path, monkeypatch):
+    from mcpbrain import config
+
+    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    d = daemon_module.Daemon.__new__(daemon_module.Daemon)
+    d._config_lock = __import__("threading").Lock()
+    d.apply_config({
+        "owner_name": "Nakia",
+        "owner_email": "n@centrepoint.church",
+        "orgs": [{"name": "Centrepoint Church", "domain": "centrepoint.church"}],
+        "enrich_mode": "off",
+    })
+    assert config.enrich_mode(str(tmp_path)) == "off"
