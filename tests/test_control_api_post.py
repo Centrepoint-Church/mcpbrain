@@ -438,6 +438,57 @@ def test_status_degrades_without_token(tmp_path, monkeypatch):
     }
 
 
+def test_connect_desktop_endpoint(tmp_path, monkeypatch):
+    """POST /api/connect-desktop re-registers the Desktop connector then relaunches
+    Claude Desktop, returning the relaunch helper's dict as-is. Both side effects
+    are monkeypatched to no-ops so this only pins the wiring/response shape."""
+    import mcpbrain.desktop as desktop
+    import mcpbrain.setup as setup
+
+    calls = {"registered": False}
+
+    def fake_register(**kwargs):
+        calls["registered"] = True
+
+    monkeypatch.setattr(setup, "_register_desktop_mcp", fake_register)
+    monkeypatch.setattr(
+        desktop, "relaunch_claude_desktop",
+        lambda: {"relaunched": True, "detail": "Claude Desktop is restarting"},
+    )
+
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        r = _post(base + "/api/connect-desktop", srv.token, {})
+        data = json.loads(r.read())
+        assert data == {"relaunched": True, "detail": "Claude Desktop is restarting"}
+        assert calls["registered"] is True
+    finally:
+        srv.stop()
+
+
+def test_connect_desktop_endpoint_requires_token(tmp_path):
+    """Without the bearer token /api/connect-desktop is rejected (loopback auth gate)."""
+    import urllib.error
+
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        req = urllib.request.Request(
+            base + "/api/connect-desktop", data=json.dumps({}).encode(), method="POST")
+        try:
+            urllib.request.urlopen(req)
+            assert False, "expected auth rejection without a token"
+        except urllib.error.HTTPError as e:
+            assert e.code in (401, 403)
+    finally:
+        srv.stop()
+
+
 def test_enrich_backfill_start_cancel_endpoints(tmp_path):
     import time
 
