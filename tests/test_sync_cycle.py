@@ -369,6 +369,27 @@ def test_sync_cycle_multi_source_accumulates_and_no_double_embed(tmp_path, emb):
     )
 
 
+def test_drive_failure_does_not_abort_cycle(monkeypatch, tmp_path, emb):
+    """A raising My-Drive sync must be logged and skipped; the cycle completes.
+
+    Note: this file has no fixtures literally named `tmp_store`/`fake_embedder`;
+    it uses `tmp_path` (build a Store) and the module-scoped `emb` embedder
+    fixture, matching every other test in this module.
+    """
+    from mcpbrain import sync
+
+    store = Store(tmp_path / "drive-fail.sqlite3", dim=emb.dim)
+    store.init()
+
+    def boom(*a, **k):
+        raise RuntimeError("[SSL] record layer failure")
+
+    monkeypatch.setattr("mcpbrain.sync.drive.sync_drive", boom)
+
+    result = sync.run_sync_cycle(store, emb, drive_service=object(), home=None)
+    assert result["drive"] == 0  # skipped, not crashed
+
+
 def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
     from mcpbrain import config
     from mcpbrain.store import Store
