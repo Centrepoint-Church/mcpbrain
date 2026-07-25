@@ -1,8 +1,16 @@
 import asyncio
+import json
 import logging
 from unittest.mock import patch
 from mcpbrain.store import Store
 from mcpbrain.mcp_server import make_brain_search
+
+
+def _push_tool_schema():
+    """Pull brain_enrich_push's declared inputSchema out of the module-level
+    builder, so the test reads exactly what the MCP client is offered."""
+    from mcpbrain.mcp_server import push_input_schema
+    return push_input_schema()
 
 
 class FakeControlClient:
@@ -544,3 +552,51 @@ def test_context_and_save(tmp_path):
 def test_old_draft_tools_removed():
     import mcpbrain.mcp_server as m
     assert not hasattr(m, "make_brain_draft_reply") and not hasattr(m, "make_brain_draft_refine")
+
+
+# --- brain_enrich_push forwards review-block answers ---------------------
+
+from mcpbrain.mcp_server import make_brain_enrich_push
+
+
+def test_enrich_push_forwards_review_block_answers(tmp_path):
+    """A review verdict must reach enrich_inbox under its own key. It used to
+    be dropped: push filtered **blocks against ANSWER_BLOCKS only, so the
+    registered review drainers could never fire."""
+    push = make_brain_enrich_push(str(tmp_path))
+
+    out = asyncio.run(push(
+        unit_id="u-review1",
+        review_orphan=[{"finding_id": 7, "ref_id": "e-ghost", "verdict": "keep"}],
+    ))
+
+    assert out["written"] is True, out
+    payload = json.loads((tmp_path / "enrich_inbox" / "u-review1.json").read_text())
+    assert payload["review_orphan"] == [
+        {"finding_id": 7, "ref_id": "e-ghost", "verdict": "keep"}]
+    assert payload["extractions"] == []
+
+
+def test_enrich_push_review_answer_satisfies_the_block_unit_guard(tmp_path):
+    """extractions may be omitted for a block unit. A review answer counts as
+    a block answer, so the derailed-subagent guard must not reject it."""
+    push = make_brain_enrich_push(str(tmp_path))
+
+    out = asyncio.run(push(
+        unit_id="u-review2",
+        extractions=None,
+        review_org=[{"finding_id": 9, "ref_id": "accі", "verdict": "skip"}],
+    ))
+
+    assert out["written"] is True, out
+
+
+def test_enrich_push_schema_declares_every_push_block():
+    """The inputSchema is what the MCP client is allowed to send. A key that
+    is accepted by the handler but undeclared here is unreachable in
+    practice."""
+    from mcpbrain import enrich_blocks
+    schema = _push_tool_schema()
+    for key in enrich_blocks.PUSH_BLOCKS:
+        assert key in schema["properties"], f"{key} missing from push inputSchema"
+    assert "merge_answers" in schema["properties"]
