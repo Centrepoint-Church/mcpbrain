@@ -63,6 +63,8 @@ def drain_distil(store, inbox_obj: dict) -> dict:
     expired_count = 0
     promoted_count = 0
 
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     for item in items:
         doc_id = item.get("doc_id", "")
         verdict = item.get("verdict", "")
@@ -71,8 +73,6 @@ def drain_distil(store, inbox_obj: dict) -> dict:
         if verdict not in _VALID_VERDICTS:
             log.debug("memory_distil: skipping doc_id=%s unknown verdict=%s", doc_id, verdict)
             continue
-
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if verdict == "keep":
             # Stamp distilled_at even on a no-op verdict: nothing about an
@@ -122,8 +122,9 @@ def drain_distil(store, inbox_obj: dict) -> dict:
                 summary=f"Memory note flagged for promotion: {doc_id}",
                 detail=f"reason={reason} target_hint={target_hint}",
             )
-            store.patch_chunk_metadata(doc_id, distilled_at=now)
-            promoted_count += 1
+            ok = store.patch_chunk_metadata(doc_id, distilled_at=now)
+            if ok:
+                promoted_count += 1
 
     return {"expired": expired_count, "promotions_flagged": promoted_count}
 

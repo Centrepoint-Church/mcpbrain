@@ -87,6 +87,35 @@ def test_dismiss_records_a_verdict_that_blocks_reopening(tmp_path):
         srv.stop()
 
 
+def test_dismiss_agent_stderr_finding_does_not_stick(tmp_path):
+    """agent_stderr findings are exempt from the sticky dismiss verdict: the
+    dashboard's dismiss route must record no verdict for this finding type,
+    so a recurring failure with the same fingerprint reopens the finding
+    (agent_errs.py's documented design) — the opposite of
+    test_dismiss_records_a_verdict_that_blocks_reopening."""
+    from mcpbrain import agent_errs
+    s = _store(tmp_path)
+    s.record_finding(agent_errs.FINDING_TYPE, ref_id="x", summary="s")
+    fid = s.open_findings()[0]["id"]
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path), store=s)
+    srv.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.port}/api/dashboard/findings/{fid}/dismiss",
+            data=b"{}", method="POST")
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        out = json.loads(urllib.request.urlopen(req).read())
+        assert out["dismissed"] is True
+
+        assert s.get_finding(fid)["verdict"] == ""
+
+        # Re-detection: the same agent stderr fingerprint recurs.
+        s.record_finding(agent_errs.FINDING_TYPE, ref_id="x", summary="s (redetected)")
+        assert len(s.open_findings(agent_errs.FINDING_TYPE)) == 1
+    finally:
+        srv.stop()
+
+
 def test_changes_digest_degrades_on_store_error(tmp_path):
     """changes_digest must return empty lists rather than crashing on a store error."""
     from unittest import mock
