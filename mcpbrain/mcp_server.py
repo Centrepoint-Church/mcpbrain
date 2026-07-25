@@ -246,7 +246,7 @@ def make_brain_finding_resolve(store):
                         "error": f"{ftype} is resolved automatically and cannot be "
                                  f"closed by hand; only {list(MANUAL_RESOLVE_TYPES)} "
                                  f"may be"}
-            if not store.resolve_finding(finding_id):
+            if not store.resolve_finding(finding_id, verdict=outcome):
                 return {"resolved": False,
                         "error": f"finding {finding_id} could not be resolved"}
             store.record_change(

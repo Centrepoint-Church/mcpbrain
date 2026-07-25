@@ -420,7 +420,7 @@ class ControlServer:
                 if self.store is None:
                     return h_json(h, 503, {"error": "dashboard not available"})
                 finding_id = int(m.group(1))
-                ok = self.store.resolve_finding(finding_id)
+                ok = self.store.resolve_finding(finding_id, verdict="dismissed_by_human")
                 if not ok:
                     return h_json(h, 404, {"error": "finding not found or already dismissed"})
                 self.store.record_change("finding_dismissed", ref_id=str(finding_id))
