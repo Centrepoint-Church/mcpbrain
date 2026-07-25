@@ -347,6 +347,15 @@ def build_report(conn) -> str:
 
 # ── findings sink ─────────────────────────────────────────────────────────────
 
+# Finding types this module used to produce. A retired check leaves its rows
+# stranded open forever, because resolve_findings_not_in only runs for types
+# still emitted below. Listing them here closes them out on the next run, on
+# every install, with no manual SQL. Deliberately an explicit list and not a
+# "close any type with no producer" sweep: memory_promotion (memory_distil)
+# and org_unrecognised (drain) are produced outside this module.
+RETIRED_FINDING_TYPES = ("lint:possible_duplicate",)
+
+
 def run(store, *, now: str, log_dir=None) -> dict:
     """Run all lint checks, write a markdown report, and record proactive findings.
 
@@ -442,6 +451,10 @@ def run(store, *, now: str, log_dir=None) -> dict:
         live_refs.append(ref_id)
         findings_count += 1
     store.resolve_findings_not_in("lint:unenriched_emails", live_refs, now)
+
+    # Close out rows left behind by checks this module no longer runs.
+    for retired_type in RETIRED_FINDING_TYPES:
+        store.resolve_findings_not_in(retired_type, [], now)
 
     log.info("lint complete: %d findings, report at %s", findings_count, report_path)
     return {"findings": findings_count, "report_path": str(report_path)}
