@@ -401,3 +401,40 @@ def test_deleted_lint_checks_not_importable():
     assert not hasattr(lint_graph, "check_possible_duplicates")
     assert not hasattr(lint_graph, "check_community_singletons")
     assert not hasattr(lint_graph, "check_threads_without_summary")
+
+
+# ---------------------------------------------------------------------------
+# Retired checks: their findings must not stay open forever
+# ---------------------------------------------------------------------------
+
+def test_lint_run_closes_findings_from_retired_checks(tmp_path):
+    """A deleted check leaves its rows stranded: resolve_findings_not_in only
+    runs for types the module still produces. 50 lint:possible_duplicate rows
+    sat open on the live store for six weeks this way."""
+    s = _store(tmp_path, name="retired.sqlite3")
+    s.record_finding(
+        "lint:possible_duplicate", "michael|michael-hollister",
+        summary="Possible duplicate: Michael / Michael Hollister",
+        severity="info",
+    )
+    assert len(s.open_findings("lint:possible_duplicate")) == 1
+
+    run(s, now="2026-07-25T00:00:00Z", log_dir=tmp_path / "logs")
+
+    assert s.open_findings("lint:possible_duplicate") == []
+
+
+def test_lint_run_leaves_live_finding_types_alone(tmp_path):
+    """The sweep is an explicit allowlist, not a 'close anything unfamiliar'
+    heuristic: memory_promotion and org_unrecognised are produced elsewhere
+    (memory_distil, drain) and must survive a lint run."""
+    s = _store(tmp_path, name="live_types.sqlite3")
+    s.record_finding("memory_promotion", "note-1",
+                     summary="Memory note flagged for promotion", severity="info")
+    s.record_finding("org_unrecognised", "acci",
+                     summary="Unrecognised org 'ACCI'", severity="info")
+
+    run(s, now="2026-07-25T00:00:00Z", log_dir=tmp_path / "logs")
+
+    assert len(s.open_findings("memory_promotion")) == 1
+    assert len(s.open_findings("org_unrecognised")) == 1
