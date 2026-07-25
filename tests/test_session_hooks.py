@@ -57,22 +57,29 @@ def test_session_start_includes_tool_reminder(tmp_path, monkeypatch):
     assert text.index("Use mcpbrain proactively") < text.index("## Recent continuity")
 
 
-def test_session_start_no_tool_reminder_on_compact(tmp_path):
+def test_session_start_tool_reminder_survives_compact(tmp_path):
+    # The policy block is timeless framing, not session state — it's exactly
+    # what's at risk of falling out of context at a compaction, so it must
+    # still print even when the rest of the priming block goes quiet.
     out = io.StringIO()
     session_hooks.session_start(str(tmp_path / "home"), out=out, source="compact")
-    assert out.getvalue() == ""
+    assert "Use mcpbrain proactively" in out.getvalue()
 
 
 def test_session_start_silent_on_compact(tmp_path, monkeypatch):
-    # After a compaction the priming block is noise — session_start must emit
-    # nothing so it doesn't re-inject stale continuity/actions mid-session.
+    # After a compaction the continuity/actions block is noise (the compaction
+    # summary already preserves the thread) — session_start must not re-inject
+    # stale hot.md/open-actions state, even though the policy block still prints.
     repo = tmp_path / "records"
     (repo / "state").mkdir(parents=True)
     (repo / "state" / "hot.md").write_text("# Hot\n- **2026-06-10:** shipped the thing\n")
     monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
     out = io.StringIO()
     session_hooks.session_start(str(tmp_path / "home"), out=out, source="compact")
-    assert out.getvalue() == ""
+    text = out.getvalue()
+    assert "shipped the thing" not in text
+    assert "## Recent continuity" not in text
+    assert "## Open actions" not in text
 
 
 def test_session_start_full_on_clear(tmp_path, monkeypatch):
