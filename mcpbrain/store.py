@@ -1592,19 +1592,27 @@ class Store:
 
     def note_chunks(self, *, observation_type: str | None = None,
                     include_expired: bool = False, exclude_distilled: bool = False,
-                    limit: int = 500) -> list[dict]:
+                    keep_review_days: int = 30, limit: int = 500) -> list[dict]:
         """Return capture-note chunks (doc_id starting with 'note-'), with parsed metadata.
 
         Excludes expired chunks (meta["expired"] is truthy) unless include_expired=True.
         Excludes chunks memory_distil has already classified (meta["distilled_at"] is
         truthy) when exclude_distilled=True — pass this only from memory_distil's own
         selection query; callers like memory_index.py that render the live memory set
-        must NOT set it, since a distilled note still belongs in the index. Filters by
-        observation_type if provided. Returns the newest `limit` live results (ORDER BY
-        rowid DESC). The limit is applied AFTER the Python-side expired/distilled/
-        observation_type filter, so a store full of expired or already-distilled notes
-        never truncates live/fresh ones — we iterate the cursor and stop once `limit`
-        live rows are collected rather than pre-truncating in SQL.
+        must NOT set it, since a distilled note still belongs in the index.
+
+        A "keep" verdict is a deferral, not a decision, so it is time-boxed: a
+        distilled_verdict="keep" chunk is RE-INCLUDED once distilled_at is more than
+        keep_review_days old, so memory_distil reconsiders it. "expire"/"promote" (or a
+        distilled_at with no distilled_verdict at all) stay excluded permanently — those
+        are genuine terminal decisions. A malformed or missing distilled_at on a "keep"
+        row fails safe (stays excluded) rather than raising or spuriously resurfacing.
+
+        Filters by observation_type if provided. Returns the newest `limit` live results
+        (ORDER BY rowid DESC). The limit is applied AFTER the Python-side expired/
+        distilled/observation_type filter, so a store full of expired or already-distilled
+        notes never truncates live/fresh ones — we iterate the cursor and stop once
+        `limit` live rows are collected rather than pre-truncating in SQL.
         """
         sql = ("SELECT doc_id, text, metadata FROM chunks "
                "WHERE doc_id LIKE 'note-%' ORDER BY rowid DESC")
@@ -1618,7 +1626,17 @@ class Store:
                 if not include_expired and meta.get("expired"):
                     continue
                 if exclude_distilled and meta.get("distilled_at"):
-                    continue
+                    stale = False
+                    if meta.get("distilled_verdict") == "keep":
+                        try:
+                            stamped = datetime.fromisoformat(
+                                meta["distilled_at"].replace("Z", "+00:00"))
+                            stale = (datetime.now(timezone.utc) - stamped
+                                     > timedelta(days=keep_review_days))
+                        except (ValueError, TypeError, AttributeError):
+                            stale = False  # malformed timestamp: fail safe, stay excluded
+                    if not stale:
+                        continue
                 if observation_type is not None and meta.get("observation_type") != observation_type:
                     continue
                 results.append({
