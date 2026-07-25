@@ -690,3 +690,24 @@ def test_finding_resolve_rejects_unknown_and_already_resolved(tmp_path):
     again = asyncio.run(tool(finding_id=fid, outcome="merged"))
     assert again["resolved"] is False
     assert "already resolved" in again["error"]
+
+
+def test_finding_resolve_verdict_survives_redetection(tmp_path):
+    """The closure-durability fix: a memory_promotion finding closed via
+    brain_finding_resolve must not reopen if memory_distil re-flags the same
+    doc_id on a later run."""
+    s = _promotion_store(tmp_path, name="fr_redetect.sqlite3")
+    fid = _finding_id(s, "memory_promotion")
+    tool = make_brain_finding_resolve(s)
+
+    asyncio.run(tool(finding_id=fid, outcome="dismissed", note="not durable"))
+    assert s.get_finding(fid)["verdict"] == "dismissed"
+
+    # Re-detection: memory_distil flags the same note again on a later run.
+    s.record_finding(
+        "memory_promotion", "note-abc",
+        summary="Memory note flagged for promotion: note-abc",
+        detail="reason=durable preference target_hint=preferences",
+        severity="info",
+    )
+    assert s.open_findings("memory_promotion") == []
