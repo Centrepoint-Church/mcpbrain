@@ -595,6 +595,10 @@ class Store:
                 resolved_at  TEXT,
                 UNIQUE(finding_type, ref_id)
             )""")
+            _pf_cols = {row["name"] for row in
+                        db.execute("PRAGMA table_info(proactive_findings)").fetchall()}
+            if "verdict" not in _pf_cols:
+                db.execute("ALTER TABLE proactive_findings ADD COLUMN verdict TEXT")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pf_type "
                 "ON proactive_findings(finding_type)"
@@ -2662,8 +2666,11 @@ class Store:
 
         Upserts on the UNIQUE(finding_type, ref_id) constraint so re-detecting
         the same signal updates the existing row rather than accumulating
-        duplicates. resolved_at is cleared on upsert so a previously resolved
-        finding resurfaces if it is re-detected.
+        duplicates. resolved_at is cleared on upsert UNLESS the existing row
+        already carries a verdict (set by resolve_finding) — a settled review
+        decision must not be thrown away just because the same unchanged
+        signal was detected again. record_finding itself never writes the
+        verdict column; only resolve_finding does.
         """
         if not detected_at:
             detected_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2678,7 +2685,7 @@ class Store:
                 "  detail      = excluded.detail, "
                 "  severity    = excluded.severity, "
                 "  detected_at = excluded.detected_at, "
-                "  resolved_at = NULL",
+                "  resolved_at = CASE WHEN verdict IS NOT NULL THEN resolved_at ELSE NULL END",
                 (finding_type, ref_id, org, summary, detail, severity, detected_at),
             )
 
@@ -2759,7 +2766,8 @@ class Store:
             return row[0] if row else 0
 
     def get_finding(self, finding_id) -> dict | None:
-        """Return one finding as {id, finding_type, ref_id, resolved_at} or None.
+        """Return one finding as {id, finding_type, ref_id, resolved_at, verdict}
+        or None.
 
         The review appliers use this to target the finding's OWN stored ref_id
         and finding_type rather than trusting the adjudicator's verdict payload —
@@ -2767,20 +2775,30 @@ class Store:
         arbitrary entity or resolve an unrelated finding (defense-in-depth)."""
         with self._connect() as db:
             r = db.execute(
-                "SELECT id, finding_type, ref_id, resolved_at FROM proactive_findings WHERE id=?",
+                "SELECT id, finding_type, ref_id, resolved_at, verdict "
+                "FROM proactive_findings WHERE id=?",
                 (finding_id,)).fetchone()
         if r is None:
             return None
         return {"id": r["id"], "finding_type": r["finding_type"],
-                "ref_id": r["ref_id"], "resolved_at": r["resolved_at"] or ""}
+                "ref_id": r["ref_id"], "resolved_at": r["resolved_at"] or "",
+                "verdict": r["verdict"] or ""}
 
-    def resolve_finding(self, finding_id: int) -> bool:
-        """Dismiss one finding (sets resolved_at). True if a row changed."""
+    def resolve_finding(self, finding_id: int, verdict: str | None = None) -> bool:
+        """Dismiss one finding (sets resolved_at). If `verdict` is given, it is
+        stored too, and record_finding's upsert will not reopen this finding on
+        a later re-detection of the same (finding_type, ref_id) — a settled
+        review decision (keep/skip/dismissed/etc.) should not resurface just
+        because the same unchanged signal was detected again. Leave verdict
+        None for a resolution that SHOULD still be reopenable (today's only
+        path, and resolve_findings_not_in's "the underlying ref genuinely
+        disappeared" case, which is a real new occurrence if it reappears).
+        True if a row changed."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._connect() as db:
             cur = db.execute(
-                "UPDATE proactive_findings SET resolved_at=? "
-                "WHERE id=? AND resolved_at IS NULL", (now, finding_id))
+                "UPDATE proactive_findings SET resolved_at=?, verdict=? "
+                "WHERE id=? AND resolved_at IS NULL", (now, verdict, finding_id))
             return cur.rowcount > 0
 
     # --- Session-4, Task 2.1: reversible entity suppression ------------------

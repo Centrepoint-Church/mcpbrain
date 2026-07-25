@@ -580,3 +580,63 @@ def test_store_clear_waiting(tmp_path):
     assert row["waiting_on_cleared_by_doc_id"] == "gmail-m-99"
     assert row["reply_received"] == 1
     assert row["updated_at"] == now
+
+
+def test_proactive_findings_has_verdict_column(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        cols = {row["name"] for row in db.execute("PRAGMA table_info(proactive_findings)").fetchall()}
+    assert "verdict" in cols
+
+
+def test_resolve_finding_with_verdict_is_recorded(tmp_path):
+    s = _store(tmp_path)
+    s.record_finding("lint:orphan_entity", "e-1", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+
+    assert s.resolve_finding(fid, verdict="keep") is True
+
+    finding = s.get_finding(fid)
+    assert finding["verdict"] == "keep"
+    assert finding["resolved_at"] != ""
+
+
+def test_record_finding_does_not_reopen_a_verdicted_finding(tmp_path):
+    """The core fix: re-detecting the same signal must not force a settled
+    finding back open. Before this fix, record_finding's upsert unconditionally
+    cleared resolved_at on every re-detection, so a 'keep'/'skip' decision was
+    thrown away the moment the lint check ran again."""
+    s = _store(tmp_path)
+    s.record_finding("lint:orphan_entity", "e-1", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+    s.resolve_finding(fid, verdict="keep")
+
+    # Re-detection: the lint check runs again, entity is still unchanged/orphan.
+    s.record_finding("lint:orphan_entity", "e-1", summary="orphan (redetected)")
+
+    assert s.open_findings("lint:orphan_entity") == []
+    finding = s.get_finding(fid)
+    assert finding["resolved_at"] != ""
+    assert finding["verdict"] == "keep"
+    # summary/detail still refresh even though resolved_at/verdict stay put —
+    # get_finding doesn't expose summary, so check the row directly.
+    with s._connect() as db:
+        row = db.execute(
+            "SELECT summary FROM proactive_findings WHERE id=?", (fid,)).fetchone()
+    assert row["summary"] == "orphan (redetected)"
+
+
+def test_record_finding_still_reopens_when_no_verdict_was_recorded(tmp_path):
+    """Regression guard for the untouched default: a finding resolved WITHOUT
+    a verdict (resolve_finding's default, and resolve_findings_not_in's path)
+    must keep reopening on redetection exactly as before this change."""
+    s = _store(tmp_path)
+    s.record_finding("lint:orphan_entity", "e-2", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+    s.resolve_finding(fid)  # no verdict — today's only path
+
+    s.record_finding("lint:orphan_entity", "e-2", summary="orphan (redetected)")
+
+    open_now = s.open_findings("lint:orphan_entity")
+    assert len(open_now) == 1
+    assert open_now[0]["id"] == fid
