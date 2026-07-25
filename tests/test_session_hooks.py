@@ -39,6 +39,30 @@ def test_session_end_captures_substantial(tmp_path, monkeypatch):
     assert "migration" in captured["env"]["content"].lower()
 
 
+def test_session_start_includes_tool_reminder(tmp_path, monkeypatch):
+    repo = tmp_path / "records"
+    (repo / "state").mkdir(parents=True)
+    (repo / "state" / "hot.md").write_text("# Hot\n")
+    monkeypatch.setattr(session_hooks.config, "records_dir", lambda home: str(repo))
+    monkeypatch.setattr(session_hooks.probes, "all_connections", lambda home, store=None: {
+        name: {"state": "ok", "detail": "", "last_verified": None}
+        for name in ("google", "claude", "clickup", "backup", "records", "enrichment")
+    })
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out)
+    text = out.getvalue()
+    assert "Use mcpbrain proactively" in text
+    assert "ToolSearch(\"select:mcp__mcpbrain__brain_search" in text
+    # the reminder sets the frame before the continuity/actions data
+    assert text.index("Use mcpbrain proactively") < text.index("## Recent continuity")
+
+
+def test_session_start_no_tool_reminder_on_compact(tmp_path):
+    out = io.StringIO()
+    session_hooks.session_start(str(tmp_path / "home"), out=out, source="compact")
+    assert out.getvalue() == ""
+
+
 def test_session_start_silent_on_compact(tmp_path, monkeypatch):
     # After a compaction the priming block is noise — session_start must emit
     # nothing so it doesn't re-inject stale continuity/actions mid-session.
