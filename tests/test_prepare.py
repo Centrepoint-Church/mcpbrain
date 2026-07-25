@@ -838,3 +838,35 @@ def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
         f"Expected fewer units at high cap ({summary_big['units_written']}) than "
         f"low cap ({summary_small['units_written']})"
     )
+
+
+def test_write_units_emits_a_unit_per_review_block(tmp_path):
+    """The review cadence's blocks must become real work units. They were
+    silently dropped because write_units only iterated UNIT_BLOCKS and the
+    review families were missing from it."""
+    data = {
+        "batch_id": "batch-review",
+        "prepared_at": "2026-07-25T00:00:00Z",
+        "context": {},
+        "threads": [],
+        "review_orphan": [
+            {"finding_id": 1, "packet": {"finding_type": "lint:orphan_entity",
+                                         "ref_id": "e-ghost"}},
+        ],
+        "org_merge_review": [
+            {"pair_id": "p-1", "a": {"name": "ACC"}, "b": {"name": "ACCI"}},
+        ],
+    }
+
+    summary = prepare.write_units(data, home=str(tmp_path))
+
+    blocks = {}
+    for path in (tmp_path / "enrich_queue" / "units").glob("*.json"):
+        unit = json.loads(path.read_text())
+        if unit["kind"] == "block":
+            blocks[unit["block"]] = unit["items"]
+
+    assert "review_orphan" in blocks, f"got block units: {sorted(blocks)}"
+    assert "org_merge_review" in blocks, f"got block units: {sorted(blocks)}"
+    assert blocks["review_orphan"][0]["finding_id"] == 1
+    assert summary["units_written"] == 2
