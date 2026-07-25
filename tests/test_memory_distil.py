@@ -1,4 +1,6 @@
 """memory_distil: expire/merge memory notes; promote candidates -> findings."""
+from datetime import datetime, timedelta, timezone
+
 from mcpbrain import memory_distil
 from mcpbrain.store import Store
 
@@ -154,7 +156,7 @@ def test_build_distil_requests_leaves_fresh_keep_note_excluded(tmp_path):
                    metadata={"source": "note", "title": "Fresh",
                              "observation_type": "memory",
                              "captured_at": "2026-07-20T00:00:00Z",
-                             "distilled_at": "2026-07-24T00:00:00Z",
+                             "distilled_at": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                              "distilled_verdict": "keep"})
 
     reqs = memory_distil.build_distil_requests(s, cap=30, keep_review_days=30)
