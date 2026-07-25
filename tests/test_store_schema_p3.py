@@ -652,7 +652,8 @@ def test_note_chunks_exclude_distilled(tmp_path):
                    metadata={"source": "note", "title": "B",
                              "observation_type": "memory",
                              "captured_at": "2026-06-01T00:00:00Z",
-                             "distilled_at": "2026-07-01T00:00:00Z"})
+                             "distilled_at": "2026-07-01T00:00:00Z",
+                             "distilled_verdict": "expire"})
 
     # Default (memory_index.py's call shape): both still show.
     ids = {c["doc_id"] for c in s.note_chunks(observation_type="memory")}
@@ -674,7 +675,8 @@ def test_note_chunks_exclude_distilled_applies_before_limit(tmp_path):
                    metadata={"source": "note", "title": "Old",
                              "observation_type": "memory",
                              "captured_at": "2026-06-01T00:00:00Z",
-                             "distilled_at": "2026-06-02T00:00:00Z"})
+                             "distilled_at": "2026-06-02T00:00:00Z",
+                             "distilled_verdict": "expire"})
     s.upsert_chunk(doc_id="note-new", text="New\n\nbody", content_hash="note-new",
                    metadata={"source": "note", "title": "New",
                              "observation_type": "memory",
@@ -683,3 +685,82 @@ def test_note_chunks_exclude_distilled_applies_before_limit(tmp_path):
     ids = {c["doc_id"] for c in
            s.note_chunks(observation_type="memory", exclude_distilled=True, limit=1)}
     assert ids == {"note-new"}
+
+
+def test_note_chunks_exclude_distilled_reincludes_stale_keep(tmp_path):
+    """A keep-verdicted note past the re-review window must resurface — keep is a
+    deferral, not a decision, and permanently parking it means most notes get
+    looked at exactly once, at their freshest and least-informative moment."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-stale-keep", text="Stale\n\nbody", content_hash="note-stale-keep",
+                   metadata={"source": "note", "title": "Stale",
+                             "observation_type": "memory",
+                             "captured_at": "2026-05-01T00:00:00Z",
+                             "distilled_at": "2026-06-01T00:00:00Z",
+                             "distilled_verdict": "keep"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True,
+                        keep_review_days=30, limit=500)}
+
+    assert ids == {"note-stale-keep"}
+
+
+def test_note_chunks_exclude_distilled_keeps_excluding_fresh_keep(tmp_path):
+    """A keep-verdicted note still inside the window stays excluded."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-fresh-keep", text="Fresh\n\nbody", content_hash="note-fresh-keep",
+                   metadata={"source": "note", "title": "Fresh",
+                             "observation_type": "memory",
+                             "captured_at": "2026-07-20T00:00:00Z",
+                             "distilled_at": "2026-07-24T00:00:00Z",
+                             "distilled_verdict": "keep"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True,
+                        keep_review_days=30, limit=500)}
+
+    assert ids == set()
+
+
+def test_note_chunks_exclude_distilled_never_reincludes_expire_or_promote(tmp_path):
+    """expire/promote stay permanently excluded no matter how old the stamp is —
+    only keep is time-boxed."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-old-expire", text="X\n\nbody", content_hash="note-old-expire",
+                   metadata={"source": "note", "title": "X",
+                             "observation_type": "memory",
+                             "captured_at": "2026-01-01T00:00:00Z",
+                             "expired": True,
+                             "distilled_at": "2026-01-01T00:00:00Z",
+                             "distilled_verdict": "expire"})
+    s.upsert_chunk(doc_id="note-old-promote", text="Y\n\nbody", content_hash="note-old-promote",
+                   metadata={"source": "note", "title": "Y",
+                             "observation_type": "memory",
+                             "captured_at": "2026-01-01T00:00:00Z",
+                             "distilled_at": "2026-01-01T00:00:00Z",
+                             "distilled_verdict": "promote"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True,
+                        keep_review_days=30, limit=500)}
+
+    assert ids == set()
+
+
+def test_note_chunks_exclude_distilled_keep_with_bad_timestamp_fails_safe(tmp_path):
+    """A malformed distilled_at on a keep-verdicted row must not crash and must
+    not spuriously resurface — the safe default is to stay excluded."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-bad-ts", text="Bad\n\nbody", content_hash="note-bad-ts",
+                   metadata={"source": "note", "title": "Bad",
+                             "observation_type": "memory",
+                             "captured_at": "2026-01-01T00:00:00Z",
+                             "distilled_at": "not-a-timestamp",
+                             "distilled_verdict": "keep"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True,
+                        keep_review_days=30, limit=500)}
+
+    assert ids == set()
