@@ -104,7 +104,7 @@ tool, never by hand:
 ```
 brain_memory_write(slug="<short-kebab-slug>", description="<one-line hook>",
                    body="<the fact, plus Why: / How to apply: for feedback and project types>",
-                   memory_type="user|feedback|project|reference")
+                   memory_type="project|system|preference")
 ```
 
 The daemon writes `memory/<slug>.md` and the `MEMORY.md` pointer and commits it
