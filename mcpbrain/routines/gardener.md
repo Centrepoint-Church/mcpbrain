@@ -43,6 +43,7 @@ Each week the gardener's job is to tidy what the daemon and sessions have alread
 2. **Expire stale** — remove or mark memories that are no longer true (superseded behaviour, retired systems, migrated infrastructure) and drop their MEMORY.md pointers.
 3. **Promote captured-but-not-promoted** — when a durable fact has been captured (e.g. landed in `context/memory.md` / the note index) but never surfaced as a proper `memory/*.md` pointer, add the pointer so it's discoverable. This is reorganising existing captured content, not authoring new facts.
 4. **Fix drift** — correct MEMORY.md descriptions/pointers that no longer match the files they point at; remove pointers for files that no longer exist.
+5. **Work the promotion queue** — act on every open `memory_promotion` finding (see the section below). This is the one part of the pass that closes work items, not just files.
 
 If nothing needs tidying, log that instead — don't make cosmetic edits. If you find a durable fact that has NOT been captured anywhere, do not write it yourself; flag it for capture through the MCP tools rather than writing it directly.
 
@@ -73,6 +74,62 @@ Note: `context/identity.md` and `context/preferences.md` are developed autonomou
 - Do not author new decisions, continuity notes, or memory files from scratch. Those are written via `brain_decision` / `brain_note` / `brain_memory_write` → daemon → records file + commit.
 - Do not hand-edit `state/decisions.md` or `state/hot.md` to add content.
 - If you spot an uncaptured durable fact, flag it for capture through the MCP tools rather than writing it directly.
+
+## Promotion queue (memory_promotion findings)
+
+`memory_distil` flags a session note when it judges the note durable enough to
+belong in the records repo as a real `memory/*.md` file. Each flag is an open
+`memory_promotion` finding. Work every one of them, and close every one of them
+— a finding you leave open is one nobody will look at again.
+
+Read the queue:
+
+```
+brain_proactive(finding_type="memory_promotion")
+```
+
+Each finding gives you:
+
+- `id` — pass this to `brain_finding_resolve`
+- `ref_id` — **this is the note's `doc_id`**; read the full note with `brain_read(ref_id)`
+- `detail` — the distiller's `reason=` and `target_hint=`
+- `org` — the note's org tag, if it had one
+
+For each finding, read the note, compare it against the existing `memory/*.md`
+files and the `MEMORY.md` index, then take exactly one of three actions:
+
+**promote** — the fact is durable and not already recorded. Write it through the
+tool, never by hand:
+
+```
+brain_memory_write(slug="<short-kebab-slug>", description="<one-line hook>",
+                   body="<the fact, plus Why: / How to apply: for feedback and project types>",
+                   memory_type="user|feedback|project|reference")
+```
+
+The daemon writes `memory/<slug>.md` and the `MEMORY.md` pointer and commits it
+within a cycle. Do not also create the file yourself.
+
+**merge** — the fact already lives in an existing memory file. Fold it into that
+file, fix the `MEMORY.md` description if it has drifted, and do not create a new
+file.
+
+**dismiss** — the note is not durable after all (one-off status, superseded, or
+already captured somewhere better). Change nothing.
+
+Then close the finding, in all three cases:
+
+```
+brain_finding_resolve(finding_id=<id>, outcome="promoted|merged|dismissed",
+                      note="<one line on what you did>")
+```
+
+`brain_finding_resolve` only accepts `memory_promotion`. Every other finding type
+is resolved automatically by the enrichment pipeline — leave those alone.
+
+Promotions and merges are memory file updates and count against the cap below.
+Dismissals touch no files, so they are uncapped: clear the whole queue of them in
+one run.
 
 ## Caps per run
 
