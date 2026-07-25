@@ -5,8 +5,9 @@ Block contract:
       Returns live memory notes ready for LLM review.
 
   drain_distil(store, inbox_obj) -> {"expired": N, "promotions_flagged": N}
-      Applies verdicts:
-        "keep"    — no-op
+      Applies verdicts (all three stamp distilled_at so build_distil_requests
+      stops re-submitting an already-classified note):
+        "keep"    — stamps distilled_at only
         "expire"  — patches chunk metadata expired=True, records memory_expired
         "promote" — records a memory_promotion finding; keeps the note live
       Unknown doc_id or unknown verdict: silently skipped.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +31,7 @@ def build_distil_requests(store, *, cap: int = 30) -> list[dict]:
         {doc_id, title, content, captured_at}
     content is the body after the first blank line, capped at 300 chars.
     """
-    chunks = store.note_chunks(observation_type="memory", limit=cap)
+    chunks = store.note_chunks(observation_type="memory", exclude_distilled=True, limit=cap)
     results = []
     for c in chunks:
         text = c["text"] or ""
@@ -70,7 +72,17 @@ def drain_distil(store, inbox_obj: dict) -> dict:
             log.debug("memory_distil: skipping doc_id=%s unknown verdict=%s", doc_id, verdict)
             continue
 
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         if verdict == "keep":
+            # Stamp distilled_at even on a no-op verdict: nothing about an
+            # unchanged note will produce a different answer on the next
+            # distil run, so re-asking Haiku about it forever is pure
+            # recurring cost. patch_chunk_metadata's own existence guard
+            # (returns False, harmlessly) covers a doc_id gone stale between
+            # listing and draining, so no separate get_chunk check is needed
+            # for this branch.
+            store.patch_chunk_metadata(doc_id, distilled_at=now)
             continue
 
         # Verify the chunk exists before acting.
@@ -80,7 +92,7 @@ def drain_distil(store, inbox_obj: dict) -> dict:
             continue
 
         if verdict == "expire":
-            ok = store.patch_chunk_metadata(doc_id, expired=True)
+            ok = store.patch_chunk_metadata(doc_id, expired=True, distilled_at=now)
             if ok:
                 reason = item.get("reason", "")
                 store.record_change(
@@ -110,6 +122,7 @@ def drain_distil(store, inbox_obj: dict) -> dict:
                 summary=f"Memory note flagged for promotion: {doc_id}",
                 detail=f"reason={reason} target_hint={target_hint}",
             )
+            store.patch_chunk_metadata(doc_id, distilled_at=now)
             promoted_count += 1
 
     return {"expired": expired_count, "promotions_flagged": promoted_count}

@@ -640,3 +640,46 @@ def test_record_finding_still_reopens_when_no_verdict_was_recorded(tmp_path):
     open_now = s.open_findings("lint:orphan_entity")
     assert len(open_now) == 1
     assert open_now[0]["id"] == fid
+
+
+def test_note_chunks_exclude_distilled(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-a", text="A\n\nbody", content_hash="note-a",
+                   metadata={"source": "note", "title": "A",
+                             "observation_type": "memory",
+                             "captured_at": "2026-06-01T00:00:00Z"})
+    s.upsert_chunk(doc_id="note-b", text="B\n\nbody", content_hash="note-b",
+                   metadata={"source": "note", "title": "B",
+                             "observation_type": "memory",
+                             "captured_at": "2026-06-01T00:00:00Z",
+                             "distilled_at": "2026-07-01T00:00:00Z"})
+
+    # Default (memory_index.py's call shape): both still show.
+    ids = {c["doc_id"] for c in s.note_chunks(observation_type="memory")}
+    assert ids == {"note-a", "note-b"}
+
+    # exclude_distilled=True (memory_distil's call shape): only the
+    # not-yet-distilled note shows.
+    ids = {c["doc_id"] for c in s.note_chunks(observation_type="memory", exclude_distilled=True)}
+    assert ids == {"note-a"}
+
+
+def test_note_chunks_exclude_distilled_applies_before_limit(tmp_path):
+    """A distilled note must not occupy a slot in the capped result set — it
+    should be filtered out before `limit` truncates, exactly like the
+    existing `expired` filter. Otherwise a store with many already-distilled
+    notes could starve build_distil_requests of the genuinely fresh ones."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-old", text="Old\n\nbody", content_hash="note-old",
+                   metadata={"source": "note", "title": "Old",
+                             "observation_type": "memory",
+                             "captured_at": "2026-06-01T00:00:00Z",
+                             "distilled_at": "2026-06-02T00:00:00Z"})
+    s.upsert_chunk(doc_id="note-new", text="New\n\nbody", content_hash="note-new",
+                   metadata={"source": "note", "title": "New",
+                             "observation_type": "memory",
+                             "captured_at": "2026-07-01T00:00:00Z"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True, limit=1)}
+    assert ids == {"note-new"}
