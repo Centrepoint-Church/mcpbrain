@@ -748,6 +748,25 @@ def test_note_chunks_exclude_distilled_never_reincludes_expire_or_promote(tmp_pa
     assert ids == set()
 
 
+def test_note_chunks_exclude_distilled_bare_distilled_at_stays_excluded(tmp_path):
+    """A distilled_at with no distilled_verdict key at all (the shape produced
+    before this feature existed, or by any future caller that forgets to stamp
+    the verdict) must stay permanently excluded, not be re-included by the
+    keep-specific age check."""
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-bare", text="Bare\n\nbody", content_hash="note-bare",
+                   metadata={"source": "note", "title": "Bare",
+                             "observation_type": "memory",
+                             "captured_at": "2026-01-01T00:00:00Z",
+                             "distilled_at": "2026-01-01T00:00:00Z"})
+
+    ids = {c["doc_id"] for c in
+           s.note_chunks(observation_type="memory", exclude_distilled=True,
+                        keep_review_days=30, limit=500)}
+
+    assert ids == set()
+
+
 def test_note_chunks_exclude_distilled_keep_with_bad_timestamp_fails_safe(tmp_path):
     """A malformed distilled_at on a keep-verdicted row must not crash and must
     not spuriously resurface — the safe default is to stay excluded."""

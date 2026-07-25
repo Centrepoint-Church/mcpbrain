@@ -1605,8 +1605,10 @@ class Store:
         distilled_verdict="keep" chunk is RE-INCLUDED once distilled_at is more than
         keep_review_days old, so memory_distil reconsiders it. "expire"/"promote" (or a
         distilled_at with no distilled_verdict at all) stay excluded permanently — those
-        are genuine terminal decisions. A malformed or missing distilled_at on a "keep"
-        row fails safe (stays excluded) rather than raising or spuriously resurfacing.
+        are genuine terminal decisions. A malformed distilled_at on a "keep" row fails
+        safe (stays excluded); a keep-verdicted row with no distilled_at key at all is
+        included (not excluded) by the outer truthy check, but this never occurs in
+        practice since drain_distil always stamps distilled_at and distilled_verdict together.
 
         Filters by observation_type if provided. Returns the newest `limit` live results
         (ORDER BY rowid DESC). The limit is applied AFTER the Python-side expired/
