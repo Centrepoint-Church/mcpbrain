@@ -23,7 +23,16 @@ def test_gardener_closes_every_promotion_finding():
 
 
 def test_gardener_promotes_through_the_write_tool():
-    """Promotion must go through brain_memory_write -> daemon. The routine's
-    standing rule is that it never hand-authors a new memory file."""
+    """Promotion must go through brain_memory_write -> daemon, documented
+    specifically in the Promotion queue section (not merely present
+    elsewhere in the routine, e.g. the pre-existing 'What you can update'
+    section)."""
     text = _ROUTINE.read_text()
-    assert "brain_memory_write" in text
+    start = text.index("## Promotion queue")
+    end = text.index("\n## ", start + 1)
+    section = text[start:end]
+    assert "brain_memory_write(slug=" in section
+    assert 'description="' in section
+    assert 'body="' in section
+    assert 'memory_type="project|system|preference")' in section
+    assert "Do not also create the file yourself." in section
