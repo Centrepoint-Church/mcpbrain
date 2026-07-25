@@ -35,7 +35,9 @@ enriched nothing.
       - `kind` `"block"`: answer the block named in `block` for each item in `items`
         (`merge_review` → `merge_answers`; otherwise the field of the same name:
         `synthesis` / `profile_synthesis` / `community_synthesis` / `memory_distil` /
-        `profile_audit`).
+        `profile_audit`, and the review/curator families `review_orphan` /
+        `review_missing_org` / `review_ownerless` / `review_org` /
+        `org_merge_review` — full rules for each are below).
    c. Call `brain_enrich_push` with:
       - `unit_id=<the unit_id from the claim result>`
       - For a **thread unit**: `extractions=[…]` — one object per thread. Required for
