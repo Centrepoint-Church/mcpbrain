@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 from mcpbrain import config
-from mcpbrain.enrich_blocks import ANSWER_BLOCKS as _ENRICH_ANSWER_BLOCKS
+from mcpbrain.enrich_blocks import PUSH_BLOCKS as _PUSH_BLOCKS
 
 from mcpbrain.retrieval import annotate_action_freshness
 
@@ -479,11 +479,11 @@ def _routine_instructions(name: str) -> str | None:
 
 
 # The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
-# merge_answers (_ENRICH_ANSWER_BLOCKS, imported at module top). Each is drained
+# merge_answers (_PUSH_BLOCKS, imported at module top). Each is drained
 # by the daemon from the inbox object under this exact key (see drain.py
 # BLOCK_DRAINERS + synthesise_threads). Without forwarding them, the
-# synthesis/profile/community/memory/audit work the batch requested is
-# silently dropped on the MCP path.
+# synthesis/profile/community/memory/audit/review/curator work the batch
+# requested is silently dropped on the MCP path.
 
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
 _UNITS_BATCH_DEFAULT = 30  # max units handed out (and claimed) per brain_enrich_units call
@@ -648,6 +648,28 @@ def make_brain_enrich_pull(home: str):
     return brain_enrich_pull
 
 
+def push_input_schema() -> dict:
+    """brain_enrich_push's inputSchema, with one property per push block.
+
+    Generated from _PUSH_BLOCKS rather than hand-listed so a block can never be
+    added to the registry and forgotten here — an undeclared key is one the MCP
+    client is not allowed to send, which makes its drainer unreachable.
+    merge_answers stays explicit: it is the only block whose answer key differs
+    from its unit key (merge_review).
+    """
+    return {"type": "object", "properties": {
+        "unit_id": {"type": "string",
+                    "description": "the unit you pulled (writes enrich_inbox/<unit_id>.json)"},
+        "extractions": {"type": "array", "items": {"type": "object"},
+                        "description": "one extraction object per thread (thread unit)"},
+        "merge_answers": {"type": "array", "items": {"type": "object"},
+                          "description": "answers for a merge_review block unit"},
+        **{_k: {"type": "array", "items": {"type": "object"},
+                "description": f"answers for a {_k} block unit"}
+           for _k in _PUSH_BLOCKS},
+    }, "required": ["unit_id"]}
+
+
 def make_brain_enrich_push(home: str):
     async def brain_enrich_push(unit_id: str = "", extractions: list | None = None,
                                 merge_answers: list | None = None,
@@ -655,8 +677,9 @@ def make_brain_enrich_push(home: str):
         """Write a unit's enrichment result to enrich_inbox/<unit_id>.json for the
         daemon to drain (it applies the result, marks chunks enriched, and deletes the
         unit). Besides `extractions` and `merge_answers`, accepts the optional answer
-        blocks (synthesis, profile_synthesis, community_synthesis, memory_distil,
-        profile_audit) and forwards each. Returns {"written": bool, path|error}.
+        blocks — the synthesis/profile/community/memory/audit families and the
+        review/curator families (see enrich_blocks.PUSH_BLOCKS) — and forwards
+        each. Returns {"written": bool, path|error}.
 
         Schema rules:
           - `extractions` must be a list when provided; passing a non-list (string,
@@ -664,8 +687,8 @@ def make_brain_enrich_push(home: str):
             its result instead of producing a proper tool call is caught at the
             boundary rather than silently consuming the unit with zero extractions.
           - `extractions` may be None/omitted ONLY for block units that carry their
-            answer in a block field (merge_answers, synthesis, profile_synthesis,
-            community_synthesis, memory_distil, profile_audit).  A push with no
+            answer in a block field (merge_answers or any enrich_blocks.PUSH_BLOCKS
+            key).  A push with no
             extractions AND no block answers is rejected — it indicates a derailed
             subagent that produced prose instead of a real extraction payload.
         """
@@ -682,7 +705,7 @@ def make_brain_enrich_push(home: str):
         # a missing extractions means the subagent derailed (produced prose, timed out,
         # or skipped the tool call entirely) and must not silently drain the unit.
         has_block_answer = (merge_answers is not None and merge_answers != []) or any(
-            blocks.get(k) for k in _ENRICH_ANSWER_BLOCKS
+            blocks.get(k) for k in _PUSH_BLOCKS
         )
         if extractions is None and not has_block_answer:
             return {"written": False,
@@ -702,7 +725,7 @@ def make_brain_enrich_push(home: str):
             inbox.mkdir(parents=True, exist_ok=True)
             payload = {"unit_id": unit_id, "extractions": extractions,
                        "merge_answers": merge_answers or []}
-            for _k in _ENRICH_ANSWER_BLOCKS:
+            for _k in _PUSH_BLOCKS:
                 if blocks.get(_k):
                     payload[_k] = blocks[_k]
             target = inbox / f"{unit_id}.json"
@@ -1163,24 +1186,14 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             ),
             types.Tool(
                 name="brain_enrich_push",
-                description="Submit a unit's enrichment result by unit_id → enrich_inbox/<unit_id>.json; the daemon applies it, marks chunks enriched, and deletes the unit. Pass `extractions` (one per thread, for a thread unit) and/or the block answer field for a block unit: merge_answers (merge_review), synthesis / profile_synthesis / community_synthesis / memory_distil / profile_audit.",
-                inputSchema={"type": "object", "properties": {
-                    "unit_id": {"type": "string", "description": "the unit you pulled (writes enrich_inbox/<unit_id>.json)"},
-                    "extractions": {"type": "array", "items": {"type": "object"},
-                                    "description": "one extraction object per thread (thread unit)"},
-                    "merge_answers": {"type": "array", "items": {"type": "object"},
-                                      "description": "answers for a merge_review block unit"},
-                    "synthesis": {"type": "array", "items": {"type": "object"},
-                                  "description": "answers for a synthesis block unit"},
-                    "profile_synthesis": {"type": "array", "items": {"type": "object"},
-                                          "description": "answers for a profile_synthesis block unit"},
-                    "community_synthesis": {"type": "array", "items": {"type": "object"},
-                                            "description": "answers for a community_synthesis block unit"},
-                    "memory_distil": {"type": "array", "items": {"type": "object"},
-                                      "description": "answers for a memory_distil block unit"},
-                    "profile_audit": {"type": "array", "items": {"type": "object"},
-                                      "description": "answers for a profile_audit block unit"},
-                }, "required": ["unit_id"]},
+                description=(
+                    "Submit a unit's enrichment result by unit_id → enrich_inbox/<unit_id>.json; "
+                    "the daemon applies it, marks chunks enriched, and deletes the unit. Pass "
+                    "`extractions` (one per thread, for a thread unit) and/or the block answer "
+                    "field for a block unit: merge_answers (merge_review), or the block's own "
+                    "name for " + ", ".join(_PUSH_BLOCKS) + "."
+                ),
+                inputSchema=push_input_schema(),
             ),
             types.Tool(
                 name="brain_enrich_advance",
@@ -1349,7 +1362,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                 unit_id=arguments.get("unit_id", ""),
                 extractions=arguments.get("extractions"),  # None if absent; validated in handler
                 merge_answers=arguments.get("merge_answers") or [],
-                **{k: arguments[k] for k in _ENRICH_ANSWER_BLOCKS if arguments.get(k)},
+                **{k: arguments[k] for k in _PUSH_BLOCKS if arguments.get(k)},
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_enrich_advance":

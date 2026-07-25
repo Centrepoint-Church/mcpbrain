@@ -16,6 +16,7 @@ The end-to-end round trip against the real apply lives in
 test_integration_spool.py.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -997,3 +998,29 @@ def test_block_drainers_use_configured_review_cap(
     drain.BLOCK_DRAINERS[block_key](None, {block_key: []})
 
     assert captured["cap"] == 3
+
+
+def test_review_orphan_round_trip_resolves_the_finding(store, home):
+    """End-to-end proof of the repaired path: push a review verdict, drain it,
+    and the finding closes. Every link in this chain existed before; the
+    producer and push allowlists were the two broken ones."""
+    from mcpbrain.mcp_server import make_brain_enrich_push
+
+    store.record_finding(
+        "lint:orphan_entity", "e-ghost",
+        summary="orphan_entity: Ghost", severity="info",
+    )
+    finding_id = store.open_findings("lint:orphan_entity")[0]["id"]
+
+    push = make_brain_enrich_push(str(home))
+    out = asyncio.run(push(
+        unit_id="u-e2e",
+        review_orphan=[{"finding_id": finding_id, "ref_id": "e-ghost",
+                        "verdict": "keep"}],
+    ))
+    assert out["written"] is True, out
+
+    summary = drain.drain(store, home=home, apply=RecordingApply())
+
+    assert summary["review_orphan_drained"] == 1
+    assert store.get_finding(finding_id)["resolved_at"] != ""
