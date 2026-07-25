@@ -208,6 +208,58 @@ def make_brain_proactive(store):
     return brain_proactive
 
 
+# Finding types brain_finding_resolve may close. Deliberately narrow: every
+# other type is owned by an automated resolver (the review appliers via
+# drain.BLOCK_DRAINERS, or lint's own resolve_findings_not_in). Closing one of
+# those by hand is churn — the next lint run re-opens it because the underlying
+# entity is still there — and a general tool would let any session quietly clear
+# the graph-hygiene queue. The dashboard route
+# /api/dashboard/findings/<id>/dismiss remains the human override for any type.
+MANUAL_RESOLVE_TYPES = ("memory_promotion",)
+
+_RESOLVE_OUTCOMES = ("promoted", "merged", "dismissed")
+
+
+def make_brain_finding_resolve(store):
+    async def brain_finding_resolve(finding_id: int, outcome: str,
+                                    note: str = "") -> dict:
+        """Close one proactive finding the caller has acted on.
+
+        Only types in MANUAL_RESOLVE_TYPES may be closed this way. outcome is
+        one of promoted | merged | dismissed and is recorded in the change log
+        alongside `note`. Returns {"resolved": bool, ...} — never raises.
+        """
+        try:
+            if outcome not in _RESOLVE_OUTCOMES:
+                return {"resolved": False,
+                        "error": f"outcome must be one of {list(_RESOLVE_OUTCOMES)}, "
+                                 f"got {outcome!r}"}
+            finding = store.get_finding(finding_id)
+            if finding is None:
+                return {"resolved": False, "error": f"finding {finding_id} not found"}
+            if finding["resolved_at"]:
+                return {"resolved": False,
+                        "error": f"finding {finding_id} is already resolved"}
+            ftype = finding["finding_type"]
+            if ftype not in MANUAL_RESOLVE_TYPES:
+                return {"resolved": False,
+                        "error": f"{ftype} is resolved automatically and cannot be "
+                                 f"closed by hand; only {list(MANUAL_RESOLVE_TYPES)} "
+                                 f"may be"}
+            if not store.resolve_finding(finding_id):
+                return {"resolved": False,
+                        "error": f"finding {finding_id} could not be resolved"}
+            store.record_change(
+                "finding_resolved", ref_id=str(finding_id),
+                summary=f"{ftype} {outcome}: {finding['ref_id']}",
+                detail=note, source="mcp")
+            return {"resolved": True, "finding_id": finding_id, "outcome": outcome}
+        except Exception as exc:  # noqa: BLE001 — a tool must return, not raise
+            _log.exception("brain_finding_resolve failed")
+            return {"resolved": False, "error": str(exc)}
+    return brain_finding_resolve
+
+
 def _capture_envelope(kind: str, source: str = "mcp", **fields) -> dict:
     from datetime import datetime, timezone
     return {"kind": kind, "source": source,
@@ -894,6 +946,8 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     meetings_today = make_brain_meetings_today(store, home)
     meeting_pack_get = make_brain_meeting_pack_get(store)
     meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
+    # Writable handle: resolving a finding UPDATEs proactive_findings.
+    finding_resolve = make_brain_finding_resolve(draft_store)
     # Standing instructions read by every session that connects this server —
     # the owner's identity/role/orgs + the brain tools + the capture loop. Rendered
     # from saved config at connect time (so it's never a stale paste), then captured
@@ -997,6 +1051,29 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
                         },
                         "severity": {"type": "string"},
                     },
+                },
+            ),
+            types.Tool(
+                name="brain_finding_resolve",
+                description=(
+                    "Close one proactive finding you have acted on. Only "
+                    "memory_promotion findings may be closed this way — every other "
+                    "type is resolved automatically. outcome: 'promoted' (a memory "
+                    "file was written), 'merged' (folded into an existing memory "
+                    "file), or 'dismissed' (not durable)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "finding_id": {"type": "integer",
+                                       "description": "the finding's id, from brain_proactive"},
+                        "outcome": {"type": "string",
+                                    "enum": list(_RESOLVE_OUTCOMES),
+                                    "description": "what you did about it"},
+                        "note": {"type": "string",
+                                 "description": "short free text for the change log"},
+                    },
+                    "required": ["finding_id", "outcome"],
                 },
             ),
             types.Tool(
@@ -1268,6 +1345,13 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_proactive":
             out = await proactive(arguments.get("finding_type", ""), arguments.get("severity", ""))
+            return [types.TextContent(type="text", text=json.dumps(out))]
+        if name == "brain_finding_resolve":
+            out = await finding_resolve(
+                finding_id=arguments.get("finding_id", 0),
+                outcome=arguments.get("outcome", ""),
+                note=arguments.get("note", ""),
+            )
             return [types.TextContent(type="text", text=json.dumps(out))]
         if name == "brain_ingest":
             out = await ingest(
