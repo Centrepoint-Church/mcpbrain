@@ -103,7 +103,7 @@ tool, never by hand:
 
 ```
 brain_memory_write(slug="<short-kebab-slug>", description="<one-line hook>",
-                   body="<the fact, plus Why: / How to apply: for feedback and project types>",
+                   body="<the fact, plus Why: / How to apply: for preference and project types; a system fact is usually just stated>",
                    memory_type="project|system|preference")
 ```
 

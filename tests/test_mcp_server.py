@@ -585,7 +585,7 @@ def test_enrich_push_review_answer_satisfies_the_block_unit_guard(tmp_path):
     out = asyncio.run(push(
         unit_id="u-review2",
         extractions=None,
-        review_org=[{"finding_id": 9, "ref_id": "accі", "verdict": "skip"}],
+        review_org=[{"finding_id": 9, "ref_id": "ACCI", "verdict": "skip"}],
     ))
 
     assert out["written"] is True, out
