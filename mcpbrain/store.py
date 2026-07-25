@@ -1591,15 +1591,20 @@ class Store:
             return True
 
     def note_chunks(self, *, observation_type: str | None = None,
-                    include_expired: bool = False, limit: int = 500) -> list[dict]:
+                    include_expired: bool = False, exclude_distilled: bool = False,
+                    limit: int = 500) -> list[dict]:
         """Return capture-note chunks (doc_id starting with 'note-'), with parsed metadata.
 
         Excludes expired chunks (meta["expired"] is truthy) unless include_expired=True.
-        Filters by observation_type if provided. Returns the newest `limit` live
-        results (ORDER BY rowid DESC). The limit is applied AFTER the Python-side
-        expired/observation_type filter, so a store full of expired notes never
-        truncates live ones — we iterate the cursor and stop once `limit` live
-        rows are collected rather than pre-truncating in SQL.
+        Excludes chunks memory_distil has already classified (meta["distilled_at"] is
+        truthy) when exclude_distilled=True — pass this only from memory_distil's own
+        selection query; callers like memory_index.py that render the live memory set
+        must NOT set it, since a distilled note still belongs in the index. Filters by
+        observation_type if provided. Returns the newest `limit` live results (ORDER BY
+        rowid DESC). The limit is applied AFTER the Python-side expired/distilled/
+        observation_type filter, so a store full of expired or already-distilled notes
+        never truncates live/fresh ones — we iterate the cursor and stop once `limit`
+        live rows are collected rather than pre-truncating in SQL.
         """
         sql = ("SELECT doc_id, text, metadata FROM chunks "
                "WHERE doc_id LIKE 'note-%' ORDER BY rowid DESC")
@@ -1611,6 +1616,8 @@ class Store:
                 except Exception:
                     continue
                 if not include_expired and meta.get("expired"):
+                    continue
+                if exclude_distilled and meta.get("distilled_at"):
                     continue
                 if observation_type is not None and meta.get("observation_type") != observation_type:
                     continue

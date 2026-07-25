@@ -67,3 +67,48 @@ def test_unknown_doc_or_verdict_skipped(tmp_path):
         {"doc_id": "note-a", "verdict": "vaporise"},
     ]})
     assert n == {"expired": 0, "promotions_flagged": 0}
+
+
+def test_drain_stamps_distilled_at_on_keep(tmp_path):
+    s = _store(tmp_path)
+    _note(s, "note-a", "Keep me")
+    memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-a", "verdict": "keep"},
+    ]})
+    chunk = s.get_chunk("note-a")
+    assert chunk["metadata"].get("distilled_at")
+
+
+def test_drain_stamps_distilled_at_on_expire(tmp_path):
+    s = _store(tmp_path)
+    _note(s, "note-b", "Expire me")
+    memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-b", "verdict": "expire", "reason": "stale"},
+    ]})
+    chunk = s.get_chunk("note-b")
+    assert chunk["metadata"].get("distilled_at")
+    assert chunk["metadata"].get("expired") is True
+
+
+def test_drain_stamps_distilled_at_on_promote(tmp_path):
+    s = _store(tmp_path)
+    _note(s, "note-c", "Promote me")
+    memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-c", "verdict": "promote",
+         "reason": "stated 4 times", "target_hint": "preferences.md"},
+    ]})
+    chunk = s.get_chunk("note-c")
+    assert chunk["metadata"].get("distilled_at")
+
+
+def test_build_distil_requests_excludes_already_distilled_notes(tmp_path):
+    s = _store(tmp_path)
+    _note(s, "note-a", "Already distilled")
+    _note(s, "note-b", "Fresh note")
+    memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-a", "verdict": "keep"},
+    ]})
+
+    reqs = memory_distil.build_distil_requests(s, cap=30)
+
+    assert {r["doc_id"] for r in reqs} == {"note-b"}
