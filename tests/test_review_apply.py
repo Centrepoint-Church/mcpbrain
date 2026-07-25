@@ -824,3 +824,82 @@ def test_duplicate_verdict_preexisting_skip_reasons_still_handled(tmp_path):
     assert result == {"merged": 0, "guarded": 0, "capped": 0, "skipped": 3}
     assert s.get_entity("only-one") is not None
     assert s.list_entity_merges() == []
+
+
+# ---------------------------------------------------------------------------
+# Closure durability: every terminal verdict must survive a re-detection
+# ---------------------------------------------------------------------------
+
+def test_orphan_keep_verdict_survives_redetection(tmp_path):
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e2", summary="probably fine")
+    finding = s.open_findings("lint:orphan_entity")[0]
+
+    apply_orphan_verdicts(
+        s, [{"finding_id": finding["id"], "ref_id": "e2", "verdict": "keep"}], cap=50)
+    assert s.get_finding(finding["id"])["verdict"] == "keep"
+
+    # Re-detection: the lint check runs again, e2 is still unchanged/orphan.
+    s.record_finding("lint:orphan_entity", "e2", summary="probably fine (redetected)")
+    assert s.open_findings("lint:orphan_entity") == []
+
+
+def test_orphan_skip_verdict_survives_redetection(tmp_path):
+    s = _seed(tmp_path)
+    s.record_finding("lint:orphan_entity", "e3", summary="unclear")
+    finding = s.open_findings("lint:orphan_entity")[0]
+
+    apply_orphan_verdicts(
+        s, [{"finding_id": finding["id"], "ref_id": "e3", "verdict": "maybe???"}], cap=50)
+    assert s.get_finding(finding["id"])["verdict"] == "skip"
+
+    s.record_finding("lint:orphan_entity", "e3", summary="unclear (redetected)")
+    assert s.open_findings("lint:orphan_entity") == []
+
+
+def test_missing_org_external_verdict_survives_redetection(tmp_path):
+    s = _seed(tmp_path)
+    s.record_finding("lint:missing_org", "e3", summary="no org")
+    finding = s.open_findings("lint:missing_org")[0]
+
+    cfg_home = _write_config(tmp_path, ACME_CFG)
+    apply_missing_org_verdicts(
+        s, [{"finding_id": finding["id"], "ref_id": "e3", "verdict": "external"}],
+        cap=50, home=cfg_home)
+    assert s.get_finding(finding["id"])["verdict"] == "external"
+
+    s.record_finding("lint:missing_org", "e3", summary="no org (redetected)")
+    assert s.open_findings("lint:missing_org") == []
+
+
+def test_ownerless_waiting_on_verdict_survives_redetection(tmp_path):
+    # _seed_ownerless is this file's existing helper for apply_ownerless_verdicts
+    # tests (defined above, around line 325) — it returns (store, {"a1": id, "a2": id}).
+    s, action_ids = _seed_ownerless(tmp_path)
+    aid = action_ids["a1"]
+    s.record_finding("lint:ownerless_action", str(aid), summary="no owner")
+    finding = s.open_findings("lint:ownerless_action")[0]
+
+    apply_ownerless_verdicts(
+        s, [{"finding_id": finding["id"], "ref_id": aid, "verdict": "waiting_on"}], cap=50)
+    assert s.get_finding(finding["id"])["verdict"] == "waiting_on"
+
+    s.record_finding("lint:ownerless_action", str(aid), summary="no owner (redetected)")
+    assert s.open_findings("lint:ownerless_action") == []
+
+
+def test_org_skip_verdict_survives_redetection(tmp_path):
+    # _seed_org is this file's existing helper for apply_org_verdicts tests
+    # (defined above, around line 461) — two entities tagged org='external'.
+    home = _write_config(tmp_path, ACME_CFG)
+    s = _seed_org(tmp_path)
+    s.record_finding("org_unrecognised", "rotary club", summary="unrecognised org")
+    finding = s.open_findings("org_unrecognised")[0]
+
+    apply_org_verdicts(
+        s, [{"finding_id": finding["id"], "finding_type": "org_unrecognised",
+             "ref_id": "rotary club", "verdict": "skip"}], cap=50, home=home)
+    assert s.get_finding(finding["id"])["verdict"] == "skip"
+
+    s.record_finding("org_unrecognised", "rotary club", summary="unrecognised org (redetected)")
+    assert s.open_findings("org_unrecognised") == []
