@@ -1,9 +1,20 @@
 """Cross-platform bodies for the mcpbrain session hooks.
 
-session-start prints bounded priming context (recent hot.md + open actions) to
-stdout for Claude Code to inject — but only at a genuine session boundary
-(startup/resume/clear). It stays silent after a `compact`, where re-injecting
-stale continuity/actions mid-session would just be noise.
+session-start prints two kinds of priming context to stdout for Claude Code to
+inject, gated differently:
+  - a timeless policy block (how to use mcpbrain's tools/resources/write triggers)
+    on EVERY SessionStart firing, including `compact` — that's exactly the moment
+    early-context framing is most at risk of being dropped;
+  - bounded state (recent hot.md + open actions) only at a genuine session
+    boundary (startup/resume/clear) — after a `compact` the compaction summary
+    already preserves the thread, so re-injecting stale continuity/actions here
+    would just be noise.
+
+session-end and pre-compact both read the hook JSON from stdin, parse the
+transcript, and queue an ingest capture of the conversation (both sides, so the
+enrich pipeline can summarise what was *decided/done*, not just what was asked):
+  - session-end fires on a real end (it skips `resume`, which is a continuation);
+  - pre-compact fires before compaction discards the full-fidelity thread.
 
 session-end and pre-compact both read the hook JSON from stdin, parse the
 transcript, and queue an ingest capture of the conversation (both sides, so the
@@ -59,32 +70,46 @@ _REMEDY_PRIORITY: tuple[str, ...] = (
 _MAX_ACTIONS = 3
 
 # The mcpbrain MCP server's connect-time `instructions` (rendered by
-# render_project_instructions) already ask Claude to use these tools, but that
-# text is easy to lose among everything else in a long system prompt. This
-# block re-states it at every real session boundary — high-salience, close to
-# where the model actually reads system-reminders — because in practice the
-# tools were being used only when explicitly asked for, not proactively.
+# render_project_instructions) already ask Claude to use these tools/resources,
+# but that text is easy to lose among everything else in a long system prompt.
+# This block re-states it at high salience, close to where the model actually
+# reads system-reminders — because in practice these were only used when
+# explicitly asked for, not proactively. It's timeless framing, not session
+# state, so session_start() prints it on EVERY firing including `compact` (see
+# module docstring) — unlike the resource mechanism (below), a resource is
+# never force-injected, so this hook is the only reliable place to say so.
 _TOOL_REMINDER = """\
 ## Use mcpbrain proactively
-These are deferred tools — load once via ToolSearch("select:mcp__mcpbrain__brain_search,\
-mcp__mcpbrain__brain_context,mcp__mcpbrain__brain_actions,mcp__mcpbrain__brain_graph") then \
-call directly for the rest of the session. Don't wait to be asked: check brain_search / \
-brain_context whenever a question touches a person, org, project, decision, or anything that \
-might already be in memory — even in passing.
+- Identity/voice/preferences/reference/decisions: read directly via the mcpbrain @-resources \
+(context/voice.md, identity.md, preferences.md, reference/*, decisions.md) — no tool call \
+needed. Apply voice to everything you produce for me: emails, documents, slides, any deliverable.
+- Recall: these are deferred tools — load once via ToolSearch("select:mcp__mcpbrain__brain_search,\
+mcp__mcpbrain__brain_context,mcp__mcpbrain__brain_actions,mcp__mcpbrain__brain_graph") then call \
+directly for the rest of the session. Don't wait to be asked: check brain_search / brain_context \
+whenever a question touches a person, org, project, decision, or anything that might already be \
+in memory — even in passing.
+- Keep the brain current as we work, unprompted: a decision that changes how things are done -> \
+brain_decision; a "just decided / where we're up to" note -> brain_note; a durable learning, \
+preference, or fact worth keeping -> brain_memory_write; a system/project materially changing -> \
+propose an edit to the matching reference file. Never hand-edit records/context or records/state \
+files directly — they're daemon-managed; always go through these write tools.
 """
 
 
 def session_start(home: str, out=None, source: str = "startup") -> None:
     out = out or sys.stdout
-    # SessionStart fires for startup | resume | clear | compact. The priming
-    # block belongs at a real boundary (startup/resume/clear). After a compaction
-    # the session is mid-flight: the block was already injected at startup, the
+    # Timeless policy framing — prints on every firing, including `compact`,
+    # since compaction is exactly when early-context instructions risk being
+    # dropped and a re-assertion matters most.
+    print(_TOOL_REMINDER, file=out)
+    # SessionStart also fires for startup | resume | clear | compact. The
+    # continuity/actions state below belongs only at a genuine boundary
+    # (startup/resume/clear): after a compaction the session is mid-flight, the
     # compaction summary preserves the thread, and pre-compact has separately
     # captured the full-fidelity history to the brain — so re-injecting stale
-    # continuity + actions here is pure noise. Stay silent.
+    # continuity + actions here would just be noise. Stay silent for those.
     if source == "compact":
         return
-    print(_TOOL_REMINDER, file=out)
     print("## Recent continuity (hot.md)", file=out)
     try:
         hot = Path(config.records_dir(home)) / "state" / "hot.md"
