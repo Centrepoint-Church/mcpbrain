@@ -112,3 +112,51 @@ def test_build_distil_requests_excludes_already_distilled_notes(tmp_path):
     reqs = memory_distil.build_distil_requests(s, cap=30)
 
     assert {r["doc_id"] for r in reqs} == {"note-b"}
+
+
+def test_drain_stamps_distilled_verdict_alongside_distilled_at(tmp_path):
+    """distilled_verdict must record WHICH verdict produced the stamp, so
+    note_chunks can tell a deferral (keep) apart from a decision
+    (expire/promote) when deciding whether to re-include it."""
+    s = _store(tmp_path)
+    _note(s, "note-k", "Keep me")
+    _note(s, "note-e", "Expire me")
+    _note(s, "note-p", "Promote me")
+    memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-k", "verdict": "keep"},
+        {"doc_id": "note-e", "verdict": "expire", "reason": "stale"},
+        {"doc_id": "note-p", "verdict": "promote",
+         "reason": "stated 4 times", "target_hint": "preferences.md"},
+    ]})
+
+    assert s.get_chunk("note-k")["metadata"]["distilled_verdict"] == "keep"
+    assert s.get_chunk("note-e")["metadata"]["distilled_verdict"] == "expire"
+    assert s.get_chunk("note-p")["metadata"]["distilled_verdict"] == "promote"
+
+
+def test_build_distil_requests_resurfaces_stale_keep_note(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-stale", text="Stale\n\nbody", content_hash="note-stale",
+                   metadata={"source": "note", "title": "Stale",
+                             "observation_type": "memory",
+                             "captured_at": "2026-05-01T00:00:00Z",
+                             "distilled_at": "2026-06-01T00:00:00Z",
+                             "distilled_verdict": "keep"})
+
+    reqs = memory_distil.build_distil_requests(s, cap=30, keep_review_days=30)
+
+    assert {r["doc_id"] for r in reqs} == {"note-stale"}
+
+
+def test_build_distil_requests_leaves_fresh_keep_note_excluded(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_chunk(doc_id="note-fresh", text="Fresh\n\nbody", content_hash="note-fresh",
+                   metadata={"source": "note", "title": "Fresh",
+                             "observation_type": "memory",
+                             "captured_at": "2026-07-20T00:00:00Z",
+                             "distilled_at": "2026-07-24T00:00:00Z",
+                             "distilled_verdict": "keep"})
+
+    reqs = memory_distil.build_distil_requests(s, cap=30, keep_review_days=30)
+
+    assert reqs == []
