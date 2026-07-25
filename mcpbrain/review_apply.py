@@ -51,16 +51,16 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
                 result["capped"] += 1
                 continue
             if store.suppress_entity(ref_id, reason=verdict.get("reason", "")):
-                store.resolve_finding(finding_id)
+                store.resolve_finding(finding_id, verdict="suppress")
                 result["suppressed"] += 1
             else:
                 result["missing"] += 1
         elif verdict_str == "keep":
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="keep")
             result["kept"] += 1
         else:
             # "skip" and any unrecognised verdict string.
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="skip")
             result["skipped"] += 1
 
     return result
@@ -113,17 +113,17 @@ def apply_missing_org_verdicts(
                 result["capped"] += 1
                 continue
             if store.update_entity_org(ref_id, org):
-                store.resolve_finding(finding_id)
+                store.resolve_finding(finding_id, verdict="assign")
                 result["assigned"] += 1
             else:
                 result["missing"] += 1
         elif verdict_str == "external":
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="external")
             result["external"] += 1
         else:
             # "skip", an "assign" with a missing/invalid org, and any
             # unrecognised verdict string.
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="skip")
             result["skipped"] += 1
 
     return result
@@ -174,20 +174,20 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
                 result["capped"] += 1
                 continue
             if store.assign_action_owner(ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", "")):
-                store.resolve_finding(finding_id)
+                store.resolve_finding(finding_id, verdict="owner")
                 result["owner_assigned"] += 1
             else:
                 result["missing"] += 1
         elif verdict_str == "waiting_on":
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="waiting_on")
             result["waiting_on"] += 1
         elif verdict_str == "unowned":
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="unowned")
             result["unowned"] += 1
         else:
             # "skip", an "owner" verdict with a missing `owner` field, and any
             # unrecognised verdict string.
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="skip")
             result["skipped"] += 1
 
     return result
@@ -282,7 +282,7 @@ def apply_org_verdicts(
                 result["capped"] += 1
                 continue
             if store.update_entity_org(ref_id, canonical_org):
-                store.resolve_finding(finding_id)
+                store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
             else:
                 result["missing"] += 1
@@ -293,7 +293,7 @@ def apply_org_verdicts(
                 continue
             updated = store.rewrite_org_field(ref_id, canonical_org)
             if updated > 0:
-                store.resolve_finding(finding_id)
+                store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
             else:
                 result["missing"] += 1
@@ -302,13 +302,13 @@ def apply_org_verdicts(
                 result["capped"] += 1
                 continue
             store.suggest_org_mapping(ref_id, reason=verdict.get("reason", ""))
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="add_to_config")
             result["suggested"] += 1
         else:
             # "skip", "add_to_config" on a finding_type it isn't defined for,
             # a "canonicalize" with a missing/invalid `canonical_org`, and any
             # unrecognised verdict string.
-            store.resolve_finding(finding_id)
+            store.resolve_finding(finding_id, verdict="skip")
             result["skipped"] += 1
 
     return result
