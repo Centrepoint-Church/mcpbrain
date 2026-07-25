@@ -9,7 +9,7 @@ Tests cover:
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mcpbrain.store import Store
 
@@ -713,7 +713,7 @@ def test_note_chunks_exclude_distilled_keeps_excluding_fresh_keep(tmp_path):
                    metadata={"source": "note", "title": "Fresh",
                              "observation_type": "memory",
                              "captured_at": "2026-07-20T00:00:00Z",
-                             "distilled_at": "2026-07-24T00:00:00Z",
+                             "distilled_at": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                              "distilled_verdict": "keep"})
 
     ids = {c["doc_id"] for c in
