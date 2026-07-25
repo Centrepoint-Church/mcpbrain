@@ -600,3 +600,93 @@ def test_enrich_push_schema_declares_every_push_block():
     for key in enrich_blocks.PUSH_BLOCKS:
         assert key in schema["properties"], f"{key} missing from push inputSchema"
     assert "merge_answers" in schema["properties"]
+
+
+# --- brain_finding_resolve MCP tool --------------------------------------
+
+from mcpbrain.mcp_server import make_brain_finding_resolve
+
+
+def _promotion_store(tmp_path, name="fr.sqlite3"):
+    s = Store(tmp_path / name, dim=4)
+    s.init()
+    s.record_finding(
+        "memory_promotion", "note-abc",
+        summary="Memory note flagged for promotion: note-abc",
+        detail="reason=durable preference target_hint=preferences",
+        severity="info",
+    )
+    s.record_finding(
+        "lint:orphan_entity", "e-ghost",
+        summary="orphan_entity: Ghost", severity="info",
+    )
+    return s
+
+
+def _finding_id(store, finding_type):
+    return store.open_findings(finding_type)[0]["id"]
+
+
+def test_finding_resolve_closes_a_memory_promotion(tmp_path):
+    s = _promotion_store(tmp_path)
+    fid = _finding_id(s, "memory_promotion")
+    tool = make_brain_finding_resolve(s)
+
+    out = asyncio.run(tool(finding_id=fid, outcome="promoted",
+                           note="wrote memory/durable-preference.md"))
+
+    assert out == {"resolved": True, "finding_id": fid, "outcome": "promoted"}
+    assert s.open_findings("memory_promotion") == []
+
+
+def test_finding_resolve_records_the_change(tmp_path):
+    s = _promotion_store(tmp_path, name="fr_change.sqlite3")
+    fid = _finding_id(s, "memory_promotion")
+    tool = make_brain_finding_resolve(s)
+
+    asyncio.run(tool(finding_id=fid, outcome="dismissed", note="not durable"))
+
+    kinds = [c["change_type"] for c in s.recent_changes(limit=10)]
+    assert "finding_resolved" in kinds
+
+
+def test_finding_resolve_refuses_a_lint_finding(tmp_path):
+    """lint types are owned by the review appliers. Closing one by hand is
+    churn (the next lint run re-opens it) and would let any session quietly
+    clear graph-hygiene work."""
+    s = _promotion_store(tmp_path, name="fr_lint.sqlite3")
+    fid = _finding_id(s, "lint:orphan_entity")
+    tool = make_brain_finding_resolve(s)
+
+    out = asyncio.run(tool(finding_id=fid, outcome="dismissed"))
+
+    assert out["resolved"] is False
+    assert "lint:orphan_entity" in out["error"]
+    assert len(s.open_findings("lint:orphan_entity")) == 1
+
+
+def test_finding_resolve_rejects_a_bad_outcome(tmp_path):
+    s = _promotion_store(tmp_path, name="fr_outcome.sqlite3")
+    fid = _finding_id(s, "memory_promotion")
+    tool = make_brain_finding_resolve(s)
+
+    out = asyncio.run(tool(finding_id=fid, outcome="done"))
+
+    assert out["resolved"] is False
+    assert "outcome" in out["error"]
+    assert len(s.open_findings("memory_promotion")) == 1
+
+
+def test_finding_resolve_rejects_unknown_and_already_resolved(tmp_path):
+    s = _promotion_store(tmp_path, name="fr_missing.sqlite3")
+    tool = make_brain_finding_resolve(s)
+
+    missing = asyncio.run(tool(finding_id=99999, outcome="dismissed"))
+    assert missing["resolved"] is False
+    assert "not found" in missing["error"]
+
+    fid = _finding_id(s, "memory_promotion")
+    asyncio.run(tool(finding_id=fid, outcome="merged"))
+    again = asyncio.run(tool(finding_id=fid, outcome="merged"))
+    assert again["resolved"] is False
+    assert "already resolved" in again["error"]
