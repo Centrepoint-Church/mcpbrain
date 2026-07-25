@@ -58,6 +58,21 @@ _REMEDY_PRIORITY: tuple[str, ...] = (
 
 _MAX_ACTIONS = 3
 
+# The mcpbrain MCP server's connect-time `instructions` (rendered by
+# render_project_instructions) already ask Claude to use these tools, but that
+# text is easy to lose among everything else in a long system prompt. This
+# block re-states it at every real session boundary — high-salience, close to
+# where the model actually reads system-reminders — because in practice the
+# tools were being used only when explicitly asked for, not proactively.
+_TOOL_REMINDER = """\
+## Use mcpbrain proactively
+These are deferred tools — load once via ToolSearch("select:mcp__mcpbrain__brain_search,\
+mcp__mcpbrain__brain_context,mcp__mcpbrain__brain_actions,mcp__mcpbrain__brain_graph") then \
+call directly for the rest of the session. Don't wait to be asked: check brain_search / \
+brain_context whenever a question touches a person, org, project, decision, or anything that \
+might already be in memory — even in passing.
+"""
+
 
 def session_start(home: str, out=None, source: str = "startup") -> None:
     out = out or sys.stdout
@@ -69,6 +84,7 @@ def session_start(home: str, out=None, source: str = "startup") -> None:
     # continuity + actions here is pure noise. Stay silent.
     if source == "compact":
         return
+    print(_TOOL_REMINDER, file=out)
     print("## Recent continuity (hot.md)", file=out)
     try:
         hot = Path(config.records_dir(home)) / "state" / "hot.md"
