@@ -5,7 +5,9 @@ the warm daemon for a few semantically-relevant snippets over the loopback
 control API, and emits them as `additionalContext`. Default ON (config flag
 `prompt_recall`), but fail-open in every direction: a missing flag, a slow or
 down daemon, a trivial prompt, or no good hits all resolve to empty output and
-exit 0 — a prompt is never blocked or noticeably delayed.
+exit 0. The warm case (~0.2-0.4s) is never noticeable; a cold call (first hit
+after the daemon's been idle — see _TIMEOUT_S/_CORE_TIMEOUT_S) can add up to a
+few seconds before giving up rather than silently dropping real context.
 
 The embedder is far too slow to load per prompt, so this never opens its own
 store/embedder; it always goes through the daemon, which holds both.
@@ -32,7 +34,16 @@ _KEEP = 3              # max hits actually injected
 _SNIPPET = 200         # max chars per injected snippet
 _MAX_TOTAL = 1200      # hard cap on total injected chars
 _EXPANDED_MAX_TOTAL = 4000   # daemon-side expand_hits char_budget default (see config.expand_params)
-_TIMEOUT_S = 1.2       # fail-open latency budget for the loopback call
+_TIMEOUT_S = 3.0       # fail-open latency budget for the loopback call. Was 1.2s,
+                       # but a cold daemon call (first hit after ~45s+ idle — the
+                       # normal gap between a user reading a reply and typing the
+                       # next prompt) measured 1.5-2.6s live, i.e. it was silently
+                       # timing out on a realistic share of prompts. Raised with
+                       # buffer above the observed worst case; costs nothing on the
+                       # warm case (~0.2-0.4s), only extends how long a genuinely
+                       # dead daemon gets before the hook gives up.
+_CORE_TIMEOUT_S = 2.0  # fail-open budget for /api/core. Was 0.5s; a cold call
+                       # measured 1.3s live — same idle-daemon cause as _TIMEOUT_S.
 _MIN_PROMPT = 12       # skip trivially short prompts
 _REL_FLOOR = 0.55      # keep hits scoring >= this fraction of the top hit
 _SEEN_TTL_S = 86400    # prune per-session seen-files older than a day
@@ -305,7 +316,7 @@ def _get_core_block(home: str) -> str:
             method="GET",
             headers={"Authorization": f"Bearer {token}"},
         )
-        with _ur.urlopen(req, timeout=0.5) as r:  # noqa: S310 loopback only
+        with _ur.urlopen(req, timeout=_CORE_TIMEOUT_S) as r:  # noqa: S310 loopback only
             data = _json.loads(r.read() or b"{}")
         return (data or {}).get("core_block") or ""
     except Exception:  # noqa: BLE001 — core block failure must be invisible
