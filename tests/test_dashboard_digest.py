@@ -61,6 +61,32 @@ def test_post_dismiss_finding(tmp_path):
         srv.stop()
 
 
+def test_dismiss_records_a_verdict_that_blocks_reopening(tmp_path):
+    """A human's manual dismiss must stick, same as an AI verdict: the
+    dashboard's dismiss route should not leave a finding reopenable by the
+    next re-detection of the same signal."""
+    s = _store(tmp_path)
+    s.record_finding("org_unrecognised", ref_id="x", summary="s")
+    fid = s.open_findings()[0]["id"]
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path), store=s)
+    srv.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.port}/api/dashboard/findings/{fid}/dismiss",
+            data=b"{}", method="POST")
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        out = json.loads(urllib.request.urlopen(req).read())
+        assert out["dismissed"] is True
+
+        assert s.get_finding(fid)["verdict"] == "dismissed_by_human"
+
+        # Re-detection: org_unrecognised is re-flagged for the same raw org string.
+        s.record_finding("org_unrecognised", ref_id="x", summary="s (redetected)")
+        assert s.open_findings("org_unrecognised") == []
+    finally:
+        srv.stop()
+
+
 def test_changes_digest_degrades_on_store_error(tmp_path):
     """changes_digest must return empty lists rather than crashing on a store error."""
     from unittest import mock
