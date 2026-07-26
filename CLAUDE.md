@@ -54,8 +54,54 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-23):** the **five** version files (+ `uv.lock`) are at `0.7.107`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.107 replaces enrichment's
+- **Current state (2026-07-26):** the **five** version files (+ `uv.lock`) are at `0.7.110`,
+  releasing (source + dist wheel + plugin marketplace). **0.7.110 is a session-context +
+  actions-hygiene release.** Three threads, all driven by observed live-store behaviour:
+  **(1) SessionStart policy block** — the MCP server's connect-time `instructions` already ask
+  Claude to use the brain tools/@-resources, but that text gets lost in a long system prompt and
+  in practice the tools were used only when explicitly asked for. `session_hooks._TOOL_REMINDER`
+  now restates it at high salience (resources-vs-tools distinction for
+  voice/identity/preferences, the ToolSearch select string for the deferred recall tools, and the
+  unprompted write triggers + a "never hand-edit daemon-managed records files" guardrail).
+  `session_start()` is split so this timeless framing prints on **every** firing **including
+  `compact`** (compaction is exactly when early-context instructions are at risk), while the
+  hot.md continuity/open-actions **state** stays compact-silent as before.
+  **(2) Open-actions selection fix** — `_open_actions` appended every bucket in order then
+  truncated to 8 lines, so a long `overdue` list made `due_today`/`upcoming` **structurally
+  unreachable**; on the live store that was the normal case (20 overdue, all 2018-2023, vs 3
+  genuinely due today) so the whole budget was dead rows and today's work was never injected.
+  Same bug class as the 0.7.103 expansion fix (truncating an ordered set after the fact).
+  `_select_actions` now reserves per-bucket quota (3/3/2, unused redistributed), de-dupes on
+  normalised text, and drops rows past the archive cutoff. **The display cutoff must not be
+  stricter than the sweep** — the dashboard hands the hook the 20 **oldest** overdue rows
+  (`dashboard.py` sorts ascending then caps), so a tighter filter drops every row it is given and
+  starves the bucket; a guard test pins `_STALE_AFTER_DAYS` to
+  `archive_stale_actions(overdue_cutoff_days=…)`.
+  **(3) Actions kept clean, automatically** — `archive_stale_actions` had **no automatic caller
+  at all** (only a manual `bin/consolidate.py` run) and deliberately spared *every* dated action
+  ("an overdue task is high-signal"). True for a recent slip, not a 2018 deadline. It gains a
+  second rule for **dated but long-dead** rows (default **730** days — far more generous than the
+  120-day undated rule, so the high-signal recent-overdue case is still spared and the original
+  test contract holds), marked `resolved_by='ttl_overdue'`; new **`archive_duplicate_actions`**
+  collapses re-extracted copies keeping `MIN(id)`, marked `'dedup'` (blank fingerprints are
+  **never** grouped — many unrelated rows share an empty string). Both are wired into a new daily
+  **`action_hygiene`** cadence. Both are status-only and reversible; nothing is deleted and the
+  distinct markers make each sweep separately auditable/undoable. Applied to the live store:
+  open actions **3,529 → 3,069** (38 long-dead + 422 duplicates), zero long-dead and zero
+  duplicate groups left. Also **`prompt_recall` timeouts raised** (`_TIMEOUT_S` 1.2→3.0s,
+  `/api/core` 0.5→2.0s): a cold daemon call (first hit after ~45s idle, i.e. the normal gap
+  between reading a reply and typing) measured 1.3-2.6s live, so per-prompt recall was **silently
+  timing out** on a realistic share of turns. **`recall_max_distance` was investigated and
+  deliberately NOT changed** — raising 0.80→0.85 recovers **zero** on-topic queries (both misses
+  measured 0.864/0.878, above 0.85) while taking off-topic noise 1/8 → 5/8; note the gold harness
+  calls `hybrid_search` directly so it never exercises this gate (same blind spot as the removed
+  sufficiency gate). **Known/open:** daemon cadence passes appear **stalled** since 2026-07-23
+  (`_run_periodic_passes` early-returns wholesale when `_backfill_active` is set), which would
+  also block the new `action_hygiene` cadence — the 0.7.110 live sweep was therefore applied
+  directly, and the underlying daemon single-process contention (finding #3: ~20 cadence passes
+  vs control-API threads on GIL+DB) remains unfixed. The **Windows HARDWARE QA GATE from 0.7.97
+  remains OPEN.** Earlier: **0.7.109** shipped the findings pipeline + closure durability +
+  memory keep window; **0.7.108** zero-touch onboarding + Windows install fixes. **0.7.107 replaces enrichment's
   one-subagent-per-unit fan-out with a work-stealing drainer pool** — cutting subagent cold-start
   and coordinator↔subagent comms overhead. Two new MCP tools: **`brain_enrich_claim`** atomically
   leases ONE unit and returns its payload in a single call (folds `units`+`pull`; `O_CREAT|O_EXCL`
