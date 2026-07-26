@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from mcpbrain import config, probes
@@ -68,6 +68,28 @@ _REMEDY_PRIORITY: tuple[str, ...] = (
 )
 
 _MAX_ACTIONS = 3
+
+# Open-actions selection. The injected block is capped at _MAX_LINES, and it used
+# to be filled first-come across buckets in order — which meant a long `overdue`
+# list made `due_today`/`upcoming` structurally unreachable. On the live store
+# that was the normal case (20 overdue, all 2018-2023, vs 3 genuinely due today),
+# so today's work was never injected at all. Each bucket now reserves slots, and
+# long-dead items are dropped before the budget is spent on them.
+_BUCKET_ORDER: tuple[str, ...] = ("due_today", "overdue", "upcoming")
+_BUCKET_QUOTA: dict[str, int] = {"due_today": 3, "overdue": 3, "upcoming": 2}
+# An overdue deadline older than this is almost certainly dead or superseded
+# rather than a live task (the live store had items 3-8 years past due). This is
+# a DISPLAY filter for the injected block only — nothing is mutated or deleted,
+# and the dashboard still shows everything.
+#
+# Kept in step with store.archive_stale_actions' overdue_cutoff_days: that daily
+# sweep is what actually retires this debris, so this is only a backstop for the
+# window before it runs. A TIGHTER value here actively backfires — the dashboard
+# hands us the 20 OLDEST overdue rows (dashboard.py sorts ascending, then caps),
+# so a filter stricter than the sweep drops every row it is given and starves the
+# overdue bucket to nothing while genuinely recent misses sit further down the
+# uncapped list, never seen.
+_STALE_AFTER_DAYS = 730
 
 # The mcpbrain MCP server's connect-time `instructions` (rendered by
 # render_project_instructions) already ask Claude to use these tools/resources,
@@ -125,7 +147,67 @@ def session_start(home: str, out=None, source: str = "startup") -> None:
         print("\n" + block, file=out)
 
 
-def _open_actions(home: str) -> str:
+def _is_stale(deadline, *, today: date) -> bool:
+    """True when a deadline is so far past that the item is almost certainly dead.
+
+    Missing or unparseable deadlines are never stale — fail-open, because hiding
+    a real action over a date-parse quirk is worse than showing an old one.
+    """
+    if not deadline:
+        return False
+    try:
+        d = date.fromisoformat(str(deadline)[:10])
+    except (ValueError, TypeError):
+        return False
+    return (today - d).days > _STALE_AFTER_DAYS
+
+
+def _select_actions(actions: dict, *, today: date, limit: int = _MAX_LINES) -> list[str]:
+    """Pick up to `limit` action lines, allocating slots fairly across buckets.
+
+    Filters, in order: drop long-dead items (see _is_stale), de-duplicate on
+    normalised text (the same action extracted from two emails otherwise burns
+    two slots on one task), then take each bucket's reserved quota. Unused quota
+    is redistributed round-robin so a short bucket doesn't waste the budget.
+    Output stays grouped in _BUCKET_ORDER.
+    """
+    seen: set[str] = set()
+    fresh: dict[str, list[str]] = {}
+    for bucket in _BUCKET_ORDER:
+        kept: list[str] = []
+        for x in (actions.get(bucket) or []):
+            if not isinstance(x, dict):
+                continue
+            text = " ".join((x.get("text") or "").split())
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen or _is_stale(x.get("deadline"), today=today):
+                continue
+            seen.add(key)
+            kept.append(f"- [{bucket}] {text[:80]}")
+        fresh[bucket] = kept
+
+    counts = {b: min(len(fresh[b]), _BUCKET_QUOTA.get(b, 0)) for b in _BUCKET_ORDER}
+    while sum(counts.values()) < limit:
+        grew = False
+        for b in _BUCKET_ORDER:
+            if sum(counts.values()) >= limit:
+                break
+            if counts[b] < len(fresh[b]):
+                counts[b] += 1
+                grew = True
+        if not grew:
+            break  # every bucket exhausted -> budget can't be filled further
+
+    out: list[str] = []
+    for b in _BUCKET_ORDER:
+        out.extend(fresh[b][:counts[b]])
+    return out[:limit]
+
+
+def _open_actions(home: str, *, today: date | None = None) -> str:
+    today = today or datetime.now(timezone.utc).date()
     try:
         port = (Path(home) / "control_port").read_text().strip()
         token = (Path(home) / "control_token").read_text().strip()
@@ -140,13 +222,8 @@ def _open_actions(home: str) -> str:
     except Exception:  # noqa: BLE001 — daemon down / no dashboard
         return "(actions unavailable)"
     actions = (data or {}).get("actions", {}) or {}
-    rows = []
-    for bucket in ("overdue", "due_today", "upcoming"):
-        for x in (actions.get(bucket) or []):
-            t = (x.get("text") or "").strip().replace("\n", " ")
-            if t:
-                rows.append(f"- [{bucket}] {t[:80]}")
-    return "\n".join(rows[:_MAX_LINES]) if rows else "(no open actions)"
+    rows = _select_actions(actions, today=today)
+    return "\n".join(rows) if rows else "(no open actions)"
 
 
 def _action_needed(home: str) -> str:
