@@ -183,6 +183,11 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
                 "_last_resolve_entities", "_run_resolve_entities"),
     # Session-4: daily AI-adjudicated graph-hygiene review (build review units).
     CadencePass("review", "_review_interval_s", "_last_review", "_run_review"),
+    # Daily action hygiene: age out long-dead actions + collapse duplicates.
+    # needs_configured=False: sweeping our own actions table needs no identity.
+    CadencePass("action_hygiene", "_action_hygiene_interval_s",
+                "_last_action_hygiene", "_run_action_hygiene",
+                needs_configured=False),
     # B3 salience scoring: structural importance per chunk.
     # needs_configured=False: salience is identity-agnostic.
     CadencePass("salience_score", "_salience_score_interval_s",
@@ -598,6 +603,11 @@ class Daemon:
         # cadences config to disable. (This attr is the pre-config placeholder.)
         self._review_interval_s: float | None = None
         self._last_review = None
+        # Daily action hygiene: age out long-dead actions + collapse duplicates.
+        # Default 86400s via _CADENCE_DEFAULTS; set action_hygiene_interval_s: 0
+        # in the cadences config to disable.
+        self._action_hygiene_interval_s: float | None = None
+        self._last_action_hygiene = None
         # B3 salience scoring: structural importance per chunk (daily).
         self._salience_score_interval_s: float | None = None
         self._last_salience_score = None
@@ -1019,6 +1029,7 @@ class Daemon:
             self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
             self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
             self._review_interval_s = cadences["review_interval_s"]
+            self._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
             self._salience_score_interval_s = cadences["salience_score_interval_s"]
             self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
@@ -1786,6 +1797,37 @@ class Daemon:
         self._last_resolve_entities = now
         return summary
 
+    def _run_action_hygiene(self) -> dict | None:
+        """Daily sweep that keeps the actions table clean.
+
+        Two reversible passes, both status-only (nothing is ever deleted):
+          - archive_stale_actions: undated-by-age, plus dated deadlines so far
+            past they are debris rather than follow-ups;
+          - archive_duplicate_actions: collapse re-extracted copies of the same
+            commitment, keeping the original.
+
+        Until this cadence existed neither had an automatic caller — they ran
+        only via a manual bin/consolidate.py invocation — so on a real install
+        the actions table was never swept and accrued years of dead rows, which
+        then crowded genuinely current work out of every capped actions surface.
+        """
+        if not self._is_due("_action_hygiene_interval_s", "_last_action_hygiene"):
+            return None
+        now = self._clock()
+        try:
+            stale = self._store.archive_stale_actions()
+            dupes = self._store.archive_duplicate_actions()
+        except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
+            log.warning("action_hygiene failed: %s", exc, exc_info=True)
+            return {"action_hygiene": False, "error": str(exc)}
+        self._last_action_hygiene = now
+        summary = {"actions_archived": stale.get("archived", 0),
+                   "actions_deduped": dupes.get("archived", 0)}
+        if summary["actions_archived"] or summary["actions_deduped"]:
+            log.info("action_hygiene: archived=%d deduped=%d",
+                     summary["actions_archived"], summary["actions_deduped"])
+        return summary
+
     # -- Session-4 AI-adjudication review (graph-hygiene findings) ------------
 
     def _run_review(self) -> dict | None:
@@ -2429,6 +2471,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "org_backfill_interval_s":        86400.0,   # Q4: daily deterministic backfill
     "resolve_entities_interval_s":    86400.0,   # Task 3.3: daily deterministic entity dedup (issue #23-fix validated)
     "review_interval_s":              86400.0,   # Session-4: daily AI-adjudicated graph-hygiene review
+    "action_hygiene_interval_s":      86400.0,   # daily actions sweep: TTL + duplicate collapse
     "salience_score_interval_s":      86400.0,   # B3: daily structural salience
     "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
@@ -2459,6 +2502,7 @@ _CADENCE_KEYS = (
     "org_backfill_interval_s",
     "resolve_entities_interval_s",
     "review_interval_s",
+    "action_hygiene_interval_s",
     "salience_score_interval_s",
     "decay_pass_interval_s",
     "consolidation_interval_s",
@@ -2559,6 +2603,7 @@ def main(argv=None) -> None:
     daemon._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
     daemon._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
+    daemon._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
     daemon._review_interval_s = cadences["review_interval_s"]
     daemon._salience_score_interval_s = cadences["salience_score_interval_s"]
     daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]

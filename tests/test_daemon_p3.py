@@ -792,6 +792,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "org_backfill_interval_s": None,
              "resolve_entities_interval_s": None,
              "review_interval_s": None,
+             "action_hygiene_interval_s": None,
              "salience_score_interval_s": None,
              "decay_pass_interval_s": None,
              "consolidation_interval_s": None,

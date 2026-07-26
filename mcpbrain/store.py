@@ -1977,45 +1977,104 @@ class Store:
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
             return cur.rowcount
 
-    def archive_stale_actions(self, *, cutoff_days: int = 120, as_of: str | None = None,
+    def archive_stale_actions(self, *, cutoff_days: int = 120,
+                              overdue_cutoff_days: int = 730,
+                              as_of: str | None = None,
                               dry_run: bool = False) -> dict:
-        """Archive (never delete) stale, UNDATED open actions older than cutoff_days.
+        """Archive (never delete) stale open actions, on two independent rules.
 
-        Reversible: an eligible action's status flips to 'auto_archived' with
-        resolved_by='ttl' — reopen it any time via set_action_status. Deliberately
-        conservative about what ages out; an action is eligible only if it is:
-          - still 'open';
-          - of KNOWN age captured before the cutoff (empty/NULL created_at is
-            treated as unknown age and left alone, never archived);
-          - UNDATED — has no deadline at all. Any dated commitment is left
-            untouched, whether future (upcoming) or past (overdue) — an overdue
-            task is a high-signal follow-up, not stale noise;
-          - not currently snoozed to a future date (a deferred task resurfaces on
-            its snooze date; it must not be archived out from under that).
-        Idempotent (only touches 'open' rows). `as_of` (ISO) is for tests.
-        Returns {'archived': n} (or {'candidates': n, 'ids': [...]} for dry_run)."""
+        Reversible: an eligible action's status flips to 'auto_archived' —
+        reopen it any time via set_action_status. Never touches a row that is
+        already closed, and never a row snoozed to a future date (a deferred
+        task resurfaces on its snooze date and must not be archived out from
+        under that). Idempotent. `as_of` (ISO) is for tests.
+
+        Rule 1 — UNDATED by age (resolved_by='ttl'), cutoff_days:
+          no deadline at all, and of KNOWN age captured before the cutoff
+          (empty/NULL created_at means unknown age and is left alone).
+
+        Rule 2 — DATED but long dead (resolved_by='ttl_overdue'),
+        overdue_cutoff_days: a deadline this far in the past is not a follow-up,
+        it is debris — the live store carried open actions dated 2018-2023.
+        A merely-recent slip is still spared, deliberately: an overdue task is
+        normally high-signal, so this cutoff is far more generous than Rule 1's
+        (default 2 years vs 120 days). Future deadlines are never eligible.
+
+        Returns {'archived': n} (or {'candidates': n, 'ids': [...]} for dry_run),
+        combining both rules.
+        """
         now = (datetime.now(timezone.utc) if as_of is None
                else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
         cutoff = (now - timedelta(days=int(cutoff_days))).strftime("%Y-%m-%d")
+        dead_by = (now - timedelta(days=int(overdue_cutoff_days))).strftime("%Y-%m-%d")
         today = now.strftime("%Y-%m-%d")
         stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")   # match set_action_status's ISO format
-        where = ("status = 'open' "
-                 "AND COALESCE(created_at, '') != '' "
-                 "AND substr(created_at, 1, 10) < :cutoff "
-                 "AND COALESCE(deadline, '') = '' "
-                 "AND (COALESCE(snoozed_until, '') = '' OR substr(snoozed_until, 1, 10) < :today)")
-        params = {"cutoff": cutoff, "today": today}
+        _live = ("status = 'open' AND (COALESCE(snoozed_until, '') = '' "
+                 "OR substr(snoozed_until, 1, 10) < :today)")
+        undated = (f"{_live} "
+                   "AND COALESCE(created_at, '') != '' "
+                   "AND substr(created_at, 1, 10) < :cutoff "
+                   "AND COALESCE(deadline, '') = ''")
+        long_dead = (f"{_live} "
+                     "AND COALESCE(deadline, '') != '' "
+                     "AND substr(deadline, 1, 10) < :dead_by")
+        params = {"cutoff": cutoff, "dead_by": dead_by, "today": today}
+        with self._connect() as db:
+            def _ids(where):
+                return [r["id"] for r in db.execute(
+                    f"SELECT id FROM actions WHERE {where}", params).fetchall()]
+            todo = [("ttl", undated, _ids(undated)),
+                    ("ttl_overdue", long_dead, _ids(long_dead))]
+            total = sum(len(ids) for _, _, ids in todo)
+            if dry_run:
+                merged = [i for _, _, ids in todo for i in ids]
+                return {"candidates": total, "ids": merged[:20]}
+            for marker, where, ids in todo:
+                if not ids:
+                    continue
+                db.execute(
+                    f"UPDATE actions SET status = 'auto_archived', resolved_by = '{marker}', "
+                    f"resolved_at = :stamp, updated_at = :stamp WHERE {where}",
+                    {**params, "stamp": stamp})
+            return {"archived": total}
+
+    def archive_duplicate_actions(self, *, as_of: str | None = None,
+                                  dry_run: bool = False) -> dict:
+        """Collapse exact-duplicate OPEN actions, keeping the earliest row.
+
+        Write-time dedup (find_open_action_by_fingerprint) is supposed to prevent
+        these, but the live store still accumulated 424 redundant open rows across
+        390 fingerprint groups — the same commitment re-extracted from a second
+        email, each copy burning a slot in every actions surface. This is the
+        sweep-up for what already got through.
+
+        Groups on text_fingerprint and keeps MIN(id) — the original — archiving
+        the rest as 'auto_archived' with resolved_by='dedup' (reversible).
+        Rows with a BLANK fingerprint are never grouped: many unrelated actions
+        share an empty string, so treating that as a group would archive most of
+        the table. Only 'open' rows are considered, so an already-closed twin is
+        not competition for a live one.
+
+        Returns {'archived': n} (or {'candidates': n, 'ids': [...]} for dry_run).
+        """
+        now = (datetime.now(timezone.utc) if as_of is None
+               else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Every open, fingerprinted row that is NOT the earliest of its group.
+        _fp_open = "status = 'open' AND COALESCE(text_fingerprint, '') != ''"
+        where = (f"{_fp_open} AND id NOT IN "
+                 f"(SELECT MIN(id) FROM actions WHERE {_fp_open} GROUP BY text_fingerprint)")
         with self._connect() as db:
             ids = [r["id"] for r in db.execute(
-                f"SELECT id FROM actions WHERE {where}", params).fetchall()]
+                f"SELECT id FROM actions WHERE {where}").fetchall()]
             if dry_run:
                 return {"candidates": len(ids), "ids": ids[:20]}
             if not ids:
                 return {"archived": 0}
             db.execute(
-                f"UPDATE actions SET status = 'auto_archived', resolved_by = 'ttl', "
+                f"UPDATE actions SET status = 'auto_archived', resolved_by = 'dedup', "
                 f"resolved_at = :stamp, updated_at = :stamp WHERE {where}",
-                {**params, "stamp": stamp})
+                {"stamp": stamp})
             return {"archived": len(ids)}
 
     def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "") -> bool:
