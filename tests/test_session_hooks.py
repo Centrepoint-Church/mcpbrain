@@ -1,9 +1,117 @@
 """session-start prints bounded priming; session-end captures a real session only."""
 import io
 import json
+from datetime import date
 from pathlib import Path
 
 from mcpbrain import session_hooks
+
+TODAY = date(2026, 7, 25)
+
+
+def _act(text, deadline):
+    return {"text": text, "deadline": deadline}
+
+
+def test_select_actions_reserves_slots_for_every_bucket():
+    # The bug: appending all of `overdue` before truncating to _MAX_LINES made
+    # due_today/upcoming structurally unreachable whenever overdue was long, so
+    # today's work was never injected. Each bucket must get its own slots.
+    actions = {
+        "overdue": [_act(f"late {i}", "2026-07-01") for i in range(20)],
+        "due_today": [_act(f"today {i}", "2026-07-25") for i in range(3)],
+        "upcoming": [_act(f"soon {i}", "2026-07-30") for i in range(20)],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert len(lines) <= session_hooks._MAX_LINES
+    assert any("today 0" in ln for ln in lines), "due_today must survive a long overdue list"
+    assert any("soon 0" in ln for ln in lines), "upcoming must survive a long overdue list"
+    assert any("late 0" in ln for ln in lines)
+
+
+def test_select_actions_drops_long_dead_overdue():
+    # 2018-2023 deadlines are noise, not tasks. They were consuming the whole budget.
+    actions = {
+        "overdue": [
+            _act("register for Summer Camp 2019", "2019-01-18"),
+            _act("finance meeting recording", "2022-09-21"),
+            _act("genuinely recent slip", "2026-07-20"),
+        ],
+        "due_today": [], "upcoming": [],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    joined = "\n".join(lines)
+    assert "Summer Camp" not in joined
+    assert "finance meeting" not in joined
+    assert "genuinely recent slip" in joined
+
+
+def test_select_actions_dedups_repeated_text():
+    actions = {
+        "overdue": [
+            _act("Begin conversation with Owen about LK leadership", "2026-07-20"),
+            _act("Begin conversation with Owen about LK leadership", "2026-07-20"),
+        ],
+        "due_today": [], "upcoming": [],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert len(lines) == 1
+
+
+def test_select_actions_dedups_across_buckets_and_ignores_whitespace_case():
+    actions = {
+        "overdue": [_act("Send  out draft forms", "2026-07-20")],
+        "due_today": [],
+        "upcoming": [_act("send out DRAFT forms", "2026-07-29")],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert len(lines) == 1
+
+
+def test_select_actions_redistributes_unused_quota():
+    # Nothing due today and nothing upcoming -> overdue may use the whole budget
+    # rather than wasting the reserved slots.
+    actions = {
+        "overdue": [_act(f"late {i}", "2026-07-01") for i in range(20)],
+        "due_today": [], "upcoming": [],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert len(lines) == session_hooks._MAX_LINES
+
+
+def test_select_actions_keeps_unparseable_and_missing_deadlines():
+    # Fail-open: never hide a real action because its deadline didn't parse.
+    actions = {
+        "overdue": [_act("no deadline at all", None), _act("junk deadline", "not-a-date")],
+        "due_today": [], "upcoming": [],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert len(lines) == 2
+
+
+def test_select_actions_labels_bucket_and_survives_junk_rows():
+    actions = {
+        "overdue": ["not a dict", {"text": "   "}, _act("real one", "2026-07-20")],
+        "due_today": [], "upcoming": [],
+    }
+    lines = session_hooks._select_actions(actions, today=TODAY)
+    assert lines == ["- [overdue] real one"]
+
+
+def test_select_actions_empty_input():
+    assert session_hooks._select_actions({}, today=TODAY) == []
+
+
+def test_display_cutoff_matches_the_archive_sweep():
+    """The hook's display filter must not be stricter than the sweep that retires
+    these rows. The dashboard hands us the OLDEST overdue rows first (capped), so
+    a tighter filter here drops everything it is given and empties the bucket."""
+    import inspect
+
+    from mcpbrain.store import Store
+    sweep_default = inspect.signature(
+        Store.archive_stale_actions).parameters["overdue_cutoff_days"].default
+    assert session_hooks._STALE_AFTER_DAYS == sweep_default
 
 
 def test_session_start_prints_hot_and_degrades(tmp_path, capsys, monkeypatch):
