@@ -1048,6 +1048,12 @@ class Daemon:
         # _stalled_phase() look wedged even though nothing is wrong — report
         # no stall at all while paused rather than a false positive.
         stalled = None if self.is_paused() else self._stalled_phase()
+        # Surfaces the Task 3 backup/watchdog interaction: a "stalled: None
+        # while paused"-style silent state would otherwise make "why isn't
+        # the watchdog restarting a wedged daemon" undebuggable from status()
+        # alone when the real answer is "a backup is in flight, deliberately".
+        backup_in_progress = bool(getattr(self, "_backup_in_progress", None)
+                                   and self._backup_in_progress.is_set())
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -1065,6 +1071,7 @@ class Daemon:
             "org": org,
             "progress": progress_snapshot,
             "stalled": stalled,
+            "backup_in_progress": backup_in_progress,
             "watchdog_exits": watchdog_exits,
             "watchdog_limit_reached": watchdog_exits >= WATCHDOG_MAX_EXITS,
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
@@ -1690,8 +1697,33 @@ class Daemon:
         on the lock, and this method pauses briefly after releasing when it
         sees that intent, so the waiter's pending acquire actually wins the
         next opportunity.
+
+        The acquire itself is done in bounded `_bulk_lock_wait_s` slices, not
+        one unbounded `.acquire()` (Task 3 review finding, reproduced
+        directly): a gated maintenance pass is allowed to legitimately hold
+        _bulk_lock past one tick (see _backup_under_bulk_lock's docstring --
+        e.g. _run_salience_score's `while rounds < 500` loop, or
+        stale_reextract's network-touching sweep). A single unbounded acquire
+        here would block the cycle thread for that whole legitimate hold with
+        ZERO progress stamped in between, and a hold longer than STALL_S
+        would then misread as a wedge and trigger a watchdog restart
+        mid-legitimate-work -- the same false-stall shape Task 3 already
+        fixed for the backup path, just via this method's lock instead.
+        Retrying in bounded slices and stamping "cycle" between attempts
+        fixes that WITHOUT skipping the unit of work the caller wraps
+        (unlike _backup_under_bulk_lock, which can safely skip a cycle's
+        backup -- the caller here still needs its chunk-mutating section to
+        actually run, so this loops until it acquires rather than giving up).
+        getattr guards a bare test double that models locking but not
+        _progress at all (see test_bulk_lock_fairness.py).
         """
-        self._bulk_lock.acquire()
+        with self._bulk_lock_intent():
+            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
+        while not acquired:
+            if getattr(self, "_progress_lock", None) is not None:
+                self._note_progress("cycle")
+            with self._bulk_lock_intent():
+                acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
         try:
             yield
         finally:
@@ -1730,7 +1762,18 @@ class Daemon:
         race. This runs on the CYCLE thread itself (called from run()'s loop,
         not the maintenance thread) -- see _bulk_lock_intent's docstring for
         why that means a plain counter, not a single Event, is required here.
+
+        _note_progress("backup") is stamped UNCONDITIONALLY first, before the
+        acquire attempt (Task 3 review fix, reproduced directly): the
+        acquire-timeout skip path below used to leave "backup" untouched, so
+        if a gated maintenance pass legitimately held _bulk_lock continuously
+        past STALL_S, "backup" aged out on its own every cycle this method
+        skipped -- a false stall on a completely idle, healthy daemon, same
+        shape as the cycle_error bug this same task fixed elsewhere. Stamping
+        first means "we are here, trying" counts as liveness regardless of
+        whether the acquire succeeds.
         """
+        self._note_progress("backup")
         with self._bulk_lock_intent():
             acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
         if not acquired:
@@ -1739,17 +1782,16 @@ class Daemon:
                 "%.1fs (maintenance pass busy); will retry next cycle",
                 self._bulk_lock_wait_s)
             return
-        # _backup_in_progress + the surrounding _note_progress stamps (Task 3):
-        # os._exit bypasses `finally`, so a watchdog restart mid-snapshot
-        # orphans the temp dir make_encrypted_snapshot is still writing to --
-        # the mechanism that left ~24GB of mcpbrain-snap-* on disk and froze
-        # the host on 2026-07-27. _recover_from_stall checks this event and
-        # defers recovery while a backup is in flight. The bracketing
-        # _note_progress calls also mean a multi-minute backup (large store,
-        # slow upload) reads as fresh progress, not a stall.
+        # _backup_in_progress (Task 3): os._exit bypasses `finally`, so a
+        # watchdog restart mid-snapshot orphans the temp dir
+        # make_encrypted_snapshot is still writing to -- the mechanism that
+        # left ~24GB of mcpbrain-snap-* on disk and froze the host on
+        # 2026-07-27. _recover_from_stall checks this event and defers
+        # recovery while a backup is in flight. The second _note_progress
+        # below means a multi-minute backup (large store, slow upload) also
+        # reads as fresh progress throughout, not just at the start.
         self._backup_in_progress.set()
         try:
-            self._note_progress("backup")
             self.maybe_backup()
             self._note_progress("backup")
         finally:
@@ -2845,6 +2887,21 @@ class Daemon:
                     # _stalled_phase/_recover_from_stall falls through to the
                     # broad except below and keeps this thread alive; a real
                     # assertion failure should not.
+                    #
+                    # Scope note: this only closes the gap for a SYNCHRONOUS
+                    # call to _maintenance_loop (exactly what
+                    # test_maintenance_loop_does_not_swallow_assertion_error
+                    # exercises). In real operation this method runs on its
+                    # own background thread, so an AssertionError escaping it
+                    # there does NOT fail a synchronous test assertion by
+                    # itself -- threading.excepthook prints it and the thread
+                    # dies; pytest turns that into a
+                    # PytestUnhandledThreadExceptionWarning, which is not
+                    # configured here to fail the suite (no matching
+                    # filterwarnings entry). Closing that remaining gap would
+                    # mean either adding that filterwarnings entry (suite-wide,
+                    # unverified against tests outside this task's scope) or a
+                    # dedicated threading.excepthook capture in a future task.
                     raise
                 except Exception:  # noqa: BLE001 — a bad pass must not kill the thread
                     log.warning("maintenance loop iteration failed", exc_info=True)
@@ -2973,16 +3030,23 @@ class Daemon:
                     # crash loop). Log and retry on the next interval; the
                     # skipped _pending_* resets in run_one preserve the stash.
                     #
-                    # _note_progress("cycle_error") + _cycle_error_streak
-                    # (Task 3): run_one() only stamps "cycle" progress on a
-                    # clean return (see its last line), so a DETERMINISTIC
-                    # raise (a code/config bug that fails the same way every
-                    # time) left "cycle" frozen and looked exactly like a hang
-                    # to _stalled_phase — burning the watchdog's 3-exit budget
-                    # restart-looping on something a restart cannot fix. The
-                    # streak lets _recover_from_stall tell the two apart (see
-                    # its docstring) once past the threshold.
-                    self._note_progress("cycle_error")
+                    # Re-stamp "cycle" here too, NOT a separate "cycle_error"
+                    # key (Task 3 review fix, reproduced directly): a cycle
+                    # that raised but whose loop thread is still turning IS
+                    # liveness — the thread isn't wedged, it's actively
+                    # retrying — so "cycle" is the correct key to refresh.
+                    # _stalled_phase() takes the MINIMUM timestamp over EVERY
+                    # key in _progress and nothing ever prunes a key, so a
+                    # distinct key written only here and never touched again
+                    # would go permanently stale after a single transient
+                    # error (one Gmail timeout is literally the motivating
+                    # case) and falsely trip a restart 30 minutes later on an
+                    # otherwise perfectly healthy daemon — the exact failure
+                    # mode this whole task exists to prevent, just moved to a
+                    # new key. _cycle_error_streak (a plain counter, not in
+                    # _progress) is the separate diagnostic signal instead;
+                    # _recover_from_stall consults it directly.
+                    self._note_progress("cycle")
                     self._cycle_error_streak += 1
                     if self._cycle_error_streak > 3:
                         log.error(
