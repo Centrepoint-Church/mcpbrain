@@ -118,7 +118,15 @@ def model_weights_cached() -> bool:
 class _LocalEmbedder:
     def __init__(self, model_name: str, dim: int, query_prefix: str):
         from fastembed import TextEmbedding          # lazy: keep import-time light
-        self._model = TextEmbedding(model_name=model_name, cache_dir=_model_cache_dir())
+        import os as _os
+        # Leave the control plane schedulable. Unconfigured, ORT affinitises
+        # intra-op threads across every physical core (measured 425% CPU on a
+        # 10-core box) and /api/recall starves behind embedding.
+        if not _os.environ.get("OMP_NUM_THREADS"):
+            _os.environ["OMP_NUM_THREADS"] = "1"
+        cpu = _os.cpu_count() or 4
+        threads = max(1, cpu - 2)
+        self._model = TextEmbedding(model_name=model_name, cache_dir=_model_cache_dir(), threads=threads)
         self.dim = dim
         self._qp = query_prefix
         # get_embedder() memoises one instance per kind, so index_pending (cycle

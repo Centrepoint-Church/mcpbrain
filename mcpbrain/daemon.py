@@ -2620,7 +2620,10 @@ def _backup_from_config(home):
     if not (escrow_key and shared_drive_id and user_id):
         return (None, None)
     try:
-        services = auth.build_google_services(token_file=Path(home) / "google_token.json")
+        # Backup uploads are ~750MB and need the long timeout; routine reads use
+        # DEFAULT_READ_TIMEOUT_S (60s). Pass the 600s timeout explicitly.
+        services = auth.build_google_services(token_file=Path(home) / "google_token.json",
+                                              drive_timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 — backup must not crash startup
         # NOTE: this also catches programming errors (e.g. a bad call signature).
         # If auth.build_google_services' signature changes, re-verify this call.
