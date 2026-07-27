@@ -164,6 +164,17 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     per_drive[drive_id] = info["processed"]
                     total_files += info["processed"]
                     total_miss += len(info["miss"])
+                    # Bound per-drive publish work the same way sources are bounded
+                    # between each other above: a live 1h44m SSL hang happened
+                    # INSIDE a single source's own work, not between sources, so a
+                    # many-shared-drives fleet needs the same check immediately
+                    # after each drive (this loop's "page") is processed, not only
+                    # once the whole shared-drives block finishes.
+                    if budget is not None and budget.expired():
+                        result["shared_drives"] = per_drive
+                        result["revoked_drives"] = sd.get("_revoked", [])
+                        result["budget_spent"] = True
+                        return result
                 result["shared_drives"] = per_drive
                 revoked = sd.get("_revoked", [])
                 result["revoked_drives"] = revoked
@@ -175,7 +186,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # Reuses this cycle's storage instances — no second
                 # storage_factory call.
                 bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
-                                                    contextual_retrieval=cr)
+                                                    contextual_retrieval=cr, budget=budget)
                 if any(r["processed"] for r in bf_sd.values()):
                     _embed()
                 backfill_counts: dict[str, int] = {}
@@ -188,6 +199,12 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                         total_published += _publish_drive_misses(
                             store, ingest_cache, fs, drive_id, res["miss"], pin, published_by,
                             contextual_retrieval=cr)
+                    # Same per-page bound as the publish loop above, applied to
+                    # the backfill-window's own per-drive publish work.
+                    if budget is not None and budget.expired():
+                        result["shared_drives_backfill"] = backfill_counts
+                        result["budget_spent"] = True
+                        return result
                 result["shared_drives_backfill"] = backfill_counts
                 # Cache hit/miss over BOTH the live delta and the backfill window
                 # (computed after the backfill loop so backfilled files count too —
@@ -396,6 +413,7 @@ def _shared_drive_backfill_step(
     stop_after_empty_windows: int = _STOP_AFTER_EMPTY_WINDOWS,
     now: datetime | None = None,
     contextual_retrieval: bool = False,
+    budget=None,
 ) -> dict:
     """One backfill window per pinned Shared Drive, walking newest -> oldest.
 
@@ -420,6 +438,13 @@ def _shared_drive_backfill_step(
     that is still a real, correct, per-drive-windowed periodic backfill (not a
     stub), wired into `run_sync_cycle`'s shared-drive block (and therefore
     into every daemon cycle) as its actual production caller.
+
+    `budget` (a `Budget`, or None for unbounded) is checked once per drive
+    (this loop's "page"), immediately after that drive's window is processed,
+    same as the between-sources checks in `run_sync_cycle` -- a fleet with
+    many pinned shared drives must not let one cycle's backfill loop run
+    unbounded across all of them. A drive not yet reached this cycle keeps its
+    existing floor cursor and is retried next cycle.
     """
     from mcpbrain.sync.drive import backfill_shared_drive
 
@@ -462,6 +487,10 @@ def _shared_drive_backfill_step(
         else:
             store.set_cursor(empty_key, str(_empty_count(empty_key) + 1))
         out[drive_id] = res
+        if budget is not None and budget.expired():
+            log.info("shared-drive backfill: budget spent after %d/%d drive(s)",
+                     len(out), len(drives))
+            break
     return out
 
 

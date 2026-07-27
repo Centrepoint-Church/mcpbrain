@@ -739,11 +739,21 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
                   resolution_due: bool, now=None,
                   synthesis_requests: list | None = None,
                   extra_blocks: dict | None = None, home=None,
-                  window: int = 600) -> dict:
+                  window: int = 600, budget=None) -> dict:
     """Build the current batch (un-enriched threads + due blocks) and write it as
     work units. The work-queue replacement for prepare(): no single pending.json —
     a bounded queue of immutable units the enrich session consumes. Unlike prepare()
-    it still produces block units when there are no threads."""
+    it still produces block units when there are no threads.
+
+    `budget` (a `Budget`, or None for unbounded) is threaded into build_pending's
+    per-thread assembly loop so a large kept-thread set can't hold the daemon's
+    cycle indefinitely -- run_one() never passed a budget here at all, so this
+    step ran unbounded for the whole of prepare_units while the cycle held
+    _bulk_lock (live: 8m39s in one cycle, zero heartbeat advance). Stopping
+    early is safe: the threads not yet assembled this cycle are still
+    un-enriched and are picked up again next cycle by
+    _group_unenriched_threads.
+    """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
@@ -767,7 +777,7 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,
                          synthesis_requests=synthesis_requests,
-                         extra_blocks=extra_blocks)
+                         extra_blocks=extra_blocks, budget=budget)
     summary = write_units(data, home=home, window=window)
     summary["threads"] = len(data.get("threads") or [])
     summary["batch_id"] = data.get("batch_id")
@@ -793,7 +803,7 @@ def attach_extra_blocks(pending: dict, extra_blocks: dict | None) -> dict:
 def build_pending(store, batches, *, char_budget: int, now,
                   batch_id: str | None = None, resolution_due: bool = False,
                   synthesis_requests: list | None = None,
-                  extra_blocks: dict | None = None) -> dict:
+                  extra_blocks: dict | None = None, budget=None) -> dict:
     """Assemble the pending.json dict for already-grouped, noise-filtered batches.
 
     Pure assembly: builds thread blocks (splitting over-long threads), context,
@@ -801,9 +811,19 @@ def build_pending(store, batches, *, char_budget: int, now,
     any file and does NOT mark the store. `batch_id` defaults to a timestamped
     id when not supplied. Callers that need many concurrent batches pass their
     own unique batch_id.
+
+    `budget` (a `Budget`, or None for unbounded) is checked once per batch in
+    the thread-assembly loop below, so a large `batches` list can't hold the
+    daemon's cycle indefinitely -- each batch's _thread_block call does real
+    store I/O (thread_context, unified_actions) that adds up across hundreds
+    of threads. Stopping early is safe: any batch not yet assembled this cycle
+    is simply picked up again next cycle (still un-enriched).
     """
     threads = []
     for batch in batches:
+        if budget is not None and budget.expired():
+            log.info("prepare_units: budget spent after %d threads", len(threads))
+            break
         block = _thread_block(store, batch)
         threads.extend(_split_long_thread(block, char_budget))
 
