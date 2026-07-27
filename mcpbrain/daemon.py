@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -150,6 +151,13 @@ WATCHDOG_WINDOW_S = 6 * 3600.0
 # successor spawned by the watchdog (unsupervised Windows) does not fail
 # outright while its slow-exiting parent still holds the lockfile.
 HANDOVER_LOCK_WAIT_S = 2.0
+
+# Orphaned mcpbrain-snap-* work dirs (see backup.sweep_orphan_snapshots) older
+# than this are swept once at startup. Generous on purpose: a snapshot in
+# genuine progress is bounded by however long checkpoint+copy+encrypt takes
+# (minutes, not hours) for any corpus size seen live, so an hour of headroom
+# can only ever catch a truly orphaned dir, never a live one.
+SNAPSHOT_ORPHAN_MAX_AGE_S = 3600.0
 
 
 def _graph_apply():
@@ -422,7 +430,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               enrich_mode: str = "off", resolution_due: bool = False,
               synthesis_requests: list | None = None,
               extra_blocks: dict | None = None, budget=None,
-              on_progress=None, bulk_section=None) -> dict:
+              on_progress=None, bulk_section=None,
+              embed_max_items: int = 2000) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -472,6 +481,14 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     `reflow_outdated_chunks` call below gets its own small section. Defaults
     to `contextlib.nullcontext` (a no-op) so direct callers/tests that don't
     pass one keep running unlocked, exactly as before.
+
+    `embed_max_items` (Task 7) is threaded straight into `run_sync_cycle`,
+    which caps each `index_pending` call at this many chunks per cycle (see
+    that constant's own docstring for the "more_work" implication). Defaults
+    to 2000, matching `run_sync_cycle`'s own default, so a direct caller that
+    doesn't pass one behaves exactly as before; the live daemon resolves the
+    configured value via `Daemon._embed_max_items` (see `_tuning_from_config`)
+    and passes it in explicitly.
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -483,6 +500,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         home=str(config.app_dir()),
         budget=budget,
         bulk_section=bulk_section,
+        embed_max_items=embed_max_items,
     )
     if on_progress is not None:
         on_progress("sync")
@@ -595,10 +613,13 @@ class Daemon:
                         self._model_building = False
         return self._embedder_obj
 
-    def _embedder_bounded(self, timeout: float = BULK_LOCK_ACQUIRE_S):
+    def _embedder_bounded(self, timeout: float | None = None):
         """Like the _embedder property, but with a BOUNDED acquire: returns
         None instead of blocking if the embedder is still being built and the
-        wait exceeds `timeout`.
+        wait exceeds `timeout` (default: `self._bulk_lock_wait_s`, config-
+        overridable -- see _tuning_from_config -- so this stays in step with
+        BULK_LOCK_ACQUIRE_S's config override rather than freezing the
+        default at class-definition time).
 
         The _embedder property holds _embedder_lock for the WHOLE lazy build
         (a cold fastembed download takes minutes) -- fine for the cycle
@@ -621,6 +642,8 @@ class Daemon:
         """
         if self._embedder_obj is not None:
             return self._embedder_obj
+        if timeout is None:
+            timeout = self._bulk_lock_wait_s
         if not self._embedder_lock.acquire(timeout=timeout):
             return None
         try:
@@ -872,6 +895,11 @@ class Daemon:
         # so a wedged cycle can never park the watchdog behind it.
         self._bulk_lock = threading.Lock()
         self._bulk_lock_wait_s = BULK_LOCK_ACQUIRE_S
+        # Brief pause after releasing _bulk_lock when another thread wants it
+        # (see BULK_LOCK_YIELD_S / _cycle_bulk_section). Config-overridable the
+        # same way as _bulk_lock_wait_s below (see _tuning_from_config; main()
+        # reassigns both post-construction from the `tuning` config block).
+        self._bulk_lock_yield_s = BULK_LOCK_YIELD_S
         # Count of threads currently waiting to acquire _bulk_lock (the
         # maintenance thread's _run_periodic_passes, and the cycle thread's own
         # _backup_under_bulk_lock -- TWO independent call sites can be waiting
@@ -955,6 +983,26 @@ class Daemon:
         # "shared_drive_cache" result key; surfaced via status()'s "org" block.
         self._last_cache_hits = 0
         self._last_cache_misses = 0
+        # Tuning knobs (Task 7): default to the module constants so a Daemon
+        # built without going through main() (every direct test construction)
+        # behaves exactly as before. main() overrides these from the `tuning`
+        # config block post-construction (see _tuning_from_config), the same
+        # "not constructor params; wire after construction" pattern already
+        # used above for the S2/Q4/B3/B5/B4/B6 cadences -- these are read at
+        # call time wherever they're used, so a post-construction reassignment
+        # here is exactly as effective as passing them in at construction.
+        # Every read site uses getattr(self, "_x", MODULE_CONSTANT) rather
+        # than a bare attribute access, so the many existing unit tests that
+        # bypass __init__ entirely (Daemon.__new__(Daemon), setting only the
+        # handful of attributes each test needs -- see test_daemon_watchdog.py
+        # / test_bulk_lock_fairness.py) keep working unchanged: an instance
+        # missing one of these attributes falls back to the exact same
+        # constant it would have used before Task 7 introduced the attribute.
+        self._cycle_budget_s = CYCLE_BUDGET_S
+        self._stall_s = STALL_S
+        self._watchdog_max_exits = WATCHDOG_MAX_EXITS
+        self._watchdog_window_s = WATCHDOG_WINDOW_S
+        self._embed_max_items = 2000  # mirrors sync.run_sync_cycle's own default
 
     # -- service resolution -------------------------------------------------
 
@@ -997,12 +1045,22 @@ class Daemon:
         self._pause.set()
 
     def resume(self) -> None:
-        # Re-stamp every tracked phase BEFORE unpausing. _maintenance_loop skips
-        # its whole body (watchdog included) while paused, so the timestamps
-        # freeze for the length of the pause. A pause longer than STALL_S would
-        # otherwise make the first tick after resume see pre-pause timestamps,
-        # judge the daemon wedged and self-restart it — a false positive on a
-        # daemon that was deliberately idle, not stalled.
+        """Clear the pause flag, after re-stamping every tracked progress phase.
+
+        Behaviour note (Task 7): cadence passes used to run inline every cycle
+        regardless of pause state. Since Task 4 they live on their own
+        maintenance thread, and `_maintenance_loop` skips its ENTIRE body while
+        `_pause` is set -- not just the chunk-mutating cadence passes, but also
+        the `_note_progress("maintenance")` stamp and the watchdog stall check
+        that follow them. So a pause freezes every `_progress` timestamp, not
+        just "cycle" -- re-stamping all of them here, before clearing `_pause`,
+        stops the first post-resume tick from reading those frozen timestamps
+        as a stall (`STALL_S`) and self-restarting a daemon that was only ever
+        idle on purpose, never actually wedged.
+        """
+        # Re-stamp every tracked phase BEFORE unpausing -- see the docstring
+        # above for why a pause longer than STALL_S would otherwise misread
+        # pre-pause timestamps as a stall on the very first tick after resume.
         with self._progress_lock:
             now = self._clock()
             for phase in self._progress:
@@ -1158,7 +1216,8 @@ class Daemon:
             "backup_in_progress": backup_in_progress,
             "bulk_pass_active": bulk_pass_active,
             "watchdog_exits": watchdog_exits,
-            "watchdog_limit_reached": watchdog_exits >= WATCHDOG_MAX_EXITS,
+            "watchdog_limit_reached":
+                watchdog_exits >= getattr(self, "_watchdog_max_exits", WATCHDOG_MAX_EXITS),
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
@@ -1685,7 +1744,7 @@ class Daemon:
         # Bound this cycle's bulk work (embed/sync/drain) to CYCLE_BUDGET_S so
         # the loop always reaches the maintenance passes and heartbeat below it,
         # even on a large backlog. See CYCLE_BUDGET_S for the incident this fixes.
-        budget = Budget(CYCLE_BUDGET_S, clock=self._clock)
+        budget = Budget(getattr(self, "_cycle_budget_s", CYCLE_BUDGET_S), clock=self._clock)
         result = run_cycle(self._store, self._embedder,
                            enrich_client=enrich_client,
                            enrich_limit=self._enrich_batch,
@@ -1696,6 +1755,7 @@ class Daemon:
                            budget=budget,
                            on_progress=self._note_progress,
                            bulk_section=self._cycle_bulk_section,
+                           embed_max_items=getattr(self, "_embed_max_items", 2000),
                            **services)
         # Absent key (fleet unpinned, Drive-API outage caught by the cache
         # block's own try/except, or drive_service/home not both present)
@@ -1869,7 +1929,7 @@ class Daemon:
             if self._bulk_lock_wanted():
                 # Give the waiter a scheduling window; without this the
                 # re-acquire above beats it on an unfair lock.
-                self._stop.wait(timeout=BULK_LOCK_YIELD_S)
+                self._stop.wait(timeout=getattr(self, "_bulk_lock_yield_s", BULK_LOCK_YIELD_S))
 
     def _backup_under_bulk_lock(self) -> None:
         """Run maybe_backup() under _bulk_lock, with the SAME bounded-acquire-
@@ -2971,7 +3031,7 @@ class Daemon:
                 return None            # nothing started yet is not a stall
             phase, ts = min(self._progress.items(), key=lambda kv: kv[1])
         age = self._clock() - ts
-        return (phase, age) if age > STALL_S else None
+        return (phase, age) if age > getattr(self, "_stall_s", STALL_S) else None
 
     def _watchdog_exits_path(self):
         # Daemon has no _home attribute — the app dir is resolved on demand,
@@ -2999,7 +3059,7 @@ class Daemon:
             recent = [float(t) for t in _json.loads(path.read_text())]
         except (OSError, ValueError, TypeError):
             recent = []
-        cutoff = time.time() - WATCHDOG_WINDOW_S
+        cutoff = time.time() - getattr(self, "_watchdog_window_s", WATCHDOG_WINDOW_S)
         return [t for t in recent if t >= cutoff]
 
     def _watchdog_may_exit(self) -> bool:
@@ -3008,7 +3068,8 @@ class Daemon:
         A persistently broken install should end up visibly stuck rather than
         restarting forever.
         """
-        return len(self._recent_watchdog_exits()) < WATCHDOG_MAX_EXITS
+        return len(self._recent_watchdog_exits()) < getattr(
+            self, "_watchdog_max_exits", WATCHDOG_MAX_EXITS)
 
     def _record_watchdog_exit(self) -> None:
         import json as _json
@@ -3253,6 +3314,24 @@ class Daemon:
         via the context manager.
         """
         with self._lock:
+            # Sweep orphaned mcpbrain-snap-* work dirs FIRST, before anything
+            # else in this block: make_encrypted_snapshot cleans up in a
+            # `finally` that cannot fire when the process is killed mid-
+            # snapshot -- exactly what the watchdog does deliberately
+            # (os._exit). ~24GB of these accumulated live in the OS temp dir
+            # (tempfile.gettempdir() -- /var/folders/... on macOS, NOT $HOME;
+            # that is where the 24GB was actually found) and filled the disk.
+            # Swept against the SAME parent make_encrypted_snapshot's own
+            # tempfile.mkdtemp(prefix="mcpbrain-snap-") call uses (no `dir=`
+            # there, so it resolves to gettempdir() too). Best-effort: a sweep
+            # failure must not block startup.
+            try:
+                removed = backup.sweep_orphan_snapshots(
+                    tempfile.gettempdir(), max_age_s=SNAPSHOT_ORPHAN_MAX_AGE_S)
+                if removed:
+                    log.info("startup: swept %d orphaned snapshot temp dir(s)", removed)
+            except Exception as exc:  # noqa: BLE001 — sweep must not crash startup
+                log.warning("snapshot orphan sweep failed: %s", exc, exc_info=True)
             # Reinstall recovery FIRST: if the store is empty and a backup is
             # configured, pull+restore the latest Drive snapshot before the
             # loop, so the first normal cycle delta-syncs from the snapshot
@@ -3637,6 +3716,39 @@ def _cadences_from_config(home) -> dict:
     return result
 
 
+# Task 7: module-tuning-constant defaults, keyed by the config['tuning'] name
+# each reads through. Built FROM the module constants (not duplicated as
+# separate literals) so this dict can never drift from what a Daemon actually
+# falls back to when the config block is absent or invalid.
+_TUNING_DEFAULTS: dict[str, float | int] = {
+    "cycle_budget_s": CYCLE_BUDGET_S,
+    "maintenance_tick_s": MAINTENANCE_TICK_S,
+    "stall_s": STALL_S,
+    "bulk_lock_acquire_s": BULK_LOCK_ACQUIRE_S,
+    "bulk_lock_yield_s": BULK_LOCK_YIELD_S,
+    "watchdog_max_exits": WATCHDOG_MAX_EXITS,
+    "watchdog_window_s": WATCHDOG_WINDOW_S,
+    "handover_lock_wait_s": HANDOVER_LOCK_WAIT_S,
+    "embed_max_items": 2000,  # mirrors sync.run_sync_cycle's own default
+}
+
+# Keys that coerce via int() rather than the default float() -- a restart
+# count and an item count, not a duration.
+_TUNING_INT_KEYS = frozenset({"watchdog_max_exits", "embed_max_items"})
+
+
+def _tuning_from_config(home) -> dict:
+    """Read config['tuning'], overriding _TUNING_DEFAULTS. Thin wrapper around
+    config.daemon_tuning so this module's own defaults dict is the single
+    source of truth (see _TUNING_DEFAULTS). Unlike _cadences_from_config,
+    none of these knobs has an OFF state, so an invalid override falls back to
+    the default rather than mapping to None. Lets a wedged install be tuned
+    (e.g. raise the cycle budget, lower the watchdog restart ceiling) without
+    a release.
+    """
+    return config.daemon_tuning(home, _TUNING_DEFAULTS, int_keys=_TUNING_INT_KEYS)
+
+
 def main(argv=None) -> None:
     """CLI entry point: `python -m mcpbrain.daemon [--once] [--interval N]`.
 
@@ -3674,6 +3786,7 @@ def main(argv=None) -> None:
     enrich_mode = config.enrich_mode(str(config.app_dir()))
     backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
     cadences = _cadences_from_config(str(config.app_dir()))
+    tuning = _tuning_from_config(str(config.app_dir()))
     daemon = Daemon(store, embedder=None, interval_s=args.interval,
                     enrich_mode=enrich_mode,
                     backup=backup_cfg, backup_interval_s=backup_interval,
@@ -3705,6 +3818,16 @@ def main(argv=None) -> None:
     daemon._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
     daemon._org_import_interval_s = cadences["org_import_interval_s"]
     daemon._org_curate_interval_s = cadences["org_curate_interval_s"]
+    # Task 7 tuning knobs: not constructor params either, wired the same way
+    # as the cadences just above (see _tuning_from_config / Daemon.__init__).
+    daemon._cycle_budget_s = tuning["cycle_budget_s"]
+    daemon._maintenance_interval_s = tuning["maintenance_tick_s"]
+    daemon._stall_s = tuning["stall_s"]
+    daemon._bulk_lock_wait_s = tuning["bulk_lock_acquire_s"]
+    daemon._bulk_lock_yield_s = tuning["bulk_lock_yield_s"]
+    daemon._watchdog_max_exits = tuning["watchdog_max_exits"]
+    daemon._watchdog_window_s = tuning["watchdog_window_s"]
+    daemon._embed_max_items = tuning["embed_max_items"]
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle
@@ -3733,7 +3856,7 @@ def main(argv=None) -> None:
         # a couple of seconds later.
         try:
             probe = SingleWriterLock()
-            probe.acquire(timeout_s=HANDOVER_LOCK_WAIT_S)
+            probe.acquire(timeout_s=tuning["handover_lock_wait_s"])
             probe.release()
         except AlreadyRunningError:
             log.error("another mcpbrain daemon is already running; exiting")

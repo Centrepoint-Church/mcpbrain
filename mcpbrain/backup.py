@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -184,6 +185,47 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
         # Promptly destroy all transient cleartext, regardless of outcome.
         shutil.rmtree(work, ignore_errors=True)
     return out_path
+
+
+def sweep_orphan_snapshots(parent, *, max_age_s: float) -> int:
+    """Remove stale `mcpbrain-snap-*` work dirs directly under `parent`.
+
+    make_encrypted_snapshot's cleanup runs in a `finally`, which cannot fire
+    when the process is killed mid-snapshot -- exactly what the daemon's
+    watchdog does deliberately (os._exit on a detected stall/Windows handover).
+    Orphaned work dirs then accumulate forever: ~24GB of them was found live
+    under the OS temp dir (`tempfile.gettempdir()` -- typically
+    `/var/folders/...` on macOS, NOT `$HOME`) on 2026-07-27, having filled the
+    disk. Call this once at daemon startup against that same parent (the one
+    `tempfile.mkdtemp(prefix="mcpbrain-snap-")` above actually uses).
+
+    A directory is removed only when it is older than `max_age_s` (judged by
+    mtime), so a snapshot that is genuinely still being written moments ago
+    is left alone. Returns the number of directories removed. Best-effort:
+    a directory that can't be listed/stat'd/removed (permissions, already
+    gone, a race with an in-flight snapshot) is skipped rather than raised --
+    a failed sweep must never crash daemon startup.
+    """
+    parent = Path(parent)
+    try:
+        candidates = list(parent.glob("mcpbrain-snap-*"))
+    except OSError as exc:
+        log.warning("snapshot orphan sweep: could not list %s: %s", parent, exc)
+        return 0
+    now = time.time()
+    removed = 0
+    for d in candidates:
+        try:
+            if not d.is_dir():
+                continue
+            age = now - d.stat().st_mtime
+            if age < max_age_s:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except OSError as exc:
+            log.warning("snapshot orphan sweep: could not remove %s: %s", d, exc)
+    return removed
 
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
