@@ -43,6 +43,21 @@ def test_no_stall_before_any_progress_recorded(tmp_path):
     assert dm._stalled_phase() is None
 
 
+def test_stall_detected_on_stalest_phase_not_freshest(tmp_path):
+    """Regression: _maintenance_loop ticks "maintenance" every ~60s on its own
+    thread, independent of the bulk sync/cycle thread. If _stalled_phase picked
+    the freshest phase (as an earlier version did via max() instead of min()),
+    a live "maintenance" heartbeat would mask a genuinely wedged "sync"/"cycle"
+    forever -- exactly the failure mode this whole task exists to catch."""
+    dm = _wd_daemon(tmp_path)
+    dm._note_progress("sync")             # last real work: far in the past
+    dm._clock = lambda: 1000.0 + d.STALL_S + 1.0
+    dm._note_progress("maintenance")       # maintenance thread ticked just now
+    stalled = dm._stalled_phase()
+    assert stalled is not None
+    assert stalled[0] == "sync"
+
+
 def test_exit_limiter_stops_after_three_in_window(tmp_path, monkeypatch):
     dm = _wd_daemon(tmp_path, monkeypatch)
     (tmp_path / "watchdog_exits.json").write_text(

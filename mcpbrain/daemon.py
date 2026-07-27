@@ -2335,11 +2335,19 @@ class Daemon:
             self._progress[phase] = self._clock()
 
     def _stalled_phase(self) -> tuple[str, float] | None:
-        """(phase, seconds_since) for the most recent progress, if it is too old."""
+        """(phase, seconds_since) for the STALEST recorded phase, if it is too old.
+
+        Must be the minimum timestamp, not the maximum: the maintenance thread
+        (Task 4) calls _note_progress("maintenance") every ~60s independent of
+        the bulk sync/cycle thread, so "maintenance" is always the freshest key
+        once the daemon is up. Picking the freshest phase would mean this never
+        fires no matter how long "sync"/"cycle" have been wedged -- exactly the
+        failure mode STALL_S exists to catch.
+        """
         with self._progress_lock:
             if not self._progress:
                 return None            # nothing started yet is not a stall
-            phase, ts = max(self._progress.items(), key=lambda kv: kv[1])
+            phase, ts = min(self._progress.items(), key=lambda kv: kv[1])
         age = self._clock() - ts
         return (phase, age) if age > STALL_S else None
 
