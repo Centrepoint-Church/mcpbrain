@@ -148,6 +148,23 @@ def test_omp_num_threads_is_set_before_the_fastembed_import_runs(monkeypatch):
         _LocalEmbedder("BAAI/bge-small-en-v1.5", 384, "prefix ")
     finally:
         sys.meta_path.remove(finder)
+        # monkeypatch's own teardown only reverses mutations IT performed (the
+        # pre-test delitem/delenv above, restoring whatever was there before
+        # this test ran). It has NO idea that the real import machinery just
+        # inserted a brand-new "fastembed" entry into sys.modules as a side
+        # effect of the (faked) `from fastembed import TextEmbedding`
+        # statement above, or that the guard code under test set
+        # OMP_NUM_THREADS as a side effect of running -- both are new state
+        # this test's OWN actions created, not something monkeypatch tracked.
+        # Left alone, the stub fastembed module (TextEmbedding -> a bare
+        # SimpleNamespace with no query_embed/embed) permanently replaces the
+        # real package for the rest of this worker process: e.g.
+        # tests/test_embed.py's real-embedder tests then crash with
+        # AttributeError: 'SimpleNamespace' object has no attribute
+        # 'query_embed'. Only reproduces under `-n0` (all tests share one
+        # worker process); `-n auto` masks it by scheduling luck.
+        sys.modules.pop("fastembed", None)
+        os.environ.pop("OMP_NUM_THREADS", None)
 
     assert seen.get("omp_num_threads_at_import") == "1", (
         "OMP_NUM_THREADS must already be '1' by the time fastembed is "
