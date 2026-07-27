@@ -186,6 +186,7 @@ def schtasks_xml(*, shim_path, home: str) -> str:
     Windows would kill the daemon until the next logon — strictly worse than the
     stall it is recovering from.
     """
+    shim_path_xml = _xml_escape(str(shim_path))
     return (
         '<?xml version="1.0" encoding="UTF-16"?>\n'
         '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
@@ -197,7 +198,7 @@ def schtasks_xml(*, shim_path, home: str) -> str:
         "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
         "  </Settings>\n"
         "  <Actions Context=\"Author\">\n"
-        f"    <Exec><Command>{shim_path}</Command></Exec>\n"
+        f"    <Exec><Command>{shim_path_xml}</Command></Exec>\n"
         "  </Actions>\n"
         "</Task>\n"
     )
