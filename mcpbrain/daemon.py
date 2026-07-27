@@ -45,6 +45,7 @@ from pathlib import Path
 
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
+from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
 from mcpbrain.retrieval import hybrid_search
 from mcpbrain.sync import run_sync_cycle
@@ -94,6 +95,11 @@ SPOOL_CHAR_BUDGET = 24000
 # re-extraction under newer enrichment logic. A trickle so the existing corpus
 # re-extracts in the background without swamping new-mail enrichment or token cost.
 REEXTRACT_CAP = 50
+
+# Wall-clock slice for one bulk-work cycle. The loop must always reach the
+# bottom: maintenance, the enrichment producer and the heartbeat all live after
+# run_one(), and an unbounded cycle starved them for four days (2026-07-23..27).
+CYCLE_BUDGET_S = 60.0
 
 
 def _graph_apply():
@@ -340,7 +346,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               enrich_limit: int | None = None,
               enrich_mode: str = "off", resolution_due: bool = False,
               synthesis_requests: list | None = None,
-              extra_blocks: dict | None = None) -> dict:
+              extra_blocks: dict | None = None, budget=None) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -360,7 +366,13 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     it in explicitly.
 
     Returns the sync result dict ({"gmail","calendar","drive","embedded"}) plus
-    an "enrich" key holding the chosen path's summary.
+    an "enrich" key holding the chosen path's summary and a "more_work" bool.
+
+    `budget` (a `Budget`, or None for unbounded) is threaded into both
+    run_sync_cycle and drain.drain so a large backlog yields the cycle instead
+    of holding it for hours; `more_work` is True when the budget expired
+    (i.e. this cycle stopped early and there's more to do), telling the caller
+    to re-wake promptly instead of waiting the full interval.
     """
     result = run_sync_cycle(
         store, embedder,
@@ -368,6 +380,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         calendar_service=calendar_service,
         drive_service=drive_service,
         home=str(config.app_dir()),
+        budget=budget,
     )
     try:
         drain_caps = drain.drain_captures(store)
@@ -405,12 +418,13 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                                      synthesis_requests=synthesis_requests,
                                      extra_blocks=extra_blocks,
                                      home=str(app_dir()))
-        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder)
+        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder, budget=budget)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
         if drained.get("files") or drained.get("applied"):
             _stamp_enrich_log(drained)
     else:  # "off" (or any unknown value)
         result["enrich"] = {"mode": "off"}
+    result["more_work"] = bool(budget is not None and budget.expired())
     return result
 
 
@@ -1241,6 +1255,10 @@ class Daemon:
         if extra_blocks:
             log.info("extra blocks attached: %s",
                      {k: len(v) for k, v in extra_blocks.items()})
+        # Bound this cycle's bulk work (embed/sync/drain) to CYCLE_BUDGET_S so
+        # the loop always reaches the maintenance passes and heartbeat below it,
+        # even on a large backlog. See CYCLE_BUDGET_S for the incident this fixes.
+        budget = Budget(CYCLE_BUDGET_S, clock=self._clock)
         result = run_cycle(self._store, self._embedder,
                            enrich_client=enrich_client,
                            enrich_limit=self._enrich_batch,
@@ -1248,6 +1266,7 @@ class Daemon:
                            resolution_due=resolution_due,
                            synthesis_requests=synthesis_requests,
                            extra_blocks=extra_blocks,
+                           budget=budget,
                            **services)
         # Absent key (fleet unpinned, Drive-API outage caught by the cache
         # block's own try/except, or drive_service/home not both present)
@@ -2303,8 +2322,9 @@ class Daemon:
             self.ensure_services()
             while not self._stop.is_set():
                 self._wake.clear()          # clear before the cycle; a sync_now during the cycle re-sets it
+                cycle_result = None
                 try:
-                    self.run_one()
+                    cycle_result = self.run_one()
                 except Exception as exc:  # noqa: BLE001 — a transient cycle error must not kill the daemon
                     # Crashing here would hand the failure to launchd, whose
                     # restart resets every cadence anchor and drops stashed
@@ -2325,8 +2345,11 @@ class Daemon:
                 write_daemon_heartbeat(str(config.app_dir()))
                 if self._pending_update or self._stop.is_set():
                     break
-                # Block until woken (sync_now/stop) or the interval elapses.
-                self._wake.wait(timeout=self._interval_s)
+                # Re-wake promptly when the cycle yielded mid-work, so a large
+                # backlog still drains at close to full speed while the loop
+                # keeps reaching the maintenance/heartbeat section every minute.
+                more = bool((cycle_result or {}).get("more_work"))
+                self._wake.wait(timeout=1.0 if more else self._interval_s)
 
         if self._pending_update:
             try:
