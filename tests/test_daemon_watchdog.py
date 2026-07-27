@@ -1,6 +1,7 @@
 """Stall detection and platform-aware self-healing."""
 import json
 import threading
+import time
 
 import pytest
 
@@ -418,7 +419,51 @@ def test_run_tracks_and_resets_consecutive_cycle_failures(monkeypatch):
 
     assert streak_before_reset["value"] == 4, "4 consecutive raises before the success"
     assert dm._cycle_error_streak == 0, "a later success must reset the streak"
-    assert "cycle_error" in dm._progress
+    # The exception path re-stamps "cycle" itself (proof the loop thread is
+    # alive, just failing) -- see test_transient_cycle_error_does_not_leave_a_
+    # stale_progress_key for why a distinct "cycle_error" key must NOT exist.
+    assert "cycle_error" not in dm._progress
+    assert "cycle" in dm._progress
+
+
+def test_transient_cycle_error_does_not_leave_a_stale_progress_key():
+    """Critical regression, reproduced directly in review: _stalled_phase()
+    takes the MINIMUM timestamp over EVERY key in _progress and nothing ever
+    prunes a key. A distinct "cycle_error" key written only on failure and
+    never touched again would go permanently stale after a single transient
+    error (one Gmail timeout -- literally the motivating case for this whole
+    step) even while the REST of the daemon keeps ticking normally --
+    reproduced directly: all real phases (cycle/sync/maintenance/backup)
+    stamped fresh every 60s for an hour, one cycle_error stamp from an hour
+    ago -> _stalled_phase() returns ('cycle_error', 3600.0), tripping the
+    watchdog on an otherwise perfectly healthy daemon. The fix re-stamps
+    "cycle" itself on the exception path (see run()) instead of a side key,
+    so there is no longer any key that can go stale this way on its own."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._progress_lock = threading.Lock()
+    now = [1000.0]
+    dm._clock = lambda: now[0]
+    dm._progress = {}
+
+    # t=1000: one transient error. run()'s except handler's behavior --
+    # re-stamp "cycle", not a separate "cycle_error" key.
+    dm._note_progress("cycle")
+
+    # The daemon then runs perfectly for the next hour: every real phase
+    # ticks fresh every 60s (cycle thread + independent maintenance thread +
+    # a due backup cadence).
+    for _ in range(60):
+        now[0] += 60.0
+        dm._note_progress("cycle")
+        dm._note_progress("sync")
+        dm._note_progress("maintenance")
+        dm._note_progress("backup")
+
+    assert "cycle_error" not in dm._progress
+    assert dm._stalled_phase() is None, (
+        "a single transient cycle error an hour ago must not still read as "
+        "stalled once the rest of the daemon has kept ticking normally"
+    )
 
 
 def test_status_suppresses_stalled_while_paused(tmp_path, monkeypatch):
@@ -431,3 +476,96 @@ def test_status_suppresses_stalled_while_paused(tmp_path, monkeypatch):
     dm.pause()
     st = dm.status()
     assert st["stalled"] is None
+
+
+def test_status_surfaces_backup_in_progress(tmp_path, monkeypatch):
+    """status() was already in this task's scope; a backup-deferred-recovery
+    state should be visible there too, not only as a log line -- otherwise
+    "why isn't the watchdog restarting a wedged daemon" is undebuggable from
+    the outside when the real answer is "a backup is in flight, deliberately".
+    """
+    dm = _real_daemon(tmp_path, monkeypatch)
+    assert dm.status()["backup_in_progress"] is False
+    dm._backup_in_progress.set()
+    assert dm.status()["backup_in_progress"] is True
+
+
+def test_backup_progress_stamped_even_when_the_acquire_times_out(tmp_path, monkeypatch):
+    """Important regression, same false-stall shape as the cycle_error
+    Critical via a different key: _note_progress("backup") used to run only
+    AFTER a successful bulk-lock acquire, so on the acquire-timeout skip path
+    "backup" was never touched. If a gated maintenance pass legitimately held
+    _bulk_lock continuously past STALL_S, "backup" would age out on its own
+    every cycle this method skipped -- a false stall on an otherwise idle,
+    healthy daemon."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._bulk_lock = threading.Lock()
+    dm._bulk_lock.acquire()          # simulate a gated pass already holding it
+    dm._bulk_lock_wait_s = 0.01
+    dm._bulk_lock_waiters = 0
+    dm._bulk_lock_waiters_lock = threading.Lock()
+    dm._backup_in_progress = threading.Event()
+    monkeypatch.setattr(dm, "maybe_backup", lambda: None)
+
+    dm._backup_under_bulk_lock()
+
+    assert "backup" in dm._progress, "must stamp progress even when the acquire times out"
+
+
+def test_cycle_bulk_section_stamps_progress_while_waiting_on_a_long_hold(tmp_path, monkeypatch):
+    """Important regression: a gated maintenance pass is allowed to
+    legitimately hold _bulk_lock past one tick (see
+    _backup_under_bulk_lock's docstring -- e.g. _run_salience_score's
+    `while rounds < 500` loop). _cycle_bulk_section's acquire used to be a
+    single unbounded `.acquire()`, so the cycle thread could block for that
+    WHOLE legitimate hold with zero progress stamped -- a hold longer than
+    STALL_S would then misread as a wedge. It must keep "cycle" fresh while
+    it waits, and still (eventually) get the lock -- never skip the unit of
+    work it wraps, unlike the backup path."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_wait_s = 0.05
+    dm._bulk_lock_waiters = 0
+    dm._bulk_lock_waiters_lock = threading.Lock()
+    dm._stop = threading.Event()
+
+    dm._bulk_lock.acquire()          # simulate a gated pass already holding it
+    entered = threading.Event()
+
+    def _hold_then_release():
+        time.sleep(0.2)              # several bounded-acquire attempts' worth
+        dm._bulk_lock.release()
+
+    holder = threading.Thread(target=_hold_then_release)
+    holder.start()
+
+    with dm._cycle_bulk_section():
+        entered.set()
+    holder.join(timeout=2)
+
+    assert entered.is_set(), "must eventually acquire and run the wrapped unit of work"
+    assert "cycle" in dm._progress, "must stamp progress while waiting on a long hold"
+
+
+def test_start_maintenance_thread_creates_a_fresh_thread(monkeypatch):
+    """Strengthens test_run_restarts_maintenance_thread_if_it_dies (which only
+    proves run() CALLS _start_maintenance_thread() again on a dead thread) by
+    confirming the method itself actually creates and starts a NEW Thread
+    object running _maintenance_loop -- not e.g. a no-op or a redundant
+    .start() on the already-dead one."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stop = threading.Event()
+    ran = threading.Event()
+    monkeypatch.setattr(dm, "_maintenance_loop", lambda: ran.set())
+
+    old = threading.Thread(target=lambda: None)
+    old.start()
+    old.join()
+    dm._maintenance_thread = old
+
+    dm._start_maintenance_thread()
+
+    assert dm._maintenance_thread is not old
+    assert isinstance(dm._maintenance_thread, threading.Thread)
+    dm._maintenance_thread.join(timeout=2)
+    assert ran.is_set(), "the new thread must actually run _maintenance_loop"
