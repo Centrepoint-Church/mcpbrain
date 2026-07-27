@@ -714,6 +714,42 @@ def review_max_apply_per_run(home) -> int:
         return 50
 
 
+def daemon_tuning(home, defaults: dict, *, int_keys: frozenset = frozenset()) -> dict:
+    """Read the `tuning` config block, overriding daemon.py's own tuning
+    constants (e.g. CYCLE_BUDGET_S, WATCHDOG_MAX_EXITS) so a wedged install can
+    be adjusted without a release.
+
+    `defaults` is daemon.py's own dict of {key: current module-constant value}
+    -- passed in rather than hardcoded here so config.py never duplicates (and
+    can never drift from) the values daemon.py actually falls back to when the
+    block is absent. Mirrors daemon.py's `_cadences_from_config` pattern: an
+    absent key keeps its default, an explicit key overrides, and an invalid
+    value (wrong type, or <= 0) is logged and the default is used instead --
+    unlike cadences, none of these knobs has a sensible "0 means off" meaning,
+    so there is no OFF mapping here, just a safe fallback.
+
+    `int_keys` names which keys coerce via int() (e.g. a restart-count
+    ceiling) rather than the default float() (seconds).
+    """
+    block = read_config(home).get("tuning") or {}
+    result = {}
+    for key, default in defaults.items():
+        if key not in block:
+            result[key] = default
+            continue
+        raw = block[key]
+        try:
+            val = int(raw) if key in int_keys else float(raw)
+            if val <= 0:
+                raise ValueError("must be positive")
+            result[key] = val
+        except (TypeError, ValueError) as exc:
+            log.warning("tuning.%s invalid (%r); using default %s: %s",
+                        key, raw, default, exc)
+            result[key] = default
+    return result
+
+
 def clickup_api_key(home) -> str:
     """Return the ClickUp personal API token from config, or '' if unset."""
     return read_config(home).get("clickup_api_key", "") or ""
