@@ -5,6 +5,7 @@ Cancelled events are skipped. Cursor (nextSyncToken) is written only after
 all event chunks have been durably upserted.
 """
 
+import json
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
@@ -317,22 +318,41 @@ def sync_calendar(
     recurring events arbitrarily far into the future (and then needlessly
     embedding/enriching them).
 
-    Bounded and checkpoint-safe (Task 2 duty-cycle fix): `budget` (a `Budget`,
-    or None for unbounded) is checked in `_list_events`'s pagination AND once
-    per event below. On expiry the cursor is NOT advanced — re-processing the
-    same delta window next time is safe because `store.upsert_chunk` is an
-    idempotent upsert and the graph writes
-    (`_apply_attendees_to_graph`/`_annotate_series_from_event`) are documented
-    idempotent/accumulating (see their docstrings) rather than duplicating —
-    the same tolerated behaviour every normal re-sync of unchanged events
-    already exercises, not a new risk. `bulk_section` (a zero-arg
-    context-manager factory, default `contextlib.nullcontext`) brackets each
-    event's writes so `_bulk_lock` is released between events rather than
-    held for the whole call.
+    Bounded and INCREMENTALLY checkpoint-safe (Task 2 duty-cycle fix):
+    `budget` (a `Budget`, or None for unbounded) is checked in `_list_events`'s
+    pagination AND once per not-yet-resumed event below. On expiry the REAL
+    cursor is NOT advanced — Google's `nextSyncToken` is only ever emitted on
+    the delta's FINAL page, so an early advance would silently and
+    permanently skip whatever this round hasn't reached yet.
+
+    Merely "don't advance the cursor and let the next call re-walk the same
+    window" is NOT sufficient once one delta is bigger than one budget's
+    worth of events: every subsequent call would re-list the SAME syncToken,
+    get the SAME ordered event list, and process the SAME prefix every time
+    — the cursor would never advance and events past the prefix would never
+    be ingested (this exact livelock was reproduced and fixed for Gmail; see
+    sync_gmail's docstring). So a second, separate piece of state —
+    `f"{source}:resume_ids"` (a JSON list of event ids already durably
+    processed for the CURRENT, not-yet-committed delta round, stored via the
+    same generic `sync_cursors` table) — is checked per event: an id already
+    in it is skipped (no re-fetch-equivalent work, no re-upsert — genuine
+    forward progress), and the set is grown and persisted after each call.
+    Only once every event id in this round's (possibly still-growing) list is
+    accounted for does the real cursor advance and the resume set clear.
+    `store.upsert_chunk` being an idempotent upsert and the graph writes
+    (`_apply_attendees_to_graph`/`_annotate_series_from_event`) being
+    documented idempotent/accumulating (see their docstrings) means a
+    resumed event that DID somehow get reprocessed is still safe — the
+    resume set just avoids paying for that redundant work.
+
+    `bulk_section` (a zero-arg context-manager factory, default
+    `contextlib.nullcontext`) brackets each event's writes so `_bulk_lock` is
+    released between events rather than held for the whole call.
 
     Returns the count of events that produced at least one chunk (i.e.
-    non-cancelled events that were upserted). May be a partial count when the
-    budget expired mid-run.
+    non-cancelled events that were upserted) THIS call. May be a partial
+    count when the budget expired mid-run; already-resumed events from a
+    prior call are not re-counted.
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -347,7 +367,19 @@ def sync_calendar(
     # Evict any calendar chunks that fell outside the new forward horizon —
     # for example, recurring events that an earlier (unbounded) sync expanded
     # years ahead. Cheap idempotent no-op once the store has caught up.
-    store.delete_calendar_chunks_after(time_max)
+    # Writes/deletes `chunks` (DELETE FROM chunks/vec_chunks/fts_chunks) --
+    # the same table the four gated maintenance passes mutate -- so it needs
+    # the same bulk_section bracketing as every other write in this module
+    # (lock-coverage regression found in adversarial review: this ran with no
+    # lock at all in an earlier revision of this task).
+    with bulk_section():
+        store.delete_calendar_chunks_after(time_max)
+
+    resume_key = f"{source}:resume_ids"
+    try:
+        resumed_ids: set = set(json.loads(store.get_cursor(resume_key) or "[]"))
+    except (ValueError, TypeError):
+        resumed_ids = set()
 
     if cursor:
         try:
@@ -366,7 +398,11 @@ def sync_calendar(
             service, calendar_id, None, time_min, time_max, budget=budget)
 
     count = 0
+    newly_done: set = set()
     for ev in items:
+        eid = ev.get("id")
+        if eid and eid in resumed_ids:
+            continue
         if budget is not None and budget.expired():
             interrupted = True
             break
@@ -378,10 +414,19 @@ def sync_calendar(
                 count += 1
                 _apply_attendees_to_graph(store, ev, owner)
                 _annotate_series_from_event(store, ev, owner)
+        if eid:
+            newly_done.add(eid)
 
-    # Advance cursor only after all upserts are durable AND neither the
-    # pagination nor the per-event loop was cut short by the budget.
-    if next_sync and not interrupted:
+    if newly_done:
+        resumed_ids |= newly_done
+        store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
+
+    # Advance the REAL cursor only once pagination completed, the per-event
+    # loop wasn't cut short, AND every (id-bearing) event from this round's
+    # list is accounted for in the resume set.
+    item_ids = {ev.get("id") for ev in items if ev.get("id")}
+    if next_sync and not interrupted and item_ids <= resumed_ids:
         store.set_cursor(source, next_sync)
+        store.set_cursor(resume_key, "[]")
 
     return count

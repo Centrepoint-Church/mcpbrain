@@ -173,3 +173,93 @@ def test_normalise_includes_key_fields(tmp_path):
     assert "Annual strategy review day." in ch.text
     assert "Taryn Hamilton" in ch.text
     assert ch.metadata["source_type"] == "calendar"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 duty-cycle fix: budget-interrupted mid-delta must checkpoint
+# INCREMENTALLY, not just "don't advance the cursor" (that alone livelocks
+# once a delta is bigger than one budget — see sync_gmail's docstring for the
+# reproduced-and-fixed original case).
+# ---------------------------------------------------------------------------
+
+class _FakeBudget:
+    """expired() returns False for the first `expire_after_calls` calls, True
+    from then on — pins EXACTLY which iteration a real Budget's wall-clock
+    expiry would have landed on, deterministically."""
+
+    def __init__(self, expire_after_calls):
+        self.calls = 0
+        self.expire_after_calls = expire_after_calls
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after_calls
+
+
+def test_budget_interrupted_mid_event_loop_resumes_incrementally(tmp_path):
+    """A budget that expires partway through the per-event loop must not
+    advance the cursor, and a resumed call must SKIP the already-processed
+    event rather than merely re-doing it idempotently."""
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("calendar", "old")
+
+    events = [_event(f"evt{i}", f"Meeting {i}") for i in range(1, 4)]
+    resp = _resp(events, next_sync_token="tokNEW")
+    svc = FakeCalService(on_synctoken=resp)
+
+    # Call 1: _list_events' single-page pagination check (not expired). Call
+    # 2: event-loop check before evt1 (not expired -> evt1 processed). Call
+    # 3: before evt2 (expired -> stop; evt2/evt3 not reached this call).
+    budget = _FakeBudget(expire_after_calls=2)
+    result = sync_calendar(svc, store, budget=budget)
+
+    assert result == 1
+    assert store.get_cursor("calendar") == "old", "cursor must not advance on a partial run"
+    assert store.get_chunk("cal-evt1") is not None
+    assert store.get_chunk("cal-evt2") is None
+    assert store.get_chunk("cal-evt3") is None
+
+    # Resume: evt1 is now in the persisted resume set and must be skipped;
+    # only evt2/evt3 are genuinely new work this call.
+    result2 = sync_calendar(svc, store, budget=None)
+
+    assert result2 == 2, "only the genuinely new events (evt2, evt3) should be counted this call"
+    assert store.get_cursor("calendar") == "tokNEW"
+    assert store.get_cursor("calendar:resume_ids") == "[]"
+    for i in range(1, 4):
+        assert store.get_chunk(f"cal-evt{i}") is not None
+
+
+def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
+    """Critical-B reproduction, calendar variant (adversarial review, Task 2
+    round 3): a delta bigger than one budget's worth of events must not
+    livelock. Drives a 7-event delta through repeated budget-truncated calls
+    (2 events' worth of capacity each) and asserts the cursor eventually
+    reaches the true final syncToken and every event is ingested."""
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("calendar", "old")
+
+    n = 7
+    events = [_event(f"evt{i}", f"Meeting {i}") for i in range(1, n + 1)]
+    resp = _resp(events, next_sync_token="tokFINAL")
+    svc = FakeCalService(on_synctoken=resp)
+
+    per_call_capacity = 2
+    max_cycles = 20
+    for _cycle in range(max_cycles):
+        if store.get_cursor("calendar") != "old":
+            break
+        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
+        sync_calendar(svc, store, budget=budget)
+    else:
+        raise AssertionError(
+            f"cursor never advanced past the original delta window after "
+            f"{max_cycles} cycles — this is the livelock the fix targets"
+        )
+
+    assert store.get_cursor("calendar") == "tokFINAL"
+    assert store.get_cursor("calendar:resume_ids") == "[]"
+    for i in range(1, n + 1):
+        assert store.get_chunk(f"cal-evt{i}") is not None

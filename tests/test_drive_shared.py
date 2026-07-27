@@ -130,6 +130,64 @@ def test_sync_shared_drive_removal_purges_local_and_artifact(tmp_path):
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
 
 
+class _FakeBudget:
+    """expired() returns False for the first `expire_after_calls` calls, True
+    from then on — pins EXACTLY which iteration a real Budget's wall-clock
+    expiry would have landed on, deterministically."""
+
+    def __init__(self, expire_after_calls):
+        self.calls = 0
+        self.expire_after_calls = expire_after_calls
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after_calls
+
+
+def test_sync_shared_drive_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
+    """Critical-B reproduction, Shared-Drive variant (adversarial review, Task
+    2 round 3): a delta bigger than one budget's worth of files must not
+    livelock. Drives a 7-file delta through repeated budget-truncated calls
+    and asserts the cursor eventually reaches the true final
+    newStartPageToken and every file is durably upserted exactly once."""
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+
+    n = 7
+    changes = [_gdoc_change(f"f{i}", f"Doc {i}") for i in range(1, n + 1)]
+    exports = {f"f{i}": f"document body number {i}, long enough to matter".encode()
+              for i in range(1, n + 1)}
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": changes, "newStartPageToken": "200"}],
+        exports=exports)
+
+    per_call_capacity = 2
+    max_cycles = 20
+    for _cycle in range(max_cycles):
+        if s.get_cursor("drive:D1") != "100":
+            break
+        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
+        sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=budget)
+    else:
+        raise AssertionError(
+            f"cursor never advanced past the original delta window after "
+            f"{max_cycles} cycles — this is the livelock the fix targets"
+        )
+
+    assert s.get_cursor("drive:D1") == "200"
+    assert s.get_cursor("drive:D1:resume_ids") == "[]"
+    assert s.get_cursor("drive:D1:resume_removed_ids") == "[]"
+    for i in range(1, n + 1):
+        doc_id = f"gdrive-f{i}-0"
+        assert s.get_chunk(doc_id) is not None, f"f{i} was never ingested"
+        with s._connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (doc_id,)
+            ).fetchone()[0]
+        assert count == 1, f"f{i} produced more than one chunk row"
+
+
 def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
     s = _store(tmp_path)
     s.set_cursor("drive:D1", "100")
@@ -335,6 +393,88 @@ def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
                              absence_threshold=2)
     assert out["_revoked"] == ["GONE"]
     assert s.doc_ids_for_drive("GONE") == []
+
+
+class _FakeBudget:
+    """expired() returns False for the first `expire_after_calls` calls, True
+    from then on — lets a test pin exactly when a real Budget's wall-clock
+    expiry would have landed, deterministically."""
+
+    def __init__(self, expire_after_calls):
+        self.calls = 0
+        self.expire_after_calls = expire_after_calls
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after_calls
+
+
+def test_budget_break_does_not_purge_drives_merely_not_yet_reached(tmp_path):
+    """Critical-A reproduction (adversarial review, Task 2 round 3).
+
+    `sync_shared_drives` used to build `present` by appending each drive id
+    AS IT WAS VISITED in the per-drive loop, so a `budget` break partway
+    through left every not-yet-reached drive missing from `present` even
+    though `list_shared_drives` (a complete enumeration, paginated fully
+    up front) had already confirmed it's still authorized. Those unreached-
+    but-authorized drives then accumulated toward `note_drive_presence`'s
+    consecutive-absence purge counter exactly like a genuinely revoked
+    drive would -- reproduced live by the reviewer with threshold=2: after
+    two budget-truncated cycles, a drive that was simply never reached in
+    time got `purge_drive`'d (chunks deleted, relations invalidated).
+
+    This drives THREE shared drives through `threshold` consecutive cycles,
+    each with a budget that expires after only the first drive is actually
+    processed (so the other two are enumerated but never reached), and
+    asserts no drive is ever purged -- and that a pre-existing chunk in one
+    of the never-reached drives survives all `threshold` cycles.
+
+    All three drives must already be `known` to `note_drive_presence` before
+    the budget-truncated cycles start (a fleet that's been running fine and
+    then hits a busy backlog, not a fleet meeting these drives for the first
+    time) -- `known` only grows from drives that actually appear in
+    `present`, so a drive never once fully visited never enters the
+    absence-tracking system at all and this test would otherwise pass
+    trivially even with the bug present (verified: an earlier draft of this
+    test without the seeding step below passed against BOTH the buggy and
+    the fixed code, i.e. it was not actually discriminating).
+    """
+    s = _store(tmp_path)
+    # D2 has real cached content; if the bug purged it, this would be gone.
+    s.import_cached_chunk("gdrive-F2-0", "d2 doc body", "h2",
+                          {"file_id": "F2", "drive_id": "D2"}, [0.0] * 4)
+    svc = FakeDriveService(shared_drives=[
+        {"id": "D1", "name": "Ops"},
+        {"id": "D2", "name": "Finance"},
+        {"id": "D3", "name": "Legal"},
+    ])
+
+    threshold = 2
+    # Seed: one full, unbounded cycle so all three drives become `known` with
+    # a reset (0) absence counter, matching a fleet that's been healthy.
+    seed_out = sync_shared_drives(svc, s, pin=PIN,
+                                  storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
+                                  absence_threshold=threshold)
+    assert seed_out["_revoked"] == []
+
+    for cycle in range(threshold):
+        # Expires on the very first budget.expired() call this invocation
+        # makes -- i.e. right after whichever drive is the first to actually
+        # complete (or fail-and-be-skipped) its sync_shared_drive call, so at
+        # most one drive is ever fully processed per cycle and the other two
+        # are enumerated but never reached.
+        budget = _FakeBudget(expire_after_calls=0)
+        out = sync_shared_drives(svc, s, pin=PIN,
+                                 storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
+                                 absence_threshold=threshold, budget=budget)
+        assert out["_revoked"] == [], (
+            f"cycle {cycle}: a drive was purged for merely not being reached "
+            f"in time, despite still being present in the full enumeration"
+        )
+
+    # D2's chunk must still be there — it was never actually revoked from
+    # the fleet, only unlucky about when the budget ran out.
+    assert s.get_chunk("gdrive-F2-0") is not None
 
 
 from mcpbrain.sync.drive import sync_shared_drives   # noqa: E402  (import after helpers)

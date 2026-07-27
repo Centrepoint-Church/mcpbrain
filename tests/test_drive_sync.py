@@ -467,10 +467,14 @@ def test_budget_interrupted_mid_upsert_resumes_without_skip_or_duplicate(tmp_pat
 
     Verifies: (1) an interrupted run upserts only the files it reached and
     leaves the cursor at its OLD value; (2) a follow-up call with no budget
-    completes the resume — every file ends up upserted, f1 exactly once
-    despite being fetched+processed across BOTH calls (upsert_chunk no-ops on
-    an unchanged content_hash), and the cursor advances to the true
-    newStartPageToken.
+    completes the resume — f1 (already durably done in the first call) is
+    genuinely SKIPPED in the upsert loop via the persisted `drive:resume_ids`
+    set, only f2 is newly processed — and the cursor advances to the true
+    newStartPageToken. (Unlike Gmail, the PAGINATION loop's own `_fetch_text`
+    calls are not gated on the resume set here — see sync_drive's docstring
+    for why that's an accepted, documented trade-off — so f1's export IS
+    still re-fetched during pagination on resume; only the upsert/count is
+    genuinely incremental.)
     """
     store = _store(tmp_path)
     store.set_cursor("drive", "100")
@@ -503,20 +507,63 @@ def test_budget_interrupted_mid_upsert_resumes_without_skip_or_duplicate(tmp_pat
     assert store.get_chunk("gdrive-f1-0") is not None
     assert store.get_chunk("gdrive-f2-0") is None
 
-    # Resume: cursor unchanged, so this re-lists the SAME page/delta window
-    # (re-upserting f1 is a safe no-op — unchanged content_hash) and finishes
-    # f2 with no budget cutting it short.
+    # Resume: cursor unchanged, so pagination re-lists the SAME page (and
+    # re-fetches f1's/f2's text — see docstring), but the upsert loop must
+    # SKIP f1 (already resumed) and process only f2.
     result2 = sync_drive(svc, store, budget=None)
 
-    assert result2 == 2, "the resume re-walks the whole pending set (idempotent), not just the tail"
+    assert result2 == 1, "only the genuinely new file (f2) should be counted/upserted on resume"
     assert store.get_cursor("drive") == "105"
     assert store.get_chunk("gdrive-f1-0") is not None
     assert store.get_chunk("gdrive-f2-0") is not None
+    assert store.get_cursor("drive:resume_ids") == "[]", "resume set must be cleared once the round closes"
 
-    # No duplicate-visible-effect: f1 was upserted across both calls but
-    # stayed one row (upsert keyed on doc_id), never inserted twice.
+    # No duplicate-visible-effect regardless: f1 stayed one row (upsert keyed
+    # on doc_id), never inserted twice.
     with store._connect() as db:
         count = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE doc_id='gdrive-f1-0'"
         ).fetchone()[0]
     assert count == 1
+
+
+def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
+    """Critical-B reproduction, My-Drive variant (adversarial review, Task 2
+    round 3): a delta bigger than one budget's worth of files must not
+    livelock. Drives a 7-file delta through repeated budget-truncated calls
+    (2 files' worth of upsert capacity each) and asserts the cursor
+    eventually reaches the true final newStartPageToken and every file is
+    durably upserted exactly once."""
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+
+    n = 7
+    changes = [_gdoc_change(f"f{i}", f"Doc {i}") for i in range(1, n + 1)]
+    exports = {f"f{i}": f"document body number {i}, long enough to matter".encode()
+              for i in range(1, n + 1)}
+    pages = [_page(changes, new_start_page_token="200")]
+    svc = FakeDriveService(pages=pages, exports=exports)
+
+    per_call_capacity = 2
+    max_cycles = 20
+    for _cycle in range(max_cycles):
+        if store.get_cursor("drive") != "100":
+            break
+        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
+        sync_drive(svc, store, budget=budget)
+    else:
+        raise AssertionError(
+            f"cursor never advanced past the original delta window after "
+            f"{max_cycles} cycles — this is the livelock the fix targets"
+        )
+
+    assert store.get_cursor("drive") == "200"
+    assert store.get_cursor("drive:resume_ids") == "[]"
+    for i in range(1, n + 1):
+        doc_id = f"gdrive-f{i}-0"
+        assert store.get_chunk(doc_id) is not None, f"f{i} was never ingested"
+        with store._connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (doc_id,)
+            ).fetchone()[0]
+        assert count == 1, f"f{i} produced more than one chunk row"

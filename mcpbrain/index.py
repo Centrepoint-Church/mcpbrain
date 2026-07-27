@@ -77,9 +77,15 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     # Phase C: drain the contextual-BM25 FTS re-index backfill in bounded
     # batches (no re-embed) so existing chunks pick up the C1 contextual
     # prefix. Runs every cycle — including when nothing is pending — so it
-    # actually converges once the corpus is fully embedded.
+    # actually converges once the corpus is fully embedded. This is a
+    # bounded (cap=5000) bulk `UPDATE chunks`/FTS-rewrite -- one of the
+    # coarsest chunk writes in the whole cycle (six index_pending call sites
+    # per cycle) -- so it needs bulk_section too (lock-coverage regression
+    # found in adversarial review: this ran with no lock at all in an
+    # earlier revision of this task).
     try:
-        store.reindex_fts_batch(cap=5000)
+        with bulk_section():
+            store.reindex_fts_batch(cap=5000)
     except Exception:  # noqa: BLE001
         log.warning("reindex_fts_batch failed; FTS contextual backfill deferred", exc_info=True)
     return done
