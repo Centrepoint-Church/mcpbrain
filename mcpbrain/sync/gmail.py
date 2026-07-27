@@ -4,6 +4,7 @@ Implements the delta path + first-run bootstrap.
 The initial bulk backfill (messages.list over recent mail) is a separate task.
 """
 
+import json
 from contextlib import nullcontext
 
 from googleapiclient.errors import HttpError
@@ -44,27 +45,47 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     Gmail's `history.list` "historyId" response field is a SNAPSHOT of the
     mailbox's current state as of the query, not a per-page incremental
     cursor — the same value is returned on every page of one delta round. So
-    advancing the stored cursor to that value before every page's
-    `messagesAdded` records have actually been fetched-and-upserted would
-    permanently skip whatever was on the unvisited pages (they occurred
-    strictly before the new cursor value, so a future `startHistoryId=<new
-    cursor>` query can never see them again). The only safe checkpoint is
-    therefore "all or nothing": the cursor advances ONLY when both the
-    history-list pagination AND every collected message's fetch+upsert
-    completed without an early exit.
+    advancing the REAL stored cursor (`source`, e.g. "gmail") to that value
+    before every page's `messagesAdded` records have actually been
+    fetched-and-upserted would permanently skip whatever was on the unvisited
+    pages (they occurred strictly before the new cursor value, so a future
+    `startHistoryId=<new cursor>` query can never see them again). The real
+    cursor therefore still only advances once the WHOLE delta round —
+    pagination AND every collected message — completes without an early exit.
 
-    This is not lossy on an early exit, only WASTEFUL: `store.upsert_chunk` is
-    an idempotent upsert keyed on (doc_id, content_hash) — re-fetching and
-    re-upserting an already-processed message on the next attempt is a fast
-    no-op (one SELECT + hash compare, no write), not a duplicate or a
-    corruption. So leaving the cursor untouched after a partial run means the
-    next `sync_gmail` call simply re-lists the same delta window and re-does
-    (cheaply) whatever was already durably upserted, then makes forward
-    progress on what wasn't. Nothing is lost, nothing is double-counted.
+    That alone is NOT sufficient once a single delta round is bigger than one
+    budget's worth of work: naively "just don't advance the cursor" means
+    every subsequent call re-lists the SAME `startHistoryId`, gets the SAME
+    ordered message-id list, and — with the SAME per-call budget — processes
+    the SAME PREFIX of it every time. Reproduced directly: 5 identical calls
+    over a 7-message delta with a budget that only covers 2 messages each
+    time produced `processed=2` and an unmoved cursor on EVERY call — the
+    delta never converges and messages past the prefix are silently and
+    PERMANENTLY never ingested. This is genuinely worse than the pre-budget
+    behaviour (unbounded, but always eventually completed).
 
-    Returns the number of messages processed this call (may be a partial
-    count when the budget expired before every message was reached — those
-    messages ARE durably upserted; only the cursor is deliberately held back).
+    The fix is a second, separate piece of persisted state: `f"{source}:resume_ids"`
+    (a JSON list, stored via the same generic `sync_cursors` table as the real
+    cursor — no schema change) holding the message ids ALREADY durably
+    upserted so far during the CURRENT, not-yet-committed delta round. Each
+    call reads it, SKIPS any message id already in it (no re-fetch, no
+    re-upsert — genuine forward progress, not just idempotent re-work), and
+    persists the updated set after processing whatever it reaches this call.
+    A message that 404s (deleted between listing and fetching) is also added
+    to the resume set — there's nothing to write for it, but it must not
+    permanently occupy the "next thing to retry" slot forever. Only once
+    EVERY id in this round's message list is in the resume set (checked via
+    set difference, not just "loop finished" — the id list itself can grow
+    between calls if new mail keeps arriving) does the real cursor advance,
+    and the resume set is cleared for the next fresh delta round.
+
+    This makes forward progress monotonic: each call either finishes the
+    round (cursor advances) or durably grows the resume set (skipping
+    already-done ids next time, spending its budget only on genuinely new
+    work) — never repeats the exact same prefix twice.
+
+    Returns the number of messages processed this call (durably upserted just
+    now; already-resumed ids from a prior call are not re-counted).
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -75,6 +96,12 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
         hid = service.users().getProfile(userId="me").execute()["historyId"]
         store.set_cursor(source, str(hid))
         return 0
+
+    resume_key = f"{source}:resume_ids"
+    try:
+        resumed_ids: set = set(json.loads(store.get_cursor(resume_key) or "[]"))
+    except (ValueError, TypeError):
+        resumed_ids = set()
 
     # Delta run — page through history.list. This loop only READS (it collects
     # message ids into memory); it never mutates `chunks`, so it needs a budget
@@ -116,17 +143,23 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
             # historyId too old / invalid — reset to current and let a backfill fill the gap
             hid = service.users().getProfile(userId="me").execute()["historyId"]
             store.set_cursor(source, str(hid))
+            store.set_cursor(resume_key, "[]")
             return 0
         raise
 
-    # Fetch, normalise, and upsert each message.
-    # A 404 on an individual id means the message was deleted between
-    # history.list and our get — skip it rather than crashing the whole sync.
-    # Other HttpErrors still propagate so the cursor stays at the last good
-    # position and the next run retries them.
+    # Fetch, normalise, and upsert each message NOT already in the resume set
+    # (already durably processed in an earlier, budget-cut call for this same
+    # round). A 404 on an individual id means the message was deleted between
+    # history.list and our get — treated as "done" too (nothing to write, but
+    # it must not block forward progress forever). Other HttpErrors still
+    # propagate so the cursor/resume state stays at the last good position
+    # and the next run retries them.
     messages_processed = 0
     fetch_interrupted = False
+    newly_done: set = set()
     for mid in new_message_ids:
+        if mid in resumed_ids:
+            continue
         if budget is not None and budget.expired():
             fetch_interrupted = True
             break
@@ -135,18 +168,28 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 404:
+                newly_done.add(mid)
                 continue
             raise
         with bulk_section():
             for chunk in normalise_gmail(raw):
                 store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash, chunk.metadata)
         messages_processed += 1
+        newly_done.add(mid)
 
-    # Advance the cursor only when NEITHER loop was cut short by the budget —
-    # see the "Checkpointing" note above for why a partial advance would be
-    # unsafe (it would silently skip messages on unvisited history pages).
-    if not pagination_interrupted and not fetch_interrupted:
+    if newly_done:
+        resumed_ids |= newly_done
+        store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
+
+    # Advance the REAL cursor only once pagination completed AND every id in
+    # this round's (possibly still-growing) message list is accounted for in
+    # the resume set — not merely "the fetch loop reached the end" (the id
+    # list can grow between pagination and this check on a live mailbox; a
+    # plain loop-completed flag would miss that). Clearing the resume set
+    # marks the round as closed so the next call starts a fresh one.
+    if not pagination_interrupted and not fetch_interrupted and set(new_message_ids) <= resumed_ids:
         store.set_cursor(source, str(latest_history_id))
+        store.set_cursor(resume_key, "[]")
 
     return messages_processed
 

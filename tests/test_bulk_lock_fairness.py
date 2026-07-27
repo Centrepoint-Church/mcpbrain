@@ -27,6 +27,7 @@ never idles, and asserts the gated pass actually gets a turn.
 """
 import threading
 import time
+from contextlib import contextmanager
 
 from mcpbrain import daemon as d
 from mcpbrain.daemon import Daemon
@@ -267,4 +268,269 @@ def test_run_one_actually_holds_bulk_lock_during_the_cycle(tmp_path, monkeypatch
         "run_cycle (and down into run_sync_cycle/sync_gmail) is missing or "
         "broken. bulk_section silently defaults to a no-op nullcontext, so "
         "this class of regression produces no other test failure."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Silent-revert coverage for the remaining bulk_section threading points.
+#
+# test_run_one_actually_holds_bulk_lock_during_the_cycle above only pins ONE
+# of the eight `bulk_section` threading call sites this task added (gmail,
+# via the full Daemon.run_one() -> run_cycle() chain). Adversarial review
+# (round 3) found deleting `bulk_section=bulk_section` from any of the other
+# SEVEN would still leave the whole suite green. These tests close the
+# remaining seven. Six of them (calendar, my-drive, shared-drive,
+# index_pending, drain_captures — plus gmail above) drive the real
+# `run_cycle` free function (the actual choke point that threads
+# `bulk_section` to each source/step; a full Daemon isn't needed to test
+# THIS link since run_cycle takes bulk_section as a plain parameter) with a
+# standalone real-Lock-based section, and observe the lock is GENUINELY held
+# at the moment of the relevant write — not merely that an argument was
+# forwarded. The last two (drain.drain, prepare.prepare_units) are complex to
+# drive end-to-end with real contract-valid content, so they instead verify
+# run_cycle's own wiring directly: the exact `bulk_section` object passed to
+# run_cycle is forwarded, unmodified, into both calls — weaker than a held-
+# lock observation, but still catches exactly the "deleted
+# bulk_section=bulk_section" regression class this task is about.
+# ---------------------------------------------------------------------------
+
+def _standalone_bulk_section():
+    """A real, minimal _cycle_bulk_section-shaped CM, not tied to a Daemon —
+    run_cycle is a free function and the actual choke point under test here.
+    Returns (lock, section_factory)."""
+    lock = threading.Lock()
+
+    @contextmanager
+    def section():
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+    return lock, section
+
+
+def test_bulk_section_threaded_to_calendar_sync(tmp_path, monkeypatch):
+    from mcpbrain.daemon import run_cycle
+    from mcpbrain.store import Store
+    from tests.test_calendar_sync import FakeCalService, _event, _resp
+    from tests.test_daemon import FakeEmbedder
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    ev = _event("evt1", "Team meeting")
+    svc = FakeCalService(on_full=_resp([ev], next_sync_token="tok1"))
+
+    lock, section = _standalone_bulk_section()
+    seen_locked: list = []
+    orig_upsert = store.upsert_chunk
+
+    def spy(*a, **kw):
+        seen_locked.append(lock.locked())
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy
+    run_cycle(store, FakeEmbedder(), calendar_service=svc, bulk_section=section)
+
+    assert seen_locked, "fixture produced no chunk writes to observe"
+    assert all(seen_locked), (
+        "calendar sync wrote a chunk WITHOUT holding bulk_section's lock -- "
+        "the bulk_section threading from run_cycle into run_sync_cycle/"
+        "sync_calendar is missing or broken"
+    )
+
+
+def test_bulk_section_threaded_to_my_drive_sync(tmp_path, monkeypatch):
+    from mcpbrain.daemon import run_cycle
+    from mcpbrain.store import Store
+    from tests.test_daemon import FakeEmbedder
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change, _page
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("drive", "100")  # skip the no-op bootstrap path
+    pages = [_page([_gdoc_change("f1", "Doc One")], new_start_page_token="105")]
+    svc = FakeDriveService(pages=pages,
+                          exports={"f1": b"document body content, long enough to matter"})
+
+    lock, section = _standalone_bulk_section()
+    seen_locked: list = []
+    orig_upsert = store.upsert_chunk
+
+    def spy(*a, **kw):
+        seen_locked.append(lock.locked())
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy
+    run_cycle(store, FakeEmbedder(), drive_service=svc, bulk_section=section)
+
+    assert seen_locked, "fixture produced no chunk writes to observe"
+    assert all(seen_locked), (
+        "My-Drive sync wrote a chunk WITHOUT holding bulk_section's lock -- "
+        "the bulk_section threading from run_cycle into run_sync_cycle/"
+        "sync_drive is missing or broken"
+    )
+
+
+def test_bulk_section_threaded_to_shared_drive_sync(tmp_path, monkeypatch):
+    from mcpbrain import config
+    from mcpbrain.daemon import run_cycle
+    from mcpbrain.store import Store
+    from tests.test_daemon import FakeEmbedder
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    home = str(tmp_path)
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("drive:D1", "100")
+
+    def _fake_factory(_home, _svc):
+        return lambda drive_id: LocalDirFleetStorage(tmp_path / drive_id)
+
+    monkeypatch.setattr("mcpbrain.fleet_storage.cache_storage_factory", _fake_factory)
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"shared drive body content, long enough to matter"})
+
+    lock, section = _standalone_bulk_section()
+    seen_locked: list = []
+    orig_upsert = store.upsert_chunk
+
+    def spy(*a, **kw):
+        seen_locked.append(lock.locked())
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy
+    run_cycle(store, FakeEmbedder(), drive_service=svc, bulk_section=section)
+
+    assert seen_locked, "fixture produced no chunk writes to observe"
+    assert all(seen_locked), (
+        "shared-drive sync wrote a chunk WITHOUT holding bulk_section's lock -- "
+        "the bulk_section threading from run_cycle into run_sync_cycle/"
+        "sync_shared_drives/sync_shared_drive/_cache_first_extract_one is "
+        "missing or broken"
+    )
+
+
+def test_bulk_section_threaded_to_index_pending(tmp_path, monkeypatch):
+    """Reuses the gmail fixture purely to produce a chunk for index_pending
+    to embed; the assertion is on write_embedding (index_pending's own
+    write), not upsert_chunk."""
+    from mcpbrain.daemon import run_cycle
+    from tests.test_daemon import FakeEmbedder, _gmail_fake_one_message, _make_store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    fake = _gmail_fake_one_message()
+
+    lock, section = _standalone_bulk_section()
+    seen_locked: list = []
+    orig_write_embedding = store.write_embedding
+
+    def spy(*a, **kw):
+        seen_locked.append(lock.locked())
+        return orig_write_embedding(*a, **kw)
+
+    store.write_embedding = spy
+    run_cycle(store, FakeEmbedder(), gmail_service=fake, bulk_section=section)
+
+    assert seen_locked, "fixture produced no embeddings to observe"
+    assert all(seen_locked), (
+        "index_pending wrote an embedding WITHOUT holding bulk_section's lock -- "
+        "the bulk_section threading from run_cycle into run_sync_cycle/"
+        "index_pending is missing or broken"
+    )
+
+
+def test_bulk_section_threaded_to_drain_captures(tmp_path, monkeypatch):
+    import json
+
+    from mcpbrain.daemon import run_cycle
+    from tests.test_daemon import FakeEmbedder, _make_store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    inbox = tmp_path / "capture_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "cap-1.json").write_text(json.dumps({
+        "kind": "ingest", "captured_at": "2026-06-04T12:00:00Z",
+        "source": "code", "title": "T", "content": "C",
+        "tags": "", "observation_type": "memory", "org": "",
+    }))
+
+    lock, section = _standalone_bulk_section()
+    seen_locked: list = []
+    orig_upsert = store.upsert_chunk
+
+    def spy(*a, **kw):
+        seen_locked.append(lock.locked())
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy
+    run_cycle(store, FakeEmbedder(), bulk_section=section)
+
+    assert seen_locked, "fixture produced no chunk writes to observe"
+    assert all(seen_locked), (
+        "drain_captures wrote a chunk WITHOUT holding bulk_section's lock -- "
+        "the bulk_section threading from run_cycle into drain.drain_captures "
+        "is missing or broken"
+    )
+
+
+def test_bulk_section_argument_reaches_drain_and_prepare_units(monkeypatch):
+    """prepare_units and drain.drain are costly to drive end-to-end with real
+    contract-valid content (unit files, valid extractions, graph_write
+    plumbing), so — unlike the five tests above — this verifies run_cycle's
+    OWN wiring directly: the exact `bulk_section` object passed into
+    run_cycle is forwarded, unmodified, into both calls. Weaker than a
+    genuinely-held-lock observation, but still catches exactly the "deleted
+    bulk_section=bulk_section" regression class this task is about."""
+    import mcpbrain.daemon as daemon_module
+    from mcpbrain.daemon import run_cycle
+
+    calls: dict = {}
+
+    def _prepare_spy(store, **kwargs):
+        calls["prepare_units"] = kwargs.get("bulk_section")
+        return {}
+
+    def _drain_spy(store, **kwargs):
+        calls["drain"] = kwargs.get("bulk_section")
+        return {}
+
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _prepare_spy)
+    monkeypatch.setattr(daemon_module.drain, "drain", _drain_spy)
+    monkeypatch.setattr(daemon_module, "_graph_apply", lambda: object())
+
+    class _FakeStore:
+        def unenriched_chunks(self, limit=None):
+            return []
+
+    class _FakeEmbedder:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0, 0, 0] for _ in texts]
+
+    def my_section():
+        return _standalone_bulk_section()[1]()
+
+    run_cycle(_FakeStore(), _FakeEmbedder(), enrich_mode="spool", bulk_section=my_section)
+
+    assert calls.get("prepare_units") is my_section, (
+        "run_cycle no longer forwards its bulk_section into prepare.prepare_units"
+    )
+    assert calls.get("drain") is my_section, (
+        "run_cycle no longer forwards its bulk_section into drain.drain"
     )

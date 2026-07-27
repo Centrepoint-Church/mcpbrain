@@ -103,6 +103,19 @@ REEXTRACT_CAP = 50
 # run_one(), and an unbounded cycle starved them for four days (2026-07-23..27).
 CYCLE_BUDGET_S = 60.0
 
+# Separate, independent wall-clock slice for drain_captures — the ONLY
+# consumer of the MCP write-tool spool (brain_note/brain_decision/
+# brain_memory_write/brain_action_create). It must NOT share CYCLE_BUDGET_S:
+# that budget is constructed once per cycle and threaded through
+# run_sync_cycle first, so on any cycle with a sync backlog (the live-store
+# normal case per the CYCLE_BUDGET_S incident above) it is already fully
+# spent by the time drain_captures would run, applying zero queued envelopes
+# for as long as the backlog persists — silently contradicting the "queued...
+# within ~a minute" contract elsewhere in the codebase. The capture spool is
+# small and user-paced (not a bulk-sync-sized backlog), so a short budget of
+# its own is enough while still bounding a pathological capture backlog.
+CAPTURES_BUDGET_S = 10.0
+
 # Tick interval for the maintenance thread (Daemon._maintenance_loop). Each
 # cadence pass still self-gates on its own interval, so a tick is cheap; this
 # just bounds how promptly a newly-due pass is noticed.
@@ -476,9 +489,15 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     try:
         # drain_captures writes `chunks` (upsert_chunk for "ingest" captures) --
         # the same table the four gated maintenance passes mutate -- so it gets
-        # its own budget/bulk_section threading (Task 2 race-safety fix; this
-        # call used to run with no lock at all).
-        drain_caps = drain.drain_captures(store, budget=budget, bulk_section=bulk_section)
+        # its own bulk_section threading (Task 2 race-safety fix; this call
+        # used to run with no lock at all). It gets its OWN independent
+        # budget (CAPTURES_BUDGET_S), NOT the shared `budget` that
+        # run_sync_cycle just spent -- reusing the same (often already-
+        # expired, on a live backlog) budget object would silently starve
+        # the MCP write-tool spool for as long as the sync backlog persists.
+        # See CAPTURES_BUDGET_S for the full reasoning.
+        drain_caps = drain.drain_captures(
+            store, budget=Budget(CAPTURES_BUDGET_S), bulk_section=bulk_section)
         if drain_caps:
             log.info("captures applied: %d", drain_caps)
             from mcpbrain.memory_index import regenerate
