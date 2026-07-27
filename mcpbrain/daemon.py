@@ -451,13 +451,17 @@ class Daemon:
         # search cycles — goes through it, not just the wizard's ensure_model()
         # button), so _model_building is set around exactly this span.
         if self._embedder_obj is None:
-            if self._embedder_factory is None:
-                raise RuntimeError("embedder unavailable (model not loaded yet)")
-            self._model_building = True
-            try:
-                self._embedder_obj = self._embedder_factory()
-            finally:
-                self._model_building = False
+            with self._embedder_lock:
+                # Re-check inside the lock: another thread may have finished
+                # the build while this one was waiting to acquire it.
+                if self._embedder_obj is None:
+                    if self._embedder_factory is None:
+                        raise RuntimeError("embedder unavailable (model not loaded yet)")
+                    self._model_building = True
+                    try:
+                        self._embedder_obj = self._embedder_factory()
+                    finally:
+                        self._model_building = False
         return self._embedder_obj
 
     def model_status(self) -> dict:
@@ -668,6 +672,16 @@ class Daemon:
         # signals run_one to yield its write cycle while the backfill is live.
         self._backfill_active = threading.Event()
         self._backfill_lock = threading.Lock()
+        # Guards the _pending_* stashes. They are written by cadence passes and
+        # read-and-cleared by run_one; once those run on different threads that
+        # is a genuine read-delete race.
+        self._stash_lock = threading.Lock()
+        # Guards the lazily-built embedder. index_pending (cycle thread) and
+        # consolidation/self_improve (maintenance thread) share one ONNX model.
+        self._embedder_lock = threading.Lock()
+        # Coarse advisory lock. Held by the cycle around chunk-mutating phases
+        # and acquired by the four cadence passes that also write `chunks`.
+        self._bulk_lock = threading.Lock()
         # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
         # can fire on an HTTP thread while the loop thread independently bootstraps
         # the same cycle — two concurrent import_snapshot transactions into one
@@ -1214,6 +1228,30 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.warning("singleton recompute skipped: %s", exc)
 
+    def _stash_take(self) -> dict:
+        """Atomically snapshot and clear the three request stashes.
+
+        A generic, lock-guarded snapshot-and-clear for the `_pending_*` dicts.
+        Not currently called by `run_one` (below) — that method deliberately
+        keeps its existing "re-attach until the drain confirms" semantics
+        (pinned by tests in test_daemon_p3.py), which an unconditional clear
+        would break, and `_pending_synthesis` there is list-shaped, not
+        dict-shaped, so `dict(...)` on it would raise once populated. This
+        method is exercised directly by test_daemon_thread_safety.py and is
+        available for callers (e.g. a future maintenance thread) that want an
+        atomic take without the retry bookkeeping.
+        """
+        with self._stash_lock:
+            got = {
+                "blocks": dict(self._pending_blocks),
+                "audit": dict(self._pending_audit),
+                "synthesis": dict(self._pending_synthesis),
+            }
+            self._pending_blocks = {}
+            self._pending_audit = {}
+            self._pending_synthesis = {}
+            return got
+
     def run_one(self) -> dict | None:
         """Run a single cycle, unless paused.
 
@@ -1249,8 +1287,9 @@ class Daemon:
         # stash is cleared below, once the drain summary shows its answers
         # actually came back; until then every freshly-produced batch of units
         # carries the same requests.
-        synthesis_requests = self._pending_synthesis
-        merged = {**self._pending_blocks, **self._pending_audit}
+        with self._stash_lock:
+            synthesis_requests = self._pending_synthesis
+            merged = {**self._pending_blocks, **self._pending_audit}
         extra_blocks = {k: v for k, v in merged.items() if v} or None
         if extra_blocks:
             log.info("extra blocks attached: %s",
@@ -1277,18 +1316,19 @@ class Daemon:
         self._last_cache_hits = cache_counts.get("hits", 0)
         self._last_cache_misses = cache_counts.get("misses", 0)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
-        if drained.get("synthesis_written"):
-            self._pending_synthesis = []
-        for key in list(self._pending_blocks):
-            if f"{key}_drained" in drained:
-                log.info("block %s answers drained (%s); stash cleared",
-                         key, drained[f"{key}_drained"])
-                del self._pending_blocks[key]
-        for key in list(self._pending_audit):
-            if f"{key}_drained" in drained:
-                log.info("block %s answers drained (%s); stash cleared",
-                         key, drained[f"{key}_drained"])
-                del self._pending_audit[key]
+        with self._stash_lock:
+            if drained.get("synthesis_written"):
+                self._pending_synthesis = []
+            for key in list(self._pending_blocks):
+                if f"{key}_drained" in drained:
+                    log.info("block %s answers drained (%s); stash cleared",
+                             key, drained[f"{key}_drained"])
+                    del self._pending_blocks[key]
+            for key in list(self._pending_audit):
+                if f"{key}_drained" in drained:
+                    log.info("block %s answers drained (%s); stash cleared",
+                             key, drained[f"{key}_drained"])
+                    del self._pending_audit[key]
         return result
 
     # -- cadence helpers ----------------------------------------------------
@@ -1877,9 +1917,10 @@ class Daemon:
                 block_key = kind_to_block_key.get(u["packet"].get("finding_type"))
                 if block_key:
                     by_block.setdefault(block_key, []).append(u)
-            for key, items in by_block.items():
-                if items:
-                    self._pending_blocks[key] = items
+            with self._stash_lock:
+                for key, items in by_block.items():
+                    if items:
+                        self._pending_blocks[key] = items
             counts = {k: len(v) for k, v in by_block.items()}
             log.info("review: stashed %s", counts)
         except Exception as exc:  # noqa: BLE001 — review must never crash the loop
@@ -1989,7 +2030,8 @@ class Daemon:
             # merges on push. Async because there is no synchronous LLM client.
             units = res.pop("adjudication_units", [])
             if units:
-                self._pending_blocks["org_merge_review"] = units
+                with self._stash_lock:
+                    self._pending_blocks["org_merge_review"] = units
             log.info("org_curate: %s",
                      {**{k: res[k] for k in ("version", "ingested") if k in res},
                       "merge_units": len(units)})
@@ -2045,7 +2087,8 @@ class Daemon:
             # optional path; also lets tests patch build_synthesis_requests.
             from mcpbrain.synthesise_threads import build_synthesis_requests
             requests = build_synthesis_requests(self._store)
-            self._pending_synthesis = requests
+            with self._stash_lock:
+                self._pending_synthesis = requests
         except Exception as exc:  # noqa: BLE001 — synthesis must never crash the loop
             log.warning(
                 "synthesis build failed (will retry next due): %s", exc,
@@ -2151,11 +2194,12 @@ class Daemon:
             profile_reqs = build_profile_requests(self._store)
             community_reqs = build_community_requests(self._store)
             distil_reqs = build_distil_requests(self._store)
-            self._pending_blocks.update({
-                "profile_synthesis": profile_reqs,
-                "community_synthesis": community_reqs,
-                "memory_distil": distil_reqs,
-            })
+            with self._stash_lock:
+                self._pending_blocks.update({
+                    "profile_synthesis": profile_reqs,
+                    "community_synthesis": community_reqs,
+                    "memory_distil": distil_reqs,
+                })
         except Exception as exc:  # noqa: BLE001 — must never crash the loop
             log.warning(
                 "blocks build failed (will retry next due): %s", exc, exc_info=True
@@ -2196,7 +2240,8 @@ class Daemon:
         try:
             from mcpbrain.profile_audit import build_audit_requests
             audit_reqs = build_audit_requests(self._store)
-            self._pending_audit = {"profile_audit": audit_reqs}
+            with self._stash_lock:
+                self._pending_audit = {"profile_audit": audit_reqs}
         except Exception as exc:  # noqa: BLE001 — must never crash the loop
             log.warning(
                 "audit build failed (will retry next due): %s", exc, exc_info=True

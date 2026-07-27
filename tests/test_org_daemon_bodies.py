@@ -1,3 +1,5 @@
+import threading
+
 from mcpbrain import daemon as d
 
 
@@ -13,6 +15,7 @@ def _daemon():
             self._org_curate_interval_s = 1.0
             self._last_org_curate = None
             self._pending_blocks = {}
+            self._stash_lock = threading.Lock()
             self._clock = lambda: 1000.0
 
         def ensure_services(self):          # real daemon resolves services here
