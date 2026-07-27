@@ -64,6 +64,18 @@ def _row_to_action(row: sqlite3.Row) -> dict:
     }
 
 
+def queue_state(*, queued: int, unenriched_eligible: int) -> str:
+    """Distinguish an empty queue from a starved producer.
+
+    prepare_units runs inside run_cycle; when the cycle wedged, no units were
+    produced and the dashboard reported 'queue clear' while 64,340 chunks were
+    waiting. 'Nothing queued' is not 'nothing to do'.
+    """
+    if queued > 0:
+        return "working"
+    return "idle" if unenriched_eligible == 0 else "starved"
+
+
 def actions_today(store, owner: str | None = None) -> dict:
     """Bucket open actions into overdue / due_today / upcoming / blocked.
 
@@ -435,6 +447,9 @@ def stats(store, home, status: dict) -> dict:
         for k in ("google", "claude", "backup", "records", "enrichment") if k in conns
     ]
 
+    eligible = max(0, indexed - gc["cold"] - enriched)
+    queued = status.get("spool", {}).get("pending", 0)
+
     return {
         "as_of": _now_iso(),
         "index": {
@@ -449,6 +464,7 @@ def stats(store, home, status: dict) -> dict:
                 round(enriched / (indexed - gc["cold"]) * 100)
                 if (indexed - gc["cold"]) > 0 else 0
             ),
+            "queue": queue_state(queued=queued, unenriched_eligible=eligible),
         },
         "graph": {
             "entities": entities,

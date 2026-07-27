@@ -32,6 +32,11 @@ from mcpbrain import config
 # only ever prevents a premature cut-off; fast calls are unaffected.
 DEFAULT_HTTP_TIMEOUT_S = 600
 
+# Routine Gmail/Drive/Calendar reads. The 600s figure above exists for ~750MB
+# resumable backup uploads; applying it to every request means one stalled call
+# holds the daemon's cycle for ten minutes.
+DEFAULT_READ_TIMEOUT_S = 60
+
 logger = logging.getLogger(__name__)
 
 SCOPES = [
@@ -240,7 +245,7 @@ def fetch_google_name(creds: Credentials) -> str:
 
 
 def build_service(api: str, version: str, creds: Credentials,
-                  *, timeout_s: float = DEFAULT_HTTP_TIMEOUT_S):
+                  *, timeout_s: float = DEFAULT_READ_TIMEOUT_S):
     """Build a Google API service client with an explicit socket timeout.
 
     Args:
@@ -299,7 +304,7 @@ def _granted_scopes(creds, token_file: Path | None = None) -> set[str] | None:
     return None
 
 
-def build_google_services(creds=None, *, scopes=SCOPES, token_file=None) -> dict:
+def build_google_services(creds=None, *, scopes=SCOPES, token_file=None, drive_timeout_s=None) -> dict:
     """Build the Google API service clients for sync from user credentials.
 
     Loads credentials via load_credentials() if creds is None. Returns a dict
@@ -307,6 +312,13 @@ def build_google_services(creds=None, *, scopes=SCOPES, token_file=None) -> dict
     "drive_service":...}. A service whose scope the token lacks is OMITTED
     gracefully (e.g. a token without calendar.readonly -> no calendar_service),
     rather than failing the whole build.
+
+    Args:
+        creds: Credentials object; loaded from token_file if None.
+        scopes: OAuth scopes to validate; defaults to SCOPES.
+        token_file: Path to token file; defaults to token_path().
+        drive_timeout_s: Optional timeout for the drive service (used for
+            large uploads). If None, uses DEFAULT_READ_TIMEOUT_S.
     """
     if creds is None:
         # Resolve the on-disk path so granted scopes can be read from the
@@ -324,7 +336,12 @@ def build_google_services(creds=None, *, scopes=SCOPES, token_file=None) -> dict
         if granted is not None and scope not in granted:
             continue
         try:
-            services[key] = build_service(api, version, creds)
+            # Use the provided drive_timeout_s for the drive service if specified.
+            timeout = drive_timeout_s if (key == "drive_service" and drive_timeout_s is not None) else None
+            if timeout is not None:
+                services[key] = build_service(api, version, creds, timeout_s=timeout)
+            else:
+                services[key] = build_service(api, version, creds)
         except Exception as exc:  # noqa: BLE001 — one bad service must not abort the rest
             logger.warning("Skipping %s: build failed: %s", key, exc)
 
