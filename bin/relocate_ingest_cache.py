@@ -28,7 +28,17 @@ _FOLDER_MIME = "application/vnd.google-apps.folder"
 
 def _drive_service(home):
     from mcpbrain import auth
-    services = auth.build_google_services(token_file=Path(home) / "google_token.json")
+    # build_google_services' drive_timeout_s defaults to DEFAULT_READ_TIMEOUT_S
+    # (60s, dropped from DEFAULT_HTTP_TIMEOUT_S's 600s so the daemon's per-cycle
+    # reads can't stall a whole cycle) — this call site silently inherited that
+    # drop. This script only lists/deletes cache FOLDERS (metadata calls; it
+    # never reads/writes the cache blob contents), so 60s is very likely fine.
+    # Still passing the larger timeout because this is a one-shot, manually-run
+    # maintenance script (never on the daemon's contended cycle path the
+    # shorter default protects), it can iterate many drives/folders in one run,
+    # and a generous timeout only ever prevents a premature cut-off.
+    services = auth.build_google_services(token_file=Path(home) / "google_token.json",
+                                          drive_timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S)
     svc = services.get("drive_service")
     if svc is None:
         raise SystemExit(
