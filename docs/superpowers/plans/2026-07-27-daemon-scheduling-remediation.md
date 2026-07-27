@@ -1047,3 +1047,14 @@ Every reviewed finding and where it is addressed.
   extractors) beyond adding the `budget` parameter in Task 2 — that is specs 2
   and 3.
 - Nothing here is pushed. Do not push or release; Josh decides both.
+- **Expect backup failures during Task 8 acceptance — they are pre-existing, not
+  yours.** The live daemon logged `periodic backup failed: The write operation
+  timed out` twice on 2026-07-27 *after* disk was freed to 54 GB, and its last
+  successful backup was 2026-07-23. This is NOT the Task 6 timeout split: the
+  backup path correctly passes `drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S`
+  (`daemon.py:2801`). The cause is snapshot size — the store is 11.9 GB, a large
+  share of it the 66,653 content-free chunks documented in
+  `2026-07-27-ingestion-defects-findings.md`, and four days of missed backups
+  meant more to ship. Record it in the acceptance notes; do not try to fix it
+  here. The real fix is the ingestion cleanup in specs 2/3, after which a
+  re-measure will show whether 600 s is still too tight.
