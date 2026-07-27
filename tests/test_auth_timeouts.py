@@ -33,3 +33,39 @@ def test_backup_can_still_request_the_long_timeout(monkeypatch):
     monkeypatch.setattr(auth, "build", lambda api, version, http: ("svc", api))
     auth.build_service("drive", "v3", object(), timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S)
     assert seen["timeout"] == auth.DEFAULT_HTTP_TIMEOUT_S
+
+
+def test_build_google_services_applies_drive_timeout_to_drive_service(monkeypatch):
+    """Verify that build_google_services' drive_timeout_s param is passed through."""
+    timeouts_seen = {}
+
+    class _Http:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+    def _capture_http(timeout=None):
+        timeouts_seen["http_timeout"] = timeout
+        return _Http(timeout)
+
+    def _build_service(api, version, creds, timeout_s=None):
+        # Capture the timeout that build_service was called with for drive
+        if api == "drive":
+            timeouts_seen["drive_timeout"] = timeout_s
+        return f"mock_{api}_service"
+
+    monkeypatch.setattr(auth.httplib2, "Http", _capture_http)
+    monkeypatch.setattr(auth, "AuthorizedHttp", lambda creds, http: http)
+    monkeypatch.setattr(auth, "build", lambda api, version, http: f"mock_{api}_service")
+    monkeypatch.setattr(auth, "build_service", _build_service)
+    monkeypatch.setattr(auth, "_granted_scopes", lambda creds, tf: None)
+    monkeypatch.setattr(auth, "load_credentials", lambda **kw: object())
+
+    # Call build_google_services with explicit drive_timeout_s
+    services = auth.build_google_services(
+        creds=object(),
+        drive_timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S
+    )
+
+    # Verify the drive service was built with the long timeout
+    assert timeouts_seen.get("drive_timeout") == auth.DEFAULT_HTTP_TIMEOUT_S
+    assert services.get("drive_service") == "mock_drive_service"

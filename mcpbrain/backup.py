@@ -211,8 +211,10 @@ def _default_media(path):
     httplib2, which mishandles the 308 "Resume Incomplete" responses and raises
     RedirectMissingLocation (a long-standing httplib2 bug). A single PUT avoids
     308s entirely; the real fix for the original failure was the socket timeout
-    (auth.build_service now uses a generous one), not chunking. A mid-upload
-    network blip simply fails this run and the daily cadence retries.
+    (callers must explicitly pass timeout_s=DEFAULT_HTTP_TIMEOUT_S or
+    drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S to build_service/build_google_services
+    for upload/download operations). A mid-upload network blip simply fails this
+    run and the daily cadence retries.
     """
     from googleapiclient.http import MediaFileUpload
 
