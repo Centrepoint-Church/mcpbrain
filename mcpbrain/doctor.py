@@ -134,8 +134,22 @@ def _reprobe(home, key: str, fallback: dict) -> dict:
     return probes.all_connections(home).get(key, fallback)
 
 
+def _live_daemon_status(home) -> dict | None:
+    """The running daemon's /api/status, or None when it isn't reachable.
+
+    A down daemon is already reported by the "claude" probe, so this degrades
+    silently rather than adding a second failure line for the same cause.
+    """
+    from mcpbrain.control_client import ControlClient
+    try:
+        return ControlClient(str(home), timeout=5).status()
+    except Exception:  # noqa: BLE001 — diagnostics must never fail on a probe
+        return None
+
+
 def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
-               mcpbrain_bin=None, agent_installed=None, model_present=None) -> tuple[int, str]:
+               mcpbrain_bin=None, agent_installed=None, model_present=None,
+               daemon_status=None) -> tuple[int, str]:
     """Diagnose, auto-fix the idempotent local failures, report, return (code, msg).
 
     Pure-ish: probes and repairs are injectable. With nothing injected it reads
@@ -157,6 +171,8 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         conns = probes.all_connections(home)
     if repairs is None:
         repairs = _default_repairs(str(home), platform, mcpbrain_bin)
+    if daemon_status is None:
+        daemon_status = _live_daemon_status(home)
 
     lines: list[str] = []
     fixed = 0
@@ -282,6 +298,23 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                          + (f" ({res['reason']})" if res.get("reason") else ""))
         except Exception as exc:  # noqa: BLE001 — never fatal
             lines.append(f"➖ {'Baseline':<16} skipped ({exc})")
+
+    # Watchdog restart limiter. The daemon self-restarts on a 30-min stall but
+    # gives up after 3 restarts in 6 hours and stays up "visibly stuck" — which
+    # is only visible if something says so. Skipped entirely when the daemon
+    # isn't reachable (the Daemon line already covers that).
+    if daemon_status:
+        wd_exits = int(daemon_status.get("watchdog_exits") or 0)
+        if daemon_status.get("watchdog_limit_reached"):
+            lines.append(f"❌ {'Watchdog':<16} {wd_exits} self-restarts in the last 6 h — "
+                         f"restart limit reached, daemon left running for diagnosis; "
+                         f"check the daemon log")
+            need_action += 1
+        elif wd_exits:
+            lines.append(f"✅ {'Watchdog':<16} {wd_exits} self-restart(s) in the last 6 h "
+                         f"(recovered)")
+        else:
+            lines.append(f"✅ {'Watchdog':<16} no stall restarts")
 
     lines.append(arch_line())
 
