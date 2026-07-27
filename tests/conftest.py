@@ -38,11 +38,25 @@ def _no_real_exit(monkeypatch):
     """os._exit(1) in the watchdog bypasses pytest entirely — a test that ever
     reaches it kills the worker with no traceback. Today that path is unreachable
     only by accident (frozen clocks, stubbed _stalled_phase); nothing structural
-    prevents it. Neutralise it for every test."""
+    prevents it. Neutralise it for every test.
+
+    Patched at the os._exit BOUNDARY, not by nuking Daemon._exit_for_restart /
+    Daemon._spawn_replacement at the class level: both real methods bottom out
+    in os._exit(1) (daemon.py:2528, :2547) and that is the only call this fixture
+    needs to make unreachable. A class-level patch on the methods themselves
+    would win over the instance-level monkeypatches that
+    test_daemon_watchdog.py's test_spawn_replacement_detaches_the_successor_on_windows
+    / test_spawn_replacement_passes_no_creationflags_on_posix rely on — those
+    two deliberately exercise the REAL _spawn_replacement() body (asserting on
+    subprocess.Popen's creationflags/close_fds) and already mock only
+    subprocess.Popen and os._exit directly. Patching os._exit here instead
+    keeps both true: nothing in the suite can reach the real process-killing
+    exit, and those two tests' own os._exit override still wins for the
+    duration of their test body (monkeypatch is last-write-wins, teardown
+    unwinds in reverse order)."""
     from mcpbrain import daemon as _d
-    monkeypatch.setattr(_d.Daemon, "_exit_for_restart",
-                        lambda self: (_ for _ in ()).throw(
-                            AssertionError("_exit_for_restart called in a test")))
-    monkeypatch.setattr(_d.Daemon, "_spawn_replacement",
-                        lambda self: (_ for _ in ()).throw(
-                            AssertionError("_spawn_replacement called in a test")))
+
+    def _boom(code=0):
+        raise AssertionError(f"os._exit({code!r}) called in a test")
+
+    monkeypatch.setattr(_d.os, "_exit", _boom)
