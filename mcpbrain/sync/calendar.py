@@ -160,7 +160,7 @@ def _annotate_series_from_event(store, event, owner) -> bool:
     candidate_orgs.append("external")
     for org in candidate_orgs:
         eid = _meeting_series_id(summary, org)
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             exists = db.execute(
                 "SELECT 1 FROM entities WHERE id=? AND type='meeting'", (eid,)).fetchone()
             if not exists:

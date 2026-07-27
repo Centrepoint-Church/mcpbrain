@@ -40,7 +40,7 @@ class _InMemoryStore:
         self._db = sqlite3.connect(":memory:")
         self._db.row_factory = sqlite3.Row
 
-    def _connect(self):
+    def _connect(self, *, write=False):
         return self._db
 
 

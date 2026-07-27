@@ -290,7 +290,7 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
     if attribute == "role" and value.strip().lower() in _JUNK_ROLE_VALUES:
         return
 
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         if attribute == "role":
             # Skip low-ranked sources when an authoritative observation already exists.
             if _source_rank(source) < _BODY_MENTION_RANK:
@@ -375,7 +375,7 @@ def consolidate_observations(store) -> dict:
     group size and last_seen to the group's max date, and delete the rest.
     Historical/retired rows are left untouched. Returns counts. Idempotent."""
     removed = groups = 0
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         rows = conn.execute(
             "SELECT id, entity_id, attribute, value, valid_from, last_seen "
             "FROM entity_observations "
@@ -475,7 +475,7 @@ def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
     now = datetime.now(timezone.utc) if as_of is None else datetime.fromisoformat(as_of)
     cutoff = (now - timedelta(days=int(stale_days))).strftime("%Y-%m-%d")
     stamp = now.strftime("%Y-%m-%d")
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         cur = conn.execute(
             "UPDATE entity_relations "
             "SET strength = 0, valid_to = COALESCE(valid_to, ?), superseded_reason = 'decayed' "
@@ -552,7 +552,7 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
         raise ValueError("valid_from is required for bi-temporal writes")
     confidence = max(0.0, min(1.0, float(confidence)))
     now = _now_iso()
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         conflicts = _find_conflicting_relations(conn, entity_a, relation)
         same_target = [c for c in conflicts if c["entity_b"] == entity_b]
 
@@ -1850,7 +1850,7 @@ def _bump_email_count(store, entity_id: str) -> None:
     created, so email_count tracks distinct message appearances and stays stable
     when a thread is re-applied.
     """
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         conn.execute(
             "UPDATE entities SET email_count = email_count + 1 WHERE id = ?",
             (entity_id,))
@@ -1949,7 +1949,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
     if email_addr:
         norm_email = email_addr.lower().strip()
         candidate_id = slugify(name)
-        with store._connect() as conn:
+        with store._connect(write=True) as conn:
             existing_by_email = conn.execute(
                 "SELECT id FROM entities WHERE lower(email_addr) = ? AND id != ?",
                 (norm_email, candidate_id),
@@ -1975,7 +1975,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
         return None
     today = _today()
 
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         existing = conn.execute(
             "SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
 

@@ -33,7 +33,7 @@ def _renormalize_email_context_topics(store, home) -> int:
         tags = [topics.normalize_topic(t, home) for t in raw_topics.split(",")]
         new_topics = ", ".join(dict.fromkeys(t for t in tags if t))
         if new_topics != raw_topics:
-            with store._connect() as db:
+            with store._connect(write=True) as db:
                 db.execute(
                     "UPDATE email_context SET topics=? WHERE message_id=?",
                     (new_topics, message_id))

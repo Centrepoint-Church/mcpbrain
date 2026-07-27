@@ -43,7 +43,7 @@ class _InMemoryStore:
         self._conn.row_factory = sqlite3.Row
         self._feedback = feedback_rows or []
 
-    def _connect(self):
+    def _connect(self, *, write=False):
         return self._conn
 
     def all_feedback_rows(self):

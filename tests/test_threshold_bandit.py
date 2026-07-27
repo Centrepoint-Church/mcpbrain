@@ -39,7 +39,7 @@ def _make_store(feedback_rows=None):
     store = MagicMock()
     _arms = {}
 
-    def _connect():
+    def _connect(*, write=False):
         import sqlite3, tempfile
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -64,7 +64,7 @@ class _InMemoryStore:
         self._conn = sqlite3.connect(":memory:")
         self._conn.row_factory = sqlite3.Row
 
-    def _connect(self):
+    def _connect(self, *, write=False):
         return self._conn
 
     def all_feedback_rows(self):

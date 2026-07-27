@@ -88,7 +88,7 @@ def drain_communities(store, inbox_obj: dict) -> dict:
             log.debug("community_synthesis: skipping community_id=%s (no title)", cid)
             continue
 
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE community_summaries SET title=?, summary=? WHERE community_id=?",
                 (title, summary, cid),

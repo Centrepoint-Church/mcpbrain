@@ -93,7 +93,7 @@ def _ingest(store, fleet_storage) -> dict:
             log.warning("curate: skipping undecodable contrib batch %s: %s", path, exc)
             continue
         batches += 1
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             for line in text.splitlines():
                 line = line.strip()
                 if not line:
@@ -122,7 +122,7 @@ def _staged_claims(store) -> list[dict]:
 
 
 def _stamp_origin(store, *, entity_ids=(), relation_ids=()) -> None:
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         for eid in entity_ids:
             db.execute("UPDATE entities SET origin='org' WHERE id=?", (eid,))
         for rid in relation_ids:
@@ -162,7 +162,7 @@ def _apply_org_skeleton(store, entity_id, aggregated_claim) -> None:
     if not updates:
         return
     set_clause = ", ".join(f"{k}=?" for k in updates)
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         db.execute(f"UPDATE entities SET {set_clause} WHERE id=?",
                    list(updates.values()) + [entity_id])
 
@@ -323,7 +323,7 @@ def _materialise(store, pin_allowlist=None) -> dict:
     # mechanism, that decision is based on comparing actual dated facts and is
     # trusted over blindly stomping it with a possibly-stale contributed value.
     if contributed_valid_to:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             for rid, valid_to in contributed_valid_to:
                 db.execute(
                     "UPDATE entity_relations SET valid_to=? "

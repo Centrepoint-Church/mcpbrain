@@ -1164,11 +1164,11 @@ class Daemon:
                 from mcpbrain.maintenance.graph_cleanup import cleanup_graph  # noqa: F401  (dev-only; excluded from the wheel)
             except ImportError:
                 log.debug("maintenance module not installed (expected in a wheel install); skipping graph cleanup")
-                with self._store._connect() as db:
+                with self._store._connect(write=True) as db:
                     db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
                 return
             counts = cleanup_graph(self._store)
-            with self._store._connect() as db:
+            with self._store._connect(write=True) as db:
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
             log.info("graph cleanup (one-shot): %s", counts)
         except Exception as exc:  # noqa: BLE001
@@ -1190,11 +1190,11 @@ class Daemon:
                 from mcpbrain.maintenance.graph_cleanup import recompute_singletons  # noqa: F401  (dev-only; excluded from the wheel)
             except ImportError:
                 log.debug("maintenance module not installed (expected in a wheel install); skipping singleton recompute")
-                with self._store._connect() as db:
+                with self._store._connect(write=True) as db:
                     db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
                 return
             counts = recompute_singletons(self._store)
-            with self._store._connect() as db:
+            with self._store._connect(write=True) as db:
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (flag, "1"))
             log.info("singleton recency recompute (one-shot): %s", counts)
         except Exception as exc:  # noqa: BLE001
@@ -1447,7 +1447,7 @@ class Daemon:
     def _mark_communities_clustered(self) -> None:
         try:
             cur_e, cur_r = self._graph_counts()
-            with self._store._connect() as db:
+            with self._store._connect(write=True) as db:
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('communities_clustered_entities',?)", (str(cur_e),))
                 db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('communities_clustered_relations',?)", (str(cur_r),))
         except Exception:  # noqa: BLE001
