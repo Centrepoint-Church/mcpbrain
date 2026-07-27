@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import nullcontext
 
 from mcpbrain import config, prompt, thread_enrich
 from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
@@ -331,7 +332,8 @@ def _drive_mentioned_in_email(store, meta: dict) -> bool:
     return store.email_mentions(meta.get("file_id") or "", meta.get("file_name") or "")
 
 
-def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = False) -> tuple[list, dict]:
+def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = False,
+                         bulk_section=None) -> tuple[list, dict]:
     """Run should_enrich() over all chunks in each batch.
 
     Chunks that do not enrich are marked 'cold' in the store (reversible) and
@@ -342,7 +344,15 @@ def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = 
     ADDITIONALLY required to be referenced in email (ops-brain's mention gate) —
     off by default because mcpbrain holds valuable un-emailed docs (minutes,
     profiles) that a blanket mention requirement would wrongly cold-gate.
+
+    `store.set_enrich_state` writes `chunks.enrich_state` — the same table the
+    four gated maintenance passes mutate — so (Task 2 duty-cycle/race-safety
+    fix) each batch's write is bracketed in `bulk_section` (a zero-arg
+    context-manager factory, default `contextlib.nullcontext`), same as
+    build_pending's per-thread loop.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     gated = kept = 0
     result = []
     for batch in batches:
@@ -366,7 +376,8 @@ def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = 
                 cold_ids.append(chunk["doc_id"])
                 gated += 1
         if cold_ids:
-            store.set_enrich_state(cold_ids, "cold")
+            with bulk_section():
+                store.set_enrich_state(cold_ids, "cold")
         if kept_chunks:
             import copy
             new_batch = copy.copy(batch)
@@ -380,7 +391,7 @@ def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = 
 
 # --- noise marking ---------------------------------------------------------
 
-def _filter_noise(store, batches) -> list:
+def _filter_noise(store, batches, *, bulk_section=None) -> list:
     """Return the non-noise batches; mark each noise batch enriched so it never
     re-queues. This is the only place prepare writes the store. Prepare runs in
     the daemon (single writer), so the single-writer invariant holds. Marking
@@ -393,12 +404,20 @@ def _filter_noise(store, batches) -> list:
     running the filter on batch.chunks directly would see empty fields and never
     detect noise. Kept batches get reassembled again in _thread_block; that double
     call is fine because prepare runs on a small capped batch per cycle.
+
+    `store.mark_enriched` writes `chunks.enriched` — the same column the
+    stale_reextract/reflow_outdated_chunks gated passes reset — so (Task 2
+    duty-cycle/race-safety fix) each write is bracketed in `bulk_section`
+    (default `contextlib.nullcontext`).
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     kept = []
     for batch in batches:
         messages = list(_reassemble_thread(batch.chunks))
         if thread_is_noise(messages):
-            store.mark_enriched(batch.doc_ids)
+            with bulk_section():
+                store.mark_enriched(batch.doc_ids)
         else:
             kept.append(batch)
     return kept
@@ -425,7 +444,7 @@ def _extractive_summary(lead: dict) -> str:
     return subject or first_sentence
 
 
-def _apply_trivial_threads(store, batches, *, home=None) -> list:
+def _apply_trivial_threads(store, batches, *, home=None, bulk_section=None) -> list:
     """Route trivial threads (see is_trivial_thread) straight to a deterministic
     extractive-summary write via graph_write.apply(), skipping the model unit
     path entirely; return the remaining (non-trivial) batches unchanged for the
@@ -437,7 +456,13 @@ def _apply_trivial_threads(store, batches, *, home=None) -> list:
     duplicates one _thread_block call for batches that turn out non-trivial —
     the same accepted tradeoff _filter_noise's docstring calls out for kept
     batches being reassembled again downstream).
+
+    `graph_write.apply` + `store.mark_enriched` both write `chunks` (and the
+    graph), so (Task 2 duty-cycle/race-safety fix) each batch's write is
+    bracketed in `bulk_section` (default `contextlib.nullcontext`).
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     _home = str(home) if home is not None else str(config.app_dir())
     if not config.enrich_trivial_thread_summary(_home):
         return batches
@@ -462,8 +487,9 @@ def _apply_trivial_threads(store, batches, *, home=None) -> list:
             "actions": [],
             "topics": [],
         }
-        graph_write.apply(store, extraction, doc_ids=batch.doc_ids, home=home)
-        store.mark_enriched(batch.doc_ids)
+        with bulk_section():
+            graph_write.apply(store, extraction, doc_ids=batch.doc_ids, home=home)
+            store.mark_enriched(batch.doc_ids)
     return kept
 
 
@@ -739,7 +765,7 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
                   resolution_due: bool, now=None,
                   synthesis_requests: list | None = None,
                   extra_blocks: dict | None = None, home=None,
-                  window: int = 600, budget=None) -> dict:
+                  window: int = 600, budget=None, bulk_section=None) -> dict:
     """Build the current batch (un-enriched threads + due blocks) and write it as
     work units. The work-queue replacement for prepare(): no single pending.json —
     a bounded queue of immutable units the enrich session consumes. Unlike prepare()
@@ -753,7 +779,22 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     early is safe: the threads not yet assembled this cycle are still
     un-enriched and are picked up again next cycle by
     _group_unenriched_threads.
+
+    `bulk_section` (a zero-arg context-manager factory, default
+    `contextlib.nullcontext`) is threaded into `_apply_salience_gate`/
+    `_filter_noise`/`_apply_trivial_threads` — the three helpers below that
+    actually write `chunks` (`set_enrich_state`/`mark_enriched`/
+    `graph_write.apply`), each bracketing its own per-batch write. This closes
+    a real race the previous plan revision introduced: those three calls run
+    OUTSIDE run_cycle's bulk_section entirely (prepare_units itself isn't
+    wrapped there — see run_cycle), so without their OWN sectioning here they
+    could race the four gated maintenance passes' chunk-column writes with no
+    lock at all. `build_pending`'s own per-thread loop does no writes
+    (`_thread_block` only reads `thread_context`/`unified_actions`), so it
+    only needs the `budget` check above, not `bulk_section`.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
@@ -764,15 +805,16 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     if config.salience_gate_enabled(_home):
         batches, salience_summary = _apply_salience_gate(
             store, batches,
-            require_drive_mention=config.salience_require_drive_mention(_home))
-    non_noise = _filter_noise(store, batches)
+            require_drive_mention=config.salience_require_drive_mention(_home),
+            bulk_section=bulk_section)
+    non_noise = _filter_noise(store, batches, bulk_section=bulk_section)
     # Trivial threads are deterministically extracted and marked enriched here
     # (no model call) before thread_cap is applied. group_unenriched_threads already
     # caps the pool at thread_cap, so within THIS cycle excluding trivial threads
     # doesn't add more model calls. The benefit is cross-cycle: resolving trivial
     # threads clears them from the backlog faster, making more distinct non-trivial
     # threads visible to group_unenriched_threads in the NEXT cycle.
-    non_trivial = _apply_trivial_threads(store, non_noise, home=home)
+    non_trivial = _apply_trivial_threads(store, non_noise, home=home, bulk_section=bulk_section)
     kept = non_trivial[:thread_cap]
     data = build_pending(store, kept, char_budget=char_budget, now=now,
                          resolution_due=resolution_due,

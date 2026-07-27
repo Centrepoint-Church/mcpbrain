@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+from contextlib import nullcontext
 from pathlib import Path
 
 from mcpbrain import config, orgs, review_apply
@@ -275,7 +276,8 @@ def _regroup_parts(extractions: list) -> list:
     return recombined
 
 
-def drain(store, *, home=None, apply=None, embedder=None, budget=None) -> dict:
+def drain(store, *, home=None, apply=None, embedder=None, budget=None,
+         bulk_section=None) -> dict:
     """Process every inbox file. Returns a summary dict.
 
     Summary keys: files, applied, marked, merges, quarantined, entities,
@@ -293,7 +295,17 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None) -> dict:
     `Budget`, or None for unbounded) is checked once per inbox file; once it
     expires the loop stops and `summary["budget_spent"] = True` — remaining
     files are untouched (not deleted) and retried on the next cycle.
+
+    `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
+    default `contextlib.nullcontext`) brackets one WHOLE FILE's processing —
+    matching the existing per-file budget-check granularity — so `_bulk_lock`
+    is released between files rather than held for the whole drain() call. A
+    soak test showed the latter shape starves the maintenance thread's 5s
+    acquire almost every time on a sustained backlog even though this call was
+    already budget-bounded.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     home_dir = _home(home)
     summary = {"files": 0, "applied": 0, "marked": 0, "merges": 0,
                "quarantined": 0, "entities": 0, "relations": 0,
@@ -316,275 +328,286 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None) -> dict:
         if budget is not None and budget.expired():
             summary["budget_spent"] = True
             break
-        try:
-            data = json.loads(path.read_text())
-        except (ValueError, OSError) as exc:
-            log.warning("drain: malformed inbox file %s, quarantining: %s", path.name, exc)
-            _quarantine(path)
-            summary["quarantined"] += 1
-            continue
-
-        # Tolerant validation: only wrapper / merge_answers problems (structural,
-        # or irreversible-merge risk) quarantine the whole file. A single bad
-        # extraction is sanitised (droppable noise removed) and, if still
-        # invalid, skipped individually — one malformed relation from the LLM
-        # must not discard an entire batch of good extractions.
-        problems = validate_batch_wrapper(data)
-        if problems:
-            log.warning("drain: wrapper contract violation in %s, quarantining: %s",
-                        path.name, "; ".join(problems[:5]))
-            _quarantine(path)
-            summary["quarantined"] += 1
-            continue
-
-        data, dropped_noise = sanitize_batch(data)
-        if dropped_noise:
-            log.warning("drain: dropped %d malformed relation/action item(s) in %s",
-                        dropped_noise, path.name)
-            summary["dropped_items"] = summary.get("dropped_items", 0) + dropped_noise
-
-        summary["files"] += 1
-        file_ok = True
-
-        extractions = _regroup_parts(data["extractions"])
-        taxonomy = orgs.taxonomy_from_config(home)
-        # Fail loudly on a misconfigured call rather than letting the per-
-        # extraction handler swallow the TypeError, set file_ok=False, keep the
-        # file, and loop forever. Raised before the loop so it is never caught.
-        if extractions and apply is None:
-            raise TypeError("drain() requires an apply callable; inject graph_write.apply")
-
-        # Build a thread_id -> messages lookup from the unit file (when present).
-        # Message metadata is system-owned: sender/date/message_id come from
-        # prepare._thread_block, not the model. We read them back from the unit
-        # file so drain can inject them when the model omits messages[] (Task 2.3).
-        unit_messages_by_thread: dict = {}
-        unit_id = data.get("unit_id")
-        if unit_id:
-            unit_path = home_dir / "enrich_queue" / "units" / f"{unit_id}.json"
+        with bulk_section():
             try:
-                unit_data = json.loads(unit_path.read_text())
-                for t in (unit_data.get("threads") or []):
-                    tid = t.get("thread_id")
-                    msgs = t.get("messages")
-                    if tid and isinstance(msgs, list) and msgs:
-                        unit_messages_by_thread[tid] = msgs
-            except (OSError, ValueError) as exc:
-                log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
-
-        for extraction in extractions:
-            # Message metadata is system-owned: attach the unit's original messages
-            # (built by prepare._thread_block) so graph_write derives lead msg/date/sender
-            # from authoritative data, not the model's echo. Injection happens BEFORE
-            # validate_extraction so the Q8 attempt-cap logic (which reads messages[])
-            # has ids available even when the model omitted messages[] AND the extraction
-            # is contract-invalid — without this the chunk re-queues forever on empty
-            # content without bumping the attempt counter.
-            if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
-                extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
-
-            # Per-extraction contract check (post-sanitise). A structurally
-            # invalid extraction (missing thread_id, bad messages, unknown
-            # content_type…) is dropped and logged, NOT quarantined with the
-            # batch — its chunks stay enriched=0 and re-queue next prepare. This
-            # does not flip file_ok: the file is still consumed (we did our best
-            # with the salvageable extractions).
-            ext_problems = validate_extraction(extraction)
-            if ext_problems:
-                log.warning("drain: skipping invalid extraction (thread %s) in %s: %s",
-                            extraction.get("thread_id", "?"), path.name,
-                            "; ".join(ext_problems[:3]))
-                summary["skipped"] = summary.get("skipped", 0) + 1
-                # Q8: bound the re-queue loop. Skipped chunks normally stay
-                # enriched=0 to re-queue, but a genuinely content-empty doc would
-                # then re-extract every cycle forever. After _EMPTY_ATTEMPT_CAP
-                # tries, consume the chunks so the loop terminates (transient
-                # extractor failures still get their retries first).
-                #
-                # The doc_ids resolution is deliberately INSIDE this try, matching
-                # the pre-_give_up_or_bump behaviour: a store lacking/failing
-                # doc_ids_for_messages here must not crash drain(), only skip this
-                # extraction's give-up bookkeeping (regression caught in release
-                # verification — narrowing this to wrap only _give_up_or_bump broke
-                # a real caller whose store didn't implement doc_ids_for_messages).
-                try:
-                    _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
-                             if m.get("message_id")]
-                    _dids = store.doc_ids_for_messages(_mids) if _mids else []
-                    gave_up, attempts = _give_up_or_bump(store, _dids, summary)
-                    if gave_up:
-                        log.info("drain: giving up on thread %s after %d empty "
-                                 "attempts; consuming %d chunk(s)",
-                                 extraction.get("thread_id", "?"), attempts, len(_dids))
-                except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
-                    log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
+                data = json.loads(path.read_text())
+            except (ValueError, OSError) as exc:
+                log.warning("drain: malformed inbox file %s, quarantining: %s", path.name, exc)
+                _quarantine(path)
+                summary["quarantined"] += 1
                 continue
-            thread_id = extraction["thread_id"]
-            # Org drift gate: canonicalise; coerce an unconfigured org to
-            # "unknown" and record it, so repeated sightings of a real org
-            # surface as a "add it to config orgs?" finding instead of either
-            # quarantining the thread or vanishing silently.
-            raw_org = normalise_org(extraction, taxonomy)
-            if raw_org is not None:
-                log.info("drain: unconfigured org %r on thread %s coerced to "
-                         "'unknown'", raw_org, thread_id)
-                store.record_finding(
-                    "org_unrecognised", ref_id=raw_org.strip().lower(),
-                    org="unknown",
-                    summary=f"Extractor returned unconfigured org '{raw_org}'",
-                    detail=f"Last seen on thread {thread_id}; coerced to "
-                           f"'unknown'. If this is a real organisation, add it "
-                           f"to the orgs list in config.json.",
-                    severity="info")
-            # Q2 grounding check: drop entities/relations not found in source text.
-            if config.schema_grounding_enabled(str(home_dir)):
-                extraction, grounding_dropped = _grounding_filter(extraction)
-                if grounding_dropped:
-                    log.debug("drain: grounding filter dropped %d item(s) on thread %s",
-                              grounding_dropped, thread_id)
-                    summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
 
-            # Recover the chunks this extraction covers by message id, NOT by a
-            # thread-wide query. Marking only the messages that were actually
-            # extracted means a late-arriving message (synced after prepare) or a
-            # dropped long-thread part stays enriched=0 and re-queues next cycle,
-            # instead of being silently marked done without ever being enriched.
-            msg_ids = [m.get("message_id") for m in extraction.get("messages", [])
-                       if m.get("message_id")]
-            doc_ids = store.doc_ids_for_messages(msg_ids)
-            if not doc_ids:
-                # The model's message ids didn't resolve (it may have echoed bad or
-                # normalised ids). Recover from the unit's CANONICAL messages for this
-                # thread — the same authoritative source the injection step uses.
-                _u = unit_messages_by_thread.get(thread_id) or []
-                _umids = [m.get("message_id") for m in _u if m.get("message_id")]
-                doc_ids = store.doc_ids_for_messages(_umids) if _umids else []
-            if not doc_ids:
-                # Still nothing: a valid, content-bearing extraction we cannot tie to
-                # ANY chunk (e.g. the model rewrote the thread_id). Applying here would
-                # write un-groundable edges (provenance enriched-{phantom}) AND, because
-                # mark_enriched([]) marks nothing, the real chunks would re-queue every
-                # cycle forever without reaching the Q8 cap. Instead: skip the apply and
-                # bump the cap on the unit's own chunks so the loop terminates. Mirrors
-                # the invalid-extraction skip path.
-                _unit_mids = [m.get("message_id")
-                              for msgs in unit_messages_by_thread.values()
-                              for m in msgs if m.get("message_id")]
-                _unit_dids = store.doc_ids_for_messages(_unit_mids) if _unit_mids else []
-                _give_up_or_bump(store, _unit_dids, summary)
-                log.warning("drain: thread %s extraction matched no chunk in %s; "
-                            "skipping apply and bumping the unit's attempt cap",
-                            thread_id, path.name)
-                summary["skipped"] = summary.get("skipped", 0) + 1
+            # Tolerant validation: only wrapper / merge_answers problems (structural,
+            # or irreversible-merge risk) quarantine the whole file. A single bad
+            # extraction is sanitised (droppable noise removed) and, if still
+            # invalid, skipped individually — one malformed relation from the LLM
+            # must not discard an entire batch of good extractions.
+            problems = validate_batch_wrapper(data)
+            if problems:
+                log.warning("drain: wrapper contract violation in %s, quarantining: %s",
+                            path.name, "; ".join(problems[:5]))
+                _quarantine(path)
+                summary["quarantined"] += 1
                 continue
-            # Fix #2: a Drive file-wide resolve (the file_id branch of
-            # doc_ids_for_messages) returns EVERY chunk of the document, even
-            # ones the salience gate has since marked cold -- but the
-            # extraction's batch text only ever covered the hot chunks
-            # should_enrich() queued. Drop cold chunks here, right before
-            # apply/mark_enriched, so a Drive extraction marks only the chunks
-            # it actually covered (matching the message-precise email path).
-            # No-op for email doc_ids, which aren't cold-gated the same way.
-            doc_ids = store.drop_cold(doc_ids)
-            try:
-                # Pass the run-scoped dedup index only when built (flag on) so an
-                # injected/legacy apply that doesn't accept the kwarg is unaffected.
-                _apply_kw = {"entity_index": _entity_index} if _entity_index is not None else {}
-                res = apply(store, extraction, doc_ids=doc_ids, **_apply_kw)
-            except Exception as exc:
-                log.error("drain: apply failed for thread %s in %s: %s",
-                          thread_id, path.name, exc)
-                file_ok = False
-                continue
-            summary["applied"] += 1
-            # Surface apply()'s own counts: entities counts entities LINKED to
-            # the thread (including upserts of already-known people), so it is
-            # > 0 even when no net store rows are added. (res or {}).get(...)
-            # so a minimal apply returning None or a dict without these keys
-            # never crashes drain.
-            summary["entities"] += (res or {}).get("entities", 0)
-            summary["relations"] += (res or {}).get("relations", 0)
-            store.mark_enriched(doc_ids)
-            summary["marked"] += len(doc_ids)
-            # A#4: persist the validated extraction for shared-drive docs so its
-            # cache artifact can carry it (importers then skip Haiku). Drive-only:
-            # email payloads never enter a shared cache. `extraction` here has
-            # already passed sanitize_batch + validate_extraction + grounding.
-            _drive_docs = [d for d in doc_ids if d.startswith("gdrive-")]
-            if _drive_docs:
-                _payload = json.dumps(extraction, sort_keys=True)
-                for _d in _drive_docs:
-                    store.set_enrich_payload(_d, _payload, ENRICH_LOGIC_VERSION)
 
-        try:
-            _merge_result = review_apply.apply_duplicate_verdicts(
-                store, data.get("merge_answers") or [],
-                cap=config.review_max_apply_per_run(str(config.app_dir()))
-            )
-            summary["merges"] += _merge_result["merged"]
-        except Exception as exc:
-            log.error("drain: merge-answer processing failed in %s: %s", path.name, exc)
-            file_ok = False
+            data, dropped_noise = sanitize_batch(data)
+            if dropped_noise:
+                log.warning("drain: dropped %d malformed relation/action item(s) in %s",
+                            dropped_noise, path.name)
+                summary["dropped_items"] = summary.get("dropped_items", 0) + dropped_noise
 
-        try:
-            from mcpbrain.synthesise_threads import drain_synthesis
-            synth = drain_synthesis(store, data)
-            if synth.get("thread_context_written", 0):
-                summary["synthesis_written"] = summary.get("synthesis_written", 0) + synth["thread_context_written"]
-        except Exception as exc:
-            log.error("drain: synthesis drain failed in %s: %s", path.name, exc)
-            file_ok = False
+            summary["files"] += 1
+            file_ok = True
 
-        for _key, _drainer in BLOCK_DRAINERS.items():
-            if _key not in data:
-                continue
-            try:
-                res = _drainer(store, data)
-                # Always report the key on success, even for a falsy result, so
-                # the daemon clears its stash for this block (it keys off the
-                # presence of f"{_key}_drained", not its value).
-                summary[f"{_key}_drained"] = sum(
-                    v for v in res.values() if isinstance(v, int)) if res else 0
-            except Exception as exc:
-                log.error("drain: %s drain failed in %s: %s", _key, path.name, exc)
-                # Retain the file for retry — matches the synthesis-drain failure
-                # path above. Without this the inbox file is deleted with the
-                # block's answers unapplied while the daemon's stash re-attaches
-                # the same requests every cycle (silent infinite retry loop).
-                file_ok = False
+            extractions = _regroup_parts(data["extractions"])
+            taxonomy = orgs.taxonomy_from_config(home)
+            # Fail loudly on a misconfigured call rather than letting the per-
+            # extraction handler swallow the TypeError, set file_ok=False, keep the
+            # file, and loop forever. Raised before the loop so it is never caught.
+            if extractions and apply is None:
+                raise TypeError("drain() requires an apply callable; inject graph_write.apply")
 
-        # Delete only when every extraction applied and merge-answers ran. A
-        # partial failure leaves the file for retry next cycle. Idempotency on a
-        # re-applied extraction rests on apply()'s upsert/dedup (Phase 1); drain
-        # itself just does not double-delete -- a gone file is skipped by the
-        # glob in _iter_inbox.
-        if file_ok:
-            try:
-                path.unlink()
-            except OSError as exc:
-                log.error("drain: could not delete completed file %s: %s", path.name, exc)
-
-            # Work-queue: the unit this result answers is consumed — remove its unit
-            # file and lease claim so it stops being listed.
+            # Build a thread_id -> messages lookup from the unit file (when present).
+            # Message metadata is system-owned: sender/date/message_id come from
+            # prepare._thread_block, not the model. We read them back from the unit
+            # file so drain can inject them when the model omits messages[] (Task 2.3).
+            unit_messages_by_thread: dict = {}
             unit_id = data.get("unit_id")
             if unit_id:
-                for p in (home_dir / "enrich_queue" / "units" / f"{unit_id}.json",
-                          home_dir / "enrich_queue" / "claims" / unit_id):
+                unit_path = home_dir / "enrich_queue" / "units" / f"{unit_id}.json"
+                try:
+                    unit_data = json.loads(unit_path.read_text())
+                    for t in (unit_data.get("threads") or []):
+                        tid = t.get("thread_id")
+                        msgs = t.get("messages")
+                        if tid and isinstance(msgs, list) and msgs:
+                            unit_messages_by_thread[tid] = msgs
+                except (OSError, ValueError) as exc:
+                    log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
+
+            for extraction in extractions:
+                # Message metadata is system-owned: attach the unit's original messages
+                # (built by prepare._thread_block) so graph_write derives lead msg/date/sender
+                # from authoritative data, not the model's echo. Injection happens BEFORE
+                # validate_extraction so the Q8 attempt-cap logic (which reads messages[])
+                # has ids available even when the model omitted messages[] AND the extraction
+                # is contract-invalid — without this the chunk re-queues forever on empty
+                # content without bumping the attempt counter.
+                if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
+                    extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
+
+                # Per-extraction contract check (post-sanitise). A structurally
+                # invalid extraction (missing thread_id, bad messages, unknown
+                # content_type…) is dropped and logged, NOT quarantined with the
+                # batch — its chunks stay enriched=0 and re-queue next prepare. This
+                # does not flip file_ok: the file is still consumed (we did our best
+                # with the salvageable extractions).
+                ext_problems = validate_extraction(extraction)
+                if ext_problems:
+                    log.warning("drain: skipping invalid extraction (thread %s) in %s: %s",
+                                extraction.get("thread_id", "?"), path.name,
+                                "; ".join(ext_problems[:3]))
+                    summary["skipped"] = summary.get("skipped", 0) + 1
+                    # Q8: bound the re-queue loop. Skipped chunks normally stay
+                    # enriched=0 to re-queue, but a genuinely content-empty doc would
+                    # then re-extract every cycle forever. After _EMPTY_ATTEMPT_CAP
+                    # tries, consume the chunks so the loop terminates (transient
+                    # extractor failures still get their retries first).
+                    #
+                    # The doc_ids resolution is deliberately INSIDE this try, matching
+                    # the pre-_give_up_or_bump behaviour: a store lacking/failing
+                    # doc_ids_for_messages here must not crash drain(), only skip this
+                    # extraction's give-up bookkeeping (regression caught in release
+                    # verification — narrowing this to wrap only _give_up_or_bump broke
+                    # a real caller whose store didn't implement doc_ids_for_messages).
                     try:
-                        p.unlink()
-                    except OSError:
-                        pass
+                        _mids = [m.get("message_id") for m in (extraction.get("messages") or [])
+                                 if m.get("message_id")]
+                        _dids = store.doc_ids_for_messages(_mids) if _mids else []
+                        gave_up, attempts = _give_up_or_bump(store, _dids, summary)
+                        if gave_up:
+                            log.info("drain: giving up on thread %s after %d empty "
+                                     "attempts; consuming %d chunk(s)",
+                                     extraction.get("thread_id", "?"), attempts, len(_dids))
+                    except Exception as exc:  # noqa: BLE001 — bookkeeping must not break drain
+                        log.debug("drain: attempt-cap bookkeeping failed: %s", exc)
+                    continue
+                thread_id = extraction["thread_id"]
+                # Org drift gate: canonicalise; coerce an unconfigured org to
+                # "unknown" and record it, so repeated sightings of a real org
+                # surface as a "add it to config orgs?" finding instead of either
+                # quarantining the thread or vanishing silently.
+                raw_org = normalise_org(extraction, taxonomy)
+                if raw_org is not None:
+                    log.info("drain: unconfigured org %r on thread %s coerced to "
+                             "'unknown'", raw_org, thread_id)
+                    store.record_finding(
+                        "org_unrecognised", ref_id=raw_org.strip().lower(),
+                        org="unknown",
+                        summary=f"Extractor returned unconfigured org '{raw_org}'",
+                        detail=f"Last seen on thread {thread_id}; coerced to "
+                               f"'unknown'. If this is a real organisation, add it "
+                               f"to the orgs list in config.json.",
+                        severity="info")
+                # Q2 grounding check: drop entities/relations not found in source text.
+                if config.schema_grounding_enabled(str(home_dir)):
+                    extraction, grounding_dropped = _grounding_filter(extraction)
+                    if grounding_dropped:
+                        log.debug("drain: grounding filter dropped %d item(s) on thread %s",
+                                  grounding_dropped, thread_id)
+                        summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
+
+                # Recover the chunks this extraction covers by message id, NOT by a
+                # thread-wide query. Marking only the messages that were actually
+                # extracted means a late-arriving message (synced after prepare) or a
+                # dropped long-thread part stays enriched=0 and re-queues next cycle,
+                # instead of being silently marked done without ever being enriched.
+                msg_ids = [m.get("message_id") for m in extraction.get("messages", [])
+                           if m.get("message_id")]
+                doc_ids = store.doc_ids_for_messages(msg_ids)
+                if not doc_ids:
+                    # The model's message ids didn't resolve (it may have echoed bad or
+                    # normalised ids). Recover from the unit's CANONICAL messages for this
+                    # thread — the same authoritative source the injection step uses.
+                    _u = unit_messages_by_thread.get(thread_id) or []
+                    _umids = [m.get("message_id") for m in _u if m.get("message_id")]
+                    doc_ids = store.doc_ids_for_messages(_umids) if _umids else []
+                if not doc_ids:
+                    # Still nothing: a valid, content-bearing extraction we cannot tie to
+                    # ANY chunk (e.g. the model rewrote the thread_id). Applying here would
+                    # write un-groundable edges (provenance enriched-{phantom}) AND, because
+                    # mark_enriched([]) marks nothing, the real chunks would re-queue every
+                    # cycle forever without reaching the Q8 cap. Instead: skip the apply and
+                    # bump the cap on the unit's own chunks so the loop terminates. Mirrors
+                    # the invalid-extraction skip path.
+                    _unit_mids = [m.get("message_id")
+                                  for msgs in unit_messages_by_thread.values()
+                                  for m in msgs if m.get("message_id")]
+                    _unit_dids = store.doc_ids_for_messages(_unit_mids) if _unit_mids else []
+                    _give_up_or_bump(store, _unit_dids, summary)
+                    log.warning("drain: thread %s extraction matched no chunk in %s; "
+                                "skipping apply and bumping the unit's attempt cap",
+                                thread_id, path.name)
+                    summary["skipped"] = summary.get("skipped", 0) + 1
+                    continue
+                # Fix #2: a Drive file-wide resolve (the file_id branch of
+                # doc_ids_for_messages) returns EVERY chunk of the document, even
+                # ones the salience gate has since marked cold -- but the
+                # extraction's batch text only ever covered the hot chunks
+                # should_enrich() queued. Drop cold chunks here, right before
+                # apply/mark_enriched, so a Drive extraction marks only the chunks
+                # it actually covered (matching the message-precise email path).
+                # No-op for email doc_ids, which aren't cold-gated the same way.
+                doc_ids = store.drop_cold(doc_ids)
+                try:
+                    # Pass the run-scoped dedup index only when built (flag on) so an
+                    # injected/legacy apply that doesn't accept the kwarg is unaffected.
+                    _apply_kw = {"entity_index": _entity_index} if _entity_index is not None else {}
+                    res = apply(store, extraction, doc_ids=doc_ids, **_apply_kw)
+                except Exception as exc:
+                    log.error("drain: apply failed for thread %s in %s: %s",
+                              thread_id, path.name, exc)
+                    file_ok = False
+                    continue
+                summary["applied"] += 1
+                # Surface apply()'s own counts: entities counts entities LINKED to
+                # the thread (including upserts of already-known people), so it is
+                # > 0 even when no net store rows are added. (res or {}).get(...)
+                # so a minimal apply returning None or a dict without these keys
+                # never crashes drain.
+                summary["entities"] += (res or {}).get("entities", 0)
+                summary["relations"] += (res or {}).get("relations", 0)
+                store.mark_enriched(doc_ids)
+                summary["marked"] += len(doc_ids)
+                # A#4: persist the validated extraction for shared-drive docs so its
+                # cache artifact can carry it (importers then skip Haiku). Drive-only:
+                # email payloads never enter a shared cache. `extraction` here has
+                # already passed sanitize_batch + validate_extraction + grounding.
+                _drive_docs = [d for d in doc_ids if d.startswith("gdrive-")]
+                if _drive_docs:
+                    _payload = json.dumps(extraction, sort_keys=True)
+                    for _d in _drive_docs:
+                        store.set_enrich_payload(_d, _payload, ENRICH_LOGIC_VERSION)
+
+            try:
+                _merge_result = review_apply.apply_duplicate_verdicts(
+                    store, data.get("merge_answers") or [],
+                    cap=config.review_max_apply_per_run(str(config.app_dir()))
+                )
+                summary["merges"] += _merge_result["merged"]
+            except Exception as exc:
+                log.error("drain: merge-answer processing failed in %s: %s", path.name, exc)
+                file_ok = False
+
+            try:
+                from mcpbrain.synthesise_threads import drain_synthesis
+                synth = drain_synthesis(store, data)
+                if synth.get("thread_context_written", 0):
+                    summary["synthesis_written"] = summary.get("synthesis_written", 0) + synth["thread_context_written"]
+            except Exception as exc:
+                log.error("drain: synthesis drain failed in %s: %s", path.name, exc)
+                file_ok = False
+
+            for _key, _drainer in BLOCK_DRAINERS.items():
+                if _key not in data:
+                    continue
+                try:
+                    res = _drainer(store, data)
+                    # Always report the key on success, even for a falsy result, so
+                    # the daemon clears its stash for this block (it keys off the
+                    # presence of f"{_key}_drained", not its value).
+                    summary[f"{_key}_drained"] = sum(
+                        v for v in res.values() if isinstance(v, int)) if res else 0
+                except Exception as exc:
+                    log.error("drain: %s drain failed in %s: %s", _key, path.name, exc)
+                    # Retain the file for retry — matches the synthesis-drain failure
+                    # path above. Without this the inbox file is deleted with the
+                    # block's answers unapplied while the daemon's stash re-attaches
+                    # the same requests every cycle (silent infinite retry loop).
+                    file_ok = False
+
+            # Delete only when every extraction applied and merge-answers ran. A
+            # partial failure leaves the file for retry next cycle. Idempotency on a
+            # re-applied extraction rests on apply()'s upsert/dedup (Phase 1); drain
+            # itself just does not double-delete -- a gone file is skipped by the
+            # glob in _iter_inbox.
+            if file_ok:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    log.error("drain: could not delete completed file %s: %s", path.name, exc)
+
+                # Work-queue: the unit this result answers is consumed — remove its unit
+                # file and lease claim so it stops being listed.
+                unit_id = data.get("unit_id")
+                if unit_id:
+                    for p in (home_dir / "enrich_queue" / "units" / f"{unit_id}.json",
+                              home_dir / "enrich_queue" / "claims" / unit_id):
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
 
     return summary
 
 
-def drain_captures(store, *, home=None) -> int:
+def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """Apply every capture_inbox envelope. Returns the number applied.
 
     validate -> dedupe -> apply -> change_log -> delete. Invalid or unparseable
     envelopes quarantine to capture_inbox/bad/. The daemon calls this each
     cycle; it is the ONLY consumer of the spool the MCP write tools feed.
+
+    This writes to `chunks` (via `store.upsert_chunk` for "ingest" captures) —
+    the same table the four gated maintenance passes mutate — so, per the
+    Task 2 duty-cycle/race-safety fix, `bulk_section` (a zero-arg
+    context-manager factory, default `contextlib.nullcontext`) brackets each
+    envelope's writes and `budget` (a `Budget`, or None for unbounded) is
+    checked once per envelope. An unprocessed envelope simply stays queued and
+    is retried next cycle — the spool is durable, so nothing is lost.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     from mcpbrain.chunking import action_fingerprint, content_hash
     from mcpbrain.contract import validate_capture
 
@@ -595,95 +618,98 @@ def drain_captures(store, *, home=None) -> int:
     applied = 0
     _records_repo_path: str | None = None
     for path in sorted(inbox.glob("*.json")):
-        try:
-            env = json.loads(path.read_text())
-        except (ValueError, OSError) as exc:
-            log.warning("capture: unparseable %s, quarantining: %s", path.name, exc)
-            _quarantine(path)
-            continue
-        problems = validate_capture(env)
-        if problems:
-            log.warning("capture: invalid %s, quarantining: %s",
-                        path.name, "; ".join(problems[:3]))
-            _quarantine(path)
-            continue
-        kind = env["kind"]
-        file_ok = True
-        if kind == "ingest":
-            text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
-            chash = content_hash(text)
-            doc_id = f"note-{chash[:32]}"
+        if budget is not None and budget.expired():
+            break
+        with bulk_section():
             try:
-                changed = store.upsert_chunk(doc_id, text, chash,
-                                   {"source": "note", "title": env["title"],
-                                    "observation_type": env.get("observation_type", "note"),
-                                    # tags stored for future FTS indexing (not yet live)
-                                    "tags": env.get("tags", ""),
-                                    "org": env.get("org", ""),
-                                    "captured_at": env.get("captured_at", "")})
-                if changed:
-                    store.record_change("capture_ingest", ref_id=doc_id,
-                                        summary=f"Saved note '{env['title'][:60]}'")
-                    applied += 1
-            except Exception as exc:
-                log.error("capture: ingest failed for %s: %s", path.name, exc)
-                file_ok = False
-        elif kind == "action_create":
-            try:
-                fp = action_fingerprint(env["text"])
-                if store.find_open_action_by_fingerprint(fp) is not None:
-                    log.info("capture: duplicate action skipped: %r", env["text"][:60])
-                else:
-                    owner = env.get("owner") or config.owner_name(str(home_dir))
-                    aid = store.add_unified_action(
-                        text=env["text"], owner=owner, deadline=env.get("deadline", ""),
-                        org=env.get("org", ""), project_id=env.get("project_id", ""),
-                        area_id=env.get("area_id", ""), source="capture",
-                        text_fingerprint=fp)
-                    store.record_change("capture_action", ref_id=str(aid),
-                                        summary=f"Created action '{env['text'][:60]}'")
-                    applied += 1
-            except Exception as exc:
-                log.error("capture: action_create failed for %s: %s", path.name, exc)
-                file_ok = False
-        elif kind == "action_update":
-            try:
-                changed = store.set_action_status(
-                    env["action_id"], env["status"],
-                    resolved_by=f"capture:{env.get('source', 'mcp')}",
-                    only_if_open=(env["status"] == "done"))
-                if changed:
-                    store.record_change(
-                        "capture_action_update", ref_id=str(env["action_id"]),
-                        summary=f"Action {env['action_id']} -> {env['status']}")
-                    applied += 1
-                else:
-                    log.info("capture: action_update %s no-op (not open / not found)",
-                             env["action_id"])
-            except Exception as exc:
-                log.error("capture: action_update failed for %s: %s", path.name, exc)
-                file_ok = False
-        elif kind in ("decision", "continuity", "memory"):
-            try:
-                from mcpbrain import records_write as rw
-                if _records_repo_path is None:
-                    _records_repo_path = _records_repo(str(home_dir))
-                repo = _records_repo_path
-                if kind == "decision":
-                    committed = rw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
-                                       owner=env.get("owner", ""), supersedes=env.get("supersedes", ""))
-                elif kind == "continuity":
-                    committed = rw.append_continuity(repo, text=env["text"])
-                else:  # memory
-                    committed = rw.write_memory(repo, slug=env["slug"], description=env.get("description", ""),
-                                    body=env["body"], memory_type=env.get("memory_type", "project"))
-                if committed:
-                    applied += 1
-                else:
-                    log.info("capture: %s no-op (already applied) for %s", kind, path.name)
-            except Exception as exc:
-                log.error("capture: %s write failed for %s: %s", kind, path.name, exc)
-                file_ok = False
-        if file_ok:
-            path.unlink(missing_ok=True)
+                env = json.loads(path.read_text())
+            except (ValueError, OSError) as exc:
+                log.warning("capture: unparseable %s, quarantining: %s", path.name, exc)
+                _quarantine(path)
+                continue
+            problems = validate_capture(env)
+            if problems:
+                log.warning("capture: invalid %s, quarantining: %s",
+                            path.name, "; ".join(problems[:3]))
+                _quarantine(path)
+                continue
+            kind = env["kind"]
+            file_ok = True
+            if kind == "ingest":
+                text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
+                chash = content_hash(text)
+                doc_id = f"note-{chash[:32]}"
+                try:
+                    changed = store.upsert_chunk(doc_id, text, chash,
+                                       {"source": "note", "title": env["title"],
+                                        "observation_type": env.get("observation_type", "note"),
+                                        # tags stored for future FTS indexing (not yet live)
+                                        "tags": env.get("tags", ""),
+                                        "org": env.get("org", ""),
+                                        "captured_at": env.get("captured_at", "")})
+                    if changed:
+                        store.record_change("capture_ingest", ref_id=doc_id,
+                                            summary=f"Saved note '{env['title'][:60]}'")
+                        applied += 1
+                except Exception as exc:
+                    log.error("capture: ingest failed for %s: %s", path.name, exc)
+                    file_ok = False
+            elif kind == "action_create":
+                try:
+                    fp = action_fingerprint(env["text"])
+                    if store.find_open_action_by_fingerprint(fp) is not None:
+                        log.info("capture: duplicate action skipped: %r", env["text"][:60])
+                    else:
+                        owner = env.get("owner") or config.owner_name(str(home_dir))
+                        aid = store.add_unified_action(
+                            text=env["text"], owner=owner, deadline=env.get("deadline", ""),
+                            org=env.get("org", ""), project_id=env.get("project_id", ""),
+                            area_id=env.get("area_id", ""), source="capture",
+                            text_fingerprint=fp)
+                        store.record_change("capture_action", ref_id=str(aid),
+                                            summary=f"Created action '{env['text'][:60]}'")
+                        applied += 1
+                except Exception as exc:
+                    log.error("capture: action_create failed for %s: %s", path.name, exc)
+                    file_ok = False
+            elif kind == "action_update":
+                try:
+                    changed = store.set_action_status(
+                        env["action_id"], env["status"],
+                        resolved_by=f"capture:{env.get('source', 'mcp')}",
+                        only_if_open=(env["status"] == "done"))
+                    if changed:
+                        store.record_change(
+                            "capture_action_update", ref_id=str(env["action_id"]),
+                            summary=f"Action {env['action_id']} -> {env['status']}")
+                        applied += 1
+                    else:
+                        log.info("capture: action_update %s no-op (not open / not found)",
+                                 env["action_id"])
+                except Exception as exc:
+                    log.error("capture: action_update failed for %s: %s", path.name, exc)
+                    file_ok = False
+            elif kind in ("decision", "continuity", "memory"):
+                try:
+                    from mcpbrain import records_write as rw
+                    if _records_repo_path is None:
+                        _records_repo_path = _records_repo(str(home_dir))
+                    repo = _records_repo_path
+                    if kind == "decision":
+                        committed = rw.append_decision(repo, text=env["text"], rationale=env.get("rationale", ""),
+                                           owner=env.get("owner", ""), supersedes=env.get("supersedes", ""))
+                    elif kind == "continuity":
+                        committed = rw.append_continuity(repo, text=env["text"])
+                    else:  # memory
+                        committed = rw.write_memory(repo, slug=env["slug"], description=env.get("description", ""),
+                                        body=env["body"], memory_type=env.get("memory_type", "project"))
+                    if committed:
+                        applied += 1
+                    else:
+                        log.info("capture: %s no-op (already applied) for %s", kind, path.name)
+                except Exception as exc:
+                    log.error("capture: %s write failed for %s: %s", kind, path.name, exc)
+                    file_ok = False
+            if file_ok:
+                path.unlink(missing_ok=True)
     return applied

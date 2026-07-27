@@ -5,6 +5,7 @@ Cancelled events are skipped. Cursor (nextSyncToken) is written only after
 all event chunks have been durably upserted.
 """
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
@@ -186,8 +187,8 @@ def _annotate_series_from_event(store, event, owner) -> bool:
 # ---------------------------------------------------------------------------
 
 def _list_events(service, calendar_id: str, sync_token: str | None,
-                 time_min: str | None, time_max: str | None):
-    """Page through events().list. Returns (items, next_sync_token).
+                 time_min: str | None, time_max: str | None, *, budget=None):
+    """Page through events().list. Returns (items, next_sync_token, interrupted).
 
     Uses the syncToken path for delta syncs; falls back to timeMin +
     singleEvents for the initial full fetch (sync_token is None).
@@ -196,12 +197,25 @@ def _list_events(service, calendar_id: str, sync_token: str | None,
     singleEvents=True can stretch arbitrarily far into the future, and we
     don't want to embed/enrich events years ahead. timeMax is rejected by
     Google when syncToken is set, so it applies only to the full-fetch path.
+
+    This loop only reads (collects `items` in memory); it never writes to the
+    store, so it needs a `budget` check (Task 2 duty-cycle fix) but no
+    `bulk_section`. `interrupted=True` means the budget expired before the
+    last page was reached — `next_sync` is naturally still None in that case
+    (Google only returns `nextSyncToken` on the final page), so the existing
+    `if next_sync:` cursor-advance guard downstream already does the right
+    thing; `interrupted` is returned anyway so the caller can also gate its
+    OWN item-loop's cursor-advance decision on it explicitly.
     """
     items: list[dict] = []
     page_token: str | None = None
     next_sync: str | None = None
+    interrupted = False
 
     while True:
+        if budget is not None and budget.expired():
+            interrupted = True
+            break
         params: dict = {"calendarId": calendar_id, "showDeleted": True}
         if sync_token:
             params["syncToken"] = sync_token
@@ -221,18 +235,28 @@ def _list_events(service, calendar_id: str, sync_token: str | None,
         if not page_token:
             break
 
-    return items, next_sync
+    return items, next_sync, interrupted
 
 
 def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
                              calendar_id: str = "primary",
-                             max_events: int | None = None) -> int:
+                             max_events: int | None = None,
+                             bulk_section=None) -> int:
     """List events in [time_min, time_max] and upsert them. No syncToken side effects.
 
     Used by the progressive-backfill loop to walk old history without resetting
     the delta cursor. Cancelled events are skipped via `normalise_calendar`.
     Returns the count of events that produced at least one chunk.
+
+    Already item-bounded by `max_events` (the progressive-backfill step caps
+    this at `_BACKFILL_MAX_PER_SOURCE`, default 200) and touches no delta
+    cursor, so no budget/checkpoint logic is needed here — but `bulk_section`
+    (defaulting to `contextlib.nullcontext`) still brackets each event's
+    writes so even this bounded window doesn't hold `_bulk_lock` for its
+    whole duration.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     items: list[dict] = []
     page_token: str | None = None
     while True:
@@ -256,13 +280,14 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
     for ev in items:
         if max_events is not None and count >= max_events:
             break
-        chunks = normalise_calendar(ev)
-        for ch in chunks:
-            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-        if chunks:
-            count += 1
-            _apply_attendees_to_graph(store, ev, owner)
-            _annotate_series_from_event(store, ev, owner)
+        with bulk_section():
+            chunks = normalise_calendar(ev)
+            for ch in chunks:
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            if chunks:
+                count += 1
+                _apply_attendees_to_graph(store, ev, owner)
+                _annotate_series_from_event(store, ev, owner)
     return count
 
 
@@ -277,6 +302,9 @@ def sync_calendar(
     calendar_id: str = "primary",
     time_min: str | None = None,
     time_max: str | None = None,
+    *,
+    budget=None,
+    bulk_section=None,
 ) -> int:
     """Delta sync via syncToken; full fetch on first run or HTTP 410 (expired token).
 
@@ -289,9 +317,25 @@ def sync_calendar(
     recurring events arbitrarily far into the future (and then needlessly
     embedding/enriching them).
 
+    Bounded and checkpoint-safe (Task 2 duty-cycle fix): `budget` (a `Budget`,
+    or None for unbounded) is checked in `_list_events`'s pagination AND once
+    per event below. On expiry the cursor is NOT advanced — re-processing the
+    same delta window next time is safe because `store.upsert_chunk` is an
+    idempotent upsert and the graph writes
+    (`_apply_attendees_to_graph`/`_annotate_series_from_event`) are documented
+    idempotent/accumulating (see their docstrings) rather than duplicating —
+    the same tolerated behaviour every normal re-sync of unchanged events
+    already exercises, not a new risk. `bulk_section` (a zero-arg
+    context-manager factory, default `contextlib.nullcontext`) brackets each
+    event's writes so `_bulk_lock` is released between events rather than
+    held for the whole call.
+
     Returns the count of events that produced at least one chunk (i.e.
-    non-cancelled events that were upserted).
+    non-cancelled events that were upserted). May be a partial count when the
+    budget expired mid-run.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     cursor = store.get_cursor(source)
     owner = owner_identity_from_config()
     now = datetime.now(timezone.utc)
@@ -307,29 +351,37 @@ def sync_calendar(
 
     if cursor:
         try:
-            items, next_sync = _list_events(service, calendar_id, cursor, time_min, time_max)
+            items, next_sync, interrupted = _list_events(
+                service, calendar_id, cursor, time_min, time_max, budget=budget)
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 410:
                 # Sync token expired — fall back to full fetch.
-                items, next_sync = _list_events(service, calendar_id, None, time_min, time_max)
+                items, next_sync, interrupted = _list_events(
+                    service, calendar_id, None, time_min, time_max, budget=budget)
             else:
                 raise
     else:
-        items, next_sync = _list_events(service, calendar_id, None, time_min, time_max)
+        items, next_sync, interrupted = _list_events(
+            service, calendar_id, None, time_min, time_max, budget=budget)
 
     count = 0
     for ev in items:
-        chunks = normalise_calendar(ev)
-        for ch in chunks:
-            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-        if chunks:
-            count += 1
-            _apply_attendees_to_graph(store, ev, owner)
-            _annotate_series_from_event(store, ev, owner)
+        if budget is not None and budget.expired():
+            interrupted = True
+            break
+        with bulk_section():
+            chunks = normalise_calendar(ev)
+            for ch in chunks:
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            if chunks:
+                count += 1
+                _apply_attendees_to_graph(store, ev, owner)
+                _annotate_series_from_event(store, ev, owner)
 
-    # Advance cursor only after all upserts are durable.
-    if next_sync:
+    # Advance cursor only after all upserts are durable AND neither the
+    # pagination nor the per-event loop was cut short by the budget.
+    if next_sync and not interrupted:
         store.set_cursor(source, next_sync)
 
     return count

@@ -439,3 +439,84 @@ def test_fetch_text_sheets_export_csv():
     assert "Month" in text
     assert "January" in text
     assert "50000" in text
+
+
+# ---------------------------------------------------------------------------
+# Task 2 duty-cycle fix: budget-interrupted mid-upsert must checkpoint safely
+# ---------------------------------------------------------------------------
+
+class _FakeBudget:
+    """expired() returns False for the first `expire_after_calls` calls, True
+    from then on — pins EXACTLY which iteration a real Budget's wall-clock
+    expiry would have landed on, deterministically."""
+
+    def __init__(self, expire_after_calls):
+        self.calls = 0
+        self.expire_after_calls = expire_after_calls
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after_calls
+
+
+def test_budget_interrupted_mid_upsert_resumes_without_skip_or_duplicate(tmp_path):
+    """Mirrors test_gmail_sync.py's checkpoint-resume test for the Drive delta
+    path. `newStartPageToken` is only emitted once ALL pages are consumed, so
+    (like Gmail's historyId) advancing the cursor before every pending file
+    is durably upserted would silently skip whatever wasn't reached yet.
+
+    Verifies: (1) an interrupted run upserts only the files it reached and
+    leaves the cursor at its OLD value; (2) a follow-up call with no budget
+    completes the resume — every file ends up upserted, f1 exactly once
+    despite being fetched+processed across BOTH calls (upsert_chunk no-ops on
+    an unchanged content_hash), and the cursor advances to the true
+    newStartPageToken.
+    """
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+
+    pages = [
+        _page(
+            [_gdoc_change("f1", "Doc One"), _gdoc_change("f2", "Doc Two")],
+            new_start_page_token="105",
+        )
+    ]
+    svc = FakeDriveService(
+        pages=pages,
+        exports={"f1": b"first document content, long enough to matter",
+                "f2": b"second document content, long enough to matter"},
+    )
+
+    # Call 1: pagination check before the (only) page (not expired -> both
+    # f1/f2 fetched+buffered into `pending` during that one page). Call 2:
+    # upsert-loop check before f1 (not expired -> f1 upserted). Call 3:
+    # upsert-loop check before f2 (expired -> stop; f2 never upserted).
+    budget = _FakeBudget(expire_after_calls=2)
+    result = sync_drive(svc, store, budget=budget)
+
+    assert result == 1, "only the file(s) upserted before budget expiry should count"
+    assert store.get_cursor("drive") == "100", (
+        "cursor must NOT advance on a partial run — an early advance would "
+        "silently and permanently skip f2 (newStartPageToken is only valid "
+        "once every pending file from this delta window is durable)"
+    )
+    assert store.get_chunk("gdrive-f1-0") is not None
+    assert store.get_chunk("gdrive-f2-0") is None
+
+    # Resume: cursor unchanged, so this re-lists the SAME page/delta window
+    # (re-upserting f1 is a safe no-op — unchanged content_hash) and finishes
+    # f2 with no budget cutting it short.
+    result2 = sync_drive(svc, store, budget=None)
+
+    assert result2 == 2, "the resume re-walks the whole pending set (idempotent), not just the tail"
+    assert store.get_cursor("drive") == "105"
+    assert store.get_chunk("gdrive-f1-0") is not None
+    assert store.get_chunk("gdrive-f2-0") is not None
+
+    # No duplicate-visible-effect: f1 was upserted across both calls but
+    # stayed one row (upsert keyed on doc_id), never inserted twice.
+    with store._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()[0]
+    assert count == 1

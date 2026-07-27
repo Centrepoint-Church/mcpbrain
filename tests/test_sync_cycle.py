@@ -418,11 +418,11 @@ def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
     fsmap = {}
     orig = drivemod.sync_shared_drives
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig(service, s, pin=pin,
                     storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
                     absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval)
+                    contextual_retrieval=contextual_retrieval, **kw)
     drivemod.sync_shared_drives = _patched
     try:
         svc = FakeDriveService(
@@ -464,7 +464,7 @@ def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
     captured = {}
 
     def _spy(service, s, *, pin, storage_factory, absence_threshold=3,
-             contextual_retrieval=False):
+             contextual_retrieval=False, **kw):
         captured["fs"] = storage_factory("D1")
         return {"_revoked": []}
 
@@ -532,11 +532,11 @@ def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path):
     fsmap = {}
     orig = drivemod.sync_shared_drives
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig(service, s, pin=pin,
                     storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
                     absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval)
+                    contextual_retrieval=contextual_retrieval, **kw)
     drivemod.sync_shared_drives = _patched
     try:
         svc = FakeDriveService(
@@ -607,11 +607,11 @@ def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
     fsmap = {}
     orig_sync_shared_drives = drivemod.sync_shared_drives
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig_sync_shared_drives(
             service, s, pin=pin,
             storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-            absence_threshold=absence_threshold)
+            absence_threshold=absence_threshold, **kw)
     drivemod.sync_shared_drives = _patched
 
     # Fail publish_file only for FID1, on every drive; FID2 must still succeed,
@@ -747,11 +747,11 @@ def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured
     orig = drivemod.sync_shared_drives
 
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig(service, s, pin=pin,
                     storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
                     absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval)
+                    contextual_retrieval=contextual_retrieval, **kw)
     drivemod.sync_shared_drives = _patched
     try:
         svc = FakeDriveService(
@@ -804,11 +804,11 @@ def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_pat
     orig = drivemod.sync_shared_drives
 
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig(service, s, pin=pin,
                     storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
                     absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval)
+                    contextual_retrieval=contextual_retrieval, **kw)
     drivemod.sync_shared_drives = _patched
     try:
         svc = FakeDriveService(
@@ -871,11 +871,11 @@ def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
     orig = drivemod.sync_shared_drives
 
     def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False):
+                 contextual_retrieval=False, **kw):
         return orig(service, s, pin=pin,
                     storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
                     absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval)
+                    contextual_retrieval=contextual_retrieval, **kw)
     drivemod.sync_shared_drives = _patched
     try:
         svc = FakeDriveService(

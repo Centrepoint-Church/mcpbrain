@@ -21,7 +21,8 @@ _STOP_AFTER_EMPTY_WINDOWS = 4   # 4 × 90d = ~1 year of empty before declaring d
 
 def run_sync_cycle(store, embedder, *, gmail_service=None,
                    calendar_service=None, drive_service=None, home=None,
-                   budget=None, embed_max_items: int = 2000) -> dict:
+                   budget=None, embed_max_items: int = 2000,
+                   bulk_section=None) -> dict:
     """Run a sync+embed cycle over whichever services are provided.
 
     For each provided service: run its source delta-sync, then index_pending
@@ -57,6 +58,16 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     finishing the source block it was in — subsequent sources/backfill are
     skipped this cycle and picked up on the next tick (the underlying work is
     predicate-driven, so nothing is lost).
+
+    `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
+    default `contextlib.nullcontext`) is threaded into `sync_gmail`/
+    `sync_calendar`/`sync_drive`/`sync_shared_drives`/`index_pending`, each of
+    which brackets its OWN small units of work (one message/event/file/embed-
+    batch) with it, rather than this function holding one `_bulk_lock` for its
+    entire body. A soak test showed the latter shape (one lock hold per whole
+    call, even budget-bounded) still starves the maintenance thread's 5s
+    acquire almost every time on a sustained backlog; per-item sections give
+    it a real chance throughout the cycle instead of once.
     """
     from mcpbrain.index import index_pending
     from mcpbrain.sync.gmail import sync_gmail
@@ -75,25 +86,29 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         """
         st: dict = {}
         result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                            max_items=embed_max_items, stats=st)
+                                            max_items=embed_max_items, stats=st,
+                                            bulk_section=bulk_section)
         if st.get("capped"):
             result["embed_capped"] = True
 
     if gmail_service is not None:
-        result["gmail"] = sync_gmail(gmail_service, store)
+        result["gmail"] = sync_gmail(gmail_service, store, budget=budget,
+                                     bulk_section=bulk_section)
         _embed()
         if budget is not None and budget.expired():
             result["budget_spent"] = True
             return result
     if calendar_service is not None:
-        result["calendar"] = sync_calendar(calendar_service, store)
+        result["calendar"] = sync_calendar(calendar_service, store, budget=budget,
+                                           bulk_section=bulk_section)
         _embed()
         if budget is not None and budget.expired():
             result["budget_spent"] = True
             return result
     if drive_service is not None:
         try:
-            result["drive"] = sync_drive(drive_service, store)
+            result["drive"] = sync_drive(drive_service, store, budget=budget,
+                                         bulk_section=bulk_section)
             _embed()
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
             log.warning("sync: My-Drive sync failed (cycle continues, retries next cycle): %s", exc)
@@ -130,7 +145,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     drive_service, store, pin=pin,
                     storage_factory=cache_storage_factory(home, drive_service),
                     absence_threshold=config.ingest_cache_revocation_threshold(home),
-                    contextual_retrieval=cr)
+                    contextual_retrieval=cr, budget=budget, bulk_section=bulk_section)
                 # Embed the misses, THEN publish them (publish reads vectors back).
                 _embed()
                 # config.owner_email can return "" when unconfigured. Rather than
@@ -186,7 +201,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # Reuses this cycle's storage instances — no second
                 # storage_factory call.
                 bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
-                                                    contextual_retrieval=cr, budget=budget)
+                                                    contextual_retrieval=cr, budget=budget,
+                                                    bulk_section=bulk_section)
                 if any(r["processed"] for r in bf_sd.values()):
                     _embed()
                 backfill_counts: dict[str, int] = {}
@@ -227,6 +243,20 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             result["budget_spent"] = True
             return result
 
+    # Gate entry on the budget UNCONDITIONALLY (not nested inside the
+    # shared-drive `if` above, which only ran when drive_service+home were
+    # both set) — previously a gmail-only or calendar-only cycle (or one where
+    # `home` wasn't passed) fell through to progressive_backfill_step with NO
+    # budget check at all. progressive_backfill_step's own per-source calls
+    # are already item-bounded (max_per_source, default 200/source), so it
+    # doesn't need internal per-item budget checks the way the delta-sync
+    # sources do — but a cycle that already spent its whole budget on the
+    # deltas above must not ALSO do this bounded-but-nonzero backfill work
+    # unconditionally.
+    if budget is not None and budget.expired():
+        result["budget_spent"] = True
+        return result
+
     # One backfill step per cycle, AFTER the live deltas. Bounded by
     # max_per_source so a slow cycle never starves new items.
     bf = progressive_backfill_step(
@@ -234,6 +264,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         gmail_service=gmail_service,
         drive_service=drive_service,
         calendar_service=calendar_service,
+        bulk_section=bulk_section,
     )
     result["backfill"] = bf
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
@@ -316,6 +347,7 @@ def progressive_backfill_step(
     max_per_source: int = _BACKFILL_MAX_PER_SOURCE,
     stop_after_empty_windows: int = _STOP_AFTER_EMPTY_WINDOWS,
     now: datetime | None = None,
+    bulk_section=None,
 ) -> dict:
     """Run ONE backfill window per source, walking newest -> oldest. No horizon.
 
@@ -332,6 +364,11 @@ def progressive_backfill_step(
     NOT touch the live delta cursors (gmail historyId, drive pageToken,
     calendar syncToken). Errors per source are isolated — a failed window
     leaves that source's floor untouched so the next cycle retries it.
+
+    Each per-source call is already item-bounded (`max_per_source`, default
+    200), so no budget/checkpoint logic is added here — but `bulk_section` is
+    threaded into each so even this bounded window releases `_bulk_lock`
+    between items rather than holding it for up to 200 items straight.
     """
     from mcpbrain.sync.gmail import backfill_gmail
     from mcpbrain.sync.drive import backfill_drive
@@ -377,6 +414,7 @@ def progressive_backfill_step(
                 after=start.strftime("%Y/%m/%d"),
                 before=end.strftime("%Y/%m/%d"),
                 max_messages=max_per_source,
+                bulk_section=bulk_section,
             )
         result["gmail"] = _step("gmail_backfill_until", "gmail_backfill_empty",
                                 _gmail, "gmail_done")
@@ -388,6 +426,7 @@ def progressive_backfill_step(
                 modified_after=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 modified_before=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 max_files=max_per_source,
+                bulk_section=bulk_section,
             )
         result["drive"] = _step("drive_backfill_until", "drive_backfill_empty",
                                 _drive, "drive_done")
@@ -399,6 +438,7 @@ def progressive_backfill_step(
                 time_min=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 time_max=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 max_events=max_per_source,
+                bulk_section=bulk_section,
             )
         result["calendar"] = _step("calendar_backfill_until", "calendar_backfill_empty",
                                    _cal, "calendar_done")
@@ -414,6 +454,7 @@ def _shared_drive_backfill_step(
     now: datetime | None = None,
     contextual_retrieval: bool = False,
     budget=None,
+    bulk_section=None,
 ) -> dict:
     """One backfill window per pinned Shared Drive, walking newest -> oldest.
 
@@ -475,6 +516,7 @@ def _shared_drive_backfill_step(
                 modified_before=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 max_files=max_per_source,
                 contextual_retrieval=contextual_retrieval,
+                bulk_section=bulk_section,
             )
         except Exception:  # noqa: BLE001 — one drive's failure must not stall others
             out[drive_id] = {"processed": 0, "miss": []}

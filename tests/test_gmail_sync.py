@@ -281,3 +281,122 @@ def test_non_404_httperror_propagates(tmp_path):
 
     # Cursor must be unchanged
     assert store.get_cursor("gmail") == "1000"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 duty-cycle fix: budget-interrupted mid-fetch must checkpoint safely
+# ---------------------------------------------------------------------------
+
+class _FakeBudget:
+    """expired() returns False for the first `expire_after_calls` calls, True
+    from then on — lets a test pin EXACTLY which iteration a real Budget's
+    wall-clock expiry would have landed on, deterministically."""
+
+    def __init__(self, expire_after_calls):
+        self.calls = 0
+        self.expire_after_calls = expire_after_calls
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after_calls
+
+
+def test_budget_interrupted_mid_fetch_resumes_without_skip_or_duplicate(tmp_path):
+    """A budget that expires partway through the message-fetch loop must not
+    advance the cursor. Gmail's history.list "historyId" field is a SNAPSHOT
+    of the mailbox's current state, not a per-page cursor — advancing to it
+    before every message on this delta round is fetched-and-upserted would
+    silently skip whatever wasn't reached yet, forever (a future
+    startHistoryId=<new cursor> query can never see it again).
+
+    Verifies both halves of the checkpoint contract:
+    (1) the interrupted call durably upserts only the messages it reached
+        before the budget expired, and leaves the cursor at its OLD value;
+    (2) a follow-up call with no budget completes the resume — every message
+        ends up upserted, and exactly once each despite m1 being fetched
+        twice across the two calls (store.upsert_chunk's idempotent-on-
+        unchanged-content-hash upsert makes the retry a no-op, not a
+        duplicate row) — and the cursor advances to the true final
+        historyId.
+    """
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    msg_m1 = plain_msg("m1", "First", "alice@example.com",
+                       "first message body content, long enough to matter")
+    msg_m2 = plain_msg("m2", "Second", "bob@example.com",
+                       "second message body content, long enough to matter")
+    msg_m3 = plain_msg("m3", "Third", "carol@example.com",
+                       "third message body content, long enough to matter")
+    # Single page (no nextPageToken), so the pagination loop makes exactly one
+    # budget.expired() check before consuming it; the message-fetch loop then
+    # checks once per message id, in order, BEFORE fetching that message.
+    pages = [_make_page(["m1", "m2", "m3"], history_id="1010")]
+    svc = FakeService(profile_hid="1000", pages=pages,
+                      messages={"m1": msg_m1, "m2": msg_m2, "m3": msg_m3})
+
+    # Call 1: pagination's own check (not expired). Call 2: fetch-loop check
+    # before m1 (not expired -> m1 IS processed). Call 3: fetch-loop check
+    # before m2 (expired -> loop stops; m2/m3 never fetched this call).
+    budget = _FakeBudget(expire_after_calls=2)
+    result = sync_gmail(svc, store, budget=budget)
+
+    assert result == 1, "only the message(s) processed before budget expiry should count"
+    assert store.get_cursor("gmail") == "1000", (
+        "cursor must NOT advance on a partial run — an early advance would "
+        "silently and permanently skip m2/m3 (see docstring)"
+    )
+    assert store.get_chunk("gmail-m1-body-0") is not None
+    assert store.get_chunk("gmail-m2-body-0") is None
+    assert store.get_chunk("gmail-m3-body-0") is None
+
+    # Resume: cursor is unchanged, so this re-lists the SAME delta window
+    # (re-fetching m1 is safe/idempotent — upsert_chunk no-ops on an
+    # unchanged content_hash) and this time completes both remaining messages
+    # with no budget cutting it short.
+    result2 = sync_gmail(svc, store, budget=None)
+
+    assert result2 == 3, "the resume re-walks the whole delta window (idempotent), not just the tail"
+    assert store.get_cursor("gmail") == "1010"
+    assert store.get_chunk("gmail-m1-body-0") is not None
+    assert store.get_chunk("gmail-m2-body-0") is not None
+    assert store.get_chunk("gmail-m3-body-0") is not None
+
+    # No duplicate-visible-effect: m1 was fetched and processed across BOTH
+    # calls, but upsert_chunk keys on doc_id, so it stayed one row, updated
+    # (or no-op'd) in place — never inserted twice.
+    with store._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE doc_id='gmail-m1-body-0'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_budget_interrupted_mid_pagination_never_advances_cursor(tmp_path):
+    """Same checkpoint contract, but the budget expires during history.list
+    PAGINATION itself (before any message is even collected) rather than
+    during the fetch loop — the cursor must still not move."""
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    msg_m1 = plain_msg("m1", "First", "alice@example.com",
+                       "first message body content, long enough to matter")
+    # Two pages, so a budget that's already expired before the SECOND page
+    # request stops pagination with page 2 (and its message) never fetched.
+    pages = [
+        _make_page(["m1"], history_id="1003", next_page_token="1"),
+        _make_page(["m2"], history_id="1007"),
+    ]
+    svc = FakeService(profile_hid="1000", pages=pages, messages={"m1": msg_m1})
+
+    # Call 1: pagination check before page 0 (not expired -> page 0 fetched,
+    # m1 collected). Call 2: pagination check before page 1 (expired -> loop
+    # stops; page 1 / m2 never even listed).
+    budget = _FakeBudget(expire_after_calls=1)
+    result = sync_gmail(svc, store, budget=budget)
+
+    assert result == 0, "pagination was interrupted before the fetch loop ever ran"
+    assert store.get_cursor("gmail") == "1000"
+    assert store.get_chunk("gmail-m1-body-0") is None
