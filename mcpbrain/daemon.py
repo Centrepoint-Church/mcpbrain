@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
+from mcpbrain.agents import win_persistence_mechanism
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
@@ -105,6 +106,12 @@ CYCLE_BUDGET_S = 60.0
 # cadence pass still self-gates on its own interval, so a tick is cheap; this
 # just bounds how promptly a newly-due pass is noticed.
 MAINTENANCE_TICK_S = 60.0
+
+# Zero progress for this long means the cycle is wedged, not merely slow. A
+# sampled main thread once sat in _ssl__SSLSocket_read at 0% CPU for 1h44m.
+STALL_S = 1800.0
+WATCHDOG_MAX_EXITS = 3
+WATCHDOG_WINDOW_S = 6 * 3600.0
 
 
 def _graph_apply():
@@ -352,7 +359,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               enrich_limit: int | None = None,
               enrich_mode: str = "off", resolution_due: bool = False,
               synthesis_requests: list | None = None,
-              extra_blocks: dict | None = None, budget=None) -> dict:
+              extra_blocks: dict | None = None, budget=None,
+              on_progress=None) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -379,6 +387,13 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     of holding it for hours; `more_work` is True when the budget expired
     (i.e. this cycle stopped early and there's more to do), telling the caller
     to re-wake promptly instead of waiting the full interval.
+
+    `on_progress` (Task 5), if given, is called with `"sync"` right after
+    run_sync_cycle returns — a free function has no `self`, so the daemon
+    passes `self._note_progress` in as this callback rather than run_cycle
+    calling it directly. This gives the watchdog a progress signal for the
+    sync phase specifically, distinct from the "cycle" mark run_one records
+    only once the whole sync+enrich cycle (this function's full body) returns.
     """
     result = run_sync_cycle(
         store, embedder,
@@ -388,6 +403,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         home=str(config.app_dir()),
         budget=budget,
     )
+    if on_progress is not None:
+        on_progress("sync")
     try:
         drain_caps = drain.drain_captures(store)
         if drain_caps:
@@ -693,6 +710,12 @@ class Daemon:
         # so an unbounded cycle starved every cadence pass for four days).
         self._maintenance_interval_s = MAINTENANCE_TICK_S
         self._maintenance_thread = None
+        # Per-phase progress heartbeat (Task 5): the old heartbeat was written
+        # only after the cadence passes, so a mid-cycle stall was invisible by
+        # construction. _note_progress records a timestamp per named phase;
+        # _stalled_phase compares the freshest one against STALL_S.
+        self._progress: dict = {}
+        self._progress_lock = threading.Lock()
         # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
         # can fire on an HTTP thread while the loop thread independently bootstraps
         # the same cycle — two concurrent import_snapshot transactions into one
@@ -856,6 +879,8 @@ class Daemon:
             "connections": connections,
             "backfill": backfill,
             "org": org,
+            "progress": dict(self._progress),
+            "stalled": self._stalled_phase(),
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
@@ -1317,6 +1342,7 @@ class Daemon:
                            synthesis_requests=synthesis_requests,
                            extra_blocks=extra_blocks,
                            budget=budget,
+                           on_progress=self._note_progress,
                            **services)
         # Absent key (fleet unpinned, Drive-API outage caught by the cache
         # block's own try/except, or drive_service/home not both present)
@@ -1340,6 +1366,7 @@ class Daemon:
                     log.info("block %s answers drained (%s); stash cleared",
                              key, drained[f"{key}_drained"])
                     del self._pending_audit[key]
+        self._note_progress("cycle")
         return result
 
     # -- cadence helpers ----------------------------------------------------
@@ -2299,6 +2326,78 @@ class Daemon:
             except Exception as exc:  # noqa: BLE001
                 log.warning("periodic pass %s failed: %s", cp.name, exc, exc_info=True)
 
+    # -- progress heartbeat + watchdog --------------------------------------
+
+    def _note_progress(self, phase: str) -> None:
+        """Record that `phase` advanced. The old heartbeat was written only after
+        the cadence passes, so a mid-cycle stall was invisible by construction."""
+        with self._progress_lock:
+            self._progress[phase] = self._clock()
+
+    def _stalled_phase(self) -> tuple[str, float] | None:
+        """(phase, seconds_since) for the most recent progress, if it is too old."""
+        with self._progress_lock:
+            if not self._progress:
+                return None            # nothing started yet is not a stall
+            phase, ts = max(self._progress.items(), key=lambda kv: kv[1])
+        age = self._clock() - ts
+        return (phase, age) if age > STALL_S else None
+
+    def _watchdog_exits_path(self):
+        # Daemon has no _home attribute — the app dir is resolved on demand,
+        # as everywhere else in this module.
+        return app_dir() / "watchdog_exits.json"
+
+    def _watchdog_may_exit(self) -> bool:
+        """False once WATCHDOG_MAX_EXITS restarts have happened in the window.
+
+        A persistently broken install should end up visibly stuck rather than
+        restarting forever.
+        """
+        import json as _json
+        path = self._watchdog_exits_path()
+        try:
+            recent = [float(t) for t in _json.loads(path.read_text())]
+        except (OSError, ValueError):
+            recent = []
+        cutoff = self._clock() - WATCHDOG_WINDOW_S
+        recent = [t for t in recent if t >= cutoff]
+        return len(recent) < WATCHDOG_MAX_EXITS
+
+    def _record_watchdog_exit(self) -> None:
+        import json as _json
+        path = self._watchdog_exits_path()
+        try:
+            recent = [float(t) for t in _json.loads(path.read_text())]
+        except (OSError, ValueError):
+            recent = []
+        cutoff = self._clock() - WATCHDOG_WINDOW_S
+        recent = [t for t in recent if t >= cutoff] + [self._clock()]
+        try:
+            path.write_text(_json.dumps(recent))
+        except OSError:
+            pass
+
+    def _exit_for_restart(self) -> None:
+        os._exit(1)   # noqa: SLF001 — bypass atexit; the supervisor restarts us
+
+    def _spawn_replacement(self) -> None:
+        """Start a detached successor before exiting (unsupervised Windows only)."""
+        import subprocess
+        subprocess.Popen([sys.executable, "-m", "mcpbrain.daemon"],  # noqa: S603
+                         close_fds=True)
+        os._exit(1)  # noqa: SLF001
+
+    def _recover_from_stall(self) -> None:
+        supervised = True
+        if sys.platform == "win32":
+            supervised = win_persistence_mechanism() == "schtasks"
+        self._record_watchdog_exit()
+        if supervised:
+            self._exit_for_restart()
+        else:
+            self._spawn_replacement()
+
     def _maintenance_loop(self) -> None:
         """Run due cadence passes on our own clock, independent of the bulk cycle.
 
@@ -2311,6 +2410,17 @@ class Daemon:
                 try:
                     self._run_periodic_passes()
                     self._note_progress("maintenance")
+                    stalled = self._stalled_phase()
+                    if stalled is not None:
+                        phase, age = stalled
+                        if self._watchdog_may_exit():
+                            log.error("watchdog: no progress in %.0fs (last phase=%s) "
+                                      "— restarting", age, phase)
+                            self._recover_from_stall()
+                        else:
+                            log.error("watchdog: no progress in %.0fs (last phase=%s); "
+                                      "restart limit reached, staying up for diagnosis",
+                                      age, phase)
                 except Exception:  # noqa: BLE001 — a bad pass must not kill the thread
                     log.warning("maintenance loop iteration failed", exc_info=True)
             self._stop.wait(timeout=self._maintenance_interval_s)
