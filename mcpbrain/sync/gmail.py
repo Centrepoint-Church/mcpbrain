@@ -152,11 +152,17 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     # round). A 404 on an individual id means the message was deleted between
     # history.list and our get — treated as "done" too (nothing to write, but
     # it must not block forward progress forever). Other HttpErrors still
-    # propagate so the cursor/resume state stays at the last good position
-    # and the next run retries them.
+    # propagate so the cursor stays at the last good position and the next
+    # run retries the REST of the round — but the resume set is persisted
+    # PER ITEM (not once after the whole loop) specifically so that when this
+    # happens, the messages already durably upserted before the raise are not
+    # discarded from the checkpoint: a plain "persist once after the loop"
+    # would otherwise mean a poison message at a fixed position (or a process
+    # death / STALL_S watchdog restart landing mid-loop) re-triggers the same
+    # Critical-B livelock shape on a narrower trigger — the whole call's
+    # progress lost even though the writes themselves were already durable.
     messages_processed = 0
     fetch_interrupted = False
-    newly_done: set = set()
     for mid in new_message_ids:
         if mid in resumed_ids:
             continue
@@ -168,17 +174,15 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 404:
-                newly_done.add(mid)
+                resumed_ids.add(mid)
+                store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
                 continue
             raise
         with bulk_section():
             for chunk in normalise_gmail(raw):
                 store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash, chunk.metadata)
         messages_processed += 1
-        newly_done.add(mid)
-
-    if newly_done:
-        resumed_ids |= newly_done
+        resumed_ids.add(mid)
         store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
     # Advance the REAL cursor only once pagination completed AND every id in

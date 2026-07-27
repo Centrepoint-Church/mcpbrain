@@ -183,6 +183,26 @@ def _annotate_series_from_event(store, event, owner) -> bool:
     return False
 
 
+def _event_resume_key(ev: dict) -> str | None:
+    """Resume-set key for one event: event id + its `updated` timestamp, so
+    an event EDITED mid-round (while its id is already resumed from an
+    earlier budget-truncated call) is recognized as new work rather than
+    silently skipped for the rest of the round (Critical bug found in
+    adversarial review round 4: keying on bare id meant a reschedule between
+    two calls in the same open round was permanently lost once the round
+    closed and the syncToken advanced past it — reproduced directly: an
+    edited event's stored text stayed at its pre-edit start time after the
+    round closed). `updated` is a standard Calendar API field (RFC3339
+    last-modification timestamp) present on every real event; degrading to
+    `f"{eid}|"` when absent (a defensive fallback, not expected in practice)
+    matches the pre-fix behaviour for exactly that edge case.
+    """
+    eid = ev.get("id")
+    if not eid:
+        return None
+    return f"{eid}|{ev.get('updated', '')}"
+
+
 # ---------------------------------------------------------------------------
 # Internal: paginated events.list
 # ---------------------------------------------------------------------------
@@ -332,13 +352,25 @@ def sync_calendar(
     — the cursor would never advance and events past the prefix would never
     be ingested (this exact livelock was reproduced and fixed for Gmail; see
     sync_gmail's docstring). So a second, separate piece of state —
-    `f"{source}:resume_ids"` (a JSON list of event ids already durably
-    processed for the CURRENT, not-yet-committed delta round, stored via the
-    same generic `sync_cursors` table) — is checked per event: an id already
-    in it is skipped (no re-fetch-equivalent work, no re-upsert — genuine
-    forward progress), and the set is grown and persisted after each call.
-    Only once every event id in this round's (possibly still-growing) list is
-    accounted for does the real cursor advance and the resume set clear.
+    `f"{source}:resume_ids"` (a JSON list of `_event_resume_key` id+`updated`
+    composites already durably processed for the CURRENT, not-yet-committed
+    delta round, stored via the same generic `sync_cursors` table) — is
+    checked per event: a key already in it is skipped (no re-fetch-equivalent
+    work, no re-upsert — genuine forward progress), and the set is grown and
+    persisted after each call. Keying on id+`updated` rather than bare id
+    matters: an event RESCHEDULED mid-round (while its id is already resumed
+    from an earlier budget-truncated call) produces a DIFFERENT key and is
+    therefore reprocessed, not silently skipped for the rest of the round
+    (Critical bug found in adversarial review — reproduced directly: a
+    rescheduled event's stored text kept showing the OLD time after the round
+    closed and the syncToken advanced past it). Only once every event key in
+    this round's (possibly still-growing) list is accounted for does the real
+    cursor advance and the resume set clear. The HTTP 410 (stale sync token)
+    recovery path is a fresh round by definition, so it explicitly resets the
+    resume set rather than inheriting one anchored at the now-invalid token
+    (a related bug found in the same review pass: without this, recovery
+    re-skipped every leftover id instead of applying the content the repair
+    fetch just returned for them).
     `store.upsert_chunk` being an idempotent upsert and the graph writes
     (`_apply_attendees_to_graph`/`_annotate_series_from_event`) being
     documented idempotent/accumulating (see their docstrings) means a
@@ -388,7 +420,20 @@ def sync_calendar(
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 410:
-                # Sync token expired — fall back to full fetch.
+                # Sync token expired — fall back to full fetch. This is the
+                # REPAIR path for a stale token, so it must not inherit
+                # whatever resume set was left over from the round that was
+                # open when the token went stale: those ids/keys refer to a
+                # round anchored at the OLD (now-invalid) token, and a full
+                # re-fetch is a fresh round by definition. Without this reset,
+                # recovery re-skips every leftover id/key instead of applying
+                # the (possibly changed) content the full fetch just returned
+                # for them — the repair path making things WORSE, not better
+                # (bug found in adversarial review round 4, reproduced
+                # directly: a leftover resumed event stayed stale across a
+                # 410 recovery that had its fresh content in hand).
+                resumed_ids = set()
+                store.set_cursor(resume_key, "[]")
                 items, next_sync, interrupted = _list_events(
                     service, calendar_id, None, time_min, time_max, budget=budget)
             else:
@@ -397,11 +442,17 @@ def sync_calendar(
         items, next_sync, interrupted = _list_events(
             service, calendar_id, None, time_min, time_max, budget=budget)
 
+    # Keyed on id+`updated` (_event_resume_key), NOT bare id: an event edited
+    # mid-round (after its id was already resumed from an earlier
+    # budget-truncated call) must be recognized as new work, not skipped.
+    # The resume set is persisted PER EVENT (not once after the whole loop)
+    # so an exception partway through (a poison event, a process death, a
+    # STALL_S watchdog restart) never discards the checkpoint for events
+    # already durably upserted earlier in this same call.
     count = 0
-    newly_done: set = set()
     for ev in items:
-        eid = ev.get("id")
-        if eid and eid in resumed_ids:
+        rkey = _event_resume_key(ev)
+        if rkey and rkey in resumed_ids:
             continue
         if budget is not None and budget.expired():
             interrupted = True
@@ -414,18 +465,15 @@ def sync_calendar(
                 count += 1
                 _apply_attendees_to_graph(store, ev, owner)
                 _annotate_series_from_event(store, ev, owner)
-        if eid:
-            newly_done.add(eid)
-
-    if newly_done:
-        resumed_ids |= newly_done
-        store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
+        if rkey:
+            resumed_ids.add(rkey)
+            store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
     # Advance the REAL cursor only once pagination completed, the per-event
     # loop wasn't cut short, AND every (id-bearing) event from this round's
     # list is accounted for in the resume set.
-    item_ids = {ev.get("id") for ev in items if ev.get("id")}
-    if next_sync and not interrupted and item_ids <= resumed_ids:
+    item_keys = {_event_resume_key(ev) for ev in items if _event_resume_key(ev)}
+    if next_sync and not interrupted and item_keys <= resumed_ids:
         store.set_cursor(source, next_sync)
         store.set_cursor(resume_key, "[]")
 
