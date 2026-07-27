@@ -8,62 +8,76 @@ import threading
 from mcpbrain import daemon as d
 
 
-def _bare_daemon():
-    dm = d.Daemon.__new__(d.Daemon)
-    dm._stash_lock = threading.Lock()
-    dm._embedder_lock = threading.Lock()
-    dm._bulk_lock = threading.Lock()
-    dm._pending_blocks = {}
-    dm._pending_audit = {}
-    dm._pending_synthesis = {}
-    return dm
-
-
 def test_locks_exist_on_a_real_daemon(tmp_path):
     """The real constructor must create all three locks."""
     for name in ("_stash_lock", "_embedder_lock", "_bulk_lock"):
         assert name in d.Daemon.__init__.__code__.co_names, f"{name} not set in __init__"
 
 
-def test_stash_take_is_atomic_under_concurrent_writers():
-    """No update is lost and no key is read-then-dropped mid-write."""
-    dm = _bare_daemon()
-    stop = threading.Event()
-
-    def writer(n):
-        i = 0
-        while not stop.is_set():
-            with dm._stash_lock:
-                dm._pending_blocks[f"w{n}-{i}"] = [i]
-            i += 1
-
-    threads = [threading.Thread(target=writer, args=(n,)) for n in range(3)]
-    for t in threads:
-        t.start()
-
-    taken = []
-    for _ in range(200):
-        taken.append(dm._stash_take())
-
-    stop.set()
-    for t in threads:
-        t.join(timeout=30)
-    assert not any(t.is_alive() for t in threads)
-
-    # Every take returns a plain dict snapshot and leaves the stash cleared;
-    # crucially nothing raises "dictionary changed size during iteration".
-    assert all(isinstance(x, dict) for x in taken)
+def test_pending_update_stops_the_maintenance_thread():
+    """Breaking out of run() for an update releases SingleWriterLock; if the
+    maintenance thread is still writing, the successor process makes two
+    writers — exactly what the file lock exists to prevent."""
+    import threading
+    from mcpbrain import daemon as d
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stop = threading.Event()
+    dm._maintenance_thread = threading.Thread(target=dm._stop.wait, daemon=True)
+    dm._maintenance_thread.start()
+    dm._shutdown_maintenance()
+    assert dm._stop.is_set()
+    assert not dm._maintenance_thread.is_alive()
 
 
-def test_stash_take_clears_and_returns_contents():
-    dm = _bare_daemon()
-    dm._pending_blocks = {"a": [1]}
-    dm._pending_audit = {"b": [2]}
-    dm._pending_synthesis = {"c": [3]}
-    got = dm._stash_take()
-    assert got == {"blocks": {"a": [1]}, "audit": {"b": [2]}, "synthesis": {"c": [3]}}
-    assert dm._pending_blocks == {} and dm._pending_audit == {}
-    assert dm._pending_synthesis == {}
+def test_stash_delete_does_not_drop_a_fresh_batch():
+    """run_one snapshots, the cycle runs, then it deletes drained keys. If a
+    pass rewrote that key meanwhile, the fresh batch is deleted unattached."""
+    import threading
+    from mcpbrain import daemon as d
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stash_lock = threading.Lock()
+    dm._pending_blocks = {"k": ["old"]}
+    dm._pending_audit = {}
+    dm._pending_synthesis = []
+    dm._stash_generation = {"k": 1}
+    taken = dm._stash_snapshot()
+    dm._pending_blocks["k"] = ["fresh"]          # maintenance thread rewrites
+    dm._stash_generation["k"] = 2
+    dm._stash_clear_drained({"k_drained": 1}, taken)
+    assert dm._pending_blocks.get("k") == ["fresh"], "fresh batch was dropped"
+
+
+def test_stash_delete_clears_an_unchanged_key():
+    """Sanity check on the other side of the generation-safety fix: a key that
+    was NOT rewritten since the snapshot must still be cleared once drained --
+    otherwise every stash would leak forever and never actually clear."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stash_lock = threading.Lock()
+    dm._pending_blocks = {"k": ["old"]}
+    dm._pending_audit = {}
+    dm._pending_synthesis = []
+    dm._stash_generation = {"k": 1}
+    taken = dm._stash_snapshot()
+    # Nothing rewrites "k" this time.
+    dm._stash_clear_drained({"k_drained": 1}, taken)
+    assert "k" not in dm._pending_blocks, "unchanged, drained key must be cleared"
+
+
+def test_stash_snapshot_and_clear_handle_synthesis_the_same_way():
+    """_pending_synthesis is list-shaped, not dict-shaped like blocks/audit, but
+    it has the identical mid-cycle-rewrite race: a fresh synthesise pass must
+    not be wiped by a drain result that answered the OLD batch."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stash_lock = threading.Lock()
+    dm._pending_blocks = {}
+    dm._pending_audit = {}
+    dm._pending_synthesis = ["old"]
+    dm._stash_generation = {dm._SYNTHESIS_GEN_KEY: 1}
+    taken = dm._stash_snapshot()
+    dm._pending_synthesis = ["fresh"]
+    dm._stash_generation[dm._SYNTHESIS_GEN_KEY] = 2
+    dm._stash_clear_drained({"synthesis_written": True}, taken)
+    assert dm._pending_synthesis == ["fresh"], "fresh synthesis batch was dropped"
 
 
 def test_embedder_lock_serialises_model_access():
@@ -100,3 +114,34 @@ def test_embedder_lock_serialises_model_access():
     assert not any(t.is_alive() for t in threads)
 
     assert overlaps == [], "embedder model was entered concurrently"
+
+
+def test_embedder_bounded_returns_immediately_once_built():
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._embedder_obj = object()
+    dm._embedder_lock = threading.Lock()
+    assert dm._embedder_bounded() is dm._embedder_obj
+
+
+def test_embedder_bounded_skips_rather_than_blocking_on_a_build_in_flight():
+    """_run_self_improve (non-gated) must not park the whole maintenance tick
+    behind someone else's in-flight cold model download."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._embedder_obj = None
+    dm._embedder_lock = threading.Lock()
+    dm._embedder_lock.acquire()      # simulate a build already in progress
+    try:
+        assert dm._embedder_bounded(timeout=0.05) is None
+    finally:
+        dm._embedder_lock.release()
+
+
+def test_embedder_bounded_builds_when_free():
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._embedder_obj = None
+    dm._embedder_lock = threading.Lock()
+    built = object()
+    dm._embedder_factory = lambda: built
+    dm._model_building = False
+    assert dm._embedder_bounded(timeout=1.0) is built
+    assert dm._embedder_obj is built

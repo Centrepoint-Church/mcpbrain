@@ -132,6 +132,23 @@ MAINTENANCE_TICK_S = 60.0
 # tick.
 BULK_LOCK_ACQUIRE_S = 5.0
 
+# How long the maintenance thread will WAIT for a single gated pass's own
+# execution (not just its _bulk_lock acquire) before giving up and moving on
+# to the rest of this tick's dispatch, leaving the pass running in the
+# background. Must stay well under STALL_S: without this bound, a pass that
+# never returns at all (a true hang -- a network call with no timeout, a
+# genuine infinite loop, as opposed to merely a *long* pass like a 500-round
+# salience-scoring sweep) makes _run_periodic_passes() itself never return,
+# which means _maintenance_loop never reaches _note_progress("maintenance")/
+# _stalled_phase()/_recover_from_stall() again either -- the watchdog thread
+# is technically alive but permanently unable to check anything, including a
+# genuine wedge of the CYCLE thread it exists to catch. Abandoning the wait
+# (not the pass) is safe: _run_gated_pass owns the whole acquire/run/release
+# lifecycle on its own thread regardless of who is watching, so the lock is
+# only ever released by whichever thread actually finishes the pass, never by
+# a caller that merely stopped waiting.
+MAINTENANCE_PASS_EXEC_TIMEOUT_S = 300.0
+
 # Brief pause the cycle thread takes, after releasing _bulk_lock between units
 # of work, when another thread has signalled intent to acquire it (see
 # Daemon._bulk_lock_intent / _bulk_lock_wanted). CPython locks are not
@@ -595,6 +612,47 @@ class Daemon:
                         self._model_building = False
         return self._embedder_obj
 
+    def _embedder_bounded(self, timeout: float = BULK_LOCK_ACQUIRE_S):
+        """Like the _embedder property, but with a BOUNDED acquire: returns
+        None instead of blocking if the embedder is still being built and the
+        wait exceeds `timeout`.
+
+        The _embedder property holds _embedder_lock for the WHOLE lazy build
+        (a cold fastembed download takes minutes) -- fine for the cycle
+        thread, which genuinely needs the model to proceed and has nothing
+        safe to skip to, but _run_self_improve (a non-gated maintenance pass,
+        so it is NOT covered by _run_gated_pass's worker-thread bound) calling
+        the property directly would park the ENTIRE maintenance tick --
+        _note_progress + the watchdog stall check that follow it in
+        _maintenance_loop included -- behind someone else's in-flight model
+        download. Same "an unbounded acquire parks the watchdog" shape
+        BULK_LOCK_ACQUIRE_S already exists to prevent for _bulk_lock, mirrored
+        here for _embedder_lock. Skipping is safe: the caller's own
+        _is_due-gated _last_* attribute only advances on a successful run, so
+        a skipped tick is retried next time that pass is due, never silently
+        lost.
+
+        A fast path avoids the lock entirely once the embedder is built (the
+        normal case after the first cycle): a plain attribute read of an
+        already-set reference needs no lock under the GIL.
+        """
+        if self._embedder_obj is not None:
+            return self._embedder_obj
+        if not self._embedder_lock.acquire(timeout=timeout):
+            return None
+        try:
+            if self._embedder_obj is None:
+                if self._embedder_factory is None:
+                    return None
+                self._model_building = True
+                try:
+                    self._embedder_obj = self._embedder_factory()
+                finally:
+                    self._model_building = False
+            return self._embedder_obj
+        finally:
+            self._embedder_lock.release()
+
     def model_status(self) -> dict:
         """Search-model state for the wizard: cached on disk / downloading / last error."""
         from mcpbrain.embed import model_weights_cached
@@ -813,6 +871,15 @@ class Daemon:
         # read-and-cleared by run_one; once those run on different threads that
         # is a genuine read-delete race.
         self._stash_lock = threading.Lock()
+        # Per-key write generation for the _pending_* stashes (Task 4). Bumped
+        # alongside every write under _stash_lock; _stash_snapshot() captures the
+        # generation map along with the values, and _stash_clear_drained() only
+        # deletes a key whose generation is UNCHANGED since the snapshot. Without
+        # this, run_one's old read-then-delete was check-then-clear across the
+        # whole cycle window: a cadence pass rewriting a key (e.g. maybe_blocks
+        # firing again) between run_one's snapshot and its post-drain clear had
+        # its fresh batch deleted unattached, even though it was never drained.
+        self._stash_generation: dict = {}
         # Guards the lazily-built embedder. index_pending (cycle thread) and
         # consolidation/self_improve (maintenance thread) share one ONNX model.
         self._embedder_lock = threading.Lock()
@@ -842,6 +909,18 @@ class Daemon:
         # cleanup) can't be erased by an unrelated waiter's cleanup this way.
         self._bulk_lock_waiters = 0
         self._bulk_lock_waiters_lock = threading.Lock()
+        # Set for the duration of a gated cadence pass's OWN execution (Task 4
+        # known-gap fix), from the moment it actually acquires _bulk_lock to the
+        # moment it releases it -- set/cleared by _run_gated_pass, on WHICHEVER
+        # thread ends up running the pass, not by whichever maintenance tick
+        # happens to be watching it. A gated pass that legitimately holds
+        # _bulk_lock past STALL_S (e.g. _run_salience_score's `while rounds <
+        # 500` loop) makes "sync"/"cycle"/"maintenance" all go stale together --
+        # every one of them is blocked behind the same lock -- which
+        # _stalled_phase() cannot tell apart from a genuine wedge on the raw
+        # timestamps alone. _recover_from_stall defers while this is set, the
+        # same shape as the existing _backup_in_progress check.
+        self._bulk_pass_active = threading.Event()
         # Maintenance runs on its own thread, ticking independently of the bulk
         # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
         # so an unbounded cycle starved every cadence pass for four days).
@@ -1054,6 +1133,13 @@ class Daemon:
         # alone when the real answer is "a backup is in flight, deliberately".
         backup_in_progress = bool(getattr(self, "_backup_in_progress", None)
                                    and self._backup_in_progress.is_set())
+        # Same debuggability rationale (Task 4): a gated cadence pass
+        # legitimately holding _bulk_lock past STALL_S defers watchdog
+        # recovery (_recover_from_stall) just like a backup in flight does --
+        # surface it so that deferral is visible from status() too, not just
+        # a log line.
+        bulk_pass_active = bool(getattr(self, "_bulk_pass_active", None)
+                                 and self._bulk_pass_active.is_set())
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -1072,6 +1158,7 @@ class Daemon:
             "progress": progress_snapshot,
             "stalled": stalled,
             "backup_in_progress": backup_in_progress,
+            "bulk_pass_active": bulk_pass_active,
             "watchdog_exits": watchdog_exits,
             "watchdog_limit_reached": watchdog_exits >= WATCHDOG_MAX_EXITS,
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
@@ -1393,13 +1480,41 @@ class Daemon:
         self._wake.set()
 
     def stop(self) -> None:
-        """Signal the loop to exit, and wake it so run() returns promptly."""
-        self._stop.set()
+        """Signal the loop to exit, and wake it so run() returns promptly.
+
+        Also stops and joins the maintenance thread (_shutdown_maintenance),
+        same as run()'s own _pending_update path: a deliberate stop() must
+        leave no writer thread still running once the caller gets control
+        back, for the same single-writer reason described there.
+        """
+        self._shutdown_maintenance()
         self._wake.set()
 
     def is_stopped(self) -> bool:
         """Return True if stop() has been called (the _stop event is set)."""
         return self._stop.is_set()
+
+    def _shutdown_maintenance(self, timeout: float = 10.0) -> None:
+        """Stop and join the maintenance thread.
+
+        Must run before run() releases SingleWriterLock on the _pending_update
+        path (and from stop()): otherwise update_from_index reinstalls (or a
+        deliberate stop()'s caller proceeds) while the maintenance thread is
+        still writing SQLite, and the successor process -- which now waits
+        HANDOVER_LOCK_WAIT_S for the lock rather than failing outright --
+        becomes a SECOND concurrent writer for that window, exactly what
+        SingleWriterLock exists to prevent.
+
+        Sets _stop unconditionally first (idempotent: run()'s own _stop.is_set()
+        check and stop()'s previous direct `self._stop.set()` both relied on
+        this happening), then joins the maintenance thread if one exists and is
+        alive. getattr guards minimally-constructed Daemon doubles in tests that
+        may not have started (or even set) _maintenance_thread.
+        """
+        self._stop.set()
+        t = getattr(self, "_maintenance_thread", None)
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout)
 
     # -- one cycle ----------------------------------------------------------
 
@@ -1457,29 +1572,75 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.warning("singleton recompute skipped: %s", exc)
 
-    def _stash_take(self) -> dict:
-        """Atomically snapshot and clear the three request stashes.
+    # Generation key used for _pending_synthesis in _stash_generation. It is a
+    # single list, not a dict of independently-keyed batches like
+    # _pending_blocks/_pending_audit, so one fixed key (rather than a per-item
+    # key) is enough to track its own rewrite history.
+    _SYNTHESIS_GEN_KEY = "_pending_synthesis"
 
-        A generic, lock-guarded snapshot-and-clear for the `_pending_*` dicts.
-        Not currently called by `run_one` (below) — that method deliberately
-        keeps its existing "re-attach until the drain confirms" semantics
-        (pinned by tests in test_daemon_p3.py), which an unconditional clear
-        would break, and `_pending_synthesis` there is list-shaped, not
-        dict-shaped, so `dict(...)` on it would raise once populated. This
-        method is exercised directly by test_daemon_thread_safety.py and is
-        available for callers (e.g. a future maintenance thread) that want an
-        atomic take without the retry bookkeeping.
+    def _bump_stash_gen(self, *keys: str) -> None:
+        """Record that `keys` were just (re)written to a _pending_* stash.
+
+        Call this while already holding _stash_lock, right alongside the write
+        itself (a single multi-key write, e.g. _run_blocks's one `.update()`
+        call for three keys, bumps all of them together in one lock hold).
+        _stash_clear_drained compares this against the generation captured at
+        snapshot time to tell "this key was rewritten mid-cycle" apart from
+        "this key is unchanged since the snapshot, safe to delete."
+        """
+        for key in keys:
+            self._stash_generation[key] = self._stash_generation.get(key, 0) + 1
+
+    def _stash_snapshot(self) -> dict:
+        """Atomically snapshot the three request stashes plus their generations.
+
+        Does NOT clear anything — pairs with _stash_clear_drained, which only
+        deletes the keys the caller's cycle actually confirmed were drained,
+        and only if nothing rewrote them in the meantime. Replaces the old
+        `with self._stash_lock: synthesis_requests = ...; merged = {...}` read
+        in run_one with a single named snapshot both halves of that method now
+        share.
         """
         with self._stash_lock:
-            got = {
+            return {
                 "blocks": dict(self._pending_blocks),
                 "audit": dict(self._pending_audit),
-                "synthesis": dict(self._pending_synthesis),
+                "synthesis": list(self._pending_synthesis),
+                "gen": dict(self._stash_generation),
             }
-            self._pending_blocks = {}
-            self._pending_audit = {}
-            self._pending_synthesis = {}
-            return got
+
+    def _stash_clear_drained(self, drained: dict, taken: dict) -> None:
+        """Delete only stash entries that were actually drained AND have NOT
+        been rewritten since `taken` (from _stash_snapshot) was captured.
+
+        run_one snapshots, the (possibly long) sync+enrich cycle runs, and only
+        then does the drain result say what was actually applied. If a cadence
+        pass on the maintenance thread rewrote a key in between (e.g.
+        maybe_blocks firing again mid-cycle), the OLD read-then-delete would
+        delete that fresh, never-yet-drained batch right along with the
+        answered one it was really meant to clear -- a live silent-data-loss
+        shape, same family as the 2026-06-05 stash-loss incident this whole
+        _pending_* mechanism exists to avoid. Comparing the live generation
+        against the one captured in `taken["gen"]` tells the two cases apart:
+        unchanged generation means safe to delete; changed means keep the
+        fresh write and let it ride to the next cycle.
+        """
+        taken_gen = taken.get("gen") or {}
+        with self._stash_lock:
+            for name in ("_pending_blocks", "_pending_audit"):
+                store = getattr(self, name)
+                for key in list(store):
+                    if f"{key}_drained" not in drained:
+                        continue
+                    if self._stash_generation.get(key) != taken_gen.get(key):
+                        continue      # rewritten mid-cycle; keep the fresh batch
+                    log.info("block %s answers drained (%s); stash cleared",
+                             key, drained[f"{key}_drained"])
+                    del store[key]
+            if drained.get("synthesis_written"):
+                if self._stash_generation.get(self._SYNTHESIS_GEN_KEY) \
+                        == taken_gen.get(self._SYNTHESIS_GEN_KEY):
+                    self._pending_synthesis = []
 
     def run_one(self) -> dict | None:
         """Run a single cycle, unless paused.
@@ -1516,9 +1677,9 @@ class Daemon:
         # stash is cleared below, once the drain summary shows its answers
         # actually came back; until then every freshly-produced batch of units
         # carries the same requests.
-        with self._stash_lock:
-            synthesis_requests = self._pending_synthesis
-            merged = {**self._pending_blocks, **self._pending_audit}
+        taken = self._stash_snapshot()
+        synthesis_requests = taken["synthesis"]
+        merged = {**taken["blocks"], **taken["audit"]}
         extra_blocks = {k: v for k, v in merged.items() if v} or None
         if extra_blocks:
             log.info("extra blocks attached: %s",
@@ -1547,19 +1708,7 @@ class Daemon:
         self._last_cache_hits = cache_counts.get("hits", 0)
         self._last_cache_misses = cache_counts.get("misses", 0)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
-        with self._stash_lock:
-            if drained.get("synthesis_written"):
-                self._pending_synthesis = []
-            for key in list(self._pending_blocks):
-                if f"{key}_drained" in drained:
-                    log.info("block %s answers drained (%s); stash cleared",
-                             key, drained[f"{key}_drained"])
-                    del self._pending_blocks[key]
-            for key in list(self._pending_audit):
-                if f"{key}_drained" in drained:
-                    log.info("block %s answers drained (%s); stash cleared",
-                             key, drained[f"{key}_drained"])
-                    del self._pending_audit[key]
+        self._stash_clear_drained(drained, taken)
         self._note_progress("cycle")
         return result
 
@@ -2142,12 +2291,22 @@ class Daemon:
 
         # S4a: embedding-drift monitor vs the gold set.
         if config.drift_monitor_enabled(home):
-            try:
-                from mcpbrain.drift_monitor import init_drift_table, run_drift_check
-                init_drift_table(self._store)
-                summary["drift"] = run_drift_check(self._store, self._embedder, home)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("drift_monitor failed: %s", exc, exc_info=True)
+            # Bounded acquire (Task 4): this pass is NOT bulk-lock-gated, so an
+            # in-flight embedder build elsewhere (self._embedder's unbounded
+            # acquire) would otherwise park this whole maintenance tick -- see
+            # _embedder_bounded's docstring.
+            embedder = self._embedder_bounded()
+            if embedder is None:
+                log.warning("self_improve: embedder busy building (cold "
+                            "download in progress); skipping drift check "
+                            "this tick, will retry when next due")
+            else:
+                try:
+                    from mcpbrain.drift_monitor import init_drift_table, run_drift_check
+                    init_drift_table(self._store)
+                    summary["drift"] = run_drift_check(self._store, embedder, home)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("drift_monitor failed: %s", exc, exc_info=True)
 
         # S4b: feed the bandit real reward from recent accept signals, then advise.
         try:
@@ -2300,6 +2459,7 @@ class Daemon:
                 for key, items in by_block.items():
                     if items:
                         self._pending_blocks[key] = items
+                        self._bump_stash_gen(key)
             counts = {k: len(v) for k, v in by_block.items()}
             log.info("review: stashed %s", counts)
         except Exception as exc:  # noqa: BLE001 — review must never crash the loop
@@ -2411,6 +2571,7 @@ class Daemon:
             if units:
                 with self._stash_lock:
                     self._pending_blocks["org_merge_review"] = units
+                    self._bump_stash_gen("org_merge_review")
             log.info("org_curate: %s",
                      {**{k: res[k] for k in ("version", "ingested") if k in res},
                       "merge_units": len(units)})
@@ -2468,6 +2629,7 @@ class Daemon:
             requests = build_synthesis_requests(self._store)
             with self._stash_lock:
                 self._pending_synthesis = requests
+                self._bump_stash_gen(self._SYNTHESIS_GEN_KEY)
         except Exception as exc:  # noqa: BLE001 — synthesis must never crash the loop
             log.warning(
                 "synthesis build failed (will retry next due): %s", exc,
@@ -2579,6 +2741,8 @@ class Daemon:
                     "community_synthesis": community_reqs,
                     "memory_distil": distil_reqs,
                 })
+                self._bump_stash_gen(
+                    "profile_synthesis", "community_synthesis", "memory_distil")
         except Exception as exc:  # noqa: BLE001 — must never crash the loop
             log.warning(
                 "blocks build failed (will retry next due): %s", exc, exc_info=True
@@ -2621,6 +2785,7 @@ class Daemon:
             audit_reqs = build_audit_requests(self._store)
             with self._stash_lock:
                 self._pending_audit = {"profile_audit": audit_reqs}
+                self._bump_stash_gen("profile_audit")
         except Exception as exc:  # noqa: BLE001 — must never crash the loop
             log.warning(
                 "audit build failed (will retry next due): %s", exc, exc_info=True
@@ -2641,6 +2806,49 @@ class Daemon:
 
     # -- periodic pass orchestration ----------------------------------------
 
+    def _run_gated_pass(self, cp: "CadencePass") -> None:
+        """Acquire _bulk_lock (bounded) and run ONE gated cadence pass to completion.
+
+        Runs on its own worker thread, spawned by _run_periodic_passes, and owns
+        the WHOLE acquire -> run -> release (+ _bulk_pass_active flag) lifecycle
+        itself. That is deliberate: _run_periodic_passes bounds how long it waits
+        for this method to return (MAINTENANCE_PASS_EXEC_TIMEOUT_S) so a pass that
+        never returns at all can't make the maintenance thread itself unreachable
+        (see that constant's docstring). If it abandons the wait, this method is
+        still running in the background and is the ONLY thing that will ever
+        release _bulk_lock or clear _bulk_pass_active for this pass -- the caller
+        must never do either itself, or it would let the cycle thread's
+        _cycle_bulk_section acquire the lock while this pass is still genuinely
+        mutating chunks, exactly the concurrent-writer race _bulk_lock exists to
+        prevent.
+
+        Signals intent BEFORE blocking on the acquire so the cycle thread's
+        _cycle_bulk_section sees it and yields between units of work (CPython's
+        Lock is not FIFO-fair, so without this explicit hand-off the cycle
+        thread wins nearly every race), and is skipped for this tick — logged,
+        not raised — if the cycle thread still holds the lock past
+        BULK_LOCK_ACQUIRE_S.
+        """
+        with self._bulk_lock_intent():
+            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
+        if not acquired:
+            log.warning(
+                "periodic pass %s skipped this tick: bulk lock held for "
+                "more than %.1fs (cycle busy); will retry", cp.name,
+                self._bulk_lock_wait_s)
+            return
+        active = getattr(self, "_bulk_pass_active", None)
+        if active is not None:
+            active.set()
+        try:
+            getattr(self, cp.fn_name)()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("periodic pass %s failed: %s", cp.name, exc, exc_info=True)
+        finally:
+            if active is not None:
+                active.clear()
+            self._bulk_lock.release()
+
     def _run_periodic_passes(self) -> None:
         """Iterate _CADENCE_PASSES; each entry self-gates on its cadence.
 
@@ -2654,22 +2862,46 @@ class Daemon:
         take the coarse _bulk_lock so they never race the cycle thread's own
         chunk-mutating phases (_cycle_bulk_section).
 
-        That lock is acquired with a BOUNDED timeout (BULK_LOCK_ACQUIRE_S),
-        with intent marked via _bulk_lock_intent for the duration of the wait
-        so the cycle thread's _cycle_bulk_section actually yields to this
-        acquire between units of work (CPython locks are not FIFO-fair), and
-        the pass is skipped for this tick if the cycle thread still holds it.
-        An unbounded acquire here parks the whole maintenance thread — including
-        the progress heartbeat and the watchdog check that follow this call in
-        _maintenance_loop — behind a wedged cycle, which is precisely the
-        failure the watchdog exists to break out of. It also starved every
-        cadence pass ordered after the first gated one.
-
         A gated pass's own cadence is checked BEFORE the lock is attempted, so a
         not-due pass never contends for it at all (each _run_X keeps its own
         _is_due call as the authoritative gate; this is only a pre-filter, and
         only for the gated passes — auto_update/verify resolve a default
         interval internally and would be wrongly disabled by an outer check).
+
+        A due gated pass's acquire-and-run (_run_gated_pass) runs on its OWN
+        worker thread, joined with a bound of MAINTENANCE_PASS_EXEC_TIMEOUT_S —
+        not called inline. Two distinct problems this solves, both found live
+        by review (see docs/superpowers/plans/2026-07-27-daemon-scheduling-
+        remediation.md, Task 4 known-gap section):
+
+          1. The _bulk_lock ACQUIRE alone was already bounded (BULK_LOCK_ACQUIRE_S)
+             so a cycle thread holding the lock could never park this dispatch
+             loop. But once acquired, the pass's own EXECUTION was unbounded —
+             _run_salience_score's `while rounds < 500` loop or
+             stale_reextract's network-touching sweep can legitimately run far
+             longer than one tick. Called inline, that parks THIS thread (and
+             the _note_progress + _stalled_phase watchdog check that follow this
+             call in _maintenance_loop) for the pass's whole duration. A pass
+             that genuinely never returns would make the maintenance thread
+             permanently unable to check anything again — including a real
+             wedge of the cycle thread, which is exactly the failure the
+             watchdog exists to catch (it would be alive but functionally inert).
+          2. Bounding just this wait (not the pass) is safe specifically because
+             _run_gated_pass owns its own acquire/run/release lifecycle
+             end-to-end regardless of who is watching — abandoning the JOIN
+             here never abandons the lock: the lock and _bulk_pass_active are
+             only ever touched by whichever thread is actually running the
+             pass, so a slow-but-legitimate pass just keeps running in the
+             background exactly as it would have inline, and this loop moves
+             on to the rest of this tick's dispatch instead of blocking on it.
+             A LATER tick's attempt at the SAME still-not-due-to-finish pass
+             harmlessly re-fails its own bounded _bulk_lock acquire (the
+             background run still holds it) and skips again — no double-run.
+
+        _bulk_pass_active (set for the duration of the pass's real execution,
+        by _run_gated_pass itself) is the signal _recover_from_stall() checks to
+        tell "blocked on a legitimately slow gated pass" apart from "wedged" —
+        see its docstring for the false-stall shape this closes.
         """
         configured = config.is_configured(str(app_dir()))
         for cp in _CADENCE_PASSES:
@@ -2679,23 +2911,20 @@ class Daemon:
                 if cp.needs_bulk_lock:
                     if not self._is_due(cp.interval_attr, cp.last_attr):
                         continue
-                    # Signal intent BEFORE blocking on the acquire so the cycle
-                    # thread's _cycle_bulk_section sees it and yields between
-                    # units of work -- CPython's Lock is not FIFO-fair, so
-                    # without this explicit hand-off the cycle thread wins
-                    # nearly every race.
-                    with self._bulk_lock_intent():
-                        acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
-                    if not acquired:
+                    t = threading.Thread(
+                        target=self._run_gated_pass, args=(cp,),
+                        daemon=True, name=f"mcpbrain-pass-{cp.name}")
+                    t.start()
+                    t.join(timeout=MAINTENANCE_PASS_EXEC_TIMEOUT_S)
+                    if t.is_alive():
                         log.warning(
-                            "periodic pass %s skipped this tick: bulk lock held for "
-                            "more than %.1fs (cycle busy); will retry", cp.name,
-                            self._bulk_lock_wait_s)
-                        continue
-                    try:
-                        getattr(self, cp.fn_name)()
-                    finally:
-                        self._bulk_lock.release()
+                            "periodic pass %s still running past %.0fs; "
+                            "continuing this tick's dispatch without waiting "
+                            "further so the maintenance thread's own "
+                            "progress/watchdog check stays reachable -- the "
+                            "pass keeps running in the background and will "
+                            "release the bulk lock itself when it finishes",
+                            cp.name, MAINTENANCE_PASS_EXEC_TIMEOUT_S)
                 else:
                     getattr(self, cp.fn_name)()
             except Exception as exc:  # noqa: BLE001
@@ -2796,8 +3025,8 @@ class Daemon:
     def _recover_from_stall(self) -> None:
         """Exit (or, unsupervised, spawn+exit) so the supervisor restarts us.
 
-        Two cases must NOT restart even though _stalled_phase() looks wedged
-        (Task 3):
+        Three cases must NOT restart even though _stalled_phase() looks wedged
+        (Task 3, Task 4):
 
         - A backup is in flight (_backup_in_progress). os._exit bypasses
           `finally`, so firing mid-snapshot orphans the temp dir
@@ -2805,6 +3034,24 @@ class Daemon:
           left ~24GB of mcpbrain-snap-* on disk and froze the host on
           2026-07-27. Recovery is deferred, not skipped: the next tick that
           finds the backup finished re-evaluates normally.
+        - A gated cadence pass is actively holding _bulk_lock
+          (_bulk_pass_active, Task 4). A pass like _run_salience_score's
+          `while rounds < 500` loop or stale_reextract's network-touching
+          sweep can legitimately run well past STALL_S while holding the
+          lock -- and while it does, the cycle thread's own
+          _cycle_bulk_section blocks on the SAME lock, so "sync"/"cycle" (and,
+          for however many ticks the pass outlasts, "maintenance" itself)
+          all go stale TOGETHER. _stalled_phase() cannot tell that apart from
+          a genuine wedge from the raw timestamps alone -- confirmed by a
+          full-timeline simulation of a 2100s hold, which reproduces
+          `_stalled_phase() -> ("sync", ~2100.0)` on an otherwise perfectly
+          healthy daemon. _bulk_pass_active is set/cleared by _run_gated_pass
+          around the pass's REAL execution (not around whichever maintenance
+          tick happens to be watching it — see MAINTENANCE_PASS_EXEC_TIMEOUT_S),
+          so it stays accurate across ticks even if one tick gives up WAITING
+          on a slow pass. Once the pass genuinely finishes, the flag clears and
+          a later real stall (progress never resuming afterward) is still
+          caught normally -- this defers, it does not silence the watchdog.
         - The cycle is repeatedly raising, not hanging
           (_cycle_error_streak > 3). A deterministic exception looks
           identical to a wedge from _stalled_phase's point of view -- "cycle"
@@ -2814,15 +3061,22 @@ class Daemon:
           can't solve. The daemon stays up, visibly failing (already logged
           loudly in run()'s except handler), instead.
 
-        getattr(..., default) guards both: minimally-constructed Daemon
+        getattr(..., default) guards all three: minimally-constructed Daemon
         doubles in tests (Daemon.__new__ + hand-set attributes) may not set
-        either attribute, and that must read as "no, not deferring" rather
-        than raise.
+        any of these attributes, and that must read as "no, not deferring"
+        rather than raise.
         """
         if getattr(self, "_backup_in_progress", None) is not None \
                 and self._backup_in_progress.is_set():
             log.warning("watchdog: stall detected but a backup is in "
                         "progress; deferring recovery")
+            return
+        if getattr(self, "_bulk_pass_active", None) is not None \
+                and self._bulk_pass_active.is_set():
+            log.warning("watchdog: stall detected but a gated maintenance "
+                        "pass is still actively holding the bulk lock (e.g. "
+                        "a long salience-scoring or stale-reextract sweep); "
+                        "deferring recovery")
             return
         if getattr(self, "_cycle_error_streak", 0) > 3:
             log.error("watchdog: cycle is repeatedly failing, not hanging "
@@ -3094,6 +3348,18 @@ class Daemon:
                 # a separate process) reports real daemon health, not cached probes.
                 write_daemon_heartbeat(str(config.app_dir()))
                 if self._pending_update or self._stop.is_set():
+                    # Stop the maintenance thread BEFORE breaking out of the
+                    # `with self._lock:` block below releases SingleWriterLock.
+                    # On the _pending_update path this is the ONLY place that
+                    # happens (a plain stop() also calls this itself, making
+                    # this a harmless no-op here) -- without it,
+                    # update_from_index reinstalls and restarts while the
+                    # maintenance thread is still writing SQLite, and the
+                    # successor (which now waits HANDOVER_LOCK_WAIT_S for the
+                    # lock rather than failing outright) becomes a second
+                    # concurrent writer for that window. See
+                    # _shutdown_maintenance's docstring.
+                    self._shutdown_maintenance()
                     break
                 # Re-wake promptly when the cycle yielded mid-work, so a large
                 # backlog still drains at close to full speed while the loop
