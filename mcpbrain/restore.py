@@ -30,7 +30,8 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False) -> 
     user_id = backup_cfg.get("user_id") or _cfg.owner_email(home)
 
     creds = _auth.load_credentials()
-    drive_service = _auth.build_service("drive", "v3", creds)
+    drive_service = _auth.build_service("drive", "v3", creds,
+                                        timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
 
     file_id = _backup.find_latest_snapshot(drive_service, shared_drive_id, user_id)
     if file_id is None:
@@ -227,7 +228,8 @@ def run_restore_auto(home: str, *, force: bool = False, drive_service=None) -> s
 
     if drive_service is None:
         creds = _auth.load_credentials()
-        drive_service = _auth.build_service("drive", "v3", creds)
+        drive_service = _auth.build_service("drive", "v3", creds,
+                                            timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
 
     info = detect_restorable(home, drive_service)
     if not info["available"]:
@@ -283,7 +285,8 @@ def run_restore_main(argv=None) -> None:
     try:
         if ns.check:
             creds = _auth.load_credentials()
-            drive_service = _auth.build_service("drive", "v3", creds)
+            drive_service = _auth.build_service("drive", "v3", creds,
+                                                timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
             info = detect_restorable(home, drive_service)
             if info["available"]:
                 print(f"Restorable backup found for {info['user_email']} "

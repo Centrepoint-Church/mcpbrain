@@ -469,7 +469,8 @@ class ControlServer:
                 try:
                     from mcpbrain import backup_setup, auth as _auth, config as _config
                     creds = _auth.load_credentials()
-                    svc = _auth.build_service("drive", "v3", creds)
+                    svc = _auth.build_service("drive", "v3", creds,
+                                              timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
                     owner = _config.owner_email(str(self.home)) or "unknown"
                     cfg = backup_setup.enable_backup(str(self.home), drive_service=svc, user_id=owner)
                     return h_json(h, 200, {"enabled": True, "shared_drive_id": cfg["backup"]["shared_drive_id"]})
@@ -495,7 +496,8 @@ class ControlServer:
                     if not owner:
                         return h_json(h, 200, {"action": "pending", "reason": "no account yet"})
                     creds = _auth.load_credentials()
-                    svc = _auth.build_service("drive", "v3", creds)
+                    svc = _auth.build_service("drive", "v3", creds,
+                                              timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
                     info = _restore.detect_restorable(str(self.home), svc)
                     # The daemon initializes brain.sqlite3 (schema only) before the
                     # wizard runs, so file size can't distinguish a fresh install
