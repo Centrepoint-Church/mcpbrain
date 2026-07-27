@@ -545,10 +545,14 @@ def test_start_maintenance_thread_creates_a_fresh_thread(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4 known-gap fix: a legitimately long gated-pass hold must not trigger a
-# spurious restart, and a genuinely-hung pass must not make the watchdog
-# itself unreachable. See docs/superpowers/sdd/2026-07-27-daemon-scheduling-
-# remediation/task-4-brief.md's callout and _recover_from_stall's docstring.
+# Task 4 known-gap fix (partial, by design): a legitimately long-but-FINITE
+# gated-pass hold must not trigger a spurious restart. A genuinely-hung pass
+# (never returns at all) making the watchdog itself unreachable remains an
+# explicit, tracked known gap -- a fix for that was attempted, reviewed, and
+# reverted; see _run_periodic_passes's and _recover_from_stall's docstrings,
+# and the note just below, for the full writeup of why. See
+# docs/superpowers/sdd/2026-07-27-daemon-scheduling-remediation/task-4-brief.md's
+# callout for the original gap description.
 # ---------------------------------------------------------------------------
 
 def test_watchdog_defers_recovery_while_a_gated_pass_holds_the_bulk_lock(tmp_path, monkeypatch):
@@ -638,38 +642,22 @@ def test_long_gated_pass_hold_does_not_trigger_spurious_restart(tmp_path, monkey
     assert called2 == ["exit"], "a genuine stall after the pass finished must still restart"
 
 
-def test_run_periodic_passes_stays_bounded_when_a_gated_pass_never_returns(monkeypatch):
-    """Cause 2 of the known gap: a genuinely-HUNG pass (never returns at all,
-    not merely slow) must not make _run_periodic_passes() -- and therefore
-    _maintenance_loop's own _note_progress/_stalled_phase/_recover_from_stall
-    check -- unreachable forever. Before this fix the dispatch loop called a
-    gated pass's _run_X inline while holding the lock, so a genuine hang there
-    parked the maintenance thread permanently: technically alive, but never
-    able to check anything again, including a real wedge of the cycle thread."""
-    import time
-    dm = d.Daemon.__new__(d.Daemon)
-    dm._bulk_lock = threading.Lock()
-    dm._bulk_lock_waiters = 0
-    dm._bulk_lock_waiters_lock = threading.Lock()
-    dm._bulk_lock_wait_s = 0.1
-    dm._bulk_pass_active = threading.Event()
-    dm._clock = time.monotonic
-
-    monkeypatch.setattr(d, "MAINTENANCE_PASS_EXEC_TIMEOUT_S", 0.2)
-    never_return = threading.Event()   # never set -> the pass hangs forever
-    fake_cp = d.CadencePass("fake_hung", "_x_interval_s", "_x_last", "_run_x",
-                            needs_configured=False, needs_bulk_lock=True)
-    monkeypatch.setattr(d, "_CADENCE_PASSES", (fake_cp,))
-    dm._run_x = lambda: never_return.wait()
-    dm._x_interval_s = 0.0    # always due
-    dm._x_last = None
-
-    started = time.monotonic()
-    dm._run_periodic_passes()
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 2.0, (
-        f"_run_periodic_passes() blocked {elapsed:.1f}s on a pass that never "
-        "returns; the maintenance thread's own watchdog check must stay "
-        "reachable regardless"
-    )
+# NOTE: a test for "a genuinely-hung gated pass must not make
+# _run_periodic_passes()/the watchdog check unreachable forever" (cause 2 of
+# the known gap) was deliberately NOT added here. A worker-thread dispatch
+# variant that closed it was built, reviewed, and REVERTED: an end-to-end
+# simulation (199 ticks / 3.3 simulated hours against a real hung pass) showed
+# it made _bulk_pass_active's watchdog-defer unbounded for exactly the case it
+# was meant to help with (a pass that never returns holds _bulk_lock AND the
+# flag forever either way, so _recover_from_stall never fires for that
+# specific wedge under either shape) while ALSO leaving the four gated
+# passes running on separate, untracked threads that _shutdown_maintenance
+# does not join -- a genuine two-concurrent-writers hazard on the
+# _pending_update restart path. _run_gated_pass is back to running INLINE
+# (see its docstring and _run_periodic_passes's docstring for the full
+# writeup); this specific cause remains an explicit, tracked known gap rather
+# than a fix verified safe enough to ship. A test that actually exercises it
+# would need to either hang the test process or race a timeout against a
+# thread with no clean teardown -- exactly what made the reverted variant's
+# own tests unreliable pre-fix discriminators; better to track the gap in
+# the plan doc than pin an untrustworthy test to it.
