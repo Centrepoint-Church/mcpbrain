@@ -31,14 +31,12 @@ def _drive_service(home):
     # build_google_services' drive_timeout_s defaults to DEFAULT_READ_TIMEOUT_S
     # (60s, dropped from DEFAULT_HTTP_TIMEOUT_S's 600s so the daemon's per-cycle
     # reads can't stall a whole cycle) — this call site silently inherited that
-    # drop. This script only lists/deletes cache FOLDERS (metadata calls; it
-    # never reads/writes the cache blob contents), so 60s is very likely fine.
-    # Still passing the larger timeout because this is a one-shot, manually-run
-    # maintenance script (never on the daemon's contended cycle path the
-    # shorter default protects), it can iterate many drives/folders in one run,
-    # and a generous timeout only ever prevents a premature cut-off.
-    services = auth.build_google_services(token_file=Path(home) / "google_token.json",
-                                          drive_timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S)
+    # drop. Checked (Task 6, per the brief's own conditional: "pass
+    # DEFAULT_HTTP_TIMEOUT_S if this moves large cache blobs"): it does NOT —
+    # this script only lists/deletes cache FOLDERS by metadata, never reading
+    # or writing the cache blob contents. Left on the new 60s default
+    # deliberately, matching the brief's literal conditional.
+    services = auth.build_google_services(token_file=Path(home) / "google_token.json")
     svc = services.get("drive_service")
     if svc is None:
         raise SystemExit(

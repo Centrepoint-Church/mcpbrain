@@ -101,22 +101,26 @@ def update_on_recall(store, doc_ids: list[str],
 
     Fire-and-forget: errors are swallowed so recall never fails because of
     the strength update. Called inline from Daemon.search (the /api/recall
-    handler), so the write below uses a small retry budget
-    (RECALL_PATH_BEGIN_RETRIES) rather than the store's normal default —
-    a live recall response should not pile up seconds of wait behind a write
-    lock just to bump memory_strength; on contention, skip this bump rather
-    than block, same as any other failure here.
+    handler), so the write below uses BOTH a small retry budget
+    (RECALL_PATH_BEGIN_RETRIES) AND a small busy_timeout
+    (RECALL_PATH_BUSY_TIMEOUT_MS) — retries alone does not bound the wait,
+    since even one BEGIN IMMEDIATE attempt can block for the connection's
+    full busy_timeout before failing. A live recall response should not pile
+    up wait behind a write lock just to bump memory_strength; on contention,
+    skip this bump rather than block, same as any other failure here.
     """
     if not doc_ids:
         return
     ts = now or _now_iso()
     try:
-        from mcpbrain.store import RECALL_PATH_BEGIN_RETRIES
+        from mcpbrain.store import RECALL_PATH_BEGIN_RETRIES, RECALL_PATH_BUSY_TIMEOUT_MS
         rows = []
         for doc_id in doc_ids:
             strength, _ = store.get_memory_strength(doc_id)
             rows.append((doc_id, strength + 1.0, ts))
-        store.update_memory_strength_batch(rows, retries=RECALL_PATH_BEGIN_RETRIES)
+        store.update_memory_strength_batch(
+            rows, retries=RECALL_PATH_BEGIN_RETRIES,
+            busy_timeout_ms=RECALL_PATH_BUSY_TIMEOUT_MS)
     except Exception as exc:  # noqa: BLE001
         log.debug("decay.update_on_recall error (swallowed): %s", exc)
 

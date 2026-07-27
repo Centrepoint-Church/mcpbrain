@@ -12,14 +12,12 @@ def _build_drive_service():
     # build_service's default timeout_s dropped from DEFAULT_HTTP_TIMEOUT_S
     # (600s) to DEFAULT_READ_TIMEOUT_S (60s) so the daemon's per-cycle reads
     # can't stall the whole cycle for ten minutes — this call site silently
-    # inherited that drop. The beacon/report payloads this module uploads are
-    # small (per-install JSON, an aggregated status.html), so 60s would almost
-    # certainly be fine either way; use the larger timeout anyway because this
-    # is a one-shot CLI/cadence call (not the daemon's contended cycle path
-    # the shorter default protects) aggregating potentially many beacons
-    # sequentially across a large fleet, and a generous timeout only ever
-    # prevents a premature cut-off (see auth.DEFAULT_HTTP_TIMEOUT_S's docstring).
-    return auth.build_service("drive", "v3", creds, timeout_s=auth.DEFAULT_HTTP_TIMEOUT_S)
+    # inherited that drop. Checked (Task 6, per the brief's own conditional:
+    # "pass DEFAULT_HTTP_TIMEOUT_S if this moves large cache blobs"): it does
+    # NOT — write_beacon/write_report upload/download only small per-install
+    # JSON beacons and one aggregated status.html. Left on the new 60s
+    # default deliberately, matching the brief's literal conditional.
+    return auth.build_service("drive", "v3", creds)
 
 
 def main(argv=None) -> None:

@@ -4,6 +4,7 @@ These are real-thread tests on purpose: the whole bug class lives in the
 interleaving, and a mocked lock proves nothing.
 """
 import threading
+import time
 
 from mcpbrain import daemon as d
 
@@ -80,8 +81,23 @@ def test_stash_snapshot_and_clear_handle_synthesis_the_same_way():
     assert dm._pending_synthesis == ["fresh"], "fresh synthesis batch was dropped"
 
 
-def test_embedder_lock_serialises_model_access():
-    """Two threads embedding concurrently must not overlap inside the model."""
+def test_embedder_model_access_is_not_serialised():
+    """Concurrent embed_passages calls MUST be allowed to overlap inside the
+    model.
+
+    This used to be test_embedder_lock_serialises_model_access, asserting the
+    OPPOSITE (that access never overlaps) -- correct for the per-instance lock
+    _LocalEmbedder used to hold across embed_passages/embed_query, but that
+    lock was removed (Task 6, Step 3 of the 2026-07-27 daemon-scheduling
+    remediation): it was serialising /api/recall's embed_query behind a bulk
+    embed_passages batch, the opposite of a stated goal. That old assertion
+    was also non-deterministic-by-luck rather than a real guarantee: with no
+    sleep/IO point inside the fake model's critical section, the GIL rarely
+    preempted mid-call, so the old test kept passing even after the lock was
+    removed -- it was measuring GIL scheduling luck, not the lock. This
+    version forces a real overlap window (a short sleep while "inside" the
+    model) so the assertion is deterministic either way.
+    """
     overlaps = []
     inside = threading.Lock()
     active = [0]
@@ -90,8 +106,10 @@ def test_embedder_lock_serialises_model_access():
         def embed(self, texts):
             with inside:
                 active[0] += 1
-                if active[0] > 1:
-                    overlaps.append(True)
+                overlapped = active[0] > 1
+            time.sleep(0.05)  # force a real window for another thread to enter
+            if overlapped:
+                overlaps.append(True)
             try:
                 return [[0.0] * 4 for _ in texts]
             finally:
@@ -103,9 +121,9 @@ def test_embedder_lock_serialises_model_access():
     emb._model = _Model()
     emb.dim = 4
     emb._qp = ""
-    emb._lock = threading.Lock()
+    emb._lock = threading.Lock()  # matches the __new__-construction shape; unused by embed_passages
 
-    threads = [threading.Thread(target=lambda: emb.embed_passages(["x"] * 50))
+    threads = [threading.Thread(target=lambda: emb.embed_passages(["x"] * 4))
                for _ in range(4)]
     for t in threads:
         t.start()
@@ -113,7 +131,7 @@ def test_embedder_lock_serialises_model_access():
         t.join(timeout=30)
     assert not any(t.is_alive() for t in threads)
 
-    assert overlaps == [], "embedder model was entered concurrently"
+    assert overlaps, "expected concurrent entry into the model (no serialising lock)"
 
 
 def test_embedder_bounded_returns_immediately_once_built():
