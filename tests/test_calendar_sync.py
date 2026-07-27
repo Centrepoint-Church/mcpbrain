@@ -331,26 +331,39 @@ def test_event_edited_mid_round_is_picked_up_not_skipped(tmp_path):
     assert upsert_calls.count("cal-evt1") == 2
 
 
-def test_410_recovery_clears_leftover_resume_ids(tmp_path):
-    """Related bug found in the same review pass: the HTTP 410 (stale sync
-    token) recovery path is the REPAIR for a broken token -- a fresh round by
-    definition -- but it used to inherit whatever resume set was left over
-    from the round that was open when the token went stale. So recovery
-    re-skipped every leftover id instead of applying the (possibly changed)
-    content the repair's full fetch just returned for them, making the
-    repair path WORSE, not better.
+def test_410_recovery_applies_content_despite_a_leftover_resume_entry(tmp_path):
+    """The HTTP 410 (stale sync token) recovery path is the REPAIR for a
+    broken token. A round-4 revision of this fix had it explicitly RESET the
+    resume set in the 410 branch, reasoning that a leftover entry from the
+    round that was open when the token went stale could otherwise cause
+    recovery to re-skip content. Round 5 found that reasoning wrong on both
+    counts:
 
-    Reproduced directly before this fix: a leftover resumed event stayed
-    entirely absent from the store across a 410 recovery that had its fresh
-    content in hand (`result == 0`, chunk never written). Fixed by resetting
-    the resume-ids cursor in the 410 branch before/alongside the fallback
-    full listing.
+    (1) The reset was unnecessary. With `_event_resume_key` keyed on
+        id+`updated`, a leftover entry either no longer matches the CURRENT
+        version of that event (so it's naturally reprocessed with no reset
+        needed -- exactly what this test exercises: the seeded leftover key's
+        `updated` value deliberately does NOT match the post-recovery
+        event's, so it's a non-match by construction) or still matches
+        because the event genuinely hasn't changed (in which case skipping
+        it loses nothing -- that version's content is already durably
+        upserted).
+    (2) The reset was actively unsafe: unlike Gmail's equivalent 404/410
+        reset (which ALSO advances the real cursor in the same call, so it
+        fires at most once), Calendar's reset did NOT advance the cursor --
+        so on a PERSISTENTLY-stale token it fired every single cycle,
+        wiping the round's progress before it could ever accumulate enough
+        to close. See test_persistently_410ing_token_eventually_recovers_
+        not_livelocked below for that reproduction; THIS test only proves
+        the single-call recovery-applies-content behaviour still holds
+        without any special-case reset.
     """
     store = Store(tmp_path / "test.sqlite3", dim=4)
     store.init()
     store.set_cursor("calendar", "old-token")
     # Simulate a leftover resume set from an earlier interrupted round,
-    # anchored at the now-stale token.
+    # anchored at the now-stale token -- its `updated` value is stale, so it
+    # does not match the post-recovery event's actual (current) key.
     store.set_cursor("calendar:resume_ids", '["evt1|stale-updated-value"]')
 
     ev1 = _event("evt1", "Meeting one (post-recovery)")
@@ -364,3 +377,56 @@ def test_410_recovery_clears_leftover_resume_ids(tmp_path):
     assert store.get_cursor("calendar") == "tokRECOVERED"
     assert store.get_chunk("cal-evt1") is not None
     assert store.get_cursor("calendar:resume_ids") == "[]"
+
+
+def test_persistently_410ing_token_eventually_recovers_not_livelocked(tmp_path):
+    """Critical bug found in adversarial review round 5: a PREVIOUS revision
+    of this fix had the 410 branch reset the resume set on every call. That
+    reset never advances the real cursor itself (only the round-close path
+    further down does), so a PERSISTENTLY-stale token -- one that keeps
+    410ing on every attempt, not just once, e.g. a client/token integration
+    that is fundamentally broken rather than merely due for a refresh --
+    wiped the round's progress every single cycle before it could ever
+    accumulate enough to close. A single-call test (like the one above)
+    can't catch this class of bug: a lone 410-then-recover looks identical
+    with or without the reset. Only a MULTI-cycle, budget-truncated,
+    persistently-410ing scenario discriminates.
+
+    Reproduced directly against the buggy (reset-in-place) code: 6+
+    consecutive cycles all showed the cursor stuck at the original stale
+    token, never progressing. This drives the same shape against the FIXED
+    code (no reset) and asserts the cursor eventually reaches the recovered
+    token instead of looping forever, and that every event is durably
+    ingested by the time it does.
+    """
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("calendar", "stale-token")
+
+    n = 7
+    events = [_event(f"evt{i}", f"Meeting {i}") for i in range(1, n + 1)]
+    for ev in events:
+        ev["updated"] = "2026-05-01T00:00:00Z"
+    full_resp = _resp(events, next_sync_token="tokRECOVERED")
+    # raise_410_on_synctoken=True means EVERY syncToken-bearing call 410s,
+    # even after a cycle "recovers" and stores a new cursor -- simulating a
+    # persistently broken token/client, not a one-time expiry.
+    svc = FakeCalService(raise_410_on_synctoken=True, on_full=full_resp)
+
+    per_call_capacity = 2
+    max_cycles = 20
+    for _cycle in range(max_cycles):
+        if store.get_cursor("calendar") != "stale-token":
+            break
+        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
+        sync_calendar(svc, store, budget=budget)
+    else:
+        raise AssertionError(
+            f"cursor never advanced past the stale token after {max_cycles} "
+            f"cycles of persistent 410s -- this is the livelock the fix targets"
+        )
+
+    assert store.get_cursor("calendar") == "tokRECOVERED"
+    assert store.get_cursor("calendar:resume_ids") == "[]"
+    for i in range(1, n + 1):
+        assert store.get_chunk(f"cal-evt{i}") is not None, f"evt{i} was never ingested"

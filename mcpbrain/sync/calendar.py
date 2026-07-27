@@ -366,11 +366,15 @@ def sync_calendar(
     closed and the syncToken advanced past it). Only once every event key in
     this round's (possibly still-growing) list is accounted for does the real
     cursor advance and the resume set clear. The HTTP 410 (stale sync token)
-    recovery path is a fresh round by definition, so it explicitly resets the
-    resume set rather than inheriting one anchored at the now-invalid token
-    (a related bug found in the same review pass: without this, recovery
-    re-skipped every leftover id instead of applying the content the repair
-    fetch just returned for them).
+    recovery path deliberately does NOT reset the resume set — an earlier
+    revision of this task did, and that reset was itself a Critical livelock:
+    it cleared the resume set but never advances the real cursor (only the
+    round-close path further below does), so a PERSISTENTLY-stale token (410
+    on every attempt) wiped the round's progress every single cycle before it
+    could ever accumulate enough to close, permanently stuck. See
+    `sync_calendar`'s 410 branch for the full reasoning on why the reset
+    turned out to be both unnecessary (version-qualified keys already handle
+    a leftover entry correctly) and unsafe.
     `store.upsert_chunk` being an idempotent upsert and the graph writes
     (`_apply_attendees_to_graph`/`_annotate_series_from_event`) being
     documented idempotent/accumulating (see their docstrings) means a
@@ -421,19 +425,37 @@ def sync_calendar(
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 410:
                 # Sync token expired — fall back to full fetch. This is the
-                # REPAIR path for a stale token, so it must not inherit
-                # whatever resume set was left over from the round that was
-                # open when the token went stale: those ids/keys refer to a
-                # round anchored at the OLD (now-invalid) token, and a full
-                # re-fetch is a fresh round by definition. Without this reset,
-                # recovery re-skips every leftover id/key instead of applying
-                # the (possibly changed) content the full fetch just returned
-                # for them — the repair path making things WORSE, not better
-                # (bug found in adversarial review round 4, reproduced
-                # directly: a leftover resumed event stayed stale across a
-                # 410 recovery that had its fresh content in hand).
-                resumed_ids = set()
-                store.set_cursor(resume_key, "[]")
+                # REPAIR path for a stale token.
+                #
+                # Deliberately does NOT reset `resumed_ids`/the resume cursor
+                # here (an earlier revision of this task did, and that was
+                # itself a bug — see below). With `_event_resume_key` keyed
+                # on id+`updated`, a leftover resume entry from before the
+                # 410 either (a) no longer matches the CURRENT version of
+                # that event, so it's naturally reprocessed without any
+                # reset, or (b) still matches because the event genuinely
+                # hasn't changed, in which case skipping it loses nothing —
+                # that version's content is already durably upserted. So the
+                # reset was never actually needed once version-qualified
+                # keys were in place.
+                #
+                # Worse, the reset was a NEW livelock: this branch clears the
+                # resume set but does NOT advance the real cursor (that only
+                # happens once the full re-fetch round completes, further
+                # below) — so a PERSISTENTLY-stale token (410 on every
+                # attempt, not just once) used to wipe the resume set every
+                # single cycle before the round's own progress could
+                # accumulate, permanently preventing the round from ever
+                # completing. Reproduced directly: 6+ consecutive
+                # budget-truncated cycles all showed the cursor stuck at the
+                # stale token with the reset in place; removing it let the
+                # same scenario close the round and recover in a handful of
+                # cycles. Contrast with Gmail's 404/410 reset (a different
+                # code path this one was originally modelled on): Gmail's
+                # reset ALSO advances the real cursor in the same call, so it
+                # can only ever fire once — Calendar's reset didn't have that
+                # property, so firing it unconditionally on every cycle was
+                # unsafe.
                 items, next_sync, interrupted = _list_events(
                     service, calendar_id, None, time_min, time_max, budget=budget)
             else:
