@@ -100,6 +100,44 @@ def test_update_on_recall_empty_list(store):
     update_on_recall(store, [])  # must not raise
 
 
+def test_update_on_recall_passes_the_recall_path_retry_and_timeout_budget(store, monkeypatch):
+    """update_on_recall must pass BOTH RECALL_PATH_BEGIN_RETRIES and
+    RECALL_PATH_BUSY_TIMEOUT_MS down to update_memory_strength_batch. Every
+    other test in this file (and every store-level test of the two constants)
+    exercises a quiescent store with no contention, so none of them would
+    notice if this call site silently dropped one or both keyword arguments
+    — this test pins the actual wiring at the call site, not just the
+    constants or the _connect/_open_db forwarding.
+    """
+    from mcpbrain.decay import update_on_recall
+    from mcpbrain.store import RECALL_PATH_BEGIN_RETRIES, RECALL_PATH_BUSY_TIMEOUT_MS
+
+    store.upsert_chunk("doc-wiring", "some text", "h1", {})
+
+    seen = {}
+    orig = store.update_memory_strength_batch
+
+    def spy(rows, **kwargs):
+        seen["retries"] = kwargs.get("retries")
+        seen["busy_timeout_ms"] = kwargs.get("busy_timeout_ms")
+        return orig(rows, **kwargs)
+
+    monkeypatch.setattr(store, "update_memory_strength_batch", spy)
+
+    update_on_recall(store, ["doc-wiring"])
+
+    assert seen["retries"] == RECALL_PATH_BEGIN_RETRIES
+    assert seen["busy_timeout_ms"] == RECALL_PATH_BUSY_TIMEOUT_MS
+    # Sanity: these must actually be the SMALLER, recall-path values, not
+    # merely "whatever the default happens to be" (which would trivially
+    # satisfy the assertions above if update_on_recall passed nothing at all
+    # and update_memory_strength_batch's own defaults were coincidentally
+    # equal -- they are not, but this makes the intent explicit).
+    from mcpbrain.store import _BEGIN_RETRIES, DEFAULT_BUSY_TIMEOUT_MS
+    assert seen["retries"] < _BEGIN_RETRIES
+    assert seen["busy_timeout_ms"] < DEFAULT_BUSY_TIMEOUT_MS
+
+
 # ---------------------------------------------------------------------------
 # apply_decay_pass
 # ---------------------------------------------------------------------------
