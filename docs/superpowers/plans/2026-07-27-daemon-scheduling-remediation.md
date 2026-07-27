@@ -518,6 +518,54 @@ permanently and pinned doctor to a red Watchdog line."
 - Modify: `mcpbrain/daemon.py` (`run()` update path, `stop()`, `_pending_*` handling, `_embedder`, `_stash_take`)
 - Test: `tests/test_daemon_thread_safety.py` (extend)
 
+> **Known gap carried from Task 3 (added 2026-07-28 during Task 3 review) —
+> not a scripted step below, flagging for whoever implements this task.**
+>
+> A gated maintenance pass that legitimately holds `_bulk_lock` longer than
+> `STALL_S` (e.g. `_run_salience_score`'s `while rounds < 500` loop, or
+> `stale_reextract`'s network-touching sweep) can trigger a **spurious
+> watchdog restart on an otherwise healthy daemon**, via two distinct,
+> compounding causes that are both lifecycle/cross-thread-state problems —
+> the class this task already owns (`_shutdown_maintenance`, stash
+> generation-safety, the embedder lock):
+>
+> 1. **`_stalled_phase()`'s `min()`-over-unpruned-`_progress`-keys has no way
+>    to express "the cycle thread is legitimately waiting on a long-running
+>    pass, not wedged."** While the cycle thread blocks in
+>    `_cycle_bulk_section`'s `_bulk_lock.acquire()` (called from inside
+>    `run_sync_cycle`/`index_pending`/`drain`), `"sync"` — stamped once, at
+>    the very end of the whole `run_sync_cycle` call, not per-phase — goes
+>    stale for the entire hold duration, and `"backup"` never gets reached
+>    that cycle either. Task 3 tried a bounded-retry-with-progress-stamp fix
+>    on `_cycle_bulk_section` (re-stamping `"cycle"` between retry attempts)
+>    and **reverted it after review**: it never touches `"sync"`, so it did
+>    not fix the scenario — confirmed by direct instrumentation, a
+>    full-timeline simulation of a 2100s hold produced the *identical*
+>    `_stalled_phase() -> ('sync', 2110.0)` outcome with or without the retry
+>    loop. `_cycle_bulk_section` is back to the plain, Task-2-signed-off
+>    unbounded `.acquire()` — confirmed safe on its own, just not a fix for
+>    this. **Do not resurrect that retry-loop approach without also solving
+>    the `"sync"`-staleness half** — it was reverted specifically for being
+>    behaviorally safe but operationally pointless.
+> 2. **Separately, a genuinely-HUNG cadence pass makes the watchdog itself
+>    unreachable**, not just prone to a false positive: `_maintenance_loop`
+>    calls `_run_periodic_passes()` *before* its own stall check runs on each
+>    tick, so if any pass never returns, the loop never reaches
+>    `_note_progress("maintenance")` / `_stalled_phase()` /
+>    `_recover_from_stall()` again. The thread is technically alive (so Task
+>    3's Step 6 liveness check in `run()` sees "not dead" and does nothing)
+>    but is functionally inert as a watchdog.
+>
+> Suggest addressing alongside this task's Step 5 (bounding the embedder
+> acquire from the maintenance thread is the same "bound a legitimately-long
+> operation so it can't park the watchdog" shape) — e.g. a per-pass execution
+> timeout/heartbeat inside `_run_periodic_passes`, or restructuring so the
+> stall check can run concurrently with, not strictly after, a slow pass.
+> Make sure whatever ships here is verified against a real long-hold /
+> genuine-hang timeline simulation, not just unit-level mechanism tests —
+> that is exactly the gap that let the Task 3 attempt look plausible while
+> being pointless.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_daemon_thread_safety.py`:
@@ -1023,6 +1071,7 @@ Every reviewed finding and where it is addressed.
 | H2 | Non-waiting shim ⇒ `RestartOnFailure` never fires | 5 |
 | H3 | XML likely rejected; `check=True` aborts install | 5 |
 | M7 | Watchdog dies with the maintenance thread; no join | 3, 4 |
+| — (found in Task 3 review, 2026-07-28) | Gated pass holding `_bulk_lock` past `STALL_S` can spuriously restart via stale `"sync"`; a hung pass makes the watchdog itself unreachable | 4 (open, see note in Task 4 section) |
 | L9 | `schtasks_xml(home=…)` unused | 5 |
 | L10 | `OMP_NUM_THREADS` set too late | 6 |
 | L11 | Tuning constants not config-overridable | 7 |

@@ -1,7 +1,6 @@
 """Stall detection and platform-aware self-healing."""
 import json
 import threading
-import time
 
 import pytest
 
@@ -510,41 +509,6 @@ def test_backup_progress_stamped_even_when_the_acquire_times_out(tmp_path, monke
     dm._backup_under_bulk_lock()
 
     assert "backup" in dm._progress, "must stamp progress even when the acquire times out"
-
-
-def test_cycle_bulk_section_stamps_progress_while_waiting_on_a_long_hold(tmp_path, monkeypatch):
-    """Important regression: a gated maintenance pass is allowed to
-    legitimately hold _bulk_lock past one tick (see
-    _backup_under_bulk_lock's docstring -- e.g. _run_salience_score's
-    `while rounds < 500` loop). _cycle_bulk_section's acquire used to be a
-    single unbounded `.acquire()`, so the cycle thread could block for that
-    WHOLE legitimate hold with zero progress stamped -- a hold longer than
-    STALL_S would then misread as a wedge. It must keep "cycle" fresh while
-    it waits, and still (eventually) get the lock -- never skip the unit of
-    work it wraps, unlike the backup path."""
-    dm = _wd_daemon(tmp_path, monkeypatch)
-    dm._bulk_lock = threading.Lock()
-    dm._bulk_lock_wait_s = 0.05
-    dm._bulk_lock_waiters = 0
-    dm._bulk_lock_waiters_lock = threading.Lock()
-    dm._stop = threading.Event()
-
-    dm._bulk_lock.acquire()          # simulate a gated pass already holding it
-    entered = threading.Event()
-
-    def _hold_then_release():
-        time.sleep(0.2)              # several bounded-acquire attempts' worth
-        dm._bulk_lock.release()
-
-    holder = threading.Thread(target=_hold_then_release)
-    holder.start()
-
-    with dm._cycle_bulk_section():
-        entered.set()
-    holder.join(timeout=2)
-
-    assert entered.is_set(), "must eventually acquire and run the wrapped unit of work"
-    assert "cycle" in dm._progress, "must stamp progress while waiting on a long hold"
 
 
 def test_start_maintenance_thread_creates_a_fresh_thread(monkeypatch):
