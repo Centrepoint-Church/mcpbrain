@@ -74,7 +74,8 @@ def test_stats_index_and_graph_counts(tmp_path):
     out = dashboard.stats(_Store(p, communities=7), str(tmp_path), _status())
 
     # enriched_pct is measured against ELIGIBLE (warm) chunks: 61 / (100-12) = 69%.
-    assert out["index"] == {"indexed": 100, "enriched": 61, "cold": 12, "enriched_pct": 69}
+    # queue_state is "working" when pending > 0; eligible = 100 - 12 - 61 = 27.
+    assert out["index"] == {"indexed": 100, "enriched": 61, "cold": 12, "enriched_pct": 69, "queue": "working"}
     assert out["graph"]["entities"] == 50
     assert out["graph"]["relations"] == 125
     assert out["graph"]["observations"] == 90
