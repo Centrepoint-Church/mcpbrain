@@ -12,21 +12,18 @@ import time
 from mcpbrain import daemon as d
 
 
-def test_bulk_lock_gates_only_the_four_chunk_writing_passes(monkeypatch, tmp_path):
-    """Real _bulk_lock contention through the real dispatch loop.
-
-    daemon.run() now holds _bulk_lock for the whole run_one() cycle. A
-    genuinely wedged cycle must not starve the ~16 non-gated cadence passes
-    (that's this task's fix) but the four passes that also write `chunks`
-    legitimately wait for the lock (the documented contention trade-off, not a
-    bug) and catch up as soon as it's released.
-    """
+def _dispatch_daemon(monkeypatch, tmp_path, *, wait_s=0.15, due=True):
+    """A bare Daemon wired for a real _run_periodic_passes over two fake passes:
+    one non-gated, one needing _bulk_lock. Returns (dm, ungated_calls,
+    gated_calls)."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     dm = d.Daemon.__new__(d.Daemon)
     dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_wait_s = wait_s
+    dm._clock = time.monotonic
 
-    ungated_calls = []
-    gated_calls = []
+    ungated_calls: list = []
+    gated_calls: list = []
 
     fake_passes = (
         d.CadencePass("fake_ungated", "_fake_ungated_interval_s", "_fake_ungated_last",
@@ -37,24 +34,46 @@ def test_bulk_lock_gates_only_the_four_chunk_writing_passes(monkeypatch, tmp_pat
     monkeypatch.setattr(d, "_CADENCE_PASSES", fake_passes)
     dm._run_fake_ungated = lambda: ungated_calls.append(1)
     dm._run_fake_gated = lambda: gated_calls.append(1)
+    # The gated entry is cadence-pre-checked before the lock is attempted:
+    # interval None == pass OFF (never due), 0 == always due.
+    dm._fake_ungated_interval_s = 0.0
+    dm._fake_ungated_last = None
+    dm._fake_gated_interval_s = 0.0 if due else None
+    dm._fake_gated_last = None
+    return dm, ungated_calls, gated_calls
 
-    lock_acquired = threading.Event()
-    release_lock = threading.Event()
 
-    def _hold_lock():
+def _hold_bulk_lock(dm, release_evt, hold_timeout=5.0):
+    """Stand in for run()'s `with self._bulk_lock: self.run_one()` wedged
+    mid-cycle: a real thread genuinely holding the real lock."""
+    acquired = threading.Event()
+
+    def _hold():
         with dm._bulk_lock:
-            lock_acquired.set()
-            release_lock.wait(timeout=2.0)
+            acquired.set()
+            release_evt.wait(timeout=hold_timeout)
 
-    # Stand in for run()'s `with self._bulk_lock: cycle_result = self.run_one()`
-    # wedged mid-cycle: a real thread genuinely holding the real lock.
-    holder = threading.Thread(target=_hold_lock, daemon=True)
+    holder = threading.Thread(target=_hold, daemon=True)
     holder.start()
-    assert lock_acquired.wait(timeout=2.0), "lock holder never acquired _bulk_lock"
+    assert acquired.wait(timeout=2.0), "lock holder never acquired _bulk_lock"
+    return holder
 
-    # Run the real dispatch loop (Daemon._run_periodic_passes, unmocked) on its
-    # own thread: with the lock held, the gated entry blocks acquiring it, so
-    # this call must not be made inline on the test's main thread.
+
+def test_bulk_lock_gates_only_the_four_chunk_writing_passes(monkeypatch, tmp_path):
+    """Real _bulk_lock contention through the real dispatch loop.
+
+    daemon.run() holds _bulk_lock for the whole run_one() cycle. A genuinely
+    wedged cycle must not starve the ~16 non-gated cadence passes (that's Task
+    4's fix); the four passes that also write `chunks` legitimately wait for the
+    lock — but only for a BOUNDED wait, after which they are skipped for this
+    tick and retried later.
+    """
+    dm, ungated_calls, gated_calls = _dispatch_daemon(monkeypatch, tmp_path, wait_s=5.0)
+    release_lock = threading.Event()
+    holder = _hold_bulk_lock(dm, release_lock)
+
+    # With the lock held, the gated entry waits on it, so the dispatch loop must
+    # not be run inline on the test's main thread.
     passes_thread = threading.Thread(target=dm._run_periodic_passes, daemon=True)
     passes_thread.start()
 
@@ -71,15 +90,114 @@ def test_bulk_lock_gates_only_the_four_chunk_writing_passes(monkeypatch, tmp_pat
     holder.join(timeout=2.0)
     assert not holder.is_alive()
 
-    # Once the cycle releases the lock, the gated pass catches up.
-    passes_thread.join(timeout=2.0)
+    # Once the cycle releases the lock (well inside the 5s wait), it catches up.
+    passes_thread.join(timeout=3.0)
     assert not passes_thread.is_alive()
     assert gated_calls == [1], "gated pass never ran once the bulk lock was released"
+
+
+def test_dispatch_skips_a_lock_gated_pass_rather_than_blocking_forever(monkeypatch, tmp_path):
+    """THE critical regression: the watchdog must stay reachable under contention.
+
+    run() holds _bulk_lock for the whole of run_one(), so a wedged cycle holds it
+    indefinitely. The dispatch loop used to do a plain `with self._bulk_lock:`,
+    which parked the maintenance thread inside _run_periodic_passes for as long
+    as the cycle was wedged -- taking _note_progress AND the _stalled_phase
+    watchdog check (which run AFTER it in _maintenance_loop) down with it, and
+    starving every pass ordered after the first gated one. The self-healing
+    mechanism was therefore unreachable during exactly the stall it exists to
+    detect. The acquire is now bounded: the pass is skipped for this tick.
+    """
+    dm, ungated_calls, gated_calls = _dispatch_daemon(monkeypatch, tmp_path, wait_s=0.15)
+    release_lock = threading.Event()
+    holder = _hold_bulk_lock(dm, release_lock)
+    try:
+        started = time.monotonic()
+        dm._run_periodic_passes()      # must RETURN, inline, lock still held
+        elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=2.0)
+
+    assert elapsed < 2.0, f"dispatch blocked {elapsed:.1f}s on a held bulk lock"
+    assert ungated_calls == [1], "non-gated pass did not run"
+    assert gated_calls == [], "gated pass ran while the lock was held"
+
+
+def test_maintenance_tick_completes_while_the_cycle_holds_the_bulk_lock(monkeypatch, tmp_path):
+    """End-to-end shape of the same bug, through the real _maintenance_loop:
+    with _bulk_lock held by a wedged cycle, the tick must still reach
+    _note_progress and the watchdog check."""
+    dm, ungated_calls, gated_calls = _dispatch_daemon(monkeypatch, tmp_path, wait_s=0.1)
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._maintenance_interval_s = 0.01
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    watchdog_checks: list = []
+    dm._stalled_phase = lambda: watchdog_checks.append(1) and None
+
+    release_lock = threading.Event()
+    holder = _hold_bulk_lock(dm, release_lock, hold_timeout=10.0)
+    t = threading.Thread(target=dm._maintenance_loop, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while len(watchdog_checks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        dm._stop.set()
+        t.join(timeout=3.0)
+        release_lock.set()
+        holder.join(timeout=2.0)
+
+    assert len(watchdog_checks) >= 2, (
+        "maintenance tick never reached the watchdog check while _bulk_lock was held")
+    assert "maintenance" in dm._progress, "progress heartbeat never advanced"
+    assert len(ungated_calls) >= 2, "non-gated passes were starved"
+    assert gated_calls == [], "gated pass ran while the lock was held"
+
+
+def test_not_due_gated_pass_never_contends_for_the_bulk_lock(monkeypatch, tmp_path):
+    """Cheap pre-gate: a gated pass that isn't due must not even attempt the
+    lock, so a wedged cycle costs it nothing (not even the acquire timeout)."""
+    dm, ungated_calls, gated_calls = _dispatch_daemon(
+        monkeypatch, tmp_path, wait_s=5.0, due=False)
+    release_lock = threading.Event()
+    holder = _hold_bulk_lock(dm, release_lock)
+    try:
+        started = time.monotonic()
+        dm._run_periodic_passes()
+        elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=2.0)
+
+    assert elapsed < 1.0, (
+        f"a not-due gated pass waited {elapsed:.1f}s on the bulk lock; the "
+        "cadence pre-check must run before the acquire")
+    assert ungated_calls == [1]
+    assert gated_calls == []
 
 
 def test_four_chunk_writers_need_the_bulk_lock():
     need = {cp.name for cp in d._CADENCE_PASSES if cp.needs_bulk_lock}
     assert need == {"stale_reextract", "salience_score", "decay_pass", "consolidation"}
+
+
+def test_gated_passes_self_gate_on_the_attrs_the_dispatch_pre_check_uses():
+    """The dispatch loop checks a gated pass's cadence BEFORE taking _bulk_lock,
+    using the descriptor's interval/last attrs. If a pass's own _is_due call ever
+    drifted to different attrs, the outer pre-check would silently suppress it.
+    (Only the gated passes are pre-checked — auto_update/verify resolve a default
+    interval internally, so an outer check would wrongly disable them.)"""
+    import inspect
+    for cp in d._CADENCE_PASSES:
+        if not cp.needs_bulk_lock:
+            continue
+        src = inspect.getsource(getattr(d.Daemon, cp.fn_name))
+        assert f'self._is_due("{cp.interval_attr}", "{cp.last_attr}")' in src, (
+            f"{cp.name} does not self-gate on the attrs its descriptor names")
 
 
 def test_passes_run_while_the_cycle_thread_is_blocked():

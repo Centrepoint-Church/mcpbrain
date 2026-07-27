@@ -234,3 +234,56 @@ def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_pa
     assert calls["records"]["repo_dir"] == str(tmp_path / "records")
     assert calls["records"]["git_name"] == "Sam Admin"
     assert calls["records"]["git_email"] == "sam@acme.org"
+
+
+# ---------------------------------------------------------------------------
+# watchdog restart limiter (surfaced from /api/status)
+# ---------------------------------------------------------------------------
+
+def _ok_repairs():
+    return {"daemon": _Recorder(), "agent": _Recorder(), "records": _Recorder()}
+
+
+def test_watchdog_limit_reached_is_actionable():
+    """"Stops self-restarting and stays visibly stuck" is only visible if
+    something says so — doctor is where a user looks."""
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 3, "watchdog_limit_reached": True})
+    assert "❌ Watchdog" in msg
+    assert "restart limit reached" in msg
+    assert code == 1
+
+
+def test_watchdog_recovered_restarts_are_reported_but_not_actionable():
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 1, "watchdog_limit_reached": False})
+    assert "✅ Watchdog" in msg
+    assert "1 self-restart(s)" in msg
+    assert code == 0
+
+
+def test_watchdog_clean_reports_no_restarts():
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False})
+    assert "✅ Watchdog" in msg
+    assert "no stall restarts" in msg
+    assert code == 0
+
+
+def test_watchdog_line_omitted_when_the_daemon_is_unreachable():
+    """A down daemon is already reported by the Daemon line; don't double-report."""
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(), daemon_status={})
+    assert "Watchdog" not in msg
+    assert code == 0
+
+
+def test_live_daemon_status_degrades_to_none_without_a_daemon(tmp_path):
+    assert doctor._live_daemon_status(str(tmp_path)) is None

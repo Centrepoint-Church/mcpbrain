@@ -306,6 +306,56 @@ def test_single_writer_lock_context_manager(tmp_path):
     after.release()
 
 
+def test_lock_acquire_retries_briefly_to_cover_a_handover(tmp_path):
+    """The watchdog's unsupervised-Windows path spawns the successor BEFORE the
+    parent has finished exiting, so a strictly non-blocking acquire kills the
+    successor and leaves nothing running. acquire(timeout_s=...) waits out the
+    handover; the default is still non-blocking."""
+    lock_path = tmp_path / "daemon.lock"
+    parent = SingleWriterLock(lock_path)
+    parent.acquire()
+    # The "parent" finishes exiting shortly after the successor starts.
+    threading.Timer(0.3, parent.release).start()
+
+    successor = SingleWriterLock(lock_path)
+    started = time.monotonic()
+    successor.acquire(timeout_s=3.0, interval_s=0.05)   # must NOT raise
+    try:
+        waited = time.monotonic() - started
+        assert waited >= 0.2, "acquire returned before the parent released"
+        assert waited < 3.0
+    finally:
+        successor.release()
+
+
+def test_lock_acquire_still_raises_once_the_retry_window_expires(tmp_path):
+    """Bounded, not a queue: a genuinely-running second daemon must still lose."""
+    lock_path = tmp_path / "daemon.lock"
+    held = SingleWriterLock(lock_path)
+    held.acquire()
+    try:
+        other = SingleWriterLock(lock_path)
+        started = time.monotonic()
+        with pytest.raises(AlreadyRunningError):
+            other.acquire(timeout_s=0.3, interval_s=0.05)
+        assert time.monotonic() - started < 3.0
+    finally:
+        held.release()
+
+
+def test_lock_acquire_is_non_blocking_by_default(tmp_path):
+    lock_path = tmp_path / "daemon.lock"
+    held = SingleWriterLock(lock_path)
+    held.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(AlreadyRunningError):
+            SingleWriterLock(lock_path).acquire()
+        assert time.monotonic() - started < 0.2
+    finally:
+        held.release()
+
+
 def test_lock_defaults_to_app_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     lock = SingleWriterLock()
@@ -758,6 +808,32 @@ def test_run_loop_runs_a_backup_within_the_loop(tmp_path):
 
     assert not t.is_alive(), "run() did not return promptly after stop()"
     assert cfg.out_path.exists(), "loop did not produce a backup artifact"
+
+
+def test_run_loop_holds_the_bulk_lock_across_the_backup(tmp_path):
+    """backup.snapshot() runs PRAGMA wal_checkpoint(TRUNCATE) and aborts with
+    RuntimeError on a busy checkpoint — its docstring rests on a single-writer
+    invariant that the maintenance thread removed. A racing chunk-writing pass
+    either silently stops backups advancing (_last_backup never moves; only
+    discovered during a restore) or writes enough during the subsequent copy2 to
+    trip wal_autocheckpoint and tear the snapshot. maybe_backup must therefore be
+    held under _bulk_lock, exactly as run_one() already is."""
+    store = _make_store(tmp_path)
+    daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+    locked_during_backup = []
+    daemon.maybe_backup = lambda: locked_during_backup.append(daemon._bulk_lock.locked())
+
+    t = threading.Thread(target=daemon.run)
+    t.start()
+    deadline = time.monotonic() + 5.0
+    while not locked_during_backup and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    daemon.stop()
+    t.join(timeout=5.0)
+
+    assert locked_during_backup, "maybe_backup was never called from the loop"
+    assert all(locked_during_backup), "maybe_backup ran without holding _bulk_lock"
 
 
 # ---------------------------------------------------------------------------

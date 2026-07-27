@@ -107,11 +107,27 @@ CYCLE_BUDGET_S = 60.0
 # just bounds how promptly a newly-due pass is noticed.
 MAINTENANCE_TICK_S = 60.0
 
+# How long a cadence pass will wait for _bulk_lock before giving up for this
+# tick. MUST be bounded and MUST stay well under MAINTENANCE_TICK_S: the cycle
+# thread holds _bulk_lock for the whole of run_one(), so a wedged cycle holds it
+# indefinitely. An unbounded `with self._bulk_lock:` in the dispatch loop parks
+# the maintenance thread inside _run_periodic_passes forever, which also parks
+# the _note_progress + watchdog check that follow it in _maintenance_loop --
+# i.e. the self-healing watchdog would be unreachable during exactly the stall
+# it exists to detect. Skipping the pass is free: it stays due and retries next
+# tick.
+BULK_LOCK_ACQUIRE_S = 5.0
+
 # Zero progress for this long means the cycle is wedged, not merely slow. A
 # sampled main thread once sat in _ssl__SSLSocket_read at 0% CPU for 1h44m.
 STALL_S = 1800.0
 WATCHDOG_MAX_EXITS = 3
 WATCHDOG_WINDOW_S = 6 * 3600.0
+
+# Brief bounded wait for the single-writer lock on daemon startup, so a
+# successor spawned by the watchdog (unsupervised Windows) does not fail
+# outright while its slow-exiting parent still holds the lockfile.
+HANDOVER_LOCK_WAIT_S = 2.0
 
 
 def _graph_apply():
@@ -260,7 +276,31 @@ class SingleWriterLock:
         self.lock_path = Path(lock_path) if lock_path is not None else app_dir() / "daemon.lock"
         self._fd = None
 
-    def acquire(self) -> None:
+    def acquire(self, timeout_s: float = 0.0, interval_s: float = 0.1) -> None:
+        """Take the lock, raising AlreadyRunningError if another daemon holds it.
+
+        Non-blocking by default (timeout_s=0.0): one attempt, immediate raise —
+        the semantics every existing caller relies on.
+
+        `timeout_s` adds a brief bounded retry for ONE case: the watchdog's
+        unsupervised-Windows handover, where _spawn_replacement starts the
+        successor before the parent has finished exiting. Without it the
+        successor races the parent's still-held lockfile and dies on the first
+        attempt, leaving nothing running at all. Bounded on purpose — this is a
+        handover window, not a queue; a genuinely-running second daemon must
+        still lose quickly.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            try:
+                self._acquire_once()
+                return
+            except AlreadyRunningError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(interval_s)
+
+    def _acquire_once(self) -> None:
         if fcntl is not None:
             # POSIX path — current behaviour, fully tested on Linux/macOS.
             fd = open(self.lock_path, "w")
@@ -384,9 +424,10 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
 
     `budget` (a `Budget`, or None for unbounded) is threaded into both
     run_sync_cycle and drain.drain so a large backlog yields the cycle instead
-    of holding it for hours; `more_work` is True when the budget expired
-    (i.e. this cycle stopped early and there's more to do), telling the caller
-    to re-wake promptly instead of waiting the full interval.
+    of holding it for hours; `more_work` is True when this cycle stopped early
+    with work still to do — either the budget expired OR a bounded phase hit its
+    own item cap (`embed_capped` from run_sync_cycle) — telling the caller to
+    re-wake promptly instead of waiting the full interval.
 
     `on_progress` (Task 5), if given, is called with `"sync"` right after
     run_sync_cycle returns — a free function has no `self`, so the daemon
@@ -447,7 +488,14 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
             _stamp_enrich_log(drained)
     else:  # "off" (or any unknown value)
         result["enrich"] = {"mode": "off"}
-    result["more_work"] = bool(budget is not None and budget.expired())
+    # More work is pending if EITHER the wall-clock budget ran out mid-cycle OR a
+    # bounded phase stopped on its own item cap. Budget expiry alone was not
+    # enough: index_pending caps each call at embed_max_items (2000), so a large
+    # backlog embedded 2000 chunks well inside the budget, reported more_work
+    # False, and the loop then slept the full _interval_s (300 s) before taking
+    # the next slice.
+    result["more_work"] = bool(
+        (budget is not None and budget.expired()) or result.get("embed_capped"))
     return result
 
 
@@ -704,7 +752,10 @@ class Daemon:
         self._embedder_lock = threading.Lock()
         # Coarse advisory lock. Held by the cycle around chunk-mutating phases
         # and acquired by the four cadence passes that also write `chunks`.
+        # The maintenance thread's acquire is bounded (see BULK_LOCK_ACQUIRE_S)
+        # so a wedged cycle can never park the watchdog behind it.
         self._bulk_lock = threading.Lock()
+        self._bulk_lock_wait_s = BULK_LOCK_ACQUIRE_S
         # Maintenance runs on its own thread, ticking independently of the bulk
         # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
         # so an unbounded cycle starved every cadence pass for four days).
@@ -713,9 +764,16 @@ class Daemon:
         # Per-phase progress heartbeat (Task 5): the old heartbeat was written
         # only after the cadence passes, so a mid-cycle stall was invisible by
         # construction. _note_progress records a timestamp per named phase;
-        # _stalled_phase compares the freshest one against STALL_S.
-        self._progress: dict = {}
+        # _stalled_phase compares the STALEST one against STALL_S.
+        #
+        # Seeded with "cycle" so a first cycle that NEVER completes is visible
+        # to the watchdog. _stalled_phase returns None on an empty dict, and
+        # once the maintenance thread is up "maintenance" is re-stamped every
+        # tick — so without this seed a daemon that wedges before its first
+        # run_one() returns would look permanently healthy. That is exactly the
+        # live incident's shape ("stale for 35.9 h across three restarts").
         self._progress_lock = threading.Lock()
+        self._progress: dict = {"cycle": self._clock()}
         # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
         # can fire on an HTTP thread while the loop thread independently bootstraps
         # the same cycle — two concurrent import_snapshot transactions into one
@@ -772,6 +830,16 @@ class Daemon:
         self._pause.set()
 
     def resume(self) -> None:
+        # Re-stamp every tracked phase BEFORE unpausing. _maintenance_loop skips
+        # its whole body (watchdog included) while paused, so the timestamps
+        # freeze for the length of the pause. A pause longer than STALL_S would
+        # otherwise make the first tick after resume see pre-pause timestamps,
+        # judge the daemon wedged and self-restart it — a false positive on a
+        # daemon that was deliberately idle, not stalled.
+        with self._progress_lock:
+            now = self._clock()
+            for phase in self._progress:
+                self._progress[phase] = now
         self._pause.clear()
 
     def is_paused(self) -> bool:
@@ -864,6 +932,14 @@ class Daemon:
             org["merge_suppressed"] = len(org_curate._suppressed_pairs(self._store))
         except Exception as exc:  # noqa: BLE001 — status must never raise
             log.debug("status: org block degraded: %s", exc)
+        # Watchdog restart-limiter state (spec: "exposed on /api/status for
+        # doctor and the tray"). Reuses _recent_watchdog_exits so status can
+        # never disagree with the limiter that actually decides. Best-effort —
+        # status must never raise.
+        try:
+            watchdog_exits = len(self._recent_watchdog_exits())
+        except Exception:  # noqa: BLE001
+            watchdog_exits = 0
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -881,6 +957,8 @@ class Daemon:
             "org": org,
             "progress": dict(self._progress),
             "stalled": self._stalled_phase(),
+            "watchdog_exits": watchdog_exits,
+            "watchdog_limit_reached": watchdog_exits >= WATCHDOG_MAX_EXITS,
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
         }
 
@@ -2312,6 +2390,20 @@ class Daemon:
         blocks the remaining passes. The four passes that also write `chunks`
         take the coarse _bulk_lock so they never race the cycle thread's own
         chunk-mutating phases.
+
+        That lock is acquired with a BOUNDED timeout (BULK_LOCK_ACQUIRE_S) and
+        the pass is skipped for this tick if the cycle thread still holds it.
+        An unbounded acquire here parks the whole maintenance thread — including
+        the progress heartbeat and the watchdog check that follow this call in
+        _maintenance_loop — behind a wedged cycle, which is precisely the
+        failure the watchdog exists to break out of. It also starved every
+        cadence pass ordered after the first gated one.
+
+        A gated pass's own cadence is checked BEFORE the lock is attempted, so a
+        not-due pass never contends for it at all (each _run_X keeps its own
+        _is_due call as the authoritative gate; this is only a pre-filter, and
+        only for the gated passes — auto_update/verify resolve a default
+        interval internally and would be wrongly disabled by an outer check).
         """
         configured = config.is_configured(str(app_dir()))
         for cp in _CADENCE_PASSES:
@@ -2319,8 +2411,18 @@ class Daemon:
                 continue
             try:
                 if cp.needs_bulk_lock:
-                    with self._bulk_lock:
+                    if not self._is_due(cp.interval_attr, cp.last_attr):
+                        continue
+                    if not self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s):
+                        log.warning(
+                            "periodic pass %s skipped this tick: bulk lock held for "
+                            "more than %.1fs (cycle busy); will retry", cp.name,
+                            self._bulk_lock_wait_s)
+                        continue
+                    try:
                         getattr(self, cp.fn_name)()
+                    finally:
+                        self._bulk_lock.release()
                 else:
                     getattr(self, cp.fn_name)()
             except Exception as exc:  # noqa: BLE001
@@ -2356,33 +2458,35 @@ class Daemon:
         # as everywhere else in this module.
         return app_dir() / "watchdog_exits.json"
 
+    def _recent_watchdog_exits(self) -> list[float]:
+        """Watchdog-triggered exit timestamps still inside WATCHDOG_WINDOW_S.
+
+        The single reader of watchdog_exits.json — the limiter, the recorder and
+        status() all go through here so they can never disagree about what
+        "recent" means. A missing/corrupt file reads as no history.
+        """
+        import json as _json
+        path = self._watchdog_exits_path()
+        try:
+            recent = [float(t) for t in _json.loads(path.read_text())]
+        except (OSError, ValueError, TypeError):
+            recent = []
+        cutoff = self._clock() - WATCHDOG_WINDOW_S
+        return [t for t in recent if t >= cutoff]
+
     def _watchdog_may_exit(self) -> bool:
         """False once WATCHDOG_MAX_EXITS restarts have happened in the window.
 
         A persistently broken install should end up visibly stuck rather than
         restarting forever.
         """
-        import json as _json
-        path = self._watchdog_exits_path()
-        try:
-            recent = [float(t) for t in _json.loads(path.read_text())]
-        except (OSError, ValueError):
-            recent = []
-        cutoff = self._clock() - WATCHDOG_WINDOW_S
-        recent = [t for t in recent if t >= cutoff]
-        return len(recent) < WATCHDOG_MAX_EXITS
+        return len(self._recent_watchdog_exits()) < WATCHDOG_MAX_EXITS
 
     def _record_watchdog_exit(self) -> None:
         import json as _json
-        path = self._watchdog_exits_path()
+        recent = self._recent_watchdog_exits() + [self._clock()]
         try:
-            recent = [float(t) for t in _json.loads(path.read_text())]
-        except (OSError, ValueError):
-            recent = []
-        cutoff = self._clock() - WATCHDOG_WINDOW_S
-        recent = [t for t in recent if t >= cutoff] + [self._clock()]
-        try:
-            path.write_text(_json.dumps(recent))
+            self._watchdog_exits_path().write_text(_json.dumps(recent))
         except OSError:
             pass
 
@@ -2390,10 +2494,22 @@ class Daemon:
         os._exit(1)   # noqa: SLF001 — bypass atexit; the supervisor restarts us
 
     def _spawn_replacement(self) -> None:
-        """Start a detached successor before exiting (unsupervised Windows only)."""
+        """Start a detached successor before exiting (unsupervised Windows only).
+
+        close_fds is NOT detachment: without DETACHED_PROCESS the successor
+        inherits our console, and without CREATE_NEW_PROCESS_GROUP a Ctrl-Break
+        or a console teardown aimed at the dying parent reaches it too. Both
+        flags are Windows-only names, so they are resolved only on win32 (they
+        do not exist in POSIX `subprocess`); elsewhere Popen keeps its current
+        behaviour, which matters because tests exercise this path on macOS.
+        """
         import subprocess
+        kwargs: dict = {"close_fds": True}
+        if sys.platform == "win32":  # pragma: no cover - Windows-only flags
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NEW_PROCESS_GROUP)
         subprocess.Popen([sys.executable, "-m", "mcpbrain.daemon"],  # noqa: S603
-                         close_fds=True)
+                         **kwargs)
         os._exit(1)  # noqa: SLF001
 
     def _recover_from_stall(self) -> None:
@@ -2519,6 +2635,13 @@ class Daemon:
             # first cycle, regardless of pause state. ensure_services() is
             # idempotent: the subsequent call inside run_one() becomes a no-op.
             self.ensure_services()
+            # Start the watchdog's clock for the cycle phase HERE, not at
+            # construction: startup (restore, embed migration, service
+            # resolution) can legitimately take a while, and the 30-minute
+            # stall budget should be measured from the loop actually starting.
+            # Stamping it before the maintenance thread exists means a first
+            # cycle that never returns is visible to the watchdog.
+            self._note_progress("cycle")
             # Maintenance now ticks on its own thread/clock (Task 4) instead of
             # running inline after run_one() — an unbounded cycle used to
             # starve every cadence pass behind it for four days.
@@ -2542,7 +2665,20 @@ class Daemon:
                 # Backup self-gates on configured + due; harmless when paused
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
-                self.maybe_backup()
+                #
+                # Held under _bulk_lock for the same reason run_one() is:
+                # backup.snapshot() runs PRAGMA wal_checkpoint(TRUNCATE) and
+                # aborts with RuntimeError when the checkpoint reports busy,
+                # resting on a single-writer invariant that the maintenance
+                # thread broke. Uncontended, a racing pass either silently stops
+                # backups advancing (_last_backup never moves; only discovered
+                # during a restore) or writes enough during the subsequent
+                # copy2 to trigger wal_autocheckpoint mid-copy and tear the
+                # snapshot. This closes the four chunk-writing passes — the most
+                # probable contenders — the same way the rest of this plan
+                # scopes _bulk_lock.
+                with self._bulk_lock:
+                    self.maybe_backup()
                 # Stamp the daemon's own liveness so the fleet beacon (written by
                 # a separate process) reports real daemon health, not cached probes.
                 write_daemon_heartbeat(str(config.app_dir()))
@@ -2862,9 +2998,16 @@ def main(argv=None) -> None:
         # so daemon.run()'s own `with self._lock:` can re-acquire normally; the
         # TOCTOU window is microseconds vs. launchd's 10-second minimum-runtime
         # retry cadence.
+        #
+        # The probe waits HANDOVER_LOCK_WAIT_S rather than giving up on the
+        # first attempt: when the watchdog self-heals an unsupervised Windows
+        # install it spawns this process while the parent is still exiting, so
+        # a strictly non-blocking acquire would kill the successor and leave
+        # nothing running. A genuinely-running second daemon still loses, just
+        # a couple of seconds later.
         try:
             probe = SingleWriterLock()
-            probe.acquire()
+            probe.acquire(timeout_s=HANDOVER_LOCK_WAIT_S)
             probe.release()
         except AlreadyRunningError:
             log.error("another mcpbrain daemon is already running; exiting")

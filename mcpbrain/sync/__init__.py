@@ -64,25 +64,37 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     from mcpbrain.sync.drive import sync_drive
 
     result = {"gmail": 0, "calendar": 0, "drive": 0, "embedded": 0}
+
+    def _embed() -> None:
+        """One bounded embed pass, accumulating count AND the cap signal.
+
+        `embed_capped` means index_pending stopped on embed_max_items with more
+        chunks still pending — the cycle has more work RIGHT NOW even though the
+        budget never expired. Without it the daemon loop slept a full interval
+        (300 s) between 2000-chunk slices of a live backlog.
+        """
+        st: dict = {}
+        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                            max_items=embed_max_items, stats=st)
+        if st.get("capped"):
+            result["embed_capped"] = True
+
     if gmail_service is not None:
         result["gmail"] = sync_gmail(gmail_service, store)
-        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                            max_items=embed_max_items)
+        _embed()
         if budget is not None and budget.expired():
             result["budget_spent"] = True
             return result
     if calendar_service is not None:
         result["calendar"] = sync_calendar(calendar_service, store)
-        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                            max_items=embed_max_items)
+        _embed()
         if budget is not None and budget.expired():
             result["budget_spent"] = True
             return result
     if drive_service is not None:
         try:
             result["drive"] = sync_drive(drive_service, store)
-            result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                                max_items=embed_max_items)
+            _embed()
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
             log.warning("sync: My-Drive sync failed (cycle continues, retries next cycle): %s", exc)
         if budget is not None and budget.expired():
@@ -120,8 +132,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     absence_threshold=config.ingest_cache_revocation_threshold(home),
                     contextual_retrieval=cr)
                 # Embed the misses, THEN publish them (publish reads vectors back).
-                result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                                    max_items=embed_max_items)
+                _embed()
                 # config.owner_email can return "" when unconfigured. Rather than
                 # stamp published artifacts with an empty published_by, skip
                 # publishing this cycle — files are still synced/embedded locally
@@ -166,8 +177,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
                                                     contextual_retrieval=cr)
                 if any(r["processed"] for r in bf_sd.values()):
-                    result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                                        max_items=embed_max_items)
+                    _embed()
                 backfill_counts: dict[str, int] = {}
                 for drive_id, res in bf_sd.items():
                     fs = drives_fs[drive_id]
@@ -210,8 +220,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     )
     result["backfill"] = bf
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
-        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
-                                            max_items=embed_max_items)
+        _embed()
     if budget is not None and budget.expired():
         result["budget_spent"] = True
     return result
