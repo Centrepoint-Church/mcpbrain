@@ -566,6 +566,59 @@ permanently and pinned doctor to a red Watchdog line."
 > that is exactly the gap that let the Task 3 attempt look plausible while
 > being pointless.
 
+> **Task 4 round-2 update (2026-07-28, review) — cause 1 fixed and verified,
+> cause 2 attempted and reverted, tracked open.**
+>
+> Round 1 fixed both causes: `_bulk_pass_active` (set/cleared around a gated
+> pass's real execution, checked by `_recover_from_stall` the same way
+> `_backup_in_progress` already is) for cause 1, plus running each gated
+> pass's acquire-and-run on its own worker thread (bounded join, so a hung
+> pass couldn't park `_run_periodic_passes()`/the watchdog check behind it)
+> for cause 2.
+>
+> The reviewer ran the composed system end-to-end (199 simulated maintenance
+> ticks, 3.3 simulated hours, against a real pass that never returns) and
+> found the worker-thread half introduced two Criticals rather than fixing
+> cause 2 cleanly:
+> 1. **The two causes' fixes cancelled each other out.** `_bulk_pass_active`
+>    is only cleared when the pass's OWN thread finishes. A pass that never
+>    returns holds it forever, so `_recover_from_stall` deferred recovery
+>    forever too — confirmed live: `NO RESTART`, `stalled=('cycle',
+>    11940.0)` after 199 ticks. Identical "daemon silently dead, nothing to
+>    page anyone" end-state as the original gap, reached by a subtler path
+>    (watchdog reachable but permanently muzzled, instead of unreachable) —
+>    the same "behaviorally safe, operationally pointless" pattern as the
+>    Task 3 retry-loop reversion above.
+> 2. **`_shutdown_maintenance` didn't track the new pass threads.** It only
+>    joins `_maintenance_thread`; the four gated passes now ran on separate,
+>    untracked `mcpbrain-pass-*` threads, so a stray pass thread in a dying
+>    process could still be writing chunks while the `_pending_update`
+>    successor started writing too — the exact two-writers hazard
+>    `_shutdown_maintenance` exists to prevent. `_run_periodic_passes` also
+>    never re-checked `_stop`, so it kept spawning new chunk-mutating
+>    threads even after shutdown was requested.
+>
+> **Resolution: reverted the worker-thread dispatch, kept `_bulk_pass_active`.**
+> `_run_gated_pass` runs INLINE again (on the maintenance thread, exactly as
+> before this task), with `_bulk_pass_active` set/cleared around its real
+> (inline) execution. This closes cause 1 — the actual problem Task 3's
+> review observed, verified by a full-timeline simulation
+> (`test_long_gated_pass_hold_does_not_trigger_spurious_restart`, 2100s hold,
+> no spurious restart, a later genuine stall still recovers) — with zero new
+> risk, since `_shutdown_maintenance` joining just `_maintenance_thread` is
+> sufficient again once nothing else is spawned. Cause 2 (a genuinely-hung
+> pass makes `_run_periodic_passes()`/the watchdog check unreachable) is left
+> as an explicit, tracked gap — same disposition as Task 3's own reversion.
+> **Do not resurrect the worker-thread-per-pass approach without ALSO**:
+> (a) bounding `_bulk_pass_active`'s defer itself (e.g. defer only up to
+> `STALL_S`, then let recovery proceed anyway — a pass hung that long needs a
+> restart the same as any other stall), AND (b) giving `_shutdown_maintenance`
+> a real thread registry it joins or explicitly abandons-and-logs. Verify
+> both with a running simulation (a genuinely-hung pass that eventually DOES
+> trigger recovery; a shutdown that actually waits for or explicitly
+> abandons an in-flight pass thread), not just unit-level mechanism tests —
+> same lesson as above, twice now.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_daemon_thread_safety.py`:

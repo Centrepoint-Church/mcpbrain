@@ -132,23 +132,6 @@ MAINTENANCE_TICK_S = 60.0
 # tick.
 BULK_LOCK_ACQUIRE_S = 5.0
 
-# How long the maintenance thread will WAIT for a single gated pass's own
-# execution (not just its _bulk_lock acquire) before giving up and moving on
-# to the rest of this tick's dispatch, leaving the pass running in the
-# background. Must stay well under STALL_S: without this bound, a pass that
-# never returns at all (a true hang -- a network call with no timeout, a
-# genuine infinite loop, as opposed to merely a *long* pass like a 500-round
-# salience-scoring sweep) makes _run_periodic_passes() itself never return,
-# which means _maintenance_loop never reaches _note_progress("maintenance")/
-# _stalled_phase()/_recover_from_stall() again either -- the watchdog thread
-# is technically alive but permanently unable to check anything, including a
-# genuine wedge of the CYCLE thread it exists to catch. Abandoning the wait
-# (not the pass) is safe: _run_gated_pass owns the whole acquire/run/release
-# lifecycle on its own thread regardless of who is watching, so the lock is
-# only ever released by whichever thread actually finishes the pass, never by
-# a caller that merely stopped waiting.
-MAINTENANCE_PASS_EXEC_TIMEOUT_S = 300.0
-
 # Brief pause the cycle thread takes, after releasing _bulk_lock between units
 # of work, when another thread has signalled intent to acquire it (see
 # Daemon._bulk_lock_intent / _bulk_lock_wanted). CPython locks are not
@@ -621,7 +604,7 @@ class Daemon:
         (a cold fastembed download takes minutes) -- fine for the cycle
         thread, which genuinely needs the model to proceed and has nothing
         safe to skip to, but _run_self_improve (a non-gated maintenance pass,
-        so it is NOT covered by _run_gated_pass's worker-thread bound) calling
+        called inline by _run_periodic_passes same as every other pass) calling
         the property directly would park the ENTIRE maintenance tick --
         _note_progress + the watchdog stall check that follow it in
         _maintenance_loop included -- behind someone else's in-flight model
@@ -911,15 +894,21 @@ class Daemon:
         self._bulk_lock_waiters_lock = threading.Lock()
         # Set for the duration of a gated cadence pass's OWN execution (Task 4
         # known-gap fix), from the moment it actually acquires _bulk_lock to the
-        # moment it releases it -- set/cleared by _run_gated_pass, on WHICHEVER
-        # thread ends up running the pass, not by whichever maintenance tick
-        # happens to be watching it. A gated pass that legitimately holds
-        # _bulk_lock past STALL_S (e.g. _run_salience_score's `while rounds <
-        # 500` loop) makes "sync"/"cycle"/"maintenance" all go stale together --
-        # every one of them is blocked behind the same lock -- which
-        # _stalled_phase() cannot tell apart from a genuine wedge on the raw
-        # timestamps alone. _recover_from_stall defers while this is set, the
-        # same shape as the existing _backup_in_progress check.
+        # moment it releases it -- set/cleared by _run_gated_pass, which runs
+        # INLINE on the maintenance thread (see _run_periodic_passes's
+        # docstring for a worker-thread variant that was tried and reverted).
+        # A gated pass that legitimately holds _bulk_lock past STALL_S (e.g.
+        # _run_salience_score's `while rounds < 500` loop) makes
+        # "sync"/"cycle"/"maintenance" all go stale together -- every one of
+        # them is blocked behind the same lock -- which _stalled_phase()
+        # cannot tell apart from a genuine wedge on the raw timestamps alone.
+        # _recover_from_stall defers while this is set, the same shape as
+        # (and the same UNBOUNDED-defer tradeoff as) the existing
+        # _backup_in_progress check: a pass that never returns at all holds
+        # both _bulk_lock and this flag forever, so recovery never fires for
+        # that specific wedge either -- an explicit, tracked known gap (see
+        # _run_periodic_passes's docstring), not a new risk this introduces
+        # beyond what _backup_in_progress already accepted for backups.
         self._bulk_pass_active = threading.Event()
         # Maintenance runs on its own thread, ticking independently of the bulk
         # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
@@ -2809,18 +2798,12 @@ class Daemon:
     def _run_gated_pass(self, cp: "CadencePass") -> None:
         """Acquire _bulk_lock (bounded) and run ONE gated cadence pass to completion.
 
-        Runs on its own worker thread, spawned by _run_periodic_passes, and owns
-        the WHOLE acquire -> run -> release (+ _bulk_pass_active flag) lifecycle
-        itself. That is deliberate: _run_periodic_passes bounds how long it waits
-        for this method to return (MAINTENANCE_PASS_EXEC_TIMEOUT_S) so a pass that
-        never returns at all can't make the maintenance thread itself unreachable
-        (see that constant's docstring). If it abandons the wait, this method is
-        still running in the background and is the ONLY thing that will ever
-        release _bulk_lock or clear _bulk_pass_active for this pass -- the caller
-        must never do either itself, or it would let the cycle thread's
-        _cycle_bulk_section acquire the lock while this pass is still genuinely
-        mutating chunks, exactly the concurrent-writer race _bulk_lock exists to
-        prevent.
+        Called INLINE by _run_periodic_passes, on the maintenance thread itself
+        (see that method's docstring for why a worker-thread version of this was
+        tried and reverted). Owns the whole acquire -> run -> release lifecycle,
+        including setting/clearing _bulk_pass_active around the pass's real
+        execution -- the signal _recover_from_stall() checks to tell "blocked on
+        a legitimately slow gated pass" apart from "wedged" (see its docstring).
 
         Signals intent BEFORE blocking on the acquire so the cycle thread's
         _cycle_bulk_section sees it and yields between units of work (CPython's
@@ -2868,40 +2851,57 @@ class Daemon:
         only for the gated passes — auto_update/verify resolve a default
         interval internally and would be wrongly disabled by an outer check).
 
-        A due gated pass's acquire-and-run (_run_gated_pass) runs on its OWN
-        worker thread, joined with a bound of MAINTENANCE_PASS_EXEC_TIMEOUT_S —
-        not called inline. Two distinct problems this solves, both found live
-        by review (see docs/superpowers/plans/2026-07-27-daemon-scheduling-
-        remediation.md, Task 4 known-gap section):
+        A due gated pass's acquire-and-run (_run_gated_pass) runs INLINE, on
+        this thread, exactly as before this task. A worker-thread variant
+        (bounded by a join timeout, so a genuinely-hung pass could not make
+        this method itself unreachable) was built and reviewed as part of this
+        task's known-gap fix, and was REVERTED — found, by actually running
+        the composed system (199 simulated maintenance ticks against a real
+        hung pass), to be worse than the plain inline shape it replaced, not
+        better:
 
-          1. The _bulk_lock ACQUIRE alone was already bounded (BULK_LOCK_ACQUIRE_S)
-             so a cycle thread holding the lock could never park this dispatch
-             loop. But once acquired, the pass's own EXECUTION was unbounded —
-             _run_salience_score's `while rounds < 500` loop or
-             stale_reextract's network-touching sweep can legitimately run far
-             longer than one tick. Called inline, that parks THIS thread (and
-             the _note_progress + _stalled_phase watchdog check that follow this
-             call in _maintenance_loop) for the pass's whole duration. A pass
-             that genuinely never returns would make the maintenance thread
-             permanently unable to check anything again — including a real
-             wedge of the cycle thread, which is exactly the failure the
-             watchdog exists to catch (it would be alive but functionally inert).
-          2. Bounding just this wait (not the pass) is safe specifically because
-             _run_gated_pass owns its own acquire/run/release lifecycle
-             end-to-end regardless of who is watching — abandoning the JOIN
-             here never abandons the lock: the lock and _bulk_pass_active are
-             only ever touched by whichever thread is actually running the
-             pass, so a slow-but-legitimate pass just keeps running in the
-             background exactly as it would have inline, and this loop moves
-             on to the rest of this tick's dispatch instead of blocking on it.
-             A LATER tick's attempt at the SAME still-not-due-to-finish pass
-             harmlessly re-fails its own bounded _bulk_lock acquire (the
-             background run still holds it) and skips again — no double-run.
+          1. It made _recover_from_stall's _bulk_pass_active defer UNBOUNDED
+             for exactly the case it was meant to help with. A pass that
+             genuinely never returns holds _bulk_lock forever either way; with
+             the worker-thread variant, _bulk_pass_active also stays set
+             forever (it is only cleared when the pass's own thread finishes),
+             so _recover_from_stall deferred recovery FOREVER too -- an
+             end-to-end run confirmed 199 ticks / 3.3 simulated hours with no
+             restart and _stalled_phase() reporting a stale "cycle" the whole
+             time. That is the identical "daemon silently dead, nothing to
+             page anyone" end-state this whole task exists to prevent, reached
+             by a subtler path (the watchdog is technically reachable now, but
+             permanently muzzled by its own deferral) instead of the original
+             one (the watchdog thread itself was unreachable) -- the same
+             "behaviorally safe, operationally pointless" pattern that got
+             Task 3's _cycle_bulk_section retry-loop attempt reverted.
+          2. _shutdown_maintenance only joins _maintenance_thread. The
+             worker-thread variant left the four gated passes running on
+             separate, untracked mcpbrain-pass-* threads, so on the
+             _pending_update restart path a stray pass thread in the dying
+             process could still be writing chunks while the successor
+             started writing too -- the exact two-concurrent-writers hazard
+             _shutdown_maintenance exists to prevent. _run_periodic_passes
+             also never re-checked _stop, so it kept spawning new
+             chunk-mutating threads even after shutdown was requested.
 
-        _bulk_pass_active (set for the duration of the pass's real execution,
-        by _run_gated_pass itself) is the signal _recover_from_stall() checks to
-        tell "blocked on a legitimately slow gated pass" apart from "wedged" —
-        see its docstring for the false-stall shape this closes.
+        Fixing both properly (a time-bounded defer with an escalation path --
+        e.g. deferring only up to STALL_S, then letting recovery proceed
+        anyway, since a pass hung that long needs a restart the same as any
+        other stall -- plus a real thread registry _shutdown_maintenance
+        joins or explicitly abandons-and-logs) is real additional concurrency
+        surface in code that has already been through 4 (Task 2) and 3
+        (Task 3) review rounds for similar correctness issues. Per the brief's
+        explicit "fine to leave this open" allowance, this task instead kept
+        the ALREADY-fixed, already-verified half — inline dispatch, with
+        _bulk_pass_active set/cleared around the pass's real (inline)
+        execution so _recover_from_stall correctly defers on a legitimately
+        long-but-FINITE hold (the actual problem Task 3's review observed) --
+        and left cause 2 (a genuinely-hung pass still makes this method,
+        and therefore the watchdog check that follows it in
+        _maintenance_loop, unreachable) as an explicit, tracked known gap. See
+        docs/superpowers/plans/2026-07-27-daemon-scheduling-remediation.md,
+        Task 4 section, for the fuller writeup.
         """
         configured = config.is_configured(str(app_dir()))
         for cp in _CADENCE_PASSES:
@@ -2911,20 +2911,7 @@ class Daemon:
                 if cp.needs_bulk_lock:
                     if not self._is_due(cp.interval_attr, cp.last_attr):
                         continue
-                    t = threading.Thread(
-                        target=self._run_gated_pass, args=(cp,),
-                        daemon=True, name=f"mcpbrain-pass-{cp.name}")
-                    t.start()
-                    t.join(timeout=MAINTENANCE_PASS_EXEC_TIMEOUT_S)
-                    if t.is_alive():
-                        log.warning(
-                            "periodic pass %s still running past %.0fs; "
-                            "continuing this tick's dispatch without waiting "
-                            "further so the maintenance thread's own "
-                            "progress/watchdog check stays reachable -- the "
-                            "pass keeps running in the background and will "
-                            "release the bulk lock itself when it finishes",
-                            cp.name, MAINTENANCE_PASS_EXEC_TIMEOUT_S)
+                    self._run_gated_pass(cp)
                 else:
                     getattr(self, cp.fn_name)()
             except Exception as exc:  # noqa: BLE001
@@ -3040,18 +3027,30 @@ class Daemon:
           sweep can legitimately run well past STALL_S while holding the
           lock -- and while it does, the cycle thread's own
           _cycle_bulk_section blocks on the SAME lock, so "sync"/"cycle" (and,
-          for however many ticks the pass outlasts, "maintenance" itself)
-          all go stale TOGETHER. _stalled_phase() cannot tell that apart from
-          a genuine wedge from the raw timestamps alone -- confirmed by a
-          full-timeline simulation of a 2100s hold, which reproduces
-          `_stalled_phase() -> ("sync", ~2100.0)` on an otherwise perfectly
-          healthy daemon. _bulk_pass_active is set/cleared by _run_gated_pass
-          around the pass's REAL execution (not around whichever maintenance
-          tick happens to be watching it — see MAINTENANCE_PASS_EXEC_TIMEOUT_S),
-          so it stays accurate across ticks even if one tick gives up WAITING
-          on a slow pass. Once the pass genuinely finishes, the flag clears and
-          a later real stall (progress never resuming afterward) is still
-          caught normally -- this defers, it does not silence the watchdog.
+          because _run_gated_pass runs INLINE on the maintenance thread, the
+          maintenance thread's OWN tick can't reach _note_progress
+          ("maintenance") either) all go stale TOGETHER. _stalled_phase()
+          cannot tell that apart from a genuine wedge from the raw timestamps
+          alone -- confirmed by a full-timeline simulation of a 2100s hold,
+          which reproduces `_stalled_phase() -> ("sync"/"cycle", ~2100.0)` on
+          an otherwise perfectly healthy daemon. _bulk_pass_active is
+          set/cleared by _run_gated_pass around the pass's real execution, so
+          once the pass genuinely finishes the flag clears and a later real
+          stall (progress never resuming afterward) is still caught normally.
+
+          This deferral is UNBOUNDED, the same tradeoff _backup_in_progress
+          already makes: a pass that never returns AT ALL (a true hang, not
+          merely a long-but-finite one) holds _bulk_lock and this flag
+          forever, so this specific wedge is never recovered from either --
+          confirmed live by an end-to-end simulation (199 ticks / 3.3
+          simulated hours, no restart). A worker-thread variant that bounded
+          this (so a genuine hang could still be recovered from) was built,
+          reviewed, and REVERTED: it introduced its own thread-tracking
+          Critical (see _run_periodic_passes's docstring) without which
+          _shutdown_maintenance's single-writer guarantee breaks, for a
+          benefit this deferral already gives up anyway once bounded that
+          way. Left as an explicit, tracked known gap rather than force a
+          fix not yet verified safe — see the plan doc's Task 4 section.
         - The cycle is repeatedly raising, not hanging
           (_cycle_error_streak > 3). A deterministic exception looks
           identical to a wedge from _stalled_phase's point of view -- "cycle"
