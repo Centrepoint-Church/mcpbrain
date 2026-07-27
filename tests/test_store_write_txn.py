@@ -150,6 +150,16 @@ def test_recall_path_write_stays_well_under_prompt_recall_budget_under_contentio
     succeed) in well under prompt_recall's 3.0s client budget -- asserted here
     at a generous 2.0s ceiling (the actual measured value is printed so a
     flaky/slow CI box's real number is visible if this ever fails).
+
+    hold_s MUST outlast the DEFAULT busy_timeout's worst case (~5.36-5.4s
+    measured) or this test cannot discriminate a working fix from a reverted
+    one: a too-short hold (an earlier version used 2.0s) lets the holder
+    finish waiting on its own timeout before a reverted (5000ms) contending
+    write would fail, so the contender just succeeds late (~1.86s measured)
+    and still passes `elapsed < 2.0` even with the fix reverted. Reproduced
+    directly: with hold_s=6.0 and RECALL_PATH_BUSY_TIMEOUT_MS monkeypatched
+    back to DEFAULT_BUSY_TIMEOUT_MS, this test genuinely FAILS at ~5.36s (see
+    task-6-report.md for the measured before/after).
     """
     import time
 
@@ -158,7 +168,7 @@ def test_recall_path_write_stays_well_under_prompt_recall_budget_under_contentio
         db.execute("CREATE TABLE IF NOT EXISTS t3(k INTEGER PRIMARY KEY, v INTEGER)")
         db.execute("INSERT INTO t3(k, v) VALUES (1, 0)")
 
-    hold_s = 2.0  # longer than the recall-path budget, so it WILL contend
+    hold_s = 6.0  # must outlast the default 5000ms busy_timeout's worst case
     release = threading.Event()
 
     def hold_writer():
