@@ -275,7 +275,7 @@ def _regroup_parts(extractions: list) -> list:
     return recombined
 
 
-def drain(store, *, home=None, apply=None, embedder=None) -> dict:
+def drain(store, *, home=None, apply=None, embedder=None, budget=None) -> dict:
     """Process every inbox file. Returns a summary dict.
 
     Summary keys: files, applied, marked, merges, quarantined, entities,
@@ -287,6 +287,12 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
     next cycle. A failure on any extraction is logged and isolated: its chunks
     are not marked and the file is kept (not deleted) so unfinished threads
     retry. A file is only fully successful when every extraction applied.
+
+    Unbounded per cycle (unlike index_pending) for the same reason embedding
+    used to be: it processes every inbox file before returning. `budget` (a
+    `Budget`, or None for unbounded) is checked once per inbox file; once it
+    expires the loop stops and `summary["budget_spent"] = True` — remaining
+    files are untouched (not deleted) and retried on the next cycle.
     """
     home_dir = _home(home)
     summary = {"files": 0, "applied": 0, "marked": 0, "merges": 0,
@@ -307,6 +313,9 @@ def drain(store, *, home=None, apply=None, embedder=None) -> dict:
             _entity_index = None
 
     for path in _iter_inbox(home_dir):
+        if budget is not None and budget.expired():
+            summary["budget_spent"] = True
+            break
         try:
             data = json.loads(path.read_text())
         except (ValueError, OSError) as exc:

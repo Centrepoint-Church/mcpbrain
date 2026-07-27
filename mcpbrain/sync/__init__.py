@@ -20,7 +20,8 @@ _STOP_AFTER_EMPTY_WINDOWS = 4   # 4 × 90d = ~1 year of empty before declaring d
 
 
 def run_sync_cycle(store, embedder, *, gmail_service=None,
-                   calendar_service=None, drive_service=None, home=None) -> dict:
+                   calendar_service=None, drive_service=None, home=None,
+                   budget=None, embed_max_items: int = 2000) -> dict:
     """Run a sync+embed cycle over whichever services are provided.
 
     For each provided service: run its source delta-sync, then index_pending
@@ -48,6 +49,14 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     Drive-API outage in `list_shared_drives`) is caught, logged, and skipped for
     this cycle — it can never abort the gmail/calendar/My-Drive sync that ran
     before it, nor the backfill step/return that runs after it.
+
+    Bounded: `budget` (a `Budget`, or None for unbounded) and `embed_max_items`
+    are threaded into every `index_pending` call so embedding one cycle's slice
+    never holds the loop for hours on a large backlog. Once `budget` expires,
+    the function returns early with `result["budget_spent"] = True` after
+    finishing the source block it was in — subsequent sources/backfill are
+    skipped this cycle and picked up on the next tick (the underlying work is
+    predicate-driven, so nothing is lost).
     """
     from mcpbrain.index import index_pending
     from mcpbrain.sync.gmail import sync_gmail
@@ -57,16 +66,28 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     result = {"gmail": 0, "calendar": 0, "drive": 0, "embedded": 0}
     if gmail_service is not None:
         result["gmail"] = sync_gmail(gmail_service, store)
-        result["embedded"] += index_pending(store, embedder, home=home)
+        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                            max_items=embed_max_items)
+        if budget is not None and budget.expired():
+            result["budget_spent"] = True
+            return result
     if calendar_service is not None:
         result["calendar"] = sync_calendar(calendar_service, store)
-        result["embedded"] += index_pending(store, embedder, home=home)
+        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                            max_items=embed_max_items)
+        if budget is not None and budget.expired():
+            result["budget_spent"] = True
+            return result
     if drive_service is not None:
         try:
             result["drive"] = sync_drive(drive_service, store)
-            result["embedded"] += index_pending(store, embedder, home=home)
+            result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                                max_items=embed_max_items)
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
             log.warning("sync: My-Drive sync failed (cycle continues, retries next cycle): %s", exc)
+        if budget is not None and budget.expired():
+            result["budget_spent"] = True
+            return result
 
     # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
     # to read config from, the cache enabled, and a fleet pin present. Without a
@@ -99,7 +120,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     absence_threshold=config.ingest_cache_revocation_threshold(home),
                     contextual_retrieval=cr)
                 # Embed the misses, THEN publish them (publish reads vectors back).
-                result["embedded"] += index_pending(store, embedder, home=home)
+                result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                                    max_items=embed_max_items)
                 # config.owner_email can return "" when unconfigured. Rather than
                 # stamp published artifacts with an empty published_by, skip
                 # publishing this cycle — files are still synced/embedded locally
@@ -144,7 +166,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
                                                     contextual_retrieval=cr)
                 if any(r["processed"] for r in bf_sd.values()):
-                    result["embedded"] += index_pending(store, embedder, home=home)
+                    result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                                        max_items=embed_max_items)
                 backfill_counts: dict[str, int] = {}
                 for drive_id, res in bf_sd.items():
                     fs = drives_fs[drive_id]
@@ -173,6 +196,9 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             # abort the rest of the cycle (pre-existing sync + the subsequent
             # backfill step must run whether or not this succeeds)
             log.warning("sync: shared-drive block failed (skipped this cycle): %s", exc)
+        if budget is not None and budget.expired():
+            result["budget_spent"] = True
+            return result
 
     # One backfill step per cycle, AFTER the live deltas. Bounded by
     # max_per_source so a slow cycle never starves new items.
@@ -184,7 +210,10 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     )
     result["backfill"] = bf
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
-        result["embedded"] += index_pending(store, embedder, home=home)
+        result["embedded"] += index_pending(store, embedder, home=home, budget=budget,
+                                            max_items=embed_max_items)
+    if budget is not None and budget.expired():
+        result["budget_spent"] = True
     return result
 
 
