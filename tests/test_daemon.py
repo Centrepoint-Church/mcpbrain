@@ -7,6 +7,8 @@ and run() is bounded by stop()/events with a tiny interval.
 """
 
 import base64
+import json
+import os
 import threading
 import time
 
@@ -1206,3 +1208,125 @@ def test_status_includes_connections_block(tmp_path, monkeypatch):
         "google", "claude", "backup", "records", "enrichment",
     }
     assert st["connections"]["claude"]["state"] == "not_started"  # no heartbeat yet
+
+
+# ---------------------------------------------------------------------------
+# Task 7: config-overridable tuning constants + startup snapshot-orphan sweep
+# ---------------------------------------------------------------------------
+
+def test_tuning_from_config_overrides_and_falls_back(tmp_path):
+    """config['tuning'] overrides daemon.py's own module-constant defaults;
+    an absent key keeps its default and an invalid value (wrong type, or
+    <= 0) is dropped back to the default rather than applied or disabling
+    anything -- unlike cadences, none of these has an OFF meaning."""
+    (tmp_path / "config.json").write_text(json.dumps({
+        "tuning": {
+            "cycle_budget_s": 12.5,
+            "watchdog_max_exits": 7,
+            "stall_s": -5,       # invalid: must be positive -> falls back
+            "bulk_lock_yield_s": "not-a-number",  # invalid -> falls back
+        }
+    }))
+    tuning = daemon_module._tuning_from_config(str(tmp_path))
+    assert tuning["cycle_budget_s"] == 12.5
+    assert tuning["watchdog_max_exits"] == 7
+    assert isinstance(tuning["watchdog_max_exits"], int)
+    # Invalid overrides fall back to the real module constants, not None.
+    assert tuning["stall_s"] == daemon_module.STALL_S
+    assert tuning["bulk_lock_yield_s"] == daemon_module.BULK_LOCK_YIELD_S
+    # Absent keys keep their module-constant default.
+    assert tuning["maintenance_tick_s"] == daemon_module.MAINTENANCE_TICK_S
+    assert tuning["embed_max_items"] == 2000
+
+
+def test_tuning_from_config_defaults_match_module_constants_when_unset(tmp_path):
+    """A fresh install (no config.json at all) must behave exactly as before
+    Task 7 -- every tuning value resolves to its pre-existing module constant."""
+    tuning = daemon_module._tuning_from_config(str(tmp_path))
+    assert tuning == {
+        "cycle_budget_s": daemon_module.CYCLE_BUDGET_S,
+        "maintenance_tick_s": daemon_module.MAINTENANCE_TICK_S,
+        "stall_s": daemon_module.STALL_S,
+        "bulk_lock_acquire_s": daemon_module.BULK_LOCK_ACQUIRE_S,
+        "bulk_lock_yield_s": daemon_module.BULK_LOCK_YIELD_S,
+        "watchdog_max_exits": daemon_module.WATCHDOG_MAX_EXITS,
+        "watchdog_window_s": daemon_module.WATCHDOG_WINDOW_S,
+        "handover_lock_wait_s": daemon_module.HANDOVER_LOCK_WAIT_S,
+        "embed_max_items": 2000,
+    }
+
+
+def test_daemon_cli_applies_tuning_config_overrides(tmp_path, monkeypatch):
+    """main() must not just COMPUTE the tuning dict and discard it -- the
+    values must actually land on the constructed Daemon instance. Regression
+    guard for the known failure shape this plan's reviews keep finding: a
+    config read that looks wired but only reaches some (or none) of the call
+    sites."""
+    import mcpbrain.embed as embed_module
+    import mcpbrain.auth as auth_module
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({
+        "tuning": {
+            "cycle_budget_s": 12.5,
+            "watchdog_max_exits": 7,
+            "bulk_lock_acquire_s": 9.0,
+            "bulk_lock_yield_s": 0.75,
+            "maintenance_tick_s": 45.0,
+            "stall_s": 900.0,
+            "watchdog_window_s": 1800.0,
+            "embed_max_items": 42,
+        }
+    }))
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(embed_module, "get_embedder", lambda kind=None: FakeEmbedder())
+    monkeypatch.setattr(auth_module, "build_google_services", lambda: {})
+
+    captured = {}
+    real_daemon_cls = daemon_module.Daemon
+
+    class SpyDaemon(real_daemon_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            captured["instance"] = self
+
+    monkeypatch.setattr(daemon_module, "Daemon", SpyDaemon)
+    daemon_module.main(["--once"])
+
+    d = captured["instance"]
+    assert d._cycle_budget_s == 12.5
+    assert d._watchdog_max_exits == 7
+    assert d._bulk_lock_wait_s == 9.0
+    assert d._bulk_lock_yield_s == 0.75
+    assert d._maintenance_interval_s == 45.0
+    assert d._stall_s == 900.0
+    assert d._watchdog_window_s == 1800.0
+    assert d._embed_max_items == 42
+
+
+def test_run_sweeps_orphan_snapshot_dirs_at_startup(tmp_path, monkeypatch):
+    """run() must sweep stale mcpbrain-snap-* work dirs from the OS temp dir
+    (tempfile.gettempdir(), NOT $HOME -- /var/folders/... on macOS, which is
+    where the live ~24GB was actually found) before entering the loop.
+    make_encrypted_snapshot's own cleanup runs in a `finally` that cannot fire
+    when the watchdog os._exits mid-snapshot, so these orphans never clean up
+    on their own."""
+    fake_tmp = tmp_path / "os_tmp"
+    fake_tmp.mkdir()
+    orphan = fake_tmp / "mcpbrain-snap-old"
+    orphan.mkdir()
+    (orphan / "part.bin").write_bytes(b"x" * 16)
+    old = time.time() - 999_999
+    os.utime(orphan, (old, old))
+    monkeypatch.setattr(daemon_module.tempfile, "gettempdir", lambda: str(fake_tmp))
+
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    daemon = Daemon(store, emb, lock=SingleWriterLock(tmp_path / "d.lock"))
+    daemon.stop()  # preset so run() does startup work, then exits promptly
+
+    daemon.run()
+
+    assert not orphan.exists(), "orphaned snapshot temp dir should be swept at startup"
