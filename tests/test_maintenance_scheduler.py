@@ -19,6 +19,7 @@ def _dispatch_daemon(monkeypatch, tmp_path, *, wait_s=0.15, due=True):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     dm = d.Daemon.__new__(d.Daemon)
     dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_wanted = threading.Event()
     dm._bulk_lock_wait_s = wait_s
     dm._clock = time.monotonic
 
