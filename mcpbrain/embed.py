@@ -1,3 +1,4 @@
+import threading
 from functools import lru_cache
 
 _BGE_Q = "Represent this sentence for searching relevant passages: "
@@ -120,12 +121,19 @@ class _LocalEmbedder:
         self._model = TextEmbedding(model_name=model_name, cache_dir=_model_cache_dir())
         self.dim = dim
         self._qp = query_prefix
+        # get_embedder() memoises one instance per kind, so index_pending (cycle
+        # thread) and consolidation/self_improve (maintenance thread) share this
+        # single ONNX model. fastembed's TextEmbedding is not documented as
+        # thread-safe, so serialise access rather than assume it.
+        self._lock = threading.Lock()
 
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
-        return [list(map(float, v)) for v in self._model.embed(list(texts))]
+        with self._lock:
+            return [list(map(float, v)) for v in self._model.embed(list(texts))]
 
     def embed_query(self, text: str) -> list[float]:
-        return list(map(float, next(self._model.query_embed([self._qp + text]))))
+        with self._lock:
+            return list(map(float, next(self._model.query_embed([self._qp + text]))))
 
 
 @lru_cache(maxsize=None)

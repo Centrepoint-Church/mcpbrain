@@ -1,3 +1,5 @@
+import threading
+
 from mcpbrain.daemon import Daemon
 
 
@@ -10,6 +12,7 @@ def _make_daemon(factory):
     d = Daemon.__new__(Daemon)          # bypass full __init__ wiring
     d._embedder_obj = None
     d._embedder_factory = factory
+    d._embedder_lock = threading.Lock()
     return d
 
 
