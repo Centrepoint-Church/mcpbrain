@@ -545,18 +545,42 @@ def test_start_maintenance_thread_creates_a_fresh_thread(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4 known-gap fix (partial, by design): a legitimately long-but-FINITE
-# gated-pass hold must not trigger a spurious restart. A genuinely-hung pass
-# (never returns at all) making the watchdog itself unreachable remains an
-# explicit, tracked known gap -- a fix for that was attempted, reviewed, and
-# reverted; see _run_periodic_passes's and _recover_from_stall's docstrings,
-# and the note just below, for the full writeup of why. See
+# Task 4 known-gap: BOTH causes remain open. A legitimately long-but-FINITE
+# gated-pass hold STILL triggers a spurious restart in the current
+# single-thread production shape (cause 1), and a genuinely-hung pass (never
+# returns at all) still makes the watchdog itself unreachable (cause 2) -- a
+# fix for cause 2 was attempted, reviewed, and reverted, and that revert's own
+# claim to have fixed cause 1 was itself found false on review and is
+# corrected here. See _run_periodic_passes's and _recover_from_stall's
+# docstrings, and docs/superpowers/plans/2026-07-27-daemon-scheduling-
+# remediation.md's Task 4 section, for the full writeup of why. See
 # docs/superpowers/sdd/2026-07-27-daemon-scheduling-remediation/task-4-brief.md's
 # callout for the original gap description.
+#
+# _bulk_pass_active is retained for status() observability only (a
+# DIFFERENT thread -- the control-API handler -- really can observe it set
+# while the maintenance thread is mid-pass). Its _recover_from_stall defer
+# branch is dead code in production: that check only ever runs on the SAME
+# thread that already cleared the flag before reaching it. The two tests
+# below reflect that split honestly -- one exercises the flag mechanism in
+# isolation (a different "thread" observing it mid-set, which is realistic
+# for status() polling but NOT for _recover_from_stall), the other pins the
+# actual current (undesired but honest) single-thread production behavior:
+# a restart DOES fire.
 # ---------------------------------------------------------------------------
 
-def test_watchdog_defers_recovery_while_a_gated_pass_holds_the_bulk_lock(tmp_path, monkeypatch):
-    """Direct unit check, same shape as test_watchdog_does_not_exit_during_a_backup."""
+def test_bulk_pass_active_flag_defers_recovery_only_when_checked_from_elsewhere(tmp_path, monkeypatch):
+    """Direct unit check, same shape as test_watchdog_does_not_exit_during_a_backup.
+
+    NOT a production-topology test: this manually sets the flag and calls
+    _recover_from_stall() from the SAME (single) call site, which is exactly
+    the scenario that can never happen in production (see this file's header
+    comment and _recover_from_stall's docstring) -- in real operation, the
+    inline caller that would set the flag is the same thread that clears it
+    before _recover_from_stall ever runs. This test is useful ONLY to confirm
+    the check itself is implemented correctly (dead code is still code that
+    can have bugs); it is not evidence cause 1 is handled.
+    """
     dm = _wd_daemon(tmp_path, monkeypatch)
     dm._bulk_pass_active = threading.Event()
     dm._bulk_pass_active.set()
@@ -564,23 +588,24 @@ def test_watchdog_defers_recovery_while_a_gated_pass_holds_the_bulk_lock(tmp_pat
     monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.append("exit"))
     monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.append("spawn"))
     dm._recover_from_stall()
-    assert called == [], "watchdog must not restart while a gated pass holds the bulk lock"
+    assert called == [], (
+        "the _bulk_pass_active check itself, in isolation, must still defer "
+        "when the flag is set -- this does NOT prove cause 1 is fixed in "
+        "production; see test_inline_gated_pass_hold_still_triggers_a_"
+        "spurious_restart_known_gap for the actual production topology"
+    )
 
 
-def test_long_gated_pass_hold_does_not_trigger_spurious_restart(tmp_path, monkeypatch):
-    """Full-timeline simulation of the known gap the Task 3 reviewer instrumented:
-    a gated pass that legitimately holds _bulk_lock past STALL_S (their example:
-    a 2100s hold) must defer watchdog recovery on an otherwise perfectly healthy
-    daemon, not restart it. Drives the REAL _run_gated_pass / _stalled_phase /
-    _recover_from_stall -- not a mocked mechanism -- with the daemon's own fake
-    clock advanced to simulate the elapsed wall time (the pass itself is only
-    actually blocked on a real threading.Event, not a real 2100s sleep).
+def test_bulk_pass_active_flag_never_observed_set_from_a_second_thread_in_isolation(tmp_path, monkeypatch):
+    """Confirms the flag mechanism itself (set-before-run, clear-in-finally)
+    behaves correctly when observed from a genuinely SEPARATE thread -- e.g.
+    a status() poll from the control-API handler thread while the
+    maintenance thread is mid-pass, which is a real scenario status()
+    exposes today. This is NOT the _recover_from_stall topology (that always
+    runs on the SAME thread as the pass, post-revert) -- see the file header
+    comment.
     """
     dm = d.Daemon.__new__(d.Daemon)
-    now = [1000.0]
-    dm._clock = lambda: now[0]
-    dm._progress = {"cycle": now[0], "sync": now[0], "maintenance": now[0], "backup": now[0]}
-    dm._progress_lock = threading.Lock()
     dm._bulk_lock = threading.Lock()
     dm._bulk_lock_waiters = 0
     dm._bulk_lock_waiters_lock = threading.Lock()
@@ -602,26 +627,10 @@ def test_long_gated_pass_hold_does_not_trigger_spurious_restart(tmp_path, monkey
     t.start()
     try:
         assert entered.wait(timeout=2.0), "gated pass never started"
+        # A genuinely different thread (this one, the test/"control-API"
+        # thread) CAN observe the flag set while the pass runs elsewhere --
+        # this is the real basis for status()'s bulk_pass_active field.
         assert dm._bulk_pass_active.is_set(), "flag must be set while the pass runs"
-
-        # Simulate the reviewer's 2100s hold: every progress key the cycle/
-        # maintenance threads would stamp is blocked behind the same lock, so
-        # none of them advance while the pass runs.
-        now[0] = 1000.0 + 2100.0
-
-        stalled = dm._stalled_phase()
-        assert stalled is not None, (
-            "precondition: this must look stalled from the raw timestamps alone "
-            "(this is exactly what a plain min()-over-progress check reports)")
-
-        called = []
-        dm._exit_for_restart = lambda: called.append("exit")
-        dm._spawn_replacement = lambda: called.append("spawn")
-        dm._recover_from_stall()
-        assert called == [], (
-            "a legitimately long gated-pass hold triggered a spurious watchdog "
-            "restart on an otherwise healthy daemon"
-        )
     finally:
         release.set()
         t.join(timeout=2.0)
@@ -629,17 +638,78 @@ def test_long_gated_pass_hold_does_not_trigger_spurious_restart(tmp_path, monkey
 
     assert not dm._bulk_pass_active.is_set(), "flag must clear once the pass genuinely finishes"
 
-    # And a GENUINE stall, once the pass has actually finished and progress
-    # still never resumes, must still be caught -- deferring must not become
-    # silencing the watchdog forever.
-    now[0] += d.STALL_S + 1.0
-    stalled2 = dm._stalled_phase()
-    assert stalled2 is not None
-    called2 = []
-    dm._exit_for_restart = lambda: called2.append("exit")
-    dm._spawn_replacement = lambda: called2.append("spawn")
+
+def test_inline_gated_pass_hold_still_triggers_a_spurious_restart_known_gap(tmp_path, monkeypatch):
+    """Honest regression-pin for cause 1, which is STILL OPEN after the
+    round-2 revert (a round-2 note previously, wrongly, claimed this was
+    fixed -- corrected on round-3 review).
+
+    Drives the REAL, single-threaded production call chain exactly as
+    _maintenance_loop composes it -- _run_periodic_passes() ->
+    _run_gated_pass() (inline, on THIS thread) -> _note_progress("maintenance")
+    -> _stalled_phase() -> _recover_from_stall() -- with a gated pass whose
+    body just advances a fake clock by 2100s instead of returning
+    immediately (no second thread, no real sleep: this IS how a
+    legitimately-long-but-finite pass looks from the maintenance thread's own
+    point of view -- one call that takes a long time and then returns).
+
+    This asserts the CURRENT (undesired but honest) behavior: a restart DOES
+    fire, because by the time _recover_from_stall() runs, _run_gated_pass's
+    own `finally: active.clear()` has already cleared _bulk_pass_active on
+    this same thread -- there was never a second thread to observe it set.
+    If a future fix makes this assertion flip to `== []`, that is exactly the
+    signal cause 1 has actually been fixed -- update the docs (this file's
+    header comment, _run_periodic_passes's and _recover_from_stall's
+    docstrings, and the plan doc's Task 4 section) at that point; don't just
+    delete this test.
+    """
+    dm = d.Daemon.__new__(d.Daemon)
+    monkeypatch.setattr(d, "app_dir", lambda: tmp_path)
+    now = [1000.0]
+    dm._clock = lambda: now[0]
+    dm._progress = {"cycle": now[0], "sync": now[0], "maintenance": now[0], "backup": now[0]}
+    dm._progress_lock = threading.Lock()
+    dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_waiters = 0
+    dm._bulk_lock_waiters_lock = threading.Lock()
+    dm._bulk_lock_wait_s = 0.1
+    dm._bulk_pass_active = threading.Event()
+    dm._cycle_error_streak = 0
+
+    def _slow_pass():
+        # A legitimately long-but-finite pass, from the maintenance thread's
+        # own point of view: one call that takes 2100s and then returns --
+        # no second thread involved, matching production exactly.
+        now[0] += 2100.0
+
+    fake_cp = d.CadencePass("fake_slow", "_x_interval_s", "_x_last", "_run_x",
+                            needs_configured=False, needs_bulk_lock=True)
+    monkeypatch.setattr(d, "_CADENCE_PASSES", (fake_cp,))
+    dm._run_x = _slow_pass
+    dm._x_interval_s = 0.0    # always due
+    dm._x_last = None
+
+    # Exactly _maintenance_loop's own sequence, all on this one thread.
+    dm._run_periodic_passes()
+    assert not dm._bulk_pass_active.is_set(), (
+        "precondition: the flag is already clear by the time this thread "
+        "gets back here -- there was no second thread to see it set")
+    dm._note_progress("maintenance")
+    stalled = dm._stalled_phase()
+    assert stalled is not None, (
+        "precondition: this must look stalled from the raw timestamps alone")
+
+    called = []
+    dm._exit_for_restart = lambda: called.append("exit")
+    dm._spawn_replacement = lambda: called.append("spawn")
     dm._recover_from_stall()
-    assert called2 == ["exit"], "a genuine stall after the pass finished must still restart"
+    assert called == ["exit"], (
+        "KNOWN GAP (documented, not a surprise): a legitimately long-but-"
+        "finite gated-pass hold still causes a spurious restart in the "
+        "current single-thread shape, because _bulk_pass_active can never "
+        "be observed set by _recover_from_stall on one thread. If this ever "
+        "needs to become `== []`, cause 1 has been fixed -- update the docs."
+    )
 
 
 # NOTE: a test for "a genuinely-hung gated pass must not make
