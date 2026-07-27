@@ -2,6 +2,8 @@
 import json
 import threading
 
+import pytest
+
 from mcpbrain import daemon as d
 
 
@@ -59,6 +61,11 @@ def test_stall_detected_on_stalest_phase_not_freshest(tmp_path):
 
 
 def test_exit_limiter_stops_after_three_in_window(tmp_path, monkeypatch):
+    # _recent_watchdog_exits compares persisted history against time.time(),
+    # not self._clock() (see test_watchdog_history_survives_a_reboot) -- pin
+    # the wall clock so history "close to 1000.0" reads as recent the same
+    # way it did back when the comparison was against the fake _clock.
+    monkeypatch.setattr(d.time, "time", lambda: 1000.0)
     dm = _wd_daemon(tmp_path, monkeypatch)
     (tmp_path / "watchdog_exits.json").write_text(
         json.dumps([900.0, 950.0, 990.0]))          # 3 recent exits
@@ -171,6 +178,10 @@ def test_status_reports_the_watchdog_restart_limiter(tmp_path, monkeypatch):
     """Spec: limiter state is exposed on /api/status for doctor and the tray.
     Without it, "stops self-restarting and stays visibly stuck" is visible
     nowhere at all."""
+    # History is now compared against time.time(), not the daemon's fake
+    # _clock (see test_watchdog_history_survives_a_reboot) -- pin the wall
+    # clock so the fixture's "close to 1000.0" entries still read as recent.
+    monkeypatch.setattr(d.time, "time", lambda: 1000.0)
     dm = _real_daemon(tmp_path, monkeypatch)
     (tmp_path / "watchdog_exits.json").write_text(json.dumps([900.0, 950.0, 990.0]))
     st = dm.status()
@@ -195,6 +206,7 @@ def test_daemon_seeds_cycle_progress_at_construction(tmp_path, monkeypatch):
 def test_status_surfaces_watchdog_exit_count(tmp_path, monkeypatch):
     """The limiter's state has to be visible somewhere a human looks. Reuses the
     same history file the limiter reads, so the two can never disagree."""
+    monkeypatch.setattr(d.time, "time", lambda: 1000.0)
     dm = _wd_daemon(tmp_path, monkeypatch)
     (tmp_path / "watchdog_exits.json").write_text(json.dumps([900.0, 950.0]))
     assert len(dm._recent_watchdog_exits()) == 2
@@ -202,6 +214,7 @@ def test_status_surfaces_watchdog_exit_count(tmp_path, monkeypatch):
 
 
 def test_recent_exits_drops_entries_outside_the_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(d.time, "time", lambda: 1000.0)
     dm = _wd_daemon(tmp_path, monkeypatch)
     old = 1000.0 - d.WATCHDOG_WINDOW_S - 10.0
     (tmp_path / "watchdog_exits.json").write_text(json.dumps([old, 950.0]))
@@ -238,3 +251,183 @@ def test_resume_restamps_progress_so_a_long_pause_is_not_a_stall(tmp_path):
     dm.resume()
     assert dm._stalled_phase() is None, "resume must restart the watchdog's clock"
     assert set(dm._progress) == {"cycle", "sync"}
+
+
+def test_watchdog_does_not_exit_during_a_backup(tmp_path, monkeypatch):
+    """os._exit bypasses finally; killing mid-snapshot orphans the temp dir.
+    That is how ~24GB of mcpbrain-snap-* was left behind on 2026-07-27."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._backup_in_progress = threading.Event()
+    dm._backup_in_progress.set()
+    called = []
+    monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.append("exit"))
+    monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.append("spawn"))
+    dm._recover_from_stall()
+    assert called == [], "watchdog must not exit while a backup is running"
+
+
+def test_watchdog_history_survives_a_reboot(tmp_path, monkeypatch):
+    """Persisted timestamps must be wall-clock. time.monotonic resets on reboot,
+    which would make every historical entry look recent and disable self-healing
+    permanently."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._record_watchdog_exit()
+    import json
+    written = json.loads((tmp_path / "watchdog_exits.json").read_text())
+    import time as _t
+    assert abs(written[0] - _t.time()) < 60, "expected wall-clock, got monotonic"
+
+
+def test_backup_phase_reports_progress(tmp_path, monkeypatch):
+    """A multi-minute backup must not read as a stall."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._note_progress("backup")
+    assert "backup" in dm._progress
+
+
+def test_recovery_deferred_while_cycle_is_repeatedly_failing(tmp_path, monkeypatch):
+    """A deterministic exception looks identical to a hang from _stalled_phase's
+    point of view -- "cycle" simply stops advancing either way -- but a restart
+    cannot fix a bug that fails the same way every time. _recover_from_stall
+    must defer once the consecutive-failure streak run() tracks passes 3,
+    rather than burning the watchdog's 3-exit budget restart-looping on
+    something a restart can't solve."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._cycle_error_streak = 4
+    called = []
+    monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.append("exit"))
+    monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.append("spawn"))
+    dm._recover_from_stall()
+    assert called == [], "watchdog must not restart-loop a repeatedly-failing (not hung) cycle"
+
+
+def test_recovery_still_fires_below_the_failure_threshold(tmp_path, monkeypatch):
+    """Sanity check on the other side of the >3 threshold: a genuine stall with
+    few or no recent cycle failures must still recover normally."""
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    dm._cycle_error_streak = 2
+    monkeypatch.setattr(d.sys, "platform", "darwin")
+    called = {}
+    monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.setdefault("exit", True))
+    monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.setdefault("spawn", True))
+    dm._recover_from_stall()
+    assert called == {"exit": True}
+
+
+def test_maintenance_loop_does_not_swallow_assertion_error(monkeypatch):
+    """The outer `except Exception` around a maintenance tick used to also catch
+    AssertionError -- exactly what tests' _no_real_exit safety net raises when
+    the watchdog reaches a real os._exit. Swallowing it here would silently
+    demote that regression to a WARNING log line instead of a failing test."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._maintenance_interval_s = 3600.0
+
+    def _boom():
+        raise AssertionError("os._exit(1) called in a test")
+
+    monkeypatch.setattr(dm, "_run_periodic_passes", _boom)
+
+    with pytest.raises(AssertionError):
+        dm._maintenance_loop()
+
+
+def test_run_restarts_maintenance_thread_if_it_dies(monkeypatch):
+    """The watchdog lives inside _maintenance_loop (see _start_maintenance_thread),
+    so if that thread dies, the daemon must not silently keep looping cycles
+    forever with nobody watching for a wedge ever again."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._lock = threading.Lock()
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._wake = threading.Event()
+    dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    dm._clock = lambda: 0.0
+    dm._interval_s = 0.01
+    dm._pending_update = False
+    dm._cycle_error_streak = 0
+
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    dm._maintenance_thread = dead
+
+    restarted = []
+    monkeypatch.setattr(dm, "_start_maintenance_thread", lambda: restarted.append(1))
+
+    calls = {"n": 0}
+
+    def _run_one():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            dm._stop.set()
+        return {}
+
+    monkeypatch.setattr(dm, "run_one", _run_one)
+    monkeypatch.setattr(dm, "ensure_services", lambda: {})
+    monkeypatch.setattr(dm, "_backup_under_bulk_lock", lambda: None)
+    monkeypatch.setattr(d, "write_daemon_heartbeat", lambda home: None)
+
+    dm.run()
+
+    # Once at startup (run() always starts it) + once more when the loop
+    # notices the thread died and restarts it.
+    assert restarted == [1, 1]
+
+
+def test_run_tracks_and_resets_consecutive_cycle_failures(monkeypatch):
+    """run()'s except handler must increment _cycle_error_streak on every raise
+    and reset it on the next clean return -- the streak is how
+    _recover_from_stall tells a repeatedly-failing cycle apart from a genuine
+    wedge (see its docstring)."""
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._lock = threading.Lock()
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._wake = threading.Event()
+    dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    dm._clock = lambda: 0.0
+    dm._interval_s = 0.01
+    dm._pending_update = False
+    dm._maintenance_thread = None
+    dm._cycle_error_streak = 0
+
+    calls = {"n": 0}
+    streak_before_reset = {}
+
+    def _run_one():
+        calls["n"] += 1
+        if calls["n"] < 5:
+            raise RuntimeError("boom")
+        streak_before_reset["value"] = dm._cycle_error_streak
+        dm._stop.set()
+        return {}
+
+    monkeypatch.setattr(dm, "run_one", _run_one)
+    monkeypatch.setattr(dm, "ensure_services", lambda: {})
+    monkeypatch.setattr(dm, "_start_maintenance_thread", lambda: None)
+    monkeypatch.setattr(dm, "_backup_under_bulk_lock", lambda: None)
+    monkeypatch.setattr(d, "write_daemon_heartbeat", lambda home: None)
+
+    dm.run()
+
+    assert streak_before_reset["value"] == 4, "4 consecutive raises before the success"
+    assert dm._cycle_error_streak == 0, "a later success must reset the streak"
+    assert "cycle_error" in dm._progress
+
+
+def test_status_suppresses_stalled_while_paused(tmp_path, monkeypatch):
+    """status() must not report stalled while paused: _maintenance_loop skips
+    its whole body (progress heartbeat included) while paused, so every
+    timestamp freezes and a long-enough pause would otherwise look exactly
+    like a stall."""
+    dm = _real_daemon(tmp_path, monkeypatch)
+    dm._progress["cycle"] = dm._clock() - d.STALL_S - 1.0
+    dm.pause()
+    st = dm.status()
+    assert st["stalled"] is None
