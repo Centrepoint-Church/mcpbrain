@@ -1526,6 +1526,40 @@ class Daemon:
         self._last_backup = self._clock()
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 
+    def _backup_under_bulk_lock(self) -> None:
+        """Run maybe_backup() under _bulk_lock, with the SAME bounded-acquire-
+        and-skip shape the four gated maintenance passes use in
+        _run_periodic_passes (see BULK_LOCK_ACQUIRE_S).
+
+        run()'s cycle thread holds _bulk_lock for the whole of run_one(), and a
+        gated maintenance pass that has already acquired the lock is not itself
+        time-bounded (e.g. _run_salience_score's `while rounds < 500` loop, or
+        stale_reextract's network-touching sweep) -- either side can legitimately
+        hold the lock longer than one tick. Before this method existed, the loop
+        did a plain `with self._bulk_lock:` around maybe_backup(), which is an
+        unbounded wait: a long-running gated pass on the OTHER side of the lock
+        would park the cycle thread for that pass's whole duration. That's a new,
+        narrower echo of the same "unbounded lock hold blocks the other side"
+        problem BULK_LOCK_ACQUIRE_S already solves for the maintenance thread --
+        so this bounds the acquire the same way and skips the backup for this
+        cycle rather than blocking indefinitely.
+
+        Skipping is safe: maybe_backup() only advances self._last_backup after a
+        clean run (see its docstring), so a skipped acquire leaves the backup
+        cadence untouched and it is retried on the next cycle where this is
+        called again -- never lost, at worst delayed.
+        """
+        if not self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s):
+            log.warning(
+                "backup skipped this cycle: bulk lock held for more than "
+                "%.1fs (maintenance pass busy); will retry next cycle",
+                self._bulk_lock_wait_s)
+            return
+        try:
+            self.maybe_backup()
+        finally:
+            self._bulk_lock.release()
+
     # -- silent auto-update ---------------------------------------------------
 
     def _run_auto_update(self) -> dict | None:
@@ -2677,8 +2711,14 @@ class Daemon:
                 # snapshot. This closes the four chunk-writing passes — the most
                 # probable contenders — the same way the rest of this plan
                 # scopes _bulk_lock.
-                with self._bulk_lock:
-                    self.maybe_backup()
+                #
+                # The acquire itself is BOUNDED (_backup_under_bulk_lock), the
+                # same shape as the gated passes' own acquire on the other side
+                # of this lock: a gated pass's execution time is not bounded by
+                # this plan, only its acquire is, so it can legitimately hold
+                # _bulk_lock past one tick -- an unbounded `with` here would
+                # park this cycle thread for that pass's whole duration.
+                self._backup_under_bulk_lock()
                 # Stamp the daemon's own liveness so the fleet beacon (written by
                 # a separate process) reports real daemon health, not cached probes.
                 write_daemon_heartbeat(str(config.app_dir()))
