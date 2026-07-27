@@ -301,6 +301,56 @@ assertion encodes behaviour we are removing.
   impossible;
 - gold eval holds (recall@10 / MRR) — no retrieval regression.
 
+### Acceptance results (2026-07-27)
+
+Reinstalled 0.7.110 and restarted the live daemon. The core fix verified working
+in production within the first ~90 seconds:
+
+- **Cadence passes ran independently of the sync cycle** — ~16 non-gated
+  passes (`communities`, `lint`, `blocks`, `feedback_aggregate`,
+  `org_backfill`, `resolve_entities`, `review`, `voice_analyse`,
+  `self_improve`, `org_contrib`, `org_import`, `org_curate`, …) completed
+  across the first two maintenance ticks while the cycle thread was busy —
+  the direct fix for the reported 4-day starvation.
+- **The embed budget correctly bounded the cycle** — `index_pending: budget
+  spent after 224 chunks` fired and returned control promptly instead of
+  draining the whole backlog.
+- **The bounded-acquire-and-skip fix for the four chunk-mutating passes
+  worked exactly as designed** — `stale_reextract`/`salience_score`/
+  `decay_pass`/`consolidation` logged `bulk lock held for more than 5.0s
+  (cycle busy); will retry` and moved on every tick rather than blocking,
+  confirming the Critical cross-task finding from the final whole-branch
+  review is genuinely fixed live, not just in tests.
+- **The enrichment producer was active** — `prepare_units` processed a real
+  backlog (thousands of `shipping unsplit` warnings for over-budget threads),
+  confirming the 36-hour producer-stall failure mode is closed.
+- **Gold eval holds**: recall@10=0.700, MRR=0.511 (20/20 cases covered) —
+  identical to the pre-change baseline measured the same day. No retrieval
+  regression from any of the six tasks.
+
+**Not completed — deliberately deferred, not a code defect in this plan.** A
+second cycle then ran for 19+ minutes without returning, and the daemon's
+control API stopped responding for a period. Root cause, confirmed from the
+daemon's own log: `periodic backup failed: [Errno 28] No space left on
+device` — the periodic encrypted-snapshot backup (`backup.snapshot`,
+pre-existing code untouched by this plan) attempting to compress the
+11.9 GB `brain.sqlite3` database on a disk that had only ~9 GB free ran the
+disk to zero bytes free. A full disk caused a severe macOS-wide freeze
+(confirmed independently by a `WindowServer userspace_watchdog_timeout.spin`
+diagnostic and a `python3.12 cpu_resource.diag` naming the same daemon PID,
+both timestamped to the same window) that the user experienced as a system
+crash, though the kernel itself never rebooted (uptime unbroken). The daemon
+was deliberately stopped (`launchctl bootout`) and left off pending disk
+cleanup, so the remaining live-store checks — sustained multi-cycle
+heartbeat advance, cadence passes running throughout a longer ingest window,
+and `/api/recall` p95 latency under active embedding — were not completed
+this session. The backup's own last *successful* run was 2026-07-23, four
+days before this incident: it was itself a silent victim of the same
+starvation bug this plan fixes, and resumed trying to catch up the moment
+the daemon started working again, colliding with disk space that had grown
+tight in the meantime. Re-run the remaining acceptance steps once disk space
+is freed and the daemon is restarted.
+
 ## Rejected alternatives
 
 **APScheduler.** `max_instances` defaults to 1 and silently skips overruns; the
