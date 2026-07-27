@@ -60,9 +60,15 @@ def test_dispatch_table_pass_refires_after_interval(tmp_path, monkeypatch):
     assert len(fired) == 2
 
 
-def test_dispatch_table_backfill_suppresses_all_graph_passes(tmp_path, monkeypatch):
+def test_dispatch_table_backfill_flag_no_longer_suppresses_passes(tmp_path, monkeypatch):
+    """The dead _backfill_active whole-loop early return was removed in Task 4
+    (enrich_backfill.py doesn't exist, so nothing ever sets the flag for real).
+    Setting it must no longer suppress cadence passes — communities still fires,
+    exactly as it does with the flag never touched at all."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     d, clock = _configured_daemon(tmp_path, communities_interval_s=1.0)
     fired = []
-    monkeypatch.setattr("mcpbrain.communities.run", lambda store: fired.append(1) or {})
+    monkeypatch.setattr("mcpbrain.communities.run", lambda store: fired.append(1) or {"communities": 1})
+    d._backfill_active.set()
     d._run_periodic_passes()
+    assert len(fired) == 1
