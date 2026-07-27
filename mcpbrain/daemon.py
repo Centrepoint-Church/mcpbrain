@@ -119,12 +119,12 @@ MAINTENANCE_TICK_S = 60.0
 # tick.
 BULK_LOCK_ACQUIRE_S = 5.0
 
-# Brief pause the cycle thread takes, after releasing _bulk_lock between
-# phases, when the maintenance thread has signalled it wants the lock
-# (_bulk_lock_wanted). CPython locks are not FIFO-fair, so without this the
-# cycle thread -- which re-acquires ~1s later -- wins nearly every race and the
-# four gated passes never get a turn at all (183 consecutive skip warnings,
-# live).
+# Brief pause the cycle thread takes, after releasing _bulk_lock between units
+# of work, when another thread has signalled intent to acquire it (see
+# Daemon._bulk_lock_intent / _bulk_lock_wanted). CPython locks are not
+# FIFO-fair, so without this the cycle thread -- which re-acquires almost
+# immediately -- wins nearly every race and the four gated passes never get a
+# turn at all (183 consecutive skip warnings, live).
 BULK_LOCK_YIELD_S = 0.25
 
 # Zero progress for this long means the cycle is wedged, not merely slow. A
@@ -447,28 +447,38 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
 
     `bulk_section` (Task 2), if given, is a zero-arg context-manager factory --
     the daemon passes `self._cycle_bulk_section` (a free function again has no
-    `self`) -- used to bracket ONLY the chunk-mutating calls below
-    (run_sync_cycle, drain.drain) so _bulk_lock is held per-phase rather than
-    across this whole function, which is what let the cycle starve the four
-    needs_bulk_lock cadence passes for its entire duration. Defaults to
-    `contextlib.nullcontext` (a no-op) so direct callers/tests that don't pass
-    one keep running unlocked, exactly as before.
+    `self`). A soak test found that wrapping this whole function's chunk-
+    mutating calls in ONE `_bulk_lock` hold (even though each was already
+    `budget`-bounded to CYCLE_BUDGET_S=60s) still starved the maintenance
+    thread's 5s-bounded acquire almost every time on a sustained backlog --
+    the fix is a lock DUTY CYCLE problem, not a fairness problem. So
+    `bulk_section` is instead threaded straight into `run_sync_cycle`,
+    `prepare.prepare_units`, and `drain.drain`/`drain.drain_captures`, each of
+    which brackets its OWN small units of work (one message/event/file/embed-
+    batch/inbox-file) with it, and the single-statement
+    `reflow_outdated_chunks` call below gets its own small section. Defaults
+    to `contextlib.nullcontext` (a no-op) so direct callers/tests that don't
+    pass one keep running unlocked, exactly as before.
     """
     if bulk_section is None:
         bulk_section = nullcontext
-    with bulk_section():
-        result = run_sync_cycle(
-            store, embedder,
-            gmail_service=gmail_service,
-            calendar_service=calendar_service,
-            drive_service=drive_service,
-            home=str(config.app_dir()),
-            budget=budget,
-        )
+    result = run_sync_cycle(
+        store, embedder,
+        gmail_service=gmail_service,
+        calendar_service=calendar_service,
+        drive_service=drive_service,
+        home=str(config.app_dir()),
+        budget=budget,
+        bulk_section=bulk_section,
+    )
     if on_progress is not None:
         on_progress("sync")
     try:
-        drain_caps = drain.drain_captures(store)
+        # drain_captures writes `chunks` (upsert_chunk for "ingest" captures) --
+        # the same table the four gated maintenance passes mutate -- so it gets
+        # its own budget/bulk_section threading (Task 2 race-safety fix; this
+        # call used to run with no lock at all).
+        drain_caps = drain.drain_captures(store, budget=budget, bulk_section=bulk_section)
         if drain_caps:
             log.info("captures applied: %d", drain_caps)
             from mcpbrain.memory_index import regenerate
@@ -492,7 +502,14 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         if config.reextract_enabled(str(app_dir())):
             from mcpbrain.store import ENRICH_LOGIC_VERSION
             try:
-                reflowed = store.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, REEXTRACT_CAP)
+                # reflow_outdated_chunks resets `chunks.enriched` in ONE bulk
+                # UPDATE (bounded by REEXTRACT_CAP) -- a single SQL statement,
+                # not a Python loop, so bulk_section brackets the whole call
+                # rather than sub-sectioning it further (Task 2 race-safety fix
+                # -- this used to run with no lock at all, racing the same
+                # column stale_reextract resets).
+                with bulk_section():
+                    reflowed = store.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, REEXTRACT_CAP)
                 if reflowed:
                     log.info("re-extraction: re-flowed %d outdated chunk(s)", reflowed)
             except Exception as exc:  # noqa: BLE001 — never crash the cycle
@@ -503,9 +520,10 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                                      synthesis_requests=synthesis_requests,
                                      extra_blocks=extra_blocks,
                                      home=str(app_dir()),
-                                     budget=budget)
-        with bulk_section():
-            drained = drain.drain(store, apply=_graph_apply(), embedder=embedder, budget=budget)
+                                     budget=budget,
+                                     bulk_section=bulk_section)
+        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder, budget=budget,
+                              bulk_section=bulk_section)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
         if drained.get("files") or drained.get("applied"):
             _stamp_enrich_log(drained)
@@ -779,12 +797,26 @@ class Daemon:
         # so a wedged cycle can never park the watchdog behind it.
         self._bulk_lock = threading.Lock()
         self._bulk_lock_wait_s = BULK_LOCK_ACQUIRE_S
-        # Set by the maintenance thread while it is waiting for _bulk_lock.
-        # CPython locks are not FIFO-fair, so without an explicit hand-off the
-        # cycle thread -- which re-acquires ~1s after releasing -- wins nearly
-        # every race and the four gated passes never run at all. See
-        # _cycle_bulk_section.
-        self._bulk_lock_wanted = threading.Event()
+        # Count of threads currently waiting to acquire _bulk_lock (the
+        # maintenance thread's _run_periodic_passes, and the cycle thread's own
+        # _backup_under_bulk_lock -- TWO independent call sites can be waiting
+        # at once). CPython locks are not FIFO-fair, so without an explicit
+        # hand-off the cycle thread -- which re-acquires ~1s after releasing --
+        # wins nearly every race and the four gated passes never run at all.
+        # See _cycle_bulk_section / _bulk_lock_intent.
+        #
+        # A single threading.Event was tried first and is WRONG: one waiter's
+        # cleanup (Event.clear() in its own finally) can erase another waiter's
+        # still-pending "I'm waiting" signal -- e.g. maintenance sets the flag
+        # and blocks on acquire(); the cycle thread's own _backup_under_bulk_lock
+        # (same call, on the CYCLE thread) also sets the flag, wins the race,
+        # runs, and clears the flag in ITS finally even though maintenance is
+        # STILL genuinely waiting. The next _cycle_bulk_section release then
+        # sees no intent and skips the yield pause, right when it's needed. A
+        # plain int counter (incremented per waiter, decremented on its own
+        # cleanup) can't be erased by an unrelated waiter's cleanup this way.
+        self._bulk_lock_waiters = 0
+        self._bulk_lock_waiters_lock = threading.Lock()
         # Maintenance runs on its own thread, ticking independently of the bulk
         # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
         # so an unbounded cycle starved every cadence pass for four days).
@@ -1557,31 +1589,67 @@ class Daemon:
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 
     @contextmanager
+    def _bulk_lock_intent(self):
+        """Mark 'a thread is about to wait for _bulk_lock' for the duration of the
+        wrapped block (normally just the bounded `.acquire(timeout=...)` call).
+
+        Backed by a plain counter (`_bulk_lock_waiters`, guarded by
+        `_bulk_lock_waiters_lock`) rather than a single `threading.Event`: TWO
+        independent call sites can be waiting on `_bulk_lock` at once
+        (`_run_periodic_passes` on the maintenance thread, and
+        `_backup_under_bulk_lock` on the cycle thread itself), and an Event
+        would let one waiter's cleanup (`.clear()` in its own `finally`) erase
+        the other's still-pending signal. The counter only reads "nobody is
+        waiting" once every waiter that incremented it has also decremented.
+        """
+        with self._bulk_lock_waiters_lock:
+            self._bulk_lock_waiters += 1
+        try:
+            yield
+        finally:
+            with self._bulk_lock_waiters_lock:
+                self._bulk_lock_waiters -= 1
+
+    def _bulk_lock_wanted(self) -> bool:
+        """True while at least one thread is waiting to acquire _bulk_lock."""
+        with self._bulk_lock_waiters_lock:
+            return self._bulk_lock_waiters > 0
+
+    @contextmanager
     def _cycle_bulk_section(self):
-        """Hold _bulk_lock for ONE chunk-mutating phase, yielding between phases.
+        """Hold _bulk_lock for ONE small chunk-mutating unit of work, yielding
+        between units.
 
         The lock used to be held across the whole of run_one() (see run()'s
         history), which starved the four needs_bulk_lock cadence passes and
         _backup_under_bulk_lock entirely -- live: 183 consecutive "bulk lock
-        held" skip warnings and not one gated pass run in over 8 minutes. The
-        cycle now acquires this lock only around each chunk-mutating phase
-        (run_sync_cycle, drain.drain) via this context manager, releasing it
-        in between so the maintenance thread has a real chance to acquire it.
+        held" skip warnings and not one gated pass run in over 8 minutes.
+        Bounding the WHOLE-CALL hold with `budget` alone was not enough
+        either: a soak test showed one lock hold per whole (even
+        budget-bounded, <=60s) sync/drain call still starved the maintenance
+        thread's 5s-bounded acquire almost every time on a sustained backlog
+        -- this is a lock DUTY-CYCLE problem, not only a fairness problem. So
+        every caller now enters this section around ONE message/event/file/
+        embed-batch/inbox-file (see run_sync_cycle, index_pending, drain,
+        sync_gmail/calendar/drive, prepare_units's per-batch helpers), not
+        once per whole call, releasing the lock in between so the
+        maintenance thread has a real, frequent chance to acquire it.
 
         CPython's Lock is not FIFO-fair, so a bare release+re-acquire still
         lets the cycle thread win almost every race against a waiter (it
         re-enters this section ~immediately; the maintenance thread's acquire
-        has to be scheduled in). _bulk_lock_wanted is the explicit hand-off:
-        the maintenance thread sets it before blocking on the lock, and this
-        method pauses briefly after releasing when it sees the flag set, so
-        the waiter's pending acquire actually wins the next opportunity.
+        has to be scheduled in). `_bulk_lock_wanted()` is the explicit
+        hand-off: a waiter marks intent (`_bulk_lock_intent`) before blocking
+        on the lock, and this method pauses briefly after releasing when it
+        sees that intent, so the waiter's pending acquire actually wins the
+        next opportunity.
         """
         self._bulk_lock.acquire()
         try:
             yield
         finally:
             self._bulk_lock.release()
-            if self._bulk_lock_wanted.is_set():
+            if self._bulk_lock_wanted():
                 # Give the waiter a scheduling window; without this the
                 # re-acquire above beats it on an unfair lock.
                 self._stop.wait(timeout=BULK_LOCK_YIELD_S)
@@ -1609,15 +1677,15 @@ class Daemon:
         cadence untouched and it is retried on the next cycle where this is
         called again -- never lost, at worst delayed.
 
-        Sets _bulk_lock_wanted around the acquire, same as _run_periodic_passes,
-        so a cycle thread between _cycle_bulk_section phases actually yields to
-        this wait instead of winning the unfair-lock race.
+        Marks intent via `_bulk_lock_intent` around the acquire, same as
+        _run_periodic_passes, so a cycle thread between _cycle_bulk_section
+        units actually yields to this wait instead of winning the unfair-lock
+        race. This runs on the CYCLE thread itself (called from run()'s loop,
+        not the maintenance thread) -- see _bulk_lock_intent's docstring for
+        why that means a plain counter, not a single Event, is required here.
         """
-        self._bulk_lock_wanted.set()
-        try:
+        with self._bulk_lock_intent():
             acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
-        finally:
-            self._bulk_lock_wanted.clear()
         if not acquired:
             log.warning(
                 "backup skipped this cycle: bulk lock held for more than "
@@ -2495,10 +2563,10 @@ class Daemon:
         chunk-mutating phases (_cycle_bulk_section).
 
         That lock is acquired with a BOUNDED timeout (BULK_LOCK_ACQUIRE_S),
-        with _bulk_lock_wanted set for the duration of the wait so the cycle
-        thread's _cycle_bulk_section actually yields to this acquire between
-        phases (CPython locks are not FIFO-fair), and the pass is skipped for
-        this tick if the cycle thread still holds it.
+        with intent marked via _bulk_lock_intent for the duration of the wait
+        so the cycle thread's _cycle_bulk_section actually yields to this
+        acquire between units of work (CPython locks are not FIFO-fair), and
+        the pass is skipped for this tick if the cycle thread still holds it.
         An unbounded acquire here parks the whole maintenance thread — including
         the progress heartbeat and the watchdog check that follow this call in
         _maintenance_loop — behind a wedged cycle, which is precisely the
@@ -2521,13 +2589,11 @@ class Daemon:
                         continue
                     # Signal intent BEFORE blocking on the acquire so the cycle
                     # thread's _cycle_bulk_section sees it and yields between
-                    # phases -- CPython's Lock is not FIFO-fair, so without this
-                    # explicit hand-off the cycle thread wins nearly every race.
-                    self._bulk_lock_wanted.set()
-                    try:
+                    # units of work -- CPython's Lock is not FIFO-fair, so
+                    # without this explicit hand-off the cycle thread wins
+                    # nearly every race.
+                    with self._bulk_lock_intent():
                         acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
-                    finally:
-                        self._bulk_lock_wanted.clear()
                     if not acquired:
                         log.warning(
                             "periodic pass %s skipped this tick: bulk lock held for "

@@ -19,6 +19,7 @@ the store, then advancing the cursor only after all upserts complete.
 import hashlib
 import logging
 import uuid
+from contextlib import nullcontext
 
 from mcpbrain.chunking import chunk_text, content_hash
 from mcpbrain.org_contracts import DRIVE_ID_META_KEY
@@ -268,7 +269,8 @@ def _cache_first_extract_one(
 # Sync entry point
 # ---------------------------------------------------------------------------
 
-def sync_drive(service, store, source: str = "drive") -> int:
+def sync_drive(service, store, source: str = "drive", *, budget=None,
+               bulk_section=None) -> int:
     """Incremental Drive sync via the Changes API.
 
     First run (no cursor): calls changes.getStartPageToken, stores the token
@@ -284,9 +286,23 @@ def sync_drive(service, store, source: str = "drive") -> int:
     Any exception during fetch or upsert propagates before the cursor is
     written, leaving the cursor unchanged (safe to retry).
 
+    Bounded and checkpoint-safe (Task 2 duty-cycle fix): `budget` (a `Budget`,
+    or None for unbounded) is checked once per changes.list page (that loop
+    only fetches+buffers text, it does not write the store) and once per
+    pending file in the upsert loop. On expiry the cursor is NOT advanced —
+    `newStartPageToken` is only emitted by Google on the FINAL page anyway
+    (mirroring Gmail's historyId, an intermediate advance would silently skip
+    unvisited changes), and `store.upsert_chunk` is an idempotent upsert, so
+    re-processing the same delta window next time is a safe, cheap no-op for
+    whatever was already durably upserted. `bulk_section` (a zero-arg
+    context-manager factory, default `contextlib.nullcontext`) brackets each
+    file's writes so `_bulk_lock` is released between files.
+
     Returns the number of files processed (files that yielded at least one
-    chunk).
+    chunk). May be a partial count when the budget expired mid-run.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     cursor = store.get_cursor(source)
 
     # Bootstrap: no prior cursor
@@ -298,12 +314,16 @@ def sync_drive(service, store, source: str = "drive") -> int:
     # Delta: page through changes.list
     page_token = cursor
     new_start = None
+    interrupted = False
     # Collect (file_meta, text) across all pages before writing to the store.
     # This keeps the advance-after-durable-write guarantee simple: the cursor
     # is set only after every upsert completes.
     pending: list[tuple[dict, str]] = []
 
     while True:
+        if budget is not None and budget.expired():
+            interrupted = True
+            break
         resp = service.changes().list(
             pageToken=page_token,
             spaces="drive",
@@ -330,20 +350,25 @@ def sync_drive(service, store, source: str = "drive") -> int:
     # Upsert all collected files, then advance cursor
     processed = 0
     for fmeta, text in pending:
-        chunks = normalise_drive(fmeta, text)
-        for c in chunks:
-            store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
-        if chunks:
-            processed += 1
+        if budget is not None and budget.expired():
+            interrupted = True
+            break
+        with bulk_section():
+            chunks = normalise_drive(fmeta, text)
+            for c in chunks:
+                store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+            if chunks:
+                processed += 1
 
-    if new_start:
+    if new_start and not interrupted:
         store.set_cursor(source, str(new_start))
 
     return processed
 
 
 def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
-                      contextual_retrieval: bool = False) -> dict:
+                      contextual_retrieval: bool = False, budget=None,
+                      bulk_section=None) -> dict:
     """Incremental sync for ONE Shared Drive via the Changes API, cache-first.
 
     Cursor key is 'drive:<driveId>' in sync_cursors. First run stores
@@ -358,10 +383,32 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     publish after embedding. Removed files are purged locally and their artifacts
     deleted. The cursor advances only after every write completes.
 
+    Bounded and checkpoint-safe (Task 2 duty-cycle fix): `budget` (a `Budget`,
+    or None for unbounded).
+
+    The changes.list PAGINATION loop below collapses possibly-recurring
+    per-fileId events into ONE final-state view (see the comment inline) — it
+    genuinely needs every page to be correct, unlike Gmail/Calendar/My-Drive's
+    independent read/write loops. So if `budget` expires mid-pagination, the
+    per-file processing loops are SKIPPED ENTIRELY this call (not run against a
+    knowingly-incomplete collapse) and the cursor is left untouched — safe,
+    just deferred to the next attempt, which re-lists the same window.
+
+    If pagination completes but the (expensive: network fetch + extraction)
+    per-file loop or the removed-file cleanup loop is interrupted instead, the
+    collapsed `events` view IS complete/correct, so partial processing is
+    safe: `_cache_first_extract_one`'s upsert is idempotent and a deferred
+    removal just stays live one more cycle. Either way the cursor only
+    advances when every loop that ran, ran to completion. `bulk_section` (a
+    zero-arg context-manager factory, default `contextlib.nullcontext`)
+    brackets each file's writes.
+
     Returns {'processed', 'miss': [(file_id, content_hash)], 'live_file_ids': set}.
     """
     from mcpbrain import ingest_cache
 
+    if bulk_section is None:
+        bulk_section = nullcontext
     source = f"drive:{drive_id}"
     cursor = store.get_cursor(source)
     if cursor is None:
@@ -372,6 +419,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
 
     page_token = cursor
     new_start = None
+    pagination_interrupted = False
     # Collapse the whole delta into ONE ordered, deduplicated view keyed by
     # fileId. A fileId can legitimately recur across pages (or within one page):
     # edited then re-edited, changed then removed, or removed then restored.
@@ -387,6 +435,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     # Each value is {"removed": bool, "fmeta": dict | None}.
     events: dict[str, dict] = {}
     while True:
+        if budget is not None and budget.expired():
+            pagination_interrupted = True
+            break
         resp = service.changes().list(
             pageToken=page_token,
             driveId=drive_id,
@@ -415,51 +466,64 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
             break
         page_token = nxt
 
-    live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
-
     processed = 0
     miss: list[tuple[str, str]] = []
-    for fid, ev in events.items():
-        if ev["removed"]:
-            continue
-        try:
-            did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, ev["fmeta"], pin,
-                contextual_retrieval=contextual_retrieval)
-            if did_process:
-                processed += 1
-            if file_miss:
-                miss.append(file_miss)
-        except Exception as exc:  # noqa: BLE001 — isolate one file's failure
-            # Without this, one poison file (corrupt doc, transient export
-            # error, decode failure) would propagate up to sync_shared_drives'
-            # per-drive handler, which skips the WHOLE DRIVE for the cycle
-            # WITHOUT advancing the cursor — so the same poison file would be
-            # re-fetched and re-fail forever, permanently blocking the drive.
-            log.warning("drive: extraction failed for file %s in drive %s: %s",
-                        fid, drive_id, exc)
-            continue
+    live_ids: set = set()
+    interrupted = pagination_interrupted
 
-    for fid, ev in events.items():
-        if not ev["removed"]:
-            continue
-        doc_ids = store.doc_ids_for_file(fid)
-        if doc_ids:
-            store.invalidate_local_relations_for_docs(doc_ids)
-            store.delete_chunks(doc_ids)
-        try:
-            ingest_cache.remove_file_artifacts(fleet_storage, fid)
-        except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
-            log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
+    if not pagination_interrupted:
+        live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
 
-    if new_start:
+        for fid, ev in events.items():
+            if ev["removed"]:
+                continue
+            if budget is not None and budget.expired():
+                interrupted = True
+                break
+            try:
+                with bulk_section():
+                    did_process, file_miss = _cache_first_extract_one(
+                        service, store, fleet_storage, drive_id, ev["fmeta"], pin,
+                        contextual_retrieval=contextual_retrieval)
+                if did_process:
+                    processed += 1
+                if file_miss:
+                    miss.append(file_miss)
+            except Exception as exc:  # noqa: BLE001 — isolate one file's failure
+                # Without this, one poison file (corrupt doc, transient export
+                # error, decode failure) would propagate up to sync_shared_drives'
+                # per-drive handler, which skips the WHOLE DRIVE for the cycle
+                # WITHOUT advancing the cursor — so the same poison file would be
+                # re-fetched and re-fail forever, permanently blocking the drive.
+                log.warning("drive: extraction failed for file %s in drive %s: %s",
+                            fid, drive_id, exc)
+                continue
+
+        for fid, ev in events.items():
+            if not ev["removed"]:
+                continue
+            if budget is not None and budget.expired():
+                interrupted = True
+                break
+            with bulk_section():
+                doc_ids = store.doc_ids_for_file(fid)
+                if doc_ids:
+                    store.invalidate_local_relations_for_docs(doc_ids)
+                    store.delete_chunks(doc_ids)
+            try:
+                ingest_cache.remove_file_artifacts(fleet_storage, fid)
+            except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
+                log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
+
+    if new_start and not interrupted:
         store.set_cursor(source, str(new_start))
     return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
 
 
 def sync_shared_drives(service, store, *, pin, storage_factory,
                        absence_threshold: int = 3,
-                       contextual_retrieval: bool = False) -> dict:
+                       contextual_retrieval: bool = False,
+                       budget=None, bulk_section=None) -> dict:
     """Enumerate all Shared Drives, sync each cache-first, and run the
     consecutive-absence revocation counter.
 
@@ -471,6 +535,12 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
 
     Deliberately does NOT sweep the ingest cache off each cycle's delta — see
     the note inline below.
+
+    `budget`/`bulk_section` are threaded straight into each drive's
+    `sync_shared_drive` call (see its docstring for the checkpoint contract);
+    a fleet with many pinned drives also checks `budget` here, between drives,
+    so a huge drive count can't run unbounded even if each individual drive's
+    own sync stays within budget.
     """
     from mcpbrain import ingest_cache
 
@@ -485,7 +555,8 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
         fs = storage_factory(drive_id)
         try:
             res = sync_shared_drive(service, store, drive_id, fleet_storage=fs, pin=pin,
-                                    contextual_retrieval=contextual_retrieval)
+                                    contextual_retrieval=contextual_retrieval,
+                                    budget=budget, bulk_section=bulk_section)
         except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
             log.warning("shared-drive sync failed for %s (%s) (skipped): %s",
                         drive_name, drive_id, exc)
@@ -500,6 +571,8 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
         # (gc_superseded) already cover cleanup correctly. A genuine full-
         # drive sweep would need a complete, explicitly-full-enumeration-
         # driven pass — out of scope for this per-cycle delta loop.
+        if budget is not None and budget.expired():
+            break
     revoked = ingest_cache.note_drive_presence(
         store, present, threshold=absence_threshold)["purged"]
     out["_revoked"] = revoked
@@ -508,7 +581,7 @@ def sync_shared_drives(service, store, *, pin, storage_factory,
 
 def backfill_drive(service, store, modified_after: str,
                    modified_before: str | None = None,
-                   max_files: int | None = None) -> int:
+                   max_files: int | None = None, bulk_section=None) -> int:
     """One-shot bounded backfill via files.list with a modifiedTime filter.
 
     Text-native files only (reuses _fetch_text, which returns None for binaries).
@@ -517,7 +590,14 @@ def backfill_drive(service, store, modified_after: str,
     `modified_before` optionally caps the upper bound (RFC 3339 timestamp) so
     callers can walk a historical window without re-fetching newer files.
     Omit it for the original "everything since X" semantics.
+
+    Already item-bounded by `max_files` (the progressive-backfill step caps
+    this at `_BACKFILL_MAX_PER_SOURCE`, default 200) and touches no delta
+    cursor, so no budget/checkpoint logic is needed — `bulk_section` (default
+    `contextlib.nullcontext`) still brackets each file's writes.
     """
+    if bulk_section is None:
+        bulk_section = nullcontext
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
@@ -533,9 +613,10 @@ def backfill_drive(service, store, modified_after: str,
                 return processed
             text = _fetch_text(service, f)
             if text:
-                for ch in normalise_drive(f, text):
-                    store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-                processed += 1
+                with bulk_section():
+                    for ch in normalise_drive(f, text):
+                        store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+                    processed += 1
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
@@ -544,11 +625,20 @@ def backfill_drive(service, store, modified_after: str,
 
 def backfill_shared_drive(service, store, drive_id, modified_after, *,
                           fleet_storage, pin, modified_before=None,
-                          max_files=None, contextual_retrieval: bool = False) -> dict:
+                          max_files=None, contextual_retrieval: bool = False,
+                          bulk_section=None) -> dict:
     """One-shot bounded backfill for ONE Shared Drive (files.list, driveId-scoped),
     cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
     import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
-    Returns {'processed', 'miss': [(file_id, content_hash)]}."""
+    Returns {'processed', 'miss': [(file_id, content_hash)]}.
+
+    Already item-bounded by `max_files` (default `_BACKFILL_MAX_PER_SOURCE`,
+    200) and touches no cursor, so no budget/checkpoint logic is needed —
+    `bulk_section` (default `contextlib.nullcontext`) still brackets each
+    file's extraction+upsert.
+    """
+    if bulk_section is None:
+        bulk_section = nullcontext
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
@@ -568,9 +658,10 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 return {"processed": processed, "miss": miss}
-            did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, f, pin,
-                contextual_retrieval=contextual_retrieval)
+            with bulk_section():
+                did_process, file_miss = _cache_first_extract_one(
+                    service, store, fleet_storage, drive_id, f, pin,
+                    contextual_retrieval=contextual_retrieval)
             if did_process:
                 processed += 1
             if file_miss:

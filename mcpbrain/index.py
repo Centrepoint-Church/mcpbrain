@@ -1,5 +1,6 @@
 # mcpbrain/index.py
 import logging
+from contextlib import nullcontext
 
 from mcpbrain.embed import contextual_prefix
 
@@ -8,7 +9,7 @@ log = logging.getLogger(__name__)
 
 def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None,
                   budget=None, max_items: int | None = None,
-                  stats: dict | None = None) -> int:
+                  stats: dict | None = None, bulk_section=None) -> int:
     """Embed pending chunks, prepending the Q6 contextual-retrieval prefix to each
     passage when enabled.
 
@@ -23,6 +24,17 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     Remaining chunks keep embedded=0 and are picked up next cycle — the work is
     resumable because it is driven by that predicate, not an in-memory cursor.
 
+    `bulk_section` (Task 2 duty-cycle fix), if given, is a zero-arg context-
+    manager factory bracketing ONE BATCH's writes (`store.write_embedding` for
+    every chunk in that batch) — not the whole call. A soak test showed that
+    wrapping an entire multi-batch call in one `_bulk_lock` hold (even though it
+    was already `budget`-bounded to CYCLE_BUDGET_S=60s) still starved the
+    maintenance thread's 5s-bounded acquire almost every time; releasing the
+    lock between batches (a batch is ~32 chunks, sub-second) gives it a real,
+    frequent opportunity instead of one per call. Defaults to
+    `contextlib.nullcontext` so direct callers/tests that don't pass one keep
+    running unlocked, exactly as before.
+
     `stats`, if given, is filled in with `{"capped": bool}`: True when this call
     stopped because it hit `max_items` (not because the pending set ran out or
     the budget expired), i.e. there is very likely more embedding work waiting
@@ -33,6 +45,8 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     """
     from mcpbrain import config
     _home = home or str(config.app_dir())
+    if bulk_section is None:
+        bulk_section = nullcontext
     if stats is not None:
         stats["capped"] = False
     if budget is not None and budget.expired():
@@ -51,9 +65,10 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
                 for c in batch
             ]
             vectors = embedder.embed_passages(texts)
-            for c, v in zip(batch, vectors):
-                store.write_embedding(c["rowid"], v, home=_home)
-                done += 1
+            with bulk_section():
+                for c, v in zip(batch, vectors):
+                    store.write_embedding(c["rowid"], v, home=_home)
+                    done += 1
     # `pending` was fetched with limit=max_items, so embedding exactly that many
     # means the fetch — not the pending set and not the budget — is what stopped
     # us. (A budget cut leaves done < max_items, so it can't false-positive.)
