@@ -104,7 +104,7 @@ def test_run_sync_cycle_propagates_the_embed_cap(tmp_path, monkeypatch):
     from mcpbrain import sync as sync_mod
 
     s = _store_with_pending(tmp_path, 50)
-    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store: 0)
+    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store, **kw: 0)
     monkeypatch.setattr(sync_mod, "progressive_backfill_step",
                         lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
     res = sync_mod.run_sync_cycle(s, _FakeEmbedder(), gmail_service=object(),
@@ -117,7 +117,7 @@ def test_run_sync_cycle_leaves_embed_capped_unset_when_the_backlog_fits(tmp_path
     from mcpbrain import sync as sync_mod
 
     s = _store_with_pending(tmp_path, 5)
-    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store: 0)
+    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store, **kw: 0)
     monkeypatch.setattr(sync_mod, "progressive_backfill_step",
                         lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
     res = sync_mod.run_sync_cycle(s, _FakeEmbedder(), gmail_service=object(),
