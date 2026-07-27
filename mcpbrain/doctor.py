@@ -149,12 +149,23 @@ def _live_daemon_status(home) -> dict | None:
 
 def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                mcpbrain_bin=None, agent_installed=None, model_present=None,
-               daemon_status=None) -> tuple[int, str]:
+               daemon_status=None, offline: bool = False) -> tuple[int, str]:
     """Diagnose, auto-fix the idempotent local failures, report, return (code, msg).
 
     Pure-ish: probes and repairs are injectable. With nothing injected it reads
     the live probes and builds the real repair dispatch. Exit code is 0 when
     nothing needs user action after auto-fix, else 1.
+
+    offline: when True and daemon_status was not explicitly injected, skip the
+    live /api/status probe (_live_daemon_status) entirely instead of attempting
+    it and degrading to None on failure. That probe is a real HTTP call against
+    the local daemon's control API, added for the watchdog-restart-limiter
+    line — every other live check here (probes.all_connections) predates it and
+    is doctor's actual job, but this one is new and skippable, so offline mode
+    restores a way to run doctor's other checks with zero network/socket
+    attempts (e.g. from a sandboxed test, or a "just show me the rest" run).
+    Defaults to False so the CLI's existing behaviour (always live) is
+    unchanged; wired to `--offline` in run_doctor_main.
     """
     from mcpbrain import probes
 
@@ -172,7 +183,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     if repairs is None:
         repairs = _default_repairs(str(home), platform, mcpbrain_bin)
     if daemon_status is None:
-        daemon_status = _live_daemon_status(home)
+        daemon_status = {} if offline else _live_daemon_status(home)
 
     lines: list[str] = []
     fixed = 0
@@ -427,7 +438,15 @@ def _agent_installed(home, platform) -> bool:
 
 
 def run_doctor_main(argv=None) -> None:
+    import argparse
     from mcpbrain import config
-    code, msg = run_doctor(str(config.app_dir()))
+
+    ap = argparse.ArgumentParser(prog="mcpbrain doctor")
+    ap.add_argument("--offline", action="store_true",
+                    help="skip the live daemon /api/status check (see run_doctor's "
+                         "offline= docstring); the rest of doctor's checks still run")
+    args = ap.parse_args(argv)
+
+    code, msg = run_doctor(str(config.app_dir()), offline=args.offline)
     print(msg)
     sys.exit(code)

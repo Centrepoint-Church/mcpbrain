@@ -287,3 +287,62 @@ def test_watchdog_line_omitted_when_the_daemon_is_unreachable():
 
 def test_live_daemon_status_degrades_to_none_without_a_daemon(tmp_path):
     assert doctor._live_daemon_status(str(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# offline flag (Task 6, Step 6): doctor must stay usable with zero live HTTP
+# ---------------------------------------------------------------------------
+
+def test_offline_skips_the_live_daemon_status_probe(monkeypatch):
+    called = {"n": 0}
+
+    def spy(home):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(doctor, "_live_daemon_status", spy)
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(), offline=True)
+    assert called["n"] == 0
+    assert code == 0
+
+
+def test_offline_false_still_calls_the_live_probe_by_default(monkeypatch):
+    called = {"n": 0}
+
+    def spy(home):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(doctor, "_live_daemon_status", spy)
+    doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs())
+    assert called["n"] == 1
+
+
+def test_offline_is_ignored_when_daemon_status_is_explicitly_injected():
+    # An explicit injection (as every other doctor test does) always wins,
+    # offline or not — offline only changes what happens on the None default.
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(), offline=True,
+        daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False})
+    assert "✅ Watchdog" in msg
+
+
+def test_cli_offline_flag_is_parsed_and_forwarded(monkeypatch):
+    seen = {}
+
+    def fake_run_doctor(home, *, offline=False):
+        seen["offline"] = offline
+        return (0, "ok")
+
+    monkeypatch.setattr(doctor, "run_doctor", fake_run_doctor)
+    monkeypatch.setattr("mcpbrain.config.app_dir", lambda: "/tmp/home")
+    try:
+        doctor.run_doctor_main(["--offline"])
+    except SystemExit:
+        pass
+    assert seen["offline"] is True
