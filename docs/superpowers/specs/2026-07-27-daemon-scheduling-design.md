@@ -200,20 +200,26 @@ only if no work remains, else re-wake promptly.
 Scheduler tick (~60 s): for each due pass, acquire `_bulk_lock` if it is one of
 the four contending passes, run it, record progress.
 
-**Paused behaviour (Task 7 addendum).** Both ticks go idle while `_pause` is
-set, but not identically. The main loop's `run_one()` returns `None`
-immediately and writes nothing — the existing pause guarantee, unchanged.
-`_maintenance_loop`'s tick skips its **entire body** while paused: not just
-the cadence passes but also the `_note_progress("maintenance")` stamp and the
-watchdog stall check. This is a behaviour change from before Task 4 split
-maintenance onto its own thread, when cadence passes ran inline after every
-`run_one()` regardless of pause state (only the chunk-mutating writes were
-gated). It is intentional — a paused daemon has no reason to run graph
-hygiene/synthesis passes either — but it means every `_progress` timestamp
-freezes for the duration of the pause, not just `cycle`'s. `resume()`
-re-stamps all of them before clearing `_pause` specifically to stop the first
-post-resume tick from reading those frozen timestamps as a `STALL_S` stall
-(see its docstring).
+**Paused behaviour (Task 7 addendum).** Only `run_one()` itself goes idle
+while `_pause` is set: it returns `None` immediately and writes nothing — the
+existing pause guarantee, unchanged. The rest of the main loop keeps running
+every interval regardless of pause — `_backup_under_bulk_lock()` (a full
+`maybe_backup()`: checkpoint, snapshot, encrypt, upload when due), the
+maintenance-thread liveness check, and the heartbeat write. `_maintenance_loop`
+skips its **entire tick body** while paused: not just the cadence passes but
+also the `_note_progress("maintenance")` stamp and the watchdog stall check.
+This is a behaviour change from before Task 4 split maintenance onto its own
+thread, when cadence passes ran inline after every `run_one()` regardless of
+pause state (only the chunk-mutating writes were gated). It is intentional —
+a paused daemon has no reason to run graph hygiene/synthesis passes either —
+and it means every `_progress` key EXCEPT `"backup"` freezes for the duration
+of the pause: `_backup_under_bulk_lock()` re-stamps `"backup"` unconditionally
+as its first statement, before it even checks whether a backup is due, so
+that key alone keeps advancing throughout. `resume()` re-stamps every key
+(including `"backup"`, harmlessly) before clearing `_pause` specifically to
+stop the first post-resume tick from reading the genuinely-frozen
+`cycle`/`sync`/`enrich`/`maintenance` timestamps as a `STALL_S` stall (see its
+docstring).
 
 ## Error handling and self-healing
 
