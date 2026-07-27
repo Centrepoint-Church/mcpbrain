@@ -2,12 +2,79 @@
 
 The regression this locks in: passes must fire even while run_one() is blocked.
 Nothing in the suite covered that, which is why a four-day starvation went
-unnoticed.
+unnoticed. test_bulk_lock_gates_only_the_four_chunk_writing_passes exercises
+the real _bulk_lock contention path added to gate the four chunk-writing
+passes against a genuinely wedged cycle.
 """
 import threading
 import time
 
 from mcpbrain import daemon as d
+
+
+def test_bulk_lock_gates_only_the_four_chunk_writing_passes(monkeypatch, tmp_path):
+    """Real _bulk_lock contention through the real dispatch loop.
+
+    daemon.run() now holds _bulk_lock for the whole run_one() cycle. A
+    genuinely wedged cycle must not starve the ~16 non-gated cadence passes
+    (that's this task's fix) but the four passes that also write `chunks`
+    legitimately wait for the lock (the documented contention trade-off, not a
+    bug) and catch up as soon as it's released.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._bulk_lock = threading.Lock()
+
+    ungated_calls = []
+    gated_calls = []
+
+    fake_passes = (
+        d.CadencePass("fake_ungated", "_fake_ungated_interval_s", "_fake_ungated_last",
+                      "_run_fake_ungated", needs_configured=False, needs_bulk_lock=False),
+        d.CadencePass("fake_gated", "_fake_gated_interval_s", "_fake_gated_last",
+                      "_run_fake_gated", needs_configured=False, needs_bulk_lock=True),
+    )
+    monkeypatch.setattr(d, "_CADENCE_PASSES", fake_passes)
+    dm._run_fake_ungated = lambda: ungated_calls.append(1)
+    dm._run_fake_gated = lambda: gated_calls.append(1)
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_lock():
+        with dm._bulk_lock:
+            lock_acquired.set()
+            release_lock.wait(timeout=2.0)
+
+    # Stand in for run()'s `with self._bulk_lock: cycle_result = self.run_one()`
+    # wedged mid-cycle: a real thread genuinely holding the real lock.
+    holder = threading.Thread(target=_hold_lock, daemon=True)
+    holder.start()
+    assert lock_acquired.wait(timeout=2.0), "lock holder never acquired _bulk_lock"
+
+    # Run the real dispatch loop (Daemon._run_periodic_passes, unmocked) on its
+    # own thread: with the lock held, the gated entry blocks acquiring it, so
+    # this call must not be made inline on the test's main thread.
+    passes_thread = threading.Thread(target=dm._run_periodic_passes, daemon=True)
+    passes_thread.start()
+
+    deadline = time.monotonic() + 2.0
+    while not ungated_calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ungated_calls == [1], "non-gated pass was blocked by a held bulk lock"
+    # Give the gated entry a moment to (wrongly) get through if the dispatch
+    # loop weren't actually gating it on the held lock.
+    time.sleep(0.1)
+    assert gated_calls == [], "gated pass ran despite the bulk lock being held"
+
+    release_lock.set()
+    holder.join(timeout=2.0)
+    assert not holder.is_alive()
+
+    # Once the cycle releases the lock, the gated pass catches up.
+    passes_thread.join(timeout=2.0)
+    assert not passes_thread.is_alive()
+    assert gated_calls == [1], "gated pass never ran once the bulk lock was released"
 
 
 def test_four_chunk_writers_need_the_bulk_lock():
