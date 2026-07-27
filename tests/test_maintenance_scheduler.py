@@ -206,6 +206,8 @@ def test_passes_run_while_the_cycle_thread_is_blocked():
     dm._stop = threading.Event()
     dm._pause = threading.Event()
     dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
     dm._maintenance_interval_s = 0.01
     ran = []
 
@@ -215,10 +217,21 @@ def test_passes_run_while_the_cycle_thread_is_blocked():
     dm._run_periodic_passes = _fake_passes
     dm._note_progress = lambda phase: None
 
-    # Simulate the cycle loop wedged inside run_one(): it holds nothing the
-    # scheduler needs, so maintenance must keep ticking.
-    wedged = threading.Event()
-    threading.Thread(target=wedged.wait, daemon=True).start()
+    # Simulate the cycle loop wedged inside run_one(): a real thread genuinely
+    # holding _bulk_lock (the same lock run()'s `with self._bulk_lock:` holds
+    # for the whole cycle). The maintenance loop must keep ticking regardless,
+    # since _maintenance_loop itself never touches _bulk_lock.
+    holder_go = threading.Event()
+    holder_release = threading.Event()
+
+    def _hold_bulk_lock():
+        with dm._bulk_lock:
+            holder_go.set()
+            holder_release.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold_bulk_lock, daemon=True)
+    holder.start()
+    assert holder_go.wait(timeout=2.0), "holder never acquired the lock"
 
     t = threading.Thread(target=dm._maintenance_loop, daemon=True)
     t.start()
@@ -227,7 +240,8 @@ def test_passes_run_while_the_cycle_thread_is_blocked():
         time.sleep(0.01)
     dm._stop.set()
     t.join(timeout=2.0)
-    wedged.set()
+    holder_release.set()
+    holder.join(timeout=5.0)
 
     assert len(ran) >= 3, f"scheduler only ticked {len(ran)} times"
 
@@ -237,6 +251,8 @@ def test_maintenance_loop_exits_on_stop():
     dm._stop = threading.Event()
     dm._pause = threading.Event()
     dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
     dm._maintenance_interval_s = 0.01
     dm._run_periodic_passes = lambda: None
     dm._note_progress = lambda phase: None
@@ -253,6 +269,8 @@ def test_maintenance_loop_survives_a_raising_pass():
     dm._stop = threading.Event()
     dm._pause = threading.Event()
     dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
     dm._maintenance_interval_s = 0.01
     calls = []
 
