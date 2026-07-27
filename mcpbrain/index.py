@@ -7,7 +7,8 @@ log = logging.getLogger(__name__)
 
 
 def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None,
-                  budget=None, max_items: int | None = None) -> int:
+                  budget=None, max_items: int | None = None,
+                  stats: dict | None = None) -> int:
     """Embed pending chunks, prepending the Q6 contextual-retrieval prefix to each
     passage when enabled.
 
@@ -21,9 +22,19 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     stops the loop between batches once the cycle's wall-clock slice is spent.
     Remaining chunks keep embedded=0 and are picked up next cycle — the work is
     resumable because it is driven by that predicate, not an in-memory cursor.
+
+    `stats`, if given, is filled in with `{"capped": bool}`: True when this call
+    stopped because it hit `max_items` (not because the pending set ran out or
+    the budget expired), i.e. there is very likely more embedding work waiting
+    right now. The caller folds that into the cycle's `more_work` so the loop
+    re-wakes promptly instead of sleeping a full interval on a live backlog.
+    An out-param rather than a changed return type: `-> int` is what every
+    caller and a dozen tests already consume.
     """
     from mcpbrain import config
     _home = home or str(config.app_dir())
+    if stats is not None:
+        stats["capped"] = False
     if budget is not None and budget.expired():
         return 0
     pending = store.unembedded_chunks(limit=max_items)
@@ -43,6 +54,11 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
             for c, v in zip(batch, vectors):
                 store.write_embedding(c["rowid"], v, home=_home)
                 done += 1
+    # `pending` was fetched with limit=max_items, so embedding exactly that many
+    # means the fetch — not the pending set and not the budget — is what stopped
+    # us. (A budget cut leaves done < max_items, so it can't false-positive.)
+    if stats is not None and max_items is not None and done >= max_items:
+        stats["capped"] = True
     # Phase C: drain the contextual-BM25 FTS re-index backfill in bounded
     # batches (no re-embed) so existing chunks pick up the C1 contextual
     # prefix. Runs every cycle — including when nothing is pending — so it

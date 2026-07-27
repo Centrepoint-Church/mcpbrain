@@ -107,13 +107,43 @@ HTTP threads write via `daemon.search → decay.update_on_recall`
 
 ### Contention policy
 
-Of the ~20 passes, only four touch `chunks` and genuinely contend with ingest:
+Of the ~20 passes, only four touch `chunks` and can produce a LOGICAL race with
+ingest — read-modify-write of the same rows the cycle is mutating:
 `stale_reextract` (`daemon.py:1526`), `salience_score` (`:1576`), `decay_pass`
 (`:1609`), `consolidation` (`:1640`). Those acquire a coarse advisory
-`_bulk_lock` that the cycle holds around chunk-mutating phases. The other
-sixteen write disjoint tables and run freely. This is cheaper and less
+`_bulk_lock` that the cycle holds around `run_one()`. This is cheaper and less
 deadlock-prone than routing all writes through a single queue, and matches what
 the store already tolerates.
+
+`_bulk_lock` is scoped to that logical hazard and **nothing else**. It is *not*
+a general writer mutex, and the other sixteen passes do **not** "write disjoint
+tables and run freely": SQLite's write lock is **database-wide**, not per-table,
+so every non-gated pass still contends with the cycle thread for the single
+write lock. What handles that is Task 1's machinery — `BEGIN IMMEDIATE` plus
+`busy_timeout=5000` and a jittered retry — which makes contention a bounded wait
+rather than a lost update, for *all* writers, gated or not. It is a mitigation,
+not a guarantee: a pass that holds one very long transaction (e.g.
+`communities` → `store.replace_communities`, which deletes and reinserts the
+whole `entity_communities` partition in a single transaction) can still exceed
+the retry budget and surface `OperationalError: database is locked`. That raise
+is caught per-pass by the dispatch loop and the pass retries on its next
+cadence, so it degrades to a skipped tick rather than a crash.
+
+`_bulk_lock` is also held around `maybe_backup()` in `run()`. `backup.snapshot()`
+runs `PRAGMA wal_checkpoint(TRUNCATE)` and aborts if the checkpoint reports
+busy; its "daemon is the sole writer" premise stops being true the moment
+maintenance gets its own thread, and a racing writer either silently stops
+backups advancing or tears the snapshot mid-`copy2`.
+
+**The maintenance thread's acquisition of `_bulk_lock` must be bounded**
+(`BULK_LOCK_ACQUIRE_S`), and its own cadence checked *before* the lock is
+attempted. The cycle thread holds the lock for the whole of `run_one()`, so a
+wedged cycle holds it indefinitely; an unbounded `with self._bulk_lock:` in the
+dispatch loop parks the maintenance thread — and with it the progress heartbeat
+and the watchdog check that follow `_run_periodic_passes()` in
+`_maintenance_loop` — making the self-healing watchdog unreachable during
+exactly the stall it exists to detect, and starving every pass ordered after the
+first gated one. On timeout the pass is skipped for that tick and retried later.
 
 Inter-pass ordering constraints to preserve: `lint → review`
 (`review.py:82`), `communities → blocks` (`community_synth.py:54`),
@@ -190,8 +220,13 @@ time, then triggers recovery.
   can. A clean exit is then genuinely supervised, as on macOS.
 - **Windows, Task Scheduler policy-blocked** — the Startup-folder `.lnk`
   fallback (`agents.py:151-157`) cannot be supervised by anything, so here the
-  daemon spawns a detached replacement and then exits. The incoming process
-  retries the writer lock briefly to cover the handover.
+  daemon spawns a detached replacement and then exits. Detached means the
+  Windows creation flags `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` —
+  `close_fds` alone leaves the successor sharing the dying parent's console and
+  process group. The incoming process retries the writer lock briefly
+  (`HANDOVER_LOCK_WAIT_S`) to cover the handover: `SingleWriterLock.acquire`
+  is non-blocking by default, so without an explicit wait the successor would
+  lose the race against its own slow-exiting parent and leave nothing running.
 
 This widens what the open 0.7.97 Windows QA gate must cover, since task
 registration changes. That is the accepted cost of making Windows genuinely
@@ -201,8 +236,21 @@ supervised rather than working around its absence.
 to ~2 restarts/hour. On top of that the watchdog records consecutive
 watchdog-triggered exits; after 3 within 6 hours it stops self-exiting and
 degrades to log-and-surface, so a persistently broken install becomes visibly
-stuck rather than restarting forever. State is exposed on `/api/status` for
-`doctor` and the tray.
+stuck rather than restarting forever. State is exposed on `/api/status` as
+`watchdog_exits` / `watchdog_limit_reached` (both derived from the same
+`watchdog_exits.json` history the limiter itself reads, so they cannot
+disagree), and `mcpbrain doctor` renders it as a Watchdog line — a reached limit
+is an actionable ❌, since "visibly stuck" is only visible if something says so.
+
+The watchdog also needs a starting point: `_progress` is seeded with a `cycle`
+timestamp when `run()` enters its loop. `_stalled_phase()` returns `None` on an
+empty `_progress`, and only the maintenance thread writes to it if the cycle
+wedges before its first `run_one()` returns — so without the seed the very
+failure shape from the live incident (stale for 35.9 h across three restarts)
+would be invisible. Symmetrically, `resume()` re-stamps every tracked phase
+before clearing the pause: `_maintenance_loop` skips its whole body while
+paused, so a pause longer than `STALL_S` would otherwise be read as a stall on
+the first tick after resume and trigger a false-positive restart.
 
 **Ordinary errors** keep today's semantics: each pass individually wrapped
 (`daemon.py:2218-2221`), cycle exceptions caught and retried next interval
