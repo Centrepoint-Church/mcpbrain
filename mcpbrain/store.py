@@ -88,6 +88,10 @@ def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     # via WAL with a bounded wait instead of failing immediately on a locked DB. WAL is
     # set once at init() and is a file-level setting, so every connection inherits it.
     db.execute("PRAGMA busy_timeout=5000")
+    # Cap WAL growth. A long-lived reader can otherwise prevent checkpointing
+    # and the WAL grows without bound; this makes SQLite truncate it back after
+    # a checkpoint instead. Chosen well above normal transaction size.
+    db.execute("PRAGMA journal_size_limit=67108864")  # 64 MiB
     db.enable_load_extension(True)
     sqlite_vec.load(db)  # vec0 tables need the extension even on a read-only conn
     db.enable_load_extension(False)
@@ -107,6 +111,32 @@ def _base_cal_event_id(value: str) -> str:
     return _CAL_INSTANCE_SUFFIX.sub("", value)
 
 
+_BEGIN_RETRIES = 6
+_BEGIN_BASE_SLEEP_S = 0.05
+
+
+def _begin_immediate(db, *, retries: int = _BEGIN_RETRIES) -> None:
+    """Start a write transaction, retrying with jittered backoff on lock contention.
+
+    BEGIN IMMEDIATE acquires the write lock up front, so a later read-then-write
+    never has to upgrade — the upgrade is what SQLite refuses instantly, ignoring
+    busy_timeout. busy_timeout still covers most contention; this retry loop is
+    the backstop for the window where it does not.
+    """
+    import random
+    import time as _time
+    for attempt in range(retries):
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            if attempt == retries - 1:
+                raise
+            _time.sleep(_BEGIN_BASE_SLEEP_S * (2 ** attempt) * (0.5 + random.random()))
+
+
 class Store:
     # Phase C: bump when the FTS contextual-text format changes so
     # reindex_fts_batch() knows which embedded chunks are stale.
@@ -119,7 +149,7 @@ class Store:
         # the MCP server also opens a writable handle for draft_records (serialised via WAL)
 
     @contextmanager
-    def _connect(self):
+    def _connect(self, *, write: bool = False):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
@@ -129,17 +159,42 @@ class Store:
         failing with `sqlite3.OperationalError: unable to open database file`.
         This wrapper keeps the existing commit/rollback semantics (via the inner
         `with db:`) and adds an unconditional close in the finally block.
+
+        write=True takes an IMMEDIATE write lock up front instead of Python's
+        sqlite3 default DEFERRED transaction. A DEFERRED transaction that reads
+        then writes must upgrade its lock, and SQLite refuses that upgrade
+        instantly (ignoring busy_timeout) when another writer already holds the
+        lock — BEGIN IMMEDIATE avoids the upgrade entirely so busy_timeout (and
+        the bounded retry below) actually cover contention between writers.
         """
         db = _open_db(self.path, self.read_only)
         try:
-            with db:
-                yield db
+            if write and not self.read_only:
+                # Manual transaction control: take the write lock up front.
+                db.isolation_level = None
+                _begin_immediate(db)
+                try:
+                    yield db
+                except BaseException:
+                    db.execute("ROLLBACK")
+                    raise
+                else:
+                    db.execute("COMMIT")
+            else:
+                with db:
+                    yield db
         finally:
             db.close()
 
     def init(self) -> None:
+        # journal_mode=WAL must run OUTSIDE any explicit transaction (SQLite
+        # refuses to change journal mode from within one), so it gets its own
+        # plain (non-write) connect before the write=True block below opens its
+        # BEGIN IMMEDIATE. WAL is a file-level setting set once here; every
+        # later connection (including this one, moments later) inherits it.
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")  # concurrent reader (MCP) + one writer (daemon)
+        with self._connect(write=True) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS chunks(
                 rowid INTEGER PRIMARY KEY,
                 doc_id TEXT UNIQUE, text TEXT, content_hash TEXT,
@@ -812,7 +867,7 @@ class Store:
     def record_recall_feedback(self, doc_id: str, session_id: str,
                                event_type: str, ts: str) -> None:
         """Append one recall feedback event row."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO recall_feedback(doc_id,session_id,event_type,ts) VALUES(?,?,?,?)",
                 (doc_id, session_id, event_type, ts))
@@ -825,7 +880,7 @@ class Store:
         """
         if not rows:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.executemany(
                 "INSERT INTO recall_feedback(doc_id,session_id,event_type,ts) VALUES(?,?,?,?)",
                 rows)
@@ -849,7 +904,7 @@ class Store:
         """Upsert the quality row for one chunk."""
         from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 """INSERT INTO chunk_quality(doc_id,quality,exposures,uses,updated_at)
                    VALUES(?,?,?,?,?)
@@ -870,7 +925,7 @@ class Store:
         """
         if not doc_ids:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.executemany(
                 "UPDATE chunks SET enrich_state=? WHERE doc_id=?",
                 [(state, d) for d in doc_ids])
@@ -915,7 +970,7 @@ class Store:
         """
         if not doc_ids:
             return 0
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             qmarks = ",".join("?" for _ in doc_ids)
             db.execute(
                 f"UPDATE chunks SET enrich_attempts = COALESCE(enrich_attempts,0) + 1 "
@@ -967,7 +1022,7 @@ class Store:
 
     def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> bool:
         """Set the org (and optionally org_valid_from) on one entity. Returns True if a row was actually updated."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
                 (org, org_valid_from, entity_id))
@@ -983,7 +1038,7 @@ class Store:
         new_name = (new_name or "").strip()
         if not new_name:
             return False
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             row = db.execute("SELECT name, COALESCE(aliases,'') AS aliases "
                              "FROM entities WHERE id=?", (entity_id,)).fetchone()
             if row is None:
@@ -998,14 +1053,14 @@ class Store:
 
     def set_entity_email(self, entity_id: str, email_addr: str) -> bool:
         """Set an entity's email_addr. Returns True iff a row was updated."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute("UPDATE entities SET email_addr=? WHERE id=?",
                              (email_addr or "", entity_id))
             return cur.rowcount > 0
 
     def set_entity_notes(self, entity_id: str, notes: str) -> bool:
         """Set an entity's notes. Returns True iff a row was updated."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute("UPDATE entities SET notes=? WHERE id=?",
                              (notes or "", entity_id))
             return cur.rowcount > 0
@@ -1014,7 +1069,7 @@ class Store:
         """Bulk-correct the org field: relabel every entity currently tagged
         with variant_org to canonical_org. Returns the number of rows updated
         (0 means no entity currently carries variant_org — a stale finding)."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE entities SET org=? WHERE org=?",
                 (canonical_org, variant_org))
@@ -1028,7 +1083,7 @@ class Store:
         """
         if not org:
             return False
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE entities SET org=? WHERE id=? AND (org='' OR org IS NULL)",
                 (org, entity_id))
@@ -1043,7 +1098,7 @@ class Store:
         """
         if not email_addr:
             return False
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE entities SET email_addr=? WHERE id=? AND (email_addr='' OR email_addr IS NULL)",
                 (email_addr, entity_id))
@@ -1055,7 +1110,7 @@ class Store:
                             cowork_session: str = "",
                             context_hash: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 """INSERT INTO meeting_packs(event_id, event_title, event_date, pack_text,
                        attendees, built_at, cowork_session, context_hash)
@@ -1089,7 +1144,7 @@ class Store:
                    voice_issues: list, samples_used: int, model: str,
                    parent_draft_id: int | None = None,
                    refinement: str = "") -> int:
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 """INSERT INTO draft_records(email_id, thread_id, intent, audience_tier,
                        draft_text, critique, voice_issues, samples_used, model,
@@ -1114,7 +1169,7 @@ class Store:
         anything", which closes the crash-retry gap where a read-then-write pair
         could double-count or silently drop a re-processed envelope.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?", (doc_id,))
             row = cur.fetchone()
             if row and row["content_hash"] == content_hash:
@@ -1132,7 +1187,7 @@ class Store:
             return True
 
     def mark_all_unembedded(self) -> None:
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("UPDATE chunks SET embedded=0")
 
     def delete_calendar_chunks_after(self, iso_cutoff: str) -> int:
@@ -1149,7 +1204,7 @@ class Store:
         touched — the graph is canonical knowledge, the chunk is just one of
         the evidence sources. Returns the number of chunk rows deleted.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "SELECT rowid FROM chunks "
                 "WHERE json_extract(metadata,'$.source_type')='calendar' "
@@ -1187,7 +1242,7 @@ class Store:
         doc_ids = list(doc_ids)
         if not doc_ids:
             return 0
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             # Clean up enrich_payloads for the requested doc_ids UNCONDITIONALLY,
             # even if no chunk rows exist (e.g. payload orphaned after chunk deletion).
             db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
@@ -1215,7 +1270,7 @@ class Store:
             return 0
         at = at or datetime.now(timezone.utc).isoformat()
         qs = ",".join("?" * len(doc_ids))
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
                 f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
@@ -1285,7 +1340,7 @@ class Store:
         under older logic."""
         if not doc_ids:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.executemany(
                 "UPDATE chunks SET enriched=1, enriched_version=? WHERE doc_id=?",
                 [(version, d) for d in doc_ids],
@@ -1298,7 +1353,7 @@ class Store:
         number reset. This is the change-driven re-extraction lever: bump
         ENRICH_LOGIC_VERSION when enrichment improves and the corpus re-extracts
         itself gradually as the daemon calls this each cycle."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             rows = db.execute(
                 "SELECT doc_id FROM chunks "
                 "WHERE enriched=1 AND COALESCE(enriched_version,0) < ? "
@@ -1372,7 +1427,7 @@ class Store:
         stale rows — either legacy pre-Phase-C rows, or rows written while the
         contextual_retrieval flag was OFF that need to catch up once it flips ON.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             rows = db.execute(
                 "SELECT rowid, text, metadata FROM chunks "
                 "WHERE embedded=1 AND COALESCE(fts_context_version,0) < ? LIMIT ?",
@@ -1389,7 +1444,7 @@ class Store:
             return n
 
     def write_embedding(self, rowid: int, vector: list[float], *, home=None) -> None:
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
             db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
                        (rowid, sqlite_vec.serialize_float32(vector)))
@@ -1446,7 +1501,7 @@ class Store:
         fts_chunks mirrors write_embedding: contextual-prefixed when
         contextual_retrieval is enabled, else raw text. Returns True.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
                                          enriched=enriched, enriched_version=enriched_version,
                                          home=home)
@@ -1464,7 +1519,7 @@ class Store:
         Returns True (raises if the connection/write itself fails; callers that
         need fail-safe behaviour catch around this call — see ingest_cache).
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             for row in rows:
                 self._write_cached_chunk_row(
                     db, row["doc_id"], row["text"], row["content_hash"],
@@ -1578,7 +1633,7 @@ class Store:
         Leaves content_hash and embedded untouched so an expiry flag (or any other
         metadata patch) does not re-queue embedding.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             row = db.execute(
                 "SELECT metadata FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
             if row is None:
@@ -1656,7 +1711,7 @@ class Store:
             return r["cursor"] if r else None
 
     def set_cursor(self, source: str, cursor: str) -> None:
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO sync_cursors(source, cursor, updated_at) VALUES(?,?,datetime('now')) "
                 "ON CONFLICT(source) DO UPDATE SET cursor=excluded.cursor, updated_at=datetime('now')",
@@ -1666,7 +1721,7 @@ class Store:
 
     def set_meta(self, k: str, v: str) -> None:
         """Insert or replace a key/value pair in the meta table."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)", (k, v))
 
     def get_meta(self, k: str) -> str | None:
@@ -1677,7 +1732,7 @@ class Store:
 
     def delete_meta(self, k: str) -> None:
         """Delete the row for key k. No-op (does not raise) if absent."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("DELETE FROM meta WHERE k=?", (k,))
 
     # --- enrichment graph writers (Task 4.2) ------------------------------
@@ -1687,7 +1742,7 @@ class Store:
         False if an existing entity was merged into."""
         # Single-writer invariant: this SELECT + upsert is race-free only because
         # the daemon is the sole writer. Do not call concurrently.
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             existed = db.execute(
                 "SELECT 1 FROM entities WHERE id=?", (ent_id,)).fetchone() is not None
             db.execute(
@@ -1718,7 +1773,7 @@ class Store:
         if not eid:
             return None
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             existing = db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone()
             if existing:
                 db.execute(
@@ -1742,7 +1797,7 @@ class Store:
         INSERT is race-free. Returns True on insert, False when the row already
         exists.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             exists = db.execute(
                 "SELECT 1 FROM entity_observations "
                 "WHERE entity_id=? AND attribute='occurrence' AND valid_from=? AND source=?",
@@ -1759,7 +1814,7 @@ class Store:
     def add_relation(self, entity_a, relation, entity_b, source_doc_id="") -> bool:
         """Insert a relation triple. Returns True if a new row was inserted,
         False if the (entity_a, relation, entity_b) triple already existed."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cursor = db.execute(
                 "INSERT OR IGNORE INTO entity_relations(entity_a, relation, entity_b, source_doc_id) "
                 "VALUES(?,?,?,?)",
@@ -1781,7 +1836,7 @@ class Store:
         org map). On conflict, the situational fields refresh; identity columns
         (sender, date) are left as first written.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 """INSERT INTO email_context
                    (message_id, subject, sender, sender_email, sender_id, date_str,
@@ -1812,7 +1867,7 @@ class Store:
         this to drive email_count, so the link table is the single source of
         truth for how many distinct messages an entity appears in.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "INSERT OR IGNORE INTO email_entities (message_id, entity_id, role) "
                 "VALUES (?, ?, ?)",
@@ -1834,7 +1889,7 @@ class Store:
         """
         if loser_id == winner_id:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             loser = db.execute(
                 "SELECT name,type,org,mentions,COALESCE(aliases,'') AS aliases "
                 "FROM entities WHERE id=?", (loser_id,)).fetchone()
@@ -1939,7 +1994,7 @@ class Store:
             cols.append("priority")
             vals.append(priority)
         placeholders = ",".join("?" * len(cols))
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"INSERT INTO actions({','.join(cols)}) VALUES({placeholders})",
                 vals)
@@ -1971,7 +2026,7 @@ class Store:
         if thread_id is not None:
             where.append("thread_id = ?")
             params.append(thread_id)
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"UPDATE actions SET status = ?, resolved_by = ?, resolved_at = ?, "
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
@@ -2019,7 +2074,7 @@ class Store:
                      "AND COALESCE(deadline, '') != '' "
                      "AND substr(deadline, 1, 10) < :dead_by")
         params = {"cutoff": cutoff, "dead_by": dead_by, "today": today}
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             def _ids(where):
                 return [r["id"] for r in db.execute(
                     f"SELECT id FROM actions WHERE {where}", params).fetchall()]
@@ -2064,7 +2119,7 @@ class Store:
         _fp_open = "status = 'open' AND COALESCE(text_fingerprint, '') != ''"
         where = (f"{_fp_open} AND id NOT IN "
                  f"(SELECT MIN(id) FROM actions WHERE {_fp_open} GROUP BY text_fingerprint)")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             ids = [r["id"] for r in db.execute(
                 f"SELECT id FROM actions WHERE {where}").fetchall()]
             if dry_run:
@@ -2085,7 +2140,7 @@ class Store:
         deleted between detection and verdict) is reported as a no-op miss
         rather than a phantom success.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE actions SET owner=?, owner_entity_id=? WHERE id=?",
                 (owner, owner_entity_id, action_id))
@@ -2111,7 +2166,7 @@ class Store:
         # row never gains a snooze or a change_log entry. The prior-value read
         # for revert_ref shares the same connection (single SQLite write-lock
         # window), and record_change runs only when rowcount confirms a hit.
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             row = db.execute(
                 "SELECT snoozed_until FROM actions WHERE id = ?",
                 (action_id,)).fetchone()
@@ -2149,7 +2204,7 @@ class Store:
         if thread_id is not None:
             where.append("thread_id = ?")
             params.append(thread_id)
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"UPDATE actions SET text = ?, text_fingerprint = ?, updated_at = ? "
                 f"WHERE {' AND '.join(where)}", params)
@@ -2159,7 +2214,7 @@ class Store:
 
     def set_action_clickup_id(self, action_id: int, clickup_task_id: str) -> int:
         """Cache the linked ClickUp task id on an action. Returns rows changed."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE actions SET clickup_task_id = ?, updated_at = ? WHERE id = ?",
                 (clickup_task_id,
@@ -2170,7 +2225,7 @@ class Store:
     def set_action_clickup_closed(self, action_id: int, closed: bool) -> int:
         """Record the last-observed ClickUp closed-state (bookkeeping for reopen
         detection). Stores 1/0; does not touch updated_at."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE actions SET clickup_closed=? WHERE id=?",
                 (1 if closed else 0, action_id))
@@ -2196,7 +2251,7 @@ class Store:
         sets.append("updated_at = ?")
         params.append(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         params.append(action_id)
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"UPDATE actions SET {', '.join(sets)} WHERE id = ?", params)
             return cur.rowcount
@@ -2220,7 +2275,7 @@ class Store:
                             triggered_at: str) -> None:
         """Upsert the marker recording that `thread_id` was re-triggered at the
         given content `signature` and time."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT OR REPLACE INTO stale_reextract"
                 "(thread_id, signature, triggered_at) VALUES(?,?,?)",
@@ -2229,7 +2284,7 @@ class Store:
     def set_enrich_payload(self, doc_id: str, payload: str, logic_version: int) -> None:
         """Persist the validated extraction (JSON string) a drive doc produced, so
         its shared-drive cache artifact can carry it and importers skip re-enrich."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("INSERT OR REPLACE INTO enrich_payloads"
                        "(doc_id, payload, logic_version) VALUES(?,?,?)",
                        (doc_id, payload, int(logic_version)))
@@ -2396,7 +2451,7 @@ class Store:
         """Set enriched=0 on every enriched chunk in the thread so the next
         enrichment cycle re-extracts it. Returns the number of rows flipped.
         Touches only this thread; leaves embedded untouched."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE chunks SET enriched=0 "
                 "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=1",
@@ -2514,7 +2569,7 @@ class Store:
         if not ids:
             return 0
         ph = ",".join("?" * len(ids))
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 f"UPDATE chunks SET enriched=0, enriched_version=0 WHERE doc_id IN ({ph})", ids)
             return cur.rowcount
@@ -2582,7 +2637,7 @@ class Store:
         Deletes both tables then reinserts in a single transaction so callers
         always see either the full old set or the full new set.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute("DELETE FROM entity_communities")  # admin-delete-ok
             db.execute("DELETE FROM community_summaries")  # admin-delete-ok
             db.executemany(
@@ -2669,7 +2724,7 @@ class Store:
         clobbering already-populated subject/org/email_count.
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO thread_context"
                 "(thread_id, subject, org, email_count, participant_ids, "
@@ -2760,7 +2815,7 @@ class Store:
         """
         if not detected_at:
             detected_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO proactive_findings"
                 "(finding_type, ref_id, org, summary, detail, severity, detected_at, resolved_at) "
@@ -2797,7 +2852,7 @@ class Store:
         Used at the end of a pipeline pass to retire findings whose underlying
         condition has cleared. Returns the count of rows resolved.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             if not live_ref_ids:
                 # Everything of this type is stale.
                 cur = db.execute(
@@ -2820,7 +2875,7 @@ class Store:
     def record_change(self, change_type: str, *, ref_id: str = "", summary: str = "",
                       detail: str = "", revert_ref: str = "", source: str = "") -> int:
         """Append one row to the change digest's audit trail."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref, source) "
                 "VALUES(?,?,?,?,?,?)",
@@ -2835,7 +2890,7 @@ class Store:
 
     def prune_change_log(self, keep: int = 500) -> int:
         """Delete old change_log rows, keeping the most recent `keep`. Returns count deleted."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             row = db.execute(
                 "SELECT id FROM change_log ORDER BY id DESC LIMIT 1 OFFSET ?",
                 (keep - 1,)).fetchone()
@@ -2881,7 +2936,7 @@ class Store:
         disappeared" case, which is a real new occurrence if it reappears).
         True if a row changed."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE proactive_findings SET resolved_at=?, verdict=? "
                 "WHERE id=? AND resolved_at IS NULL", (now, verdict, finding_id))
@@ -2896,7 +2951,7 @@ class Store:
         never touched (no column added, no delete). Returns False (no-op) if
         entity_id isn't a real entity. Reverse with unsuppress_entity.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             row = db.execute("SELECT id FROM entities WHERE id=?", (entity_id,)).fetchone()
             if not row:
                 return False
@@ -2910,7 +2965,7 @@ class Store:
 
     def unsuppress_entity(self, entity_id: str) -> bool:
         """Remove a suppression. True if a row was deleted."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (entity_id,))
             return cur.rowcount > 0
 
@@ -2928,7 +2983,7 @@ class Store:
         to fail (raw_org is a free-text string, not a foreign key).
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT OR REPLACE INTO org_suggestions(raw_org, reason, suggested_at) "
                 "VALUES(?, ?, ?)",
@@ -2983,7 +3038,7 @@ class Store:
         waiting_on_cleared_by_doc_id, sets reply_received=1, refreshes updated_at.
         No-op if the id does not exist.
         """
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "UPDATE actions SET "
                 "  waiting_on = NULL, "
@@ -3074,7 +3129,7 @@ class Store:
 
     def set_chunk_salience(self, doc_id: str, salience: float) -> None:
         """Write the salience score for one chunk."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "UPDATE chunks SET salience=? WHERE doc_id=?",
                 (round(float(salience), 3), doc_id))
@@ -3083,7 +3138,7 @@ class Store:
         """Write salience for many chunks. pairs = [(doc_id, salience), ...]."""
         if not pairs:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.executemany(
                 "UPDATE chunks SET salience=? WHERE doc_id=?",
                 [(round(float(s), 3), d) for d, s in pairs])
@@ -3107,13 +3162,13 @@ class Store:
 
     def set_chunk_tier(self, doc_id: str, tier: str) -> None:
         """Set memory_tier for one chunk. tier: core/hot/warm/cold/''."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "UPDATE chunks SET memory_tier=? WHERE doc_id=?", (tier, doc_id))
 
     def set_chunk_type(self, doc_id: str, memory_type: str) -> None:
         """Set memory_type for one chunk. type: episodic/semantic/procedural."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "UPDATE chunks SET memory_type=? WHERE doc_id=?", (memory_type, doc_id))
 
@@ -3150,7 +3205,7 @@ class Store:
 
     def promote_chunk_tier(self, doc_id: str, from_tier: str, to_tier: str) -> bool:
         """Promote a chunk from from_tier to to_tier. Returns True if updated."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE chunks SET memory_tier=? "
                 "WHERE doc_id=? AND memory_tier=?",
@@ -3244,7 +3299,7 @@ class Store:
 
     def update_memory_strength(self, doc_id: str, strength: float, last_accessed: str) -> None:
         """Upsert memory_strength + last_accessed in chunk_quality."""
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
@@ -3258,7 +3313,7 @@ class Store:
         """Update many rows. rows = [(doc_id, strength, last_accessed), ...]."""
         if not rows:
             return
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.executemany(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
@@ -3295,7 +3350,7 @@ class Store:
         """Set memory_tier='cold' for the given doc_ids. Returns count changed."""
         if not doc_ids:
             return 0
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             qs = ",".join("?" for _ in doc_ids)
             cur = db.execute(
                 f"UPDATE chunks SET memory_tier='cold' "
@@ -3310,7 +3365,7 @@ class Store:
                                 evidence_ids: list, explanation: str) -> int:
         """Insert one voice suggestion. Returns the new row id."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             cur = db.execute(
                 "INSERT INTO voice_suggestions(kind, rule, confidence, explanation, "
                 "evidence_ids, status, created_at) VALUES(?,?,?,?,?,?,?)",
@@ -3330,7 +3385,7 @@ class Store:
     def mark_voice_suggestion_applied(self, suggestion_id: int) -> None:
         """Mark one suggestion as applied."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "UPDATE voice_suggestions SET status='applied', applied_at=? WHERE id=?",
                 (ts, suggestion_id),
@@ -3347,7 +3402,7 @@ class Store:
     def set_voice_analyser_state(self, key: str, value: str) -> None:
         """Upsert a key in voice_analyser_state."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as db:
+        with self._connect(write=True) as db:
             db.execute(
                 "INSERT INTO voice_analyser_state(key, value, updated_at) "
                 "VALUES(?, ?, ?) "
