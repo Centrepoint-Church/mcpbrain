@@ -104,13 +104,23 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
 def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str) -> str:
     """A .vbs that runs `mcpbrain <subcommand>` with a hidden console via the
     ABSOLUTE installed launcher path (resolved by setup). Window style 0 hides the
-    console; VBScript escapes a double-quote by doubling it."""
+    console; VBScript escapes a double-quote by doubling it.
+
+    sh.Run's third argument is True (wait): wscript blocks until the child exits
+    and propagates its exit code as wscript's own. With False (the previous
+    value), sh.Run returned immediately, so the scheduled task always completed
+    with exit code 0 -- regardless of whether the daemon later crashed --
+    and Task Scheduler's RestartOnFailure could never see a failure to act on.
+    Waiting is correct for the one-shot cadence subcommands too (records-prune /
+    records-health / fleet-report --beacon): the task now genuinely reports
+    whether that run succeeded instead of "completing" before it started work.
+    """
     bin_q = '""' + mcpbrain_bin + '""'
     home_esc = home.replace('"', '""')
     return (
         'Set sh = CreateObject("WScript.Shell")\r\n'
         f'sh.Environment("PROCESS")("MCPBRAIN_HOME") = "{home_esc}"\r\n'
-        f'sh.Run "{bin_q} {subcommand}", 0, False\r\n'
+        f'sh.Run "{bin_q} {subcommand}", 0, True\r\n'
     )
 
 
@@ -178,18 +188,34 @@ def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     return _schtasks_args(task_name=_TASK_NAME, subcommand="daemon", mcpbrain_bin=mcpbrain_bin, home=home)
 
 
-def schtasks_xml(*, shim_path, home: str) -> str:
+def schtasks_xml(*, shim_path) -> str:
     """On-logon task XML with RestartOnFailure.
 
     The CLI's /RI flag cannot express restart-on-failure for an on-logon task,
     so registration goes through /XML instead. Without this, a watchdog exit on
     Windows would kill the daemon until the next logon — strictly worse than the
     stall it is recovering from.
+
+    Two further defects this fixes (verified by reading the previously-generated
+    XML): Exec is CreateProcess under the hood and cannot execute a .vbs
+    directly, so <Command> must be wscript.exe with the .vbs path passed as an
+    <Arguments> element rather than as the command itself; and Actions
+    Context="Author" requires a matching <Principal id="Author"> inside a
+    <Principals> block (with <RegistrationInfo> alongside it), or the task
+    definition is invalid.
     """
     shim_path_xml = _xml_escape(str(shim_path))
     return (
         '<?xml version="1.0" encoding="UTF-16"?>\n'
         '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        "  <RegistrationInfo>\n"
+        "    <Author>mcpbrain</Author>\n"
+        "  </RegistrationInfo>\n"
+        "  <Principals>\n"
+        '    <Principal id="Author">\n'
+        "      <LogonType>InteractiveToken</LogonType>\n"
+        "    </Principal>\n"
+        "  </Principals>\n"
         "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n"
         "  <Settings>\n"
         "    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>\n"
@@ -197,8 +223,11 @@ def schtasks_xml(*, shim_path, home: str) -> str:
         "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
         "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
         "  </Settings>\n"
-        "  <Actions Context=\"Author\">\n"
-        f"    <Exec><Command>{shim_path_xml}</Command></Exec>\n"
+        '  <Actions Context="Author">\n'
+        "    <Exec>\n"
+        "      <Command>wscript.exe</Command>\n"
+        f'      <Arguments>"{shim_path_xml}"</Arguments>\n'
+        "    </Exec>\n"
         "  </Actions>\n"
         "</Task>\n"
     )
@@ -293,7 +322,7 @@ def _restart_launchd() -> None:  # pragma: no cover
 # Windows helpers
 # ---------------------------------------------------------------------------
 
-def _register_schtasks_xml(*, task_name: str, shim_path: Path, home: str) -> None:  # pragma: no cover
+def _register_schtasks_xml(*, task_name: str, shim_path: Path) -> None:  # pragma: no cover
     """Register an on-logon task via /XML instead of /TR + /SC ONLOGON.
 
     The CLI flags cannot express RestartOnFailure for an on-logon trigger, so the
@@ -301,7 +330,7 @@ def _register_schtasks_xml(*, task_name: str, shim_path: Path, home: str) -> Non
     schtasks_xml for why this matters to the watchdog (Task 5).
     """
     import tempfile
-    xml = schtasks_xml(shim_path=shim_path, home=home)
+    xml = schtasks_xml(shim_path=shim_path)
     fd, xml_path = tempfile.mkstemp(suffix=".xml")
     try:
         with os.fdopen(fd, "w", encoding="utf-16") as f:
@@ -319,8 +348,21 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                            subcommand="daemon"))
     log.info("wrote Windows shim %s", shim_path)
     if win_persistence_mechanism() == "schtasks":
-        _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path, home=home)
-        log.info("Windows scheduled task '%s' created", _TASK_NAME)
+        try:
+            _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path)
+            log.info("Windows scheduled task '%s' created (RestartOnFailure)", _TASK_NAME)
+        except Exception:
+            # Malformed/rejected XML must not abort the whole install (the previous
+            # behaviour, via check=True) -- fall back to the plain /TR registration
+            # so the daemon still starts at logon, and log loudly since this
+            # fallback silently loses RestartOnFailure supervision.
+            log.exception(
+                "schtasks /xml registration of '%s' failed; falling back to the "
+                "plain /TR form -- the on-logon task will start the daemon but "
+                "will NOT restart it on a watchdog exit until this is fixed",
+                _TASK_NAME)
+            subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
+            log.info("Windows scheduled task '%s' created via CLI fallback", _TASK_NAME)
     else:
         _install_startup_shortcut(_TASK_NAME, shim_path=shim_path)
         log.info("Task Scheduler blocked; installed Startup-folder shortcut for '%s'", _TASK_NAME)
