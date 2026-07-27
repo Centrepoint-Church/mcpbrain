@@ -53,10 +53,30 @@ def _no_real_exit(monkeypatch):
     keeps both true: nothing in the suite can reach the real process-killing
     exit, and those two tests' own os._exit override still wins for the
     duration of their test body (monkeypatch is last-write-wins, teardown
-    unwinds in reverse order)."""
+    unwinds in reverse order).
+
+    subprocess.Popen is ALSO neutralised here, for the same reason: narrowing
+    the net to just os._exit means a future test calling the real
+    _spawn_replacement() without also stubbing Popen would actually spawn a
+    real detached `python -m mcpbrain.daemon` subprocess before reaching (and
+    failing at) the neutralised os._exit -- a lingering real background
+    process, arguably worse than the original footgun. _spawn_replacement does
+    `import subprocess` locally and calls subprocess.Popen(...), so patching
+    the real subprocess module's Popen attribute (not a daemon-local name —
+    there isn't one) covers it, module-globally, the same way the os._exit
+    patch does. The two watchdog tests already `import subprocess` and
+    monkeypatch.setattr(subprocess, "Popen", ...) themselves — same
+    last-write-wins mechanism as os._exit — so their own mock keeps winning
+    for their test body with no change needed on their side."""
+    import subprocess
+
     from mcpbrain import daemon as _d
 
-    def _boom(code=0):
+    def _boom_exit(code=0):
         raise AssertionError(f"os._exit({code!r}) called in a test")
 
-    monkeypatch.setattr(_d.os, "_exit", _boom)
+    def _boom_popen(*args, **kwargs):
+        raise AssertionError("subprocess.Popen called in a test")
+
+    monkeypatch.setattr(_d.os, "_exit", _boom_exit)
+    monkeypatch.setattr(subprocess, "Popen", _boom_popen)
