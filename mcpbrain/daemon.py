@@ -691,6 +691,12 @@ class Daemon:
             raise ValueError("backup_interval_s is required when backup is configured")
         self._clock = clock
         self._last_backup = None
+        # Set for the duration of _backup_under_bulk_lock's maybe_backup() call
+        # (Task 3). The watchdog's _recover_from_stall checks this and defers
+        # recovery while it is set: os._exit bypasses `finally`, so firing mid
+        # snapshot orphans the temp dir under construction -- the mechanism that
+        # left ~24GB of mcpbrain-snap-* on disk and froze the host on 2026-07-27.
+        self._backup_in_progress = threading.Event()
         # Periodic community detection is OFF unless communities_interval_s is set.
         # Tiered like resolve: OFF by default; time-based cadence via self._clock.
         self._communities_interval_s: float | None = communities_interval_s
@@ -854,6 +860,15 @@ class Daemon:
         # live incident's shape ("stale for 35.9 h across three restarts").
         self._progress_lock = threading.Lock()
         self._progress: dict = {"cycle": self._clock()}
+        # Consecutive run_one() exceptions (Task 3). A deterministic raise (a
+        # code/config bug, not a hang) looks identical to a wedge from
+        # _stalled_phase's point of view -- "cycle" simply stops advancing
+        # either way -- and would otherwise burn the watchdog's 3-exit budget
+        # restarting something a restart cannot fix. run() increments this on
+        # every failed cycle and resets it on the next success; once it passes
+        # 3, _recover_from_stall defers (stays up, visibly failing) instead of
+        # restart-looping.
+        self._cycle_error_streak = 0
         # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
         # can fire on an HTTP thread while the loop thread independently bootstraps
         # the same cycle — two concurrent import_snapshot transactions into one
@@ -1020,6 +1035,19 @@ class Daemon:
             watchdog_exits = len(self._recent_watchdog_exits())
         except Exception:  # noqa: BLE001
             watchdog_exits = 0
+        # _progress is written by two threads (the cycle thread and
+        # _maintenance_loop) under _progress_lock; reading it here without the
+        # lock (as this used to) is a bare data race with dict mutation on the
+        # other side. Snapshot under the lock, THEN call _stalled_phase()
+        # (which takes the same lock itself) — never call it while already
+        # holding the lock, _progress_lock is a plain Lock, not reentrant.
+        with self._progress_lock:
+            progress_snapshot = dict(self._progress)
+        # A deliberately paused daemon freezes every timestamp in _progress
+        # (see resume()'s docstring), so a pause longer than STALL_S makes
+        # _stalled_phase() look wedged even though nothing is wrong — report
+        # no stall at all while paused rather than a false positive.
+        stalled = None if self.is_paused() else self._stalled_phase()
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -1035,8 +1063,8 @@ class Daemon:
             "connections": connections,
             "backfill": backfill,
             "org": org,
-            "progress": dict(self._progress),
-            "stalled": self._stalled_phase(),
+            "progress": progress_snapshot,
+            "stalled": stalled,
             "watchdog_exits": watchdog_exits,
             "watchdog_limit_reached": watchdog_exits >= WATCHDOG_MAX_EXITS,
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
@@ -1711,9 +1739,21 @@ class Daemon:
                 "%.1fs (maintenance pass busy); will retry next cycle",
                 self._bulk_lock_wait_s)
             return
+        # _backup_in_progress + the surrounding _note_progress stamps (Task 3):
+        # os._exit bypasses `finally`, so a watchdog restart mid-snapshot
+        # orphans the temp dir make_encrypted_snapshot is still writing to --
+        # the mechanism that left ~24GB of mcpbrain-snap-* on disk and froze
+        # the host on 2026-07-27. _recover_from_stall checks this event and
+        # defers recovery while a backup is in flight. The bracketing
+        # _note_progress calls also mean a multi-minute backup (large store,
+        # slow upload) reads as fresh progress, not a stall.
+        self._backup_in_progress.set()
         try:
+            self._note_progress("backup")
             self.maybe_backup()
+            self._note_progress("backup")
         finally:
+            self._backup_in_progress.clear()
             self._bulk_lock.release()
 
     # -- silent auto-update ---------------------------------------------------
@@ -2664,6 +2704,14 @@ class Daemon:
         The single reader of watchdog_exits.json — the limiter, the recorder and
         status() all go through here so they can never disagree about what
         "recent" means. A missing/corrupt file reads as no history.
+
+        Persisted and compared on WALL-CLOCK time (time.time()), not
+        self._clock() (time.monotonic() by default): monotonic's epoch is
+        arbitrary per-process and resets across a reboot, which would make
+        every historical entry look like it just happened — disabling the
+        restart limiter permanently right after the reboot it's most needed
+        for. _progress stays on self._clock(): monotonic is correct there
+        because it only measures in-process durations, never persisted.
         """
         import json as _json
         path = self._watchdog_exits_path()
@@ -2671,7 +2719,7 @@ class Daemon:
             recent = [float(t) for t in _json.loads(path.read_text())]
         except (OSError, ValueError, TypeError):
             recent = []
-        cutoff = self._clock() - WATCHDOG_WINDOW_S
+        cutoff = time.time() - WATCHDOG_WINDOW_S
         return [t for t in recent if t >= cutoff]
 
     def _watchdog_may_exit(self) -> bool:
@@ -2684,7 +2732,7 @@ class Daemon:
 
     def _record_watchdog_exit(self) -> None:
         import json as _json
-        recent = self._recent_watchdog_exits() + [self._clock()]
+        recent = self._recent_watchdog_exits() + [time.time()]
         try:
             self._watchdog_exits_path().write_text(_json.dumps(recent))
         except OSError:
@@ -2713,6 +2761,43 @@ class Daemon:
         os._exit(1)  # noqa: SLF001
 
     def _recover_from_stall(self) -> None:
+        """Exit (or, unsupervised, spawn+exit) so the supervisor restarts us.
+
+        Two cases must NOT restart even though _stalled_phase() looks wedged
+        (Task 3):
+
+        - A backup is in flight (_backup_in_progress). os._exit bypasses
+          `finally`, so firing mid-snapshot orphans the temp dir
+          make_encrypted_snapshot is still writing to -- the mechanism that
+          left ~24GB of mcpbrain-snap-* on disk and froze the host on
+          2026-07-27. Recovery is deferred, not skipped: the next tick that
+          finds the backup finished re-evaluates normally.
+        - The cycle is repeatedly raising, not hanging
+          (_cycle_error_streak > 3). A deterministic exception looks
+          identical to a wedge from _stalled_phase's point of view -- "cycle"
+          simply stops advancing either way -- but a restart cannot fix a
+          code/config bug that fails the same way every time; doing it anyway
+          just burns the 3-exit watchdog budget on something restart-looping
+          can't solve. The daemon stays up, visibly failing (already logged
+          loudly in run()'s except handler), instead.
+
+        getattr(..., default) guards both: minimally-constructed Daemon
+        doubles in tests (Daemon.__new__ + hand-set attributes) may not set
+        either attribute, and that must read as "no, not deferring" rather
+        than raise.
+        """
+        if getattr(self, "_backup_in_progress", None) is not None \
+                and self._backup_in_progress.is_set():
+            log.warning("watchdog: stall detected but a backup is in "
+                        "progress; deferring recovery")
+            return
+        if getattr(self, "_cycle_error_streak", 0) > 3:
+            log.error("watchdog: cycle is repeatedly failing, not hanging "
+                       "(%d consecutive errors); a restart cannot fix a "
+                       "deterministic failure, so recovery is skipped -- "
+                       "staying up for diagnosis",
+                       self._cycle_error_streak)
+            return
         supervised = True
         if sys.platform == "win32":
             supervised = win_persistence_mechanism() == "schtasks"
@@ -2739,12 +2824,28 @@ class Daemon:
                         phase, age = stalled
                         if self._watchdog_may_exit():
                             log.error("watchdog: no progress in %.0fs (last phase=%s) "
-                                      "— restarting", age, phase)
+                                      "— invoking recovery", age, phase)
+                            # _recover_from_stall may itself defer (backup in
+                            # flight, or the cycle repeatedly failing rather
+                            # than hanging — see its docstring) rather than
+                            # actually restarting; it logs that outcome itself.
                             self._recover_from_stall()
                         else:
                             log.error("watchdog: no progress in %.0fs (last phase=%s); "
                                       "restart limit reached, staying up for diagnosis",
                                       age, phase)
+                except AssertionError:
+                    # Never swallow: this is how tests' _no_real_exit safety net
+                    # (an os._exit call raises AssertionError instead of really
+                    # exiting) reports an illegitimate watchdog trip. Catching
+                    # it here as just another "bad pass" would print a WARNING
+                    # and keep looping — silently hiding the exact regression
+                    # that fixture exists to catch. Anything else genuinely
+                    # unexpected from _run_periodic_passes/_note_progress/
+                    # _stalled_phase/_recover_from_stall falls through to the
+                    # broad except below and keeps this thread alive; a real
+                    # assertion failure should not.
+                    raise
                 except Exception:  # noqa: BLE001 — a bad pass must not kill the thread
                     log.warning("maintenance loop iteration failed", exc_info=True)
             self._stop.wait(timeout=self._maintenance_interval_s)
@@ -2859,14 +2960,41 @@ class Daemon:
                     # 183 consecutive skip warnings, no gated pass run in 8+
                     # minutes).
                     cycle_result = self.run_one()
+                    # A cycle that returns (even with a degraded/partial
+                    # result) is not the repeated-failure case Task 3's streak
+                    # tracks — only a raise is. Reset here, not just at the top
+                    # of the loop, so a run of failures immediately followed by
+                    # one success clears the streak before the NEXT failure.
+                    self._cycle_error_streak = 0
                 except Exception as exc:  # noqa: BLE001 — a transient cycle error must not kill the daemon
                     # Crashing here would hand the failure to launchd, whose
                     # restart resets every cadence anchor and drops stashed
                     # block/synthesis requests (live 2026-06-05 Gmail-timeout
                     # crash loop). Log and retry on the next interval; the
                     # skipped _pending_* resets in run_one preserve the stash.
-                    log.error("cycle failed; retrying next interval: %s",
-                              exc, exc_info=True)
+                    #
+                    # _note_progress("cycle_error") + _cycle_error_streak
+                    # (Task 3): run_one() only stamps "cycle" progress on a
+                    # clean return (see its last line), so a DETERMINISTIC
+                    # raise (a code/config bug that fails the same way every
+                    # time) left "cycle" frozen and looked exactly like a hang
+                    # to _stalled_phase — burning the watchdog's 3-exit budget
+                    # restart-looping on something a restart cannot fix. The
+                    # streak lets _recover_from_stall tell the two apart (see
+                    # its docstring) once past the threshold.
+                    self._note_progress("cycle_error")
+                    self._cycle_error_streak += 1
+                    if self._cycle_error_streak > 3:
+                        log.error(
+                            "cycle has failed %d times in a row (%s: %s); a "
+                            "restart cannot fix a deterministic failure, so "
+                            "the watchdog will not restart for this — "
+                            "staying up, visibly failing",
+                            self._cycle_error_streak, type(exc).__name__, exc,
+                            exc_info=True)
+                    else:
+                        log.error("cycle failed; retrying next interval: %s",
+                                  exc, exc_info=True)
                 # Backup self-gates on configured + due; harmless when paused
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
@@ -2891,6 +3019,22 @@ class Daemon:
                 # _bulk_lock past one tick -- an unbounded `with` here would
                 # park this cycle thread for that pass's whole duration.
                 self._backup_under_bulk_lock()
+                # Maintenance-thread liveness (Task 3): the watchdog itself
+                # lives inside _maintenance_loop (see _start_maintenance_thread),
+                # so if that thread dies (an uncaught exception past the pass-
+                # isolation try/except, or the AssertionError re-raise above)
+                # the daemon would keep looping cycles forever with no one
+                # watching for a wedge ever again — a dead scheduler silently
+                # took the watchdog down with it. Checked here, on the cycle
+                # thread, once per iteration; restarting is safe because
+                # _maintenance_loop is idempotent to (re)start (fresh thread,
+                # same self). Skipped while stopping so a deliberate shutdown
+                # never resurrects the thread.
+                if not self._stop.is_set() and self._maintenance_thread is not None \
+                        and not self._maintenance_thread.is_alive():
+                    log.error("maintenance thread died; restarting it "
+                              "(the watchdog lives there)")
+                    self._start_maintenance_thread()
                 # Stamp the daemon's own liveness so the fleet beacon (written by
                 # a separate process) reports real daemon health, not cached probes.
                 write_daemon_heartbeat(str(config.app_dir()))
