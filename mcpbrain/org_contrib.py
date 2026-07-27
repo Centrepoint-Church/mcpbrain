@@ -185,7 +185,7 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
     if not records:
         return 0
     inserted = 0
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         # Dedup against still-pending outbox rows: the boundary-second (>=)
         # watermark re-scan can re-derive an identical record on the next cycle;
         # the curator's staging UNIQUE absorbs it, but skipping it here keeps the
@@ -220,7 +220,7 @@ def upload_pending(store, fleet_storage: FleetStorage, contributor_email: str) -
     path = f"contrib/{contributor_email}/{ts}.jsonl"
     fleet_storage.put_bytes(path, payload)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         db.executemany("UPDATE org_contrib_outbox SET uploaded_at=? WHERE id=?",
                         [(now, r["id"]) for r in rows])
     return {"uploaded": len(rows), "batch": path}

@@ -59,7 +59,7 @@ def _now_iso() -> str:
 def init_bandit_table(store) -> None:
     """Create bandit_arms table in the main brain.sqlite3 if it doesn't exist."""
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS bandit_arms (
                     arm_value REAL PRIMARY KEY,
@@ -101,7 +101,7 @@ def _read_arms(store) -> dict[float, tuple[float, float]]:
 def _write_arm(store, arm_value: float, alpha: float, beta: float) -> None:
     """Upsert one arm's stats."""
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute(
                 "INSERT INTO bandit_arms(arm_value, alpha, beta, updated_at) "
                 "VALUES(?,?,?,?) ON CONFLICT(arm_value) DO UPDATE SET "

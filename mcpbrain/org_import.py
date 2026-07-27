@@ -166,7 +166,7 @@ def _resolve_tombstone_chains(tombstones: list[Tombstone]) -> list[Tombstone]:
 
 
 def _log_repoint(store, from_id, to_id, version, reason) -> None:
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         db.execute(
             "INSERT INTO org_repoint_log(from_entity_id,to_entity_id,snapshot_version,reason) "
             "VALUES(?,?,?,?)", (from_id, to_id, version, reason))
@@ -328,7 +328,7 @@ def _restore_from_repoint_log(store, entities) -> int:
     """
     incoming = {e["id"]: e for e in entities}
     restored = 0
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         logs = [dict(r) for r in db.execute(
             "SELECT from_entity_id, to_entity_id, reason FROM org_repoint_log").fetchall()]
         for lg in logs:
@@ -431,14 +431,14 @@ def import_snapshot(store, fleet_storage) -> dict:
     # runs after stubbing so merge_entities always has a materialised org
     # winner to fold the local loser into.
     restored = _restore_from_repoint_log(store, entities)
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         for e in entities:                          # stub org ids so reconcile can merge into them
             db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin,first_seen,last_seen) "
                        "VALUES(?,?,?, 'org', '', '')",
                        (e["id"], e.get("name", ""), e.get("type", "person")))
     reconciled = _reconcile_slug_drift(store, entities, manifest.version)
 
-    with store._connect() as db:
+    with store._connect(write=True) as db:
         # (1) Upsert snapshot entities as origin='org'. A same-id row already
         # marked origin='local' (a demoted former org node, or a genuine local
         # collision) is NEVER touched — the WHERE clause on DO UPDATE makes the

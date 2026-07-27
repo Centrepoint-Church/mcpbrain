@@ -128,7 +128,7 @@ def drain_profiles(store, inbox_obj: dict) -> dict:
         if not eid or not profile_text or not profile_text.strip():
             continue
 
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE entities SET profile=?, profile_updated_at=? WHERE id=?",
                 (profile_text.strip(), now_iso, eid),

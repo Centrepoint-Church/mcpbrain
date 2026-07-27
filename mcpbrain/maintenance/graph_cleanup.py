@@ -24,7 +24,7 @@ def recompute_singletons(store) -> dict:
     Idempotent. Returns a counts dict."""
     from mcpbrain.graph_write import SINGLETON_RELATIONS, _now_iso
     changed = 0
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         for relation in SINGLETON_RELATIONS:
             groups = conn.execute(
                 "SELECT DISTINCT entity_a FROM entity_relations WHERE relation = ?",
@@ -60,7 +60,7 @@ def cleanup_graph(store, *, taxonomy=None) -> dict:
     if taxonomy is None:
         taxonomy = orgs.taxonomy_from_config()
     counts = {"self_loops": 0, "type_invalid": 0, "orgs_folded": 0}
-    with store._connect() as conn:
+    with store._connect(write=True) as conn:
         # 1. self-loops
         cur = conn.execute("DELETE FROM entity_relations WHERE entity_a = entity_b")
         counts["self_loops"] = cur.rowcount or 0

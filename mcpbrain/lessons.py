@@ -45,7 +45,7 @@ _VERIFY_TIMEOUT = 15
 def init_lessons_table(store) -> None:
     """Create recall_lessons table in brain.sqlite3 if it doesn't exist."""
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS recall_lessons (
                     id INTEGER PRIMARY KEY,
@@ -186,7 +186,7 @@ def _write_lesson(store, lesson: str, source_events: list[dict]) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     doc_ids = list({r.get("doc_id") for r in source_events if r.get("doc_id")})
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute(
                 "INSERT INTO recall_lessons(lesson_text, source_events, content_hash, "
                 "verified, written_at) VALUES(?,?,?,1,?)",
