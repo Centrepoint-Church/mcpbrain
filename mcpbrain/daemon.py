@@ -893,22 +893,26 @@ class Daemon:
         self._bulk_lock_waiters = 0
         self._bulk_lock_waiters_lock = threading.Lock()
         # Set for the duration of a gated cadence pass's OWN execution (Task 4
-        # known-gap fix), from the moment it actually acquires _bulk_lock to the
-        # moment it releases it -- set/cleared by _run_gated_pass, which runs
-        # INLINE on the maintenance thread (see _run_periodic_passes's
-        # docstring for a worker-thread variant that was tried and reverted).
-        # A gated pass that legitimately holds _bulk_lock past STALL_S (e.g.
-        # _run_salience_score's `while rounds < 500` loop) makes
-        # "sync"/"cycle"/"maintenance" all go stale together -- every one of
-        # them is blocked behind the same lock -- which _stalled_phase()
-        # cannot tell apart from a genuine wedge on the raw timestamps alone.
-        # _recover_from_stall defers while this is set, the same shape as
-        # (and the same UNBOUNDED-defer tradeoff as) the existing
-        # _backup_in_progress check: a pass that never returns at all holds
-        # both _bulk_lock and this flag forever, so recovery never fires for
-        # that specific wedge either -- an explicit, tracked known gap (see
-        # _run_periodic_passes's docstring), not a new risk this introduces
-        # beyond what _backup_in_progress already accepted for backups.
+        # known-gap attempt), from the moment it actually acquires _bulk_lock
+        # to the moment it releases it -- set/cleared by _run_gated_pass,
+        # which runs INLINE on the maintenance thread (a worker-thread variant
+        # was tried and reverted -- see _run_periodic_passes's docstring).
+        #
+        # IMPORTANT: on THIS single thread, _recover_from_stall's check of
+        # this flag is DEAD CODE, not a working watchdog mitigation --
+        # _run_gated_pass's own `finally: active.clear()` runs strictly
+        # BEFORE _run_periodic_passes() returns, which is strictly before
+        # _maintenance_loop ever reaches _stalled_phase()/_recover_from_stall()
+        # on that same thread, so the flag is ALWAYS already clear by the
+        # time it's checked. Confirmed directly by a full-timeline simulation
+        # of the real production call chain: 69/69 pass-completions produced
+        # a spurious restart. Kept ONLY for status() observability (so a
+        # human/dashboard polling mid-pass can see one is running); the
+        # false-restart problem it was meant to fix (cause 1 of the Task 4
+        # known-gap note) is an explicit, tracked, STILL-OPEN gap -- see
+        # _recover_from_stall's and _run_periodic_passes's docstrings, and
+        # docs/superpowers/plans/2026-07-27-daemon-scheduling-remediation.md,
+        # Task 4 section.
         self._bulk_pass_active = threading.Event()
         # Maintenance runs on its own thread, ticking independently of the bulk
         # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
@@ -1122,11 +1126,16 @@ class Daemon:
         # alone when the real answer is "a backup is in flight, deliberately".
         backup_in_progress = bool(getattr(self, "_backup_in_progress", None)
                                    and self._backup_in_progress.is_set())
-        # Same debuggability rationale (Task 4): a gated cadence pass
-        # legitimately holding _bulk_lock past STALL_S defers watchdog
-        # recovery (_recover_from_stall) just like a backup in flight does --
-        # surface it so that deferral is visible from status() too, not just
-        # a log line.
+        # Task 4: surfaces whether a gated cadence pass is CURRENTLY holding
+        # _bulk_lock. Unlike backup_in_progress, this does NOT correspond to
+        # a working watchdog deferral -- _recover_from_stall's own check of
+        # this flag is dead code on the single (maintenance) thread that both
+        # sets/clears it and would check it (see that method's docstring).
+        # It genuinely IS useful here, though: status() is served by a
+        # DIFFERENT thread (the control-API handler), which really can
+        # observe this flag set while the maintenance thread is mid-pass --
+        # so this is real "a gated pass is running right now" visibility for
+        # a human/dashboard, just not a watchdog signal.
         bulk_pass_active = bool(getattr(self, "_bulk_pass_active", None)
                                  and self._bulk_pass_active.is_set())
         return {
@@ -2802,8 +2811,11 @@ class Daemon:
         (see that method's docstring for why a worker-thread version of this was
         tried and reverted). Owns the whole acquire -> run -> release lifecycle,
         including setting/clearing _bulk_pass_active around the pass's real
-        execution -- the signal _recover_from_stall() checks to tell "blocked on
-        a legitimately slow gated pass" apart from "wedged" (see its docstring).
+        execution. That flag is kept for status() observability only -- on
+        this single thread, _recover_from_stall()'s check of it is dead code
+        (always sees it already clear by the time it runs); see
+        _recover_from_stall's docstring for why, and for the still-open gap
+        this leaves.
 
         Signals intent BEFORE blocking on the acquire so the cycle thread's
         _cycle_bulk_section sees it and yields between units of work (CPython's
@@ -2892,16 +2904,35 @@ class Daemon:
         joins or explicitly abandons-and-logs) is real additional concurrency
         surface in code that has already been through 4 (Task 2) and 3
         (Task 3) review rounds for similar correctness issues. Per the brief's
-        explicit "fine to leave this open" allowance, this task instead kept
-        the ALREADY-fixed, already-verified half — inline dispatch, with
-        _bulk_pass_active set/cleared around the pass's real (inline)
-        execution so _recover_from_stall correctly defers on a legitimately
-        long-but-FINITE hold (the actual problem Task 3's review observed) --
-        and left cause 2 (a genuinely-hung pass still makes this method,
-        and therefore the watchdog check that follows it in
-        _maintenance_loop, unreachable) as an explicit, tracked known gap. See
+        explicit "fine to leave this open" allowance, this task instead
+        reverted to plain inline dispatch (this method's current shape).
+
+        IMPORTANT — correcting an earlier version of this docstring: reverting
+        to inline dispatch does NOT also fix cause 1. _bulk_pass_active is
+        kept and still set/cleared around the pass's real (inline) execution,
+        but on a SINGLE thread that both sets/clears it AND is the only thing
+        that ever checks it, _run_gated_pass's own `finally: active.clear()`
+        runs strictly BEFORE this method returns, which is strictly before
+        _maintenance_loop reaches _note_progress("maintenance") /
+        _stalled_phase() / _recover_from_stall() on that SAME thread. So by
+        the time _recover_from_stall() ever runs, _bulk_pass_active is ALWAYS
+        already clear -- there is no concurrent second thread left to ever
+        observe it set. A full-timeline simulation of the real, single-
+        threaded production call chain (this method -> _run_gated_pass ->
+        _stalled_phase -> _recover_from_stall, a pass holding the lock for
+        2100 simulated seconds) confirmed this directly: 69 out of 69
+        pass-completions produced a spurious restart. _bulk_pass_active is
+        retained purely for status() observability (a human/dashboard can see
+        "a gated pass is running" mid-pass); it is NOT a working watchdog
+        mitigation in the current shape. Cause 1 (the false-restart problem)
+        is therefore STILL OPEN, behaviorally identical to Task 3's
+        end-state (cd172ce) -- this revert only restored the topology, not a
+        fix for the underlying gap. Both cause 1 and cause 2 are left as
+        explicit, tracked known gaps. See
         docs/superpowers/plans/2026-07-27-daemon-scheduling-remediation.md,
-        Task 4 section, for the fuller writeup.
+        Task 4 section, for the fuller writeup, including a smaller suggested
+        future-fix direction (recording the pass's hold window as a
+        timestamp pair instead of a live flag).
         """
         configured = config.is_configured(str(app_dir()))
         for cp in _CADENCE_PASSES:
@@ -3012,8 +3043,8 @@ class Daemon:
     def _recover_from_stall(self) -> None:
         """Exit (or, unsupervised, spawn+exit) so the supervisor restarts us.
 
-        Three cases must NOT restart even though _stalled_phase() looks wedged
-        (Task 3, Task 4):
+        Two cases genuinely, currently prevent a restart even though
+        _stalled_phase() looks wedged (Task 3):
 
         - A backup is in flight (_backup_in_progress). os._exit bypasses
           `finally`, so firing mid-snapshot orphans the temp dir
@@ -3021,36 +3052,6 @@ class Daemon:
           left ~24GB of mcpbrain-snap-* on disk and froze the host on
           2026-07-27. Recovery is deferred, not skipped: the next tick that
           finds the backup finished re-evaluates normally.
-        - A gated cadence pass is actively holding _bulk_lock
-          (_bulk_pass_active, Task 4). A pass like _run_salience_score's
-          `while rounds < 500` loop or stale_reextract's network-touching
-          sweep can legitimately run well past STALL_S while holding the
-          lock -- and while it does, the cycle thread's own
-          _cycle_bulk_section blocks on the SAME lock, so "sync"/"cycle" (and,
-          because _run_gated_pass runs INLINE on the maintenance thread, the
-          maintenance thread's OWN tick can't reach _note_progress
-          ("maintenance") either) all go stale TOGETHER. _stalled_phase()
-          cannot tell that apart from a genuine wedge from the raw timestamps
-          alone -- confirmed by a full-timeline simulation of a 2100s hold,
-          which reproduces `_stalled_phase() -> ("sync"/"cycle", ~2100.0)` on
-          an otherwise perfectly healthy daemon. _bulk_pass_active is
-          set/cleared by _run_gated_pass around the pass's real execution, so
-          once the pass genuinely finishes the flag clears and a later real
-          stall (progress never resuming afterward) is still caught normally.
-
-          This deferral is UNBOUNDED, the same tradeoff _backup_in_progress
-          already makes: a pass that never returns AT ALL (a true hang, not
-          merely a long-but-finite one) holds _bulk_lock and this flag
-          forever, so this specific wedge is never recovered from either --
-          confirmed live by an end-to-end simulation (199 ticks / 3.3
-          simulated hours, no restart). A worker-thread variant that bounded
-          this (so a genuine hang could still be recovered from) was built,
-          reviewed, and REVERTED: it introduced its own thread-tracking
-          Critical (see _run_periodic_passes's docstring) without which
-          _shutdown_maintenance's single-writer guarantee breaks, for a
-          benefit this deferral already gives up anyway once bounded that
-          way. Left as an explicit, tracked known gap rather than force a
-          fix not yet verified safe — see the plan doc's Task 4 section.
         - The cycle is repeatedly raising, not hanging
           (_cycle_error_streak > 3). A deterministic exception looks
           identical to a wedge from _stalled_phase's point of view -- "cycle"
@@ -3060,10 +3061,42 @@ class Daemon:
           can't solve. The daemon stays up, visibly failing (already logged
           loudly in run()'s except handler), instead.
 
-        getattr(..., default) guards all three: minimally-constructed Daemon
-        doubles in tests (Daemon.__new__ + hand-set attributes) may not set
-        any of these attributes, and that must read as "no, not deferring"
-        rather than raise.
+        A THIRD check below (_bulk_pass_active, Task 4) is present in code but
+        is CURRENTLY DEAD -- it can never actually defer anything in
+        production, and must not be read as a working mitigation. The intent
+        was: a gated cadence pass actively holding _bulk_lock (e.g.
+        _run_salience_score's `while rounds < 500` loop, legitimately running
+        well past STALL_S) makes "sync"/"cycle"/"maintenance" all go stale
+        together (the cycle thread's own _cycle_bulk_section blocks on the
+        SAME lock, and because _run_gated_pass runs INLINE on the maintenance
+        thread, that thread's own tick can't reach _note_progress either),
+        which _stalled_phase() cannot tell apart from a genuine wedge from
+        the raw timestamps alone -- so defer while the flag is set, same
+        shape as _backup_in_progress.
+
+        The problem: on a single thread that both sets/clears the flag AND is
+        the only thing that ever checks it, _run_gated_pass's own
+        `finally: active.clear()` runs strictly BEFORE _run_periodic_passes()
+        returns, which is strictly before THIS method is ever reached (via
+        _maintenance_loop's _note_progress -> _stalled_phase ->
+        _recover_from_stall, all on that same thread). So by the time this
+        method runs, _bulk_pass_active is ALWAYS already clear -- there is no
+        concurrent second thread left to observe it set. A full-timeline
+        simulation of the real, single-threaded production call chain (a
+        pass holding the lock for 2100 simulated seconds) confirmed this
+        directly: 69 out of 69 pass-completions produced a spurious restart.
+        _bulk_pass_active is kept only for status() observability (so a
+        human/dashboard polling mid-pass can see one is running); the check
+        below is inert in the current shape. This is an explicit, tracked
+        known gap (cause 1 of the Task 4 known-gap note), not fixed here --
+        see docs/superpowers/plans/2026-07-27-daemon-scheduling-remediation.md,
+        Task 4 section, for the fuller writeup and a suggested smaller future
+        fix (recording the pass's hold window instead of a live flag).
+
+        getattr(..., default) guards all three checks: minimally-constructed
+        Daemon doubles in tests (Daemon.__new__ + hand-set attributes) may
+        not set any of these attributes, and that must read as "no, not
+        deferring" rather than raise.
         """
         if getattr(self, "_backup_in_progress", None) is not None \
                 and self._backup_in_progress.is_set():

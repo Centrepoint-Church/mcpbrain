@@ -566,11 +566,12 @@ permanently and pinned doctor to a red Watchdog line."
 > that is exactly the gap that let the Task 3 attempt look plausible while
 > being pointless.
 
-> **Task 4 round-2 update (2026-07-28, review) — cause 1 fixed and verified,
-> cause 2 attempted and reverted, tracked open.**
+> **Task 4 round-2 update (2026-07-28, review) — worker-thread attempt at
+> cause 2 reverted (two Criticals); cause 1 is STILL OPEN too, corrected
+> after a round-3 review caught this note overclaiming a fix.**
 >
-> Round 1 fixed both causes: `_bulk_pass_active` (set/cleared around a gated
-> pass's real execution, checked by `_recover_from_stall` the same way
+> Round 1 attempted both causes: `_bulk_pass_active` (set/cleared around a
+> gated pass's real execution, checked by `_recover_from_stall` the same way
 > `_backup_in_progress` already is) for cause 1, plus running each gated
 > pass's acquire-and-run on its own worker thread (bounded join, so a hung
 > pass couldn't park `_run_periodic_passes()`/the watchdog check behind it)
@@ -600,16 +601,43 @@ permanently and pinned doctor to a red Watchdog line."
 >
 > **Resolution: reverted the worker-thread dispatch, kept `_bulk_pass_active`.**
 > `_run_gated_pass` runs INLINE again (on the maintenance thread, exactly as
-> before this task), with `_bulk_pass_active` set/cleared around its real
-> (inline) execution. This closes cause 1 — the actual problem Task 3's
-> review observed, verified by a full-timeline simulation
-> (`test_long_gated_pass_hold_does_not_trigger_spurious_restart`, 2100s hold,
-> no spurious restart, a later genuine stall still recovers) — with zero new
-> risk, since `_shutdown_maintenance` joining just `_maintenance_thread` is
-> sufficient again once nothing else is spawned. Cause 2 (a genuinely-hung
-> pass makes `_run_periodic_passes()`/the watchdog check unreachable) is left
-> as an explicit, tracked gap — same disposition as Task 3's own reversion.
-> **Do not resurrect the worker-thread-per-pass approach without ALSO**:
+> before this task, and exactly as it did at the end of Task 3), with
+> `_bulk_pass_active` set/cleared around its real (inline) execution. This
+> fully resolves the two Criticals above (`_shutdown_maintenance` joining
+> just `_maintenance_thread` is sufficient again once nothing else is
+> spawned) — but this round's note originally, WRONGLY, also claimed it
+> "closes cause 1." **It does not. Cause 1 (the false-restart problem) is
+> STILL OPEN, behaviorally identical to Task 3's end-state (`cd172ce`) —
+> the revert only changed the topology back, not the underlying gap.**
+>
+> **Why `_bulk_pass_active` cannot actually defer anything in the current
+> (post-revert) single-thread shape:** there is only ONE thread involved —
+> the maintenance thread — and it both sets/clears the flag AND is the only
+> thing that ever checks it. `_run_gated_pass`'s own `finally: active.clear()`
+> runs strictly BEFORE `_run_periodic_passes()` returns, which is strictly
+> before `_maintenance_loop` reaches `_note_progress("maintenance")` /
+> `_stalled_phase()` / `_recover_from_stall()` on that same thread. So by the
+> time `_recover_from_stall()` ever runs, `_bulk_pass_active` is ALWAYS
+> already clear — there is no concurrent second thread that could ever
+> observe it set. A round-3 review proved this by running the REAL,
+> single-threaded production call chain end-to-end against a pass that holds
+> the lock for 2100 simulated seconds: **69 out of 69 pass-completions
+> produced a spurious restart.** `_bulk_pass_active` is retained purely for
+> `status()` observability (so a human/dashboard CAN see "a gated pass is
+> currently running" while polling mid-pass) — it is dead code as a watchdog
+> mitigation in the current shape, not a working fix.
+>
+> The retained test `test_long_gated_pass_hold_does_not_trigger_spurious_restart`
+> still passes, but do not read it as coverage that cause 1 is handled: it
+> deliberately drives `_run_gated_pass` on a SEPARATE background thread and
+> calls `_recover_from_stall()` from the main test thread WHILE the pass is
+> still running on the other thread — that is the OLD (reverted)
+> worker-thread topology, which no longer exists in production. It is useful
+> as isolated coverage that the flag mechanism itself (set-before-run,
+> clear-in-finally) works correctly, nothing more.
+>
+> **Both causes are now open, tracked, and honestly described. Do not
+> resurrect the worker-thread-per-pass approach without ALSO**:
 > (a) bounding `_bulk_pass_active`'s defer itself (e.g. defer only up to
 > `STALL_S`, then let recovery proceed anyway — a pass hung that long needs a
 > restart the same as any other stall), AND (b) giving `_shutdown_maintenance`
@@ -618,6 +646,18 @@ permanently and pinned doctor to a red Watchdog line."
 > trigger recovery; a shutdown that actually waits for or explicitly
 > abandons an in-flight pass thread), not just unit-level mechanism tests —
 > same lesson as above, twice now.
+>
+> **A smaller suggested direction for a real future fix to cause 1** (not
+> implemented, just left here for whoever picks this up): have
+> `_run_gated_pass` record the pass's hold WINDOW (start/end timestamps,
+> e.g. `self._bulk_pass_last_hold = (start, end)`) instead of relying on a
+> live flag that is structurally unobservable on a single thread. Then
+> `_stalled_phase()` (or `_recover_from_stall`) can subtract any overlap
+> between a stale progress key's staleness window and the recorded hold
+> window before comparing against `STALL_S` — no second thread needed, and
+> no defer-forever risk, since the window is a fixed, bounded fact recorded
+> AFTER the pass returns, not a live signal that can only be checked by the
+> same thread that already cleared it.
 
 - [ ] **Step 1: Write the failing tests**
 
