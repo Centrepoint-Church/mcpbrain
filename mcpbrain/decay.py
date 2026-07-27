@@ -100,17 +100,23 @@ def update_on_recall(store, doc_ids: list[str],
     """Strengthen recalled chunks: S += 1, last_accessed = now.
 
     Fire-and-forget: errors are swallowed so recall never fails because of
-    the strength update.
+    the strength update. Called inline from Daemon.search (the /api/recall
+    handler), so the write below uses a small retry budget
+    (RECALL_PATH_BEGIN_RETRIES) rather than the store's normal default —
+    a live recall response should not pile up seconds of wait behind a write
+    lock just to bump memory_strength; on contention, skip this bump rather
+    than block, same as any other failure here.
     """
     if not doc_ids:
         return
     ts = now or _now_iso()
     try:
+        from mcpbrain.store import RECALL_PATH_BEGIN_RETRIES
         rows = []
         for doc_id in doc_ids:
             strength, _ = store.get_memory_strength(doc_id)
             rows.append((doc_id, strength + 1.0, ts))
-        store.update_memory_strength_batch(rows)
+        store.update_memory_strength_batch(rows, retries=RECALL_PATH_BEGIN_RETRIES)
     except Exception as exc:  # noqa: BLE001
         log.debug("decay.update_on_recall error (swallowed): %s", exc)
 

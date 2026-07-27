@@ -111,8 +111,20 @@ def _base_cal_event_id(value: str) -> str:
     return _CAL_INSTANCE_SUFFIX.sub("", value)
 
 
-_BEGIN_RETRIES = 6
+_BEGIN_RETRIES = 3
 _BEGIN_BASE_SLEEP_S = 0.05
+
+# A smaller retry budget for writes that run inline on the /api/recall path
+# (currently decay.update_on_recall -> update_memory_strength_batch). Even at
+# _BEGIN_RETRIES=3, each failed BEGIN IMMEDIATE attempt can wait the connection's
+# full busy_timeout (5000ms via PRAGMA busy_timeout in _open_db) before this
+# loop's own backoff sleep even starts, so 3 retries is still ~15s worst case —
+# fine for a background maintenance write, not for something a recall response
+# is waiting on. update_on_recall is fire-and-forget (its caller already
+# swallows exceptions), so failing fast under contention and simply skipping
+# this recall's strength bump is strictly better than adding seconds of
+# latency to the prompt path for a non-critical bookkeeping update.
+RECALL_PATH_BEGIN_RETRIES = 1
 
 
 def _begin_immediate(db, *, retries: int = _BEGIN_RETRIES) -> None:
@@ -149,7 +161,7 @@ class Store:
         # the MCP server also opens a writable handle for draft_records (serialised via WAL)
 
     @contextmanager
-    def _connect(self, *, write: bool = False):
+    def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
@@ -166,17 +178,34 @@ class Store:
         instantly (ignoring busy_timeout) when another writer already holds the
         lock — BEGIN IMMEDIATE avoids the upgrade entirely so busy_timeout (and
         the bounded retry below) actually cover contention between writers.
+
+        retries: passed straight through to _begin_immediate. Callers on a
+        latency-sensitive path (e.g. recall) can pass a smaller budget than the
+        default so contention fails fast instead of piling up wait time; see
+        RECALL_PATH_BEGIN_RETRIES.
         """
         db = _open_db(self.path, self.read_only)
         try:
             if write and not self.read_only:
                 # Manual transaction control: take the write lock up front.
                 db.isolation_level = None
-                _begin_immediate(db)
+                _begin_immediate(db, retries=retries)
                 try:
                     yield db
                 except BaseException:
-                    db.execute("ROLLBACK")
+                    # SQLite may have already auto-rolled-back the transaction
+                    # itself before this exception surfaced (e.g. SQLITE_FULL,
+                    # SQLITE_IOERR) — in that case "ROLLBACK" fails with
+                    # OperationalError: cannot rollback - no transaction is
+                    # active, which used to propagate INSTEAD of the original
+                    # error, masking a disk-full as a confusing "no transaction"
+                    # message. Swallow only that specific failure so the real,
+                    # original exception (raised below by `raise`) is what the
+                    # caller actually sees.
+                    try:
+                        db.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
                     raise
                 else:
                     db.execute("COMMIT")
@@ -2083,16 +2112,25 @@ class Store:
                      "AND COALESCE(deadline, '') != '' "
                      "AND substr(deadline, 1, 10) < :dead_by")
         params = {"cutoff": cutoff, "dead_by": dead_by, "today": today}
-        with self._connect(write=True) as db:
-            def _ids(where):
-                return [r["id"] for r in db.execute(
-                    f"SELECT id FROM actions WHERE {where}", params).fetchall()]
-            todo = [("ttl", undated, _ids(undated)),
-                    ("ttl_overdue", long_dead, _ids(long_dead))]
+
+        def _ids(db, where):
+            return [r["id"] for r in db.execute(
+                f"SELECT id FROM actions WHERE {where}", params).fetchall()]
+
+        if dry_run:
+            # Read-only: no mutation happens on this path, so don't take the
+            # write lock (BEGIN IMMEDIATE) just to answer "what would this do".
+            with self._connect() as db:
+                todo = [("ttl", undated, _ids(db, undated)),
+                        ("ttl_overdue", long_dead, _ids(db, long_dead))]
             total = sum(len(ids) for _, _, ids in todo)
-            if dry_run:
-                merged = [i for _, _, ids in todo for i in ids]
-                return {"candidates": total, "ids": merged[:20]}
+            merged = [i for _, _, ids in todo for i in ids]
+            return {"candidates": total, "ids": merged[:20]}
+
+        with self._connect(write=True) as db:
+            todo = [("ttl", undated, _ids(db, undated)),
+                    ("ttl_overdue", long_dead, _ids(db, long_dead))]
+            total = sum(len(ids) for _, _, ids in todo)
             for marker, where, ids in todo:
                 if not ids:
                     continue
@@ -2128,11 +2166,17 @@ class Store:
         _fp_open = "status = 'open' AND COALESCE(text_fingerprint, '') != ''"
         where = (f"{_fp_open} AND id NOT IN "
                  f"(SELECT MIN(id) FROM actions WHERE {_fp_open} GROUP BY text_fingerprint)")
+        if dry_run:
+            # Read-only: no mutation happens on this path, so don't take the
+            # write lock (BEGIN IMMEDIATE) just to answer "what would this do".
+            with self._connect() as db:
+                ids = [r["id"] for r in db.execute(
+                    f"SELECT id FROM actions WHERE {where}").fetchall()]
+            return {"candidates": len(ids), "ids": ids[:20]}
+
         with self._connect(write=True) as db:
             ids = [r["id"] for r in db.execute(
                 f"SELECT id FROM actions WHERE {where}").fetchall()]
-            if dry_run:
-                return {"candidates": len(ids), "ids": ids[:20]}
             if not ids:
                 return {"archived": 0}
             db.execute(
@@ -3306,9 +3350,10 @@ class Store:
             return (5.0, "")
         return (float(row["memory_strength"] or 5.0), row["last_accessed"] or "")
 
-    def update_memory_strength(self, doc_id: str, strength: float, last_accessed: str) -> None:
+    def update_memory_strength(self, doc_id: str, strength: float, last_accessed: str, *,
+                               retries: int = _BEGIN_RETRIES) -> None:
         """Upsert memory_strength + last_accessed in chunk_quality."""
-        with self._connect(write=True) as db:
+        with self._connect(write=True, retries=retries) as db:
             db.execute(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
@@ -3318,11 +3363,17 @@ class Store:
                 (doc_id, round(float(strength), 3), last_accessed),
             )
 
-    def update_memory_strength_batch(self, rows: list[tuple]) -> None:
-        """Update many rows. rows = [(doc_id, strength, last_accessed), ...]."""
+    def update_memory_strength_batch(self, rows: list[tuple], *,
+                                     retries: int = _BEGIN_RETRIES) -> None:
+        """Update many rows. rows = [(doc_id, strength, last_accessed), ...].
+
+        retries: passed to _connect — callers on the recall path (see
+        decay.update_on_recall) pass RECALL_PATH_BEGIN_RETRIES so contention
+        fails fast instead of adding wait time to a live recall response.
+        """
         if not rows:
             return
-        with self._connect(write=True) as db:
+        with self._connect(write=True, retries=retries) as db:
             db.executemany(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
