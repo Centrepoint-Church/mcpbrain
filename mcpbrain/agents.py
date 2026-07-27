@@ -178,6 +178,31 @@ def schtasks_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     return _schtasks_args(task_name=_TASK_NAME, subcommand="daemon", mcpbrain_bin=mcpbrain_bin, home=home)
 
 
+def schtasks_xml(*, shim_path, home: str) -> str:
+    """On-logon task XML with RestartOnFailure.
+
+    The CLI's /RI flag cannot express restart-on-failure for an on-logon task,
+    so registration goes through /XML instead. Without this, a watchdog exit on
+    Windows would kill the daemon until the next logon — strictly worse than the
+    stall it is recovering from.
+    """
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n"
+        "  <Settings>\n"
+        "    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>\n"
+        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+        "  </Settings>\n"
+        "  <Actions Context=\"Author\">\n"
+        f"    <Exec><Command>{shim_path}</Command></Exec>\n"
+        "  </Actions>\n"
+        "</Task>\n"
+    )
+
+
 def schtasks_tray_args(*, mcpbrain_bin: str, home: str) -> list[str]:
     """Return the schtasks.exe argument list that registers ``mcpbrain tray`` at logon."""
     return _schtasks_args(task_name=_TRAY_TASK_NAME, subcommand="tray", mcpbrain_bin=mcpbrain_bin, home=home)
@@ -267,6 +292,25 @@ def _restart_launchd() -> None:  # pragma: no cover
 # Windows helpers
 # ---------------------------------------------------------------------------
 
+def _register_schtasks_xml(*, task_name: str, shim_path: Path, home: str) -> None:  # pragma: no cover
+    """Register an on-logon task via /XML instead of /TR + /SC ONLOGON.
+
+    The CLI flags cannot express RestartOnFailure for an on-logon trigger, so the
+    task is created from the schtasks_xml() document via a temp file instead. See
+    schtasks_xml for why this matters to the watchdog (Task 5).
+    """
+    import tempfile
+    xml = schtasks_xml(shim_path=shim_path, home=home)
+    fd, xml_path = tempfile.mkstemp(suffix=".xml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-16") as f:
+            f.write(xml)
+        subprocess.run(["schtasks", "/create", "/tn", task_name, "/xml", xml_path, "/f"],
+                       check=True)
+    finally:
+        Path(xml_path).unlink(missing_ok=True)
+
+
 def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     shim_path = _win_shim_path(home, _TASK_NAME)
     shim_path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,7 +318,7 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                            subcommand="daemon"))
     log.info("wrote Windows shim %s", shim_path)
     if win_persistence_mechanism() == "schtasks":
-        subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
+        _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path, home=home)
         log.info("Windows scheduled task '%s' created", _TASK_NAME)
     else:
         _install_startup_shortcut(_TASK_NAME, shim_path=shim_path)
