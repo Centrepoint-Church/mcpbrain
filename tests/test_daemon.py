@@ -836,6 +836,56 @@ def test_run_loop_holds_the_bulk_lock_across_the_backup(tmp_path):
     assert all(locked_during_backup), "maybe_backup ran without holding _bulk_lock"
 
 
+def test_backup_skips_rather_than_blocking_when_bulk_lock_is_held(tmp_path):
+    """The other side of test_run_loop_holds_the_bulk_lock_across_the_backup: the
+    cycle thread's acquire of _bulk_lock around maybe_backup() must be BOUNDED,
+    the same shape (BULK_LOCK_ACQUIRE_S) as the four gated maintenance passes'
+    own acquire on the other side of this lock (see
+    test_maintenance_scheduler.test_dispatch_skips_a_lock_gated_pass_rather_than_blocking_forever).
+
+    A gated pass's own execution time is not bounded by that plan -- only its
+    acquire is -- so a pass like _run_salience_score's `while rounds < 500` loop
+    or stale_reextract's network-touching sweep can legitimately hold
+    _bulk_lock past one maintenance tick. Before this fix, run()'s backup call
+    did a plain `with self._bulk_lock:`, which would park the cycle thread for
+    that pass's whole duration -- a new, narrower echo of the same
+    unbounded-lock-blocks-the-other-side problem the bounded gated-pass acquire
+    already solved. Real thread, real lock -- no mocked locks.
+    """
+    store = _make_store(tmp_path)
+    daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+    daemon._bulk_lock_wait_s = 0.15
+    backup_calls = []
+    daemon.maybe_backup = lambda: backup_calls.append(1)
+    daemon._last_backup = None  # sentinel: a skip must not falsely advance this
+
+    release_lock = threading.Event()
+    acquired = threading.Event()
+
+    def _hold():
+        with daemon._bulk_lock:
+            acquired.set()
+            release_lock.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert acquired.wait(timeout=2.0), "lock holder never acquired _bulk_lock"
+
+    try:
+        started = time.monotonic()
+        daemon._backup_under_bulk_lock()  # must RETURN promptly, lock still held
+        elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=2.0)
+
+    assert not holder.is_alive()
+    assert elapsed < 2.0, f"backup blocked {elapsed:.1f}s on a held bulk lock"
+    assert backup_calls == [], "maybe_backup ran while the bulk lock was held elsewhere"
+    assert daemon._last_backup is None, "a skipped backup must not advance _last_backup"
+
+
 # ---------------------------------------------------------------------------
 # construction-time validation: backup_interval_s is required when backup is on
 # ---------------------------------------------------------------------------
