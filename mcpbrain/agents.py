@@ -101,26 +101,45 @@ def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
                           home=home, keep_alive="crashonly")
 
 
-def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str) -> str:
+def _win_shim_content(*, mcpbrain_bin: str, home: str, subcommand: str, wait: bool = False) -> str:
     """A .vbs that runs `mcpbrain <subcommand>` with a hidden console via the
     ABSOLUTE installed launcher path (resolved by setup). Window style 0 hides the
     console; VBScript escapes a double-quote by doubling it.
 
-    sh.Run's third argument is True (wait): wscript blocks until the child exits
-    and propagates its exit code as wscript's own. With False (the previous
-    value), sh.Run returned immediately, so the scheduled task always completed
-    with exit code 0 -- regardless of whether the daemon later crashed --
-    and Task Scheduler's RestartOnFailure could never see a failure to act on.
-    Waiting is correct for the one-shot cadence subcommands too (records-prune /
-    records-health / fleet-report --beacon): the task now genuinely reports
-    whether that run succeeded instead of "completing" before it started work.
+    wait=False (default) is the original fire-and-forget form: `sh.Run "...", 0,
+    False` returns immediately with wscript exiting 0 regardless of the child's
+    outcome. This is what every caller EXCEPT the schtasks-XML daemon
+    registration wants: the Startup-folder "start now" call
+    (_install_startup_shortcut) launches a process that never returns
+    (`mcpbrain daemon`/`tray`), so a waiting shim there would hang that
+    subprocess.run call forever; the tray's and cadences' plain-CLI schtasks
+    registrations have no RestartOnFailure to feed anyway, and (for the tray/
+    daemon-CLI-fallback, both long-lived) waiting would additionally expose
+    them to Task Scheduler's un-set-by-us defaults (StopIfGoingOnBatteries=true,
+    ExecutionTimeLimit=PT72H) for no benefit.
+
+    wait=True is for the ONE caller that both needs it and is safe with it: the
+    daemon's schtasks-XML on-logon registration, whose <Settings> explicitly
+    turns those two defaults off and which sets RestartOnFailure -- a setting
+    that can only ever fire if Task Scheduler sees the daemon's REAL exit code.
+    `sh.Run(...)` (function-call form, not the fire-and-forget statement form)
+    returns the child's exit code, which is then propagated as wscript's own
+    exit code via `WScript.Quit` -- the statement form discards that return
+    value entirely, so capturing it is what actually makes this work, not the
+    wait flag by itself.
     """
     bin_q = '""' + mcpbrain_bin + '""'
     home_esc = home.replace('"', '""')
+    run_line = (
+        f'rc = sh.Run("{bin_q} {subcommand}", 0, True)\r\n'
+        'WScript.Quit rc\r\n'
+        if wait else
+        f'sh.Run "{bin_q} {subcommand}", 0, False\r\n'
+    )
     return (
         'Set sh = CreateObject("WScript.Shell")\r\n'
         f'sh.Environment("PROCESS")("MCPBRAIN_HOME") = "{home_esc}"\r\n'
-        f'sh.Run "{bin_q} {subcommand}", 0, True\r\n'
+        f'{run_line}'
     )
 
 
@@ -344,23 +363,38 @@ def _register_schtasks_xml(*, task_name: str, shim_path: Path) -> None:  # pragm
 def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
     shim_path = _win_shim_path(home, _TASK_NAME)
     shim_path.parent.mkdir(parents=True, exist_ok=True)
+    # Non-waiting by default: this is the shim _install_startup_shortcut's
+    # "start now" call fires directly (see below), and also what the CLI
+    # fallback below ends up using if XML registration fails -- both need
+    # wscript to return immediately, not block for the daemon's lifetime.
     shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
-                                           subcommand="daemon"))
+                                           subcommand="daemon", wait=False))
     log.info("wrote Windows shim %s", shim_path)
     if win_persistence_mechanism() == "schtasks":
         try:
+            # Only the XML-registered task carries RestartOnFailure, so only
+            # this path gets the waiting/exit-code-propagating shim variant --
+            # switch the shim to it before registering.
+            shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
+                                                   subcommand="daemon", wait=True))
             _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path)
             log.info("Windows scheduled task '%s' created (RestartOnFailure)", _TASK_NAME)
         except Exception:
             # Malformed/rejected XML must not abort the whole install (the previous
             # behaviour, via check=True) -- fall back to the plain /TR registration
             # so the daemon still starts at logon, and log loudly since this
-            # fallback silently loses RestartOnFailure supervision.
+            # fallback silently loses RestartOnFailure supervision. Revert the
+            # shim to non-waiting first: without RestartOnFailure to feed, a
+            # waiting shim here would only expose this long-lived on-logon task
+            # to Task Scheduler's un-set-by-us defaults (StopIfGoingOnBatteries,
+            # a 72h ExecutionTimeLimit) for no benefit.
             log.exception(
                 "schtasks /xml registration of '%s' failed; falling back to the "
                 "plain /TR form -- the on-logon task will start the daemon but "
                 "will NOT restart it on a watchdog exit until this is fixed",
                 _TASK_NAME)
+            shim_path.write_text(_win_shim_content(mcpbrain_bin=mcpbrain_bin, home=home,
+                                                   subcommand="daemon", wait=False))
             subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
             log.info("Windows scheduled task '%s' created via CLI fallback", _TASK_NAME)
     else:

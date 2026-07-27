@@ -3097,6 +3097,23 @@ class Daemon:
         Daemon doubles in tests (Daemon.__new__ + hand-set attributes) may
         not set any of these attributes, and that must read as "no, not
         deferring" rather than raise.
+
+        KNOWN GAP (Task 5 review, 2026-07-28), not fixed here: `supervised`
+        below only asks "is Task Scheduler usable at all right now"
+        (win_persistence_mechanism() == "schtasks") -- it cannot tell a
+        genuinely-supervised install (the XML-registered task, RestartOnFailure
+        wired up, waiting shim) apart from one where install_agent's XML
+        registration failed and silently fell back to the plain /TR CLI form
+        (agents._install_schtasks's except branch), which has no
+        RestartOnFailure and deliberately uses a non-waiting shim. On that
+        fallback, this method still takes the "supervised, just exit cleanly"
+        branch, but nothing will actually restart the daemon -- worse than the
+        unsupervised path it thinks it's avoiding (a clean exit there is a
+        stall that now waits for next logon, instead of self-spawning
+        immediately). Fixing this needs the install side to record which
+        mechanism was actually achieved somewhere this method can read (e.g. a
+        marker file written by _install_schtasks) -- tracked, not fixed, since
+        it needs to grow beyond agents.py/daemon.py's existing surface.
         """
         if getattr(self, "_backup_in_progress", None) is not None \
                 and self._backup_in_progress.is_set():
