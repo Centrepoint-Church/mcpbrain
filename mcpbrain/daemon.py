@@ -153,11 +153,20 @@ WATCHDOG_WINDOW_S = 6 * 3600.0
 HANDOVER_LOCK_WAIT_S = 2.0
 
 # Orphaned mcpbrain-snap-* work dirs (see backup.sweep_orphan_snapshots) older
-# than this are swept once at startup. Generous on purpose: a snapshot in
-# genuine progress is bounded by however long checkpoint+copy+encrypt takes
-# (minutes, not hours) for any corpus size seen live, so an hour of headroom
-# can only ever catch a truly orphaned dir, never a live one.
+# than this are swept -- at startup, and again every loop iteration inside
+# _backup_under_bulk_lock. Generous on purpose: a snapshot in genuine progress
+# is bounded by however long checkpoint+copy+encrypt takes (minutes, not
+# hours) for any corpus size seen live, so an hour of headroom can only ever
+# catch a truly orphaned dir, never a live one.
 SNAPSHOT_ORPHAN_MAX_AGE_S = 3600.0
+
+# Default cap on chunks embedded per index_pending call within one cycle (see
+# run_cycle's/run_sync_cycle's own "embed_max_items" docs for the more_work
+# implication). sync.run_sync_cycle independently keeps its own "2000"
+# keyword default for direct/self-contained callers of that function -- this
+# constant is daemon.py's single source of truth for every OTHER place that
+# same default value is needed, so those spots can't drift from each other.
+EMBED_MAX_ITEMS = 2000
 
 
 def _graph_apply():
@@ -431,7 +440,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               synthesis_requests: list | None = None,
               extra_blocks: dict | None = None, budget=None,
               on_progress=None, bulk_section=None,
-              embed_max_items: int = 2000) -> dict:
+              embed_max_items: int = EMBED_MAX_ITEMS) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -1002,7 +1011,7 @@ class Daemon:
         self._stall_s = STALL_S
         self._watchdog_max_exits = WATCHDOG_MAX_EXITS
         self._watchdog_window_s = WATCHDOG_WINDOW_S
-        self._embed_max_items = 2000  # mirrors sync.run_sync_cycle's own default
+        self._embed_max_items = EMBED_MAX_ITEMS
 
     # -- service resolution -------------------------------------------------
 
@@ -1052,11 +1061,18 @@ class Daemon:
         maintenance thread, and `_maintenance_loop` skips its ENTIRE body while
         `_pause` is set -- not just the chunk-mutating cadence passes, but also
         the `_note_progress("maintenance")` stamp and the watchdog stall check
-        that follow them. So a pause freezes every `_progress` timestamp, not
-        just "cycle" -- re-stamping all of them here, before clearing `_pause`,
-        stops the first post-resume tick from reading those frozen timestamps
-        as a stall (`STALL_S`) and self-restarting a daemon that was only ever
-        idle on purpose, never actually wedged.
+        that follow them. So a pause freezes every `_progress` KEY EXCEPT
+        `"backup"` -- `run()`'s loop calls `_backup_under_bulk_lock()`
+        unconditionally every interval, pause or not (a backup is a snapshot
+        of current state, harmless while paused), and that method's first
+        statement re-stamps `"backup"` before it even checks whether a backup
+        is due. So `"backup"` alone keeps advancing throughout a pause; every
+        other key (`cycle`/`sync`/`enrich`/`maintenance`) genuinely freezes.
+        Re-stamping ALL of them here anyway, before clearing `_pause`, stops
+        the first post-resume tick from reading those frozen non-backup
+        timestamps as a stall (`STALL_S`) and self-restarting a daemon that
+        was only ever idle on purpose, never actually wedged -- restamping
+        "backup" too is a harmless no-op, not load-bearing.
         """
         # Re-stamp every tracked phase BEFORE unpausing -- see the docstring
         # above for why a pause longer than STALL_S would otherwise misread
@@ -1755,7 +1771,7 @@ class Daemon:
                            budget=budget,
                            on_progress=self._note_progress,
                            bulk_section=self._cycle_bulk_section,
-                           embed_max_items=getattr(self, "_embed_max_items", 2000),
+                           embed_max_items=getattr(self, "_embed_max_items", EMBED_MAX_ITEMS),
                            **services)
         # Absent key (fleet unpinned, Drive-API outage caught by the cache
         # block's own try/except, or drive_service/home not both present)
@@ -1970,6 +1986,23 @@ class Daemon:
         shape as the cycle_error bug this same task fixed elsewhere. Stamping
         first means "we are here, trying" counts as liveness regardless of
         whether the acquire succeeds.
+
+        Also re-sweeps orphaned mcpbrain-snap-* work dirs (Task 7 review
+        fix), not just once at Daemon.run() startup. The startup-only sweep
+        can't clean the very orphan it exists for: a watchdog os._exit
+        mid-snapshot triggers an IMMEDIATE restart, so the fresh orphan is
+        only minutes old when the successor's startup sweep runs, gets
+        spared for being younger than SNAPSHOT_ORPHAN_MAX_AGE_S, and then
+        never gets swept again for that successor's entire lifetime (up to a
+        day, until the next auto-update restart) -- a multi-GB workdir
+        retained on a machine whose disk this already filled once. This call
+        site is safe for the same reason startup's is: still the cycle
+        thread, still holding _bulk_lock, and by construction no snapshot can
+        be in flight -- maybe_backup() (if it ran at all) has already fully
+        returned. Runs every loop iteration (every interval_s, default 300s)
+        regardless of whether a backup happened THIS cycle, so an orphan is
+        caught within roughly SNAPSHOT_ORPHAN_MAX_AGE_S plus one interval,
+        not only at the next full restart.
         """
         self._note_progress("backup")
         with self._bulk_lock_intent():
@@ -1994,6 +2027,13 @@ class Daemon:
             self._note_progress("backup")
         finally:
             self._backup_in_progress.clear()
+            try:
+                removed = backup.sweep_orphan_snapshots(
+                    tempfile.gettempdir(), max_age_s=SNAPSHOT_ORPHAN_MAX_AGE_S)
+                if removed:
+                    log.info("swept %d orphaned snapshot temp dir(s)", removed)
+            except Exception as exc:  # noqa: BLE001 — sweep must not crash the cycle
+                log.warning("snapshot orphan sweep failed: %s", exc, exc_info=True)
             self._bulk_lock.release()
 
     # -- silent auto-update ---------------------------------------------------
@@ -3324,7 +3364,12 @@ class Daemon:
             # Swept against the SAME parent make_encrypted_snapshot's own
             # tempfile.mkdtemp(prefix="mcpbrain-snap-") call uses (no `dir=`
             # there, so it resolves to gettempdir() too). Best-effort: a sweep
-            # failure must not block startup.
+            # failure must not block startup. This is a once-per-process-
+            # lifetime safety net, not the only sweep: _backup_under_bulk_lock
+            # re-runs the same sweep every loop iteration (see its docstring)
+            # so an orphan created by an immediate watchdog-triggered restart
+            # -- too fresh for THIS sweep to touch -- still gets cleaned up
+            # well within a day, not just at the next full restart.
             try:
                 removed = backup.sweep_orphan_snapshots(
                     tempfile.gettempdir(), max_age_s=SNAPSHOT_ORPHAN_MAX_AGE_S)
@@ -3729,7 +3774,7 @@ _TUNING_DEFAULTS: dict[str, float | int] = {
     "watchdog_max_exits": WATCHDOG_MAX_EXITS,
     "watchdog_window_s": WATCHDOG_WINDOW_S,
     "handover_lock_wait_s": HANDOVER_LOCK_WAIT_S,
-    "embed_max_items": 2000,  # mirrors sync.run_sync_cycle's own default
+    "embed_max_items": EMBED_MAX_ITEMS,
 }
 
 # Keys that coerce via int() rather than the default float() -- a restart
