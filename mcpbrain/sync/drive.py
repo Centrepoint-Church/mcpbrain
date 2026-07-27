@@ -222,6 +222,41 @@ def _file_content_hash(file_meta: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _file_resume_key(fmeta: dict) -> str | None:
+    """Resume-set key for one file: file id + a version signal, so an item
+    EDITED mid-round (while its id is already in the resume set from an
+    earlier budget-truncated call) is recognized as new work rather than
+    silently skipped for the rest of the round (Critical bug found in
+    adversarial review round 4: keying on bare id meant an edit between two
+    calls in the same open round was permanently lost once the round closed
+    and the cursor advanced past it — reproduced directly: an edited file's
+    stored text stayed at its pre-edit content after the round closed).
+
+    Deliberately does NOT reuse `_file_content_hash` here: that function's
+    "no usable version signal at all" fallback folds in a fresh random nonce
+    on every call (correct for ITS purpose — never serve a stale cache hit
+    for a versionless file) but would be wrong here — a resume key that
+    changes every call for the same unedited file would never re-match
+    `resumed_ids`, blocking that file's round from ever closing at all. This
+    instead degrades to plain id-only keying for that narrow edge case (no
+    md5Checksum, no version, no modifiedTime) — matching the pre-fix
+    behaviour for exactly that subset of files (an edit to a genuinely
+    versionless file mid-round can still be missed) — because real Drive
+    files overwhelmingly carry at least one of these fields.
+    """
+    fid = fmeta.get("id")
+    if not fid:
+        return None
+    md5 = fmeta.get("md5Checksum")
+    if md5:
+        return f"{fid}|{md5}"
+    version = fmeta.get("version") or ""
+    modified = fmeta.get("modifiedTime") or ""
+    if version or modified:
+        return f"{fid}|{version}|{modified}"
+    return fid
+
+
 def _cache_first_extract_one(
     service, store, fleet_storage, drive_id, fmeta, pin,
     *, contextual_retrieval: bool = False, bulk_section=None,
@@ -321,11 +356,18 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     every time — the cursor would never advance and files past the prefix
     would never be durably ingested (this exact livelock was reproduced and
     fixed for Gmail; see sync_gmail's docstring). So a second piece of
-    state — `f"{source}:resume_ids"` (a JSON list of file ids already durably
-    upserted for the CURRENT, not-yet-committed delta round) — is checked in
-    the upsert loop: an id already in it is skipped (genuine forward
-    progress, not just an idempotent re-upsert), and the set is grown and
-    persisted after each call. Only once every pending file this round is
+    state — `f"{source}:resume_ids"` (a JSON list of `_file_resume_key`
+    id+version composites already durably upserted for the CURRENT,
+    not-yet-committed delta round) — is checked in the upsert loop: a key
+    already in it is skipped (genuine forward progress, not just an
+    idempotent re-upsert), and the set is grown and persisted after each
+    call. Keying on id+version rather than bare id matters: a file EDITED
+    mid-round (while its id is already resumed from an earlier
+    budget-truncated call) produces a DIFFERENT key and is therefore
+    reprocessed, not silently skipped for the rest of the round (Critical bug
+    found in adversarial review — reproduced directly: an edited file's
+    stored text stayed at its pre-edit content after the round closed and the
+    cursor advanced past it). Only once every pending file this round is
     accounted for does the real cursor advance and the resume set clear.
     (The pagination loop's own `_fetch_text` calls are NOT gated on the
     resume set — a resumed round still re-fetches text for already-done
@@ -392,11 +434,17 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         page_token = nxt
 
     # Upsert all collected files not already resumed, then advance cursor.
+    # Keyed on id+version (_file_resume_key), NOT bare id: a file edited
+    # mid-round (after its id was already resumed from an earlier
+    # budget-truncated call) must be recognized as new work, not skipped.
+    # The resume set is persisted PER FILE (not once after the whole loop) so
+    # an exception partway through (a poison file, a process death, a
+    # STALL_S watchdog restart) never discards the checkpoint for files
+    # already durably upserted earlier in this same call.
     processed = 0
-    newly_done: set = set()
     for fmeta, text in pending:
-        fid = fmeta.get("id")
-        if fid and fid in resumed_ids:
+        rkey = _file_resume_key(fmeta)
+        if rkey and rkey in resumed_ids:
             continue
         if budget is not None and budget.expired():
             interrupted = True
@@ -407,15 +455,12 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
                 store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
             if chunks:
                 processed += 1
-        if fid:
-            newly_done.add(fid)
+        if rkey:
+            resumed_ids.add(rkey)
+            store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
-    if newly_done:
-        resumed_ids |= newly_done
-        store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
-
-    pending_ids = {fmeta.get("id") for fmeta, _ in pending if fmeta.get("id")}
-    if new_start and not interrupted and pending_ids <= resumed_ids:
+    pending_keys = {_file_resume_key(fmeta) for fmeta, _ in pending if _file_resume_key(fmeta)}
+    if new_start and not interrupted and pending_keys <= resumed_ids:
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
 
@@ -459,12 +504,21 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     livelocking exactly like the reproduced-and-fixed Gmail case (see
     sync_gmail's docstring). So two separate pieces of resume state — one for
     the add/change loop (`f"{source}:resume_ids"`) and one for the removal
-    loop (`f"{source}:resume_removed_ids"`), each a JSON list of file ids
-    already durably handled for the CURRENT, not-yet-committed round — are
-    checked and grown the same way as the other three sources. The cursor
-    only advances, and both resume sets clear, once pagination completed AND
-    every live file id is in the add-resume set AND every removed file id is
-    in the removal-resume set.
+    loop (`f"{source}:resume_removed_ids"`) — are checked and grown the same
+    way as the other three sources. The cursor only advances, and both
+    resume sets clear, once pagination completed AND every live file's
+    resume key is in the add-resume set AND every removed file id is in the
+    removal-resume set.
+
+    The add-resume set is keyed on `_file_resume_key` (id+version), NOT bare
+    id: a file EDITED mid-round (while its id is already resumed from an
+    earlier budget-truncated call) produces a DIFFERENT key and is therefore
+    reprocessed, not silently skipped for the rest of the round (Critical bug
+    found in adversarial review — reproduced directly on this function too).
+    The removal-resume set stays keyed on bare id — a removal has no
+    "version" to re-check; a file can only be removed once per round (the
+    add/remove collapse already converges removal-then-restore to the "add"
+    bucket with its OWN, current-version key).
 
     `bulk_section` (a zero-arg context-manager factory, default
     `contextlib.nullcontext`) brackets only the actual chunk-mutating write in
@@ -550,16 +604,22 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     miss: list[tuple[str, str]] = []
     live_ids: set = set()
     interrupted = pagination_interrupted
-    newly_done: set = set()
-    newly_done_removed: set = set()
 
     if not pagination_interrupted:
         live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
 
+        # Both loops below persist their resume set PER FILE (not once after
+        # the whole loop) so an exception (an unhandled store error, a
+        # process death, a STALL_S watchdog restart) never discards the
+        # checkpoint for files already durably handled earlier in this call.
         for fid, ev in events.items():
             if ev["removed"]:
                 continue
-            if fid in resumed_ids:
+            # Keyed on id+version (_file_resume_key), NOT bare id: a file
+            # edited mid-round (while its id is already resumed from an
+            # earlier budget-truncated call) must be recognized as new work.
+            rkey = _file_resume_key(ev["fmeta"])
+            if rkey and rkey in resumed_ids:
                 continue
             if budget is not None and budget.expired():
                 interrupted = True
@@ -585,9 +645,13 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                 # pre-checkpoint behaviour of "skip it, keep moving" — it will
                 # simply be re-attempted-and-fail again next DELTA round, same
                 # as before, not blocked mid-round forever).
-                newly_done.add(fid)
+                if rkey:
+                    resumed_ids.add(rkey)
+                    store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
                 continue
-            newly_done.add(fid)
+            if rkey:
+                resumed_ids.add(rkey)
+                store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
         for fid, ev in events.items():
             if not ev["removed"]:
@@ -606,18 +670,18 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                 ingest_cache.remove_file_artifacts(fleet_storage, fid)
             except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
                 log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
-            newly_done_removed.add(fid)
+            resumed_removed_ids.add(fid)
+            store.set_cursor(resume_removed_key, json.dumps(sorted(resumed_removed_ids)))
 
-    if newly_done:
-        resumed_ids |= newly_done
-        store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
-    if newly_done_removed:
-        resumed_removed_ids |= newly_done_removed
-        store.set_cursor(resume_removed_key, json.dumps(sorted(resumed_removed_ids)))
-
+    # live_keys (id+version composites, matching what resumed_ids actually
+    # holds — both loops above persist incrementally per file, not once
+    # after the whole loop) gates the cursor advance; live_ids (bare fids) is
+    # kept separate for the live_file_ids return value other callers consume.
+    live_keys = {_file_resume_key(ev["fmeta"]) for fid, ev in events.items()
+                if not ev["removed"] and _file_resume_key(ev["fmeta"])}
     removed_ids = {fid for fid, ev in events.items() if ev["removed"]}
     if (new_start and not interrupted
-            and live_ids <= resumed_ids and removed_ids <= resumed_removed_ids):
+            and live_keys <= resumed_ids and removed_ids <= resumed_removed_ids):
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
         store.set_cursor(resume_removed_key, "[]")

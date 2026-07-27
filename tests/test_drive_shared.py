@@ -188,6 +188,51 @@ def test_sync_shared_drive_budget_interrupted_across_many_cycles_eventually_comp
         assert count == 1, f"f{i} produced more than one chunk row"
 
 
+def test_sync_shared_drive_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
+    """New Critical found in adversarial review round 4, Shared-Drive variant:
+    once a file's id landed in the resume set (round 3's fix), it was
+    skipped for the REST OF THAT ROUND no matter what -- including if the
+    file changed in between. Reproduced directly before this fix: an edited
+    file's stored text stayed at its pre-edit content forever after the
+    round closed. Fixed by keying the resume set on id+version
+    (_file_resume_key), not bare id.
+    """
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s.set_cursor("drive:D1", "100")
+
+    f1 = _gdoc_change("f1", "Doc One")
+    f1["file"]["md5Checksum"] = "hash-v1"
+    f2 = _gdoc_change("f2", "Doc Two")
+    f2["file"]["md5Checksum"] = "hash-v1-f2"
+    svc = FakeDriveService(
+        initial_cursor="100",
+        pages=[{"changes": [f1, f2], "newStartPageToken": "200"}],
+        exports={"f1": b"ORIGINAL f1 body content, long enough to matter",
+                "f2": b"f2 body content, long enough to matter"})
+
+    budget = _FakeBudget(expire_after_calls=2)
+    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=budget)
+    assert s.get_cursor("drive:D1") == "100", "round must still be open"
+    assert s.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
+
+    # f1 is edited in Drive (content AND version change) WHILE the round is
+    # still open.
+    svc._files._exports["f1"] = b"REVISED f1 body content, long enough to matter"
+    f1_edited = _gdoc_change("f1", "Doc One")
+    f1_edited["file"]["md5Checksum"] = "hash-v2"
+    svc._changes._pages[0] = {"changes": [f1_edited, f2], "newStartPageToken": "200"}
+
+    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=None)
+
+    assert s.get_cursor("drive:D1") == "200", "round must close"
+    assert s.get_chunk("gdrive-f1-0")["text"].startswith("REVISED"), (
+        "f1's edit must land -- the resume set must not have permanently "
+        "skipped it just because its OLD id+version key was already "
+        "resumed from call 1"
+    )
+    assert s.get_cursor("drive:D1:resume_ids") == "[]"
+
+
 def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
     s = _store(tmp_path)
     s.set_cursor("drive:D1", "100")

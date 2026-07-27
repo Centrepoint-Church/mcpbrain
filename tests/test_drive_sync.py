@@ -567,3 +567,72 @@ def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
                 "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (doc_id,)
             ).fetchone()[0]
         assert count == 1, f"f{i} produced more than one chunk row"
+
+
+def test_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
+    """New Critical found in adversarial review round 4: once a file's id
+    landed in the resume set (round 3's fix), it was skipped for the REST OF
+    THAT ROUND no matter what -- including if the file changed in between.
+    The round then closed and the real cursor advanced PAST the file's
+    change record, with nothing left to re-surface it until the file
+    happened to change again after the cursor had already moved on.
+
+    Reproduced directly before this fix (against the round-3 code): an
+    edited file's stored text stayed at its pre-edit content forever after
+    the round closed. Fixed by keying the resume set on id+version
+    (_file_resume_key: md5Checksum, or version+modifiedTime), not bare id,
+    so an edit produces a DIFFERENT key and is recognized as new work rather
+    than matched against the stale resume entry.
+    """
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+
+    f1 = _gdoc_change("f1", "Doc One")
+    f1["file"]["md5Checksum"] = "hash-v1"
+    f2 = _gdoc_change("f2", "Doc Two")
+    f2["file"]["md5Checksum"] = "hash-v1-f2"
+    pages = [_page([f1, f2], new_start_page_token="200")]
+    svc = FakeDriveService(pages=pages, exports={
+        "f1": b"ORIGINAL f1 body content, long enough to matter",
+        "f2": b"f2 body content, long enough to matter",
+    })
+
+    upsert_calls = []
+    orig_upsert = store.upsert_chunk
+
+    def spy_upsert(*a, **kw):
+        upsert_calls.append(a[0])  # doc_id
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy_upsert
+
+    # Call 1: budget cuts off right after f1 is processed with its ORIGINAL
+    # content -- f1's (stale-version) key lands in the resume set.
+    budget = _FakeBudget(expire_after_calls=2)
+    sync_drive(svc, store, budget=budget)
+    assert store.get_cursor("drive") == "100", "round must still be open"
+    assert store.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
+
+    # f1 is edited in Drive (content AND version change) WHILE the round is
+    # still open.
+    svc._files._exports["f1"] = b"REVISED f1 body content, long enough to matter"
+    f1_edited = _gdoc_change("f1", "Doc One")
+    f1_edited["file"]["md5Checksum"] = "hash-v2"
+    svc._changes._pages[0] = {"changes": [f1_edited, f2], "newStartPageToken": "200"}
+
+    # Call 2: unbounded, completes the round.
+    sync_drive(svc, store, budget=None)
+
+    assert store.get_cursor("drive") == "200", "round must close"
+    assert store.get_chunk("gdrive-f1-0")["text"].startswith("REVISED"), (
+        "f1's edit must land -- the resume set must not have permanently "
+        "skipped it just because its OLD id+version key was already "
+        "resumed from call 1"
+    )
+    assert store.get_cursor("drive:resume_ids") == "[]"
+
+    # f1 was upserted exactly twice total across the two calls (once with
+    # its original content, once with the edit) -- proving the edit is
+    # picked up exactly once per version, not repeatedly re-applied within
+    # the same round nor silently dropped.
+    assert upsert_calls.count("gdrive-f1-0") == 2

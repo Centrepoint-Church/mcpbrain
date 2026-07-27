@@ -263,3 +263,104 @@ def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
     assert store.get_cursor("calendar:resume_ids") == "[]"
     for i in range(1, n + 1):
         assert store.get_chunk(f"cal-evt{i}") is not None
+
+
+def test_event_edited_mid_round_is_picked_up_not_skipped(tmp_path):
+    """New Critical found in adversarial review round 4: once an event's id
+    landed in the resume set (round 3's fix), it was skipped for the REST OF
+    THAT ROUND no matter what -- including if the event changed in between.
+    The round then closed and the real syncToken advanced PAST the event's
+    change record, with nothing left to re-surface it until the event
+    happened to change again after the cursor had already moved on.
+
+    Reproduced directly before this fix (against the round-3 code): a
+    rescheduled event's stored text kept showing the OLD start time forever
+    after the round closed. Fixed by keying the resume set on id+`updated`
+    (_event_resume_key), not bare id, so an edit produces a DIFFERENT key
+    and is recognized as new work rather than matched against the stale
+    resume entry.
+    """
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("calendar", "old")
+
+    ev1 = _event("evt1", "Original meeting", start="2026-06-01T09:00:00Z")
+    ev1["updated"] = "2026-05-01T00:00:00Z"
+    ev2 = _event("evt2", "Other meeting")
+    ev2["updated"] = "2026-05-01T00:00:00Z"
+    resp = _resp([ev1, ev2], next_sync_token="tokNEW")
+    svc = FakeCalService(on_synctoken=resp)
+
+    upsert_calls = []
+    orig_upsert = store.upsert_chunk
+
+    def spy_upsert(*a, **kw):
+        upsert_calls.append(a[0])  # doc_id
+        return orig_upsert(*a, **kw)
+
+    store.upsert_chunk = spy_upsert
+
+    # Call 1: budget cuts off right after evt1 is processed with its
+    # ORIGINAL content -- evt1's (stale) key lands in the resume set.
+    budget = _FakeBudget(expire_after_calls=2)
+    sync_calendar(svc, store, budget=budget)
+    assert store.get_cursor("calendar") == "old", "round must still be open"
+    assert "09:00:00Z" in store.get_chunk("cal-evt1")["text"]
+
+    # evt1 is rescheduled WHILE the round is still open -- Google bumps
+    # `updated` on any modification, exactly like this fixture does.
+    ev1_edited = _event("evt1", "Original meeting", start="2026-06-01T15:00:00Z")
+    ev1_edited["updated"] = "2026-06-01T10:00:00Z"
+    svc._events._syn = _resp([ev1_edited, ev2], next_sync_token="tokNEW")
+
+    # Call 2: unbounded, completes the round.
+    sync_calendar(svc, store, budget=None)
+
+    assert store.get_cursor("calendar") == "tokNEW", "round must close"
+    assert "15:00:00Z" in store.get_chunk("cal-evt1")["text"], (
+        "evt1's reschedule must land -- the resume set must not have "
+        "permanently skipped it just because its OLD id+updated key was "
+        "already resumed from call 1"
+    )
+    assert store.get_cursor("calendar:resume_ids") == "[]"
+
+    # evt1 was upserted exactly twice total across the two calls (once with
+    # its original content in call 1, once with the edit in call 2) --
+    # proving the edit is picked up exactly once per version, not repeatedly
+    # re-applied within the same round nor silently dropped.
+    assert upsert_calls.count("cal-evt1") == 2
+
+
+def test_410_recovery_clears_leftover_resume_ids(tmp_path):
+    """Related bug found in the same review pass: the HTTP 410 (stale sync
+    token) recovery path is the REPAIR for a broken token -- a fresh round by
+    definition -- but it used to inherit whatever resume set was left over
+    from the round that was open when the token went stale. So recovery
+    re-skipped every leftover id instead of applying the (possibly changed)
+    content the repair's full fetch just returned for them, making the
+    repair path WORSE, not better.
+
+    Reproduced directly before this fix: a leftover resumed event stayed
+    entirely absent from the store across a 410 recovery that had its fresh
+    content in hand (`result == 0`, chunk never written). Fixed by resetting
+    the resume-ids cursor in the 410 branch before/alongside the fallback
+    full listing.
+    """
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("calendar", "old-token")
+    # Simulate a leftover resume set from an earlier interrupted round,
+    # anchored at the now-stale token.
+    store.set_cursor("calendar:resume_ids", '["evt1|stale-updated-value"]')
+
+    ev1 = _event("evt1", "Meeting one (post-recovery)")
+    ev1["updated"] = "2026-06-01T00:00:00Z"
+    full_resp = _resp([ev1], next_sync_token="tokRECOVERED")
+    svc = FakeCalService(raise_410_on_synctoken=True, on_full=full_resp)
+
+    result = sync_calendar(svc, store, budget=None)
+
+    assert result == 1, "evt1 must be applied on recovery, not skipped as already-resumed"
+    assert store.get_cursor("calendar") == "tokRECOVERED"
+    assert store.get_chunk("cal-evt1") is not None
+    assert store.get_cursor("calendar:resume_ids") == "[]"
