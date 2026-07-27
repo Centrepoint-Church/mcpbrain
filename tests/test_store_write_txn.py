@@ -109,6 +109,88 @@ def test_connect_retries_param_is_forwarded_to_begin_immediate(tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# busy_timeout, not just retries, must bound the recall-path wait
+# (post-review fix: retries=1 alone still let busy_timeout dominate, measured
+# 5.38s live -- past prompt_recall's 3.0s client timeout).
+# ---------------------------------------------------------------------------
+
+def test_recall_path_busy_timeout_is_smaller_than_the_default():
+    assert store_module.RECALL_PATH_BUSY_TIMEOUT_MS < store_module.DEFAULT_BUSY_TIMEOUT_MS
+
+
+def test_connect_busy_timeout_ms_param_is_forwarded_to_open_db(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    seen = {}
+    orig = store_module._open_db
+
+    def spy(path, read_only, *, busy_timeout_ms):
+        seen["busy_timeout_ms"] = busy_timeout_ms
+        return orig(path, read_only, busy_timeout_ms=busy_timeout_ms)
+
+    monkeypatch.setattr(store_module, "_open_db", spy)
+    with s._connect(write=True, busy_timeout_ms=250) as db:
+        db.execute("SELECT 1").fetchone()
+    assert seen["busy_timeout_ms"] == 250
+
+    with s._connect() as db:
+        actual = db.execute("PRAGMA busy_timeout").fetchone()[0]
+    # The PRAGMA actually took effect on the connection (not just recorded).
+    with s._connect(busy_timeout_ms=250) as db:
+        assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 250
+    assert actual == store_module.DEFAULT_BUSY_TIMEOUT_MS  # untouched default path
+
+
+def test_recall_path_write_stays_well_under_prompt_recall_budget_under_contention(tmp_path):
+    """Reproduces the reviewer's measurement directly: hold the write lock open
+    in one thread (simulating a bulk/ingest writer) while a SECOND thread does
+    a recall-path write (RECALL_PATH_BEGIN_RETRIES + RECALL_PATH_BUSY_TIMEOUT_MS)
+    against the same store. Before this fix, retries=1 alone still measured
+    5.38s (dominated by the default 5000ms busy_timeout). With both the smaller
+    retries AND the smaller busy_timeout, the contending write must fail (or
+    succeed) in well under prompt_recall's 3.0s client budget -- asserted here
+    at a generous 2.0s ceiling (the actual measured value is printed so a
+    flaky/slow CI box's real number is visible if this ever fails).
+    """
+    import time
+
+    s = _store(tmp_path, name="contend.sqlite3")
+    with s._connect(write=True) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS t3(k INTEGER PRIMARY KEY, v INTEGER)")
+        db.execute("INSERT INTO t3(k, v) VALUES (1, 0)")
+
+    hold_s = 2.0  # longer than the recall-path budget, so it WILL contend
+    release = threading.Event()
+
+    def hold_writer():
+        with s._connect(write=True) as db:
+            db.execute("UPDATE t3 SET v = 1 WHERE k = 1")
+            release.wait(timeout=hold_s)
+
+    holder = threading.Thread(target=hold_writer, daemon=True)
+    holder.start()
+    time.sleep(0.1)  # let the holder actually acquire BEGIN IMMEDIATE first
+
+    start = time.monotonic()
+    try:
+        with s._connect(write=True,
+                        retries=store_module.RECALL_PATH_BEGIN_RETRIES,
+                        busy_timeout_ms=store_module.RECALL_PATH_BUSY_TIMEOUT_MS) as db:
+            db.execute("UPDATE t3 SET v = 2 WHERE k = 1")
+    except sqlite3.OperationalError:
+        pass  # expected outcome under contention -- the point is HOW LONG it took
+    elapsed = time.monotonic() - start
+
+    release.set()
+    holder.join(timeout=hold_s + 5)
+    assert not holder.is_alive()
+
+    assert elapsed < 2.0, (
+        f"recall-path write took {elapsed:.2f}s under contention -- "
+        f"prompt_recall's client budget is 3.0s"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rollback must not mask the original error (Task 6, Step 5)
 # ---------------------------------------------------------------------------
 
@@ -132,8 +214,39 @@ def test_rollback_failure_does_not_mask_the_original_error(tmp_path, monkeypatch
         def close(self):
             pass
 
-    monkeypatch.setattr(store_module, "_open_db", lambda path, read_only: _FakeConn())
+    monkeypatch.setattr(store_module, "_open_db",
+                        lambda path, read_only, **kw: _FakeConn())
     s = Store(tmp_path / "fake.sqlite3", dim=4)
+
+    with pytest.raises(RuntimeError, match="disk is full"):
+        with s._connect(write=True):
+            raise RuntimeError("disk is full")
+
+
+def test_rollback_failure_of_any_exception_type_does_not_mask_the_original_error(
+        tmp_path, monkeypatch):
+    """The rollback-cleanup catch was broadened from sqlite3.OperationalError
+    to Exception: the unconditional `raise` right after it always re-raises
+    the ORIGINAL error regardless of what this cleanup-only ROLLBACK does, so
+    there is no signal lost by catching any Exception subclass here — this
+    pins that down with a non-sqlite3 exception type.
+    """
+
+    class _FakeConn:
+        row_factory = None
+        isolation_level = None
+
+        def execute(self, sql, *a, **kw):
+            if sql == "ROLLBACK":
+                raise ValueError("some unrelated cleanup failure")
+            return None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(store_module, "_open_db",
+                        lambda path, read_only, **kw: _FakeConn())
+    s = Store(tmp_path / "fake2.sqlite3", dim=4)
 
     with pytest.raises(RuntimeError, match="disk is full"):
         with s._connect(write=True):
