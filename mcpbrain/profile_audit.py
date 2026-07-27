@@ -119,7 +119,7 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
             continue
         # Mark audited (even when corrections is empty) so it rotates out and only
         # re-audits after a later change — not the same active profiles every cycle.
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute("UPDATE entities SET profile_audited_at=? WHERE id=?", (now_iso, eid))
 
         for correction in corrections:
@@ -161,7 +161,7 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
                 applied += 1
 
             elif field == "org":
-                with store._connect() as db:
+                with store._connect(write=True) as db:
                     existing = db.execute(
                         "SELECT org FROM entities WHERE id=?", (eid,)
                     ).fetchone()

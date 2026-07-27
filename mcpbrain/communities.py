@@ -279,7 +279,7 @@ def extend_communities(store, home: str | None = None) -> dict:
         updated += 1
 
     if new_assignments:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.executemany(
                 "INSERT INTO entity_communities(entity_id, community_id, level) "
                 "VALUES(?, ?, 0) "
@@ -288,7 +288,7 @@ def extend_communities(store, home: str | None = None) -> dict:
             )
         # Update member counts for affected communities.
         affected_cids = set(new_assignments.values())
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             for cid in affected_cids:
                 row = db.execute(
                     "SELECT COUNT(*) FROM entity_communities WHERE community_id=?",

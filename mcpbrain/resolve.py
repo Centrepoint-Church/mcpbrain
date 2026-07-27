@@ -137,7 +137,7 @@ def _emit_merge_candidates(store, members, origins, home=None) -> None:
                     claim=claim, confidence=0.5, valid_from="",
                     contributor_email=email, source_kind="local",
                     source_ref=source_ref(pin.fleet_secret, f"{org_ids[i]}|{org_ids[j]}"))
-                with store._connect() as db:
+                with store._connect(write=True) as db:
                     db.execute("INSERT INTO org_contrib_outbox(record) VALUES(?)",
                                (json.dumps(rec.to_dict(), sort_keys=True),))
     except Exception:  # noqa: BLE001 — a best-effort signal must never break resolution

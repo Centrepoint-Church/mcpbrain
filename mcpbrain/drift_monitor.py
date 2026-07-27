@@ -45,7 +45,7 @@ NOISE_FLOOR_STDEV_MULT = 2.0   # noise floor = 2× stddev of daily means
 def init_drift_table(store) -> None:
     """Create embedding_metrics table if not present."""
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS embedding_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +69,7 @@ def _log_metric(store, *, run_date: str, query_id: str,
                 recall_at_10: float, top_score: float,
                 expected_count: int, found_count: int) -> None:
     try:
-        with store._connect() as db:
+        with store._connect(write=True) as db:
             db.execute(
                 "INSERT INTO embedding_metrics"
                 "(run_date, query_id, recall_at_10, top_score, expected_count, found_count) "
