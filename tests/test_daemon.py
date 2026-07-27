@@ -199,6 +199,52 @@ def test_run_cycle_surfaces_agent_err_as_finding(tmp_path, monkeypatch):
     assert "records" in findings[0]["summary"]
 
 
+def test_run_cycle_drains_captures_even_when_the_shared_budget_is_already_spent(
+        tmp_path, monkeypatch):
+    """drain_captures must not starve on run_sync_cycle's leftover budget.
+
+    Adversarial review finding: drain_captures used to be called with the
+    SAME `budget` object run_sync_cycle had just spent -- on any cycle with a
+    sync backlog (the live-store NORMAL case per the CYCLE_BUDGET_S incident;
+    see its docstring) that budget is already expired by the time
+    drain_captures runs, so it applies zero queued MCP-write-tool envelopes
+    (brain_note/brain_decision/brain_memory_write/brain_action_create) for as
+    long as the backlog persists -- silently breaking the "queued...within
+    ~a minute" contract even though nothing is technically lost (the spool
+    is durable). This drives run_cycle with an ALREADY-EXPIRED shared budget
+    (Budget(deadline_s=0.0), simulating a cycle that just used its whole
+    slice on sync) and asserts a pre-spooled capture is still applied --
+    proving drain_captures now runs on its own independent budget
+    (CAPTURES_BUDGET_S), not the spent one.
+    """
+    import json
+
+    from mcpbrain.budget import Budget
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+
+    inbox = tmp_path / "capture_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "cap-1.json").write_text(json.dumps({
+        "kind": "ingest", "captured_at": "2026-06-04T12:00:00Z",
+        "source": "code", "title": "T", "content": "C",
+        "tags": "", "observation_type": "memory", "org": "",
+    }))
+
+    already_expired = Budget(deadline_s=0.0)
+    result = run_cycle(store, emb, budget=already_expired)
+
+    assert result["budget_spent"] is True, "the shared budget must indeed read as expired"
+    assert not list(inbox.glob("cap-*.json")), "the queued capture must have been drained and deleted"
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%'"
+        ).fetchone()
+    assert row is not None, "capture must be applied even though the shared cycle budget was already spent"
+
+
 def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
     store = _make_store(tmp_path)
     emb = FakeEmbedder()

@@ -312,12 +312,15 @@ def test_budget_interrupted_mid_fetch_resumes_without_skip_or_duplicate(tmp_path
     Verifies both halves of the checkpoint contract:
     (1) the interrupted call durably upserts only the messages it reached
         before the budget expired, and leaves the cursor at its OLD value;
-    (2) a follow-up call with no budget completes the resume — every message
-        ends up upserted, and exactly once each despite m1 being fetched
-        twice across the two calls (store.upsert_chunk's idempotent-on-
-        unchanged-content-hash upsert makes the retry a no-op, not a
-        duplicate row) — and the cursor advances to the true final
-        historyId.
+    (2) a follow-up call with no budget completes the resume — the remaining
+        messages get upserted, the cursor advances to the true final
+        historyId, and m1 (already durably done in the first call) is
+        genuinely SKIPPED on resume (via the persisted `gmail:resume_ids`
+        set), not re-fetched-and-re-upserted — this is the incremental
+        checkpoint, not just an idempotent re-walk (see
+        test_budget_interrupted_across_many_cycles_eventually_completes for
+        why "just re-walk the whole window every time" is actually a
+        livelock on a delta bigger than one budget).
     """
     store = Store(tmp_path / "test.sqlite3", dim=4)
     store.init()
@@ -331,7 +334,7 @@ def test_budget_interrupted_mid_fetch_resumes_without_skip_or_duplicate(tmp_path
                        "third message body content, long enough to matter")
     # Single page (no nextPageToken), so the pagination loop makes exactly one
     # budget.expired() check before consuming it; the message-fetch loop then
-    # checks once per message id, in order, BEFORE fetching that message.
+    # checks once per NOT-YET-RESUMED message id, in order, before fetching it.
     pages = [_make_page(["m1", "m2", "m3"], history_id="1010")]
     svc = FakeService(profile_hid="1000", pages=pages,
                       messages={"m1": msg_m1, "m2": msg_m2, "m3": msg_m3})
@@ -350,27 +353,97 @@ def test_budget_interrupted_mid_fetch_resumes_without_skip_or_duplicate(tmp_path
     assert store.get_chunk("gmail-m1-body-0") is not None
     assert store.get_chunk("gmail-m2-body-0") is None
     assert store.get_chunk("gmail-m3-body-0") is None
+    assert svc._messages.get_call_count.get("m1") == 1
 
-    # Resume: cursor is unchanged, so this re-lists the SAME delta window
-    # (re-fetching m1 is safe/idempotent — upsert_chunk no-ops on an
-    # unchanged content_hash) and this time completes both remaining messages
-    # with no budget cutting it short.
+    # Resume: cursor is unchanged, so this re-lists the SAME delta window, but
+    # m1 is now in the persisted resume set and must be SKIPPED (not
+    # re-fetched) — only m2/m3 are genuinely new work this call.
     result2 = sync_gmail(svc, store, budget=None)
 
-    assert result2 == 3, "the resume re-walks the whole delta window (idempotent), not just the tail"
+    assert result2 == 2, "only the genuinely new messages (m2, m3) should be counted/fetched on resume"
     assert store.get_cursor("gmail") == "1010"
     assert store.get_chunk("gmail-m1-body-0") is not None
     assert store.get_chunk("gmail-m2-body-0") is not None
     assert store.get_chunk("gmail-m3-body-0") is not None
+    # m1 was fetched via the API exactly once total, across both calls — the
+    # resume genuinely skipped it rather than harmlessly re-fetching it.
+    assert svc._messages.get_call_count.get("m1") == 1
+    assert store.get_cursor("gmail:resume_ids") == "[]", "resume set must be cleared once the round closes"
 
-    # No duplicate-visible-effect: m1 was fetched and processed across BOTH
-    # calls, but upsert_chunk keys on doc_id, so it stayed one row, updated
-    # (or no-op'd) in place — never inserted twice.
+    # No duplicate-visible-effect regardless: upsert_chunk keys on doc_id, so
+    # even if m1 HAD been re-processed it would still be exactly one row.
     with store._connect() as db:
         count = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE doc_id='gmail-m1-body-0'"
         ).fetchone()[0]
     assert count == 1
+
+
+def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
+    """Critical-B reproduction (adversarial review, Task 2 round 3).
+
+    A delta bigger than one budget's worth of fetches used to LIVELOCK: every
+    call re-listed the same unmoved cursor, got the same ordered message-id
+    list, and — with the same per-call budget — processed the exact same
+    PREFIX every time, so the cursor never advanced and messages past the
+    prefix were silently and permanently never ingested. Reproduced directly
+    against the pre-fix code: 5 identical calls over a 7-message delta with a
+    budget covering only 2 messages each time produced `processed=2,
+    cursor=1000` on EVERY call, no matter how many times it was retried.
+
+    This exercises the same 7-message/2-per-call shape across enough calls to
+    span the whole delta, and asserts: (1) the cursor DOES eventually advance
+    (proving forward progress, not a livelock); (2) every message ends up
+    ingested exactly once (via a per-doc_id COUNT, not just "no exception");
+    (3) each message was fetched via the API at most once total across every
+    call (proving genuine skip-on-resume, not merely idempotent re-work every
+    round — the bug-for-bug distinction between this fix and "just don't
+    advance the cursor").
+    """
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    n = 7
+    msgs = {
+        f"m{i}": plain_msg(f"m{i}", f"Subject {i}", "sender@example.com",
+                          f"message body number {i}, long enough to matter")
+        for i in range(1, n + 1)
+    }
+    pages = [_make_page([f"m{i}" for i in range(1, n + 1)], history_id="2000")]
+    svc = FakeService(profile_hid="1000", pages=pages, messages=msgs)
+
+    per_call_capacity = 2   # matches the reviewer's exact reproduction shape
+    max_cycles = 20         # generous upper bound; real convergence is ~4 cycles
+    for _cycle in range(max_cycles):
+        if store.get_cursor("gmail") != "1000":
+            break
+        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
+        sync_gmail(svc, store, budget=budget)
+    else:
+        raise AssertionError(
+            f"cursor never advanced past the original delta window after "
+            f"{max_cycles} cycles — this is the livelock the fix targets"
+        )
+
+    assert store.get_cursor("gmail") == "2000", "cursor must eventually reach the true final historyId"
+    assert store.get_cursor("gmail:resume_ids") == "[]"
+    for i in range(1, n + 1):
+        mid = f"m{i}"
+        assert store.get_chunk(f"gmail-{mid}-body-0") is not None, f"{mid} was never ingested"
+        with store._connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (f"gmail-{mid}-body-0",)
+            ).fetchone()[0]
+        assert count == 1, f"{mid} produced more than one chunk row"
+        # Genuine skip-on-resume: each message is fetched via the real API at
+        # most once across every cycle, not re-fetched every round.
+        assert svc._messages.get_call_count.get(mid, 0) == 1, (
+            f"{mid} was fetched {svc._messages.get_call_count.get(mid, 0)} times — "
+            "expected exactly once (re-fetching already-done messages every "
+            "cycle would still 'work' via idempotent upserts, but defeats the "
+            "point of incremental checkpointing and wastes API calls)"
+        )
 
 
 def test_budget_interrupted_mid_pagination_never_advances_cursor(tmp_path):
