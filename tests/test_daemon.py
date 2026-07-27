@@ -1330,3 +1330,36 @@ def test_run_sweeps_orphan_snapshot_dirs_at_startup(tmp_path, monkeypatch):
     daemon.run()
 
     assert not orphan.exists(), "orphaned snapshot temp dir should be swept at startup"
+
+
+def test_backup_under_bulk_lock_resweeps_orphan_snapshots_every_cycle(tmp_path, monkeypatch):
+    """Review fix: the startup-only sweep can't clean the very orphan it exists
+    for -- a watchdog os._exit mid-snapshot triggers an IMMEDIATE restart, so
+    the fresh orphan is only minutes old (younger than SNAPSHOT_ORPHAN_MAX_AGE_S)
+    when the successor's startup sweep runs, and would otherwise survive that
+    successor's entire lifetime since the startup sweep never runs again.
+    _backup_under_bulk_lock must re-run the same sweep every loop iteration
+    (still cycle-thread, still under _bulk_lock, so no snapshot can be
+    in-flight) so an old-enough orphan is caught well within a day."""
+    fake_tmp = tmp_path / "os_tmp"
+    fake_tmp.mkdir()
+    orphan = fake_tmp / "mcpbrain-snap-old"
+    orphan.mkdir()
+    (orphan / "part.bin").write_bytes(b"x" * 16)
+    old = time.time() - 999_999
+    os.utime(orphan, (old, old))
+    monkeypatch.setattr(daemon_module.tempfile, "gettempdir", lambda: str(fake_tmp))
+
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    # No backup configured (backup=None): maybe_backup() is a no-op, proving
+    # the sweep runs regardless of whether a backup actually happened this
+    # cycle, not only as a side effect of a successful snapshot.
+    daemon = Daemon(store, emb, lock=SingleWriterLock(tmp_path / "d.lock"))
+
+    daemon._backup_under_bulk_lock()
+
+    assert not orphan.exists(), (
+        "orphaned snapshot temp dir should be re-swept every "
+        "_backup_under_bulk_lock call, not just once at startup"
+    )

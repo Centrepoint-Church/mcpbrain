@@ -196,15 +196,20 @@ def sweep_orphan_snapshots(parent, *, max_age_s: float) -> int:
     Orphaned work dirs then accumulate forever: ~24GB of them was found live
     under the OS temp dir (`tempfile.gettempdir()` -- typically
     `/var/folders/...` on macOS, NOT `$HOME`) on 2026-07-27, having filled the
-    disk. Call this once at daemon startup against that same parent (the one
+    disk. Call this at daemon startup, and again periodically thereafter (see
+    Daemon._backup_under_bulk_lock), against that same parent (the one
     `tempfile.mkdtemp(prefix="mcpbrain-snap-")` above actually uses).
 
     A directory is removed only when it is older than `max_age_s` (judged by
     mtime), so a snapshot that is genuinely still being written moments ago
-    is left alone. Returns the number of directories removed. Best-effort:
-    a directory that can't be listed/stat'd/removed (permissions, already
-    gone, a race with an in-flight snapshot) is skipped rather than raised --
-    a failed sweep must never crash daemon startup.
+    is left alone. Returns the number of directories ACTUALLY removed --
+    `shutil.rmtree` is called without `ignore_errors` specifically so a
+    partial/failed removal (e.g. a permissions error, or a stray symlink
+    rmtree won't descend into) raises and is counted as a skip via the
+    `except OSError` below, rather than being silently reported as removed.
+    Best-effort overall: a directory that can't be listed/stat'd/removed
+    (permissions, already gone, a race with an in-flight snapshot) is
+    skipped rather than raised -- a failed sweep must never crash the daemon.
     """
     parent = Path(parent)
     try:
@@ -221,7 +226,7 @@ def sweep_orphan_snapshots(parent, *, max_age_s: float) -> int:
             age = now - d.stat().st_mtime
             if age < max_age_s:
                 continue
-            shutil.rmtree(d, ignore_errors=True)
+            shutil.rmtree(d)
             removed += 1
         except OSError as exc:
             log.warning("snapshot orphan sweep: could not remove %s: %s", d, exc)
