@@ -33,8 +33,20 @@ def _clear_orgs_cache():
     orgs.taxonomy_from_config.cache_clear()
 
 
+# Test files that construct a bare/real Daemon and can therefore reach
+# _spawn_replacement() / _exit_for_restart() (the watchdog's self-restart
+# path). subprocess.Popen is only neutralised for tests collected from one of
+# these — see _no_real_exit below for why a suite-wide Popen patch is wrong.
+_DAEMON_SPAWN_REACHABLE_FILES = {
+    "test_daemon_watchdog.py",
+    "test_run_loop_wiring.py",
+    "test_maintenance_scheduler.py",
+    "test_daemon_thread_safety.py",
+}
+
+
 @pytest.fixture(autouse=True)
-def _no_real_exit(monkeypatch):
+def _no_real_exit(monkeypatch, request):
     """os._exit(1) in the watchdog bypasses pytest entirely — a test that ever
     reaches it kills the worker with no traceback. Today that path is unreachable
     only by accident (frozen clocks, stubbed _stalled_phase); nothing structural
@@ -53,30 +65,40 @@ def _no_real_exit(monkeypatch):
     keeps both true: nothing in the suite can reach the real process-killing
     exit, and those two tests' own os._exit override still wins for the
     duration of their test body (monkeypatch is last-write-wins, teardown
-    unwinds in reverse order).
+    unwinds in reverse order). os._exit has no other legitimate caller anywhere
+    in the suite, so this half of the patch stays global.
 
-    subprocess.Popen is ALSO neutralised here, for the same reason: narrowing
-    the net to just os._exit means a future test calling the real
-    _spawn_replacement() without also stubbing Popen would actually spawn a
-    real detached `python -m mcpbrain.daemon` subprocess before reaching (and
-    failing at) the neutralised os._exit -- a lingering real background
-    process, arguably worse than the original footgun. _spawn_replacement does
-    `import subprocess` locally and calls subprocess.Popen(...), so patching
-    the real subprocess module's Popen attribute (not a daemon-local name —
-    there isn't one) covers it, module-globally, the same way the os._exit
-    patch does. The two watchdog tests already `import subprocess` and
-    monkeypatch.setattr(subprocess, "Popen", ...) themselves — same
-    last-write-wins mechanism as os._exit — so their own mock keeps winning
-    for their test body with no change needed on their side."""
-    import subprocess
-
+    subprocess.Popen is a DIFFERENT story and is deliberately FILE-SCOPED, not
+    global. _spawn_replacement's body calls subprocess.Popen(...) before its
+    os._exit(1), so with only os._exit neutralised, a future test calling the
+    real _spawn_replacement() without also stubbing Popen would spawn a real
+    detached `python -m mcpbrain.daemon` subprocess before hitting the
+    neutralised os._exit — a lingering real background process, worse than the
+    original footgun. A first attempt patched subprocess.Popen globally in this
+    same autouse fixture, but subprocess.Popen is ONE shared module object for
+    the whole process (import subprocess doesn't give each importer its own
+    copy) — that broke ~70 unrelated tests across test_records_repo.py,
+    test_backup_records.py, test_phase2_gardener.py, etc. that shell out via
+    mcpbrain/records.py's _git() helper for real git operations. So the Popen
+    patch is applied ONLY when the currently-running test file is one that
+    actually constructs a Daemon and could reach _spawn_replacement/
+    _exit_for_restart (_DAEMON_SPAWN_REACHABLE_FILES, above) — every other test
+    file's subprocess.Popen is left completely untouched. The two watchdog
+    tests already `import subprocess` and monkeypatch.setattr(subprocess,
+    "Popen", ...) themselves — same last-write-wins mechanism as os._exit — so
+    their own mock keeps winning for their test body with no change needed on
+    their side."""
     from mcpbrain import daemon as _d
 
     def _boom_exit(code=0):
         raise AssertionError(f"os._exit({code!r}) called in a test")
 
-    def _boom_popen(*args, **kwargs):
-        raise AssertionError("subprocess.Popen called in a test")
-
     monkeypatch.setattr(_d.os, "_exit", _boom_exit)
-    monkeypatch.setattr(subprocess, "Popen", _boom_popen)
+
+    if request.node.path.name in _DAEMON_SPAWN_REACHABLE_FILES:
+        import subprocess
+
+        def _boom_popen(*args, **kwargs):
+            raise AssertionError("subprocess.Popen called in a test")
+
+        monkeypatch.setattr(subprocess, "Popen", _boom_popen)
