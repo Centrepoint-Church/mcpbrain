@@ -1698,32 +1698,23 @@ class Daemon:
         sees that intent, so the waiter's pending acquire actually wins the
         next opportunity.
 
-        The acquire itself is done in bounded `_bulk_lock_wait_s` slices, not
-        one unbounded `.acquire()` (Task 3 review finding, reproduced
-        directly): a gated maintenance pass is allowed to legitimately hold
-        _bulk_lock past one tick (see _backup_under_bulk_lock's docstring --
-        e.g. _run_salience_score's `while rounds < 500` loop, or
-        stale_reextract's network-touching sweep). A single unbounded acquire
-        here would block the cycle thread for that whole legitimate hold with
-        ZERO progress stamped in between, and a hold longer than STALL_S
-        would then misread as a wedge and trigger a watchdog restart
-        mid-legitimate-work -- the same false-stall shape Task 3 already
-        fixed for the backup path, just via this method's lock instead.
-        Retrying in bounded slices and stamping "cycle" between attempts
-        fixes that WITHOUT skipping the unit of work the caller wraps
-        (unlike _backup_under_bulk_lock, which can safely skip a cycle's
-        backup -- the caller here still needs its chunk-mutating section to
-        actually run, so this loops until it acquires rather than giving up).
-        getattr guards a bare test double that models locking but not
-        _progress at all (see test_bulk_lock_fairness.py).
+        The acquire here is deliberately UNBOUNDED (unlike
+        _backup_under_bulk_lock's bounded, skip-on-timeout acquire): the
+        caller's chunk-mutating unit of work still needs to run, so there is
+        nothing safe to skip to. A bounded-retry-with-progress-stamp variant
+        was tried (Task 3 review) to address a related but DIFFERENT known
+        gap -- a gated pass holding _bulk_lock past STALL_S can still make
+        _stalled_phase() misreport a stall while this thread waits here, via
+        "sync" (stamped once, at the end of run_sync_cycle, not per-phase)
+        going stale, not via "cycle" -- and was reverted: re-stamping "cycle"
+        between retry attempts does not touch "sync", so it did not actually
+        fix that scenario (confirmed by direct instrumentation: identical
+        `_stalled_phase() -> ('sync', ...)` outcome with or without the
+        retry loop). See docs/superpowers/plans/2026-07-27-daemon-scheduling-
+        remediation.md (Task 4 section) for the tracked gap and why fixing it
+        belongs there, not here.
         """
-        with self._bulk_lock_intent():
-            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
-        while not acquired:
-            if getattr(self, "_progress_lock", None) is not None:
-                self._note_progress("cycle")
-            with self._bulk_lock_intent():
-                acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
+        self._bulk_lock.acquire()
         try:
             yield
         finally:
