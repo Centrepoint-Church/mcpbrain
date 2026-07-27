@@ -6,7 +6,8 @@ from mcpbrain.embed import contextual_prefix
 log = logging.getLogger(__name__)
 
 
-def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None) -> int:
+def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None,
+                  budget=None, max_items: int | None = None) -> int:
     """Embed pending chunks, prepending the Q6 contextual-retrieval prefix to each
     passage when enabled.
 
@@ -15,14 +16,24 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     `contextual_retrieval` config flag so it can be rolled back; the prefix is
     PASSAGE-ONLY (embed.contextual_prefix), never applied to the query side. `home`
     selects which config to read (defaults to the app dir).
+
+    Bounded: `max_items` caps how many chunks one call fetches, and `budget`
+    stops the loop between batches once the cycle's wall-clock slice is spent.
+    Remaining chunks keep embedded=0 and are picked up next cycle — the work is
+    resumable because it is driven by that predicate, not an in-memory cursor.
     """
     from mcpbrain import config
     _home = home or str(config.app_dir())
-    pending = store.unembedded_chunks()
+    if budget is not None and budget.expired():
+        return 0
+    pending = store.unembedded_chunks(limit=max_items)
     done = 0
     if pending:
         use_prefix = config.contextual_retrieval_enabled(_home)
         for i in range(0, len(pending), batch_size):
+            if budget is not None and budget.expired():
+                log.info("index_pending: budget spent after %d chunks", done)
+                break
             batch = pending[i:i + batch_size]
             texts = [
                 (contextual_prefix(c["metadata"]) + c["text"]) if use_prefix else c["text"]

@@ -1288,11 +1288,20 @@ class Store:
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM chunks WHERE enriched=1").fetchone()[0]
 
-    def unembedded_chunks(self) -> list[dict]:
+    def unembedded_chunks(self, limit: int | None = None) -> list[dict]:
+        """Chunks awaiting embedding. `limit` bounds one cycle's slice of work.
+
+        Unbounded by default for callers that genuinely want the whole set
+        (tests, one-shot CLI). The daemon always passes a limit: embedding the
+        entire backlog in one call is what used to hold the cycle for hours.
+        """
+        sql = "SELECT rowid,doc_id,text,metadata FROM chunks WHERE embedded=0"
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
         with self._connect() as db:
-            cur = db.execute(
-                "SELECT rowid,doc_id,text,metadata FROM chunks WHERE embedded=0"
-            )
+            cur = db.execute(sql, params)
             return [
                 {
                     "rowid": r["rowid"],
