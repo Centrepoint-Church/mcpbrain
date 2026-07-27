@@ -53,7 +53,8 @@ def test_concurrent_writers_both_succeed(tmp_path):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads)
 
     assert errors == [], f"concurrent writers raised: {errors}"
     with s._connect() as db:

@@ -47,7 +47,8 @@ def test_stash_take_is_atomic_under_concurrent_writers():
 
     stop.set()
     for t in threads:
-        t.join()
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads)
 
     # Every take returns a plain dict snapshot and leaves the stash cleared;
     # crucially nothing raises "dictionary changed size during iteration".
@@ -95,6 +96,7 @@ def test_embedder_lock_serialises_model_access():
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads)
 
     assert overlaps == [], "embedder model was entered concurrently"

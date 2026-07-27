@@ -31,3 +31,18 @@ def _clear_orgs_cache():
     orgs.taxonomy_from_config.cache_clear()
     yield
     orgs.taxonomy_from_config.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_exit(monkeypatch):
+    """os._exit(1) in the watchdog bypasses pytest entirely — a test that ever
+    reaches it kills the worker with no traceback. Today that path is unreachable
+    only by accident (frozen clocks, stubbed _stalled_phase); nothing structural
+    prevents it. Neutralise it for every test."""
+    from mcpbrain import daemon as _d
+    monkeypatch.setattr(_d.Daemon, "_exit_for_restart",
+                        lambda self: (_ for _ in ()).throw(
+                            AssertionError("_exit_for_restart called in a test")))
+    monkeypatch.setattr(_d.Daemon, "_spawn_replacement",
+                        lambda self: (_ for _ in ()).throw(
+                            AssertionError("_spawn_replacement called in a test")))
