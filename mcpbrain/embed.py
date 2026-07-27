@@ -117,7 +117,6 @@ def model_weights_cached() -> bool:
 
 class _LocalEmbedder:
     def __init__(self, model_name: str, dim: int, query_prefix: str):
-        from fastembed import TextEmbedding          # lazy: keep import-time light
         import os as _os
         # Leave the control plane schedulable. Unconfigured, ORT affinitises
         # intra-op threads across every physical core (measured 425% CPU on a
@@ -133,20 +132,34 @@ class _LocalEmbedder:
         # environment at that point and this assignment is a silent no-op —
         # there is no supported way to change it after the fact short of not
         # spawning OpenMP's thread pool at all. Only set it pre-import.
+        #
+        # MUST run BEFORE `from fastembed import TextEmbedding` below: that
+        # import statement is itself what inserts "fastembed"/"onnxruntime"
+        # into sys.modules the first time it runs (a fresh import IS a
+        # sys.modules mutation, not just a name lookup). Checking sys.modules
+        # AFTER that import — an earlier version of this code did exactly that
+        # — always finds both already present, so the guard's condition is
+        # always False and the assignment silently never happens. See
+        # tests/test_embed_locking.py's ordering regression test.
         if ("fastembed" not in sys.modules and "onnxruntime" not in sys.modules
                 and not _os.environ.get("OMP_NUM_THREADS")):
             _os.environ["OMP_NUM_THREADS"] = "1"
+        from fastembed import TextEmbedding          # lazy: keep import-time light
         cpu = _os.cpu_count() or 4
         threads = max(1, cpu - 2)
         self._model = TextEmbedding(model_name=model_name, cache_dir=_model_cache_dir(), threads=threads)
         self.dim = dim
         self._qp = query_prefix
-        # NOT held by embed_passages/embed_query (see get_embedder): kept only
-        # so an instance built via __new__ (tests) has the attribute, and as a
-        # placeholder should a future lazy-build step be added inside this
-        # class. The real single-flight guard for construction lives in
-        # get_embedder's _BUILD_LOCK below.
-        self._lock = threading.Lock()
+        # No self._lock here: an earlier version of this class held a lock
+        # across embed_passages/embed_query to serialise access to the model,
+        # which is exactly the bug this class was fixed to remove (it put
+        # /api/recall's embed_query behind a bulk embed_passages batch). There
+        # is nothing left inside this class for a lock to guard — construction
+        # is single-flight at the get_embedder level (_BUILD_LOCK, below), and
+        # ONNX Runtime + the tokenizer support concurrent calls. Tests that
+        # build an instance via __new__ (bypassing __init__) set their own
+        # `_lock` attribute for historical-shape compatibility; that has no
+        # effect on behaviour since embed_passages/embed_query never read it.
 
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         # ONNX Runtime sessions support concurrent Run() calls from multiple

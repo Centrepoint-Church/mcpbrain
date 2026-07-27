@@ -71,13 +71,25 @@ def store_dim_from_path(path) -> int | None:
         return None
 
 
-def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
+DEFAULT_BUSY_TIMEOUT_MS = 5000
+
+
+def _open_db(path, read_only: bool = False, *,
+            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """Open a connection to the derived store with sqlite-vec loaded.
 
     read_only=True uses a mode=ro URI (the MCP server's read path); read_only=False
     is the daemon's write path. row_factory is sqlite3.Row and the sqlite-vec
     extension is loaded so vec0 virtual tables resolve on connect. Shared by
     Store._connect and the backup checkpoint path.
+
+    busy_timeout_ms: how long SQLite's own busy handler blocks a single
+    statement (e.g. one BEGIN IMMEDIATE attempt) waiting for a lock before
+    raising "database is locked". This is the DOMINANT term in how long a
+    write can block under contention — cutting retry COUNT alone (see
+    RECALL_PATH_BEGIN_RETRIES) does not bound the wait, because even one
+    attempt can sit here for the full timeout. Callers on a latency-sensitive
+    path pass a smaller value; see RECALL_PATH_BUSY_TIMEOUT_MS.
     """
     if read_only:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -87,7 +99,7 @@ def _open_db(path, read_only: bool = False) -> sqlite3.Connection:
     # Explicit busy_timeout so concurrent writers (daemon + MCP draft handle) serialise
     # via WAL with a bounded wait instead of failing immediately on a locked DB. WAL is
     # set once at init() and is a file-level setting, so every connection inherits it.
-    db.execute("PRAGMA busy_timeout=5000")
+    db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     # Cap WAL growth. A long-lived reader can otherwise prevent checkpointing
     # and the WAL grows without bound; this makes SQLite truncate it back after
     # a checkpoint instead. Chosen well above normal transaction size.
@@ -115,16 +127,29 @@ _BEGIN_RETRIES = 3
 _BEGIN_BASE_SLEEP_S = 0.05
 
 # A smaller retry budget for writes that run inline on the /api/recall path
-# (currently decay.update_on_recall -> update_memory_strength_batch). Even at
-# _BEGIN_RETRIES=3, each failed BEGIN IMMEDIATE attempt can wait the connection's
-# full busy_timeout (5000ms via PRAGMA busy_timeout in _open_db) before this
-# loop's own backoff sleep even starts, so 3 retries is still ~15s worst case —
-# fine for a background maintenance write, not for something a recall response
-# is waiting on. update_on_recall is fire-and-forget (its caller already
-# swallows exceptions), so failing fast under contention and simply skipping
-# this recall's strength bump is strictly better than adding seconds of
-# latency to the prompt path for a non-critical bookkeeping update.
+# (currently decay.update_on_recall -> update_memory_strength_batch). update_on_recall
+# is fire-and-forget (its caller already swallows exceptions), so failing fast
+# under contention and simply skipping this recall's strength bump is strictly
+# better than adding latency to the prompt path for a non-critical bookkeeping
+# update.
+#
+# IMPORTANT: retries alone does not bound the wait. Even ONE failed BEGIN
+# IMMEDIATE attempt can block for the connection's full busy_timeout (default
+# 5000ms, PRAGMA busy_timeout in _open_db) before SQLite's busy handler gives
+# up and this loop's own backoff even starts -- measured live at 5.38s with
+# retries=1 alone, still well past prompt_recall's 3.0s client timeout (i.e.
+# still silently dropping the recall context, just slightly less often). The
+# write connection on this path MUST also use RECALL_PATH_BUSY_TIMEOUT_MS
+# (below), not just a smaller retries=.
 RECALL_PATH_BEGIN_RETRIES = 1
+
+# See the note above: busy_timeout, not retry count, is the dominant term.
+# 500ms x RECALL_PATH_BEGIN_RETRIES(=1) attempt = ~0.5s worst case for the
+# whole write, comfortably inside prompt_recall's 3.0s budget with ~2.5s of
+# margin for everything else on that path (the embed_query call, hybrid
+# search, formatting). Bulk/ingest writes are unaffected -- they keep
+# DEFAULT_BUSY_TIMEOUT_MS via the normal _connect()/_open_db() default.
+RECALL_PATH_BUSY_TIMEOUT_MS = 500
 
 
 def _begin_immediate(db, *, retries: int = _BEGIN_RETRIES) -> None:
@@ -161,7 +186,8 @@ class Store:
         # the MCP server also opens a writable handle for draft_records (serialised via WAL)
 
     @contextmanager
-    def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES):
+    def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
+                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
@@ -183,8 +209,14 @@ class Store:
         latency-sensitive path (e.g. recall) can pass a smaller budget than the
         default so contention fails fast instead of piling up wait time; see
         RECALL_PATH_BEGIN_RETRIES.
+
+        busy_timeout_ms: passed straight through to _open_db. This is the term
+        that actually dominates worst-case wait — even a single BEGIN IMMEDIATE
+        attempt can block for the full busy_timeout, so a caller that needs a
+        hard latency bound (recall) must lower THIS, not just retries; see
+        RECALL_PATH_BUSY_TIMEOUT_MS.
         """
-        db = _open_db(self.path, self.read_only)
+        db = _open_db(self.path, self.read_only, busy_timeout_ms=busy_timeout_ms)
         try:
             if write and not self.read_only:
                 # Manual transaction control: take the write lock up front.
@@ -199,12 +231,15 @@ class Store:
                     # OperationalError: cannot rollback - no transaction is
                     # active, which used to propagate INSTEAD of the original
                     # error, masking a disk-full as a confusing "no transaction"
-                    # message. Swallow only that specific failure so the real,
-                    # original exception (raised below by `raise`) is what the
-                    # caller actually sees.
+                    # message. The unconditional `raise` below always re-raises
+                    # the ORIGINAL exception regardless of what happens in this
+                    # except block, so there is no signal lost by catching
+                    # broadly here — `except Exception` (rather than the
+                    # narrower sqlite3.OperationalError) also covers any other
+                    # failure this cleanup-only ROLLBACK could hit.
                     try:
                         db.execute("ROLLBACK")
-                    except sqlite3.OperationalError:
+                    except Exception:  # noqa: BLE001 — see comment above; the original error always wins
                         pass
                     raise
                 else:
@@ -3351,9 +3386,10 @@ class Store:
         return (float(row["memory_strength"] or 5.0), row["last_accessed"] or "")
 
     def update_memory_strength(self, doc_id: str, strength: float, last_accessed: str, *,
-                               retries: int = _BEGIN_RETRIES) -> None:
+                               retries: int = _BEGIN_RETRIES,
+                               busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> None:
         """Upsert memory_strength + last_accessed in chunk_quality."""
-        with self._connect(write=True, retries=retries) as db:
+        with self._connect(write=True, retries=retries, busy_timeout_ms=busy_timeout_ms) as db:
             db.execute(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
@@ -3364,16 +3400,20 @@ class Store:
             )
 
     def update_memory_strength_batch(self, rows: list[tuple], *,
-                                     retries: int = _BEGIN_RETRIES) -> None:
+                                     retries: int = _BEGIN_RETRIES,
+                                     busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> None:
         """Update many rows. rows = [(doc_id, strength, last_accessed), ...].
 
-        retries: passed to _connect — callers on the recall path (see
-        decay.update_on_recall) pass RECALL_PATH_BEGIN_RETRIES so contention
-        fails fast instead of adding wait time to a live recall response.
+        retries / busy_timeout_ms: passed to _connect — callers on the recall
+        path (see decay.update_on_recall) pass RECALL_PATH_BEGIN_RETRIES and
+        RECALL_PATH_BUSY_TIMEOUT_MS so contention fails fast instead of adding
+        wait time to a live recall response. retries alone does NOT bound the
+        wait (see the comment on RECALL_PATH_BEGIN_RETRIES) -- both must be
+        passed together.
         """
         if not rows:
             return
-        with self._connect(write=True, retries=retries) as db:
+        with self._connect(write=True, retries=retries, busy_timeout_ms=busy_timeout_ms) as db:
             db.executemany(
                 "INSERT INTO chunk_quality(doc_id, quality, memory_strength, last_accessed) "
                 "VALUES(?, 1.0, ?, ?) "
