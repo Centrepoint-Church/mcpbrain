@@ -351,6 +351,52 @@ the daemon started working again, colliding with disk space that had grown
 tight in the meantime. Re-run the remaining acceptance steps once disk space
 is freed and the daemon is restarted.
 
+### Acceptance results, completed (2026-07-27, same day)
+
+Freed disk space (app/OS caches, two stale mcpbrain `.bak` snapshots, and —
+found only by checking `/var/folders` rather than `$HOME` — **two orphaned
+`mcpbrain-snap-*` temp directories totalling ~24 GB**, left behind because
+`make_encrypted_snapshot`'s cleanup runs in a `finally` block that cannot
+fire when the process is killed mid-backup, exactly what happened during
+the crash and the subsequent `launchctl bootout`. Net: 3.3 GB → 50 GB free.
+This orphan-accumulation is a real, separate finding worth a follow-up fix
+(e.g. a startup sweep for stale `mcpbrain-snap-*` dirs) — not fixed here,
+flagged for the ingestion/ops follow-up track.
+
+Restarted the daemon (`launchctl bootstrap`) with 50 GB free and observed for
+25+ minutes straight:
+
+- **The backup succeeded end-to-end** — `connections.backup.last_verified`
+  advanced to today for the first time since 2026-07-23. Disk usage during
+  the attempt: 50 GB → 27 GB (raw copy + in-progress tar.gz) → jumped back to
+  56 GB the moment the temp dir was cleaned up (confirming the `finally`
+  cleanup fired normally this time) → settled at a stable 57 GB with no
+  further growth. No ENOSPC, no freeze, no crash.
+- **`/api/recall` p95 during active ingest**: 20 requests, values 0.27–1.92 s
+  — comfortably under the ~3 s target, zero errors on `/api/recall` itself.
+  (`/api/status` does show `BrokenPipeError`s in the log — 4,423 accumulated
+  across the log's entire history from some other polling client, not from
+  this test or this session; a pre-existing, separate pattern worth noting
+  but not a regression from this plan.)
+- **Enrichment queue actively refilling**: `spool.pending`=332 matched
+  `enrich_queue/units/`'s file count exactly.
+- **Watchdog confirmed healthy, not just quiet**: `watchdog_exits: 0`,
+  `watchdog_limit_reached: False`, `stalled: None`, `paused: False` after the
+  full 25-minute observation window.
+- One long-running catch-up cycle (backlog + the overdue backup) took several
+  minutes rather than completing in under a minute — expected given how
+  stale the store was (4+ days without a working cycle, on top of the
+  already-documented spec caveat that "bounding embedding alone is not
+  sufficient" for a sufficiently large first catch-up); the four gated
+  cadence passes correctly skipped-and-retried throughout with zero blocking,
+  and every other pass and the control API stayed fully responsive the whole
+  time — the actual regression this plan targets (total starvation) did not
+  recur.
+
+All acceptance criteria met. No code changes were needed — the daemon's own
+behavior was correct throughout; the blocker was host disk space plus the
+orphaned-temp-dir issue noted above.
+
 ## Rejected alternatives
 
 **APScheduler.** `max_instances` defaults to 1 and silently skips overruns; the
