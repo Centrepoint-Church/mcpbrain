@@ -34,6 +34,32 @@ def test_win_shim_content_runs_subcommand_hidden_and_sets_home():
     assert "-m mcpbrain" not in vbs
 
 
+def test_win_shim_content_default_is_fire_and_forget():
+    """Every caller except the XML-registered daemon task needs wscript to
+    return immediately: the Startup-folder "start now" call launches a
+    process that never returns, and the tray/cadence/CLI-fallback tasks have
+    no RestartOnFailure to feed from a captured exit code anyway."""
+    vbs = agents._win_shim_content(mcpbrain_bin=r"C:\T\mcpbrain.exe",
+                                   home=r"C:\Users\jo\mcpbrain", subcommand="daemon")
+    assert ", 0, False" in vbs
+    assert "WScript.Quit" not in vbs
+    assert "rc = sh.Run(" not in vbs
+
+
+def test_win_shim_content_wait_propagates_exit_code():
+    """Critical: the wait flag alone does not propagate an exit code. wscript
+    exits 0 on normal termination no matter what the child did unless the
+    child's return value is captured (function-call form, not the
+    fire-and-forget statement form) and re-quit explicitly -- otherwise
+    RestartOnFailure still could never see a failure."""
+    vbs = agents._win_shim_content(mcpbrain_bin=r"C:\T\mcpbrain.exe",
+                                   home=r"C:\Users\jo\mcpbrain", subcommand="daemon",
+                                   wait=True)
+    assert "rc = sh.Run(" in vbs, "must capture Run's return value, not discard it"
+    assert ", 0, True)" in vbs
+    assert "WScript.Quit rc" in vbs, "must re-exit with the captured code"
+
+
 def test_daemon_schtasks_runs_shim_via_wscript():
     a = agents.schtasks_args(mcpbrain_bin=r"C:\T\mcpbrain.exe", home=r"C:\Users\jo\mcpbrain")
     assert a[0] == "schtasks" and _flag_value(a, "/sc") == "onlogon"

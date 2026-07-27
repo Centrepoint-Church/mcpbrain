@@ -886,6 +886,50 @@ so RestartOnFailure could never fire — making the watchdog's 'supervised' exit
 on Windows kill the daemon until next logon."
 ```
 
+> **Task 5 round-2 update (2026-07-28, review) — two Criticals found in the
+> first pass, both fixed; one Important addressed by scoping the wait flag
+> per-call-site; one Important left as a documented known gap.**
+>
+> 1. **Critical — the wait flag alone didn't propagate the exit code.**
+>    `sh.Run "...", 0, True` (statement form) discards `Run`'s return value,
+>    and wscript itself still exits 0 on normal script termination regardless
+>    of the daemon's actual exit code — `RestartOnFailure` still couldn't fire,
+>    which was this task's entire point. Fixed: the waiting variant now uses
+>    `rc = sh.Run("...", 0, True)` (function-call form) followed by
+>    `WScript.Quit rc`, pinned by a test asserting both `"rc = sh.Run("` and
+>    `"WScript.Quit rc"` are present.
+> 2. **Critical — the waiting shim made the Startup-folder "start now" call
+>    hang forever.** `_install_startup_shortcut`'s
+>    `subprocess.run([wscript, str(shim_path)], check=False)` (used right
+>    after installing the policy-blocked fallback) previously returned in
+>    milliseconds; with the shim waiting on `mcpbrain daemon`/`tray` (which
+>    never return), that call would block `mcpbrain setup` forever. Fixed by
+>    making `_win_shim_content`'s `wait` an explicit per-call parameter
+>    (default `False`, restoring the original fire-and-forget behaviour for
+>    every caller) and having `_install_schtasks` write the shim non-waiting
+>    by default, swap it to `wait=True` only immediately before the
+>    XML/RestartOnFailure registration, and swap it back to non-waiting before
+>    falling back to the CLI form.
+> 3. **Important — the tray's task and the CLI-fallback daemon task would
+>    otherwise lose the XML's battery/time-limit settings.** Resolved by the
+>    same per-call-site scoping above: the tray (`_install_schtasks_tray`) and
+>    cadence (`_install_cadences_schtasks`) registrations never pass
+>    `wait=True`, so they keep the original fire-and-forget shim and are never
+>    exposed to Task Scheduler's un-set-by-us `StopIfGoingOnBatteries`/
+>    `ExecutionTimeLimit` defaults; the CLI fallback path explicitly reverts to
+>    the non-waiting shim for the same reason.
+> 4. **Important — left open, documented (not fixed): `_recover_from_stall`'s
+>    `win_persistence_mechanism() == "schtasks"` check can't distinguish a
+>    genuinely-supervised XML/RestartOnFailure install from one where XML
+>    registration failed and silently fell back to the CLI form (no
+>    RestartOnFailure, non-waiting shim by design).** On that fallback,
+>    `_recover_from_stall` still takes the "supervised, just exit" branch, but
+>    nothing will actually restart the daemon — worse than the unsupervised
+>    spawn-replacement path it believes it's deferring to. A clean fix needs
+>    the install side to persist which mechanism was actually achieved (e.g. a
+>    marker file `_recover_from_stall` can read) — scoped out of this task,
+>    documented inline in `_recover_from_stall`'s docstring.
+
 ---
 
 ### Task 6: Latency and store hygiene
