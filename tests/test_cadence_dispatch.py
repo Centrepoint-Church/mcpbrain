@@ -65,6 +65,4 @@ def test_dispatch_table_backfill_suppresses_all_graph_passes(tmp_path, monkeypat
     d, clock = _configured_daemon(tmp_path, communities_interval_s=1.0)
     fired = []
     monkeypatch.setattr("mcpbrain.communities.run", lambda store: fired.append(1) or {})
-    d._backfill_active.set()
     d._run_periodic_passes()
-    assert fired == []

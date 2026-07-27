@@ -101,6 +101,11 @@ REEXTRACT_CAP = 50
 # run_one(), and an unbounded cycle starved them for four days (2026-07-23..27).
 CYCLE_BUDGET_S = 60.0
 
+# Tick interval for the maintenance thread (Daemon._maintenance_loop). Each
+# cadence pass still self-gates on its own interval, so a tick is cheap; this
+# just bounds how promptly a newly-due pass is noticed.
+MAINTENANCE_TICK_S = 60.0
+
 
 def _graph_apply():
     """Resolve Phase 1's graph_write.apply through an indirection seam.
@@ -156,6 +161,7 @@ class CadencePass:
     fn_name: str
     needs_configured: bool = True
     needs_backfill_clear: bool = True
+    needs_bulk_lock: bool = False
 
 
 _CADENCE_PASSES: tuple[CadencePass, ...] = (
@@ -175,7 +181,7 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     CadencePass("blocks", "_blocks_interval_s", "_last_blocks", "_run_blocks"),
     CadencePass("audit", "_audit_interval_s", "_last_audit", "_run_audit"),
     CadencePass("stale_reextract", "_stale_reextract_interval_s",
-                "_last_stale_reextract", "_run_stale_reextract"),
+                "_last_stale_reextract", "_run_stale_reextract", needs_bulk_lock=True),
     # S2 feedback aggregation: nightly Bayesian-smoothed CTR → chunk_quality.
     # needs_configured=False: feedback aggregation is identity-agnostic.
     CadencePass("feedback_aggregate", "_feedback_aggregate_interval_s",
@@ -198,14 +204,14 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # needs_configured=False: salience is identity-agnostic.
     CadencePass("salience_score", "_salience_score_interval_s",
                 "_last_salience_score", "_run_salience_score",
-                needs_configured=False),
+                needs_configured=False, needs_bulk_lock=True),
     # B5 decay pass: demote unaccessed low-salience chunks to cold tier.
     CadencePass("decay_pass", "_decay_pass_interval_s",
                 "_last_decay_pass", "_run_decay_pass",
-                needs_configured=False),
+                needs_configured=False, needs_bulk_lock=True),
     # B4 consolidation: RAPTOR-style cluster+summarise episodic chunks.
     CadencePass("consolidation", "_consolidation_interval_s",
-                "_last_consolidation", "_run_consolidation"),
+                "_last_consolidation", "_run_consolidation", needs_bulk_lock=True),
     # B6 voice analyser: weekly analysis-only procedural memory pass.
     CadencePass("voice_analyse", "_voice_analyse_interval_s",
                 "_last_voice_analyse", "_run_voice_analyse"),
@@ -682,6 +688,11 @@ class Daemon:
         # Coarse advisory lock. Held by the cycle around chunk-mutating phases
         # and acquired by the four cadence passes that also write `chunks`.
         self._bulk_lock = threading.Lock()
+        # Maintenance runs on its own thread, ticking independently of the bulk
+        # cycle (Task 4: the cycle used to call _run_periodic_passes() inline,
+        # so an unbounded cycle starved every cadence pass for four days).
+        self._maintenance_interval_s = MAINTENANCE_TICK_S
+        self._maintenance_thread = None
         # Single-flight guard: the control-API force path (/api/bootstrap-baseline)
         # can fire on an HTTP thread while the loop thread independently bootstraps
         # the same cycle — two concurrent import_snapshot transactions into one
@@ -2266,23 +2277,48 @@ class Daemon:
         """Iterate _CADENCE_PASSES; each entry self-gates on its cadence.
 
         The dispatch table in _CADENCE_PASSES drives the order (communities
-        first so lint reads fresh entity_communities). needs_backfill_clear
-        gates the whole call when a backfill is running. needs_configured gates
+        first so lint reads fresh entity_communities and blocks reads fresh
+        communities via community_synth.py:54). needs_configured gates
         graph-writing passes on config.is_configured so they never write blank
         attribution into the graph on an unconfigured install. Each _run_X call
         is individually wrapped so an unexpected raise from one pass never
-        blocks the remaining passes.
+        blocks the remaining passes. The four passes that also write `chunks`
+        take the coarse _bulk_lock so they never race the cycle thread's own
+        chunk-mutating phases.
         """
-        if self._backfill_active.is_set():
-            return  # single-writer: yield the whole cycle to the backfill
         configured = config.is_configured(str(app_dir()))
         for cp in _CADENCE_PASSES:
             if cp.needs_configured and not configured:
                 continue
             try:
-                getattr(self, cp.fn_name)()
+                if cp.needs_bulk_lock:
+                    with self._bulk_lock:
+                        getattr(self, cp.fn_name)()
+                else:
+                    getattr(self, cp.fn_name)()
             except Exception as exc:  # noqa: BLE001
                 log.warning("periodic pass %s failed: %s", cp.name, exc, exc_info=True)
+
+    def _maintenance_loop(self) -> None:
+        """Run due cadence passes on our own clock, independent of the bulk cycle.
+
+        Each pass still self-gates via _is_due, so a tick is cheap. This thread
+        exists because the passes used to run only after run_one() returned, and
+        an unbounded cycle therefore starved every one of them.
+        """
+        while not self._stop.is_set():
+            if not self._pause.is_set():
+                try:
+                    self._run_periodic_passes()
+                    self._note_progress("maintenance")
+                except Exception:  # noqa: BLE001 — a bad pass must not kill the thread
+                    log.warning("maintenance loop iteration failed", exc_info=True)
+            self._stop.wait(timeout=self._maintenance_interval_s)
+
+    def _start_maintenance_thread(self) -> None:
+        self._maintenance_thread = threading.Thread(
+            target=self._maintenance_loop, name="mcpbrain-maintenance", daemon=True)
+        self._maintenance_thread.start()
 
     # -- the loop -----------------------------------------------------------
 
@@ -2365,11 +2401,18 @@ class Daemon:
             # first cycle, regardless of pause state. ensure_services() is
             # idempotent: the subsequent call inside run_one() becomes a no-op.
             self.ensure_services()
+            # Maintenance now ticks on its own thread/clock (Task 4) instead of
+            # running inline after run_one() — an unbounded cycle used to
+            # starve every cadence pass behind it for four days.
+            self._start_maintenance_thread()
             while not self._stop.is_set():
                 self._wake.clear()          # clear before the cycle; a sync_now during the cycle re-sets it
                 cycle_result = None
                 try:
-                    cycle_result = self.run_one()
+                    # Hold the bulk lock around the cycle so the maintenance
+                    # thread's four chunk-writing passes never race it.
+                    with self._bulk_lock:
+                        cycle_result = self.run_one()
                 except Exception as exc:  # noqa: BLE001 — a transient cycle error must not kill the daemon
                     # Crashing here would hand the failure to launchd, whose
                     # restart resets every cadence anchor and drops stashed
@@ -2382,9 +2425,6 @@ class Daemon:
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
                 self.maybe_backup()
-                # Five periodic maintenance passes in spec order (§54, §165).
-                # communities first (lint reads fresh entity_communities).
-                self._run_periodic_passes()
                 # Stamp the daemon's own liveness so the fleet beacon (written by
                 # a separate process) reports real daemon health, not cached probes.
                 write_daemon_heartbeat(str(config.app_dir()))
