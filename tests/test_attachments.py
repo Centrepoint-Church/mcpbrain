@@ -196,3 +196,89 @@ def test_one_failing_attachment_does_not_kill_the_others(monkeypatch):
     chunks = attachments.fetch_and_normalise(_Service(), raw)
 
     assert [c.doc_id for c in chunks] == ["gmail-m1-att-1-0"]
+
+
+def test_a_tabular_attachment_is_tagged_content_subtype_table(monkeypatch):
+    """I1: prepare.should_enrich's tabular gate reads `content_subtype`, which
+    normalise_drive stamps per-MIME but this module never did — so an emailed
+    workbook's row-group chunks all reached the extractor. `table_role` (the
+    renderer's own marker) is what makes it a table chunk."""
+    from mcpbrain.sync.tabular import Table
+
+    monkeypatch.setattr(
+        attachments, "_TABLE_EXTRACTORS",
+        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+         lambda b, char_budget: [Table(sheet="Budget", header=["Item", "Amount"],
+                                       rows=[["Rent", "500"], ["Power", "120"]],
+                                       rows_total=2, truncated=False)]})
+    raw = _msg([_part("Budget.xlsx",
+                      "application/vnd.openxmlformats-officedocument."
+                      "spreadsheetml.sheet")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, b"fake")
+
+    assert chunks
+    assert all(c.metadata.get("content_subtype") == "table" for c in chunks), \
+        [c.metadata.get("content_subtype") for c in chunks]
+
+
+def test_a_prose_attachment_is_not_tagged_as_a_table(monkeypatch):
+    """The discriminator for the stamp: only chunks that came out of
+    tabular.render_chunks get it."""
+    monkeypatch.setattr(attachments, "_EXTRACTORS",
+                        {"application/pdf": lambda b: "Board minutes. " * 30})
+    raw = _msg([_part("Minutes.pdf", "application/pdf")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, b"fake")
+
+    assert chunks
+    assert all("content_subtype" not in c.metadata for c in chunks)
+
+
+def test_a_bulk_parents_attachment_inherits_the_bulk_flag(monkeypatch):
+    """I1: normalise_gmail stamps `bulk` from List-Id/List-Unsubscribe/Precedence
+    so should_enrich cold-marks newsletter bodies. Without the same stamp here, a
+    newsletter's attached flyer was graph-extracted while the body it arrived with
+    was cold-marked."""
+    monkeypatch.setattr(attachments, "_EXTRACTORS",
+                        {"application/pdf": lambda b: "Our latest offers. " * 30})
+    raw = _msg([_part("Flyer.pdf", "application/pdf")])
+    raw["payload"]["headers"].append(
+        {"name": "List-Unsubscribe", "value": "<mailto:x@y.z>"})
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, b"fake")
+
+    assert chunks
+    assert all(c.metadata.get("bulk") is True for c in chunks)
+
+
+def test_an_ordinary_parents_attachment_is_not_marked_bulk(monkeypatch):
+    monkeypatch.setattr(attachments, "_EXTRACTORS",
+                        {"application/pdf": lambda b: "Board minutes. " * 30})
+    raw = _msg([_part("Minutes.pdf", "application/pdf")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, b"fake")
+
+    assert chunks
+    assert all("bulk" not in c.metadata for c in chunks)
+
+
+def test_a_tsv_attachment_is_parsed_on_tabs(monkeypatch):
+    """I4: text/tab-separated-values is routed through tables_from_csv, which used
+    csv.reader's default comma — so a TSV parsed as ONE column holding the whole
+    row, and _MAX_CELL_CHARS then truncated it at 300 chars per row."""
+    tsv = ("Account\tDescription\tAmount\n"
+           "4521\tVenue hire\t1450.00\n"
+           "6100\tCatering\t320.50\n")
+    raw = _msg([_part("ledger.tsv", "text/tab-separated-values")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, tsv.encode())
+    rowtext = next(c.text for c in chunks if c.metadata.get("table_role") == "rows")
+
+    assert "| Account | Description | Amount |" in rowtext
+    assert "| 4521 | Venue hire | 1450.00 |" in rowtext

@@ -21,6 +21,7 @@ three.
 import csv
 import io
 import logging
+import re
 from dataclasses import dataclass, field
 
 from mcpbrain.chunking import has_content
@@ -40,11 +41,16 @@ TABLE_MIMES = frozenset({
     "text/tab-separated-values",
 })
 
-# Target size of one rendered row-group chunk. Matches chunk_text's default
-# budget (max_tokens=500 * 4) so a table chunk and a prose chunk fit the same
-# 512-token embedder window. Public: Drive files and email attachments both
-# render tables and must agree.
-CHUNK_CHARS = 2000
+# Target size of one rendered row-group chunk. Matches chunk_text's EFFECTIVE
+# default budget so a table chunk and a prose chunk fit the same 512-token
+# embedder window. 1800, not 2000 (I8): embed.contextual_prefix (default ON) adds
+# ~100 chars of provenance to every gdrive/gmail passage at embed time and
+# index.EMBED_WINDOW_CHARS measures the PREFIXED text, so a 2,000-char table
+# chunk overflows the real window and loses its tail (B3). Same number as
+# semantic.SEMANTIC_MAX_CHARS and chunking's max_tokens*4 - _PREFIX_HEADROOM_CHARS
+# — one chunking policy across the codebase. Public: Drive files and email
+# attachments both render tables and must agree.
+CHUNK_CHARS = 1800
 
 # Longest a single rendered cell may be before elision. One runaway cell (a
 # pasted paragraph in a spreadsheet) must not blow a whole row group on its own.
@@ -87,15 +93,29 @@ def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
     return [r[:width] for r in kept]
 
 
+def delimiter_for_mime(mime: str) -> str:
+    """Field delimiter for a delimited-text MIME type.
+
+    I4: TABLE_MIMES includes text/tab-separated-values, and both drive.py and
+    attachments.py routed TSV through `tables_from_csv` with csv.reader's default
+    comma — a real TSV parsed as ONE column holding the whole row, which
+    _MAX_CELL_CHARS then truncated at 300 chars, silently discarding the rest of
+    every row. Lives here so both call sites cannot drift.
+    """
+    return "\t" if mime == "text/tab-separated-values" else ","
+
+
 def tables_from_csv(text: str, *, sheet: str = "Sheet1",
-                    char_budget: int) -> list[Table]:
-    """Parse CSV text into a single Table, bounded by `char_budget`.
+                    char_budget: int, delimiter: str = ",") -> list[Table]:
+    """Parse delimited text into a single Table, bounded by `char_budget`.
 
     Serves both CSV downloads and Google Sheets exports (drive.py exports
     spreadsheets as text/csv), so those two paths and the XLSX path share one
-    renderer downstream.
+    renderer downstream. `delimiter` is driven by the caller's known MIME type
+    (see delimiter_for_mime) rather than sniffed: the MIME is authoritative and a
+    sniffer can be wrong on a one-column file.
     """
-    rows = normalise_rows(list(csv.reader(io.StringIO(text))))
+    rows = normalise_rows(list(csv.reader(io.StringIO(text), delimiter=delimiter)))
     if not rows:
         return []
     header, data = rows[0], rows[1:]
@@ -123,6 +143,55 @@ def _md_row(row: list[str], width: int, max_cell_chars: int = _MAX_CELL_CHARS) -
     return "| " + " | ".join(cells[:width]) + " |"
 
 
+# Header words that name an IDENTIFIER, and words that name a QUANTITY. Checked
+# as whole words against the header, quantity first (so "Invoice Amount" and
+# "Account Balance" are still totalled).
+_ID_HEADER_WORDS = frozenset({
+    "code", "codes", "id", "ids", "ref", "reference", "account", "acct",
+    "number", "no", "num", "year", "invoice", "phone", "mobile", "postcode",
+    "zip", "abn", "acn", "gl", "index", "row", "line", "abr",
+})
+_QUANTITY_HEADER_WORDS = frozenset({
+    "amount", "amt", "total", "totals", "subtotal", "budget", "budgeted",
+    "actual", "actuals", "cost", "costs", "price", "value", "qty", "quantity",
+    "count", "hours", "fee", "fees", "income", "expense", "expenses", "balance",
+    "variance", "paid", "spend", "revenue", "salary", "wages", "rate", "gst",
+    "tax", "$", "sum", "ytd", "forecast",
+})
+
+_HEADER_WORD = re.compile(r"[a-z$]+")
+
+
+def _looks_like_identifier_column(name: str, values: list[float]) -> bool:
+    """True when a mostly-numeric column holds CODES rather than quantities (I3).
+
+    _summary_text used to sum every mostly-numeric column, so a GL/account-code
+    column (4521, 6100, 6200…) was reported as `Totals: Account 15142.00` beside
+    the genuine monetary totals — a confident, meaningless figure in the one
+    chunk written specifically to answer "how big is this budget".
+
+    Two signals, either sufficient, with a quantity-word override on both:
+      * the header names an identifier ("Account", "GL Code", "Invoice No"); or
+      * every value is a whole number of the SAME digit width, there are at least
+        three of them, and that width is >= 3 — the shape of a code block.
+
+    Deliberate limits: a genuine quantity column of same-width integers under an
+    uninformative header ("Jun" over four-digit dollar amounts) loses its total,
+    and an identifier column headed with a quantity word keeps one. That trade is
+    the right way round — a missing total costs a broad-match hint, a fabricated
+    total is a wrong answer stated as fact.
+    """
+    words = set(_HEADER_WORD.findall((name or "").lower()))
+    if words & _QUANTITY_HEADER_WORDS:
+        return False
+    if words & _ID_HEADER_WORDS:
+        return True
+    if len(values) < 3 or not all(float(v).is_integer() for v in values):
+        return False
+    widths = {len(str(abs(int(v)))) for v in values}
+    return len(widths) == 1 and widths.pop() >= 3
+
+
 def _summary_text(file_name: str, t: Table) -> str:
     lines = [f"### Sheet summary: {t.sheet} ({file_name})",
              f"Rows: {t.rows_total} · Columns: {len(t.header)}",
@@ -137,8 +206,10 @@ def _summary_text(file_name: str, t: Table) -> str:
             except ValueError:
                 continue
         # Only total a column that is MOSTLY numeric: a stray year in a
-        # description column is not a total worth reporting.
-        if values and len(values) >= max(1, len(t.rows) // 2):
+        # description column is not a total worth reporting. And only if the
+        # numbers are quantities rather than codes (I3).
+        if (values and len(values) >= max(1, len(t.rows) // 2)
+                and not _looks_like_identifier_column(name, values)):
             totals.append(f"{name or f'col{i}'} {sum(values):.2f}")
     if totals:
         lines.append("Totals: " + ", ".join(totals))

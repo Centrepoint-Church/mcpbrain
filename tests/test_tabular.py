@@ -176,3 +176,113 @@ def test_table_mimes_agrees_with_the_drive_extraction_meta_table():
                   if sub == "table"}
 
     assert from_drive == set(tabular.TABLE_MIMES)
+
+
+def test_a_tsv_parses_into_its_real_columns():
+    """I4: TABLE_MIMES includes text/tab-separated-values and both drive.py and
+    attachments.py route TSV through this function, which always used csv.reader's
+    default comma — so a real TSV rendered as ONE column holding the whole
+    tab-separated row, and the 300-char-per-cell cap then silently discarded
+    everything past that width per row."""
+    tsv = ("Account\tDescription\tAmount\n"
+           "4521\tVenue hire for the winter conference\t1450.00\n"
+           "6100\tCatering\t320.50\n")
+
+    tables = tabular.tables_from_csv(tsv, sheet="ledger", char_budget=10_000,
+                                     delimiter="\t")
+
+    assert len(tables) == 1
+    t = tables[0]
+    assert t.header == ["Account", "Description", "Amount"]
+    assert t.rows == [["4521", "Venue hire for the winter conference", "1450.00"],
+                      ["6100", "Catering", "320.50"]]
+
+
+def test_the_tsv_delimiter_comes_from_the_mime_type():
+    assert tabular.delimiter_for_mime("text/tab-separated-values") == "\t"
+    assert tabular.delimiter_for_mime("text/csv") == ","
+    assert tabular.delimiter_for_mime("application/csv") == ","
+
+
+def test_an_identifier_column_is_not_totalled():
+    """I3: _summary_text summed every mostly-numeric column, so a GL/account-code
+    column was reported as `Totals: Account 15142.00` beside the genuine monetary
+    totals — a fabricated figure stated as fact in the one chunk written to answer
+    "how big is this budget"."""
+    t = tabular.Table(
+        sheet="Budget", header=["Account", "Description", "Amount"],
+        rows=[["4521", "Venue hire", "1450.00"],
+              ["6100", "Catering", "320.50"],
+              ["6200", "Printing", "89.00"]],
+        rows_total=3, truncated=False)
+
+    summary = tabular.render_chunks([t], file_name="2026 Budget.xlsx",
+                                    max_chars=2000)[0][0]
+    totals = next(ln for ln in summary.splitlines() if ln.startswith("Totals:"))
+
+    assert "Amount 1859.50" in totals, totals
+    assert "Account" not in totals, (
+        f"summing account codes produced a meaningless figure: {totals}"
+    )
+
+
+def test_a_uniform_width_code_column_is_not_totalled_even_without_a_hint_header():
+    """The second signal: whole numbers, all the same digit width, three or more
+    of them. A header like '2026' says nothing, but 4521/6100/6200 is a code
+    block, not a set of quantities."""
+    t = tabular.Table(
+        sheet="GL", header=["2026", "Spend"],
+        rows=[["4521", "12.5"], ["6100", "300.75"], ["6200", "9.25"]],
+        rows_total=3, truncated=False)
+
+    summary = tabular.render_chunks([t], file_name="gl.xlsx", max_chars=2000)[0][0]
+    totals = next(ln for ln in summary.splitlines() if ln.startswith("Totals:"))
+
+    assert "Spend 322.50" in totals, totals
+    assert "2026 " not in totals, totals
+
+
+def test_a_quantity_word_in_the_header_overrides_the_identifier_shape():
+    """'Invoice Amount' is a quantity even though 'invoice' is an identifier word,
+    and same-width integers are ordinary for money."""
+    t = tabular.Table(
+        sheet="Invoices", header=["Invoice Amount"],
+        rows=[["1200"], ["3400"], ["5600"]], rows_total=3, truncated=False)
+
+    summary = tabular.render_chunks([t], file_name="inv.xlsx", max_chars=2000)[0][0]
+
+    assert "Invoice Amount 10200.00" in summary
+
+
+def test_a_fully_packed_table_chunk_fits_the_embedder_window_once_prefixed():
+    """I8: CHUNK_CHARS, chunk_text's budget and index.EMBED_WINDOW_CHARS were all
+    2000, but EMBED_WINDOW_CHARS measures the PREFIXED text and
+    embed.contextual_prefix (default ON) adds ~100 chars at embed time — so a
+    fully-packed table chunk overflowed the real window on nearly every batch and
+    B3's tail truncation stayed open. CHUNK_CHARS now reserves the same headroom
+    semantic.SEMANTIC_MAX_CHARS does."""
+    from mcpbrain.embed import contextual_prefix
+    from mcpbrain.index import EMBED_WINDOW_CHARS
+
+    meta = {"source_type": "gdrive", "file_name": "2026 Operating Budget.xlsx",
+            "folder_path": "Finance/Budgets/2026", "modified": "2026-06-02",
+            "org": "Centrepoint Church"}
+    prefix = contextual_prefix(meta)
+    assert len(prefix) > 100, f"prefix too short to discriminate: {len(prefix)}"
+
+    t = tabular.Table(
+        sheet="Operating", header=[f"Column {i}" for i in range(6)],
+        rows=[[f"cell {r}-{c} value" for c in range(6)] for r in range(120)],
+        rows_total=120, truncated=False)
+    chunks = tabular.render_chunks([t], file_name=meta["file_name"],
+                                   max_chars=tabular.CHUNK_CHARS)
+
+    biggest = max(len(text) for text, _m in chunks)
+    assert biggest > tabular.CHUNK_CHARS - 200, (
+        f"no chunk got close to the budget ({biggest}) — the test would not "
+        f"discriminate"
+    )
+    assert biggest + len(prefix) <= EMBED_WINDOW_CHARS, (
+        f"prefixed table chunk is {biggest + len(prefix)} chars, over the "
+        f"{EMBED_WINDOW_CHARS}-char embedder window"
+    )

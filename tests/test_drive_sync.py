@@ -964,3 +964,137 @@ def test_backfill_drive_also_aggregates_skips_across_its_bounded_window(tmp_path
     skip_rows = [c for c in store.recent_changes(limit=1000) if c["change_type"] == "ingest_skip"]
     assert len(skip_rows) == 1, f"expected one aggregated row, got {len(skip_rows)}"
     assert str(n) in skip_rows[0]["summary"]
+
+
+# ---------------------------------------------------------------------------
+# I9: a PARTIAL extraction must not trigger the B5 orphan-delete sweep.
+# ---------------------------------------------------------------------------
+
+def test_a_partial_extraction_does_not_delete_the_chunks_it_never_reached(tmp_path):
+    """I9: extract_tables_from_xlsx / _xls / extract_text_from_pptx keep whatever
+    they had when an exception hits mid-iteration (better than nothing). But
+    upsert_file_chunks read the SHORT chunk list as evidence that the document had
+    SHRUNK and deleted the higher-index "orphans" — so a transient failure on
+    sheet 3 of 5 permanently deleted sheets 3-5's previously-good chunks, and
+    nothing re-triggers extraction for a file whose metadata never changes again.
+    A logged warning became irreversible content loss."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync.drive import normalise_drive, upsert_file_chunks
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    fmeta = {"id": "f1", "name": "Budget.xlsx", "mimeType": "text/plain"}
+
+    full = "\n\n".join(f"Sheet {i} " + "word " * 400 for i in range(5))
+    upsert_file_chunks(store, normalise_drive(fmeta, full), file_id="f1")
+    before = sorted(store.doc_ids_for_file("f1"))
+    assert len(before) >= 3
+
+    # The next round's extraction dies after sheet 1: a much shorter document.
+    partial_chunks = normalise_drive(fmeta, "Sheet 0 " + "word " * 100)
+    deleted = upsert_file_chunks(store, partial_chunks, file_id="f1", partial=True)
+
+    assert deleted == 0
+    assert sorted(store.doc_ids_for_file("f1")) == before, (
+        "a partial extraction deleted the chunks it never reached"
+    )
+
+
+def test_a_complete_short_extraction_still_sweeps_orphans(tmp_path):
+    """The discriminator: partial=False keeps B5's behaviour exactly."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync.drive import normalise_drive, upsert_file_chunks
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    fmeta = {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain"}
+
+    full = "\n\n".join(f"Para {i} " + "word " * 400 for i in range(5))
+    upsert_file_chunks(store, normalise_drive(fmeta, full), file_id="f1")
+
+    upsert_file_chunks(store, normalise_drive(fmeta, "Para 0 " + "word " * 100),
+                       file_id="f1", partial=False)
+
+    assert store.doc_ids_for_file("f1") == ["gdrive-f1-0"]
+
+
+def test_fetch_content_marks_a_partial_table_extraction(monkeypatch):
+    """The signal has to survive the trip from the extractor to Content.partial,
+    or the call sites can't act on it."""
+    from mcpbrain.sync import drive
+    from mcpbrain.sync.extractors import PartialTables
+    from mcpbrain.sync.tabular import Table
+
+    xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    class _Media:
+        def execute(self):
+            return b"fake"
+
+    class _Files:
+        def get_media(self, **kw):
+            return _Media()
+
+    class _Svc:
+        def files(self):
+            return _Files()
+
+    monkeypatch.setattr(
+        drive, "extract_tables_from_xlsx",
+        lambda data, char_budget: PartialTables(
+            [Table(sheet="S1", header=["a"], rows=[["1"]], rows_total=1)]))
+
+    content = drive.fetch_content(_Svc(), {"id": "f1", "name": "b.xlsx",
+                                           "mimeType": xlsx})
+
+    assert content is not None and content.partial is True
+    assert len(content.tables) == 1
+
+
+def test_fetch_content_does_not_mark_a_complete_extraction(monkeypatch):
+    from mcpbrain.sync import drive
+    from mcpbrain.sync.tabular import Table
+
+    xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    class _Media:
+        def execute(self):
+            return b"fake"
+
+    class _Files:
+        def get_media(self, **kw):
+            return _Media()
+
+    class _Svc:
+        def files(self):
+            return _Files()
+
+    monkeypatch.setattr(
+        drive, "extract_tables_from_xlsx",
+        lambda data, char_budget: [Table(sheet="S1", header=["a"], rows=[["1"]],
+                                         rows_total=1)])
+
+    content = drive.fetch_content(_Svc(), {"id": "f1", "name": "b.xlsx",
+                                           "mimeType": xlsx})
+
+    assert content is not None and content.partial is False
+
+
+def test_the_aggregated_skip_row_names_the_source_it_came_from():
+    """Please-fix minor: flush_skip_report passed ref_id="", so the aggregated
+    rows could not be traced to the drive that produced them. Mirrors
+    sync/gmail.py's reviewed pattern of passing `source` as ref_id."""
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    drive.flush_skip_report(store, {("unsupported_mime", "image/png"): 3},
+                            source="drive:DRIVE123")
+
+    assert store.changes[0][1] == "drive:DRIVE123"

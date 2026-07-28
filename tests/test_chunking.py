@@ -148,3 +148,52 @@ def test_has_content_accepts_non_ascii_alphanumerics():
 
     assert has_content("| 会議 |") is True
     assert has_content("| Åsa |") is True
+
+
+def test_a_fully_packed_chunk_fits_the_embedder_window_once_prefixed():
+    """I8: chunk_text's packing budget (max_tokens*4 = 2000) and
+    index.EMBED_WINDOW_CHARS (2000) were the same number, but EMBED_WINDOW_CHARS
+    measures the PREFIXED passage and embed.contextual_prefix (default ON) adds
+    ~100 chars at embed time. So a fully-packed chunk tipped over the real window
+    and tripped the oversize warning on nearly every batch — B3's tail truncation
+    left open for the bulk of the corpus, not an edge case. chunk_text now
+    reserves the same headroom semantic.SEMANTIC_MAX_CHARS (1800) does.
+    """
+    from mcpbrain.embed import contextual_prefix
+    from mcpbrain.index import EMBED_WINDOW_CHARS
+
+    meta = {"source_type": "gmail",
+            "sender": "Samuel Taylor <samuel.taylor@example.org>",
+            "date": "Tue, 02 Jun 2026 16:30:01 +0800",
+            "subject": "Hall B booking and the revised winter budget",
+            "org": "Centrepoint Church"}
+    prefix = contextual_prefix(meta)
+    assert len(prefix) > 100, f"prefix too short to discriminate: {len(prefix)}"
+
+    # Many short paragraphs, so the packer fills chunks to just under the budget.
+    text = "\n\n".join(f"Paragraph {i} about the winter budget review."
+                       for i in range(200))
+    chunks = chunk_text(text)
+
+    biggest = max(len(c) for c in chunks)
+    assert biggest > 1700, (
+        f"no chunk got close to the budget ({biggest}) — the test would not "
+        f"discriminate"
+    )
+    assert biggest + len(prefix) <= EMBED_WINDOW_CHARS, (
+        f"prefixed chunk is {biggest + len(prefix)} chars, over the "
+        f"{EMBED_WINDOW_CHARS}-char embedder window"
+    )
+
+
+def test_the_headroom_is_not_taken_out_of_a_small_explicit_budget():
+    """The reservation must not eat a caller's deliberately tiny budget (it would
+    go negative at max_tokens=20). Those chunks are nowhere near the embedder
+    window, so there is nothing to reserve for."""
+    chunks = chunk_text("w " * 500, max_tokens=20)
+
+    assert chunks
+    assert all(len(c) <= 80 for c in chunks)
+    assert max(len(c) for c in chunks) > 40, (
+        "the small budget was reduced anyway"
+    )

@@ -32,19 +32,36 @@ from mcpbrain.graph_write import (
 SEMANTIC_MAX_CHARS = 1800
 
 
+# A truncated fragment shorter than this is not worth keeping in place of the
+# elision marker — at that point there is no room left for anything readable.
+_MIN_TRUNCATED_LINE_CHARS = 40
+
+
 def _fit(lines: list[str], budget: int) -> list[str]:
-    """Keep whole lines while they fit, then stop and mark the elision.
+    """Keep whole lines while they fit; TRUNCATE the one that overflows, then stop.
 
     Callers pass lines in DESCENDING value order — subject, From/Date, summary,
     then People, Actions, Topics, Labels — because what gets dropped under
     pressure must be the least query-relevant content. Dropping the summary to
     keep a Labels line would be worse than not bounding at all.
+
+    I2: this used to drop the offending line WHOLESALE, so an over-budget summary
+    — the doc's only searchable prose — vanished entirely and the chunk was left
+    as bare headers. That is precisely the failure the paragraph above warns
+    against, caused by the bounding itself. The overflowing line is now cut to
+    the remaining budget with a trailing '…'; later lines are still elided.
     """
     out: list[str] = []
     used = 0
     for line in lines:
         if used + len(line) + 1 > budget:
-            out.append("…")
+            room = budget - used - 1        # -1 for the joining newline
+            if room >= _MIN_TRUNCATED_LINE_CHARS and line.strip():
+                # Its own trailing '…' is the elision marker — for this line AND
+                # for the lines after it, which by definition have no room left.
+                out.append(line[:room - 1] + "…")
+            else:
+                out.append("…")
             break
         out.append(line)
         used += len(line) + 1
