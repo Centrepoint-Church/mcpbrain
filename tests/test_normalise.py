@@ -11,6 +11,21 @@ from mcpbrain.sync.normalise import Chunk, normalise_gmail
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _b64(text):
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
+def _message(*, headers, body, mime="text/plain", msg_id="m1", thread_id="t1"):
+    return {"id": msg_id, "threadId": thread_id, "labelIds": ["INBOX"],
+            "payload": {"mimeType": mime,
+                        "headers": [{"name": n, "value": v} for n, v in headers],
+                        "body": {"data": _b64(body)}}}
+
+
+def _html_payload(html):
+    return {"mimeType": "text/html", "headers": [], "body": {"data": _b64(html)}}
+
+
 def b64(s: str) -> str:
     return base64.urlsafe_b64encode(s.encode()).decode()
 
@@ -188,55 +203,78 @@ _BODY = "Some real email content that should produce a chunk."
 
 
 def test_newsletter_list_unsubscribe_filtered():
-    """List-Unsubscribe header must suppress indexing entirely."""
+    """List-Unsubscribe header marks bulk mail.
+
+    A4: this used to assert normalise_gmail(msg) == [] — the message was
+    DROPPED at ingest, irreversibly, before anything downstream could see it.
+    That is gone: bulk mail is now ingested and stamped `bulk: True` in
+    metadata so prepare.should_enrich can cold-mark it instead (embedded,
+    searchable, never graph-extracted, reversible). See
+    test_bulk_mail_is_ingested_and_marked_rather_than_dropped below.
+    """
     msg = plain_msg(
         "nl001", "Weekly digest", "news@example.com", _BODY,
         extra_headers=[{"name": "List-Unsubscribe", "value": "<mailto:unsub@example.com>"}],
     )
-    assert normalise_gmail(msg) == []
+    chunks = normalise_gmail(msg)
+    assert chunks, "bulk mail must be ingested, not discarded at the door"
+    assert chunks[0].metadata["bulk"] is True
 
 
 def test_mailing_list_listid_filtered():
-    """List-Id header marks a mailing list — must be filtered."""
+    """List-Id header marks a mailing list. See A4 note above — marked, not dropped."""
     msg = plain_msg(
         "ml001", "List post", "list@example.com", _BODY,
         extra_headers=[{"name": "List-Id", "value": "<team.lists.example.com>"}],
     )
-    assert normalise_gmail(msg) == []
+    chunks = normalise_gmail(msg)
+    assert chunks
+    assert chunks[0].metadata["bulk"] is True
 
 
 def test_precedence_bulk_filtered():
-    """Precedence: bulk must be filtered."""
+    """Precedence: bulk marks bulk mail. See A4 note above — marked, not dropped."""
     msg = plain_msg(
         "prec001", "Bulk mailer", "bulk@example.com", _BODY,
         extra_headers=[{"name": "Precedence", "value": "bulk"}],
     )
-    assert normalise_gmail(msg) == []
+    chunks = normalise_gmail(msg)
+    assert chunks
+    assert chunks[0].metadata["bulk"] is True
 
 
 def test_auto_submitted_filtered():
-    """Auto-Submitted: auto-replied must be filtered; Auto-Submitted: no must NOT be."""
-    # Auto-reply — should be filtered
+    """Auto-Submitted: auto-replied marks bulk mail; Auto-Submitted: no does not.
+
+    See A4 note above — the auto-reply case used to be dropped; now marked.
+    """
+    # Auto-reply — should be marked bulk, not dropped
     msg_auto = plain_msg(
         "auto001", "Auto reply", "auto@example.com", _BODY,
         extra_headers=[{"name": "Auto-Submitted", "value": "auto-replied"}],
     )
-    assert normalise_gmail(msg_auto) == []
+    chunks_auto = normalise_gmail(msg_auto)
+    assert chunks_auto
+    assert chunks_auto[0].metadata["bulk"] is True
 
-    # Explicitly marked not-auto — should NOT be filtered
+    # Explicitly marked not-auto — should NOT be filtered or marked bulk
     msg_no = plain_msg(
         "auto002", "Human reply", "human@example.com", _BODY,
         extra_headers=[{"name": "Auto-Submitted", "value": "no"}],
     )
-    assert len(normalise_gmail(msg_no)) >= 1
+    chunks_no = normalise_gmail(msg_no)
+    assert len(chunks_no) >= 1
+    assert "bulk" not in chunks_no[0].metadata
 
 
 def test_out_of_office_subject_filtered():
-    """Subject starting with 'out of office' (case-insensitive) must be filtered."""
+    """Out-of-office subject marks bulk mail. See A4 note above — marked, not dropped."""
     msg = plain_msg(
         "ooo001", "Out of office: back Monday", "staff@example.com", _BODY,
     )
-    assert normalise_gmail(msg) == []
+    chunks = normalise_gmail(msg)
+    assert chunks
+    assert chunks[0].metadata["bulk"] is True
 
 
 def test_normal_personal_email_not_filtered():
@@ -267,3 +305,133 @@ def test_briefing_without_bulk_headers_not_filtered():
         "Morning briefing without bulk headers must NOT be filtered — "
         "filter is header-based only"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5: reply rescue, bulk marking, chunk_total, recipient counts
+# ---------------------------------------------------------------------------
+
+def test_a_reply_written_below_the_quote_survives():
+    """A3: strip_reply_chains kept only text[:earliest], so a bottom-posted
+    reply was thrown away along with the quote it sat under."""
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("On Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
+            "> Can you confirm the Hall B booking for Sunday?\n"
+            "> Sam\n\n"
+            "Yes — Hall B is confirmed for Sunday the 8th, 9am to 1pm. "
+            "I have put Priya down as the contact on the day.\n")
+
+    out = strip_reply_chains(text)
+
+    assert "Hall B is confirmed" in out, "the bottom-posted reply was discarded"
+    assert "Can you confirm" not in out, "the quote itself must still be stripped"
+
+
+def test_a_short_sign_off_below_a_quote_is_not_treated_as_a_reply():
+    """Err toward dropping: 'Sent from my iPhone' under a quote is not content,
+    and rescuing it would re-introduce boilerplate on every reply in the corpus."""
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("Thanks!\n"
+            "On Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
+            "> long quoted thing\n\nSent from my iPhone\n")
+
+    assert strip_reply_chains(text).strip() == "Thanks!"
+
+
+def test_html_mail_does_not_get_the_bottom_post_rescue():
+    """The rescue is only sound where '>' quoting was stripped first. In HTML
+    mail the quote is markup, so a tail-rescue would re-ingest the entire quoted
+    history as if it were new prose."""
+    from mcpbrain.sync.normalise import extract_body_with_signature
+
+    html = ("<p>Short answer: yes.</p>"
+            "<div>On Mon, 2 Jun 2026 at 09:14, Sam wrote:</div>"
+            "<blockquote>The whole previous thread, at length, "
+            "repeated verbatim for many lines.</blockquote>")
+
+    body, _sig = extract_body_with_signature(_html_payload(html))
+
+    assert "Short answer: yes." in body
+    assert "repeated verbatim" not in body
+
+
+def test_bulk_mail_is_ingested_and_marked_rather_than_dropped():
+    """A4: _is_bulk_or_auto returned [] for anything with List-Id /
+    List-Unsubscribe / Precedence: bulk — most vendor and ministry-platform mail
+    — and sync_gmail counted it as processed anyway, so the loss was invisible.
+
+    The drop is now gone entirely. prepare.should_enrich already cold-marks
+    promotional email (embedded and searchable, never graph-extracted, fully
+    reversible) and has shipped since 0.7.65 with ~40% of the corpus gated and
+    no recall impact. The ingest-time drop was the same idea done worse:
+    irreversibly, before anything could see the content."""
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    raw = _message(headers=[("Subject", "Weekly digest"),
+                            ("List-Unsubscribe", "<mailto:x@y.z>")],
+                   body="Some newsletter body text worth keeping.")
+
+    chunks = normalise_gmail(raw)
+
+    assert chunks, "bulk mail must be ingested, not discarded at the door"
+    assert chunks[0].metadata["bulk"] is True, (
+        "and marked, so should_enrich can cold-mark it instead of spending "
+        "Haiku on a newsletter"
+    )
+
+
+def test_ordinary_mail_is_not_marked_bulk():
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    chunks = normalise_gmail(_message(headers=[("Subject", "Hall B")],
+                                      body="Can you confirm Sunday?"))
+
+    assert "bulk" not in chunks[0].metadata
+
+
+def test_the_salience_gate_cold_marks_header_bulk_mail():
+    """The other half: the signal has to be ACTED on, or removing the drop just
+    sends newsletters to Haiku. The header signal is strictly stronger than the
+    Gmail CATEGORY_* labels should_enrich already checks — Gmail's categoriser
+    misses plenty of list mail that carries List-Id."""
+    from mcpbrain.prepare import should_enrich
+
+    assert should_enrich({"metadata": {"source_type": "gmail", "bulk": True,
+                                       "labels": "INBOX"}}) is False
+    assert should_enrich({"metadata": {"source_type": "gmail",
+                                       "labels": "INBOX"}}) is True
+
+
+def test_empty_body_is_still_reported():
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    report: dict = {}
+    assert normalise_gmail(_message(headers=[("Subject", "s")], body=""),
+                           report=report) == []
+    assert report == {"empty_body": 1}
+
+
+def test_recipient_lists_are_not_clipped_at_300_chars():
+    """C6: to[:300]/cc[:300] loses most recipients of an all-staff email."""
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    recipients = ", ".join(f"person{i}@centrepoint.church" for i in range(60))
+    meta = normalise_gmail(_message(headers=[("Subject", "All staff"),
+                                             ("To", recipients)],
+                                    body="Team update."))[0].metadata
+
+    assert meta["to"].count("@") >= 50
+    assert meta["to_count"] == 60
+
+
+def test_every_gmail_chunk_records_its_document_chunk_count():
+    """C1, gmail side."""
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    body = "\n\n".join(f"Paragraph {i} " + "word " * 300 for i in range(4))
+    chunks = normalise_gmail(_message(headers=[("Subject", "Long")], body=body))
+
+    assert len(chunks) > 1
+    assert all(c.metadata["chunk_total"] == len(chunks) for c in chunks)

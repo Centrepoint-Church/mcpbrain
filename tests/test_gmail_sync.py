@@ -482,3 +482,59 @@ def test_budget_interrupted_mid_pagination_never_advances_cursor(tmp_path):
     assert result == 1, "the one collected message should still be written"
     assert store.get_cursor("gmail") == "1000", "interrupted round must not advance"
     assert store.get_chunk("gmail-m1-body-0") is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 5: attachment wiring
+# ---------------------------------------------------------------------------
+
+def test_sync_gmail_ingests_attachments(tmp_path, monkeypatch):
+    """Wiring test: the attachment path must be reached from the real sync loop,
+    not merely be callable in isolation. normalise_gmail has never called it,
+    which is why A1 went unnoticed."""
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.normalise import Chunk
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+    seen: list = []
+
+    def _fake_fetch(service, raw, store=None):
+        seen.append(raw["id"])
+        return [Chunk(doc_id=f"gmail-{raw['id']}-att-0-0", text="Total due: 4,200.00",
+                      content_hash="h1",
+                      metadata={"source_type": "gmail",
+                                "content_type": "email_attachment",
+                                "message_id": raw["id"]})]
+
+    monkeypatch.setattr(attachments, "fetch_and_normalise", _fake_fetch)
+    svc = FakeService(profile_hid="1000",
+                      pages=[_make_page(["m1"], history_id="1005")],
+                      messages={"m1": plain_msg("m1", "Invoice", "a@b.com",
+                                                "See attached.")})
+
+    sync_gmail(svc, store)
+
+    assert seen == ["m1"], "sync_gmail never reached the attachment path"
+    assert store.get_chunk("gmail-m1-att-0-0") is not None
+
+
+def test_sync_gmail_skips_attachments_when_the_flag_is_off(tmp_path, monkeypatch):
+    from mcpbrain.sync import attachments
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"gmail_attachments": false}')
+    called: list = []
+    monkeypatch.setattr(attachments, "fetch_and_normalise",
+                        lambda *a, **kw: called.append(1) or [])
+
+    sync_gmail(FakeService(profile_hid="1000",
+                           pages=[_make_page(["m1"], history_id="1005")],
+                           messages={"m1": plain_msg("m1", "s", "a@b.com", "body")}),
+               store)
+
+    assert called == []
