@@ -659,6 +659,57 @@ permanently and pinned doctor to a red Watchdog line."
 > AFTER the pass returns, not a live signal that can only be checked by the
 > same thread that already cleared it.
 
+> **Final whole-branch review fix wave (2026-07-28) — backup- and
+> backfill-triggered false restarts (Critical B / Important I-1) are now
+> FIXED. The notes above still correctly describe the gated-pass case
+> (cause 1) as OPEN — do not read this update as touching that.**
+>
+> The final whole-branch review found the SAME defect *shape* as cause 1
+> above, but with two triggers far more common than a rare long gated
+> pass, which the notes above never named: `_backup_under_bulk_lock`
+> stamped `"backup"` after `maybe_backup()` returned but never re-stamped
+> `"cycle"`/`"sync"`, so **every** backup (not just an unusually long
+> gated pass) aged those keys for its whole duration — reproduced with a
+> simulated 2400s backup producing `_stalled_phase() -> ("cycle", 2400.0)`
+> and a spurious restart on the very next tick. `_backfill_active` had the
+> identical hole: `run_one()` returns before any `_note_progress` call
+> while a backfill runs, and unlike `_pause` the maintenance loop was never
+> gated on it — reproduced the same way with a simulated 2000s backfill.
+>
+> Both are now fixed with the exact pattern `resume()` already used for a
+> long pause (this is the pattern the final reviewer pointed at as
+> correct): a new `Daemon._restamp_all_progress()` helper re-stamps EVERY
+> tracked `_progress` key to "now" — not a single key — and `resume()` now
+> calls it too instead of duplicating its own copy of the loop. It runs
+> from `_backup_under_bulk_lock`'s `finally` (so it fires whether
+> `maybe_backup()` succeeded, failed internally, or raised) and from
+> `run_one()`'s `_backfill_active` early-return branch. Regression tests:
+> `test_long_backup_does_not_trigger_a_spurious_restart` and
+> `test_long_backfill_does_not_trigger_a_spurious_restart` in
+> `tests/test_daemon_watchdog.py`, each independently verified to fail
+> when the corresponding restamp call is reverted.
+>
+> **This does NOT fix, and was not intended to fix, the gated-pass case
+> documented above and pinned by**
+> `test_inline_gated_pass_hold_still_triggers_a_spurious_restart_known_gap`
+> **in `tests/test_daemon_watchdog.py` — that test is unchanged and its
+> `== ["exit"]` assertion is still the correct, honest description of
+> current behaviour.** A gated pass (e.g. `_run_salience_score`'s
+> `while rounds < 500` loop, or `stale_reextract`'s network-touching sweep)
+> holding `_bulk_lock` past `STALL_S` is not a *deliberate, bounded-by-a-
+> caller deferral* the way a backup or a backfill is — it is the SAME
+> thread (the maintenance thread) that is itself blocked doing the work,
+> so there is no other call site left to restamp from while it runs; see
+> cause 1's writeup above for why `_bulk_pass_active` cannot substitute.
+>
+> **Net effect: after this fix wave, "a gated pass holding `_bulk_lock`
+> past `STALL_S`" (cause 1 above) is the ONLY remaining trigger for a
+> false restart of this general shape** — the backup and backfill
+> triggers, which were live-confirmed to be far more common (every
+> backup/backfill vs. a rare long pass), are closed. Cause 2 (a
+> genuinely-hung pass making the watchdog itself unreachable) also remains
+> open and unchanged, exactly as documented above.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_daemon_thread_safety.py`:

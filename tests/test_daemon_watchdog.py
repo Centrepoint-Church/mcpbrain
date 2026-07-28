@@ -87,7 +87,7 @@ def test_exit_limiter_allows_when_no_history(tmp_path, monkeypatch):
 
 def test_recovery_exits_on_macos(tmp_path, monkeypatch):
     """launchd KeepAlive=True restarts us, so a plain exit is correct."""
-    dm = _wd_daemon(tmp_path)
+    dm = _wd_daemon(tmp_path, monkeypatch)
     monkeypatch.setattr(d.sys, "platform", "darwin")
     called = {}
     monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.setdefault("exit", True))
@@ -98,7 +98,7 @@ def test_recovery_exits_on_macos(tmp_path, monkeypatch):
 
 def test_recovery_spawns_replacement_on_unsupervised_windows(tmp_path, monkeypatch):
     """Startup-folder fallback has no supervisor, so exiting alone would kill us."""
-    dm = _wd_daemon(tmp_path)
+    dm = _wd_daemon(tmp_path, monkeypatch)
     monkeypatch.setattr(d.sys, "platform", "win32")
     monkeypatch.setattr(d, "win_persistence_mechanism", lambda: "startup")
     called = {}
@@ -110,7 +110,7 @@ def test_recovery_spawns_replacement_on_unsupervised_windows(tmp_path, monkeypat
 
 def test_recovery_exits_on_supervised_windows(tmp_path, monkeypatch):
     """With a schtasks RestartOnFailure task, exit is supervised."""
-    dm = _wd_daemon(tmp_path)
+    dm = _wd_daemon(tmp_path, monkeypatch)
     monkeypatch.setattr(d.sys, "platform", "win32")
     monkeypatch.setattr(d, "win_persistence_mechanism", lambda: "schtasks")
     called = {}
@@ -577,6 +577,98 @@ def test_backup_progress_stamped_even_when_the_acquire_times_out(tmp_path, monke
     dm._backup_under_bulk_lock()
 
     assert "backup" in dm._progress, "must stamp progress even when the acquire times out"
+
+
+def test_long_backup_does_not_trigger_a_spurious_restart(tmp_path, monkeypatch):
+    """Critical B (final whole-branch review), reproduced directly:
+    _backup_under_bulk_lock used to stamp only "backup", never re-stamping
+    "cycle"/"sync" after maybe_backup() returned -- so those two kept ageing
+    for the ENTIRE duration of a long backup. Reproduced live with a 2400s
+    backup: _stalled_phase() -> ("cycle", 2400.0), and a restart on the very
+    next tick, even though the daemon was legitimately busy backing up, not
+    wedged.
+
+    Drives the real _backup_under_bulk_lock with a fake clock that jumps
+    2400s inside maybe_backup() (simulating a long-but-finite backup call,
+    exactly as the real thing looks from this thread's own point of view --
+    one call that takes a long time and then returns), then composes
+    _maintenance_loop's own real sequence (note_progress -> stalled_phase ->
+    conditionally recover) to prove a restart is never even attempted.
+    """
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    now = [1000.0]
+    dm._clock = lambda: now[0]
+    dm._progress = {"cycle": now[0], "sync": now[0], "maintenance": now[0]}
+    dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_waiters = 0
+    dm._bulk_lock_waiters_lock = threading.Lock()
+    dm._bulk_lock_wait_s = 0.1
+    dm._backup_in_progress = threading.Event()
+    dm._cycle_error_streak = 0
+
+    def _slow_backup():
+        now[0] += 2400.0    # a long, legitimate backup -- past STALL_S
+        return {"backed_up": True}
+
+    monkeypatch.setattr(dm, "maybe_backup", _slow_backup)
+
+    dm._backup_under_bulk_lock()
+
+    # Exactly _maintenance_loop's own sequence: note progress, check for a
+    # stall, and only ever call _recover_from_stall when one is actually
+    # found -- the real gate that decides whether a restart is even
+    # attempted.
+    dm._note_progress("maintenance")
+    stalled = dm._stalled_phase()
+    assert stalled is None, (
+        f"a completed 2400s backup must not look like a stall on the very "
+        f"next tick, got {stalled!r}"
+    )
+
+    called = []
+    dm._exit_for_restart = lambda: called.append("exit")
+    dm._spawn_replacement = lambda: called.append("spawn")
+    if stalled is not None:
+        dm._recover_from_stall()
+    assert called == [], "a completed long backup must not trigger a spurious restart"
+
+
+def test_long_backfill_does_not_trigger_a_spurious_restart(tmp_path, monkeypatch):
+    """Important I-1 (final whole-branch review), same defect class as Critical
+    B above via a different path: run_one() returns early -- before ANY
+    _note_progress call -- while _backfill_active is set, and unlike _pause
+    the maintenance loop is not gated on it either. A backfill runs on its
+    own thread and can legitimately take far longer than STALL_S (2000s+
+    observed live), leaving "cycle"/"sync" stale for the whole duration with
+    nothing restamping them. Reproduced with a simulated 2000s-old backfill:
+    run_one()'s early return must restamp progress instead of doing nothing.
+    """
+    dm = _wd_daemon(tmp_path, monkeypatch)
+    now = [1000.0]
+    dm._clock = lambda: now[0]
+    dm._progress = {"cycle": now[0], "sync": now[0], "maintenance": now[0]}
+    dm._pause = threading.Event()
+    dm._backfill_active = threading.Event()
+    dm._backfill_active.set()
+    dm._cycle_error_streak = 0
+
+    now[0] += 2000.0    # the backfill has been running this long on its own thread
+
+    result = dm.run_one()
+    assert result is None, "run_one must still make no store writes during a backfill"
+
+    dm._note_progress("maintenance")
+    stalled = dm._stalled_phase()
+    assert stalled is None, (
+        f"a long in-flight backfill must not look like a stall, got {stalled!r}"
+    )
+
+    called = []
+    dm._exit_for_restart = lambda: called.append("exit")
+    dm._spawn_replacement = lambda: called.append("spawn")
+    if stalled is not None:
+        dm._recover_from_stall()
+    assert called == [], "a long in-flight backfill must not trigger a spurious restart"
 
 
 def test_start_maintenance_thread_creates_a_fresh_thread(monkeypatch):
