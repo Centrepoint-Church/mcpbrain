@@ -268,6 +268,38 @@ def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[
     return tables
 
 
+def _xls_cell_to_str(cell, datemode: int) -> str:
+    """Render one xlrd cell as a string, honouring its Excel type.
+
+    `sheet.row_values(r)` (the naive approach) returns raw Python floats for
+    both numbers AND dates — a date comes back as an Excel serial number like
+    45352.0, and a whole-number amount comes back as 500.0 with a spurious
+    trailing '.0'. Both are real defects for "budgets, ledgers and risk
+    assessments" (the stated reason this format was added at all), not
+    cosmetic: a date column full of 5-digit serials is unusable, and every
+    integral amount picks up a fake decimal. `cell.ctype` distinguishes them.
+    """
+    import xlrd
+
+    if cell.ctype == xlrd.XL_CELL_EMPTY or cell.value in (None, ""):
+        return ""
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        try:
+            dt = xlrd.xldate_as_datetime(cell.value, datemode)
+        except (xlrd.XLDateError, ValueError, OverflowError) as exc:
+            log.debug("xls: bad date serial %r: %s", cell.value, exc)
+            return str(cell.value)
+        if (dt.hour, dt.minute, dt.second, dt.microsecond) == (0, 0, 0, 0):
+            return dt.date().isoformat()
+        return dt.isoformat(sep=" ")
+    if cell.ctype == xlrd.XL_CELL_NUMBER:
+        v = cell.value
+        return str(int(v)) if v == int(v) else str(v)
+    if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+        return "TRUE" if cell.value else "FALSE"
+    return str(cell.value)
+
+
 def extract_tables_from_xls(content_bytes: bytes, *, char_budget: int) -> list[Table]:
     """Legacy .xls via xlrd, yielding the same `Table` shape as .xlsx.
 
@@ -285,7 +317,8 @@ def extract_tables_from_xls(content_bytes: bytes, *, char_budget: int) -> list[T
     tables: list[Table] = []
     try:
         for sheet in book.sheets():
-            raw = [[("" if c is None else str(c)) for c in sheet.row_values(r)]
+            raw = [[_xls_cell_to_str(sheet.cell(r, c), book.datemode)
+                    for c in range(sheet.ncols)]
                    for r in range(sheet.nrows)]
             tables.extend(_tables_from_grid(sheet.name, raw, char_budget))
     except Exception as exc:
