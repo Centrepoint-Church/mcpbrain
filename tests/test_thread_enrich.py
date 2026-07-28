@@ -385,7 +385,17 @@ def test_a_split_calendar_event_reassembles_into_one_message():
     agenda split into cal-<eid>-0..3 gave _chunk_key nothing but each chunk's own
     doc_id — four singleton "messages", each one additionally stamped with a
     truncated-tail `[…]` marker because a singleton sees itself as a fragment of
-    chunk_total. event_id is now in the chain, mirroring Drive's file_id."""
+    chunk_total. event_id is now in the chain, mirroring Drive's file_id.
+
+    The emitted id asserted below was `evt9` (the BARE event_id) when I6 landed.
+    That was wrong, not merely stylistic: it forked a SECOND identity namespace
+    for calendar events beside the `cal-`-prefixed one every existing row uses,
+    breaking store.meeting_series_for_old's `LIKE 'cal-%'` filter,
+    semantic.build_semantic_doc's `calendar_enriched_v2` labelling, and
+    graph_write's `enriched-<thread_id>` digest / action thread_id keying (a
+    routine re-extraction would write a duplicate, un-closeable set). Tightened
+    to the prefixed form, which is what the chunks' own doc_ids already use.
+    """
     from mcpbrain.thread_enrich import reassemble_thread
 
     chunks = [
@@ -405,7 +415,10 @@ def test_a_split_calendar_event_reassembles_into_one_message():
         "the full chunk set is present — a gap marker here is a lie the model "
         "cannot check"
     )
-    assert messages[0]["message_id"] == "evt9"
+    assert messages[0]["message_id"] == "cal-evt9", (
+        "the emitted id must stay in the cal- namespace every existing calendar "
+        "row uses — a bare event_id forks a second namespace"
+    )
 
 
 def test_a_split_calendar_event_groups_into_one_batch(tmp_path):
@@ -420,20 +433,57 @@ def test_a_split_calendar_event_groups_into_one_batch(tmp_path):
     batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
 
     assert len(batches) == 1
-    assert batches[0].thread_id == "evt9"
+    assert batches[0].thread_id == "cal-evt9", (
+        "same namespace as the emitted message_id — see the reassembly test")
     assert len(batches[0].doc_ids) == 4
 
 
 def test_a_calendar_event_id_resolves_back_to_every_chunk_of_the_event(tmp_path):
-    """The message_id reassemble_thread emits for a split calendar event (its
-    event_id) MUST resolve in store.doc_ids_for_messages, or drain discards the
-    extraction and the chunks re-queue forever — the 0.7.98 Drive defect. Hence
-    the event_id arm in _doc_ids_query."""
+    """The message_id reassemble_thread emits for a split calendar event
+    (`cal-<event_id>`) MUST resolve in store.doc_ids_for_messages, or drain
+    discards the extraction and the chunks re-queue forever — the 0.7.98 Drive
+    defect. Hence the event_id arm in _doc_ids_query, bound with the `cal-`
+    prefix stripped (no chunk's doc_id is the bare `cal-<eid>` once split)."""
     store = _store(tmp_path)
     for i in range(4):
         store.upsert_chunk(f"cal-evt9-{i}", f"agenda part {i}", f"h{i}",
                            {"source_type": "calendar", "event_id": "evt9",
                             "chunk_index": i, "chunk_total": 4})
 
-    assert store.doc_ids_for_messages(["evt9"]) == [
+    assert store.doc_ids_for_messages(["cal-evt9"]) == [
         "cal-evt9-0", "cal-evt9-1", "cal-evt9-2", "cal-evt9-3"]
+
+
+def test_the_emitted_calendar_id_is_exactly_what_resolves_back(tmp_path):
+    """End-to-end round trip, the property drain actually depends on: whatever
+    _chunk_key emits for a calendar chunk set must resolve to that same chunk
+    set. Asserting it as a round trip (rather than against a hardcoded literal on
+    each side) is what catches a namespace fork like the bare-event_id one."""
+    store = _store(tmp_path)
+    for i in range(3):
+        store.upsert_chunk(f"cal-evtRT-{i}", f"part {i}", f"hrt{i}",
+                           {"source_type": "calendar", "event_id": "evtRT",
+                            "chunk_index": i, "chunk_total": 3})
+    chunks = list(store.unenriched_chunks())
+
+    emitted = thread_enrich.reassemble_thread(chunks)[0]["message_id"]
+
+    assert emitted.startswith("cal-"), (
+        "graph_write/semantic/meeting_series_for_old all key off the cal- prefix")
+    assert store.doc_ids_for_messages([emitted]) == [
+        "cal-evtRT-0", "cal-evtRT-1", "cal-evtRT-2"]
+
+
+def test_a_single_chunk_calendar_event_keeps_its_doc_id_as_its_identity(tmp_path):
+    """An unsplit event's doc_id IS `cal-<eid>` (sync/calendar.py), so the
+    prefixed key coincides with it — the pre-I6 behaviour, and the doc_id
+    fallback arm resolves it even without the event_id arm."""
+    store = _store(tmp_path)
+    store.upsert_chunk("cal-solo", "short agenda", "hs",
+                       {"source_type": "calendar", "event_id": "solo",
+                        "chunk_index": 0, "chunk_total": 1})
+
+    messages = thread_enrich.reassemble_thread(list(store.unenriched_chunks()))
+
+    assert messages[0]["message_id"] == "cal-solo"
+    assert store.doc_ids_for_messages(["cal-solo"]) == ["cal-solo"]
