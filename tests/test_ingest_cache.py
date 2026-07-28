@@ -2,11 +2,18 @@ import base64
 import struct
 
 from mcpbrain import ingest_cache
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import FleetPin, CacheArtifact, CacheChunk, artifact_filename
 from mcpbrain.store import Store
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
-PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+# chunker_version tracks the CODE constant: ingest_cache floors the pin's value
+# at chunking.CHUNKER_VERSION (a fleet pin that lags the code must not key this
+# install's artifacts — see
+# test_ingest_cache_lifecycle.py::test_a_pin_lagging_the_code_does_not_key_artifacts_on_the_stale_version),
+# so a fixture pinned to an older value would make every hand-built artifact
+# here land at a fingerprint the module never reads.
+PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version=str(CHUNKER_VERSION),
                enrich_logic_floor=1, fleet_secret="s3cret")
 
 
@@ -21,7 +28,8 @@ def _b64(vec):
 
 
 def _write_artifact(fs, file_id, content_hash, *, dim=4, embed_model="bge-small",
-                    chunker="v1", enrich=None, chunks=None, published_at="2026-07-03"):
+                    chunker=str(CHUNKER_VERSION), enrich=None, chunks=None,
+                    published_at="2026-07-03"):
     chunks = chunks or (CacheChunk(idx=0, text="hello", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
                                    metadata={"source_type": "gdrive", "file_id": file_id,
                                              "chunk_index": 0}),)
@@ -69,7 +77,7 @@ def test_publish_stamps_real_contextual_retrieval_flag(tmp_path):
     ok = ingest_cache.publish_file(s, fs, "D1", "FID", "vhash1", PIN,
                                    published_by="p@x.org", contextual_retrieval=True)
     assert ok
-    fname = artifact_filename("FID", "vhash1", "bge-small", 4, "v1")
+    fname = artifact_filename("FID", "vhash1", "bge-small", 4, str(CHUNKER_VERSION))
     art = CacheArtifact.from_dict(json.loads(gzip.decompress(
         fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{fname}"))))
     assert art.enrich.get("contextual_retrieval") is True
@@ -132,7 +140,7 @@ def test_publish_file_includes_enrich_payload_when_present(tmp_path):
                          1)  # PIN.enrich_logic_floor == 1
     assert ingest_cache.publish_file(s, fs, "D1", "FID", "vh1", PIN, published_by="p@x.org")
     art = CacheArtifact.from_dict(json.loads(gzip.decompress(
-        fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}"))))
+        fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}"))))
     assert art.enrich.get("logic_version") == 1
     assert art.enrich.get("extraction", {}).get("org") == "Acme"
 
@@ -148,7 +156,7 @@ def test_publish_file_omits_payload_when_unenriched(tmp_path):
     # no set_enrich_payload -> no payload in the artifact
     ingest_cache.publish_file(s, fs, "D1", "FID", "vh1", PIN, published_by="p@x.org")
     art = CacheArtifact.from_dict(json.loads(gzip.decompress(
-        fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}"))))
+        fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}"))))
     assert "extraction" not in art.enrich
 
 
@@ -346,9 +354,15 @@ def test_import_artifact_store_write_failure_logged_as_warning_not_info(tmp_path
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     _write_artifact(fs, "FID", "vhash1")
 
-    def boom(rows):
+    # _write_cached_chunk_row, not import_cached_chunks: the B5 orphan sweep
+    # moved the row-writes INSIDE _import_artifact's own transaction (so the
+    # sweep is atomic with them), and it calls that per-row helper directly.
+    # Stubbing the old entry point stopped simulating anything at all — the
+    # import then succeeded and this test failed while the behaviour it guards
+    # was intact.
+    def boom(*a, **kw):
         raise RuntimeError("disk full")
-    s.import_cached_chunks = boom
+    s._write_cached_chunk_row = boom
 
     with caplog.at_level(logging.INFO, logger="mcpbrain.ingest_cache"):
         assert ingest_cache.try_import(s, fs, "D1", "FID", "vhash1", PIN) is False
@@ -457,12 +471,12 @@ def test_import_applies_cached_enrichment_payload(tmp_path):
                   "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns the plan"}]}
     art = CacheArtifact(
         file_id="FID", content_hash="vh1", extraction_method="gdocs",
-        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Joel Chelliah owns the plan", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
         enrich={"logic_version": 1, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",
                  gzip.compress(json.dumps(art.to_dict()).encode()))
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
     # chunk marked enriched (no local re-enrich) AND graph rows applied
@@ -489,12 +503,12 @@ def test_import_below_floor_payload_falls_back_to_reenrich(tmp_path):
                   "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns the plan"}]}
     art = CacheArtifact(
         file_id="FID", content_hash="vh1", extraction_method="gdocs",
-        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Joel Chelliah owns the plan", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
         enrich={"logic_version": 0, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",
                  gzip.compress(json.dumps(art.to_dict()).encode()))
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
     with s._connect() as db:
@@ -540,13 +554,13 @@ def test_import_apply_coerces_float_idx_to_int_doc_id(tmp_path):
                   "messages": [{"message_id": "gdrive-FID-0", "text": "Joel Chelliah owns it"}]}
     # hand-write the artifact JSON with idx as a float to simulate a peer
     art = CacheArtifact(file_id="FID", content_hash="vh1", extraction_method="gdocs",
-        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Joel Chelliah owns it", embedding_b64=vec,
                            metadata={"source_type":"gdrive","file_id":"FID","chunk_index":0}),),
         enrich={"logic_version": 1, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
     d = art.to_dict(); d["chunks"][0]["idx"] = 0.0        # float idx from a peer
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",
                  gzip.compress(json.dumps(d).encode()))
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", PIN) is True
     assert s.get_chunk("gdrive-FID-0") is not None        # int doc_id, not 0.0

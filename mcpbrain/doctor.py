@@ -333,7 +333,13 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # tails are silently truncated at embed time and become unsearchable.
     from pathlib import Path
     from mcpbrain.store import Store
-    store = Store(Path(home) / "b.sqlite3", dim=4, read_only=True)
+    # "brain.sqlite3" — the same filename config.store_path() builds under
+    # app_dir(); spelled relative to the injected `home` because run_doctor is
+    # home-parameterised (tests pass a tmp_path). It said "b.sqlite3" for a
+    # while, which exists nowhere: the read-only handle raised OperationalError,
+    # the `except Exception` below swallowed it into "skipped", and the chunk
+    # window + repair-state lines never printed on any real install.
+    store = Store(Path(home) / "brain.sqlite3", dim=4, read_only=True)
     try:
         oversize = store.count_chunks_longer_than(2000)
         glyph = "✅" if not oversize else "⚠️"

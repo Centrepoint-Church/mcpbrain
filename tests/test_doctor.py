@@ -156,11 +156,16 @@ def test_doctor_reports_over_window_chunks(tmp_path, monkeypatch):
 
 def test_run_doctor_reports_the_oversize_chunk_line(tmp_path, monkeypatch):
     """When oversize chunks exist, the chunk window line should report them with
-    the ⚠️ glyph."""
+    the ⚠️ glyph.
+
+    The store file MUST be named brain.sqlite3 — the real one (config.store_path).
+    This test used to seed 'b.sqlite3' and still passed, because run_doctor opened
+    that same wrong name; the OperationalError from the missing real file was
+    swallowed into '➖ skipped', so this line never printed on a real install."""
     from mcpbrain.store import Store
 
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d1", "y" * 3000, "h1", {"source_type": "gdrive"})
 
@@ -171,7 +176,7 @@ def test_run_doctor_reports_the_oversize_chunk_line(tmp_path, monkeypatch):
 
 
 def test_run_doctor_chunk_window_skip_on_no_store(tmp_path):
-    """When b.sqlite3 doesn't exist (fresh install), the chunk window line
+    """When brain.sqlite3 doesn't exist (fresh install), the chunk window line
     should report ➖ skipped, not vanish entirely."""
     code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
                                   conns=_conns(), repairs={})
@@ -390,7 +395,7 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
     from mcpbrain.store import Store
 
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d1", "|  |  |", "h1", {})
     store.upsert_chunk("gdrive-f1-0", "legacy text", "h2",
@@ -398,3 +403,13 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
 
     assert store.count_content_free() == 1
     assert store.stale_chunker_file_ids(2, limit=10) == ["f1"]
+
+    # Asserting the store methods is not enough: the lines are only useful if
+    # run_doctor actually prints them, and its own `except Exception` turns any
+    # failure to open the store (e.g. the wrong filename) into a silent
+    # "➖ Repair state skipped".
+    code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                  conns=_conns(), repairs={})
+    assert "⚠️ content-free chunks: 1" in msg, msg
+    assert "⚠️ Drive files awaiting re-chunk: 1" in msg, msg
+    assert "Repair state" not in msg, f"the repair-state block was skipped: {msg}"

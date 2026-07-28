@@ -1296,3 +1296,87 @@ def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monke
 
     assert summary["files"] == 2
     assert summary["failed"] == 1
+
+
+def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, monkeypatch):
+    """The convergence guarantee. store.upsert_chunk short-circuits on an
+    unchanged content_hash and writes NOTHING — metadata included — so a legacy
+    Drive file whose prose re-chunks identically (the common case: spec 2 changed
+    empty/oversize emission and tabular routing, not prose boundaries) would
+    never acquire `chunker_version`. stale_chunker_file_ids selects on exactly
+    that field and orders by MIN(rowid), so `reingest-stale --apply --limit N`
+    would re-fetch the same oldest N files forever, burning Drive quota with zero
+    progress while reporting success."""
+    from mcpbrain.chunking import CHUNKER_VERSION, content_hash
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    body = "Recovered prose content that re-chunks byte-identically."
+    # Pre-existing chunk from the old chunker: same text, same hash, no version.
+    store.upsert_chunk("gdrive-f1-0", body, content_hash(body),
+                       {"source_type": "gdrive", "file_id": "f1", "chunk_index": 0})
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["f1"]
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
+                    "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
+
+    monkeypatch.setattr(drive, "_fetch_text", lambda service, meta: body)
+
+    summary = drive.reingest_files(_Service(), store, ["f1"])
+
+    assert summary["files"] == 1
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+        "an unchanged-text file never left the stale set — reingest-stale would "
+        "re-fetch it forever"
+    )
+    meta = store.get_chunk("gdrive-f1-0")["metadata"]
+    assert meta["chunker_version"] == CHUNKER_VERSION
+
+
+def test_reingest_keeps_the_drive_id_stamp_for_a_shared_drive_file(tmp_path, monkeypatch):
+    """upsert_chunk REPLACES metadata wholesale, so a re-ingest that does not
+    re-request driveId strips the chunk's drive_id stamp — and
+    ingest_cache.purge_drive finds content to delete on access revocation via
+    store.doc_ids_for_drive, i.e. by that stamp. Re-ingested content would
+    silently survive a revocation forever."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, fields=None, **kw):
+            self._fid, self._fields = fileId, fields
+            return self
+
+        def execute(self):
+            assert "driveId" in (self._fields or ""), (
+                "driveId must be requested or the fetched metadata can never "
+                f"carry it: {self._fields}"
+            )
+            return {"id": "f1", "name": "Policy.txt", "mimeType": "text/plain",
+                    "modifiedTime": "2026-07-01T00:00:00Z", "parents": [],
+                    "driveId": "SHARED1"}
+
+    monkeypatch.setattr(drive, "_fetch_text",
+                        lambda service, meta: "Shared drive policy text.")
+
+    assert drive.reingest_files(_Service(), store, ["f1"])["files"] == 1
+
+    assert store.doc_ids_for_drive("SHARED1") == ["gdrive-f1-0"]
+    assert store.get_chunk("gdrive-f1-0")["metadata"]["drive_id"] == "SHARED1"

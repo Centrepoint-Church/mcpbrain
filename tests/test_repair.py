@@ -117,3 +117,53 @@ def test_purge_apply_halts_cleanly_on_a_graph_cited_chunk(tmp_path):
     assert reopened.get_chunk("d-cited") is not None, "cited chunk must survive"
     assert reopened.get_chunk("d-uncited") is not None, (
         "purge_doc_ids is all-or-nothing: nothing in the same batch is deleted")
+
+
+def test_status_with_apply_takes_no_backup(tmp_path):
+    """`status` writes nothing, so --apply on it is a no-op — but the backup is a
+    full copy of an ~11 GB store: minutes of I/O and 2x the disk (which this
+    machine does not have spare) for a read-only report."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "|  |  |", "h1", {})
+
+    out = _run("status", "--apply", home=tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "backup written" not in out.stdout.lower(), out.stdout
+    assert list(tmp_path.glob("brain.sqlite3.bak-*")) == []
+    # ...and with no backup to restore from, the gold-gate/restore block that
+    # names one must not be printed either.
+    assert "restore" not in out.stdout.lower()
+
+
+def test_purge_apply_stops_when_a_batch_deletes_nothing(tmp_path, monkeypatch):
+    """The purge loop re-selects until the selector comes back empty. A batch
+    that selects rows but deletes none (a concurrent writer — the daemon —
+    removing them between the select and the delete) would otherwise be
+    re-selected forever: an infinite loop that writes nothing."""
+    import bin.repair as repair
+
+    class _SpinStore:
+        def __init__(self):
+            self.selects = 0
+
+        def count_content_free(self):
+            return 3
+
+        def content_free_doc_ids(self, limit):
+            self.selects += 1
+            assert self.selects < 50, "phase_purge_empty spun on a no-progress batch"
+            return ["d1", "d2", "d3"]
+
+        def purge_doc_ids(self, doc_ids):
+            return 0        # someone else deleted them first
+
+    store = _SpinStore()
+
+    rc = repair.phase_purge_empty(store, True)
+
+    assert rc == 0
+    assert store.selects == 1

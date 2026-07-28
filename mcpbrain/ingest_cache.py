@@ -19,15 +19,17 @@ import base64
 import gzip
 import json
 import logging
+import re
 import struct
 from datetime import datetime, timezone
 
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.chunking import content_hash as _text_hash
 from mcpbrain.org_contracts import (
     CacheArtifact, CacheChunk, DRIVE_ID_META_KEY,
     artifact_filename, pipeline_fingerprint,
 )
-from mcpbrain.store import ENRICH_LOGIC_VERSION, _like_escape
+from mcpbrain.store import ENRICH_LOGIC_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -36,12 +38,51 @@ CACHE_DIR = ".mcpbrain-cache"
 
 # -- filename / path helpers ------------------------------------------------
 
+def _version_int(value) -> int:
+    """The integer inside a chunker_version string — '2' -> 2, 'v1' -> 1, and 0
+    when there is no digit at all. Both spellings are live: the code constant is
+    an int (chunking.CHUNKER_VERSION) while the fleet-distributed org pin has
+    historically carried 'v1'."""
+    m = re.search(r"\d+", str(value or ""))
+    return int(m.group()) if m else 0
+
+
+def effective_chunker_version(pin) -> str:
+    """The chunker version THIS install keys its cache artifacts on.
+
+    The org pin's value, unless it LAGS the local code constant — then the local
+    constant wins. The pin is fleet-distributed, so trusting it as a strict
+    ceiling made a local chunker bump invisible to the cache: `pipeline_
+    fingerprint` is keyed off the pin, `config.fleet_pin`'s new default only
+    applies when the key is ABSENT, and the live pin sets it explicitly ('v1').
+    Installs running post-spec-2 code therefore kept reading and writing
+    artifacts at the pre-spec-2 fingerprint — importing old-shape chunks with no
+    way to know, which is exactly what bumping CHUNKER_VERSION was supposed to
+    prevent. Flooring it here restores that intent with no fleet-wide
+    org-config.json edit as a prerequisite.
+
+    This does NOT rewrite what the pin stores or distributes; it only refuses to
+    let a stale pin lower the LOCAL fingerprint and import gate. A pin that is
+    AHEAD of this install's code is honoured verbatim (its exact string, so
+    installs sharing that pin still agree on the artifact path).
+
+    Every install on the same code version computes the same value, so cache
+    artifacts stay shareable — installs on older code simply keep using their
+    own, differently-fingerprinted path, and the two coexist without churn.
+    """
+    return (str(pin.chunker_version)
+            if _version_int(pin.chunker_version) >= CHUNKER_VERSION
+            else str(CHUNKER_VERSION))
+
+
 def _pf8(pin) -> str:
-    return pipeline_fingerprint(pin.embed_model, pin.dim, pin.chunker_version)[:8]
+    return pipeline_fingerprint(
+        pin.embed_model, pin.dim, effective_chunker_version(pin))[:8]
 
 
 def _artifact_path(file_id: str, content_hash: str, pin) -> str:
-    return f"{CACHE_DIR}/{artifact_filename(file_id, content_hash, pin.embed_model, pin.dim, pin.chunker_version)}"
+    return (f"{CACHE_DIR}/"
+            f"{artifact_filename(file_id, content_hash, pin.embed_model, pin.dim, effective_chunker_version(pin))}")
 
 
 def _parse_name(name: str):
@@ -86,7 +127,7 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     `contextual_retrieval`, when not None, must match the artifact's stamped
     enrich["contextual_retrieval"] flag (when present) — see try_import."""
     if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
-            or art.chunker_version != pin.chunker_version
+            or art.chunker_version != effective_chunker_version(pin)
             or int(art.dim) != int(store.dim)):
         return False
     try:
@@ -149,9 +190,17 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
                     row["metadata"], row["vector"],
                     enriched=row.get("enriched", False),
                     enriched_version=row.get("enriched_version", 0))
+            # Indexed doc_id RANGE predicate, not `LIKE ... ESCAPE`: ESCAPE
+            # disables SQLite's LIKE-to-index optimisation and silently turns a
+            # doc_id prefix match into a full `SCAN chunks` (the 0.7.105
+            # chunks_for_file incident; see store.doc_root_content_hashes'
+            # docstring, which uses this same form). '.' sorts immediately
+            # after '-' in ASCII, so [root+'-', root+'.') bounds exactly the
+            # "starts with <root>-" set.
+            root = f"gdrive-{art.file_id}"
             existing = [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
-                (f"gdrive-{_like_escape(art.file_id)}-%",)).fetchall()]
+                "SELECT doc_id FROM chunks WHERE doc_id >= ? AND doc_id < ?",
+                (f"{root}-", f"{root}.")).fetchall()]
             stale = [d for d in existing if d not in written]
             if stale:
                 log.info("ingest_cache: %s shrank; deleting %d orphaned chunk(s)",
@@ -280,7 +329,8 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     enrich_block["contextual_retrieval"] = contextual_retrieval
     art = CacheArtifact(
         file_id=file_id, content_hash=content_hash,
-        extraction_method=extraction_method, chunker_version=pin.chunker_version,
+        extraction_method=extraction_method,
+        chunker_version=effective_chunker_version(pin),
         embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
         enrich=enrich_block, published_by=published_by,
         published_at=datetime.now(timezone.utc).isoformat())

@@ -12,7 +12,10 @@ Every phase takes a full DB backup FIRST. If the post-run gold eval regresses
 writes the pre-migration id snapshot to <home>/consolidate_pre_ids.json for the
 later meetings-retire phase.
 """
-import argparse, json, sys, time
+import argparse
+import json
+import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

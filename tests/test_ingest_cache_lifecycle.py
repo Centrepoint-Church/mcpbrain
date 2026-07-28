@@ -1,13 +1,24 @@
+import gzip
+import json
 import struct
 import tempfile
 from pathlib import Path
 
 from mcpbrain import ingest_cache
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import FleetPin, artifact_filename
 from mcpbrain.store import Store
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
-PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+# chunker_version matches the code's own constant, which is what a caught-up org
+# pin carries. A pin that LAGS the code is a real case with its own behaviour
+# (ingest_cache floors it — see
+# test_a_pin_lagging_the_code_does_not_key_artifacts_on_the_stale_version), but
+# the fixture for every other test here should not be silently exercising it:
+# the tests below build expected artifact filenames from PIN directly, so a
+# lagging fixture would make them assert against a fingerprint the module never
+# uses.
+PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version=str(CHUNKER_VERSION),
                enrich_logic_floor=1, fleet_secret="s3cret")
 
 
@@ -334,3 +345,56 @@ def test_a_cache_import_of_the_same_size_deletes_nothing(tmp_path):
     _import_one_chunk_artifact(store, file_id="f1", text="para updated")
 
     assert sorted(store.doc_ids_for_file("f1")) == ["gdrive-f1-0"]
+
+
+def test_a_pin_lagging_the_code_does_not_key_artifacts_on_the_stale_version(tmp_path):
+    """A local chunker bump must invalidate stale fleet cache artifacts on its
+    own. pipeline_fingerprint is keyed off the FLEET-DISTRIBUTED pin, and
+    config.fleet_pin's code-version default only applies when the key is ABSENT
+    — the live pin sets it explicitly ('v1'), so bumping CHUNKER_VERSION alone
+    changed nothing and installs kept importing pre-bump artifacts silently.
+    ingest_cache floors the pin at the local constant instead."""
+    stale_pin = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+                         enrich_logic_floor=1, fleet_secret="s3cret")
+
+    assert ingest_cache.effective_chunker_version(stale_pin) == str(CHUNKER_VERSION)
+    # ...so the artifact path is the CURRENT chunker's, not the stale pin's.
+    assert ingest_cache._artifact_path("FID", "vhash1", stale_pin) != (
+        f"{ingest_cache.CACHE_DIR}/"
+        f"{artifact_filename('FID', 'vhash1', 'bge-small', 4, 'v1')}")
+    assert ingest_cache._artifact_path("FID", "vhash1", stale_pin) == (
+        f"{ingest_cache.CACHE_DIR}/"
+        f"{artifact_filename('FID', 'vhash1', 'bge-small', 4, str(CHUNKER_VERSION))}")
+
+    # An artifact published by a pre-bump install (stamped + filed under the old
+    # chunker version) is not importable by this install at all: not at the
+    # stale path (never looked at) and not through the gate either.
+    src, fs = _store(tmp_path, "src.sqlite3"), LocalDirFleetStorage(tmp_path / "drv")
+    _seed_file(src, "FID", n=1)
+    old_art = ingest_cache.CacheArtifact(
+        file_id="FID", content_hash="vhash1", extraction_method="gdocs",
+        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunks=(ingest_cache.CacheChunk(
+            idx=0, text="text 0",
+            embedding_b64=ingest_cache._encode_vec([0.0, 0.0, 0.0, 0.0]),
+            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
+        enrich={"logic_version": 1}, published_by="old@x.org",
+        published_at="2026-07-01")
+    stale_path = (f"{ingest_cache.CACHE_DIR}/"
+                  f"{artifact_filename('FID', 'vhash1', 'bge-small', 4, 'v1')}")
+    fs.put_bytes(stale_path, gzip.compress(
+        json.dumps(old_art.to_dict()).encode("utf-8")))
+
+    dst = _store(tmp_path, "dst.sqlite3")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", stale_pin) is False
+    assert ingest_cache._import_artifact(dst, "D1", old_art, stale_pin) is False, (
+        "an artifact built by the superseded chunker must not pass the gate"
+    )
+    assert dst.doc_ids_for_file("FID") == []
+
+    # And a fresh publish under the same lagging pin is importable — the floored
+    # version is what gets stamped, so installs on this code agree with each other.
+    assert ingest_cache.publish_file(src, fs, "D1", "FID", "vhash1", stale_pin,
+                                     published_by="me@x.org")
+    assert ingest_cache.try_import(dst, fs, "D1", "FID", "vhash1", stale_pin) is True
+    assert dst.doc_ids_for_file("FID") == ["gdrive-FID-0"]
