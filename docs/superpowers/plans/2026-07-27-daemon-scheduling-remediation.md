@@ -1233,6 +1233,65 @@ git commit -m "test: close coverage gaps; record honest acceptance results"
 
 ---
 
+### Task 9 (added 2026-07-28): the three gaps Task 2/5 review left open
+
+All three CLOSED. Each was a lock-hold or unbounded-loop defect inside work
+Task 2 had already sectioned, plus one missing test.
+
+1. **`records_write`'s git commit ran inside `bulk_section`** (`drain.py`).
+   `drain_captures` wrapped the WHOLE envelope in the section, including the
+   `decision`/`continuity`/`memory` branch, whose apply path shells out to
+   `git add` + `git commit` and touches the store not at all. git has no
+   timeout: a stale `.git/index.lock` blocks indefinitely, so one unlucky
+   capture would park `_bulk_lock` forever and starve all four gated passes and
+   the backup — for a write that never needed the lock. Fixed by sectioning
+   only the store-writing branches (`_RECORDS_KINDS` selects `nullcontext`);
+   envelope parse/validate/quarantine/unlink are filesystem-only and also moved
+   out. Pinned by
+   `test_bulk_lock_fairness.py::test_records_captures_commit_git_outside_the_bulk_section`,
+   which asserts the git call sees the lock free AND the ingest capture in the
+   same run sees it held (so the test can't pass by deleting the sectioning).
+
+2. **`prepare.py`'s budget reached only `build_pending`.** The three per-batch
+   WRITE loops that run FIRST — `_apply_salience_gate`, `_filter_noise`,
+   `_apply_trivial_threads` — were unbounded, and each does per-batch store I/O
+   inside its own `bulk_section`, so with a waiter present each batch
+   additionally pays `BULK_LOCK_YIELD_S` (0.25 s) on exit. At a few hundred
+   batches that is minutes of unbudgeted work before `build_pending`'s check is
+   ever reached, i.e. the stall the budget exists to bound. All three now take
+   `budget` and stop via the shared `_budget_spent` helper. The unprocessed tail
+   is DROPPED, never passed through: a batch that skipped the gate / noise
+   filter / trivial triage would otherwise reach the extractor ungated. Safe
+   because nothing is committed for unreached batches — they are still
+   un-enriched and `_group_unenriched_threads` re-picks them next cycle. Four
+   tests in `test_index_bounded.py`; the whole-function one counts batches
+   touched (400 on the old code with an already-expired budget) because the
+   pre-existing `threads == 0` assertion passed throughout the defect.
+
+3. **The `_bulk_lock` fairness hand-off is now pinned — and measured.**
+   Deleting `_bulk_lock_wanted() -> _stop.wait()` left all 11 (now 12)
+   threaded tests in `test_bulk_lock_fairness.py` green. Added
+   `test_release_pauses_only_when_a_waiter_marked_intent`: no timing, asserts
+   no pause with no waiter and exactly one pause of the CONFIGURED
+   `_bulk_lock_yield_s` with the lock already released, when intent is marked.
+   Fails on every run with the block deleted.
+
+   **Finding worth carrying forward:** an adversarial behavioural test was
+   written and then NOT kept, because it could not discriminate. With a cycle
+   thread doing zero work per section (release, immediately re-acquire) a
+   single bounded waiter still won 20/20 acquires at 500 ms, 50 ms and 10 ms
+   timeouts and 19/20 at 2 ms, hand-off deleted — CPython/macOS locks are fair
+   enough in practice that the hand-off's behavioural benefit is not observable
+   at EITHER granularity (the module docstring already recorded the coarse-
+   granularity result; this is the fine-grained one). The hand-off is kept as
+   cheap insurance for less forgiving platforms, and `_cycle_bulk_section`'s
+   docstring — which previously asserted the cycle thread "wins almost every
+   race" — was corrected to say so. If the 0.25 s pause is ever suspected of
+   costing throughput, these measurements are the starting point for removing
+   it deliberately rather than on a hunch.
+
+---
+
 ## Issue index
 
 Every reviewed finding and where it is addressed.

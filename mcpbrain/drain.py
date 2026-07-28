@@ -51,6 +51,12 @@ log = logging.getLogger(__name__)
 # re-extract loop for genuinely content-empty docs without losing transient retries.
 _EMPTY_ATTEMPT_CAP = 3
 
+# Capture kinds whose apply path writes the records GIT REPO and never the
+# store. drain_captures runs these OUTSIDE its bulk section: they need no lock,
+# and an unbounded `git commit` (a stale .git/index.lock blocks forever) holding
+# _bulk_lock would starve every gated maintenance pass and the backup.
+_RECORDS_KINDS = ("decision", "continuity", "memory")
+
 
 def _give_up_or_bump(store, doc_ids, summary) -> tuple[bool, int | None]:
     """Bump the empty-attempt counter for these chunks; once it reaches
@@ -605,6 +611,17 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     envelope's writes and `budget` (a `Budget`, or None for unbounded) is
     checked once per envelope. An unprocessed envelope simply stays queued and
     is retried next cycle — the spool is durable, so nothing is lost.
+
+    The section brackets ONLY the store-writing branches, deliberately NOT the
+    whole envelope. `decision`/`continuity`/`memory` captures write the records
+    GIT REPO (records_write shells out to `git add`/`git commit`) and touch the
+    store not at all, so they need no lock — and holding one across them is
+    actively harmful: a stale `.git/index.lock` makes git block indefinitely,
+    which under the old whole-envelope section would have parked _bulk_lock
+    forever and starved every gated maintenance pass and the backup, for a
+    capture that never needed the lock in the first place. Envelope parsing,
+    validation, quarantine and the final unlink are filesystem-only and sit
+    outside the section for the same reason.
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -620,21 +637,25 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     for path in sorted(inbox.glob("*.json")):
         if budget is not None and budget.expired():
             break
-        with bulk_section():
-            try:
-                env = json.loads(path.read_text())
-            except (ValueError, OSError) as exc:
-                log.warning("capture: unparseable %s, quarantining: %s", path.name, exc)
-                _quarantine(path)
-                continue
-            problems = validate_capture(env)
-            if problems:
-                log.warning("capture: invalid %s, quarantining: %s",
-                            path.name, "; ".join(problems[:3]))
-                _quarantine(path)
-                continue
-            kind = env["kind"]
-            file_ok = True
+        try:
+            env = json.loads(path.read_text())
+        except (ValueError, OSError) as exc:
+            log.warning("capture: unparseable %s, quarantining: %s", path.name, exc)
+            _quarantine(path)
+            continue
+        problems = validate_capture(env)
+        if problems:
+            log.warning("capture: invalid %s, quarantining: %s",
+                        path.name, "; ".join(problems[:3]))
+            _quarantine(path)
+            continue
+        kind = env["kind"]
+        # Records captures commit to the git repo and never touch the store, so
+        # they run OUTSIDE the bulk section — see this function's docstring for
+        # why holding _bulk_lock across a git commit is the dangerous case.
+        section = nullcontext if kind in _RECORDS_KINDS else bulk_section
+        file_ok = True
+        with section():
             if kind == "ingest":
                 text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
                 chash = content_hash(text)
@@ -689,7 +710,7 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                 except Exception as exc:
                     log.error("capture: action_update failed for %s: %s", path.name, exc)
                     file_ok = False
-            elif kind in ("decision", "continuity", "memory"):
+            elif kind in _RECORDS_KINDS:
                 try:
                     from mcpbrain import records_write as rw
                     if _records_repo_path is None:
@@ -710,6 +731,6 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                 except Exception as exc:
                     log.error("capture: %s write failed for %s: %s", kind, path.name, exc)
                     file_ok = False
-            if file_ok:
-                path.unlink(missing_ok=True)
+        if file_ok:
+            path.unlink(missing_ok=True)
     return applied

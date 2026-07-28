@@ -1989,14 +1989,27 @@ class Daemon:
         once per whole call, releasing the lock in between so the
         maintenance thread has a real, frequent chance to acquire it.
 
-        CPython's Lock is not FIFO-fair, so a bare release+re-acquire still
-        lets the cycle thread win almost every race against a waiter (it
-        re-enters this section ~immediately; the maintenance thread's acquire
-        has to be scheduled in). `_bulk_lock_wanted()` is the explicit
-        hand-off: a waiter marks intent (`_bulk_lock_intent`) before blocking
-        on the lock, and this method pauses briefly after releasing when it
-        sees that intent, so the waiter's pending acquire actually wins the
-        next opportunity.
+        `_bulk_lock_wanted()` is an explicit fairness hand-off on top of that:
+        a waiter marks intent (`_bulk_lock_intent`) before blocking on the
+        lock, and this method pauses briefly after releasing when it sees that
+        intent, so the waiter's pending acquire wins the next opportunity
+        rather than racing a cycle thread that re-enters this section
+        ~immediately.
+
+        Note this hand-off is INSURANCE, not a measured fix, and it is not the
+        thing that solved the live starvation -- the sectioning granularity
+        above is. CPython's Lock is not FIFO-fair in principle, but measured on
+        CPython/macOS it is fair enough in practice that deleting this pause
+        changes nothing observable: with a cycle thread doing zero work per
+        section (release, immediately re-acquire -- the adversarial shape) a
+        single bounded waiter still won 20/20 acquires at 500ms/50ms/10ms
+        timeouts and 19/20 at 2ms. Kept because it costs nothing when nobody is
+        waiting and platforms differ; pinned by
+        tests/test_bulk_lock_fairness.py::
+        test_release_pauses_only_when_a_waiter_marked_intent (a deterministic
+        contract test -- every THREADED test in that file passes with this
+        block deleted, so the contract test is the only thing preventing a
+        silent removal). See that file's module docstring for the measurements.
 
         The acquire here is deliberately UNBOUNDED (unlike
         _backup_under_bulk_lock's bounded, skip-on-timeout acquire): the
