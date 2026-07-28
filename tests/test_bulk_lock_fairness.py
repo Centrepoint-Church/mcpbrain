@@ -24,6 +24,21 @@ test_gated_pass_runs_within_bounded_ticks_under_sustained_backlog below is the
 soak-style regression test for THAT: it drives the real _cycle_bulk_section
 and _run_periodic_passes at a small-section granularity under a cycle that
 never idles, and asserts the gated pass actually gets a turn.
+
+Is the hand-off worth keeping at all? Measured, not assumed. Deleting the
+`_bulk_lock_wanted() -> _stop.wait()` block leaves every threaded test in this
+file GREEN, including an adversarial one written for the purpose: a cycle
+thread doing ZERO work per section (release, immediately re-acquire) against a
+single bounded waiter. On CPython/macOS the waiter still won 20/20 at a 500ms,
+50ms and 10ms acquire timeout, and 19/20 at 2ms — i.e. the lock is fair enough
+in practice that the hand-off's behavioural benefit is not observable here, at
+either granularity. That adversarial test was therefore NOT kept: a test that
+passes with and without the code it claims to cover is worse than none. The
+hand-off stays as cheap insurance for platforms whose lock is less forgiving,
+and test_release_pauses_only_when_a_waiter_marked_intent below pins its
+CONTRACT deterministically so it cannot be deleted silently — which was the
+actual gap. If the pause is ever suspected of costing throughput, the evidence
+above is the starting point for removing it deliberately.
 """
 import threading
 import time
@@ -69,6 +84,63 @@ def test_cycle_yields_when_maintenance_wants_the_lock():
     c.join(timeout=10)
 
     assert got == [True], "maintenance never got the bulk lock while the cycle ran"
+
+
+class _RecordingStop:
+    """Stands in for Daemon._stop, recording every pause _cycle_bulk_section
+    takes and whether the bulk lock was still held at that moment."""
+
+    def __init__(self, lock):
+        self._lock = lock
+        self.waits: list = []
+
+    def wait(self, timeout=None):
+        self.waits.append((timeout, self._lock.locked()))
+        return False
+
+    def is_set(self):
+        return False
+
+
+def test_release_pauses_only_when_a_waiter_marked_intent():
+    """Pins the hand-off itself, deterministically.
+
+    Every threaded test in this file passes with the hand-off DELETED (see the
+    module docstring for the measurements) — they pin the sectioning half of
+    the design, not the fairness half. This one has no timing in it at all, so
+    it discriminates every run:
+
+      - no waiter  -> no pause (the hand-off must not tax the common case)
+      - waiter     -> exactly one pause, for the CONFIGURED yield (so
+                      _tuning_from_config's bulk_lock_yield_s genuinely reaches
+                      here), taken AFTER the release, not while still holding
+                      the lock — pausing under the lock would make the
+                      starvation it exists to fix strictly worse.
+    """
+    dm = _dm()
+    dm._bulk_lock_yield_s = 0.05
+    stop = _RecordingStop(dm._bulk_lock)
+    dm._stop = stop
+
+    with dm._cycle_bulk_section():
+        pass
+    assert stop.waits == [], (
+        "the cycle paused on section exit with nobody waiting — the hand-off "
+        "must be conditional on _bulk_lock_wanted()"
+    )
+
+    with dm._bulk_lock_intent():
+        with dm._cycle_bulk_section():
+            pass
+
+    assert stop.waits == [(0.05, False)], (
+        "expected exactly one hand-off pause of the configured "
+        "_bulk_lock_yield_s, with the bulk lock already released; got "
+        f"{stop.waits!r}. An empty list means the fairness hand-off "
+        "(_bulk_lock_wanted -> _stop.wait) is gone: on CPython's non-FIFO "
+        "Lock the cycle thread then wins essentially every re-acquire race "
+        "and the waiter starves, which is the 183-skip live failure."
+    )
 
 
 def test_bulk_section_releases_between_phases():
@@ -486,6 +558,75 @@ def test_bulk_section_threaded_to_drain_captures(tmp_path, monkeypatch):
         "the bulk_section threading from run_cycle into drain.drain_captures "
         "is missing or broken"
     )
+
+
+def test_records_captures_commit_git_outside_the_bulk_section(tmp_path, monkeypatch):
+    """A `decision`/`continuity`/`memory` capture must NOT hold _bulk_lock.
+
+    Their apply path is records_write, which shells out to `git add` + `git
+    commit` and touches the store not at all. git has no timeout: a stale
+    `.git/index.lock` (a killed git, a crashed daemon mid-commit) makes it
+    block indefinitely. Under the original whole-envelope `with
+    bulk_section():` that turned one unlucky capture into a permanently held
+    _bulk_lock — starving all four gated cadence passes and the backup forever,
+    for a write that never needed the lock.
+
+    The ingest envelope in the same run is the discriminator: it pins that the
+    section is still genuinely entered for store writes, so this test cannot be
+    satisfied by simply deleting the bulk_section threading from
+    drain_captures.
+    """
+    import json
+
+    from mcpbrain import drain as drain_module
+    from mcpbrain import records_write
+    from tests.test_daemon import _make_store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _make_store(tmp_path)
+    inbox = tmp_path / "capture_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "cap-1-ingest.json").write_text(json.dumps({
+        "kind": "ingest", "captured_at": "2026-06-04T12:00:00Z",
+        "source": "code", "title": "T", "content": "C",
+        "tags": "", "observation_type": "memory", "org": "",
+    }))
+    (inbox / "cap-2-decision.json").write_text(json.dumps({
+        "kind": "decision", "captured_at": "2026-06-04T12:00:01Z",
+        "source": "code", "text": "Ship it", "rationale": "", "owner": "",
+    }))
+
+    lock, section = _standalone_bulk_section()
+    locked_during_git: list = []
+    locked_during_chunk_write: list = []
+
+    def fake_append_decision(repo, **kw):
+        # Stands in for the real `git add` + `git commit`.
+        locked_during_git.append(lock.locked())
+        return True
+
+    orig_upsert = store.upsert_chunk
+
+    def spy_upsert(*a, **kw):
+        locked_during_chunk_write.append(lock.locked())
+        return orig_upsert(*a, **kw)
+
+    monkeypatch.setattr(records_write, "append_decision", fake_append_decision)
+    store.upsert_chunk = spy_upsert
+
+    applied = drain_module.drain_captures(store, home=tmp_path, bulk_section=section)
+
+    assert applied == 2, "both captures should have applied"
+    assert locked_during_chunk_write == [True], (
+        "the ingest capture wrote a chunk WITHOUT holding bulk_section's lock — "
+        "the store-writing branches must stay inside the section"
+    )
+    assert locked_during_git == [False], (
+        "a records capture ran its git commit while HOLDING _bulk_lock — an "
+        "unbounded git (stale .git/index.lock) would park the lock forever and "
+        "starve every gated maintenance pass"
+    )
+    assert not lock.locked(), "bulk lock left held after drain_captures returned"
 
 
 def test_bulk_section_argument_reaches_drain_and_prepare_units(monkeypatch):

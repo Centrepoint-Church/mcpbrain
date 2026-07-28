@@ -342,3 +342,143 @@ def test_build_pending_stops_mid_batch_when_budget_expires(tmp_path, monkeypatch
 
     assert len(data["threads"]) == 1
     assert data["threads"][0]["thread_id"] == "t-0"
+
+
+# --- the three per-batch WRITE loops that run BEFORE build_pending ---------
+#
+# Budgeting build_pending alone left the real stall in place. _apply_salience_
+# gate, _filter_noise and _apply_trivial_threads all run first, all loop over
+# every batch, and all do per-batch store I/O inside their own bulk_section --
+# so with a waiter present each batch additionally pays BULK_LOCK_YIELD_S
+# (0.25s) on section exit. At a few hundred batches that is minutes of
+# unbudgeted work before build_pending's check is ever reached.
+
+class _SpyStore(_PrepFakeStore):
+    def __init__(self):
+        self.marked: list = []
+        self.cold: list = []
+
+    def mark_enriched(self, doc_ids):
+        self.marked.append(list(doc_ids))
+
+    def set_enrich_state(self, doc_ids, state):
+        self.cold.append((list(doc_ids), state))
+
+
+def _spy_batches(n):
+    """Chunks carry a doc_id as well as the message fields: _apply_salience_gate
+    reads chunk["doc_id"], so without it that helper raises KeyError before
+    reaching the assertion these tests are actually making."""
+    return [_PrepFakeBatch(f"t-{i}", [f"d-{i}"],
+                           [dict(_prep_msg(f"m{i}", "hello"), doc_id=f"d-{i}")])
+            for i in range(n)]
+
+
+def test_noise_filter_stops_writing_when_the_budget_expires(monkeypatch):
+    """Every batch here is noise, so every batch would take the section and
+    call mark_enriched. An already-expired budget must stop that at zero."""
+    _stub_prepare_seams(monkeypatch)
+    monkeypatch.setattr(prepare, "thread_is_noise", lambda messages: True)
+    store = _SpyStore()
+
+    kept = prepare._filter_noise(store, _spy_batches(3), budget=Budget(deadline_s=0.0))
+
+    assert kept == []
+    assert store.marked == [], (
+        "_filter_noise kept marking batches after its budget expired — the loop "
+        "is unbounded, which is the stall this budget exists to prevent"
+    )
+
+
+def test_noise_filter_still_processes_everything_without_a_budget(monkeypatch):
+    """Discriminator for the test above: with no budget the loop must still run
+    to completion, so a passing budget test can't be an always-empty fixture."""
+    _stub_prepare_seams(monkeypatch)
+    monkeypatch.setattr(prepare, "thread_is_noise", lambda messages: True)
+    store = _SpyStore()
+
+    prepare._filter_noise(store, _spy_batches(3), budget=None)
+
+    assert len(store.marked) == 3
+
+
+def test_salience_gate_stops_writing_when_the_budget_expires(monkeypatch):
+    """Nothing enriches here, so every batch would cold-mark. An expired budget
+    must stop before the first set_enrich_state, and drop the unreached tail
+    rather than passing it through ungated."""
+    monkeypatch.setattr(prepare, "should_enrich", lambda chunk: False)
+    store = _SpyStore()
+
+    kept, summary = prepare._apply_salience_gate(
+        store, _spy_batches(3), budget=Budget(deadline_s=0.0))
+
+    assert kept == []
+    assert summary == {"gated": 0, "kept": 0}
+    assert store.cold == [], (
+        "_apply_salience_gate kept cold-marking batches after its budget expired"
+    )
+
+
+def test_trivial_threads_stops_writing_when_the_budget_expires(monkeypatch):
+    """Every thread here is trivial, so every batch would graph_write.apply +
+    mark_enriched. An expired budget must stop at zero."""
+    from mcpbrain import graph_write
+
+    _stub_prepare_seams(monkeypatch)
+    monkeypatch.setattr(prepare, "is_trivial_thread", lambda messages: True)
+    monkeypatch.setattr(prepare.config, "enrich_trivial_thread_summary", lambda home: True)
+    applied: list = []
+    monkeypatch.setattr(graph_write, "apply",
+                        lambda *a, **kw: applied.append(1))
+    store = _SpyStore()
+
+    kept = prepare._apply_trivial_threads(store, _spy_batches(3),
+                                          budget=Budget(deadline_s=0.0))
+
+    assert kept == []
+    assert applied == [], (
+        "_apply_trivial_threads kept extracting after its budget expired"
+    )
+    assert store.marked == []
+
+
+def test_prepare_units_does_no_per_batch_work_at_all_on_an_expired_budget(
+        tmp_path, monkeypatch):
+    """The whole-function contract, and the test that actually pins the defect.
+
+    An already-expired budget must mean prepare_units touches NO batch. Before
+    the fix this passed its `threads == 0` assertion (build_pending was
+    budgeted) while still walking all 200 batches through the noise filter
+    first — so the per-batch counter, not the thread count, is what
+    discriminates here.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    # Trivial-thread summarising is off so the third loop can't drag real
+    # graph_write.apply() into this test; the salience gate and noise filter
+    # are enough to count, and each is separately pinned above.
+    (tmp_path / "config.json").write_text(
+        '{"salience_gate": true, "enrich_trivial_thread_summary": false}')
+    batches = _spy_batches(200)
+    monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: batches)
+    monkeypatch.setattr(prepare, "_build_known_people", lambda store, batch_thread_ids: [])
+    monkeypatch.setattr(prepare, "_org_domain_lines", lambda: [])
+
+    touched: list = []
+
+    def _counting_reassemble(chunks):
+        touched.append(1)
+        return sorted(chunks, key=lambda c: c["date"])
+
+    monkeypatch.setattr(prepare, "_reassemble_thread", _counting_reassemble)
+    monkeypatch.setattr(prepare, "should_enrich",
+                        lambda chunk: touched.append(1) or True)
+
+    summary = prepare.prepare_units(_SpyStore(), thread_cap=500, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path),
+                                    budget=Budget(deadline_s=0.0))
+
+    assert summary["threads"] == 0
+    assert touched == [], (
+        f"prepare_units walked {len(touched)} batches through its pre-build_pending "
+        "loops on an ALREADY-EXPIRED budget — those loops are unbounded"
+    )
