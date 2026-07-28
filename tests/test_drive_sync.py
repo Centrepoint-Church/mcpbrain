@@ -1146,3 +1146,112 @@ def test_the_aggregated_skip_row_names_the_source_it_came_from():
                             source="drive:DRIVE123")
 
     assert store.changes[0][1] == "drive:DRIVE123"
+
+
+def test_reingest_files_replaces_a_files_chunks_from_a_fresh_fetch(tmp_path, monkeypatch):
+    """There is no targeted re-ingest path: backfill_drive filters on
+    modifiedTime, and the delta sync only sees CHANGED files — so a file whose
+    content is fine but whose CHUNKING is out of date can never be revisited.
+    455 clipped spreadsheets and 9,351 legacy files need exactly that."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    # Pre-existing chunks from the old chunker: more of them, and stale text.
+    for i in range(4):
+        store.upsert_chunk(f"gdrive-f1-{i}", f"|  |  | old {i} |", f"h{i}",
+                           {"source_type": "gdrive", "file_id": "f1",
+                            "chunk_index": i})
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId, fields=None, supportsAllDrives=None):
+            self._fid = fileId
+            return self
+
+        def get_media(self, fileId, supportsAllDrives=None):
+            return self
+
+        def execute(self):
+            return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
+                    "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
+
+    monkeypatch.setattr(drive, "_fetch_text",
+                        lambda service, meta: "Recovered prose content.")
+
+    summary = drive.reingest_files(_Service(), store, ["f1"])
+
+    assert summary["files"] == 1
+    remaining = sorted(store.doc_ids_for_file("f1"))
+    assert remaining == ["gdrive-f1-0"], f"stale chunks survived: {remaining}"
+    assert "Recovered" in store.get_chunk("gdrive-f1-0")["text"]
+
+
+def test_reingest_files_skips_a_file_that_no_longer_exists(tmp_path):
+    """A file deleted from Drive since it was chunked must not abort the run or
+    delete its chunks — that is the removal path's job, not the repair's."""
+    from googleapiclient.errors import HttpError
+
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-gone-0", "text", "h", {"source_type": "gdrive",
+                                                      "file_id": "gone"})
+
+    class _Resp:
+        status = 404
+        reason = "Not Found"
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, **kw):
+            return self
+
+        def execute(self):
+            raise HttpError(_Resp(), b"not found")
+
+    summary = drive.reingest_files(_Service(), store, ["gone"])
+
+    assert summary["missing"] == 1
+    assert summary["files"] == 0
+    assert store.get_chunk("gdrive-gone-0") is not None
+
+
+def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monkeypatch):
+    """One unreadable file in 9,351 must not end the run."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            return {"id": self._fid, "name": f"{self._fid}.txt",
+                    "mimeType": "text/plain", "parents": []}
+
+    def _boom(service, meta):
+        if meta["id"] == "bad":
+            raise RuntimeError("extraction exploded")
+        return "fine content"
+
+    monkeypatch.setattr(drive, "_fetch_text", _boom)
+
+    summary = drive.reingest_files(_Service(), store, ["ok1", "bad", "ok2"])
+
+    assert summary["files"] == 2
+    assert summary["failed"] == 1

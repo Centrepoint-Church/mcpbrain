@@ -1,4 +1,6 @@
 import struct
+import tempfile
+from pathlib import Path
 
 from mcpbrain import ingest_cache
 from mcpbrain.org_contracts import FleetPin, artifact_filename
@@ -21,6 +23,24 @@ def _seed_file(store, file_id, n=2):
             f"gdrive-{file_id}-{i}", f"text {i}", f"c{i}",
             {"source_type": "gdrive", "file_id": file_id, "chunk_index": i},
             [float(i)] * 4)
+
+
+def _import_one_chunk_artifact(store, *, file_id, text, content_hash="v1"):
+    """Build a one-chunk artifact for `file_id`/`text` and import it straight
+    into `store`. Thin wrapper over the same publish/try_import round-trip
+    test_publish_then_import_roundtrips already exercises (seed a throwaway
+    source store, publish_file it to a throwaway fleet dir, try_import into
+    `store`) rather than a second, hand-rolled artifact-construction path."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _store(Path(d), "src.sqlite3")
+        fs = LocalDirFleetStorage(Path(d) / "drv")
+        src.import_cached_chunk(
+            f"gdrive-{file_id}-0", text, "c0",
+            {"source_type": "gdrive", "file_id": file_id, "chunk_index": 0},
+            [0.0, 0.0, 0.0, 0.0])
+        assert ingest_cache.publish_file(src, fs, "D1", file_id, content_hash, PIN,
+                                         published_by="test")
+        assert ingest_cache.try_import(store, fs, "D1", file_id, content_hash, PIN)
 
 
 def test_publish_then_import_roundtrips(tmp_path):
@@ -274,3 +294,43 @@ def test_remove_file_artifacts_handles_delete_failure(tmp_path):
     remaining = {p.rsplit('/', 1)[-1] for p in real_fs.list_paths(ingest_cache.CACHE_DIR + "/")}
     assert a1 in remaining
     assert a2 not in remaining
+
+
+def test_a_cache_import_deletes_chunks_the_artifact_no_longer_has(tmp_path):
+    """B5's remaining half. Spec 2 closed orphan-on-shrink for locally-extracted
+    files (upsert_file_chunks) but deliberately skipped the cache-import path to
+    avoid racing try_import's own transaction. So a shared-drive file that shrank
+    and is served from cache still leaves indices n..m-1 searchable forever, and
+    re-fed to expansion as current content.
+
+    The sweep belongs INSIDE _import_artifact's transaction — the same one that
+    writes the replacement rows — so there is no race to avoid."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    for i in range(4):
+        store.upsert_chunk(f"gdrive-f1-{i}", f"old para {i}", f"h{i}",
+                           {"source_type": "gdrive", "file_id": "f1",
+                            "chunk_index": i})
+
+    # Build a 1-chunk artifact for the same file and import it. Use this module's
+    # existing artifact-construction helper rather than hand-rolling a second one.
+    _import_one_chunk_artifact(store, file_id="f1", text="only para now")
+
+    assert sorted(store.doc_ids_for_file("f1")) == ["gdrive-f1-0"], (
+        "the cache import left the shrunk file's tail chunks behind"
+    )
+
+
+def test_a_cache_import_of_the_same_size_deletes_nothing(tmp_path):
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-f1-0", "para", "h0",
+                       {"source_type": "gdrive", "file_id": "f1", "chunk_index": 0})
+
+    _import_one_chunk_artifact(store, file_id="f1", text="para updated")
+
+    assert sorted(store.doc_ids_for_file("f1")) == ["gdrive-f1-0"]
