@@ -108,6 +108,41 @@ def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:
     return list(batches.values())
 
 
+_GAP_MARKER = "\n\n[…]\n\n"
+
+
+def _join_with_gaps(parts: list[dict]) -> str:
+    """Join one message's chunks in index order, marking any missing piece.
+
+    B8: this function only ever sees the chunks its CALLER selected, and
+    group_unenriched_threads selects UNENRICHED chunks while
+    store.unenriched_chunks additionally excludes cold-marked ones
+    (store.py:1264). A partially-enriched or partially-cold document therefore
+    reached the model as a seamless body with pieces silently absent — and the
+    model has no way to know, so it extracts confidently from a fragment.
+
+    Two independent signals, because either can occur alone: a hole in the
+    middle (indices 0, 2 — chunk 1 already enriched) and a truncated tail
+    (indices 0, 1 of a chunk_total of 5). The tail check needs chunk_total,
+    which only exists on chunks written after this plan's C1 change; on older
+    chunks it is absent and the check simply does not fire, which is the correct
+    degradation. `parts` is already sorted by chunk_index by the caller.
+    """
+    out: list[str] = []
+    prev = None
+    for p in parts:
+        idx = int((p.get("metadata") or {}).get("chunk_index", 0) or 0)
+        if prev is not None:
+            out.append(_GAP_MARKER if idx != prev + 1 else _CHUNK_JOIN)
+        out.append(p.get("text", ""))
+        prev = idx
+    if parts and prev is not None:
+        total = int((parts[-1].get("metadata") or {}).get("chunk_total", 0) or 0)
+        if total and prev < total - 1:
+            out.append(_GAP_MARKER)
+    return "".join(out)
+
+
 def reassemble_thread(chunks: list[dict]) -> list[dict]:
     """Reassemble a thread's chunks into ordered message dicts.
 
@@ -145,7 +180,7 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         parts = sorted(by_message[mid],
                        key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
         meta = parts[0].get("metadata") or {}
-        text = _CHUNK_JOIN.join(p.get("text", "") for p in parts)
+        text = _join_with_gaps(parts)
         messages.append({
             "message_id": mid,
             # Drive chunks store the file owner in "owner"; email chunks use
