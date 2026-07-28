@@ -342,7 +342,11 @@ def test_budget_interrupted_mid_fetch_resumes_without_skip_or_duplicate(tmp_path
     # Call 1: pagination's own check (not expired). Call 2: fetch-loop check
     # before m1 (not expired -> m1 IS processed). Call 3: fetch-loop check
     # before m2 (expired -> loop stops; m2/m3 never fetched this call).
-    budget = _FakeBudget(expire_after_calls=2)
+    # One fewer expired() call than before: the first item is now written
+    # unconditionally under the minimum-forward-progress guarantee, so the
+    # cut-off lands one call earlier while the outcome under test is
+    # unchanged (first item durable, second not, round still open).
+    budget = _FakeBudget(expire_after_calls=1)
     result = sync_gmail(svc, store, budget=budget)
 
     assert result == 1, "only the message(s) processed before budget expiry should count"
@@ -470,6 +474,11 @@ def test_budget_interrupted_mid_pagination_never_advances_cursor(tmp_path):
     budget = _FakeBudget(expire_after_calls=1)
     result = sync_gmail(svc, store, budget=budget)
 
-    assert result == 0, "pagination was interrupted before the fetch loop ever ran"
-    assert store.get_cursor("gmail") == "1000"
-    assert store.get_chunk("gmail-m1-body-0") is None
+    # m1 WAS collected before pagination stopped, and the minimum-forward-
+    # progress guarantee writes one item per call rather than none -- durable,
+    # checkpointed, and re-listed next cycle. The contract this test exists for
+    # is the cursor: an interrupted round must never advance it, because
+    # page 1 / m2 was never even listed.
+    assert result == 1, "the one collected message should still be written"
+    assert store.get_cursor("gmail") == "1000", "interrupted round must not advance"
+    assert store.get_chunk("gmail-m1-body-0") is not None
