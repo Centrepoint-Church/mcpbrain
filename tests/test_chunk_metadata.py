@@ -61,3 +61,20 @@ def test_note_chunks_limit_counts_live_not_expired(tmp_path):
         _add_note(s, f"note-{i}", otype="memory", expired=(i % 2 == 1))
     got = s.note_chunks(limit=3)
     assert [c["doc_id"] for c in got] == ["note-4", "note-2", "note-0"]
+
+
+def test_every_drive_chunk_records_how_many_chunks_its_document_has():
+    """C1: 154,601 chunks carry chunk_index and ZERO carry a total. Given 'chunk
+    7', nothing can tell whether the document has 8 chunks or 17,281 — so there
+    is no integrity check for partial ingestion, and no consumer can detect the
+    B5 orphaning."""
+    from mcpbrain.sync.drive import normalise_drive
+
+    fmeta = {"id": "f1", "name": "Doc.txt", "mimeType": "text/plain"}
+    text = "\n\n".join(f"Paragraph {i} " + "word " * 300 for i in range(4))
+
+    chunks = normalise_drive(fmeta, text)
+
+    assert len(chunks) > 1
+    for c in chunks:
+        assert c.metadata["chunk_total"] == len(chunks)

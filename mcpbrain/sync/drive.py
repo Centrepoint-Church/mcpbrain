@@ -21,14 +21,22 @@ import json
 import logging
 import uuid
 from contextlib import nullcontext
+from dataclasses import dataclass
 
-from mcpbrain.chunking import chunk_text, content_hash
+from mcpbrain import config
+from mcpbrain.chunking import chunk_text, content_hash, has_content
 from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
-    extract_text_from_pdf,
+    extract_tables_from_xls,
+    extract_tables_from_xlsx,
     extract_text_from_docx,
+    extract_text_from_eml,
+    extract_text_from_pdf,
+    extract_text_from_pptx,
 )
+from mcpbrain.sync.tabular import Table
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +51,9 @@ _EXPORT = {
     "application/vnd.google-apps.presentation": "text/plain",
 }
 
-_DOWNLOAD_TEXT = {"text/plain", "text/markdown", "text/csv"}
+_DOWNLOAD_TEXT = {"text/plain", "text/markdown", "text/csv",
+                  "application/csv", "text/tab-separated-values",
+                  "application/rtf", "application/json", "text/html"}
 
 _DOWNLOAD_BINARY = {
     "application/pdf": extract_text_from_pdf,
@@ -52,12 +62,11 @@ _DOWNLOAD_BINARY = {
     # extract_tables_from_xlsx, which returns structured Table objects rather
     # than pre-rendered text (mcpbrain.sync.tabular) so chunk boundaries can be
     # decided by tabular.render_chunks instead of orphaning the header in
-    # chunk 0 (B2). Wiring that into this fetch pipeline (fetch_content, a
-    # tables-aware normalise_drive) is Task 4's job. Until then, .xlsx is
-    # deliberately left out of this dict rather than left pointing at a
-    # deleted symbol — it degrades to "unsupported, skipped" exactly like any
-    # other binary type not listed here, which is the existing behaviour for
-    # types this dict does not cover.
+    # chunk 0 (B2). .xlsx/.xls are wired in below via fetch_content's
+    # binary_tables dict instead — this dict stays text-shaped.
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        extract_text_from_pptx,
+    "message/rfc822": extract_text_from_eml,
 }
 
 # Per-MIME extraction metadata: (extraction_method, content_subtype, confidence).
@@ -78,18 +87,31 @@ _MIME_EXTRACTION_META: dict[str, tuple[str, str, float]] = {
     "text/tab-separated-values": ("text", "table", 1.0),
     "text/plain": ("text", "prose", 1.0),
     "text/markdown": ("text", "prose", 1.0),
+    "application/rtf": ("text", "prose", 0.9),
+    "application/json": ("text", "prose", 1.0),
+    "text/html": ("text", "prose", 0.9),
+    "message/rfc822": ("eml", "prose", 0.95),
+    "application/vnd.ms-excel": ("spreadsheet", "table", 1.0),   # legacy .xls
 }
 
 _CHANGES_FIELDS = (
     "nextPageToken,newStartPageToken,"
     "changes(fileId,removed,file(id,name,mimeType,modifiedTime,owners,"
-    "md5Checksum,version,size))"
+    "md5Checksum,version,size,parents))"
 )
 
 
 # ---------------------------------------------------------------------------
 # Content fetch
 # ---------------------------------------------------------------------------
+
+@dataclass
+class Content:
+    """What one Drive file yielded. `tables` is set only for tabular MIME types,
+    where the chunker needs structure rather than text (see sync/tabular.py)."""
+    text: str = ""
+    tables: list[Table] | None = None
+
 
 def _fetch_text(service, file_meta: dict) -> str | None:
     """Return decoded text for supported types, else None (skip).
@@ -123,19 +145,75 @@ def _fetch_text(service, file_meta: dict) -> str | None:
     return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
 
 
+def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
+    """Fetch one Drive file, and leave a durable trace when it yields nothing.
+
+    Three outcomes, and they must stay distinguishable (B7 exists because they
+    were not):
+      - a Content with text or tables — ingest it;
+      - a Content that is empty — a SUPPORTED type that extracted to nothing,
+        i.e. a corrupt or image-only file worth investigating;
+      - None — a type we never claimed to handle.
+
+    Types deliberately still unsupported, and now RECORDED rather than silently
+    skipped: legacy .doc/.ppt/.xls, Apple .pages/.numbers/.keynote, .zip, .eml
+    and every image format. Each needs a new dependency of doubtful value or a
+    different pipeline; what changes here is that a sync no longer reports
+    success while discarding them.
+    """
+    mime = file_meta.get("mimeType", "")
+    fid = file_meta.get("id", "")
+    name = file_meta.get("name", "")
+    budget = config.sheet_char_budget(str(config.app_dir()))
+
+    binary_tables = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            extract_tables_from_xlsx,
+        "application/vnd.ms-excel": extract_tables_from_xls,   # legacy .xls
+    }
+    if mime in binary_tables:
+        raw = service.files().get_media(fileId=fid, supportsAllDrives=True).execute()
+        data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
+        tables = binary_tables[mime](data, char_budget=budget)
+        if not tables:
+            ingest_report.record_skip(store, "extraction_empty", fid, f"{mime} ({name})")
+        return Content(tables=tables)
+
+    text = _fetch_text(service, file_meta)
+    if text is None:
+        ingest_report.record_skip(store, "unsupported_mime", fid, f"{mime} ({name})")
+        return None
+    if not text.strip():
+        ingest_report.record_skip(store, "extraction_empty", fid, f"{mime} ({name})")
+        return Content()
+    if tabular.is_tabular(mime):
+        # Google Sheets export as text/csv, and CSV/TSV download verbatim — both
+        # converge on the same Table shape as XLSX so there is ONE renderer.
+        return Content(tables=tabular.tables_from_csv(
+            text, sheet=name or "Sheet1", char_budget=budget))
+    return Content(text=text)
+
+
 # ---------------------------------------------------------------------------
 # Normalisation
 # ---------------------------------------------------------------------------
 
-def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None) -> list[Chunk]:
-    """Convert Drive file metadata + text content into indexable Chunks.
+def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
+                    tables: list[Table] | None = None, folder: str = "") -> list[Chunk]:
+    """Convert Drive file metadata + text content (or structured `tables`) into
+    indexable Chunks.
 
     doc_id format: gdrive-<file_id>-<chunk_index>.
     When drive_id is given (a true Shared Drive file), it is stamped into each
     chunk's metadata under DRIVE_ID_META_KEY so revocation can target it; My Drive
     / shared-with-me files pass drive_id=None and the key stays absent.
+
+    `tables` (from fetch_content) routes through tabular.render_chunks instead
+    of chunk_text — a spreadsheet is not prose, and character-splitting it
+    orphans the header in chunk 0 (B2). `folder` (from folder_path) is stamped
+    as metadata['folder_path'] for embed.contextual_prefix (C5).
     """
-    if not text or not text.strip():
+    if not tables and (not text or not text.strip()):
         return []
 
     fid = file_meta["id"]
@@ -163,17 +241,78 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None) -> 
     }
     if drive_id:
         base_meta[DRIVE_ID_META_KEY] = drive_id
+    if folder:
+        base_meta["folder_path"] = folder[:300]
 
+    if tables:
+        rendered = tabular.render_chunks(tables, file_name=base_meta["file_name"],
+                                         max_chars=tabular.CHUNK_CHARS)
+    else:
+        rendered = [(t, {}) for t in chunk_text(text)]
+
+    kept = [(t, extra) for t, extra in rendered if has_content(t)]
     out = []
-    for i, chunk in enumerate(chunk_text(text)):
-        meta = {**base_meta, "chunk_index": i}
-        out.append(Chunk(
-            doc_id=f"gdrive-{fid}-{i}",
-            text=chunk,
-            content_hash=content_hash(chunk),
-            metadata=meta,
-        ))
+    for i, (chunk, extra) in enumerate(kept):
+        meta = {**base_meta, **extra, "chunk_index": i, "chunk_total": len(kept)}
+        out.append(Chunk(doc_id=f"gdrive-{fid}-{i}", text=chunk,
+                         content_hash=content_hash(chunk), metadata=meta))
     return out
+
+
+def folder_path(service, file_meta: dict, cache: dict) -> str:
+    """The file's folder chain, e.g. 'Finance/Budgets'.
+
+    C5: embed.contextual_prefix (default ON) reads metadata['folder_path'] and
+    normalise_drive never wrote it. `cache` maps folder_id -> (name, parents) and
+    is owned by the CALLER for a whole sync round, so a Drive with 5,000 files in
+    40 folders costs 40 lookups, not 5,000. Any failure degrades to '' —
+    provenance must never break a sync. Depth-capped at 8 and cycle-guarded,
+    because Drive shortcuts can produce a loop.
+    """
+    names: list[str] = []
+    parents = file_meta.get("parents") or []
+    seen: set[str] = set()
+    while parents and len(names) < 8:
+        fid = parents[0]
+        if fid in seen:
+            break
+        seen.add(fid)
+        if fid not in cache:
+            try:
+                info = service.files().get(fileId=fid, fields="id,name,parents",
+                                           supportsAllDrives=True).execute()
+                cache[fid] = (info.get("name", ""), info.get("parents") or [])
+            except Exception as exc:  # noqa: BLE001 — provenance is best-effort
+                log.debug("folder_path: lookup failed for %s: %s", fid, exc)
+                cache[fid] = ("", [])
+        name, parents = cache[fid]
+        if name:
+            names.append(name)
+    return "/".join(reversed(names))
+
+
+def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str) -> int:
+    """Upsert one Drive file's chunks and delete the ones it no longer has.
+
+    B5: doc_ids are positional (gdrive-<fid>-<i>) and every write path only ever
+    upserted. When a document shrank from m chunks to n, indices n..m-1 survived
+    — deleted paragraphs stayed searchable indefinitely and were re-fed to
+    expansion as current content, with nothing able to detect it (no chunk
+    recorded its document's total until C1).
+
+    Returns the number of orphans deleted. `store.delete_chunks` also clears the
+    matching vec_chunks and fts_chunks rows, so the stale text does not survive
+    in either retrieval arm.
+    """
+    for c in chunks:
+        store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    written = {c.doc_id for c in chunks}
+    orphans = [d for d in store.doc_ids_for_file(file_id) if d not in written]
+    if orphans:
+        log.info("drive: %s shrank; deleting %d orphaned chunk(s)",
+                 file_id, len(orphans))
+        store.delete_chunks(orphans)
+    return len(orphans)
 
 
 def list_shared_drives(service) -> list[dict]:
@@ -268,34 +407,41 @@ def _file_resume_key(fmeta: dict) -> str | None:
 def _cache_first_extract_one(
     service, store, fleet_storage, drive_id, fmeta, pin,
     *, contextual_retrieval: bool = False, bulk_section=None,
+    folder_cache: dict | None = None,
 ) -> tuple[bool, tuple[str, str] | None]:
     """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
     (sync_shared_drive) and backfill (backfill_shared_drive) loops.
 
     Sequence: compute the content-version hash; try the ingest cache; on a miss
-    fetch the text, RE-CHECK the cache immediately before the expensive path
+    fetch the content, RE-CHECK the cache immediately before the expensive path
     (herd-race shrink, spec §A2 — another daemon may have just published while
     we were fetching), then normalise + upsert.
 
+    `folder_cache` (C5) is a dict the CALLER owns for a whole sync round (see
+    `folder_path`'s docstring) — a fresh `{}` is used when a caller doesn't
+    pass one, but callers that want cross-file caching within a round (both
+    real callers do) must pass their own.
+
     `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
     default `contextlib.nullcontext`) brackets ONLY the final local-extraction
-    upsert loop below — NOT the two `ingest_cache.try_import` calls or the
-    `_fetch_text` call. Those are genuinely unbounded network I/O (a
-    Drive-API cache-artifact download, and a Drive export + PDF/DOCX
-    extraction) that must never be held under `_bulk_lock` — an earlier
-    version of this function put the caller's WHOLE call (including both of
-    those) inside one bulk section, directly contradicting the same
-    hoist-network-I/O-out-of-the-section principle already applied one
-    function away in `backfill_drive`. The cache-HIT path's own write (inside
-    `try_import` -> `_import_artifact`) is its own separate, already-atomic
-    SQLite transaction that runs outside this advisory lock — a deliberate,
-    small trade-off (cache hits are the common, fast case) rather than
-    further restructuring `ingest_cache.try_import` itself.
+    upsert loop below — NOT the two `ingest_cache.try_import` calls, the
+    `fetch_content` call, or the `folder_path` lookup. Those are genuinely
+    unbounded network I/O (a Drive-API cache-artifact download, a Drive export
+    + PDF/DOCX extraction, and a folder-metadata lookup) that must never be
+    held under `_bulk_lock` — an earlier version of this function put the
+    caller's WHOLE call (including both of those) inside one bulk section,
+    directly contradicting the same hoist-network-I/O-out-of-the-section
+    principle already applied one function away in `backfill_drive`. The
+    cache-HIT path's own write (inside `try_import` -> `_import_artifact`) is
+    its own separate, already-atomic SQLite transaction that runs outside this
+    advisory lock — a deliberate, small trade-off (cache hits are the common,
+    fast case) rather than further restructuring `ingest_cache.try_import`
+    itself.
 
     Returns (processed, miss):
       - processed is True when the file counted as processed — either a cache
         hit or a successful local extraction that yielded at least one chunk;
-        False when skipped (unsupported/empty text, or no chunks produced).
+        False when skipped (unsupported/empty content, or no chunks produced).
       - miss is (file_id, content_hash) when we extracted locally and the
         caller must publish the artifact after embedding; None otherwise
         (cache hit or skip — nothing new to publish).
@@ -306,25 +452,28 @@ def _cache_first_extract_one(
 
     if bulk_section is None:
         bulk_section = nullcontext
+    if folder_cache is None:
+        folder_cache = {}
 
     fid = fmeta["id"]
     content_h = _file_content_hash(fmeta)
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
                                contextual_retrieval=contextual_retrieval):
         return True, None
-    text = _fetch_text(service, fmeta)
-    if not text:
+    content = fetch_content(service, fmeta, store=store)
+    if content is None or (not content.text and not content.tables):
         return False, None
     # Re-check right before extraction: another daemon may have just published.
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
                                contextual_retrieval=contextual_retrieval):
         return True, None
-    chunks = normalise_drive(fmeta, text, drive_id=drive_id)
+    chunks = normalise_drive(fmeta, content.text, drive_id=drive_id,
+                             tables=content.tables,
+                             folder=folder_path(service, fmeta, folder_cache))
     if not chunks:
         return False, None
     with bulk_section():
-        for c in chunks:
-            store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+        upsert_file_chunks(store, chunks, file_id=fid)
     return True, (fid, content_h)
 
 
@@ -377,13 +526,13 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     stored text stayed at its pre-edit content after the round closed and the
     cursor advanced past it). Only once every pending file this round is
     accounted for does the real cursor advance and the resume set clear.
-    (The pagination loop's own `_fetch_text` calls are NOT gated on the
-    resume set — a resumed round still re-fetches text for already-done
-    files during re-listing, which is wasted network cost but not a
-    correctness issue; only the store WRITE is what needed to become
-    genuinely incremental.) `bulk_section` (a zero-arg context-manager
-    factory, default `contextlib.nullcontext`) brackets each file's writes
-    so `_bulk_lock` is released between files.
+    (The pagination loop's own `fetch_content`/`folder_path` calls ARE gated
+    on the resume set — see the `rkey in resumed_ids` check below — so a
+    resumed round does not re-fetch already-checkpointed files; the upsert
+    loop repeats the SAME check independently because `pending` is rebuilt
+    fresh each call.) `bulk_section` (a zero-arg context-manager factory,
+    default `contextlib.nullcontext`) brackets each file's writes so
+    `_bulk_lock` is released between files.
 
     Returns the number of files processed (files that yielded at least one
     chunk) THIS call. May be a partial count when the budget expired
@@ -409,10 +558,14 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     page_token = cursor
     new_start = None
     interrupted = False
-    # Collect (file_meta, text) across all pages before writing to the store.
-    # This keeps the advance-after-durable-write guarantee simple: the cursor
-    # is set only after every upsert completes.
-    pending: list[tuple[dict, str]] = []
+    # Collect (file_meta, content, folder) across all pages before writing to
+    # the store. This keeps the advance-after-durable-write guarantee simple:
+    # the cursor is set only after every upsert completes.
+    pending: list[tuple[dict, Content, str]] = []
+    # C5: owned by this whole sync call (not per file) — folder_path's own
+    # cache contract, so a Drive with many files in few folders costs one
+    # lookup per folder, not per file.
+    folder_cache: dict = {}
 
     while True:
         if budget is not None and budget.expired():
@@ -439,9 +592,11 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
             rkey = _file_resume_key(fmeta)
             if rkey and rkey in resumed_ids:
                 continue
-            text = _fetch_text(service, fmeta)
-            if text:
-                pending.append((fmeta, text))
+            content = fetch_content(service, fmeta, store=store)
+            if content is None or (not content.text and not content.tables):
+                continue
+            folder = folder_path(service, fmeta, folder_cache)
+            pending.append((fmeta, content, folder))
 
         new_start = resp.get("newStartPageToken", new_start)
         nxt = resp.get("nextPageToken")
@@ -458,7 +613,7 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     # STALL_S watchdog restart) never discards the checkpoint for files
     # already durably upserted earlier in this same call.
     processed = 0
-    for fmeta, text in pending:
+    for fmeta, content, folder in pending:
         rkey = _file_resume_key(fmeta)
         if rkey and rkey in resumed_ids:
             continue
@@ -473,16 +628,17 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
             interrupted = True
             break
         with bulk_section():
-            chunks = normalise_drive(fmeta, text)
-            for c in chunks:
-                store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+            chunks = normalise_drive(fmeta, content.text, tables=content.tables,
+                                     folder=folder)
+            upsert_file_chunks(store, chunks, file_id=fmeta["id"])
             if chunks:
                 processed += 1
         if rkey:
             resumed_ids.add(rkey)
             store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
-    pending_keys = {_file_resume_key(fmeta) for fmeta, _ in pending if _file_resume_key(fmeta)}
+    pending_keys = {_file_resume_key(fmeta) for fmeta, _, _ in pending
+                   if _file_resume_key(fmeta)}
     if new_start and not interrupted and pending_keys <= resumed_ids:
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
@@ -555,6 +711,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
 
     if bulk_section is None:
         bulk_section = nullcontext
+    # C5: owned by this whole sync call, not per file — see folder_path's
+    # docstring.
+    folder_cache: dict = {}
     source = f"drive:{drive_id}"
     cursor = store.get_cursor(source)
     if cursor is None:
@@ -656,7 +815,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
             try:
                 did_process, file_miss = _cache_first_extract_one(
                     service, store, fleet_storage, drive_id, ev["fmeta"], pin,
-                    contextual_retrieval=contextual_retrieval, bulk_section=bulk_section)
+                    contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+                    folder_cache=folder_cache)
                 if did_process:
                     processed += 1
                 if file_miss:
@@ -813,8 +973,11 @@ def backfill_drive(service, store, modified_after: str,
                    max_files: int | None = None, bulk_section=None) -> int:
     """One-shot bounded backfill via files.list with a modifiedTime filter.
 
-    Text-native files only (reuses _fetch_text, which returns None for binaries).
-    Does NOT touch the changes cursor. Returns the number of files indexed.
+    Uses `fetch_content`, which now covers structured tables (.xlsx/.xls) and
+    every other type wired into `_DOWNLOAD_TEXT`/`_DOWNLOAD_BINARY`; a type
+    fetch_content doesn't handle is recorded (ingest_report.record_skip)
+    rather than silently skipped. Does NOT touch the changes cursor. Returns
+    the number of files indexed.
 
     `modified_before` optionally caps the upper bound (RFC 3339 timestamp) so
     callers can walk a historical window without re-fetching newer files.
@@ -824,13 +987,17 @@ def backfill_drive(service, store, modified_after: str,
     this at `_BACKFILL_MAX_PER_SOURCE`, default 200) and touches no delta
     cursor, so no budget/checkpoint logic is needed — `bulk_section` (default
     `contextlib.nullcontext`) still brackets each file's writes.
+
+    `folder_cache` (C5) is created once for this whole backfill call, not per
+    file — see `folder_path`'s docstring.
     """
     if bulk_section is None:
         bulk_section = nullcontext
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
-    fields = "nextPageToken, files(id,name,mimeType,modifiedTime,owners)"
+    fields = "nextPageToken, files(id,name,mimeType,modifiedTime,owners,parents)"
+    folder_cache: dict = {}
     page_token, processed = None, 0
     while True:
         params = {"q": q, "fields": fields, "pageSize": 100, "spaces": "drive"}
@@ -840,11 +1007,14 @@ def backfill_drive(service, store, modified_after: str,
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 return processed
-            text = _fetch_text(service, f)
-            if text:
+            content = fetch_content(service, f, store=store)
+            if content is None or (not content.text and not content.tables):
+                continue
+            chunks = normalise_drive(f, content.text, tables=content.tables,
+                                     folder=folder_path(service, f, folder_cache))
+            if chunks:
                 with bulk_section():
-                    for ch in normalise_drive(f, text):
-                        store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+                    upsert_file_chunks(store, chunks, file_id=f["id"])
                     processed += 1
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -868,11 +1038,14 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     """
     if bulk_section is None:
         bulk_section = nullcontext
+    # C5: owned by this whole backfill call, not per file — see folder_path's
+    # docstring.
+    folder_cache: dict = {}
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
     fields = ("nextPageToken, files(id,name,mimeType,modifiedTime,owners,"
-              "md5Checksum,version,size)")
+              "md5Checksum,version,size,parents)")
     page_token, processed = None, 0
     miss: list[tuple[str, str]] = []
     while True:
@@ -889,7 +1062,8 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
                 return {"processed": processed, "miss": miss}
             did_process, file_miss = _cache_first_extract_one(
                 service, store, fleet_storage, drive_id, f, pin,
-                contextual_retrieval=contextual_retrieval, bulk_section=bulk_section)
+                contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+                folder_cache=folder_cache)
             if did_process:
                 processed += 1
             if file_miss:

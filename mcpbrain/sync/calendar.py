@@ -1,6 +1,8 @@
 """Google Calendar delta sync — syncToken path with HTTP 410 full-fetch fallback.
 
-Normalises events to a single Chunk per event (doc_id = cal-<id>).
+Normalises events to one Chunk per event (doc_id = cal-<id>) in the common
+case; a long agenda splits into cal-<id>-<i> chunks (Finding E) so an
+over-2,000-char description is not silently truncated by the embedder.
 Cancelled events are skipped. Cursor (nextSyncToken) is written only after
 all event chunks have been durably upserted.
 """
@@ -11,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
 
-from mcpbrain.chunking import content_hash
+from mcpbrain.chunking import chunk_text, content_hash, has_content
 from mcpbrain.graph_write import (
     _is_owner,
     _meeting_series_id,
@@ -28,10 +30,13 @@ from mcpbrain.sync.normalise import Chunk
 # ---------------------------------------------------------------------------
 
 def normalise_calendar(event: dict) -> list[Chunk]:
-    """Convert a Calendar event dict to a list containing one Chunk.
+    """Convert a Calendar event dict to a list of Chunks.
 
-    Returns an empty list for cancelled events.
-    doc_id format: cal-<event_id> (no suffix; one chunk per event).
+    Returns an empty list for cancelled events (or an event whose rendered
+    text has no content at all). doc_id format: cal-<event_id> for the common
+    single-chunk case (preserved exactly, so existing chunks/relations/
+    delete_calendar_chunks_after keep matching); cal-<event_id>-<i> only when
+    a long description needs to split across more than one chunk.
     """
     if event.get("status") == "cancelled":
         return []
@@ -69,7 +74,21 @@ def normalise_calendar(event: dict) -> list[Chunk]:
         "status": event.get("status", "confirmed"),
         "recurring_event_id": event.get("recurringEventId", ""),
     }
-    return [Chunk(doc_id=f"cal-{eid}", text=text, content_hash=content_hash(text), metadata=meta)]
+    # Finding E: this emitted exactly one chunk per event with the description
+    # inlined, never calling chunk_text, so a long agenda was truncated by the
+    # embedder rather than split. Impact is small — of 1,149 live calendar
+    # chunks, max length 2,977 and only 4 exceed 2,000 chars — so the
+    # single-chunk case stays byte-identical and only those 4 take a suffix.
+    pieces = [p for p in chunk_text(text) if has_content(p)]
+    if not pieces:
+        return []
+    if len(pieces) == 1:
+        return [Chunk(doc_id=f"cal-{eid}", text=pieces[0],
+                      content_hash=content_hash(pieces[0]),
+                      metadata={**meta, "chunk_index": 0, "chunk_total": 1})]
+    return [Chunk(doc_id=f"cal-{eid}-{i}", text=p, content_hash=content_hash(p),
+                  metadata={**meta, "chunk_index": i, "chunk_total": len(pieces)})
+            for i, p in enumerate(pieces)]
 
 
 def _attendee_valid_from(event: dict) -> str:

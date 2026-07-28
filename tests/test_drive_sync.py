@@ -713,3 +713,120 @@ def test_already_resumed_files_are_not_re_downloaded(tmp_path, monkeypatch):
     assert len(calls) < first_round, (
         f"re-downloaded {len(calls)} of {first_round} already-checkpointed files"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 / Task 4: fetch_content, folder_path, upsert_file_chunks
+# ---------------------------------------------------------------------------
+
+def test_an_unsupported_drive_type_is_recorded_rather_than_silently_dropped():
+    """A2: .pptx, .doc, .pages, images and .zip all returned None from
+    _fetch_text with no chunk, no stub and no log line."""
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    fmeta = {"id": "f-1", "name": "Deck.key",
+             "mimeType": "application/x-iwork-keynote-sffkey"}
+
+    assert drive.fetch_content(object(), fmeta, store=store) is None
+    assert store.changes and store.changes[0][0] == "ingest_skip"
+    assert "unsupported_mime" in store.changes[0][2]
+
+
+def test_a_supported_type_that_extracts_to_nothing_is_recorded_distinctly(monkeypatch):
+    """B7: eight `except Exception: return ""` sites make a corrupt DOCX
+    indistinguishable from an unsupported type. They must not share a bucket."""
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    monkeypatch.setattr(drive, "_fetch_text", lambda service, meta: "")
+    fmeta = {"id": "f-2", "name": "Broken.docx",
+             "mimeType": "application/vnd.openxmlformats-officedocument."
+                         "wordprocessingml.document"}
+
+    drive.fetch_content(object(), fmeta, store=store)
+
+    assert [s.split(":")[0] for _k, _r, s in store.changes] == ["extraction_empty"]
+
+
+def test_folder_path_is_resolved_and_cached():
+    """C5: embed.contextual_prefix reads metadata['folder_path'] and
+    normalise_drive never wrote it, so every Drive contextual prefix has been
+    missing its folder context — dead provenance in a default-ON feature."""
+    from mcpbrain.sync import drive
+
+    calls: list = []
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId, fields, supportsAllDrives=None):
+            calls.append(fileId)
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            return {"folder-1": {"id": "folder-1", "name": "Budgets",
+                                 "parents": ["folder-0"]},
+                    "folder-0": {"id": "folder-0", "name": "Finance",
+                                 "parents": []}}[self._fid]
+
+    cache: dict = {}
+    fmeta = {"id": "f1", "name": "Budget.xlsx", "parents": ["folder-1"]}
+
+    assert drive.folder_path(_Service(), fmeta, cache) == "Finance/Budgets"
+    drive.folder_path(_Service(), fmeta, cache)
+    assert calls == ["folder-1", "folder-0"], "the second call must hit the cache"
+
+
+def test_a_shrinking_document_drops_its_orphaned_chunks(tmp_path):
+    """B5: Drive writes gdrive-<fid>-<i> for i in 0..n-1 and only ever upserts.
+    Nothing deleted indices n..m left by a previous, longer version, so deleted
+    paragraphs stayed searchable indefinitely and were re-fed to expansion as
+    current content."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync.drive import normalise_drive, upsert_file_chunks
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    fmeta = {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain"}
+
+    long_text = "\n\n".join(f"Para {i} " + "word " * 400 for i in range(5))
+    upsert_file_chunks(store, normalise_drive(fmeta, long_text), file_id="f1")
+    assert len(store.doc_ids_for_file("f1")) >= 3
+
+    upsert_file_chunks(store, normalise_drive(fmeta, "Para 0 " + "word " * 100),
+                       file_id="f1")
+
+    assert store.doc_ids_for_file("f1") == ["gdrive-f1-0"], "stale chunks survived"
+
+
+def test_upserting_an_unchanged_document_deletes_nothing(tmp_path):
+    from mcpbrain.store import Store
+    from mcpbrain.sync.drive import normalise_drive, upsert_file_chunks
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    fmeta = {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain"}
+    text = "\n\n".join(f"Para {i} " + "word " * 400 for i in range(5))
+
+    upsert_file_chunks(store, normalise_drive(fmeta, text), file_id="f1")
+    first = sorted(store.doc_ids_for_file("f1"))
+    upsert_file_chunks(store, normalise_drive(fmeta, text), file_id="f1")
+
+    assert sorted(store.doc_ids_for_file("f1")) == first
