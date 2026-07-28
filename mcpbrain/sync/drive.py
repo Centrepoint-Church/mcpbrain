@@ -400,9 +400,24 @@ def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str,
     Returns the number of orphans deleted (0 when partial). `store.delete_chunks`
     also clears the matching vec_chunks and fts_chunks rows, so the stale text
     does not survive in either retrieval arm.
+
+    A chunk whose text is byte-identical to what is already stored still has its
+    METADATA refreshed. `store.upsert_chunk` short-circuits on an unchanged
+    content_hash and writes nothing at all — text, embedding AND metadata — so
+    without this a re-ingest of a file that re-chunks identically (most legacy
+    prose: spec 2 changed empty/oversize emission and tabular routing, not prose
+    boundaries) would never acquire `chunker_version`. Since
+    `store.stale_chunker_file_ids` selects on exactly that field and orders by
+    MIN(rowid), those files would stay in the stale set forever and
+    `bin/repair.py reingest-stale --limit N` would re-fetch the same oldest N
+    files on every run, burning Drive quota with zero progress while reporting
+    success. `patch_chunk_metadata` MERGES the fresh metadata without touching
+    content_hash or `embedded`, so nothing is spuriously re-queued for embedding
+    and post-write flags (e.g. `expired`) on an unchanged chunk survive.
     """
     for c in chunks:
-        store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+        if not store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata):
+            store.patch_chunk_metadata(c.doc_id, **c.metadata)
     if partial:
         log.warning("drive: %s extracted only partially; skipping the orphan "
                     "sweep so previously-good chunks are not deleted", file_id)
@@ -1230,9 +1245,11 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
 
     Deliberately bypasses the ingest cache. A cache hit would hand back the
     artifact for this content hash, which is what we are trying to replace — and
-    after the chunker_version bump the fingerprint no longer matches anyway, so
-    there is nothing to hit. Extraction is local and republishing happens through
-    the normal sync path.
+    after the chunker_version bump the fingerprint no longer matches anyway (via
+    `ingest_cache.effective_chunker_version`, which floors the fleet-distributed
+    pin at the local CHUNKER_VERSION; the pin itself lags), so there is nothing
+    to hit. Extraction is local and republishing happens through the normal sync
+    path.
 
     Isolation is per FILE: a 404 (deleted since it was chunked) counts as
     `missing` and its chunks are LEFT ALONE — removal is the delta sync's job,
@@ -1243,7 +1260,16 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     """
     if bulk_section is None:
         bulk_section = nullcontext
-    fields = "id,name,mimeType,modifiedTime,owners,parents"
+    # driveId is requested, and passed to normalise_drive below, because
+    # upsert_chunk REPLACES a chunk's metadata wholesale rather than merging:
+    # re-ingesting a shared-drive file without it would strip the chunk's
+    # drive_id stamp, and `ingest_cache.purge_drive` finds content to delete on
+    # access revocation via `store.doc_ids_for_drive` — i.e. by that exact
+    # stamp. Re-ingested content would otherwise become invisible to revocation
+    # and survive it indefinitely. My Drive / shared-with-me files have no
+    # driveId; `.get` yields None and the key stays absent, as normalise_drive
+    # already expects.
+    fields = "id,name,mimeType,modifiedTime,owners,parents,driveId"
     folder_cache: dict = {}
     summary = {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
     for fid in file_ids:
@@ -1274,7 +1300,8 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
                 summary["failed"] += 1
                 continue
             chunks = normalise_drive(
-                fmeta, content.text, tables=content.tables,
+                fmeta, content.text, drive_id=fmeta.get("driveId"),
+                tables=content.tables,
                 folder=folder_path(service, fmeta, folder_cache))
             if not chunks:
                 summary["failed"] += 1

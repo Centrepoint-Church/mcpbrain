@@ -98,6 +98,11 @@ def test_hybrid_search_reuses_query_vec(monkeypatch):
             return []
         def fts_search(self, q, k):
             return []
+        def doc_root_content_hashes(self, roots):
+            # hybrid_search's duplicate-document dedup calls this once per
+            # search with the candidate pool's doc roots; with no candidates it
+            # is called with [] and the empty mapping is the correct answer.
+            return {r: frozenset() for r in roots}
 
     out = retrieval.hybrid_search(_Store(), _Emb(), "q", 5, query_vec=[0.0, 0.0, 0.0, 0.0])
     assert out == []

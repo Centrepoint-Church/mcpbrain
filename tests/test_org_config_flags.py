@@ -1,5 +1,12 @@
-from mcpbrain import config
+from mcpbrain import config, org_defaults
 from mcpbrain.org_contracts import FleetPin, DEFAULT_RELATION_ALLOWLIST
+
+# What config.fleet_pin returns for a malformed/absent org_pin block: every
+# field at its FleetPin default EXCEPT chunker_version, which falls back to the
+# code's own version (spec 3) rather than "" — an install whose org-config.json
+# has not caught up must still read the CURRENT chunker as its baseline instead
+# of a value that matches no published cache artifact's fingerprint.
+_UNPINNED = FleetPin(chunker_version=org_defaults.ORG_PIN_CHUNKER_VERSION)
 
 
 def test_role_defaults_to_member(tmp_path):
@@ -46,13 +53,13 @@ def test_fleet_pin_reads_org_config_block(tmp_path):
 def test_fleet_pin_ignores_non_dict_org_config(tmp_path):
     config.write_config(str(tmp_path), {"org_config": "not-a-dict"})
     pin = config.fleet_pin(str(tmp_path))
-    assert pin == FleetPin()
+    assert pin == _UNPINNED
 
 
 def test_fleet_pin_ignores_non_dict_org_pin(tmp_path):
     config.write_config(str(tmp_path), {"org_config": {"org_pin": ["not", "a", "dict"]}})
     pin = config.fleet_pin(str(tmp_path))
-    assert pin == FleetPin()
+    assert pin == _UNPINNED
 
 
 def test_fleet_pin_ignores_non_string_iterable_relation_allowlist(tmp_path):

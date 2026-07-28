@@ -4,7 +4,7 @@ import unicodedata
 
 
 # Version of the chunking pipeline that produced a chunk. Stamped into every
-# chunk's metadata at write time and folded into the org pin's
+# chunk's metadata at write time, and the FLOOR for the chunker_version fed to
 # pipeline_fingerprint (which keys the shared-drive ingest-cache artifact
 # filename AND gates ingest_cache.try_import).
 #
@@ -12,9 +12,15 @@ import unicodedata
 #   chunks; tabular sources are chunked by header-repeating row group instead of
 #   character-split; content-free text is never written as a chunk.
 #
-# Bumping this is what makes a chunking change VISIBLE: it invalidates every
-# stale fleet cache artifact automatically, and `WHERE COALESCE(chunker_version,
-# 0) < CHUNKER_VERSION` becomes the level-triggered selector bin/repair.py walks.
+# Bumping this is what makes a chunking change VISIBLE, in two ways:
+#   * `WHERE COALESCE(chunker_version, 0) < CHUNKER_VERSION` is the
+#     level-triggered selector bin/repair.py walks; and
+#   * it invalidates stale fleet ingest-cache artifacts — but only because
+#     `ingest_cache.effective_chunker_version` FLOORS the org pin's value at
+#     this constant. The fingerprint is keyed off the fleet-DISTRIBUTED pin, and
+#     the live pin sets chunker_version explicitly, so bumping this constant
+#     alone would otherwise change nothing about the cache (config.fleet_pin's
+#     default only applies when the key is absent). See that function.
 # Bump it whenever chunk boundaries or chunk admission change.
 CHUNKER_VERSION = 2
 

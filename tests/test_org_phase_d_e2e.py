@@ -4,12 +4,13 @@ import json
 import struct
 
 from mcpbrain import onboarding, org_curate, ingest_cache
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import (FleetPin, CacheArtifact, CacheChunk,
                                     artifact_filename)
 from mcpbrain.store import Store
 from tests.helpers.org_fleet import make_fleet, LocalDirFleetStorage
 
-PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version=str(CHUNKER_VERSION),
                enrich_logic_floor=1, fleet_secret="s3cret")
 
 
@@ -17,11 +18,11 @@ def _publish_cache_artifact(drive_fs, file_id="F1"):
     vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
     art = CacheArtifact(
         file_id=file_id, content_hash="vh1", extraction_method="gdocs",
-        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="shared drive doc body", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": file_id, "chunk_index": 0}),),
         enrich={}, published_by="p@x.org", published_at="2026-07-04")
-    drive_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename(file_id,'vh1','bge-small',4,'v1')}",
+    drive_fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename(file_id,'vh1','bge-small',4,str(CHUNKER_VERSION))}",
                        gzip.compress(json.dumps(art.to_dict()).encode()))
 
 
@@ -40,7 +41,7 @@ def test_new_member_bootstraps_from_real_snapshot_and_cache(tmp_path):
     # curator.home is configured with role=org_curator by make_fleet; give it the pin.
     config.write_config(str(curator.home), {"org_config": {"org_pin": {
         "fleet_secret": "s3cret", "embed_model": "bge-small", "dim": 4,
-        "chunker_version": "v1"}}})
+        "chunker_version": str(CHUNKER_VERSION)}}})
     org_curate._publish(curator.store, fleet_fs, str(curator.home))  # publish snapshot v1
 
     # (b) a shared drive carries a cached artifact (bob's per-drive storage).
