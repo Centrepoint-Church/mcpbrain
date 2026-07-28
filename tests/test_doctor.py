@@ -382,3 +382,19 @@ def test_cli_offline_flag_is_parsed_and_forwarded(monkeypatch):
     except SystemExit:
         pass
     assert seen["offline"] is True
+
+
+def test_doctor_reports_repair_state(tmp_path, monkeypatch):
+    """The repair's progress has to be visible without running the CLI, or
+    'is it done?' becomes a guess."""
+    from mcpbrain.store import Store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "|  |  |", "h1", {})
+    store.upsert_chunk("gdrive-f1-0", "legacy text", "h2",
+                       {"source_type": "gdrive", "file_id": "f1"})
+
+    assert store.count_content_free() == 1
+    assert store.stale_chunker_file_ids(2, limit=10) == ["f1"]
