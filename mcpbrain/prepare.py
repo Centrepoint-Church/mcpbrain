@@ -287,6 +287,15 @@ def should_enrich(chunk: dict) -> bool:
     source = str(meta.get("source_type") or meta.get("source") or "").lower()
 
     if source == "gmail" or meta.get("thread_id"):
+        # Header-based bulk signal (List-Id / List-Unsubscribe / Precedence),
+        # stamped at ingest by normalise_gmail. Checked BEFORE the Gmail
+        # CATEGORY_* labels because it is strictly stronger: Gmail's categoriser
+        # misses plenty of list mail that carries these headers, and this is the
+        # signal that used to DROP the message outright at ingest (A4). Now it
+        # cold-marks instead — embedded, searchable, never graph-extracted,
+        # and reversible.
+        if meta.get("bulk"):
+            return False
         # Email: check Gmail category labels.
         labels_raw = meta.get("labels") or ""
         if isinstance(labels_raw, list):

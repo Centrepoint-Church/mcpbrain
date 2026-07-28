@@ -9,6 +9,8 @@ from contextlib import nullcontext
 
 from googleapiclient.errors import HttpError
 
+from mcpbrain import config
+from mcpbrain.sync import attachments, ingest_report
 from mcpbrain.sync.normalise import normalise_gmail
 
 
@@ -163,6 +165,7 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     # progress lost even though the writes themselves were already durable.
     messages_processed = 0
     fetch_interrupted = False
+    skips: dict = {}
     for mid in new_message_ids:
         if mid in resumed_ids:
             continue
@@ -184,9 +187,18 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
                 store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
                 continue
             raise
+        # Attachment fetch is NETWORK I/O and must be hoisted OUT of the bulk
+        # section — the daemon-scheduling work established that _bulk_lock must
+        # never be held across network calls (see _cache_first_extract_one).
+        att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
+                      if config.gmail_attachments(str(config.app_dir())) else [])
         with bulk_section():
-            for chunk in normalise_gmail(raw):
-                store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash, chunk.metadata)
+            for chunk in normalise_gmail(raw, report=skips):
+                store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                                   chunk.metadata)
+            for chunk in att_chunks:
+                store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                                   chunk.metadata)
         messages_processed += 1
         resumed_ids.add(mid)
         store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
@@ -200,6 +212,9 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     if not pagination_interrupted and not fetch_interrupted and set(new_message_ids) <= resumed_ids:
         store.set_cursor(source, str(latest_history_id))
         store.set_cursor(resume_key, "[]")
+
+    for reason, count in sorted(skips.items()):
+        ingest_report.record_skip(store, f"gmail_{reason}", source, str(count))
 
     return messages_processed
 
@@ -226,6 +241,12 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
     if before:
         q += f" before:{before}"
     page_token, processed = None, 0
+    skips: dict = {}
+
+    def _flush_skips() -> None:
+        for reason, count in sorted(skips.items()):
+            ingest_report.record_skip(store, f"gmail_{reason}", "gmail", str(count))
+
     while True:
         params = {"userId": "me", "q": q, "maxResults": 100}
         if page_token:
@@ -233,6 +254,7 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
         resp = service.users().messages().list(**params).execute()
         for m in resp.get("messages", []):
             if max_messages is not None and processed >= max_messages:
+                _flush_skips()
                 return processed
             try:
                 raw = service.users().messages().get(
@@ -243,11 +265,19 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
                 if resp_err is not None and resp_err.status == 404:
                     continue
                 raise
+            # Attachment fetch is NETWORK I/O and must be hoisted OUT of the
+            # bulk section — see sync_gmail for why _bulk_lock must never be
+            # held across network calls.
+            att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
+                          if config.gmail_attachments(str(config.app_dir())) else [])
             with bulk_section():
-                for ch in normalise_gmail(raw):
+                for ch in normalise_gmail(raw, report=skips):
+                    store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+                for ch in att_chunks:
                     store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
                 processed += 1
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    _flush_skips()
     return processed
