@@ -349,3 +349,84 @@ def test_dedup_passes_through_hits_with_no_content_hash(tmp_path):
     hits = [{"doc_id": "d1", "score": 0.9}, {"doc_id": "d2", "score": 0.5}]
 
     assert len(retrieval._dedupe_by_content(hits)) == 2
+
+
+def test_hybrid_search_collapses_a_multi_chunk_duplicate_file(tmp_path):
+    """A genuine duplicate FILE spanning 2+ chunks per copy must still collapse
+    to one surviving copy, not just single-chunk files. A per-chunk sibling
+    COUNT (an earlier, rejected approach) is > 1 for EVERY chunk of a
+    multi-chunk file, which would exempt the whole file from ever collapsing
+    and leave it just as crowded as before; comparing the document's WHOLE
+    hash SET is what correctly still collapses this case."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    cover = "Asset register cover page for the 2023 financial year."
+    body = "Assets: chairs, tables, projector, sound desk."
+    for fid in ("p", "q"):
+        store.upsert_chunk(f"gdrive-{fid}-0", cover, "cover-hash",
+                           {"source_type": "gdrive", "file_id": fid})
+        store.upsert_chunk(f"gdrive-{fid}-1", body, "body-hash",
+                           {"source_type": "gdrive", "file_id": fid})
+        store.embed_doc(f"gdrive-{fid}-0", emb, home=str(tmp_path))
+        store.embed_doc(f"gdrive-{fid}-1", emb, home=str(tmp_path))
+    store.upsert_chunk("gdrive-z-0", "Unrelated minutes of the board meeting.",
+                       "other-hash", {"source_type": "gdrive", "file_id": "z"})
+    store.embed_doc("gdrive-z-0", emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "asset register", limit=10)
+
+    survivors = [h for h in hits if h["doc_id"].startswith(("gdrive-p-", "gdrive-q-"))]
+    roots = {h["doc_id"].rsplit("-", 1)[0] for h in survivors}
+    assert len(roots) == 1, f"both duplicate copies survived uncollapsed: {survivors}"
+    assert {h["content_hash"] for h in survivors} == {"cover-hash", "body-hash"}, (
+        "the surviving copy must keep BOTH of its own chunks, not just the one "
+        "that happened to collide first"
+    )
+    assert any(h["doc_id"] == "gdrive-z-0" for h in hits), "unrelated content must survive untouched"
+
+
+def test_hybrid_search_does_not_collapse_a_shared_boilerplate_chunk(tmp_path):
+    """Two DIFFERENT real documents that merely share one templated/boilerplate
+    chunk (e.g. a common board-charter letterhead) must NOT collapse into one
+    — only a genuine WHOLE-document duplicate should. Comparing just the one
+    shared chunk's content_hash can't tell these apart from a true duplicate
+    file; comparing each document's full chunk-hash SET can (they differ,
+    since the rest of each document's own content is unique per document)."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    header = "Board Charter Template - Harvestnet Church Plant Policy Suite."
+    for fid, body in (("alpha", "Governance structure for the Alpha church plant."),
+                      ("beta", "Governance structure for the Beta church plant.")):
+        store.upsert_chunk(f"gdrive-{fid}-0", header, "shared-header-hash",
+                           {"source_type": "gdrive", "file_id": fid})
+        store.upsert_chunk(f"gdrive-{fid}-1", body, f"{fid}-body-hash",
+                           {"source_type": "gdrive", "file_id": fid})
+        store.embed_doc(f"gdrive-{fid}-0", emb, home=str(tmp_path))
+        store.embed_doc(f"gdrive-{fid}-1", emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "board charter template", limit=10)
+
+    roots_present = {h["doc_id"].rsplit("-", 1)[0] for h in hits}
+    assert {"gdrive-alpha", "gdrive-beta"} <= roots_present, (
+        f"a genuinely different document was wrongly collapsed: {hits}"
+    )
