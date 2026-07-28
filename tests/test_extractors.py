@@ -66,13 +66,17 @@ def test_docx_roundtrip():
 
 
 def test_xlsx_roundtrip():
-    """XLSX with a header row and a data row extracts headers, values, and sheet name."""
-    from mcpbrain.sync.extractors import extract_text_from_xlsx
-    text = extract_text_from_xlsx(_make_xlsx_bytes())
-    assert "Sheet:" in text
-    assert "Category" in text
-    assert "Amount" in text
-    assert "120000" in text
+    """extract_text_from_xlsx no longer exists: chunk boundaries used to be
+    decided here (a single markdown-rendered string per sheet), which orphaned
+    the header in chunk 0 once chunk_text split it (B2). Chunking is now the
+    renderer's job (tabular.render_chunks), so the extractor's contract is a
+    structured Table, not text — assert the same content via the new shape."""
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx
+    tables = extract_tables_from_xlsx(_make_xlsx_bytes(), char_budget=1_000_000)
+    assert len(tables) == 1
+    assert tables[0].sheet == "Budget"
+    assert tables[0].header == ["Category", "Amount"]
+    assert tables[0].rows == [["Salaries", "120000"]]
 
 
 def test_pdf_text_layer():
@@ -96,16 +100,20 @@ def test_pdf_no_text_layer_degrades_without_tesseract(monkeypatch):
 
 
 def test_extractors_return_empty_on_garbage():
-    """Garbage bytes fed to each extractor returns '' without crashing."""
+    """Garbage bytes fed to each extractor returns '' (or [] for the tabular
+    extractors, which return a list of Table, not text) without crashing.
+    extract_text_from_xlsx no longer exists (see test_xlsx_roundtrip); the
+    replacement extract_tables_from_xlsx keeps the same graceful-failure
+    contract, just with a list return type."""
     from mcpbrain.sync.extractors import (
         extract_text_from_pdf,
         extract_text_from_docx,
-        extract_text_from_xlsx,
+        extract_tables_from_xlsx,
     )
     garbage = b"not a real file"
     assert extract_text_from_pdf(garbage) == ""
     assert extract_text_from_docx(garbage) == ""
-    assert extract_text_from_xlsx(garbage) == ""
+    assert extract_tables_from_xlsx(garbage, char_budget=1_000_000) == []
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +189,201 @@ def test_ocr_roundtrip_with_real_tesseract():
     assert is_scanned_pdf(pdf) is True
     out = extract_text_from_pdf(pdf)
     assert "centrepoint" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Structured tables (A2/B1/B2), PPTX, legacy XLS, EML (A2), visible failures (B7)
+# ---------------------------------------------------------------------------
+
+def test_xlsx_yields_structured_tables():
+    """extract_text_from_xlsx is replaced by extract_tables_from_xlsx: chunk
+    boundaries are decided later, by the renderer, so each chunk can repeat the
+    header instead of orphaning it in chunk 0 (B2)."""
+    import io
+
+    import openpyxl
+
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Budget"
+    ws.append(["Item", "Amount"])
+    ws.append(["Rent", 500])
+    ws.append([None, None])          # empty row — must be dropped
+    ws.append(["Power", 120])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    tables = extract_tables_from_xlsx(buf.getvalue(), char_budget=1_000_000)
+
+    assert len(tables) == 1
+    assert tables[0].sheet == "Budget"
+    assert tables[0].header == ["Item", "Amount"]
+    assert tables[0].rows == [["Rent", "500"], ["Power", "120"]]
+    assert tables[0].truncated is False
+
+
+def test_xlsx_keeps_rows_past_the_old_200_row_cap():
+    """338 live files hit the old cap — budgets, a general ledger, risk
+    assessments — losing every row past 200 per sheet."""
+    import io
+
+    import openpyxl
+
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Item", "Amount"])
+    for i in range(400):
+        ws.append([f"Item {i}", i])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    tables = extract_tables_from_xlsx(buf.getvalue(), char_budget=1_000_000)
+
+    assert len(tables[0].rows) == 400
+    assert tables[0].truncated is False
+
+
+def test_pptx_text_is_extracted():
+    """A2: presentationml.presentation is advertised in _MIME_EXTRACTION_META but
+    reachable by no fetcher, so every .pptx was dropped. Verified live: 0 chunks
+    for .pptx against 28 for native Google Slides."""
+    import io
+
+    from pptx import Presentation
+
+    from mcpbrain.sync.extractors import extract_text_from_pptx
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = "Q3 Ministry Review"
+    buf = io.BytesIO()
+    prs.save(buf)
+
+    assert "Q3 Ministry Review" in extract_text_from_pptx(buf.getvalue())
+
+
+def test_legacy_xls_yields_the_same_table_shape_as_xlsx():
+    """A2: .xls was dropped entirely. Declining a SPREADSHEET format would be
+    indefensible after B1 established that budgets and ledgers are the
+    highest-value tabular content, and xlrd 2.0 exists purely to read .xls.
+
+    The fixture is a small binary .xls checked into tests/fixtures/, generated
+    once via `uv run --with xlwt python -c "..."` (xlwt is a dev-only,
+    write-only helper — not a project dependency — so it is never imported
+    here; only xlrd, already in pyproject.toml, is used at test time).
+    """
+    from pathlib import Path
+
+    from mcpbrain.sync.extractors import extract_tables_from_xls
+
+    raw = (Path(__file__).parent / "fixtures" / "legacy_budget.xls").read_bytes()
+
+    tables = extract_tables_from_xls(raw, char_budget=1_000_000)
+
+    assert len(tables) == 1
+    assert tables[0].sheet == "Budget"
+    assert tables[0].header == ["Item", "Amount"]
+    assert tables[0].rows == [["Rent", "500"]]
+
+
+def test_eml_is_extracted_as_prose_with_its_headers():
+    """A2: .eml files in Drive were dropped. Stdlib `email` parses them — zero
+    new dependencies — and they become prose documents, NOT synthetic Gmail
+    threads (that would be scope creep into the sync layer's identity model)."""
+    from mcpbrain.sync.extractors import extract_text_from_eml
+
+    raw = (b"From: sam@example.com\r\n"
+           b"To: josh@centrepoint.church\r\n"
+           b"Subject: Hall B booking\r\n"
+           b"Date: Tue, 02 Jun 2026 16:30:01 +0800\r\n"
+           b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+           b"Confirmed for Sunday the 8th.\r\n")
+
+    text = extract_text_from_eml(raw)
+
+    assert "Subject: Hall B booking" in text
+    assert "sam@example.com" in text
+    assert "Confirmed for Sunday the 8th." in text
+
+
+def test_a_multipart_eml_prefers_the_plain_text_part():
+    from mcpbrain.sync.extractors import extract_text_from_eml
+
+    raw = (b"Subject: Multi\r\n"
+           b'Content-Type: multipart/alternative; boundary="b"\r\n\r\n'
+           b"--b\r\nContent-Type: text/plain\r\n\r\nplain body here\r\n"
+           b"--b\r\nContent-Type: text/html\r\n\r\n<p>html body</p>\r\n--b--\r\n")
+
+    text = extract_text_from_eml(raw)
+
+    assert "plain body here" in text
+    assert "<p>" not in text
+
+
+def test_pptx_extraction_failure_returns_empty_and_logs(caplog):
+    from mcpbrain.sync.extractors import extract_text_from_pptx
+
+    with caplog.at_level("WARNING"):
+        assert extract_text_from_pptx(b"not a pptx") == ""
+
+    assert any("pptx" in r.message for r in caplog.records), (
+        "a failed extraction must leave a trace; eight sites in this module "
+        "returned '' with no log line at all (B7)"
+    )
+
+
+def test_a_scanned_pdf_with_no_ocr_available_is_reported_not_silently_empty(monkeypatch, caplog):
+    """A5: with tesseract absent a fully-scanned PDF returns '' with no warning
+    at all — no chunks, no log line, nothing to explain the absence."""
+    import fitz
+
+    from mcpbrain.sync import extractors
+
+    monkeypatch.setattr(extractors, "_tesseract_available", lambda: False)
+    doc = fitz.open()
+    doc.new_page()
+    data = doc.tobytes()
+
+    with caplog.at_level("WARNING"):
+        text = extractors.extract_text_from_pdf(data)
+
+    assert text.strip() == ""
+    assert any("scanned" in r.message.lower() and "tesseract" in r.message.lower()
+               for r in caplog.records), (
+        f"no warning explained the empty result: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_a_failed_ocr_page_is_logged(monkeypatch, caplog):
+    """A5: per-page OCR failure/timeout returns '' and falls back to page_text,
+    so a timed-out page yields nothing, unlogged."""
+    import fitz
+
+    from mcpbrain.sync import extractors
+
+    monkeypatch.setattr(extractors, "_tesseract_available", lambda: True)
+    monkeypatch.setattr(extractors, "_ocr_page", lambda page: "")
+    doc = fitz.open()
+    doc.new_page()
+
+    with caplog.at_level("WARNING"):
+        extractors.extract_text_from_pdf(doc.tobytes())
+
+    assert any("ocr" in r.message.lower() for r in caplog.records)
+
+
+def test_is_scanned_pdf_is_either_used_or_gone():
+    """A5: is_scanned_pdf is defined but never called; the real gate is an
+    inline char-count heuristic. Two heuristics that can disagree, one of them
+    dead, is worse than either alone."""
+    import subprocess
+
+    out = subprocess.run(["git", "grep", "-n", "is_scanned_pdf", "--", "mcpbrain/"],
+                         capture_output=True, text=True).stdout
+    call_sites = [ln for ln in out.splitlines() if "def is_scanned_pdf" not in ln]
+
+    assert call_sites, "is_scanned_pdf is still dead code"
