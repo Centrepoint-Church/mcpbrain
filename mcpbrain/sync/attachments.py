@@ -33,7 +33,7 @@ from mcpbrain.sync.extractors import (
     extract_text_from_pdf,
     extract_text_from_pptx,
 )
-from mcpbrain.sync.normalise import Chunk, get_header
+from mcpbrain.sync.normalise import Chunk, _is_bulk_or_auto, get_header
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +129,8 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         elif mime in _CSV_MIMES:
             tables = tabular.tables_from_csv(
                 data.decode("utf-8", errors="replace"),
-                sheet=part["filename"], char_budget=budget)
+                sheet=part["filename"], char_budget=budget,
+                delimiter=tabular.delimiter_for_mime(mime))
         elif mime in _EXTRACTORS:
             text = _EXTRACTORS[mime](data)
         else:
@@ -142,18 +143,25 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
 
     msg_id = raw_message["id"]
     headers = (raw_message.get("payload") or {}).get("headers", [])
+    subject = get_header(headers, "subject")
     base = {
         "source_type": "gmail",
         "content_type": "email_attachment",
         "message_id": msg_id,
         "thread_id": raw_message.get("threadId", ""),
-        "subject": get_header(headers, "subject")[:200],
+        "subject": subject[:200],
         "sender": get_header(headers, "from")[:200],
         "date": get_header(headers, "date")[:80],
         "attachment_name": part["filename"][:200],
         "attachment_mime": mime[:100],
         "extraction_method": _EXTRACTION_METHOD.get(mime, "text"),
     }
+    # I1: the parent's bulk signal has to reach the attachment too, or a
+    # newsletter's attached flyer is graph-extracted while the body it arrived
+    # with is cold-marked. Derived from the same headers by the same function
+    # normalise_gmail uses, so the two can't disagree.
+    if _is_bulk_or_auto(headers, subject):
+        base["bulk"] = True
 
     if tables:
         rendered = tabular.render_chunks(tables, file_name=part["filename"],
@@ -162,12 +170,19 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         rendered = [(t, {}) for t in chunk_text(text)]
     kept = [(t, extra) for t, extra in rendered if has_content(t)]
 
-    return [
-        Chunk(doc_id=f"gmail-{msg_id}-att-{part['index']}-{i}", text=t,
-              content_hash=content_hash(t),
-              metadata={**base, **extra, "chunk_index": i, "chunk_total": len(kept)})
-        for i, (t, extra) in enumerate(kept)
-    ]
+    out = []
+    for i, (t, extra) in enumerate(kept):
+        meta = {**base, **extra, "chunk_index": i, "chunk_total": len(kept)}
+        # I1: prepare.should_enrich's (now source-agnostic) tabular gate reads
+        # content_subtype, which normalise_drive stamps per-MIME but this module
+        # never did — so an emailed workbook's row-group chunks all went to the
+        # extractor. table_role is render_chunks' own marker that this chunk IS a
+        # rendered table.
+        if "table_role" in extra:
+            meta["content_subtype"] = "table"
+        out.append(Chunk(doc_id=f"gmail-{msg_id}-att-{part['index']}-{i}", text=t,
+                         content_hash=content_hash(t), metadata=meta))
+    return out
 
 
 def fetch_and_normalise(service, raw_message: dict, *, store=None) -> list[Chunk]:

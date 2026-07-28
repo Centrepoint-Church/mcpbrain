@@ -202,3 +202,26 @@ def test_content_subtype_table_is_gated():
         "source_type": "gdrive", "mime_type": "application/pdf",  # prose mime
         "content_subtype": "table"})  # but tagged tabular → skip
     assert should_enrich(c) is False
+
+
+def test_a_tabular_email_attachment_is_gated():
+    """I1: the content_subtype=='table' check claimed to be source-agnostic in its
+    own comment but physically sat inside the Drive branch. Attachment chunks are
+    source_type 'gmail' (they carry their parent's message/thread ids on purpose),
+    so an emailed budget workbook took the Gmail branch, never reached the check,
+    and sent every one of its row-group chunks to Haiku uncapped."""
+    c = _chunk("| Item | Amount |\n| Rent | 500 |", meta={
+        "source_type": "gmail", "message_id": "m1", "thread_id": "t1",
+        "content_type": "email_attachment", "attachment_name": "Budget.xlsx",
+        "content_subtype": "table", "table_role": "rows"})
+    assert should_enrich(c) is False
+
+
+def test_a_prose_email_attachment_still_passes():
+    """The discriminator: the gate must key on the tabular TAG, not on being an
+    attachment. An emailed board-paper PDF is exactly the content worth
+    extracting."""
+    c = _chunk("Minutes of the board meeting. " * 20, meta={
+        "source_type": "gmail", "message_id": "m1", "thread_id": "t1",
+        "content_type": "email_attachment", "attachment_name": "Minutes.pdf"})
+    assert should_enrich(c) is True

@@ -262,6 +262,7 @@ def should_enrich(chunk: dict) -> bool:
     """Return True when a chunk is worth LLM graph-extraction.
 
     Source-aware gate:
+    - Any source: skip a chunk tagged content_subtype 'table' (I1).
     - Email: skip CATEGORY_PROMOTIONS/UPDATES Gmail labels (in addition to the
       existing _filter_noise sender/subject checks). The label check works on the
       already-retrieved label metadata stored in the chunk.
@@ -286,6 +287,17 @@ def should_enrich(chunk: dict) -> bool:
     # legacy key and to structural hints (thread_id ⇒ email, file_id/mime ⇒ Drive).
     source = str(meta.get("source_type") or meta.get("source") or "").lower()
 
+    # Source-AGNOSTIC, and it has to physically sit above the per-source
+    # branches to be so (I1): this check used to live inside the Drive branch
+    # while claiming source-independence in its own comment. Email ATTACHMENT
+    # chunks are source_type 'gmail', so an emailed budget workbook took the
+    # Gmail branch, never reached this check, and sent every one of its row-group
+    # chunks to the extractor uncapped. A 'table' chunk is tabular data, not
+    # prose worth entity extraction, whoever produced it; any future tabular
+    # source is honoured without re-listing mimes anywhere.
+    if str(meta.get("content_subtype") or "").lower() == "table":
+        return False
+
     if source == "gmail" or meta.get("thread_id"):
         # Header-based bulk signal (List-Id / List-Unsubscribe / Precedence),
         # stamped at ingest by normalise_gmail. Checked BEFORE the Gmail
@@ -307,13 +319,8 @@ def should_enrich(chunk: dict) -> bool:
         return True
 
     if source in ("gdrive", "drive") or meta.get("file_id") or meta.get("mime_type"):
-        # Drive: gate on the extractor's content_subtype tag, then mime + length.
-        # content_subtype is set per-MIME at ingest (normalise_drive); a 'table'
-        # chunk (spreadsheet/CSV) is tabular data, not prose worth entity
-        # extraction — skip it source-agnostically so a tag set on any future
-        # tabular source is honoured without re-listing mimes here.
-        if str(meta.get("content_subtype") or "").lower() == "table":
-            return False
+        # Drive: content_subtype is checked above (source-agnostically); what is
+        # left here is the Drive-specific mime + length gate.
         mime = str(meta.get("mime_type") or "").lower()
         if mime in _COLD_DRIVE_MIMES:
             return False

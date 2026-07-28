@@ -206,14 +206,31 @@ def _split_paragraph(para: str, max_chars: int, overlap: int) -> list[str]:
     return out
 
 
+# The BGE window is 512 tokens ≈ 2,000 characters, and embed.contextual_prefix
+# (default ON) prepends ~100 chars of provenance to every gmail/gdrive passage at
+# embed time — measured against the SAME window (index.EMBED_WINDOW_CHARS, which
+# checks the PREFIXED text). So a chunk packed to the full max_tokens*4 tips over
+# it and B3's silent tail-truncation applies to the bulk of the corpus, not an
+# edge case. Reserve the headroom here, at write time, exactly as
+# semantic.SEMANTIC_MAX_CHARS (1800) already does for the one document
+# chunk_text cannot bound.
+_PREFIX_HEADROOM_CHARS = 200
+
+
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
     """Split text into embeddable chunks on paragraph boundaries.
 
-    Every returned chunk is non-empty and at most `max_tokens * 4` characters
-    (the BGE window is 512 tokens; anything longer is silently truncated at
-    embed time — 15,576 such chunks exist in the live store, B3).
+    Every returned chunk is non-empty and at most `max_tokens * 4` characters,
+    and in fact at most `max_tokens * 4 - _PREFIX_HEADROOM_CHARS` whenever that
+    is a meaningful reduction — see _PREFIX_HEADROOM_CHARS. The signature is
+    locked, so the reservation happens inside.
     """
     max_chars = max_tokens * 4
+    # Not applied when the whole requested budget is comparable to the headroom:
+    # eating most of a deliberately tiny budget would change what such a caller
+    # gets for no gain, since those chunks are nowhere near the embedder window.
+    if max_chars >= _PREFIX_HEADROOM_CHARS * 4:
+        max_chars -= _PREFIX_HEADROOM_CHARS
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: list[str] = []
     current = ""

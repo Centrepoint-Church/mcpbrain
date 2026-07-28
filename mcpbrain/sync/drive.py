@@ -8,12 +8,19 @@ Content fetch covers:
   - application/pdf       → get_media + pymupdf extraction (OCR optional via tesseract)
   - application/vnd.openxmlformats-officedocument.wordprocessingml.document → get_media + python-docx
   - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet → get_media + openpyxl
+  - application/vnd.ms-excel (legacy .xls) → get_media + xlrd (A2)
+  - message/rfc822 (.eml) → get_media + stdlib email (A2)
+  - text/tab-separated-values, application/csv, application/rtf,
+    application/json, text/html → get_media
 
-Images and other binary types are still skipped (return None).
+Images, audio, video and anything else not in the routing tables below are
+skipped (fetch_content returns None) — but the skip is now RECORDED rather than
+silent (B7); see `_note_skip` / `flush_skip_report`.
 
 The cursor-advance-after-durable-write guarantee is maintained by collecting
-all pending (file_meta, text) pairs across pages before writing anything to
-the store, then advancing the cursor only after all upserts complete.
+all pending (file_meta, Content, folder) triples across pages before writing
+anything to the store, then advancing the cursor only after all upserts
+complete.
 """
 
 import hashlib
@@ -35,6 +42,7 @@ from mcpbrain.sync.extractors import (
     extract_text_from_eml,
     extract_text_from_pdf,
     extract_text_from_pptx,
+    is_partial,
 )
 from mcpbrain.sync.tabular import Table
 
@@ -108,9 +116,15 @@ _CHANGES_FIELDS = (
 @dataclass
 class Content:
     """What one Drive file yielded. `tables` is set only for tabular MIME types,
-    where the chunker needs structure rather than text (see sync/tabular.py)."""
+    where the chunker needs structure rather than text (see sync/tabular.py).
+
+    `partial` (I9) means the extractor died PARTWAY through the document and this
+    is what it had so far — so the caller must not read the short result as a
+    shrunk document and delete the chunks the failed extraction never reached.
+    See extractors.PartialTables and upsert_file_chunks."""
     text: str = ""
     tables: list[Table] | None = None
+    partial: bool = False
 
 
 def _fetch_text(service, file_meta: dict) -> str | None:
@@ -164,23 +178,34 @@ def _note_skip(store, report: dict | None, kind: str, fid: str, mime: str, name:
     if report is None:
         ingest_report.record_skip(store, kind, fid, f"{mime} ({name})")
         return
+    # Aggregating loses the per-file audit trail that the immediate-write branch
+    # above keeps, and in production EVERY caller passes `report` — so without
+    # this line it is no longer possible to tell from any record WHICH file was
+    # skipped. Debug level: the point of the tally is that these can be
+    # hundreds per round.
+    log.debug("drive: %s skipped file %s (%s, %r)", kind, fid, mime, name)
     key = (kind, mime)
     report[key] = report.get(key, 0) + 1
 
 
-def flush_skip_report(store, report: dict) -> None:
+def flush_skip_report(store, report: dict, *, source: str = "drive") -> None:
     """Turn one sync round's `fetch_content` skip tally into a small, bounded
     number of change_log rows — one per `kind` (today: at most
     'unsupported_mime' and 'extraction_empty'), with a per-mime breakdown in
     the detail string, instead of one row per skipped file. `report` is
     typically empty (nothing skipped) — then this is a no-op.
+
+    `source` is the round's own identifier ("drive", or "drive:<driveId>" for a
+    Shared Drive) and becomes the row's `ref_id`, mirroring sync/gmail.py's
+    reviewed pattern of passing `source` there. An empty ref_id made the
+    aggregated rows untraceable to the drive that produced them.
     """
     by_kind: dict[str, list[tuple[str, int]]] = {}
     for (kind, mime), count in report.items():
         by_kind.setdefault(kind, []).append((mime, count))
     for kind, mimes in sorted(by_kind.items()):
         detail = ", ".join(f"{mime}: {count}" for mime, count in sorted(mimes))
-        ingest_report.record_skip(store, f"drive_{kind}", "", detail)
+        ingest_report.record_skip(store, f"drive_{kind}", source, detail)
 
 
 def fetch_content(service, file_meta: dict, *, store=None,
@@ -194,11 +219,16 @@ def fetch_content(service, file_meta: dict, *, store=None,
         i.e. a corrupt or image-only file worth investigating;
       - None — a type we never claimed to handle.
 
+    A Content may also be `partial` (I9): the extractor died partway and this is
+    what it had. Callers must pass that through to `upsert_file_chunks` so the
+    orphan sweep is skipped.
+
     Types deliberately still unsupported, and now RECORDED rather than silently
-    skipped: legacy .doc/.ppt/.xls, Apple .pages/.numbers/.keynote, .zip, .eml
-    and every image format. Each needs a new dependency of doubtful value or a
+    skipped: legacy .doc/.ppt, Apple .pages/.numbers/.keynote, .zip, and every
+    image/audio/video format. Each needs a new dependency of doubtful value or a
     different pipeline; what changes here is that a sync no longer reports
-    success while discarding them.
+    success while discarding them. (Legacy .xls and .eml WERE on that list and
+    are now supported — extract_tables_from_xls / extract_text_from_eml, A2.)
 
     `report`, when passed (by a sync-round caller — see `flush_skip_report`),
     accumulates skips as {(kind, mime): count} instead of writing one
@@ -221,7 +251,7 @@ def fetch_content(service, file_meta: dict, *, store=None,
         tables = binary_tables[mime](data, char_budget=budget)
         if not tables:
             _note_skip(store, report, "extraction_empty", fid, mime, name)
-        return Content(tables=tables)
+        return Content(tables=tables, partial=is_partial(tables))
 
     text = _fetch_text(service, file_meta)
     if text is None:
@@ -229,13 +259,16 @@ def fetch_content(service, file_meta: dict, *, store=None,
         return None
     if not text.strip():
         _note_skip(store, report, "extraction_empty", fid, mime, name)
-        return Content()
+        return Content(partial=is_partial(text))
     if tabular.is_tabular(mime):
         # Google Sheets export as text/csv, and CSV/TSV download verbatim — both
-        # converge on the same Table shape as XLSX so there is ONE renderer.
+        # converge on the same Table shape as XLSX so there is ONE renderer. The
+        # delimiter comes from the MIME (I4): TSV parsed with a comma collapsed
+        # every row into one 300-char-truncated cell.
         return Content(tables=tabular.tables_from_csv(
-            text, sheet=name or "Sheet1", char_budget=budget))
-    return Content(text=text)
+            text, sheet=name or "Sheet1", char_budget=budget,
+            delimiter=tabular.delimiter_for_mime(mime)))
+    return Content(text=text, partial=is_partial(text))
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +368,8 @@ def folder_path(service, file_meta: dict, cache: dict) -> str:
     return "/".join(reversed(names))
 
 
-def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str) -> int:
+def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str,
+                       partial: bool = False) -> int:
     """Upsert one Drive file's chunks and delete the ones it no longer has.
 
     B5: doc_ids are positional (gdrive-<fid>-<i>) and every write path only ever
@@ -344,12 +378,24 @@ def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str) -> int:
     expansion as current content, with nothing able to detect it (no chunk
     recorded its document's total until C1).
 
-    Returns the number of orphans deleted. `store.delete_chunks` also clears the
-    matching vec_chunks and fts_chunks rows, so the stale text does not survive
-    in either retrieval arm.
+    `partial=True` (I9, from Content.partial) means the extraction that produced
+    `chunks` died PARTWAY through the document: the chunks it never reached are
+    missing because of the failure, not because the document shrank. The orphan
+    sweep is skipped entirely in that case — whatever WAS extracted is still
+    written/updated, but nothing is deleted. Without this, a transient failure on
+    sheet 3 of 5 permanently deleted sheets 3-5's previously-good chunks, and
+    nothing re-triggers extraction for a file whose metadata never changes again.
+
+    Returns the number of orphans deleted (0 when partial). `store.delete_chunks`
+    also clears the matching vec_chunks and fts_chunks rows, so the stale text
+    does not survive in either retrieval arm.
     """
     for c in chunks:
         store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    if partial:
+        log.warning("drive: %s extracted only partially; skipping the orphan "
+                    "sweep so previously-good chunks are not deleted", file_id)
+        return 0
     written = {c.doc_id for c in chunks}
     orphans = [d for d in store.doc_ids_for_file(file_id) if d not in written]
     if orphans:
@@ -519,7 +565,7 @@ def _cache_first_extract_one(
     if not chunks:
         return False, None
     with bulk_section():
-        upsert_file_chunks(store, chunks, file_id=fid)
+        upsert_file_chunks(store, chunks, file_id=fid, partial=content.partial)
     return True, (fid, content_h)
 
 
@@ -682,7 +728,8 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         with bulk_section():
             chunks = normalise_drive(fmeta, content.text, tables=content.tables,
                                      folder=folder)
-            upsert_file_chunks(store, chunks, file_id=fmeta["id"])
+            upsert_file_chunks(store, chunks, file_id=fmeta["id"],
+                               partial=content.partial)
             if chunks:
                 processed += 1
         if rkey:
@@ -695,7 +742,7 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
 
-    flush_skip_report(store, skip_report)
+    flush_skip_report(store, skip_report, source=source)
     return processed
 
 
@@ -939,7 +986,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
         store.set_cursor(resume_removed_key, "[]")
-    flush_skip_report(store, skip_report)
+    flush_skip_report(store, skip_report, source=source)
     return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
 
 
@@ -1075,7 +1122,8 @@ def backfill_drive(service, store, modified_after: str,
                                      folder=folder_path(service, f, folder_cache))
             if chunks:
                 with bulk_section():
-                    upsert_file_chunks(store, chunks, file_id=f["id"])
+                    upsert_file_chunks(store, chunks, file_id=f["id"],
+                                       partial=content.partial)
                     processed += 1
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -1123,7 +1171,7 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         resp = service.files().list(**params).execute()
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
-                flush_skip_report(store, skip_report)
+                flush_skip_report(store, skip_report, source=f"drive:{drive_id}")
                 return {"processed": processed, "miss": miss}
             did_process, file_miss = _cache_first_extract_one(
                 service, store, fleet_storage, drive_id, f, pin,
@@ -1136,5 +1184,5 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
-    flush_skip_report(store, skip_report)
+    flush_skip_report(store, skip_report, source=f"drive:{drive_id}")
     return {"processed": processed, "miss": miss}
