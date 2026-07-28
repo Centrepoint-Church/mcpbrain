@@ -190,17 +190,19 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
                     row["metadata"], row["vector"],
                     enriched=row.get("enriched", False),
                     enriched_version=row.get("enriched_version", 0))
-            # Indexed doc_id RANGE predicate, not `LIKE ... ESCAPE`: ESCAPE
-            # disables SQLite's LIKE-to-index optimisation and silently turns a
-            # doc_id prefix match into a full `SCAN chunks` (the 0.7.105
-            # chunks_for_file incident; see store.doc_root_content_hashes'
-            # docstring, which uses this same form). '.' sorts immediately
-            # after '-' in ASCII, so [root+'-', root+'.') bounds exactly the
-            # "starts with <root>-" set.
-            root = f"gdrive-{art.file_id}"
+            # Exact metadata.file_id match (index-backed by idx_chunks_fileid),
+            # not a doc_id LIKE or RANGE predicate: `LIKE ... ESCAPE` disables
+            # SQLite's LIKE-to-index optimisation and silently turns a doc_id
+            # prefix match into a full `SCAN chunks` (the 0.7.105
+            # chunks_for_file incident), and a RANGE bound built from
+            # f"gdrive-{art.file_id}" has the same failure mode
+            # store.doc_ids_for_file's docstring describes: Drive file ids use
+            # the base64url alphabet (embed '-'), so one file's id can be a
+            # '-'-delimited prefix of another's and a range/prefix match can't
+            # tell them apart. Equality on the metadata field can.
             existing = [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE doc_id >= ? AND doc_id < ?",
-                (f"{root}-", f"{root}.")).fetchall()]
+                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.file_id')=?",
+                (art.file_id,)).fetchall()]
             stale = [d for d in existing if d not in written]
             if stale:
                 log.info("ingest_cache: %s shrank; deleting %d orphaned chunk(s)",
