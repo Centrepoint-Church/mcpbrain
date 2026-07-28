@@ -423,6 +423,14 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
             fmeta = ch.get("file") or {}
             if not fmeta.get("id"):
                 continue
+            # Skip files this round already durably wrote BEFORE paying for the
+            # download. _file_resume_key is computable from the change metadata
+            # alone, so a truncated round no longer re-exports work it has
+            # already checkpointed -- pure waste, and charged against the very
+            # budget that is running out.
+            rkey = _file_resume_key(fmeta)
+            if rkey and rkey in resumed_ids:
+                continue
             text = _fetch_text(service, fmeta)
             if text:
                 pending.append((fmeta, text))
@@ -446,7 +454,14 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         rkey = _file_resume_key(fmeta)
         if rkey and rkey in resumed_ids:
             continue
-        if budget is not None and budget.expired():
+        # Minimum forward progress: honour the budget only once this call has
+        # written something. The fetch phase above is unbounded (one network
+        # export per changed file), so the budget is routinely already spent by
+        # the time we get here -- checking it before the first item yields zero
+        # writes, leaves resumed_ids unchanged, and re-does the identical work
+        # next cycle. Guaranteeing one item per call is what makes the round
+        # monotonic and the livelock impossible.
+        if processed and budget is not None and budget.expired():
             interrupted = True
             break
         with bulk_section():

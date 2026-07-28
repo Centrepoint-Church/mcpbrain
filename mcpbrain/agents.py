@@ -33,6 +33,11 @@ _TASK_NAME = "mcpbrain"
 _TRAY_TASK_NAME = "mcpbrain-tray"
 _WIN_SHIM_DIR = "agents"  # app_dir()/agents/<task>.vbs
 
+# The waiting shim propagates the daemon's exit code via WScript.Quit; only that
+# variant lets Task Scheduler's RestartOnFailure ever see a failure. Used by
+# win_supervised() to tell a real XML registration from the /TR fallback.
+_WAITING_SHIM_MARKER = "WScript.Quit"
+
 
 # ---------------------------------------------------------------------------
 # Pure generators
@@ -188,6 +193,30 @@ def _startup_shortcut_path(task_name: str) -> Path:
 
 def _win_shim_path(home: str, task_name: str) -> Path:
     return Path(home) / _WIN_SHIM_DIR / f"{task_name}.vbs"
+
+
+def win_supervised(home: str) -> bool:
+    """True when a watchdog exit will actually be restarted by Windows.
+
+    Only the XML-registered task carries `RestartOnFailure`, and only that path
+    installs the WAITING shim (`sh.Run ..., True`) that keeps the task instance
+    alive for the daemon's lifetime so its exit code reaches Task Scheduler at
+    all. If XML registration fails, install_agent falls back to the plain /TR
+    form and reverts the shim to the non-waiting variant — the daemon still
+    starts at logon but nothing restarts it.
+
+    Deriving supervision from the installed shim rather than a separate marker
+    means there is no second piece of state to drift out of sync with reality:
+    the artefact that determines the behaviour is the artefact we inspect.
+    A missing shim, or the Startup-folder mechanism, is never supervised.
+    """
+    if win_persistence_mechanism() != "schtasks":
+        return False
+    try:
+        content = _win_shim_path(home, _TASK_NAME).read_text()
+    except OSError:
+        return False
+    return _WAITING_SHIM_MARKER in content
 
 
 def _schtasks_tr_for_shim(shim_path: Path) -> str:
