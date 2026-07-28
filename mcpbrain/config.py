@@ -1004,6 +1004,7 @@ def fleet_pin(home):
     """Typed view of the fleet-wide pin staged under config['org_config']['org_pin']
     by fleet.merge_org_config. Absent or malformed fields (a hand-edited config.json
     with the wrong shape) fall back to FleetPin defaults rather than raising."""
+    from mcpbrain import org_defaults
     from mcpbrain.org_contracts import FleetPin
     org_config = read_config(home).get("org_config")
     raw = org_config.get("org_pin") if isinstance(org_config, dict) else None
@@ -1012,7 +1013,11 @@ def fleet_pin(home):
     kwargs = dict(
         embed_model=raw.get("embed_model", ""),
         dim=int(raw.get("dim", 0) or 0),
-        chunker_version=raw.get("chunker_version", ""),
+        # Defaults to the code's own chunker version (not "") so an install
+        # whose org-config.json hasn't caught up yet still reads the CURRENT
+        # chunker as its baseline rather than a value that never matches any
+        # published cache artifact's fingerprint.
+        chunker_version=raw.get("chunker_version", org_defaults.ORG_PIN_CHUNKER_VERSION),
         enrich_logic_floor=int(raw.get("enrich_logic_floor", 0) or 0),
         fleet_secret=raw.get("fleet_secret", ""),
     )

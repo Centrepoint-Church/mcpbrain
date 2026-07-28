@@ -3,6 +3,22 @@ import re
 import unicodedata
 
 
+# Version of the chunking pipeline that produced a chunk. Stamped into every
+# chunk's metadata at write time and folded into the org pin's
+# pipeline_fingerprint (which keys the shared-drive ingest-cache artifact
+# filename AND gates ingest_cache.try_import).
+#
+# 1 -> 2 (spec 2, 2026-07-28): chunk_text no longer emits empty or oversize
+#   chunks; tabular sources are chunked by header-repeating row group instead of
+#   character-split; content-free text is never written as a chunk.
+#
+# Bumping this is what makes a chunking change VISIBLE: it invalidates every
+# stale fleet cache artifact automatically, and `WHERE COALESCE(chunker_version,
+# 0) < CHUNKER_VERSION` becomes the level-triggered selector bin/repair.py walks.
+# Bump it whenever chunk boundaries or chunk admission change.
+CHUNKER_VERSION = 2
+
+
 # Leading honorifics stripped from a name so "Ps Joel" / "Pastor Joel Chelliah"
 # canonicalise to the bare name. Matched case-insensitively with any trailing
 # full-stop removed.
