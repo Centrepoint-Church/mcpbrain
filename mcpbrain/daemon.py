@@ -117,6 +117,28 @@ CYCLE_BUDGET_S = 60.0
 # its own is enough while still bounding a pathological capture backlog.
 CAPTURES_BUDGET_S = 10.0
 
+# Separate, independent wall-clock slice for prepare.prepare_units (the
+# enrichment PRODUCER) and drain.drain (the enrichment CONSUMER) -- the exact
+# same defect CAPTURES_BUDGET_S was created to fix (see its comment above),
+# just found later (final whole-branch review, Important I-4): both were
+# still threaded the SAME `budget` object run_sync_cycle had already spent,
+# so on any cycle with a sync backlog that budget is already expired by the
+# time they run. Confirmed live: prepare_units was entered exactly twice in a
+# full day of daemon operation and logged "budget spent after 0 threads"
+# BOTH times -- including a fresh daemon's very first cycle, before any
+# backup had even run -- so the enrichment queue silently stopped refilling
+# for as long as any sync backlog persisted (the real, structural cause
+# behind the "enrichment queue refilling" acceptance criterion not showing
+# movement in Task 8's live run, not merely a session artifact of the
+# backup issue as first recorded there). Each call site gets its OWN fresh
+# Budget(ENRICH_SPOOL_BUDGET_S) (not a shared object between the two,
+# either) so prepare_units running long can't itself starve drain.drain's
+# slice within the same cycle. Sized like CYCLE_BUDGET_S rather than
+# CAPTURES_BUDGET_S's small user-paced slice: prepare_units/drain.drain
+# process the bulk thread/inbox backlog this whole plan is about, not a
+# small captures spool.
+ENRICH_SPOOL_BUDGET_S = 60.0
+
 # Tick interval for the maintenance thread (Daemon._maintenance_loop). Each
 # cadence pass still self-gates on its own interval, so a tick is cheap; this
 # just bounds how promptly a newly-due pass is noticed.
@@ -462,12 +484,17 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     Returns the sync result dict ({"gmail","calendar","drive","embedded"}) plus
     an "enrich" key holding the chosen path's summary and a "more_work" bool.
 
-    `budget` (a `Budget`, or None for unbounded) is threaded into both
-    run_sync_cycle and drain.drain so a large backlog yields the cycle instead
-    of holding it for hours; `more_work` is True when this cycle stopped early
-    with work still to do — either the budget expired OR a bounded phase hit its
-    own item cap (`embed_capped` from run_sync_cycle) — telling the caller to
-    re-wake promptly instead of waiting the full interval.
+    `budget` (a `Budget`, or None for unbounded) is threaded into run_sync_cycle
+    so a large sync backlog yields the cycle instead of holding it for hours;
+    `more_work` is True when this cycle stopped early with work still to do —
+    either the budget expired OR a bounded phase hit its own item cap
+    (`embed_capped` from run_sync_cycle) — telling the caller to re-wake
+    promptly instead of waiting the full interval. `drain_captures`,
+    `prepare.prepare_units` and `drain.drain` do NOT share this budget object —
+    see `CAPTURES_BUDGET_S` / `ENRICH_SPOOL_BUDGET_S` for why each gets its own
+    independent slice instead (reusing `budget` here silently starved all
+    three on any cycle where run_sync_cycle had already spent it, which is the
+    live-store NORMAL case on a backlog).
 
     `on_progress` (Task 5), if given, is called with `"sync"` right after
     run_sync_cycle returns — a free function has no `self`, so the daemon
@@ -560,15 +587,27 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
                     log.info("re-extraction: re-flowed %d outdated chunk(s)", reflowed)
             except Exception as exc:  # noqa: BLE001 — never crash the cycle
                 log.warning("re-extraction sweep skipped: %s", exc)
+        # prepare_units (the enrichment PRODUCER) and drain.drain (the
+        # enrichment CONSUMER) each get their OWN independent budget, exactly
+        # like drain_captures above (Important I-4, final whole-branch
+        # review) -- and NOT the same fresh budget as each other, so one
+        # running long can't itself starve the other's slice this cycle. The
+        # SHARED `budget` above (already spent by run_sync_cycle on any
+        # cycle with a sync backlog -- the live-store normal case) used to be
+        # threaded into both: confirmed live, prepare_units logged "budget
+        # spent after 0 threads" on both of its only two entries in a full
+        # day, including a fresh daemon's very first cycle before any backup
+        # had even run. See ENRICH_SPOOL_BUDGET_S.
         prep = prepare.prepare_units(store, thread_cap=config.spool_thread_cap(str(app_dir())),
                                      char_budget=SPOOL_CHAR_BUDGET,
                                      resolution_due=resolution_due,
                                      synthesis_requests=synthesis_requests,
                                      extra_blocks=extra_blocks,
                                      home=str(app_dir()),
-                                     budget=budget,
+                                     budget=Budget(ENRICH_SPOOL_BUDGET_S),
                                      bulk_section=bulk_section)
-        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder, budget=budget,
+        drained = drain.drain(store, apply=_graph_apply(), embedder=embedder,
+                              budget=Budget(ENRICH_SPOOL_BUDGET_S),
                               bulk_section=bulk_section)
         result["enrich"] = {"mode": "spool", "prepare": prep, "drain": drained}
         if drained.get("files") or drained.get("applied"):
@@ -1077,10 +1116,9 @@ class Daemon:
         # Re-stamp every tracked phase BEFORE unpausing -- see the docstring
         # above for why a pause longer than STALL_S would otherwise misread
         # pre-pause timestamps as a stall on the very first tick after resume.
-        with self._progress_lock:
-            now = self._clock()
-            for phase in self._progress:
-                self._progress[phase] = now
+        # See _restamp_all_progress -- the same helper backs the analogous
+        # long-backup and long-backfill fixes.
+        self._restamp_all_progress()
         self._pause.clear()
 
     def is_paused(self) -> bool:
@@ -1583,11 +1621,36 @@ class Daemon:
         this happening), then joins the maintenance thread if one exists and is
         alive. getattr guards minimally-constructed Daemon doubles in tests that
         may not have started (or even set) _maintenance_thread.
+
+        If the thread is STILL alive after the join times out, this logs an
+        ERROR naming the risk and returns anyway rather than blocking forever
+        (Important finding, final whole-branch review): gated-pass execution
+        is deliberately unbounded elsewhere in this file (see
+        `BULK_LOCK_ACQUIRE_S` / `_cycle_bulk_section`'s docstring -- a gated
+        pass's ACQUIRE is bounded, its execution once acquired is not), so a
+        mid-pass maintenance thread surviving this join is a real, reachable
+        case, not a hypothetical. The caller (`run()`'s `_pending_update`
+        path, and `stop()`) still proceeds to release `SingleWriterLock`
+        right after this returns either way -- blocking here indefinitely
+        would trade a visible, logged hazard for a daemon that can never
+        restart/update at all, which is its own outage, and there is no safe
+        finite bound to block on instead that would not sometimes cut off a
+        legitimately-long pass. Making the failure loud (rather than blocking
+        longer) matches how the rest of this file treats a lock hold that can
+        legitimately outlast one tick's bound (`BULK_LOCK_ACQUIRE_S`,
+        `_backup_under_bulk_lock`'s acquire): skip/log, don't block forever.
         """
         self._stop.set()
         t = getattr(self, "_maintenance_thread", None)
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
+            if t.is_alive():
+                log.error(
+                    "maintenance thread did not stop within %.1fs of "
+                    "shutdown (likely mid gated-pass, which runs unbounded "
+                    "once acquired); proceeding anyway -- this risks a "
+                    "second concurrent writer if an update/restart follows",
+                    timeout)
 
     # -- one cycle ----------------------------------------------------------
 
@@ -1721,8 +1784,22 @@ class Daemon:
         When paused, returns None and writes nothing to the store (the pause
         guarantee). Otherwise runs run_cycle with the configured services and
         returns its result dict.
+
+        Also returns None (no store writes -- single-writer, yield to the
+        backfill) while `_backfill_active` is set. Important I-1 (final
+        whole-branch review): a backfill runs on its OWN thread and can
+        legitimately take far longer than STALL_S (2000s+ observed live), but
+        this early return used to do nothing -- leaving "cycle"/"sync"
+        ageing for the backfill's whole duration with no restamp, unlike the
+        `_pause` branch above (which resume() restamps on the way out).
+        Restamping ALL progress here every time run() calls back in
+        (~_interval_s) means a long, legitimate backfill reads as "busy on
+        accounted-for work", not a wedge -- see `_restamp_all_progress`.
         """
-        if self._pause.is_set() or self._backfill_active.is_set():
+        if self._pause.is_set():
+            return None
+        if self._backfill_active.is_set():
+            self._restamp_all_progress()
             return None
         self._graph_cleanup_once()
         self._graph_recompute_once()
@@ -2003,6 +2080,19 @@ class Daemon:
         regardless of whether a backup happened THIS cycle, so an orphan is
         caught within roughly SNAPSHOT_ORPHAN_MAX_AGE_S plus one interval,
         not only at the next full restart.
+
+        Re-stamps EVERY tracked progress key, not just "backup", once
+        maybe_backup() returns (final-whole-branch-review Critical B): this
+        used to stamp only "backup" itself, so "cycle"/"sync" kept ageing
+        for the ENTIRE duration of a long backup -- reproduced live with a
+        2400s backup producing `_stalled_phase() -> ("cycle", 2400.0)` and a
+        spurious restart on the very next tick, even though the daemon was
+        legitimately busy backing up, not wedged. Uses the exact
+        `resume()`-style restamp (see `_restamp_all_progress`, and
+        `resume()`'s own docstring for the original instance of this
+        pattern), in the `finally` so it fires whether maybe_backup()
+        succeeded, failed internally (it swallows its own errors -- see its
+        docstring), or -- belt and braces -- raised.
         """
         self._note_progress("backup")
         with self._bulk_lock_intent():
@@ -2018,14 +2108,18 @@ class Daemon:
         # make_encrypted_snapshot is still writing to -- the mechanism that
         # left ~24GB of mcpbrain-snap-* on disk and froze the host on
         # 2026-07-27. _recover_from_stall checks this event and defers
-        # recovery while a backup is in flight. The second _note_progress
-        # below means a multi-minute backup (large store, slow upload) also
-        # reads as fresh progress throughout, not just at the start.
+        # recovery while a backup is in flight. The full restamp in the
+        # `finally` below means a multi-minute backup (large store, slow
+        # upload) also reads as fresh progress throughout, not just at the
+        # start.
         self._backup_in_progress.set()
         try:
             self.maybe_backup()
-            self._note_progress("backup")
         finally:
+            # Restamp ALL of _progress, not just "backup" -- see this
+            # method's docstring (Critical B) for why a single-key stamp
+            # left "cycle"/"sync" stale for the whole backup duration.
+            self._restamp_all_progress()
             self._backup_in_progress.clear()
             try:
                 removed = backup.sweep_orphan_snapshots(
@@ -3055,6 +3149,25 @@ class Daemon:
         the cadence passes, so a mid-cycle stall was invisible by construction."""
         with self._progress_lock:
             self._progress[phase] = self._clock()
+
+    def _restamp_all_progress(self) -> None:
+        """Re-stamp EVERY tracked `_progress` key to "now" in one shot.
+
+        `_stalled_phase()`'s `min()`-over-all-keys has no way to express "this
+        thread just spent a long time on a KNOWN, accounted-for deferral, not
+        a wedge" -- a single-key `_note_progress` call leaves every OTHER key
+        ageing for the whole deferral. `resume()` was the first place this
+        pattern was needed (a long pause froze every key except "backup"); it
+        is also the fix for a long backup (`_backup_under_bulk_lock`'s
+        `finally`, Critical B from the final whole-branch review) and a long
+        backfill (`run_one`'s `_backfill_active` early return, Important
+        I-1) -- both are threads legitimately busy doing accounted-for work,
+        not stalled, for a duration that can exceed STALL_S.
+        """
+        with self._progress_lock:
+            now = self._clock()
+            for phase in self._progress:
+                self._progress[phase] = now
 
     def _stalled_phase(self) -> tuple[str, float] | None:
         """(phase, seconds_since) for the STALEST recorded phase, if it is too old.

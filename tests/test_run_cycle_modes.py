@@ -72,6 +72,46 @@ def test_run_cycle_spool_passes_resolution_due(monkeypatch):
     assert prepare_call[2]["resolution_due"] is True
 
 
+def test_prepare_units_and_drain_get_their_own_budget_not_the_spent_shared_one(monkeypatch):
+    """Important I-4 (final whole-branch review), same defect class as
+    drain_captures' independent-budget fix (Task 2): prepare_units and
+    drain.drain used to receive the SAME `budget` object run_sync_cycle had
+    already spent, so on any cycle with a sync backlog (the live-store
+    NORMAL case) that budget was already expired by the time they ran --
+    confirmed live, prepare_units logged "budget spent after 0 threads" on
+    BOTH of its only two entries in a full day of operation, including a
+    fresh daemon's very first cycle before any backup had even run.
+
+    Drives run_cycle with an ALREADY-EXPIRED shared budget and asserts
+    prepare_units/drain.drain each receive their OWN fresh, unexpired budget
+    object instead -- and that the two are not even the same object as each
+    other, so one can't starve the other's slice within one cycle.
+    """
+    from mcpbrain.budget import Budget
+
+    calls = []
+    monkeypatch.setattr(daemon_module.prepare, "prepare_units", _spy(calls, "prepare_units"))
+    monkeypatch.setattr(daemon_module.drain, "drain", _spy(calls, "drain"))
+    monkeypatch.setattr(daemon_module, "_graph_apply", lambda: object())
+
+    shared = Budget(deadline_s=0.0)   # already expired -- simulates a spent sync budget
+    run_cycle(FakeStore(), FakeEmbedder(), enrich_mode="spool", budget=shared)
+
+    prepare_call = next(c for c in calls if c[0] == "prepare_units")
+    drain_call = next(c for c in calls if c[0] == "drain")
+    prepare_budget = prepare_call[2]["budget"]
+    drain_budget = drain_call[2]["budget"]
+
+    assert prepare_budget is not shared, "prepare_units must not share the spent cycle budget"
+    assert drain_budget is not shared, "drain.drain must not share the spent cycle budget"
+    assert not prepare_budget.expired(), "prepare_units' own budget must not start out expired"
+    assert not drain_budget.expired(), "drain.drain's own budget must not start out expired"
+    assert prepare_budget is not drain_budget, (
+        "prepare_units and drain.drain must not share ONE budget object either -- "
+        "prepare_units running long could otherwise starve drain.drain's own slice"
+    )
+
+
 def test_run_cycle_off_skips_enrich(monkeypatch):
     """off: neither the spool path runs."""
     calls = []
