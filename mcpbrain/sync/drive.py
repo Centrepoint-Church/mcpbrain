@@ -30,6 +30,8 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
 
+from googleapiclient.errors import HttpError
+
 from mcpbrain import config
 from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
 from mcpbrain.org_contracts import DRIVE_ID_META_KEY
@@ -1209,3 +1211,70 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
             break
     flush_skip_report(store, skip_report, source=f"drive:{drive_id}")
     return {"processed": processed, "miss": miss}
+
+
+def reingest_files(service, store, file_ids, *, bulk_section=None,
+                   report: dict | None = None) -> dict:
+    """Re-fetch and re-chunk specific Drive files by id.
+
+    The mechanism the repair needs and the sync layer lacked: `sync_drive` only
+    sees files the Changes API reports as MODIFIED, and `backfill_drive` filters
+    on modifiedTime — so a file whose bytes are unchanged but whose CHUNKING is
+    out of date (455 spreadsheets clipped at row 200, 9,351 files extracted by
+    the pre-per-type extractor) could never be revisited by either.
+
+    Per file: files().get for fresh metadata -> fetch_content -> normalise_drive
+    -> upsert_file_chunks, which replaces the file's chunks and deletes the ones
+    it no longer has (B5). Touches NO cursor, so it cannot disturb delta sync and
+    is safe to interrupt.
+
+    Deliberately bypasses the ingest cache. A cache hit would hand back the
+    artifact for this content hash, which is what we are trying to replace — and
+    after the chunker_version bump the fingerprint no longer matches anyway, so
+    there is nothing to hit. Extraction is local and republishing happens through
+    the normal sync path.
+
+    Isolation is per FILE: a 404 (deleted since it was chunked) counts as
+    `missing` and its chunks are LEFT ALONE — removal is the delta sync's job,
+    not the repair's — and any other failure counts as `failed` and moves on.
+    One unreadable file in 9,351 must not end the run.
+
+    Returns {"files": n_reingested, "missing": n, "failed": n, "orphans": n}.
+    """
+    if bulk_section is None:
+        bulk_section = nullcontext
+    fields = "id,name,mimeType,modifiedTime,owners,parents"
+    folder_cache: dict = {}
+    summary = {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
+    for fid in file_ids:
+        try:
+            fmeta = service.files().get(
+                fileId=fid, fields=fields, supportsAllDrives=True).execute()
+        except HttpError as exc:
+            resp = getattr(exc, "resp", None)
+            if resp is not None and resp.status == 404:
+                log.info("reingest: %s no longer exists in Drive; leaving its "
+                         "chunks for the delta sync's removal path", fid)
+                summary["missing"] += 1
+                continue
+            raise
+        try:
+            content = fetch_content(service, fmeta, store=store, report=report)
+            if content is None or (not content.text and not content.tables):
+                log.info("reingest: %s yielded no content", fid)
+                summary["failed"] += 1
+                continue
+            chunks = normalise_drive(
+                fmeta, content.text, tables=content.tables,
+                folder=folder_path(service, fmeta, folder_cache))
+            if not chunks:
+                summary["failed"] += 1
+                continue
+            with bulk_section():
+                summary["orphans"] += upsert_file_chunks(
+                    store, chunks, file_id=fid, partial=content.partial)
+            summary["files"] += 1
+        except Exception as exc:  # noqa: BLE001 — one file must not end the run
+            log.warning("reingest: %s failed: %s", fid, exc)
+            summary["failed"] += 1
+    return summary
