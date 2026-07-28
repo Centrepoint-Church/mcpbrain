@@ -1022,6 +1022,36 @@ def fleet_pin(home):
     return FleetPin(**kwargs)
 
 
+def gmail_attachments(home) -> bool:
+    """Whether email attachments are fetched and extracted.
+
+    Default TRUE. This is not hedging a decision — an emailed PDF is content
+    the user already believes is in their brain, and the byte-identical file in
+    Drive is already extracted. It is an operational kill switch on a path that
+    makes an extra Gmail API call per attachment, which could matter during a
+    large backfill. Attachments were the single largest content gap in the
+    2026-07-27 ingestion audit.
+    """
+    return bool(fleet_flag(home, "gmail_attachments", True))
+
+
+def sheet_char_budget(home) -> int:
+    """Per-sheet character budget for spreadsheet extraction.
+
+    Replaces the 200-rows-per-sheet cap. Counted over non-empty rendered rows
+    only, so the pathological case that motivated a cap (a grid of empty cells —
+    one live file produced 17,281 chunks of pipes) is already handled by
+    dropping empty rows, and this bound only bites on genuinely enormous REAL
+    content. Default 2,000,000 chars ≈ 16,000 typical rows, ~80x the old cap.
+    """
+    raw = read_config(home).get("sheet_char_budget", 2_000_000)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 2_000_000
+    return value if value > 0 else 2_000_000
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 
