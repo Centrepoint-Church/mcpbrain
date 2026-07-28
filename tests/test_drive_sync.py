@@ -1080,6 +1080,54 @@ def test_fetch_content_does_not_mark_a_complete_extraction(monkeypatch):
     assert content is not None and content.partial is False
 
 
+def _partial_publish_harness(tmp_path, monkeypatch, *, partial: bool):
+    """_cache_first_extract_one over a forced cache MISS, so the local-extraction
+    path runs and its (file_id, content_hash) publish tuple is observable."""
+    from mcpbrain import ingest_cache
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setattr(ingest_cache, "try_import", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        drive, "fetch_content",
+        lambda *a, **kw: drive.Content(text="Para 0 " + "word " * 200,
+                                       partial=partial))
+    monkeypatch.setattr(drive, "folder_path", lambda *a, **kw: "")
+
+    fmeta = {"id": "f1", "name": "Budget.xlsx", "mimeType": "text/plain",
+             "md5Checksum": "abc123"}
+    processed, miss = drive._cache_first_extract_one(
+        object(), store, object(), "drv1", fmeta, {})
+    return store, processed, miss
+
+
+def test_a_partial_extraction_is_not_published_to_the_ingest_cache(tmp_path, monkeypatch):
+    """The miss tuple _cache_first_extract_one returns is what the caller
+    publishes as the fleet-wide ingest-cache artifact for that content hash. I9
+    stopped a partial extraction from deleting chunks locally, but still published
+    it — so a truncated document propagated to every other install under a hash
+    that says it is complete, and would not self-heal until the file changed."""
+    store, processed, miss = _partial_publish_harness(
+        tmp_path, monkeypatch, partial=True)
+
+    assert miss is None, "a truncated extraction was published fleet-wide"
+    assert processed is True, (
+        "the file WAS indexed locally — only the cache publish is suppressed")
+    assert store.doc_ids_for_file("f1"), "local chunks must still be written"
+
+
+def test_a_complete_extraction_is_still_published_to_the_ingest_cache(tmp_path, monkeypatch):
+    """The discriminator: the normal path must keep publishing, or every install
+    re-extracts every shared-drive file forever."""
+    _store, processed, miss = _partial_publish_harness(
+        tmp_path, monkeypatch, partial=False)
+
+    assert processed is True
+    assert miss is not None and miss[0] == "f1"
+
+
 def test_the_aggregated_skip_row_names_the_source_it_came_from():
     """Please-fix minor: flush_skip_report passed ref_id="", so the aggregated
     rows could not be traced to the drive that produced them. Mirrors
