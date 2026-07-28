@@ -151,29 +151,86 @@ def _parse_first_json_object(raw: str) -> dict:
         pos = start + 1
 
 
+def has_content(text: str) -> bool:
+    """True when `text` carries at least one alphanumeric character.
+
+    The generic no-content guard. B1's empty-spreadsheet chunks are ~2,000-char
+    strings of '| | | | |' — 66,653 of them, 37% of the live store, every one
+    embedded and none matchable by any query.
+
+    `str.isalnum()` per character, not a `[A-Za-z0-9]` regex: a sheet of Chinese
+    or accented names is content and must not be discarded as noise.
+    """
+    return any(ch.isalnum() for ch in text)
+
+
+def _hard_split(word: str, max_chars: int) -> list[str]:
+    """Split a single whitespace-free token that is itself longer than the whole
+    budget (a base64 blob, a minified line, a long URL). Without this the
+    word-split path has no way to make progress and emits the token whole."""
+    if len(word) <= max_chars:
+        return [word]
+    return [word[i:i + max_chars] for i in range(0, len(word), max_chars)]
+
+
+def _split_paragraph(para: str, max_chars: int, overlap: int) -> list[str]:
+    """Split one over-long paragraph on word boundaries.
+
+    Two guarantees the previous implementation broke (B6): no emitted chunk is
+    empty, and none exceeds max_chars. The old code appended `current`
+    unconditionally on overflow — including on the first iteration when it was
+    still "" — then seeded the next chunk with `overlap` words PLUS the oversize
+    word without re-checking the budget.
+
+    The overlap seed is kept whenever it still leaves room for the next piece,
+    preserving the contract pinned by
+    test_word_split_chunks_overlap_and_lose_nothing; it is dropped only in the
+    hard-split case, where by construction no overlap can fit beside a piece
+    that already fills the whole budget.
+    """
+    out: list[str] = []
+    current = ""
+    for word in para.split():
+        for piece in _hard_split(word, max_chars):
+            if not current:
+                current = piece
+            elif len(current) + 1 + len(piece) <= max_chars:
+                current += " " + piece
+            else:
+                out.append(current)
+                tail = " ".join(current.split()[-overlap:])
+                current = (f"{tail} {piece}"
+                           if len(tail) + 1 + len(piece) <= max_chars else piece)
+    if current:
+        out.append(current)
+    return out
+
+
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
+    """Split text into embeddable chunks on paragraph boundaries.
+
+    Every returned chunk is non-empty and at most `max_tokens * 4` characters
+    (the BGE window is 512 tokens; anything longer is silently truncated at
+    embed time — 15,576 such chunks exist in the live store, B3).
+    """
     max_chars = max_tokens * 4
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks, current = [], ""
+    chunks: list[str] = []
+    current = ""
     for para in paragraphs:
         if len(current) + len(para) + 2 <= max_chars:
             current += ("\n\n" + para) if current else para
+        elif len(para) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            pieces = _split_paragraph(para, max_chars, overlap)
+            chunks.extend(pieces[:-1])
+            current = pieces[-1] if pieces else ""
         else:
             if current:
                 chunks.append(current)
-            if len(para) > max_chars:
-                # Word-split path: seeds each new chunk with the last `overlap` words of the
-                # previous chunk (NOT the full chunk). Paragraph-boundary chunks never overlap.
-                # Faithful port of src/embedder.py chunk_text.
-                words, current = para.split(), ""
-                for w in words:
-                    if len(current) + len(w) + 1 <= max_chars:
-                        current += (" " + w) if current else w
-                    else:
-                        chunks.append(current)
-                        current = " ".join(current.split()[-overlap:]) + " " + w
-            else:
-                current = para
+            current = para
     if current:
         chunks.append(current)
-    return chunks if chunks else [text[:max_chars]]
+    return [c for c in chunks if c] or ([text[:max_chars]] if text.strip() else [])

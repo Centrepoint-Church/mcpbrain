@@ -100,3 +100,51 @@ def test_slugify_and_entity_path_agree_on_accented_name(tmp_path):
     store = Store(tmp_path / "slug.sqlite3", dim=4); store.init()
     eid = upsert_entity(store, name="Chané", entity_type="person")
     assert eid == "chane" == canonical_key("Chané")
+
+
+def test_a_token_longer_than_the_budget_emits_neither_empty_nor_oversize_chunks():
+    """B6: the word-split path appended `current` while it was still "" (a
+    zero-length chunk), then let the following chunk exceed max_chars. Verified
+    live: 6 zero-length and 36 sub-5-char chunks exist in the store."""
+    text = "x" * 5000  # one whitespace-free token, well over max_chars=2000
+
+    chunks = chunk_text(text, max_tokens=500)
+
+    assert all(c for c in chunks), "chunk_text emitted a zero-length chunk"
+    assert all(len(c) <= 2000 for c in chunks), (
+        f"chunk_text emitted an oversize chunk: {[len(c) for c in chunks]}"
+    )
+    assert "".join(chunks) == text, "hard-splitting a long token must lose nothing"
+
+
+def test_an_oversize_token_mid_paragraph_does_not_corrupt_its_neighbours():
+    text = "before " + ("y" * 3000) + " after"
+
+    chunks = chunk_text(text, max_tokens=500)
+
+    assert all(len(c) <= 2000 for c in chunks)
+    joined = " ".join(chunks)
+    assert "before" in joined and "after" in joined
+
+
+def test_has_content_rejects_punctuation_only_text():
+    """B1's 66,653 content-free chunks (37% of the live store) are ~2,000-char
+    strings of '| | | | |' from empty spreadsheet cells — all embedded, none
+    matchable, and 65,770 of them share a single content_hash."""
+    from mcpbrain.chunking import has_content
+
+    assert has_content("Budget 2026") is True
+    assert has_content("| 42 |") is True
+    assert has_content("|  |  |  |") is False
+    assert has_content("| --- | --- |") is False
+    assert has_content("") is False
+    assert has_content("   \n\t ") is False
+
+
+def test_has_content_accepts_non_ascii_alphanumerics():
+    """str.isalnum rather than [A-Za-z0-9] precisely so a sheet of Chinese or
+    accented names is not discarded as content-free."""
+    from mcpbrain.chunking import has_content
+
+    assert has_content("| 会議 |") is True
+    assert has_content("| Åsa |") is True

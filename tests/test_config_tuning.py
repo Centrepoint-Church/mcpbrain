@@ -19,3 +19,17 @@ def test_tuning_rejects_non_finite_values(tmp_path):
     assert got["stall_s"] == 1800.0
     assert got["bulk_lock_acquire_s"] == 5.0
     assert got["cycle_budget_s"] == 60.0
+
+
+def test_sheet_char_budget_defaults_and_rejects_nonsense(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    assert config.sheet_char_budget(str(tmp_path)) == 2_000_000
+
+    (tmp_path / "config.json").write_text('{"sheet_char_budget": 50000}')
+    assert config.sheet_char_budget(str(tmp_path)) == 50_000
+
+    (tmp_path / "config.json").write_text('{"sheet_char_budget": "lots"}')
+    assert config.sheet_char_budget(str(tmp_path)) == 2_000_000
+
+    (tmp_path / "config.json").write_text('{"sheet_char_budget": -1}')
+    assert config.sheet_char_budget(str(tmp_path)) == 2_000_000
