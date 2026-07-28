@@ -19,6 +19,7 @@ The over-long-thread split is NOT done here — that is prepare's responsibility
 returns every message in date order; prepare decides how to chunk them.
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -44,9 +45,22 @@ class ThreadBatch:
     chunks: list[dict] = field(default_factory=list)
 
 
+# One email attachment's chunks: doc_id gmail-<message_id>-att-<n>-<chunk_index>.
+# The attachment index is read off the doc_id rather than metadata so this works
+# for chunks written before attachments carried any extra field.
+_ATTACHMENT_INDEX = re.compile(r"-att-(\d+)-\d+$")
+
+
 def _chunk_key(meta: dict, doc_id: str) -> str:
     """Message-identity key shared by _group_key and reassemble_thread: file_id,
-    else message_id, else doc_id.
+    else event_id, else message_id, else doc_id.
+
+    This is the value reassemble_thread emits as a message's `message_id`, so
+    every branch must be resolvable by store.doc_ids_for_messages — drain
+    recovers the chunks an extraction covers through it, and a key that resolves
+    to nothing means the extraction is discarded and its chunks re-queue (the
+    0.7.98 Drive defect). `event_id` is in the chain for I6, and
+    store._doc_ids_query has a matching arm for it, exactly as file_id does.
 
     This is the portion of the precedence chain that genuinely means the same
     thing at both call sites — "which message/document does this chunk belong
@@ -76,7 +90,35 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     """
     if doc_id.startswith("enriched-"):
         return doc_id
-    return meta.get("file_id") or meta.get("message_id") or doc_id
+    return (meta.get("file_id") or meta.get("event_id")
+            or meta.get("message_id") or doc_id)
+
+
+def _reassembly_key(meta: dict, doc_id: str) -> str:
+    """Grouping key for reassemble_thread: _chunk_key, except that an email
+    ATTACHMENT gets one group PER ATTACHMENT (C2).
+
+    Attachment chunks deliberately carry their parent message's `message_id`
+    (sync/attachments.py: it is what joins them to their thread for enrichment,
+    expansion and doc_ids_for_messages), so _chunk_key resolves an attachment
+    and its parent's body to the SAME key. reassemble_thread then merged them
+    into one "message" and interleaved the two by chunk_index — body 0,
+    attachment 0, body 1, attachment 1 — handing the extractor a garbled
+    document with spurious `[…]` gap markers. Every email with an attachment hit
+    this.
+
+    Grouping is therefore finer than message identity here, while the EMITTED
+    message_id stays _chunk_key (the parent message id): the attachment really
+    is part of that message, and it is the id that resolves back to these chunks
+    in store.doc_ids_for_messages. Two message dicts sharing one message_id is
+    fine downstream — drain unions their resolutions, and graph_write's
+    per-message loops key on sender, not id.
+    """
+    key = _chunk_key(meta, doc_id)
+    if meta.get("content_type") == "email_attachment":
+        m = _ATTACHMENT_INDEX.search(doc_id)
+        return f"{key}#att-{m.group(1)}" if m else f"{key}#{doc_id}"
+    return key
 
 
 def _group_key(chunk: dict) -> str:
@@ -164,7 +206,13 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
     - Drive docs (chunks with ``file_id`` in metadata): grouped by ``file_id``
       so all chunks of the same document join into one body instead of
       appearing as N one-line stubs.
+    - Calendar events (chunks with ``event_id``): grouped by ``event_id``, same
+      reasoning — a long agenda split into cal-<eid>-0..N used to become N
+      singleton "messages", each one wrongly carrying a truncated-tail `[…]`
+      marker (I6).
     - Email messages: grouped by ``message_id``.
+    - Email attachments: one group each, keyed finer than message identity —
+      see _reassembly_key (C2).
     - Fallback: ``doc_id`` for chunks with neither.
 
     Within each group, body chunks are sorted by chunk_index and joined with
@@ -175,28 +223,32 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
     Splitting an over-long thread is prepare's job, not this function's; this
     always returns the full ordered message list.
     """
-    by_message: dict[str, list[dict]] = {}
+    by_group: dict[str, list[dict]] = {}
     order: list[str] = []
     for chunk in chunks:
         meta = chunk.get("metadata") or {}
-        # Drive documents carry a file_id but no message_id. Group all chunks
-        # of the same document under the file_id so a multi-chunk doc assembles
-        # into one "message" instead of N one-line stubs. Shared with
-        # _group_key via _chunk_key so the two cannot drift on this precedence.
-        mid = _chunk_key(meta, chunk["doc_id"])
-        if mid not in by_message:
-            by_message[mid] = []
-            order.append(mid)
-        by_message[mid].append(chunk)
+        # Drive documents carry a file_id but no message_id, and calendar events
+        # an event_id. Group all chunks of the same document/event under it so a
+        # multi-chunk doc assembles into one "message" instead of N one-line
+        # stubs. Shared with _group_key via _chunk_key so the two cannot drift
+        # on this precedence; _reassembly_key adds the attachment split, which
+        # is reassembly-only.
+        key = _reassembly_key(meta, chunk["doc_id"])
+        if key not in by_group:
+            by_group[key] = []
+            order.append(key)
+        by_group[key].append(chunk)
 
     messages = []
-    for mid in order:
-        parts = sorted(by_message[mid],
+    for key in order:
+        parts = sorted(by_group[key],
                        key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
         meta = parts[0].get("metadata") or {}
         text = _join_with_gaps(parts)
         messages.append({
-            "message_id": mid,
+            # The GROUP key can be finer than message identity (attachments);
+            # the emitted id must stay the resolvable one — see _reassembly_key.
+            "message_id": _chunk_key(meta, parts[0]["doc_id"]),
             # Drive chunks store the file owner in "owner"; email chunks use
             # "sender". Fall through both so the assembled message always has
             # the best available attribution.
