@@ -277,3 +277,39 @@ def test_a_message_with_no_chunk_total_gets_no_tail_marker():
                             "subject": "s"}}]
 
     assert "[…]" not in list(reassemble_thread(chunks))[0]["text"]
+
+
+def test_the_semantic_digest_chunk_does_not_merge_with_the_message_it_summarises():
+    """Regression: C3 stamps `message_id` on the semantic digest chunk
+    (doc_id enriched-<thread_id>) for provenance, set to the SAME message_id
+    the raw lead-message chunk carries. _chunk_key's fallback chain
+    (file_id or message_id or doc_id) treated that as a GROUPING key, so once
+    mark_thread_unenriched (store.py, called from stale_reextract.py) resets
+    both chunks to enriched=0 together, reassemble_thread merged them into one
+    "message" — blending the synthesized People:/Actions:/Topics: digest text
+    into the raw email body sent back to the model for re-extraction. The
+    digest chunk must stay its own singleton group; message_id is written for
+    provenance reads, not for grouping.
+    """
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": "gmail-m1-body-0", "text": "Raw lead message body.",
+         "metadata": {"message_id": "m1", "chunk_index": 0,
+                      "date": "2026-06-01", "sender": "a@b.com", "subject": "s",
+                      "thread_id": "t1"}},
+        {"doc_id": "enriched-t1", "text": "People: Sam\nActions:\n- Do the thing",
+         "metadata": {"thread_id": "t1", "message_id": "m1"}},
+    ]
+
+    messages = reassemble_thread(chunks)
+
+    assert len(messages) == 2, "the digest chunk must not merge into the raw message's group"
+    texts = [m["text"] for m in messages]
+    assert "Raw lead message body." in texts
+    assert "People: Sam\nActions:\n- Do the thing" in texts
+    # Neither text should contain the other, concatenated.
+    raw_text = next(t for t in texts if t.startswith("Raw lead message body."))
+    digest_text = next(t for t in texts if t.startswith("People:"))
+    assert "People:" not in raw_text
+    assert "Raw lead message body." not in digest_text

@@ -61,7 +61,21 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     already-thread-grouped batch, where thread_id is constant across every
     message in a multi-message thread — folding it into this shared key would
     wrongly collapse those distinct messages into one.
+
+    The semantic digest chunk (doc_id "enriched-<thread_id>") is special-cased
+    to its own doc_id regardless of what else is in its metadata. Since C3 it
+    carries `message_id` set to the real lead message's id (for provenance —
+    "which message did this fact come from"), which is the SAME id the lead
+    message's own raw chunk carries. Falling through the message_id branch for
+    both would resolve them to one identity key, merging the synthesized
+    People:/Actions:/Topics: digest into the raw email body reassemble_thread
+    hands back to the model for re-extraction on the stale-reextract path
+    (mark_thread_unenriched resets both chunks to enriched=0 together). The
+    digest chunk must stay its own singleton group; the field is written for
+    provenance reads, not for grouping.
     """
+    if doc_id.startswith("enriched-"):
+        return doc_id
     return meta.get("file_id") or meta.get("message_id") or doc_id
 
 
