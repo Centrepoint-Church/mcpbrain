@@ -288,3 +288,64 @@ def test_index_pending_respects_disable_flag(tmp_path):
     emb = _RecordingEmbedder()
     index_pending(s, emb, home=str(tmp_path))
     assert emb.seen == ["the quarterly numbers"]   # no prefix when disabled
+
+
+def test_hybrid_search_returns_one_hit_per_distinct_content(tmp_path, monkeypatch):
+    """38,164 redundant copies survive the content-free purge: genuine duplicate
+    FILES (the asset register exists three times in Drive). Deleting two of the
+    three is the wrong fix — doc_ids are positional and cited as graph
+    provenance, so it would make that file unfindable and orphan its rows. The
+    real harm is recall crowding, and this is where crowding is fixed."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    body = "The fixed asset register for the 2023 financial year."
+    for n, fid in enumerate(("a", "b", "c")):
+        store.upsert_chunk(f"gdrive-{fid}-0", body, "same-hash",
+                           {"source_type": "gdrive", "file_id": fid,
+                            "file_name": f"Asset Register{'' if n == 0 else f' ({n})'}.xlsx"})
+        store.embed_doc(f"gdrive-{fid}-0", emb, home=str(tmp_path))
+    store.upsert_chunk("gdrive-z-0", "Unrelated minutes of the board meeting.",
+                       "other-hash", {"source_type": "gdrive", "file_id": "z"})
+    store.embed_doc("gdrive-z-0", emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "asset register", limit=10)
+
+    hashes = [h["content_hash"] for h in hits if h.get("content_hash")]
+    assert len(hashes) == len(set(hashes)), (
+        f"duplicate content crowded the result set: {hashes}"
+    )
+    assert sum(1 for h in hits if h["doc_id"].startswith("gdrive-") and
+               h["doc_id"] != "gdrive-z-0") == 1
+
+
+def test_dedup_keeps_the_best_ranked_representative(tmp_path, monkeypatch):
+    """Which copy survives matters: dropping the top-ranked one would lower the
+    result's quality while claiming to improve it."""
+    from mcpbrain import retrieval
+
+    hits = [{"doc_id": "d1", "content_hash": "h", "score": 0.9},
+            {"doc_id": "d2", "content_hash": "h", "score": 0.5},
+            {"doc_id": "d3", "content_hash": "other", "score": 0.7}]
+
+    out = retrieval._dedupe_by_content(hits)
+
+    assert [h["doc_id"] for h in out] == ["d1", "d3"]
+
+
+def test_dedup_passes_through_hits_with_no_content_hash(tmp_path):
+    """Not every producer sets it; a missing hash must never collapse rows."""
+    from mcpbrain import retrieval
+
+    hits = [{"doc_id": "d1", "score": 0.9}, {"doc_id": "d2", "score": 0.5}]
+
+    assert len(retrieval._dedupe_by_content(hits)) == 2

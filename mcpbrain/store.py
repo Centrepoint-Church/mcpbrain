@@ -1311,6 +1311,27 @@ class Store:
                 "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
                 (f"gdrive-{_like_escape(file_id)}-%",)).fetchall()]
 
+    def sibling_chunk_count(self, doc_id: str) -> int:
+        """How many chunk rows share `doc_id`'s positional root (the doc_id with
+        its trailing '-<n>' chunk index stripped, e.g. gdrive-<fid>-3 ->
+        gdrive-<fid>).
+
+        Used by hybrid_search's content-hash dedup to tell apart two crowding
+        shapes that both surface as a shared content_hash: a genuinely
+        duplicate FILE (the whole document is 1, maybe a couple, chunks — safe
+        to collapse to the best-ranked copy) versus two DIFFERENT real
+        documents that happen to share one boilerplate/template chunk (e.g. a
+        shared board-charter letterhead) while the rest of each document's
+        chunks diverge — collapsing THAT case on a single shared chunk drops a
+        genuinely different document from the result set. A doc_id with no
+        recognisable '-<n>' suffix is treated as its own singleton root."""
+        m = re.match(r"^(.*)-\d+$", doc_id)
+        root = m.group(1) if m else doc_id
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
+                (f"{_like_escape(root)}-%",)).fetchone()[0]
+
     def delete_chunks(self, doc_ids) -> int:
         """Delete the given chunk rows and their vec_chunks/fts_chunks mirrors
         (keyed on rowid, mirroring delete_calendar_chunks_after). Graph rows are
@@ -1490,6 +1511,79 @@ class Store:
                 (int(version), int(limit)),
             ).fetchall()
         return [r["fid"] for r in rows]
+
+    @staticmethod
+    def _content_free(text: str | None) -> bool:
+        """True if `text` carries no alphanumeric character at all.
+
+        68,193 of 196,396 live chunks (34.7%) match: ~2,000-char strings of
+        '| | | | |' from empty spreadsheet cells, all embedded, none matchable.
+
+        Registered as a per-row SQLite scalar function rather than expressed as
+        a GLOB expression: SQLite's GLOB character classes ([A-Za-z0-9]) are
+        ASCII-only, so `text NOT GLOB '*[A-Za-z0-9]*'` would wrongly flag a
+        genuine non-ASCII chunk (e.g. Chinese-language board minutes) as
+        content-free. Python's str.isalnum() is Unicode-aware, so real
+        non-ASCII content is correctly spared while pipe/dash separator rows
+        are still caught. Full scan by necessity — this runs from an attended
+        CLI, not the recall path.
+        """
+        return not any(c.isalnum() for c in (text or ""))
+
+    def count_content_free(self) -> int:
+        """How many chunks carry no alphanumeric character."""
+        with self._connect() as db:
+            db.create_function("is_content_free", 1, self._content_free)
+            return db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE is_content_free(text)"
+            ).fetchone()[0]
+
+    def content_free_doc_ids(self, limit: int) -> list[str]:
+        """Up to `limit` content-free chunk doc_ids, oldest first."""
+        with self._connect() as db:
+            db.create_function("is_content_free", 1, self._content_free)
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE is_content_free(text) "
+                "ORDER BY rowid LIMIT ?", (int(limit),))]
+
+    def cited_doc_ids(self, doc_ids) -> list[str]:
+        """Which of `doc_ids` the graph cites as provenance.
+
+        `delete_chunks` deliberately does not touch graph rows — invalidation is
+        a separate, bitemporal step — so deleting a cited chunk leaves dangling
+        provenance that nothing cleans up. This is the check that makes a purge
+        safe rather than merely measured-safe.
+        """
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return []
+        marks = ",".join("?" * len(doc_ids))
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT source_doc_id AS d FROM entity_relations "
+                f"WHERE source_doc_id IN ({marks}) "
+                f"UNION SELECT message_id AS d FROM email_entities "
+                f"WHERE message_id IN ({marks})",
+                (*doc_ids, *doc_ids)).fetchall()
+        return [r["d"] for r in rows]
+
+    def purge_doc_ids(self, doc_ids) -> int:
+        """Delete these chunks and their vec/FTS mirrors. Returns rows deleted.
+
+        Raises ValueError, deleting NOTHING, if the graph cites any of them —
+        all-or-nothing so the caller can always say what happened. Delegates the
+        actual delete to `delete_chunks`, which already clears both mirrors.
+        """
+        doc_ids = list(doc_ids)
+        if not doc_ids:
+            return 0
+        cited = self.cited_doc_ids(doc_ids)
+        if cited:
+            raise ValueError(
+                f"refusing to purge {len(cited)} doc_id(s) cited as graph "
+                f"provenance (e.g. {cited[:3]}); graph invalidation is a "
+                "separate bitemporal step and this would orphan those rows")
+        return self.delete_chunks(doc_ids)
 
     def embed_doc(self, doc_id: str, embedder, *, home=None) -> bool:
         """Embed a single chunk by doc_id, in place.
@@ -1731,7 +1825,8 @@ class Store:
         with self._connect() as db:
             try:
                 r = db.execute(
-                    "SELECT doc_id,text,metadata,memory_tier FROM chunks WHERE doc_id=?",
+                    "SELECT doc_id,text,metadata,memory_tier,content_hash "
+                    "FROM chunks WHERE doc_id=?",
                     (doc_id,)).fetchone()
                 tier = (r["memory_tier"] or "") if r else ""
             except sqlite3.OperationalError:
@@ -1739,7 +1834,7 @@ class Store:
                 # handle can hit this in the window between a wheel upgrade and the
                 # daemon's init() migration. Degrade gracefully — recall must not crash.
                 r = db.execute(
-                    "SELECT doc_id,text,metadata FROM chunks WHERE doc_id=?",
+                    "SELECT doc_id,text,metadata,content_hash FROM chunks WHERE doc_id=?",
                     (doc_id,)).fetchone()
                 tier = ""
             if not r:
@@ -1749,6 +1844,7 @@ class Store:
                 "text": r["text"],
                 "metadata": json.loads(r["metadata"]),
                 "memory_tier": tier,
+                "content_hash": r["content_hash"],
             }
 
     def patch_chunk_metadata(self, doc_id: str, **patch) -> bool:
