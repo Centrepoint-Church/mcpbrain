@@ -209,3 +209,71 @@ def test_group_unenriched_thread_cap_zero_returns_empty(tmp_path):
 
     batches = thread_enrich.group_unenriched_threads(store, thread_cap=0)
     assert batches == []
+
+
+def test_a_hole_in_a_message_is_marked():
+    """B8: group_unenriched_threads iterates unenriched_chunks and
+    reassemble_thread joins only those. If part of a document was already
+    enriched — or cold-marked, excluded at store.py:1264 — the model received a
+    partial document with no indication anything was missing."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": "gmail-m1-body-0", "text": "First half.",
+         "metadata": {"message_id": "m1", "chunk_index": 0, "chunk_total": 3,
+                      "date": "2026-06-01", "sender": "a@b.com", "subject": "s"}},
+        {"doc_id": "gmail-m1-body-2", "text": "Third part.",
+         "metadata": {"message_id": "m1", "chunk_index": 2, "chunk_total": 3,
+                      "date": "2026-06-01", "sender": "a@b.com", "subject": "s"}},
+    ]
+
+    messages = list(reassemble_thread(chunks))
+
+    assert len(messages) == 1
+    assert "[…]" in messages[0]["text"], (
+        "a gap between chunk 0 and chunk 2 must be visible to the model; "
+        "silently concatenating them presents a partial document as whole"
+    )
+
+
+def test_a_truncated_tail_is_marked():
+    """The other half of B8, which can occur alone: indices 0 and 1 present, but
+    chunk_total says 5."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": f"gmail-m1-body-{i}", "text": f"part {i}",
+         "metadata": {"message_id": "m1", "chunk_index": i, "chunk_total": 5,
+                      "date": "2026-06-01", "sender": "a@b.com", "subject": "s"}}
+        for i in (0, 1)
+    ]
+
+    assert "[…]" in list(reassemble_thread(chunks))[0]["text"]
+
+
+def test_a_complete_message_gets_no_gap_marker():
+    """The discriminator: a marker on every message would train the model to
+    ignore it."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": f"gmail-m1-body-{i}", "text": f"part {i}",
+         "metadata": {"message_id": "m1", "chunk_index": i, "chunk_total": 2,
+                      "date": "2026-06-01", "sender": "a@b.com", "subject": "s"}}
+        for i in (0, 1)
+    ]
+
+    assert "[…]" not in list(reassemble_thread(chunks))[0]["text"]
+
+
+def test_a_message_with_no_chunk_total_gets_no_tail_marker():
+    """chunk_total only exists on chunks written after this plan's C1 change.
+    On older chunks the tail check must simply not fire."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [{"doc_id": "gmail-m1-body-0", "text": "only part",
+               "metadata": {"message_id": "m1", "chunk_index": 0,
+                            "date": "2026-06-01", "sender": "a@b.com",
+                            "subject": "s"}}]
+
+    assert "[…]" not in list(reassemble_thread(chunks))[0]["text"]

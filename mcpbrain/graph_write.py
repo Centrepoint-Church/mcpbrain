@@ -1518,7 +1518,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     semantic_doc_id = f"enriched-{thread_id}" if thread_id else ""
     if semantic_doc_id:
         semantic_text, semantic_meta = build_semantic_doc(
-            extraction, lead, owner=owner, taxonomy=taxonomy)
+            extraction, lead, owner=owner, taxonomy=taxonomy,
+            date_iso=lead_date_iso or "", message_id=lead_msg_id or "")
         store.upsert_chunk(
             doc_id=semantic_doc_id, text=semantic_text,
             content_hash=content_hash(semantic_text), metadata=semantic_meta)

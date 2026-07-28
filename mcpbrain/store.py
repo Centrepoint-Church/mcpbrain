@@ -1352,6 +1352,13 @@ class Store:
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM chunks WHERE enriched=1").fetchone()[0]
 
+    def count_chunks_longer_than(self, n: int) -> int:
+        """Chunks whose stored text exceeds n characters — i.e. whose tail the
+        512-token embedder silently discards (B3). 15,576 in the live store."""
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM chunks WHERE length(text) > ?",
+                              (int(n),)).fetchone()[0]
+
     def unembedded_chunks(self, limit: int | None = None) -> list[dict]:
         """Chunks awaiting embedding. `limit` bounds one cycle's slice of work.
 
@@ -2504,7 +2511,11 @@ class Store:
         """Return all chunks whose metadata.thread_id matches thread_id.
 
         Each result is {doc_id, text, metadata} with metadata parsed from JSON.
-        Order is not guaranteed — callers sort by date if needed.
+
+        Row order is arbitrary (no ORDER BY). Callers MUST sort by
+        (date, message_id, chunk_index) — see retrieval_expand._by_date. Sorting
+        by date alone is NOT an ordering within a message, because every chunk
+        of one message shares its date; that was B4.
         """
         with self._connect() as db:
             # json_extract over metadata is a full table scan; acceptable at

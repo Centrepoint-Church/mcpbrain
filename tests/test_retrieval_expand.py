@@ -170,3 +170,36 @@ def test_config_retrieval_expand_defaults_off(tmp_path):
     assert _config.retrieval_expand_enabled(str(tmp_path)) is False
     assert _config.expand_params(str(tmp_path)) == {
         "window_n": 3, "short_doc_max_chunks": 15, "max_parents": 5, "char_budget": 4000}
+
+
+def test_thread_expansion_orders_chunks_within_a_message():
+    """B4: _by_date sorts by date alone, and every chunk of one message shares a
+    date, so a stable sort preserved raw SQLite scan order. Any email over 2,000
+    chars was injected with its paragraphs scrambled."""
+    from mcpbrain import retrieval_expand
+
+    scan_order = [
+        {"doc_id": "gmail-m1-body-2", "text": "third",
+         "metadata": {"date": "2026-06-02", "message_id": "m1", "chunk_index": 2}},
+        {"doc_id": "gmail-m1-body-0", "text": "first",
+         "metadata": {"date": "2026-06-02", "message_id": "m1", "chunk_index": 0}},
+        {"doc_id": "gmail-m1-body-1", "text": "second",
+         "metadata": {"date": "2026-06-02", "message_id": "m1", "chunk_index": 1}},
+    ]
+
+    ordered = retrieval_expand._by_date(scan_order)
+
+    assert [c["text"] for c in ordered] == ["first", "second", "third"]
+
+
+def test_thread_expansion_still_orders_messages_by_date():
+    from mcpbrain import retrieval_expand
+
+    chunks = [
+        {"doc_id": "b", "text": "later",
+         "metadata": {"date": "2026-06-03", "message_id": "m2", "chunk_index": 0}},
+        {"doc_id": "a", "text": "earlier",
+         "metadata": {"date": "2026-06-01", "message_id": "m1", "chunk_index": 0}},
+    ]
+
+    assert [c["text"] for c in retrieval_expand._by_date(chunks)] == ["earlier", "later"]
