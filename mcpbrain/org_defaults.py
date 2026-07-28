@@ -14,3 +14,9 @@ FLEET_FOLDER_ID = "1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o"
 
 # mcpbrain-escrow/ — per-user backup snapshots (<email>/) + escrow keys (<email>.key).
 ESCROW_FOLDER_ID = "1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi"
+
+# Must equal str(chunking.CHUNKER_VERSION) — pinned by
+# test_the_org_pin_chunker_version_matches_the_code. The pin feeds
+# pipeline_fingerprint, so a drift here means installs keep importing
+# ingest-cache artifacts built by a superseded chunker.
+ORG_PIN_CHUNKER_VERSION = "2"

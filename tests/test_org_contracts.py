@@ -39,6 +39,24 @@ def test_cache_artifact_round_trips():
     assert again.chunks[0].text == "hi"
 
 
+def test_the_org_pin_chunker_version_matches_the_code():
+    """The pin's chunker_version keys pipeline_fingerprint, which keys the
+    ingest-cache artifact filename AND gates try_import. If the pin lags the
+    code, installs keep importing artifacts built by the old chunker — the bump
+    IS the cache invalidation, so a drift here silently defeats it."""
+    from mcpbrain import org_defaults
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    assert org_defaults.ORG_PIN_CHUNKER_VERSION == str(CHUNKER_VERSION)
+
+
+def test_bumping_the_chunker_version_changes_the_artifact_fingerprint():
+    from mcpbrain.org_contracts import pipeline_fingerprint
+
+    assert (pipeline_fingerprint("bge-small", 384, "1")
+            != pipeline_fingerprint("bge-small", 384, "2"))
+
+
 def test_contribution_record_round_trips():
     rec = oc.ContributionRecord(
         claim={"kind": "relation", "a": "joel", "rel": "works_at", "b": "acme"},

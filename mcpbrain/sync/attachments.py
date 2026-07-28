@@ -25,7 +25,7 @@ import base64
 import logging
 
 from mcpbrain import config
-from mcpbrain.chunking import chunk_text, content_hash, has_content
+from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
 from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.extractors import (
     extract_tables_from_xls,
@@ -157,6 +157,7 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
     subject = get_header(headers, "subject")
     base = {
         "source_type": "gmail",
+        "chunker_version": CHUNKER_VERSION,
         "content_type": "email_attachment",
         "message_id": msg_id,
         "thread_id": raw_message.get("threadId", ""),

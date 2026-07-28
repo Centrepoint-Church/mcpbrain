@@ -8,7 +8,7 @@ import base64
 import re
 from dataclasses import dataclass
 
-from mcpbrain.chunking import chunk_text, content_hash, has_content
+from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
 
 
 @dataclass
@@ -324,6 +324,7 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
     cc = get_header(headers, "cc")
     base_metadata = {
         "source_type": "gmail",
+        "chunker_version": CHUNKER_VERSION,
         "message_id": msg_id,
         "thread_id": raw.get("threadId", ""),
         "subject": subject[:200],

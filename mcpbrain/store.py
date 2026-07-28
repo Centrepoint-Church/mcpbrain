@@ -1459,6 +1459,38 @@ class Store:
                 db.execute(f"UPDATE chunks SET enriched=0 WHERE doc_id IN ({qs})", ids)
         return len(ids)
 
+    def stale_chunker_file_ids(self, version: int, limit: int) -> list[str]:
+        """Drive `file_id`s with at least one chunk written by an older chunker.
+
+        The level-triggered selector for bin/repair.py's re-ingest phase: no
+        queue, no cursor, no new state. Re-running walks forward because a
+        repaired file stops matching, and an interrupted run simply resumes —
+        the same property that made reflow_outdated_chunks the right shape for
+        change-driven re-extraction.
+
+        Distinct file_ids (not doc_ids) because re-ingest operates per FILE: one
+        Drive fetch replaces all of that file's chunks at once.
+
+        Drive-only. Gmail is 2% of the corpus and its chunking defects are ~75
+        rows the purge deletes outright, so re-fetching a mailbox to re-chunk
+        them is not a trade worth making; Gmail chunks pick up the new version as
+        they naturally re-sync.
+
+        Ordered by MIN(rowid) so the oldest, least-recently-touched files repair
+        first and progress is monotonic across runs.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT json_extract(metadata,'$.file_id') AS fid, MIN(rowid) AS r "
+                "FROM chunks "
+                "WHERE json_extract(metadata,'$.source_type')='gdrive' "
+                "  AND json_extract(metadata,'$.file_id') IS NOT NULL "
+                "  AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ? "
+                "GROUP BY fid ORDER BY r LIMIT ?",
+                (int(version), int(limit)),
+            ).fetchall()
+        return [r["fid"] for r in rows]
+
     def embed_doc(self, doc_id: str, embedder, *, home=None) -> bool:
         """Embed a single chunk by doc_id, in place.
 
