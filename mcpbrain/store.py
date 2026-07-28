@@ -22,16 +22,6 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 ENRICH_LOGIC_VERSION = 1
 
 
-def _like_escape(value: str) -> str:
-    """Escape '%', '_' and the escape char itself for a LIKE pattern.
-
-    Google Drive file ids legitimately contain '_' (a SQL LIKE single-char
-    wildcard) with no escaping of their own, so any `doc_id LIKE 'gdrive-<id>-%'`
-    query built by interpolating a raw file_id can over-match a sibling file
-    (e.g. file_id 'F_1' matching doc_ids for file 'FA1'). Callers must pair
-    this with `ESCAPE '\\'` in the SQL.
-    """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _fts_match_query(query: str) -> str:
@@ -1305,11 +1295,20 @@ class Store:
                 (drive_id,)).fetchall()]
 
     def doc_ids_for_file(self, file_id: str) -> list[str]:
-        """Chunk doc_ids for one Drive file (gdrive-<file_id>-*)."""
+        """Chunk doc_ids for one Drive file. Filters on metadata.file_id
+        (index-backed by idx_chunks_fileid; see _chunks_for_file_query), NOT a
+        doc_id LIKE/range match on `gdrive-<file_id>-*`: Drive file ids use the
+        base64url alphabet (embed '-' and '_'), so one file's id can be a
+        '-'-delimited prefix of another's (file_id 'abc' vs 'abc-1' — the
+        second's doc_ids, gdrive-abc-1-0 etc., would fall inside any prefix or
+        range bound built from the first's id) and LIKE's '_' wildcard can
+        over-match a sibling file outright (file_id 'F_1' vs 'FA1'). An exact
+        equality match on the metadata field has neither failure mode.
+        """
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
-                (f"gdrive-{_like_escape(file_id)}-%",)).fetchall()]
+                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.file_id')=?",
+                (file_id,)).fetchall()]
 
     def doc_root_content_hashes(self, roots: list[str]) -> dict[str, frozenset[str]]:
         """Batched: for each of `roots` (a doc_id with its trailing '-<n>' chunk
@@ -1331,34 +1330,63 @@ class Store:
         count > 1 on every one of its own chunks too); comparing the full hash
         SET can.
 
-        ONE query for the whole batch — hybrid_search calls this once per
-        search against its small candidate pool (the interactive recall hot
-        path), not once per candidate. Uses an indexed doc_id RANGE condition
-        (`doc_id >= root+'-' AND doc_id < root+'.'`, exploiting '.' sorting
-        immediately after '-' in ASCII to bound a "starts with root-" prefix
-        match) rather than `doc_id LIKE ... ESCAPE`: this codebase has a
-        documented incident (0.7.105, chunks_for_file) where ESCAPE disables
-        SQLite's LIKE-to-index optimisation and silently turns a doc_id prefix
-        match into a full `SCAN chunks`; verified via EXPLAIN QUERY PLAN that
-        the range form here plans as `SEARCH ... USING INDEX` instead, both
-        standalone and inside this batched CTE-join.
+        ONE query per namespace for the whole batch (two total when both are
+        present) — hybrid_search calls this once per search against its small
+        candidate pool (the interactive recall hot path), not once per
+        candidate. `_doc_root` runs over every doc_id namespace this codebase
+        produces, not just Drive's, so roots are split in two:
+
+        - `gdrive-<file_id>` roots resolve via an exact
+          `json_extract(metadata,'$.file_id')=?` match (index-backed by
+          idx_chunks_fileid — see doc_ids_for_file), not a doc_id prefix/range
+          test. Drive file ids use the base64url alphabet (embed '-' and '_'),
+          so one file's id can be a '-'-delimited prefix of another's — a range
+          bound built from a root string can't tell "gdrive-abc"'s own chunks
+          from "gdrive-abc-1"'s. An exact metadata match has no such ambiguity
+          regardless of what characters a file id contains.
+        - every other namespace (cal-, note-, gmail-, enriched-, ...) keeps the
+          indexed doc_id RANGE condition (`doc_id >= root+'-' AND doc_id <
+          root+'.'`, exploiting '.' sorting immediately after '-' in ASCII to
+          bound a "starts with root-" prefix match) rather than `doc_id LIKE
+          ... ESCAPE`: this codebase has a documented incident (0.7.105,
+          chunks_for_file) where ESCAPE disables SQLite's LIKE-to-index
+          optimisation and silently turns a doc_id prefix match into a full
+          `SCAN chunks`; verified via EXPLAIN QUERY PLAN that the range form
+          here plans as `SEARCH ... USING INDEX` instead, both standalone and
+          inside this batched CTE-join. These namespaces' own ids (Calendar
+          event ids, content hashes, Gmail message ids) don't contain '-', so
+          the prefix-collision risk that forces Drive onto the metadata match
+          doesn't apply to them.
         """
         roots = list(dict.fromkeys(roots))  # de-dup, order doesn't matter
         if not roots:
             return {}
         result: dict[str, set[str]] = {r: set() for r in roots}
-        values = ",".join("(?,?,?)" for _ in roots)
-        params: list[str] = []
-        for r in roots:
-            params.extend([r, f"{r}-", f"{r}."])
+        gdrive_roots = [r for r in roots if r.startswith("gdrive-")]
+        other_roots = [r for r in roots if not r.startswith("gdrive-")]
         with self._connect() as db:
-            rows = db.execute(
-                f"WITH roots(root, lo, hi) AS (VALUES {values}) "
-                "SELECT roots.root AS root, chunks.content_hash AS h FROM chunks "
-                "JOIN roots ON chunks.doc_id >= roots.lo AND chunks.doc_id < roots.hi",
-                params).fetchall()
-        for row in rows:
-            result[row["root"]].add(row["h"])
+            if gdrive_roots:
+                file_ids = [r[len("gdrive-"):] for r in gdrive_roots]
+                qs = ",".join("?" * len(file_ids))
+                rows = db.execute(
+                    "SELECT json_extract(metadata,'$.file_id') AS fid, "
+                    f"content_hash AS h FROM chunks "
+                    f"WHERE json_extract(metadata,'$.file_id') IN ({qs})",
+                    file_ids).fetchall()
+                for row in rows:
+                    result[f"gdrive-{row['fid']}"].add(row["h"])
+            if other_roots:
+                values = ",".join("(?,?,?)" for _ in other_roots)
+                params: list[str] = []
+                for r in other_roots:
+                    params.extend([r, f"{r}-", f"{r}."])
+                rows = db.execute(
+                    f"WITH roots(root, lo, hi) AS (VALUES {values}) "
+                    "SELECT roots.root AS root, chunks.content_hash AS h FROM chunks "
+                    "JOIN roots ON chunks.doc_id >= roots.lo AND chunks.doc_id < roots.hi",
+                    params).fetchall()
+                for row in rows:
+                    result[row["root"]].add(row["h"])
         return {r: frozenset(s) for r, s in result.items()}
 
     def delete_chunks(self, doc_ids) -> int:
