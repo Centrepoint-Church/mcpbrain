@@ -28,7 +28,6 @@ from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
     extract_text_from_pdf,
     extract_text_from_docx,
-    extract_text_from_xlsx,
 )
 
 log = logging.getLogger(__name__)
@@ -49,7 +48,16 @@ _DOWNLOAD_TEXT = {"text/plain", "text/markdown", "text/csv"}
 _DOWNLOAD_BINARY = {
     "application/pdf": extract_text_from_pdf,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": extract_text_from_docx,
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": extract_text_from_xlsx,
+    # NOTE(Task 2 -> Task 4 handoff): extract_text_from_xlsx was replaced by
+    # extract_tables_from_xlsx, which returns structured Table objects rather
+    # than pre-rendered text (mcpbrain.sync.tabular) so chunk boundaries can be
+    # decided by tabular.render_chunks instead of orphaning the header in
+    # chunk 0 (B2). Wiring that into this fetch pipeline (fetch_content, a
+    # tables-aware normalise_drive) is Task 4's job. Until then, .xlsx is
+    # deliberately left out of this dict rather than left pointing at a
+    # deleted symbol — it degrades to "unsupported, skipped" exactly like any
+    # other binary type not listed here, which is the existing behaviour for
+    # types this dict does not cover.
 }
 
 # Per-MIME extraction metadata: (extraction_method, content_subtype, confidence).
