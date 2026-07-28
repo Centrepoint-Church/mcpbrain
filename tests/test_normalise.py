@@ -421,6 +421,56 @@ def test_a_bottom_post_under_an_outlook_marker_is_rescued_when_the_quote_is_angl
     assert "can you approve" not in out
 
 
+def test_an_unquoted_outlook_block_inside_the_rescued_tail_is_not_rescued():
+    """The C1 '>' gate is necessary but not sufficient: a message can carry BOTH
+    genuine '>'-quoted history AND an unquoted Outlook/forward block in the same
+    tail (a thread crossing mail clients, or Gmail collapsing only part of the
+    history). The gate passes on the '>' line, and taking everything after the
+    LAST '>' line then rescued the unquoted block wholesale — the ORIGINAL
+    author's commitments stamped with the REPLYING sender's metadata, which is
+    exactly the misattribution C1 exists to prevent, one level down.
+
+    The marker patterns are now re-applied inside the rescued region itself.
+    """
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("My reply is short.\n\n"
+            "> quoted line\n"
+            "On Mon wrote:\n"
+            "-----Original Message-----\n"
+            "I need your approval before Friday and the venue hire line moved "
+            "from 1200 to 1450, please confirm with the treasurer.")
+
+    out = strip_reply_chains(text)
+
+    assert out.strip() == "My reply is short."
+    assert "your approval before Friday" not in out, (
+        "the original author's commitment was rescued as the replying sender's")
+    assert "venue hire" not in out
+    assert "Original Message" not in out
+
+
+def test_a_reply_above_an_unquoted_forward_block_still_loses_only_the_forward():
+    """Same mechanism, the other marker style, and with real bottom-posted prose
+    present BEFORE the embedded marker: the prose survives, the unquoted forwarded
+    history below it does not. Proves the cut is at the marker, not a blanket
+    drop of the whole tail."""
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("\nOn Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
+            "> Can you confirm the Hall B booking for Sunday?\n\n"
+            "Yes — Hall B is confirmed for Sunday the 8th, 9am to 1pm.\n\n"
+            "----- Forwarded message -----\n"
+            "The treasurer has already signed off the 1450 venue hire line and "
+            "wants the deposit released this week.")
+
+    out = strip_reply_chains(text)
+
+    assert "Hall B is confirmed" in out, "the genuine bottom-post was lost"
+    assert "treasurer has already signed off" not in out
+    assert "Forwarded message" not in out
+
+
 def test_only_prose_after_the_last_quoted_line_is_rescued():
     """The rescued lines must fall strictly AFTER the last '>' line: text sitting
     between the reply marker and the quote body is part of the quote's own
