@@ -430,3 +430,58 @@ def test_hybrid_search_does_not_collapse_a_shared_boilerplate_chunk(tmp_path):
     assert {"gdrive-alpha", "gdrive-beta"} <= roots_present, (
         f"a genuinely different document was wrongly collapsed: {hits}"
     )
+
+
+def test_dedup_keeps_content_the_surviving_copy_does_not_contribute(tmp_path):
+    """Cluster membership is computed from the WHOLE database, but "what the
+    surviving primary root contributes" is limited to the CANDIDATE POOL being
+    deduped. When the pool holds a cluster-mate's chunk whose content_hash the
+    primary root does NOT contribute to the pool — because that chunk was
+    filtered out (metadata.expired here; exclude_cold cold-marking and the
+    limit*2 retrieval boundary do the same thing) — dropping every non-primary
+    chunk in the cluster makes that content vanish from the results entirely.
+    That is content loss, not duplicate removal."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    cover = "Asset register cover page for the 2023 financial year."
+    body = "Assets: chairs, tables, projector, sound desk."
+    # Two whole-document duplicates (identical hash SETS, so they cluster), with
+    # `p` deterministically the primary: byte-identical content offers no
+    # relevance signal, so the tie-break is recency and p is the newer copy.
+    for fid, modified in (("p", "2026-07-01T00:00:00Z"), ("q", "2020-01-01T00:00:00Z")):
+        store.upsert_chunk(f"gdrive-{fid}-0", cover, "cover-hash",
+                           {"source_type": "gdrive", "file_id": fid,
+                            "modified": modified})
+        store.upsert_chunk(f"gdrive-{fid}-1", body, "body-hash",
+                           {"source_type": "gdrive", "file_id": fid,
+                            "modified": modified,
+                            # The primary copy's body chunk is expired, so it is
+                            # filtered out of the pool before dedup runs — the
+                            # whole point: the cluster still knows about it (the
+                            # hash set is read from the DB), the pool does not.
+                            **({"expired": True} if fid == "p" else {})})
+        store.embed_doc(f"gdrive-{fid}-0", emb, home=str(tmp_path))
+        store.embed_doc(f"gdrive-{fid}-1", emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "asset register", limit=10)
+
+    hashes = [h["content_hash"] for h in hits]
+    assert "body-hash" in hashes, (
+        "the duplicate-document dedup dropped content NOTHING in the pool "
+        f"duplicates: {[h['doc_id'] for h in hits]}"
+    )
+    assert hits[0]["doc_id"] == "gdrive-p-0", "the primary copy still wins its hash"
+    # Still deduped: exactly one hit per distinct content, not both copies.
+    assert sorted(hashes) == ["body-hash", "cover-hash"], hashes
+    assert [h["doc_id"] for h in hits if h["content_hash"] == "body-hash"] == \
+        ["gdrive-q-1"], "the only unexpired copy of that content must survive"

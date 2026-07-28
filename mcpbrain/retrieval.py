@@ -389,17 +389,49 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
             best[cluster] = key
             primary_for[cluster] = root
 
-    # Drop every chunk of every non-primary root in a >1-member cluster — by
-    # definition each one duplicates a chunk the surviving root already
-    # contributes. A root whose cluster has only itself (no confirmed
-    # whole-document duplicate found) is its own primary and is never
-    # touched here.
-    drop_ids = {
-        c["doc_id"] for c in candidates
+    # Keep one hit per (cluster, content_hash) pair PRESENT IN THIS POOL — not
+    # one hit per cluster.
+    #
+    # Cluster membership is computed from the WHOLE database
+    # (doc_root_content_hashes reads every chunk under each root), but "what the
+    # surviving primary root contributes" is limited to the CANDIDATE POOL being
+    # deduped here. Those two sets are not the same: `metadata.expired`
+    # filtering, exclude_cold cold-marking (independent per chunk — 109,694
+    # chunks are cold on the live store) and the limit*2 retrieval boundary can
+    # all put a cluster-mate's chunk in the pool while the primary root's chunk
+    # with that same content_hash is absent from it. Dropping by cluster
+    # membership alone then makes that content vanish from the results
+    # ENTIRELY, even though nothing in the pool actually duplicates it — a
+    # silent content loss, not a duplicate removal.
+    #
+    # So a non-primary-root hit is dropped only when the primary root
+    # contributes the SAME content_hash somewhere in this pool (`primary_pairs`
+    # — the genuine duplicate-copy case, where the primary/recency tie-break
+    # above decides which copy survives); otherwise it is kept, and it becomes
+    # the pair's representative so further copies of that same hash within the
+    # cluster still collapse. Hits with no content_hash pass through untouched.
+    primary_pairs = {
+        (_find(_doc_root(c["doc_id"])), c["content_hash"]) for c in candidates
         if c.get("content_hash")
-        and primary_for.get(_find(_doc_root(c["doc_id"]))) not in (None, _doc_root(c["doc_id"]))
+        and primary_for.get(_find(_doc_root(c["doc_id"]))) == _doc_root(c["doc_id"])
     }
-    candidates = [c for c in candidates if c["doc_id"] not in drop_ids]
+    kept_pairs: set[tuple[str, str]] = set()
+    kept: list[dict] = []
+    for c in candidates:
+        h = c.get("content_hash")
+        if not h:
+            kept.append(c)
+            continue
+        root = _doc_root(c["doc_id"])
+        pair = (_find(root), h)
+        is_primary = primary_for.get(pair[0]) == root
+        if not is_primary and pair in primary_pairs:
+            continue        # the surviving copy contributes this exact content
+        if pair in kept_pairs:
+            continue        # already represented in the results
+        kept_pairs.add(pair)
+        kept.append(c)
+    candidates = kept
 
     results = []
     for c in candidates:

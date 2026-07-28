@@ -3,6 +3,7 @@ import struct
 
 from mcpbrain import org_contracts as oc
 from mcpbrain import org_curate, ingest_cache
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import FleetPin, CacheArtifact, CacheChunk, artifact_filename
 from mcpbrain.store import Store
 from tests.helpers.org_fleet import LocalDirFleetStorage
@@ -36,17 +37,17 @@ def test_cache_import_writes_no_graph_rows(tmp_path):
     # edge to re-emit. (A#4 would change this and is out of scope for Phase D.)
     s = _store(tmp_path)
     fs = LocalDirFleetStorage(tmp_path / "drv")
-    pin = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+    pin = FleetPin(embed_model="bge-small", dim=4, chunker_version=str(CHUNKER_VERSION),
                    enrich_logic_floor=1, fleet_secret="s3cret")
     vec_b64 = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
     art = CacheArtifact(
         file_id="FID", content_hash="vh1", extraction_method="gdocs",
-        chunker_version="v1", embed_model="bge-small", dim=4,
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Acme quarterly numbers", embedding_b64=vec_b64,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
         enrich={"logic_version": 1}, published_by="p@x.org", published_at="2026-07-04")
     import gzip, json
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,'v1')}",
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",
                  gzip.compress(json.dumps(art.to_dict()).encode()))
     assert ingest_cache.try_import(s, fs, "D1", "FID", "vh1", pin) is True
     with s._connect() as db:

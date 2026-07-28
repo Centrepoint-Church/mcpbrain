@@ -93,12 +93,23 @@ def phase_purge_empty(store, apply: bool) -> int:
         # (the alternative is silently orphaning graph provenance), it just must
         # not surface as a bare traceback: print which id(s) are cited and stop.
         try:
-            done += store.purge_doc_ids(batch)
+            deleted = store.purge_doc_ids(batch)
         except ValueError as exc:
             print(f"[purge-empty] refusing this batch: {exc}", file=sys.stderr)
             print(f"[purge-empty] deleted {done} before halting; investigate the "
                   "cited doc_id(s) above before re-running", file=sys.stderr)
             return 4
+        if not deleted:
+            # The selector returned rows but the delete removed none, so the next
+            # iteration would select the same batch again: an infinite loop that
+            # writes nothing. Realistically a concurrent writer (the daemon)
+            # deleted them between the select and the delete, which is benign —
+            # but silently spinning forever is not, so stop and say so.
+            print(f"[purge-empty] {len(batch)} chunk(s) selected but 0 deleted — "
+                  "another writer removed them first; stopping (re-run to "
+                  "continue)", file=sys.stderr)
+            break
+        done += deleted
         print(f"[purge-empty] {done}/{total}")
     print(f"[purge-empty] deleted {done}")
     return 0
@@ -144,7 +155,12 @@ def main(argv=None):
         print(f"no store at {db_path}", file=sys.stderr)
         return 2
 
-    if args.apply:
+    # `status` never writes, so --apply on it is a no-op — and a backup is a full
+    # copy of an ~11 GB store: minutes of I/O plus 2x the disk (which this
+    # machine does not have to spare) for a read-only report. Preflight is
+    # skipped with it, since its only purpose is proving the backup fits.
+    backup = None
+    if args.apply and args.phase != "status":
         ok, why = preflight(db_path)
         if not ok:
             print(f"[repair] refusing to apply: {why}", file=sys.stderr)
@@ -170,7 +186,7 @@ def main(argv=None):
         # only makes sense after a clean run.
         return rc
 
-    if args.apply:
+    if backup is not None:
         print("\n[repair] Run the gold gate now (PRODUCTION path):\n"
               "  uv run python tests/eval/run_eval.py --gold --k 10\n"
               "  Baseline 2026-07-28: recall@10 0.700 / MRR 0.510.\n"
