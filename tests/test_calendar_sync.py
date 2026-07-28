@@ -438,3 +438,60 @@ def test_persistently_410ing_token_eventually_recovers_not_livelocked(tmp_path):
     assert store.get_cursor("calendar:resume_ids") == "[]"
     for i in range(1, n + 1):
         assert store.get_chunk(f"cal-evt{i}") is not None, f"evt{i} was never ingested"
+
+
+# ---------------------------------------------------------------------------
+# Finding E: long-agenda splitting + chunk_total
+# ---------------------------------------------------------------------------
+
+def test_a_short_event_keeps_its_exact_doc_id():
+    """Finding E's fix must not change the common case: delete_calendar_chunks_
+    after and the calendar enrichment path both key on cal-<event_id>, so a
+    suffix here would orphan every existing calendar chunk."""
+    from mcpbrain.sync.calendar import normalise_calendar
+
+    chunks = normalise_calendar({"id": "e1", "summary": "Standup",
+                                 "start": {"dateTime": "2026-06-02T09:00:00Z"}})
+
+    assert [c.doc_id for c in chunks] == ["cal-e1"]
+    assert chunks[0].metadata["chunk_total"] == 1
+
+
+def test_a_very_long_agenda_is_split():
+    """Finding E: normalise_calendar emitted exactly one chunk per event with the
+    description inlined, never calling chunk_text, so a long agenda was truncated
+    by the embedder rather than split. Only 4 of 1,149 live chunks are affected."""
+    from mcpbrain.sync.calendar import normalise_calendar
+
+    chunks = normalise_calendar({"id": "e2", "summary": "Board",
+                                 "start": {"dateTime": "2026-06-02T09:00:00Z"},
+                                 "description": "agenda item. " * 500})
+
+    assert len(chunks) > 1
+    assert [c.doc_id for c in chunks] == [f"cal-e2-{i}" for i in range(len(chunks))]
+    assert all(c.metadata["chunk_total"] == len(chunks) for c in chunks)
+
+
+def test_a_split_events_chunks_are_all_evicted_when_the_horizon_shrinks(tmp_path):
+    """delete_calendar_chunks_after filters on metadata (source_type + start),
+    not on doc_id shape, so it must delete every chunk of a split event just as
+    it deletes a single-chunk one — confirming Step 8's LIKE-pattern concern
+    does not apply here (this sweep never matches on doc_id at all)."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync.calendar import normalise_calendar
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    chunks = normalise_calendar({"id": "e3", "summary": "Board",
+                                 "start": {"dateTime": "2027-01-01T09:00:00Z"},
+                                 "description": "agenda item. " * 500})
+    assert len(chunks) > 1, "fixture must actually exercise the split path"
+    for c in chunks:
+        store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    for c in chunks:
+        assert store.get_chunk(c.doc_id) is not None
+
+    store.delete_calendar_chunks_after("2026-12-31T00:00:00Z")
+
+    for c in chunks:
+        assert store.get_chunk(c.doc_id) is None, f"{c.doc_id} survived the sweep"

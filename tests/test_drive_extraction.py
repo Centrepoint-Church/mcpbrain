@@ -257,3 +257,36 @@ def test_xlsx_extracts_as_markdown_table():
     assert "| Item | Cost |" in rows_text
     assert "| --- | --- |" in rows_text
     assert "| Camp | 500 |" in rows_text
+
+
+def test_a_spreadsheet_is_chunked_by_row_group_with_headers():
+    """B2: a Google Sheet exports as CSV, chunk_text splits on \\n\\n, a CSV has
+    no blank lines, so the whole sheet became one 'paragraph' and fell to the
+    word-split branch — cut at 2,000 chars mid-row, mid-cell, with the header
+    surviving only in chunk 0."""
+    from mcpbrain.sync.drive import normalise_drive
+    from mcpbrain.sync.tabular import Table
+
+    fmeta = {"id": "f1", "name": "Budget.xlsx",
+             "mimeType": "application/vnd.openxmlformats-officedocument."
+                         "spreadsheetml.sheet"}
+    tables = [Table(sheet="GL", header=["Item", "Amount"],
+                    rows=[[f"Item {i}", str(i)] for i in range(200)],
+                    rows_total=200, truncated=False)]
+
+    chunks = normalise_drive(fmeta, "", tables=tables)
+    row_chunks = [c for c in chunks if c.metadata.get("table_role") == "rows"]
+
+    assert len(row_chunks) > 1, "200 rows should not fit in one chunk"
+    for c in row_chunks:
+        assert "| Item | Amount |" in c.text, "row group lost its header"
+    assert any(c.metadata.get("table_role") == "summary" for c in chunks)
+
+
+def test_a_content_free_document_produces_no_chunks():
+    """The 66,653 empty-pipe chunks must not be creatable any more."""
+    from mcpbrain.sync.drive import normalise_drive
+
+    fmeta = {"id": "f1", "name": "Empty.txt", "mimeType": "text/plain"}
+
+    assert normalise_drive(fmeta, "|  |  |  |\n\n|  |  |  |") == []
