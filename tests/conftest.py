@@ -102,3 +102,31 @@ def _no_real_exit(monkeypatch, request):
             raise AssertionError("subprocess.Popen called in a test")
 
         monkeypatch.setattr(subprocess, "Popen", _boom_popen)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_daemon_tempdir(tmp_path, monkeypatch):
+    """Keep the snapshot-orphan sweep away from the real OS temp dir.
+
+    Daemon.run() and _backup_under_bulk_lock() call
+    backup.sweep_orphan_snapshots(tempfile.gettempdir(), max_age_s=...), which
+    rmtree's every `mcpbrain-snap-*` directory older than the cutoff. Several
+    tests drive a real Daemon.run(), and gettempdir() is /var/folders/... —
+    shared with the user's live daemon. A planted canary there was deleted by
+    running the suite, and a live backup's work dir is exactly that shape, so a
+    developer running pytest could destroy an in-flight snapshot of an 11.9GB
+    store.
+
+    Note this redirects `tempfile.gettempdir` process-wide for the duration of
+    each test — `daemon.tempfile` is the stdlib module itself, so there is no
+    daemon-only binding to patch. That is broader than strictly needed but is
+    the safer default: no test has a legitimate reason to write into the shared
+    OS temp dir. Tests that pass an explicit parent — notably
+    tests/test_snapshot_orphans.py — are unaffected and still exercise the real
+    sweep against their own directory.
+    """
+    from mcpbrain import daemon as _d
+    sweep_root = tmp_path / "ostmp"
+    sweep_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(_d.tempfile, "gettempdir", lambda: str(sweep_root))
+    yield

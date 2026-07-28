@@ -492,10 +492,12 @@ def test_budget_interrupted_mid_upsert_resumes_without_skip_or_duplicate(tmp_pat
     )
 
     # Call 1: pagination check before the (only) page (not expired -> both
-    # f1/f2 fetched+buffered into `pending` during that one page). Call 2:
-    # upsert-loop check before f1 (not expired -> f1 upserted). Call 3:
-    # upsert-loop check before f2 (expired -> stop; f2 never upserted).
-    budget = _FakeBudget(expire_after_calls=2)
+    # f1/f2 fetched+buffered into `pending` during that one page). f1 is then
+    # written WITHOUT consulting the budget -- the minimum-forward-progress
+    # guarantee (see sync_drive): a budget already spent by the fetch phase must
+    # still yield one write, or the resume set never grows and the round
+    # livelocks. Call 2: upsert-loop check before f2 (expired -> stop).
+    budget = _FakeBudget(expire_after_calls=1)
     result = sync_drive(svc, store, budget=budget)
 
     assert result == 1, "only the file(s) upserted before budget expiry should count"
@@ -607,8 +609,10 @@ def test_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
     store.upsert_chunk = spy_upsert
 
     # Call 1: budget cuts off right after f1 is processed with its ORIGINAL
-    # content -- f1's (stale-version) key lands in the resume set.
-    budget = _FakeBudget(expire_after_calls=2)
+    # content -- f1's (stale-version) key lands in the resume set. f1 itself is
+    # written unconditionally under the minimum-forward-progress guarantee, so
+    # the cut-off lands one expired() call earlier than it used to.
+    budget = _FakeBudget(expire_after_calls=1)
     sync_drive(svc, store, budget=budget)
     assert store.get_cursor("drive") == "100", "round must still be open"
     assert store.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
@@ -636,3 +640,76 @@ def test_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
     # picked up exactly once per version, not repeatedly re-applied within
     # the same round nor silently dropped.
     assert upsert_calls.count("gdrive-f1-0") == 2
+
+
+_EXPORTS_3 = {f"f{i}": (f"document {i} content, long enough to matter".encode())
+              for i in range(3)}
+
+
+def test_budget_spent_during_downloads_still_makes_forward_progress(tmp_path):
+    """A budget spent inside the FETCH phase must not livelock sync_drive.
+
+    _fetch_text runs for every changed file inside the pagination loop, with no
+    budget check and no resume-set consultation. The write loop then checks the
+    budget BEFORE its first item, so if the downloads spent it, zero items are
+    written, resumed_ids never grows, and the cursor never advances -- the next
+    cycle re-downloads exactly the same files, forever. Reproduced over 6
+    consecutive cycles: processed=0, cursor frozen, 3 downloads re-issued each
+    time.
+
+    Two guarantees are asserted: at least one item is written per call (so the
+    resume set always grows), and repeated cycles eventually complete the round.
+    """
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+    pages = [_page([_gdoc_change(f"f{i}", f"Doc {i}") for i in range(3)],
+                   new_start_page_token="105")]
+
+    total = 0
+    for cycle in range(6):
+        svc = FakeDriveService(pages=list(pages), start_token="100",
+                               exports=_EXPORTS_3)
+        # Survives the pagination check (call 1), then dies before the write
+        # loop's first item -- i.e. consumed by the per-file downloads that
+        # happen between the two. Expiring at call 0 instead would mean the
+        # page is never even fetched, where doing nothing IS correct.
+        got = sync_drive(svc, store, budget=_FakeBudget(expire_after_calls=1))
+        total += got
+        if store.get_cursor("drive") == "105":
+            break
+
+    assert total >= 1, (
+        "no forward progress across 6 cycles with an immediately-expired "
+        "budget -- this is the livelock"
+    )
+    assert store.get_cursor("drive") == "105", "round never closed"
+
+
+def test_already_resumed_files_are_not_re_downloaded(tmp_path, monkeypatch):
+    """Skipping must happen BEFORE _fetch_text, not after: otherwise a truncated
+    cycle re-issues network exports for files it already durably wrote."""
+    from mcpbrain.sync import drive as drive_mod
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+    pages = [_page([_gdoc_change(f"f{i}", f"Doc {i}") for i in range(3)],
+                   new_start_page_token="105")]
+
+    calls = []
+    real = drive_mod._fetch_text
+    monkeypatch.setattr(drive_mod, "_fetch_text",
+                        lambda svc, fmeta: calls.append(fmeta.get("id")) or real(svc, fmeta))
+
+    # First cycle: budget allows exactly one write, so 2 files stay pending.
+    svc = FakeDriveService(pages=list(pages), start_token="100",
+                           exports=_EXPORTS_3)
+    sync_drive(svc, store, budget=_FakeBudget(expire_after_calls=1))
+    first_round = len(calls)
+    assert first_round == 3, "all three should be fetched on the first pass"
+
+    calls.clear()
+    svc2 = FakeDriveService(pages=list(pages), start_token="100",
+                            exports=_EXPORTS_3)
+    sync_drive(svc2, store, budget=_FakeBudget(expire_after_calls=1))
+    assert len(calls) < first_round, (
+        f"re-downloaded {len(calls)} of {first_round} already-checkpointed files"
+    )

@@ -100,7 +100,7 @@ def test_recovery_spawns_replacement_on_unsupervised_windows(tmp_path, monkeypat
     """Startup-folder fallback has no supervisor, so exiting alone would kill us."""
     dm = _wd_daemon(tmp_path, monkeypatch)
     monkeypatch.setattr(d.sys, "platform", "win32")
-    monkeypatch.setattr(d, "win_persistence_mechanism", lambda: "startup")
+    monkeypatch.setattr(d, "win_supervised", lambda home: False)
     called = {}
     monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.setdefault("exit", True))
     monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.setdefault("spawn", True))
@@ -112,7 +112,7 @@ def test_recovery_exits_on_supervised_windows(tmp_path, monkeypatch):
     """With a schtasks RestartOnFailure task, exit is supervised."""
     dm = _wd_daemon(tmp_path, monkeypatch)
     monkeypatch.setattr(d.sys, "platform", "win32")
-    monkeypatch.setattr(d, "win_persistence_mechanism", lambda: "schtasks")
+    monkeypatch.setattr(d, "win_supervised", lambda home: True)
     called = {}
     monkeypatch.setattr(dm, "_exit_for_restart", lambda: called.setdefault("exit", True))
     monkeypatch.setattr(dm, "_spawn_replacement", lambda: called.setdefault("spawn", True))

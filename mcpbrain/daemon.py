@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
-from mcpbrain.agents import win_persistence_mechanism
+from mcpbrain.agents import win_supervised
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
@@ -3312,22 +3312,18 @@ class Daemon:
         not set any of these attributes, and that must read as "no, not
         deferring" rather than raise.
 
-        KNOWN GAP (Task 5 review, 2026-07-28), not fixed here: `supervised`
-        below only asks "is Task Scheduler usable at all right now"
-        (win_persistence_mechanism() == "schtasks") -- it cannot tell a
-        genuinely-supervised install (the XML-registered task, RestartOnFailure
-        wired up, waiting shim) apart from one where install_agent's XML
-        registration failed and silently fell back to the plain /TR CLI form
-        (agents._install_schtasks's except branch), which has no
-        RestartOnFailure and deliberately uses a non-waiting shim. On that
-        fallback, this method still takes the "supervised, just exit cleanly"
-        branch, but nothing will actually restart the daemon -- worse than the
-        unsupervised path it thinks it's avoiding (a clean exit there is a
-        stall that now waits for next logon, instead of self-spawning
-        immediately). Fixing this needs the install side to record which
-        mechanism was actually achieved somewhere this method can read (e.g. a
-        marker file written by _install_schtasks) -- tracked, not fixed, since
-        it needs to grow beyond agents.py/daemon.py's existing surface.
+        Windows supervision (Task 5 review gap, FIXED 2026-07-28): `supervised`
+        below asks `win_supervised()`, not merely "is Task Scheduler usable".
+        install_agent falls back to the plain /TR CLI form when XML registration
+        is rejected, which keeps an on-logon task but loses RestartOnFailure; on
+        that fallback a clean exit would leave the daemon dead until next logon
+        -- worse than the unsupervised path it thinks it is avoiding, which at
+        least self-spawns. win_supervised() distinguishes them by inspecting the
+        artefact that actually determines the behaviour: only the XML path
+        installs the WAITING shim whose WScript.Quit propagates the daemon's exit
+        code, and only a propagated exit code can ever trigger RestartOnFailure.
+        Deriving it from the installed shim avoids a second piece of state (a
+        marker file) that could drift out of sync with what is really registered.
         """
         if getattr(self, "_backup_in_progress", None) is not None \
                 and self._backup_in_progress.is_set():
@@ -3350,7 +3346,14 @@ class Daemon:
             return
         supervised = True
         if sys.platform == "win32":
-            supervised = win_persistence_mechanism() == "schtasks"
+            # NOT just "is the mechanism schtasks": install_agent falls back to
+            # the plain /TR form when XML registration is rejected, which keeps
+            # the on-logon task but loses RestartOnFailure. Treating that as
+            # supervised takes the bare os._exit branch with nothing to restart
+            # us -- dead until next logon, strictly worse than the stall being
+            # recovered from. win_supervised() checks what was actually
+            # installed (the waiting, exit-code-propagating shim).
+            supervised = win_supervised(str(app_dir()))
         self._record_watchdog_exit()
         if supervised:
             self._exit_for_restart()
