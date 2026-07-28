@@ -130,10 +130,18 @@ class Content:
 def _fetch_text(service, file_meta: dict) -> str | None:
     """Return decoded text for supported types, else None (skip).
 
-    Google Docs/Slides/Sheets are exported; text/plain, text/markdown,
-    text/csv are fetched via get_media and decoded. PDF, DOCX, and XLSX are
-    fetched via get_media and extracted by the binary extractors in
-    mcpbrain.sync.extractors. Images and other binary types return None.
+    Google Docs/Slides/Sheets are exported (_EXPORT); the plain-text family
+    (text/plain, text/markdown, text/csv, TSV, RTF, JSON, HTML — _DOWNLOAD_TEXT)
+    is fetched via get_media and decoded. PDF, DOCX, PPTX and .eml
+    (_DOWNLOAD_BINARY) are fetched via get_media and run through the binary
+    extractors in mcpbrain.sync.extractors. Images and other binary types
+    return None.
+
+    XLSX/XLS are deliberately NOT here: they are intercepted earlier by
+    fetch_content's `binary_tables` dict and extracted as structured Tables
+    (sync/tabular.py) rather than pre-rendered text, so they never reach this
+    function. This docstring said otherwise for a while — see _DOWNLOAD_BINARY's
+    note.
     """
     mime = file_meta.get("mimeType", "")
     if mime in _EXPORT:
@@ -538,6 +546,15 @@ def _cache_first_extract_one(
         caller must publish the artifact after embedding; None otherwise
         (cache hit or skip — nothing new to publish).
 
+    A PARTIAL extraction (I9: the extractor died partway, so `content.partial`)
+    is indexed locally but deliberately returns miss=None: the miss list is what
+    gets published to the shared-drive ingest cache, and publishing a truncated
+    document would propagate the truncation to every other install in the fleet
+    keyed on a content hash that says it is complete — self-healing only when the
+    file next changes. Locally it self-heals on the next sync of the same version;
+    the fleet artifact would not. Same "don't do X for a partial" policy as the
+    orphan-delete skip in upsert_file_chunks.
+
     Exceptions propagate; callers that need per-file isolation wrap the call.
     """
     from mcpbrain import ingest_cache
@@ -566,6 +583,11 @@ def _cache_first_extract_one(
         return False, None
     with bulk_section():
         upsert_file_chunks(store, chunks, file_id=fid, partial=content.partial)
+    if content.partial:
+        log.warning("drive: %s extracted only partially; NOT publishing it to "
+                    "the ingest cache (a truncated artifact would propagate "
+                    "fleet-wide under a complete-looking content hash)", fid)
+        return True, None
     return True, (fid, content_h)
 
 
