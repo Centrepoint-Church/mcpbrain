@@ -342,6 +342,18 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Chunk window':<16} skipped ({exc})")
 
+    # Repair progress (spec 3, bin/repair.py): content-free chunks and Drive
+    # files whose chunks predate the current chunker. Surfaced here so "is the
+    # repair done?" is answerable without running the CLI.
+    try:
+        from mcpbrain.chunking import CHUNKER_VERSION
+        empty = store.count_content_free()
+        stale = len(store.stale_chunker_file_ids(CHUNKER_VERSION, limit=100_000))
+        lines.append(f"{'✅' if not empty else '⚠️'} content-free chunks: {empty}")
+        lines.append(f"{'✅' if not stale else '⚠️'} Drive files awaiting re-chunk: {stale}")
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        lines.append(f"➖ {'Repair state':<16} skipped ({exc})")
+
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
     enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
