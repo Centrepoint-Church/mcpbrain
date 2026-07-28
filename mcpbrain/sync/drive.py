@@ -1248,17 +1248,26 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     summary = {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
     for fid in file_ids:
         try:
-            fmeta = service.files().get(
-                fileId=fid, fields=fields, supportsAllDrives=True).execute()
-        except HttpError as exc:
-            resp = getattr(exc, "resp", None)
-            if resp is not None and resp.status == 404:
-                log.info("reingest: %s no longer exists in Drive; leaving its "
-                         "chunks for the delta sync's removal path", fid)
-                summary["missing"] += 1
-                continue
-            raise
-        try:
+            # Nested so a 404 here can `continue` without being counted as
+            # `failed` (it is `missing` instead — see the docstring) while any
+            # OTHER HttpError (403 permission-denied, 429 rate-limited, a
+            # transient 500/503 — all realistic across a 9,351-file batch)
+            # re-raises straight into the outer `except Exception` below,
+            # which is what actually gives it per-file isolation. Review
+            # finding: this used to `raise` out of a SIBLING try/except pair,
+            # which escaped the whole function on the first non-404 HttpError
+            # and aborted the run instead of moving on to the next file.
+            try:
+                fmeta = service.files().get(
+                    fileId=fid, fields=fields, supportsAllDrives=True).execute()
+            except HttpError as exc:
+                resp = getattr(exc, "resp", None)
+                if resp is not None and resp.status == 404:
+                    log.info("reingest: %s no longer exists in Drive; leaving "
+                             "its chunks for the delta sync's removal path", fid)
+                    summary["missing"] += 1
+                    continue
+                raise
             content = fetch_content(service, fmeta, store=store, report=report)
             if content is None or (not content.text and not content.tables):
                 log.info("reingest: %s yielded no content", fid)

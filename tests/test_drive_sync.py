@@ -1224,6 +1224,47 @@ def test_reingest_files_skips_a_file_that_no_longer_exists(tmp_path):
     assert store.get_chunk("gdrive-gone-0") is not None
 
 
+def test_reingest_files_isolates_a_non_404_httperror_from_metadata_fetch(tmp_path, monkeypatch):
+    """Only a 404 (the file is genuinely gone) is special-cased as `missing`.
+    A 403/429/5xx from files().get() itself -- all realistic across a
+    9,351-file batch -- is a per-file failure like any other and must not
+    escape the loop and abort the whole run; the next file must still be
+    reached and processed."""
+    from googleapiclient.errors import HttpError
+
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    class _Resp:
+        status = 429
+        reason = "Too Many Requests"
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            if self._fid == "throttled":
+                raise HttpError(_Resp(), b"rate limited")
+            return {"id": self._fid, "name": f"{self._fid}.txt",
+                    "mimeType": "text/plain", "parents": []}
+
+    monkeypatch.setattr(drive, "_fetch_text", lambda service, meta: "fine content")
+
+    summary = drive.reingest_files(_Service(), store, ["ok1", "throttled", "ok2"])
+
+    assert summary["files"] == 2, "a non-404 HttpError must not abort the run"
+    assert summary["failed"] == 1
+    assert summary["missing"] == 0
+
+
 def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monkeypatch):
     """One unreadable file in 9,351 must not end the run."""
     from mcpbrain.store import Store
