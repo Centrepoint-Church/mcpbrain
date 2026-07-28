@@ -211,7 +211,11 @@ def test_budget_interrupted_mid_event_loop_resumes_incrementally(tmp_path):
     # Call 1: _list_events' single-page pagination check (not expired). Call
     # 2: event-loop check before evt1 (not expired -> evt1 processed). Call
     # 3: before evt2 (expired -> stop; evt2/evt3 not reached this call).
-    budget = _FakeBudget(expire_after_calls=2)
+    # One fewer expired() call than before: the first item is now written
+    # unconditionally under the minimum-forward-progress guarantee, so the
+    # cut-off lands one call earlier while the outcome under test is
+    # unchanged (first item durable, second not, round still open).
+    budget = _FakeBudget(expire_after_calls=1)
     result = sync_calendar(svc, store, budget=budget)
 
     assert result == 1
@@ -302,7 +306,11 @@ def test_event_edited_mid_round_is_picked_up_not_skipped(tmp_path):
 
     # Call 1: budget cuts off right after evt1 is processed with its
     # ORIGINAL content -- evt1's (stale) key lands in the resume set.
-    budget = _FakeBudget(expire_after_calls=2)
+    # One fewer expired() call than before: the first event is now written
+    # unconditionally under the minimum-forward-progress guarantee, so the
+    # cut-off lands one call earlier while the scenario under test (a stale
+    # resume key must not mask an edit) is unchanged.
+    budget = _FakeBudget(expire_after_calls=1)
     sync_calendar(svc, store, budget=budget)
     assert store.get_cursor("calendar") == "old", "round must still be open"
     assert "09:00:00Z" in store.get_chunk("cal-evt1")["text"]

@@ -3444,7 +3444,12 @@ class Daemon:
             "embedding backend changed to %s; re-embedding %d chunks",
             backend, pending,
         )
-        count = index_pending(self._store, self._embedder)
+        # Serialise the re-embed's chunk writes like every other bulk write.
+        # This runs at startup before _start_maintenance_thread(), so the
+        # race is narrow today -- but an unlocked full-corpus write is the
+        # one shape that must not be left to ordering luck.
+        count = index_pending(self._store, self._embedder,
+                              bulk_section=self._cycle_bulk_section)
         log.info("re-embedded %d chunks for backend change", count)
         self._store.set_meta("embed_backend", backend)
         return count

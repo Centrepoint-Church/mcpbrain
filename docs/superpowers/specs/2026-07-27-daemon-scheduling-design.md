@@ -483,8 +483,12 @@ the specific numbers from Step 4 of the Task 8 brief:**
   concerns.)
 - **Gold eval holds at the floor**: `uv run python tests/eval/run_eval.py
   --gold --k 10` → recall@10=0.700, MRR=0.511 (20/20 cases covered) —
-  identical to both the pre-change baseline and the 2026-07-27 run. No
-  retrieval regression from any of the 8 tasks.
+  unchanged across the 2026-07-27 and 2026-07-28 runs, so no regression from
+  any of the 8 tasks. Note this is NOT the repo's recorded production
+  baseline of recall@10=0.750 / MRR=0.556 (`tests/eval/test_eval_baseline.py`,
+  measured 2026-07-01): the gate floors (0.55 / 0.35) pass comfortably, but
+  the 0.750 -> 0.700 drift predates this work and is unexplained — it should
+  not be described as "identical to baseline".
 - **Disk free never fell to a dangerous level, and no `mcpbrain-snap-*`
   directory survived any backup attempt** — including the *failed* ones,
   which is the harder case Task 7's periodic re-sweep exists for. Disk free

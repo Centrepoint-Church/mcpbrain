@@ -476,7 +476,13 @@ def sync_calendar(
         rkey = _event_resume_key(ev)
         if rkey and rkey in resumed_ids:
             continue
-        if budget is not None and budget.expired():
+        # Minimum forward progress: honour the budget only once this call
+        # has written something. Checking before the first item means a
+        # budget already spent upstream yields zero writes, leaves the
+        # resume set unchanged, and re-does identical work next cycle --
+        # the livelock reproduced in sync_drive. One item per call keeps
+        # the round monotonic.
+        if count and budget is not None and budget.expired():
             interrupted = True
             break
         with bulk_section():

@@ -210,7 +210,11 @@ def test_sync_shared_drive_file_edited_mid_round_is_picked_up_not_skipped(tmp_pa
         exports={"f1": b"ORIGINAL f1 body content, long enough to matter",
                 "f2": b"f2 body content, long enough to matter"})
 
-    budget = _FakeBudget(expire_after_calls=2)
+    # One fewer expired() call than before: the first item is now written
+    # unconditionally under the minimum-forward-progress guarantee, so the
+    # cut-off lands one call earlier while the outcome under test is
+    # unchanged (first item durable, second not, round still open).
+    budget = _FakeBudget(expire_after_calls=1)
     sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=budget)
     assert s.get_cursor("drive:D1") == "100", "round must still be open"
     assert s.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
