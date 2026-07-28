@@ -1311,26 +1311,55 @@ class Store:
                 "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
                 (f"gdrive-{_like_escape(file_id)}-%",)).fetchall()]
 
-    def sibling_chunk_count(self, doc_id: str) -> int:
-        """How many chunk rows share `doc_id`'s positional root (the doc_id with
-        its trailing '-<n>' chunk index stripped, e.g. gdrive-<fid>-3 ->
-        gdrive-<fid>).
+    def doc_root_content_hashes(self, roots: list[str]) -> dict[str, frozenset[str]]:
+        """Batched: for each of `roots` (a doc_id with its trailing '-<n>' chunk
+        index already stripped, e.g. gdrive-<fid>-3 -> gdrive-<fid>), the set
+        of DISTINCT content_hash values across every chunk under that root —
+        i.e. the document's whole known content fingerprint, not just one
+        chunk's hash or a flat chunk count.
 
         Used by hybrid_search's content-hash dedup to tell apart two crowding
-        shapes that both surface as a shared content_hash: a genuinely
-        duplicate FILE (the whole document is 1, maybe a couple, chunks — safe
-        to collapse to the best-ranked copy) versus two DIFFERENT real
-        documents that happen to share one boilerplate/template chunk (e.g. a
-        shared board-charter letterhead) while the rest of each document's
-        chunks diverge — collapsing THAT case on a single shared chunk drops a
-        genuinely different document from the result set. A doc_id with no
-        recognisable '-<n>' suffix is treated as its own singleton root."""
-        m = re.match(r"^(.*)-\d+$", doc_id)
-        root = m.group(1) if m else doc_id
+        shapes that both surface as a shared content_hash on ONE chunk: a
+        genuinely duplicate FILE (another document's WHOLE chunk-hash-set
+        matches this one — safe to collapse to the best-ranked copy, however
+        many chunks each copy has) versus two DIFFERENT documents that merely
+        share one boilerplate/template chunk (e.g. a shared board-charter
+        letterhead) while the rest of each document's own chunks diverge —
+        collapsing THAT case on the one shared chunk drops a genuinely
+        different document from the result set. A per-chunk sibling COUNT
+        alone can't tell these apart (a genuine multi-chunk duplicate file has
+        count > 1 on every one of its own chunks too); comparing the full hash
+        SET can.
+
+        ONE query for the whole batch — hybrid_search calls this once per
+        search against its small candidate pool (the interactive recall hot
+        path), not once per candidate. Uses an indexed doc_id RANGE condition
+        (`doc_id >= root+'-' AND doc_id < root+'.'`, exploiting '.' sorting
+        immediately after '-' in ASCII to bound a "starts with root-" prefix
+        match) rather than `doc_id LIKE ... ESCAPE`: this codebase has a
+        documented incident (0.7.105, chunks_for_file) where ESCAPE disables
+        SQLite's LIKE-to-index optimisation and silently turns a doc_id prefix
+        match into a full `SCAN chunks`; verified via EXPLAIN QUERY PLAN that
+        the range form here plans as `SEARCH ... USING INDEX` instead, both
+        standalone and inside this batched CTE-join.
+        """
+        roots = list(dict.fromkeys(roots))  # de-dup, order doesn't matter
+        if not roots:
+            return {}
+        result: dict[str, set[str]] = {r: set() for r in roots}
+        values = ",".join("(?,?,?)" for _ in roots)
+        params: list[str] = []
+        for r in roots:
+            params.extend([r, f"{r}-", f"{r}."])
         with self._connect() as db:
-            return db.execute(
-                "SELECT COUNT(*) FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
-                (f"{_like_escape(root)}-%",)).fetchone()[0]
+            rows = db.execute(
+                f"WITH roots(root, lo, hi) AS (VALUES {values}) "
+                "SELECT roots.root AS root, chunks.content_hash AS h FROM chunks "
+                "JOIN roots ON chunks.doc_id >= roots.lo AND chunks.doc_id < roots.hi",
+                params).fetchall()
+        for row in rows:
+            result[row["root"]].add(row["h"])
+        return {r: frozenset(s) for r, s in result.items()}
 
     def delete_chunks(self, doc_ids) -> int:
         """Delete the given chunk rows and their vec_chunks/fts_chunks mirrors

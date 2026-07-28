@@ -225,6 +225,16 @@ def _dedupe_by_content(hits: list[dict]) -> list[dict]:
     return out
 
 
+def _doc_root(doc_id: str) -> str:
+    """Positional root of a doc_id with its trailing '-<n>' chunk index
+    stripped (gdrive-<fid>-3 -> gdrive-<fid>). Mirrors the same convention
+    tests/eval/run_eval.py's `_doc_key` uses to group a chunk back to its
+    document for document-level recall scoring. A doc_id with no recognisable
+    '-<n>' suffix is its own singleton root."""
+    m = re.match(r"^(.*)-\d+$", doc_id)
+    return m.group(1) if m else doc_id
+
+
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
                   kw_weight: float = _KW_WEIGHT, query_vec: list | None = None,
@@ -311,27 +321,85 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # the 0.7.103 expansion fix and 0.7.110 open-actions fix each had to undo).
     #
     # A shared content_hash surfaces two different real-world shapes and only
-    # one of them is safe to collapse: a genuinely duplicate FILE (the whole
-    # document is a single chunk, or a couple — safe, and the shape the gold
-    # eval's asset-register case models) versus two DIFFERENT real documents
-    # that happen to share one boilerplate/template chunk (e.g. a shared board-
-    # charter letterhead) while the rest of each document's own chunks diverge.
-    # Measured against the live gold set: applying dedup unconditionally here
-    # DROPPED recall@10 0.700->0.600 by discarding exactly this second shape —
-    # two distinct AGM/charter documents sharing one templated header chunk,
-    # so the whole-file-duplicate assumption behind content_hash dedup broke.
-    # `sibling_chunk_count` distinguishes the two: a doc_id whose document has
-    # more than one known chunk is exempted from hash-collapsing (its
-    # content_hash is hidden from the dedup pass only — the true value is kept
-    # on the hit dict `_dedupe_by_content` returns), so a multi-chunk document
-    # is never dropped purely because ONE of its chunks textually matches
-    # another document's chunk.
-    protected = {c["doc_id"] for c in candidates
-                if c.get("content_hash") and store.sibling_chunk_count(c["doc_id"]) > 1}
-    probe = [{**c, "content_hash": None} if c["doc_id"] in protected else c
-            for c in candidates]
-    kept_ids = {c["doc_id"] for c in _dedupe_by_content(probe)}
-    candidates = [c for c in candidates if c["doc_id"] in kept_ids]
+    # one of them is safe to collapse: a genuinely duplicate FILE (another
+    # document's WHOLE chunk-hash-set matches this one, however many chunks
+    # each copy has — the shape the gold eval's asset-register case models,
+    # and confirmed on the live store too: two "Copy of X" / re-export
+    # duplicate pairs, every one of their chunks matching pairwise) versus two
+    # DIFFERENT documents that merely share ONE boilerplate/template chunk
+    # while the rest of each document's own chunks diverge. A per-chunk
+    # sibling COUNT alone can't tell the two shapes apart (a genuine
+    # multi-chunk duplicate file has count > 1 on every one of its own chunks
+    # too — protecting on count alone leaves that FILE just as crowded as
+    # before, reproducing the very problem this dedup exists to fix).
+    # Comparing each candidate's WHOLE document hash SET can: root_hashes
+    # below is fetched ONCE per search (batched, index-backed — see
+    # doc_root_content_hashes), and union-find groups roots into a cluster
+    # wherever two roots' full sets are equal and non-empty — transitively,
+    # so 3+ mutual copies of the same file (the asset-register shape) merge
+    # into one cluster. A root that only ever shares ONE hash with a root
+    # whose FULL set differs never joins that root's cluster, so it is never
+    # collapsed on that basis (protects two genuinely different documents
+    # that happen to share a boilerplate/template chunk).
+    roots = {_doc_root(c["doc_id"]) for c in candidates if c.get("content_hash")}
+    root_hashes = store.doc_root_content_hashes(list(roots))
+
+    parent = {r: r for r in roots}
+
+    def _find(r: str) -> str:
+        while parent[r] != r:
+            parent[r] = parent[parent[r]]
+            r = parent[r]
+        return r
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    hash_to_roots: dict[str, list[str]] = {}
+    for r in roots:
+        for h in (root_hashes.get(r) or ()):
+            hash_to_roots.setdefault(h, []).append(r)
+    for co_roots in hash_to_roots.values():
+        anchor = co_roots[0]
+        for other in co_roots[1:]:
+            if root_hashes.get(anchor) == root_hashes.get(other):
+                _union(anchor, other)
+
+    # Measured on the live gold set: BOTH observed collision pairs turned out
+    # to be genuine duplicates (a "Copy of X" re-upload and a double-extension
+    # re-export), so this isn't a "should we collapse" question but a "which
+    # copy survives" one. Byte-identical content offers no relevance signal to
+    # choose between the copies, so the tie-break is recency (metadata
+    # date/modified — the more likely CURRENT copy of a duplicated file), with
+    # the ranker's own order as the fallback when dates are unavailable or
+    # tie — this recovered both live gold cases (each time, the gold-expected
+    # copy was the more recently modified one).
+    from mcpbrain.importance import recency_decay as _recency
+    best: dict[str, tuple[float, int]] = {}
+    primary_for: dict[str, str] = {}
+    for i, c in enumerate(candidates):
+        if not c.get("content_hash"):
+            continue
+        root = _doc_root(c["doc_id"])
+        cluster = _find(root)
+        key = (_recency(c.get("metadata") or {}), -i)
+        if cluster not in best or key > best[cluster]:
+            best[cluster] = key
+            primary_for[cluster] = root
+
+    # Drop every chunk of every non-primary root in a >1-member cluster — by
+    # definition each one duplicates a chunk the surviving root already
+    # contributes. A root whose cluster has only itself (no confirmed
+    # whole-document duplicate found) is its own primary and is never
+    # touched here.
+    drop_ids = {
+        c["doc_id"] for c in candidates
+        if c.get("content_hash")
+        and primary_for.get(_find(_doc_root(c["doc_id"]))) not in (None, _doc_root(c["doc_id"]))
+    }
+    candidates = [c for c in candidates if c["doc_id"] not in drop_ids]
 
     results = []
     for c in candidates:
