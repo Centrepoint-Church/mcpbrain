@@ -415,3 +415,153 @@ def test_is_scanned_pdf_is_either_used_or_gone():
     call_sites = [ln for ln in out.splitlines() if "def is_scanned_pdf" not in ln]
 
     assert call_sites, "is_scanned_pdf is still dead code"
+
+
+def test_a_pdf_is_parsed_once_not_twice():
+    """I7: extract_text_from_pdf extracted `pages` itself and then called
+    is_scanned_pdf(content_bytes), which opened a SECOND fitz document and
+    re-extracted every page just to make the scanned/not-scanned decision —
+    doubling the cost of the corpus's most expensive extractor on every PDF,
+    forever. The decision is unchanged; it is now computed from the pages we
+    already have."""
+    import fitz
+
+    from mcpbrain.sync.extractors import extract_text_from_pdf
+
+    # Built BEFORE the patch — the fixture helper opens fitz itself to make the
+    # PDF, which would otherwise be counted.
+    pdf = _make_pdf_long_text_bytes()
+    opens = []
+    real_open = fitz.open
+
+    def counting_open(*a, **kw):
+        opens.append(1)
+        return real_open(*a, **kw)
+
+    fitz.open = counting_open
+    try:
+        text = extract_text_from_pdf(pdf)
+    finally:
+        fitz.open = real_open
+
+    assert "Hello" in text or text.strip(), "extraction still has to work"
+    assert len(opens) == 1, f"the document was opened {len(opens)} times"
+
+
+def test_the_scanned_decision_is_identical_whichever_way_it_is_computed():
+    """The refactor must not move the gate: is_scanned_pdf(bytes) and
+    is_scanned_pdf(bytes, pages=…) must agree for both a text PDF and a blank one."""
+    import fitz
+
+    from mcpbrain.sync.extractors import is_scanned_pdf
+
+    for pdf, expected in ((_make_pdf_long_text_bytes(), False),
+                          (_make_pdf_no_text_bytes(), True)):
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        pages = [p.get_text() for p in doc]
+        doc.close()
+        assert is_scanned_pdf(pdf) is expected
+        assert is_scanned_pdf(pdf, pages=pages) is expected
+
+
+# ---------------------------------------------------------------------------
+# I9: partial-result signalling
+# ---------------------------------------------------------------------------
+
+def _make_multi_sheet_xlsx_bytes(sheets: int = 3) -> bytes:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    for n in range(sheets):
+        ws = wb.active if n == 0 else wb.create_sheet()
+        ws.title = f"Sheet{n}"
+        ws.append(["Item", "Amount"])
+        ws.append([f"Row {n}", 100 + n])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_a_mid_workbook_failure_returns_a_partial_result(monkeypatch):
+    """I9: the extractor keeps the sheets it got (better than nothing), but the
+    CALLER has to be able to tell that apart from a genuinely short workbook —
+    otherwise drive.upsert_file_chunks deletes the chunks the failed extraction
+    never reached."""
+    from mcpbrain.sync import extractors
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx, is_partial
+    from mcpbrain.sync.tabular import Table
+
+    calls = {"n": 0}
+
+    def exploding(name, raw, char_budget):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("simulated mid-workbook failure")
+        return [Table(sheet=name, header=["a"], rows=[["1"]], rows_total=1)]
+
+    monkeypatch.setattr(extractors, "_tables_from_grid", exploding)
+
+    tables = extract_tables_from_xlsx(_make_multi_sheet_xlsx_bytes(),
+                                      char_budget=1_000_000)
+
+    assert len(tables) == 1, "the sheets read before the failure are kept"
+    assert is_partial(tables) is True
+
+
+def test_a_complete_workbook_is_not_marked_partial():
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx, is_partial
+
+    tables = extract_tables_from_xlsx(_make_multi_sheet_xlsx_bytes(),
+                                      char_budget=1_000_000)
+
+    assert len(tables) >= 2
+    assert is_partial(tables) is False
+
+
+def test_a_partial_result_still_behaves_as_the_plain_list_it_wraps():
+    """PartialTables/PartialText are list/str SUBCLASSES precisely so no existing
+    caller or test has to change."""
+    from mcpbrain.sync.extractors import PartialTables, PartialText, is_partial
+
+    assert PartialTables([1, 2]) == [1, 2]
+    assert PartialText("abc") == "abc"
+    assert is_partial([1, 2]) is False
+    assert is_partial("abc") is False
+    assert is_partial(None) is False
+
+
+def test_a_mid_deck_pptx_failure_returns_a_partial_string(monkeypatch):
+    from mcpbrain.sync import extractors
+    from mcpbrain.sync.extractors import extract_text_from_pptx, is_partial
+
+    class _Run:
+        text = "Slide body text"
+
+    class _Para:
+        runs = [_Run()]
+
+    class _Frame:
+        paragraphs = [_Para()]
+
+    class _Shape:
+        has_text_frame = True
+        text_frame = _Frame()
+
+    class _Slide:
+        shapes = [_Shape()]
+
+    class _Slides:
+        def __iter__(self):
+            yield _Slide()
+            raise RuntimeError("simulated mid-deck failure")
+
+    class _Prs:
+        slides = _Slides()
+
+    monkeypatch.setitem(__import__("sys").modules, "pptx",
+                        type("m", (), {"Presentation": lambda _b: _Prs()}))
+
+    out = extract_text_from_pptx(b"fake")
+
+    assert "Slide body text" in out
+    assert is_partial(out) is True
+    assert extractors.is_partial(out) is True

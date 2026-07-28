@@ -303,3 +303,29 @@ def test_a_normal_thread_is_not_truncated():
 
     assert "…" not in text
     assert "Sam Taylor" in text and "booking" in text
+
+
+def test_an_oversize_summary_is_truncated_not_dropped():
+    """I2: _fit appended '…' and stopped as soon as a line would overflow, so an
+    over-budget summary — the doc's only searchable prose — was dropped WHOLESALE
+    and the chunk was left as bare headers. That is exactly the "worse than not
+    bounding at all" failure _fit's own docstring warns against, caused by the
+    bounding itself."""
+    from mcpbrain.semantic import SEMANTIC_MAX_CHARS, build_semantic_doc
+
+    summary = ("The winter capital works program was reviewed at length. " * 55)
+    assert len(summary) > SEMANTIC_MAX_CHARS
+    extraction = {"thread_id": "t1", "summary": summary,
+                  "entities": [], "actions": [], "topics": []}
+
+    text, _meta = build_semantic_doc(
+        extraction, {"subject": "Capital works", "sender": "a@b.com",
+                     "date": "Tue, 02 Jun 2026 16:30:01 +0800"})
+
+    assert len(text) <= SEMANTIC_MAX_CHARS
+    assert "The winter capital works program was reviewed" in text, (
+        "the whole summary was dropped — the chunk has no searchable prose left"
+    )
+    # A large majority of the budget goes to the summary, not to headers + '…'.
+    assert len(text) > SEMANTIC_MAX_CHARS - 200
+    assert text.endswith("…"), "the elision must still be marked"

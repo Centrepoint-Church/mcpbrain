@@ -34,15 +34,69 @@ _OCR_DPI = 200             # render resolution for OCR (quality vs speed)
 
 
 # ---------------------------------------------------------------------------
+# Partial-result signalling (I9)
+# ---------------------------------------------------------------------------
+
+class PartialTables(list):
+    """`list[Table]` from an extraction that FAILED PARTWAY through the document.
+
+    The multi-sheet/multi-slide extractors below deliberately keep whatever they
+    had accumulated when an exception hit mid-iteration — better than nothing.
+    But drive.upsert_file_chunks reads a SHORT chunk list as evidence that the
+    document SHRANK and deletes the "orphaned" higher-index chunks (B5). So a
+    transient failure on sheet 3 of 5 permanently deleted sheets 3-5's
+    previously-good chunks, and nothing re-triggers extraction for a file whose
+    metadata never changes again — a logged warning turned into irreversible
+    content loss.
+
+    A list/str SUBCLASS rather than a tuple or a wrapper dataclass: it compares
+    and behaves exactly like the plain result, so every existing caller and test
+    is untouched, and the one caller that needs to know asks `is_partial()`.
+    """
+
+
+class PartialText(str):
+    """As PartialTables, for the text-returning extractors."""
+
+
+def is_partial(result) -> bool:
+    """True when `result` came from an extraction that died partway (see
+    PartialTables). False for a complete result, and for None."""
+    return isinstance(result, (PartialTables, PartialText))
+
+
+# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
-def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50) -> bool:
+def _is_scanned_pages(pages: list[str], chars_per_page_threshold: int = 50) -> bool:
+    """The scanned/image-only decision, from already-extracted page text.
+
+    Split out so the decision is computed ONCE per document (I7): extract_text_from_pdf
+    already has every page's text and used to call is_scanned_pdf, which opened a
+    SECOND fitz document and re-extracted all of it — doubling the cost of the
+    corpus's most expensive extractor on every PDF, forever.
+    """
+    if not pages:
+        return False
+    total = sum(len(p or "") for p in pages)
+    return (total / len(pages)) < chars_per_page_threshold
+
+
+def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50,
+                   pages: list[str] | None = None) -> bool:
     """True when a PDF looks scanned/image-only (avg text-layer chars/page is low).
 
     Mirrors ops-brain's pdf_scanned_check. Used to decide whether OCR is worth
     attempting; returns False on any open error (caller falls back to text layer).
+
+    `pages`, when given, is the document's already-extracted per-page text: the
+    decision is made from it directly and `content_bytes` is never opened (I7).
+    The DECISION is identical either way — both paths reduce to
+    _is_scanned_pages over the same page text.
     """
+    if pages is not None:
+        return _is_scanned_pages(pages, chars_per_page_threshold)
     try:
         import fitz  # pymupdf
         doc = fitz.open(stream=content_bytes, filetype="pdf")
@@ -50,11 +104,8 @@ def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50) 
         log.debug("is_scanned_pdf: open failed: %s", exc)
         return False
     try:
-        n = doc.page_count
-        if n == 0:
-            return False
-        total = sum(len(page.get_text() or "") for page in doc)
-        return (total / n) < chars_per_page_threshold
+        return _is_scanned_pages([page.get_text() or "" for page in doc],
+                                 chars_per_page_threshold)
     except Exception as exc:
         log.debug("is_scanned_pdf: detection failed: %s", exc)
         return False
@@ -85,7 +136,9 @@ def extract_text_from_pdf(content_bytes: bytes) -> str:
         return ""
     try:
         pages = [page.get_text() for page in doc]
-        if not is_scanned_pdf(content_bytes):
+        # `pages=` so the gate reuses the text we just extracted instead of
+        # re-opening and re-parsing the whole document (I7).
+        if not is_scanned_pdf(content_bytes, pages=pages):
             return "\n\n".join(pages)
         if not _tesseract_available():
             log.warning("pdf: looks scanned (%d pages, %d text chars) and "
@@ -247,6 +300,9 @@ def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[
     Replaces extract_text_from_xlsx. Deliberately does NOT render: chunk
     boundaries are decided by tabular.render_chunks, so each chunk can repeat
     the header rather than orphaning it in chunk 0 (B2).
+
+    A mid-iteration failure returns the sheets read so far as `PartialTables`
+    (I9) so the caller does not mistake the short result for a shrunk document.
     """
     try:
         import openpyxl
@@ -256,6 +312,7 @@ def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[
         log.warning("xlsx: workbook open failed: %s", exc)
         return []
     tables: list[Table] = []
+    partial = False
     try:
         for name in wb.sheetnames:
             raw = [[str(c) if c is not None else "" for c in row]
@@ -263,9 +320,10 @@ def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[
             tables.extend(_tables_from_grid(name, raw, char_budget))
     except Exception as exc:
         log.warning("xlsx: extraction failed after %d sheets: %s", len(tables), exc)
+        partial = True
     finally:
         wb.close()
-    return tables
+    return PartialTables(tables) if partial else tables
 
 
 def _xls_cell_to_str(cell, datemode: int) -> str:
@@ -323,6 +381,7 @@ def extract_tables_from_xls(content_bytes: bytes, *, char_budget: int) -> list[T
             tables.extend(_tables_from_grid(sheet.name, raw, char_budget))
     except Exception as exc:
         log.warning("xls: extraction failed after %d sheets: %s", len(tables), exc)
+        return PartialTables(tables)   # I9 — see PartialTables
     return tables
 
 
@@ -387,4 +446,5 @@ def extract_text_from_pptx(content_bytes: bytes) -> str:
                 parts.append(f"Slide {n}\n" + "\n".join(lines))
     except Exception as exc:
         log.warning("pptx: extraction failed after %d slides: %s", len(parts), exc)
+        return PartialText("\n\n".join(parts))   # I9 — see PartialTables
     return "\n\n".join(parts)
