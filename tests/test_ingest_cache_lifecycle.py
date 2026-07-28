@@ -347,6 +347,36 @@ def test_a_cache_import_of_the_same_size_deletes_nothing(tmp_path):
     assert sorted(store.doc_ids_for_file("f1")) == ["gdrive-f1-0"]
 
 
+def test_a_cache_import_shrink_sweep_does_not_touch_a_hyphenated_sibling_file(tmp_path):
+    """Drive file ids use the base64url alphabet (embed '-'), so file_id 'f1'
+    and file_id 'f1-1' are both real shapes, and 'gdrive-f1-1-0' (file 'f1-1',
+    chunk 0) would satisfy any doc_id RANGE/LIKE bound built from root
+    'gdrive-f1'. The orphan sweep resolves 'existing' chunks for the shrinking
+    file via an exact metadata.file_id match, so importing a smaller artifact
+    for 'f1' must never delete the unrelated file 'f1-1's chunks."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    for i in range(4):
+        store.upsert_chunk(f"gdrive-f1-{i}", f"old para {i}", f"h{i}",
+                           {"source_type": "gdrive", "file_id": "f1",
+                            "chunk_index": i})
+    store.upsert_chunk("gdrive-f1-1-0", "the OTHER file's only chunk", "hsib",
+                       {"source_type": "gdrive", "file_id": "f1-1",
+                        "chunk_index": 0})
+
+    _import_one_chunk_artifact(store, file_id="f1", text="only para now")
+
+    assert sorted(store.doc_ids_for_file("f1")) == ["gdrive-f1-0"], (
+        "the cache import left the shrunk file's own tail chunks behind"
+    )
+    assert store.doc_ids_for_file("f1-1") == ["gdrive-f1-1-0"], (
+        "the shrink sweep for file 'f1' must not delete the unrelated "
+        "hyphenated sibling file 'f1-1'"
+    )
+
+
 def test_a_pin_lagging_the_code_does_not_key_artifacts_on_the_stale_version(tmp_path):
     """A local chunker bump must invalidate stale fleet cache artifacts on its
     own. pipeline_fingerprint is keyed off the FLEET-DISTRIBUTED pin, and

@@ -1049,7 +1049,54 @@ def test_merge_repoints_observations_email_and_carries_aliases(tmp_path):
     assert "Alice A." in aliases and "Ali" in aliases   # loser name + loser's own alias carried
 
 
+# --- doc_ids_for_file (exact metadata.file_id match, not a doc_id LIKE/range) --
+
+def test_doc_ids_for_file_a_hyphenated_file_id_does_not_leak_into_a_prefix_sibling(tmp_path):
+    """Drive file ids use the base64url alphabet (embed '-'), so file_id 'abc'
+    and file_id 'abc-1' are both real shapes, and 'gdrive-abc-1-0' (file
+    'abc-1', chunk 0) would satisfy any `doc_id LIKE 'gdrive-abc-%'` or RANGE
+    bound built from file 'abc'. An exact metadata.file_id match can't
+    confuse them regardless of what characters either file id contains."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-abc-0", "short file's only chunk", "h1",
+                   {"source_type": "gdrive", "file_id": "abc"})
+    s.upsert_chunk("gdrive-abc-1-0", "the OTHER file's chunk 0", "h2",
+                   {"source_type": "gdrive", "file_id": "abc-1"})
+
+    assert s.doc_ids_for_file("abc") == ["gdrive-abc-0"]
+    assert s.doc_ids_for_file("abc-1") == ["gdrive-abc-1-0"]
+
+
+def test_doc_ids_for_file_is_case_sensitive(tmp_path):
+    """SQL LIKE is ASCII case-insensitive by default; an exact metadata match
+    is not, so a file_id differing only in case must not cross-match."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-FID-0", "upper", "h1",
+                   {"source_type": "gdrive", "file_id": "FID"})
+    s.upsert_chunk("gdrive-fid-0", "lower", "h2",
+                   {"source_type": "gdrive", "file_id": "fid"})
+
+    assert s.doc_ids_for_file("FID") == ["gdrive-FID-0"]
+    assert s.doc_ids_for_file("fid") == ["gdrive-fid-0"]
+
+
+def test_doc_ids_for_file_a_like_wildcard_char_does_not_over_match(tmp_path):
+    """file_id 'F_1' contains a SQL LIKE single-char wildcard; it must not
+    match doc_ids for an unrelated file_id like 'FA1'."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-F_1-0", "underscore file", "h1",
+                   {"source_type": "gdrive", "file_id": "F_1"})
+    s.upsert_chunk("gdrive-FA1-0", "unrelated file", "h2",
+                   {"source_type": "gdrive", "file_id": "FA1"})
+
+    assert s.doc_ids_for_file("F_1") == ["gdrive-F_1-0"]
+
+
 # --- doc_root_content_hashes (content-hash dedup's document-cluster signal) --
+
+def _gdrive_meta(file_id):
+    return {"source_type": "gdrive", "file_id": file_id}
+
 
 def test_doc_root_content_hashes_returns_full_set_per_root(tmp_path):
     """Each root's returned set is the DISTINCT content_hash values across every
@@ -1057,9 +1104,9 @@ def test_doc_root_content_hashes_returns_full_set_per_root(tmp_path):
     fingerprint hybrid_search's dedup needs to tell a genuine duplicate FILE
     from a document that merely shares one chunk with another."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
-    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
-    s.upsert_chunk("gdrive-p-1", "beta", "h1", {})
-    s.upsert_chunk("gdrive-q-0", "gamma", "h2", {})
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-p-1", "beta", "h1", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-q-0", "gamma", "h2", _gdrive_meta("q"))
 
     result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
 
@@ -1073,10 +1120,10 @@ def test_doc_root_content_hashes_equal_sets_for_true_duplicate_files(tmp_path):
     exactly what lets hybrid_search's dedup tell them apart from two merely
     similar documents."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
-    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
-    s.upsert_chunk("gdrive-p-1", "beta", "h1", {})
-    s.upsert_chunk("gdrive-q-0", "alpha", "h0", {})
-    s.upsert_chunk("gdrive-q-1", "beta", "h1", {})
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-p-1", "beta", "h1", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-q-0", "alpha", "h0", _gdrive_meta("q"))
+    s.upsert_chunk("gdrive-q-1", "beta", "h1", _gdrive_meta("q"))
 
     result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
 
@@ -1089,10 +1136,10 @@ def test_doc_root_content_hashes_unequal_sets_when_only_one_chunk_matches(tmp_pa
     UNEQUAL sets, so hybrid_search's dedup does not mistake them for a
     duplicate whole file."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
-    s.upsert_chunk("gdrive-p-0", "shared header", "hshared", {})
-    s.upsert_chunk("gdrive-p-1", "p body", "hp1", {})
-    s.upsert_chunk("gdrive-q-0", "shared header", "hshared", {})
-    s.upsert_chunk("gdrive-q-1", "q body", "hq1", {})
+    s.upsert_chunk("gdrive-p-0", "shared header", "hshared", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-p-1", "p body", "hp1", _gdrive_meta("p"))
+    s.upsert_chunk("gdrive-q-0", "shared header", "hshared", _gdrive_meta("q"))
+    s.upsert_chunk("gdrive-q-1", "q body", "hq1", _gdrive_meta("q"))
 
     result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
 
@@ -1106,7 +1153,7 @@ def test_doc_root_content_hashes_batches_many_roots_in_one_call(tmp_path):
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
     roots = [f"gdrive-r{i}" for i in range(12)]
     for i, root in enumerate(roots):
-        s.upsert_chunk(f"{root}-0", f"text-{i}", f"hash-{i}", {})
+        s.upsert_chunk(f"{root}-0", f"text-{i}", f"hash-{i}", _gdrive_meta(f"r{i}"))
 
     result = s.doc_root_content_hashes(roots)
 
@@ -1125,9 +1172,41 @@ def test_doc_root_content_hashes_unknown_root_is_empty_set(tmp_path):
     '-<n>' chunk-index suffix, or one that was purged) resolves to an empty
     set rather than raising or being omitted from the result."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
-    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", _gdrive_meta("p"))
 
     result = s.doc_root_content_hashes(["gdrive-p", "gdrive-nonexistent"])
 
     assert result["gdrive-p"] == frozenset({"h0"})
     assert result["gdrive-nonexistent"] == frozenset()
+
+
+def test_doc_root_content_hashes_a_hyphenated_file_id_does_not_leak_into_a_prefix_sibling(tmp_path):
+    """Drive file ids use the base64url alphabet (embed '-'), so file_id 'abc'
+    and file_id 'abc-1' are both real shapes, and 'gdrive-abc-1-0' (file
+    'abc-1', chunk 0) satisfies any doc_id RANGE/prefix bound built from root
+    'gdrive-abc' ('gdrive-abc-' <= 'gdrive-abc-1-0' < 'gdrive-abc.'). Resolving
+    gdrive roots via an exact metadata.file_id match (not a doc_id range) means
+    this can't happen regardless of what characters either file id contains."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-abc-0", "short file's only chunk", "h-short", _gdrive_meta("abc"))
+    s.upsert_chunk("gdrive-abc-1-0", "the OTHER file's chunk 0", "h-other",
+                   _gdrive_meta("abc-1"))
+
+    result = s.doc_root_content_hashes(["gdrive-abc", "gdrive-abc-1"])
+
+    assert result["gdrive-abc"] == frozenset({"h-short"})
+    assert result["gdrive-abc-1"] == frozenset({"h-other"})
+
+
+def test_doc_root_content_hashes_ignores_metadata_free_gdrive_doc_ids(tmp_path):
+    """A gdrive-shaped doc_id whose metadata never got a file_id (shouldn't
+    happen via the real sync path, but the store API doesn't enforce it) is
+    invisible to the exact-match query rather than silently falling back to a
+    doc_id-shape guess that would reopen the prefix-collision hole this
+    function exists to close."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-orphan-0", "no file_id stamped", "h0", {})
+
+    result = s.doc_root_content_hashes(["gdrive-orphan"])
+
+    assert result["gdrive-orphan"] == frozenset()
