@@ -34,6 +34,12 @@ def test_sweep_does_not_count_a_failed_removal_as_removed(tmp_path, monkeypatch)
     os.utime(old, (ancient, ancient))
 
     def _boom(path, *a, **kw):
+        # Respect ignore_errors so this test actually discriminates: with
+        # ignore_errors=True the real shutil.rmtree would swallow the failure
+        # and the sweep would count a still-present directory as removed. A
+        # mock that raises unconditionally cannot tell the two apart.
+        if kw.get("ignore_errors"):
+            return None
         raise PermissionError("simulated removal failure")
 
     monkeypatch.setattr(backup.shutil, "rmtree", _boom)

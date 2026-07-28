@@ -636,7 +636,13 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
             rkey = _file_resume_key(ev["fmeta"])
             if rkey and rkey in resumed_ids:
                 continue
-            if budget is not None and budget.expired():
+            # Minimum forward progress: honour the budget only once this call
+            # has written something. Checking before the first item means a
+            # budget already spent upstream yields zero writes, leaves the
+            # resume set unchanged, and re-does identical work next cycle --
+            # the livelock reproduced in sync_drive. One item per call keeps
+            # the round monotonic.
+            if processed and budget is not None and budget.expired():
                 interrupted = True
                 break
             try:
@@ -653,13 +659,23 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                 # per-drive handler, which skips the WHOLE DRIVE for the cycle
                 # WITHOUT advancing the cursor — so the same poison file would be
                 # re-fetched and re-fail forever, permanently blocking the drive.
-                log.warning("drive: extraction failed for file %s in drive %s: %s",
-                            fid, drive_id, exc)
+                log.warning(
+                    "drive: extraction failed for file %s in drive %s; this "
+                    "version is DROPPED and will not be retried until the file "
+                    "changes again: %s", fid, drive_id, exc)
                 # Still marked done: a poison file must not permanently block
                 # the cursor from ever advancing past this round (matches the
-                # pre-checkpoint behaviour of "skip it, keep moving" — it will
-                # simply be re-attempted-and-fail again next DELTA round, same
-                # as before, not blocked mid-round forever).
+                # pre-checkpoint behaviour of "skip it, keep moving").
+                #
+                # KNOWN GAP: this is genuinely lossy for a TRANSIENT failure (a
+                # TLS reset, a 5xx export). An earlier version of this comment
+                # claimed the file "will simply be re-attempted-and-fail again
+                # next DELTA round" — that is wrong: once the round closes the
+                # cursor advances, and the delta from the new cursor no longer
+                # contains this change, so the file's current version is never
+                # re-fetched. Distinguishing transient from permanent failures
+                # (a bounded per-file attempt counter, like chunks.enrich_attempts)
+                # is the real fix and is deliberately not attempted here.
                 if rkey:
                     resumed_ids.add(rkey)
                     store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))

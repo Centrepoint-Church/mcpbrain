@@ -166,7 +166,13 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     for mid in new_message_ids:
         if mid in resumed_ids:
             continue
-        if budget is not None and budget.expired():
+        # Minimum forward progress: honour the budget only once this call
+        # has written something. Checking before the first item means a
+        # budget already spent upstream yields zero writes, leaves the
+        # resume set unchanged, and re-does identical work next cycle --
+        # the livelock reproduced in sync_drive. One item per call keeps
+        # the round monotonic.
+        if messages_processed and budget is not None and budget.expired():
             fetch_interrupted = True
             break
         try:
