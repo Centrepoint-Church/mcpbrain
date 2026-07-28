@@ -21,7 +21,8 @@ Gate 2   ├─ Task 2  Extraction          extractors.py, tabular.py
          └─ Task 3  Enrichment+retrieval semantic, graph_write, thread_enrich,
            │                              retrieval_expand, store
 Gate 3   ├─ Task 4  Drive               drive.py, calendar.py
-         ├─ Task 5  Email + attachments normalise.py, gmail.py, attachments.py
+         ├─ Task 5  Email + attachments normalise.py, gmail.py, attachments.py,
+         │                              prepare.py (should_enrich only)
          └─ Task 6  Observability       index.py, doctor.py
 ```
 
@@ -37,7 +38,7 @@ Review each task independently as it lands; only the **gate** is a barrier. Six 
 | 2 | `test_extractors.py`, `test_tabular.py` (create) |
 | 3 | `test_semantic.py`, `test_thread_enrich.py`, `test_retrieval_expand.py` |
 | 4 | `test_drive_sync.py`, `test_drive_extraction.py`, `test_chunk_metadata.py`, `test_calendar_sync.py` |
-| 5 | `test_normalise.py`, `test_gmail_sync.py`, `test_attachments.py` (create) |
+| 5 | `test_normalise.py`, `test_gmail_sync.py`, `test_salience_gate.py`, `test_attachments.py` (create) |
 | 6 | `test_doctor.py`, `test_embed.py` |
 
 ---
@@ -66,17 +67,28 @@ Agreed with Josh in the session that produced the findings register, and not to 
 5. **Truncation is recorded in metadata**, not buried in the text, so `doctor` can report "N sheets clipped".
 6. **Accepted risk:** a 50k-row ledger becomes ~4,000 semantically-similar row chunks that could crowd recall. CLAUDE.md records the 0.7.101 decision *not* to exclude tabular from recall, and headers make these chunks interpretable rather than noise. Spec 3's gold gate measures it; this plan re-embeds nothing, so it cannot regress the existing number.
 
-### Two decisions deliberately NOT deferred, and one that is Josh's call
+### Nothing is deferred
 
-**Not deferred — tables are passed as structured data, not serialised text.** A first draft of this plan had `extract_text_from_xlsx` serialise to a CSV-with-directive-lines intermediate form that `normalise_drive` re-parsed, purely to keep `_fetch_text`'s `str | None` return type. The stated justification — that the shared-drive ingest-cache artifact format depended on that contract — was **wrong**: `ingest_cache` stores `CacheChunk(idx, text, embedding)`, i.e. chunks, and never sees `_fetch_text`'s output. There are exactly three call sites. So that design bought a stringly-typed round-trip, a parser state machine, and a real failure mode (a cell whose text is `### Sheet:`) in exchange for nothing. Tables are now a dataclass, passed directly.
+Everything in the findings register is either fixed by this plan or tracked in spec 3 (**C7** legacy re-extraction, **D** duplicate purge — both are backfills that must not run before the extractor is correct). There is no third category. Four things that earlier drafts left open, and how each is now closed:
 
-**Not deferred — B3 is closed as far as it can be here, and the remainder is named.** `chunk_text` now guarantees the bound for everything that goes through it. What remains is the enriched semantic doc, written whole because splitting it would break the `enriched-<thread_id>` doc_id that `mark_enriched`, `doc_ids_for_messages` and the stale-reextract sweep all key on. That is a genuine follow-up with a genuine reason, not a shrug: Task 6 counts it so it stops being invisible.
+**Tables are passed as structured data, not serialised text.** A first draft had `extract_text_from_xlsx` serialise to a CSV-with-directive-lines intermediate form that `normalise_drive` re-parsed, purely to keep `_fetch_text`'s `str | None` return type. The stated justification — that the shared-drive ingest-cache artifact format depended on that contract — was **wrong**: `ingest_cache` stores `CacheChunk(idx, text, embedding)`, i.e. chunks, and never sees `_fetch_text`'s output. There are exactly three call sites. That design bought a stringly-typed round-trip, a parser state machine and a real failure mode (a cell whose text is `### Sheet:`) in exchange for nothing.
 
-**Josh's call — `gmail_ingest_bulk` default.** `_is_bulk_or_auto` drops anything with `List-Id` / `List-Unsubscribe` / `Precedence: bulk`, which is most vendor and ministry-platform mail, some of it genuinely wanted. The coherent long-term behaviour is to **ingest it cold** — the salience gate (0.7.65) exists precisely to hold embedded-and-searchable-but-never-graph-extracted content, so bulk mail costs embedding only, no Haiku. The plan builds that capability completely and defaults it **OFF**, because nobody currently knows the volume and the store is already 11.9 GB. The counter ships live in *both* modes, so one sync round produces the number. **This is the one place the plan asks for a later decision, and it is deliberate: the alternative is guessing.** If you would rather it shipped ON, say so and Task 1 flips one default.
+**B3 is fully closed: the enriched semantic doc is bounded at build time.** An earlier draft only *counted* over-window enriched chunks, on the grounds that splitting them would break the `enriched-<thread_id>` doc_id that `mark_enriched`, `doc_ids_for_messages` and the stale-reextract sweep key on. But that framed the wrong fix. The semantic doc is **synthesised** — `build_semantic_doc` assembles it line by line, so its length is ours to choose. Task 3 bounds the assembly (dropping the lowest-value sections first, keeping subject and summary), which fixes B3 completely with no doc_id change and no split. Task 6's counter stays as the regression detector, not as the fix.
 
-### Deliberately still unsupported, and why
+**The bulk-mail drop is removed, not flagged.** `_is_bulk_or_auto` discards anything with `List-Id` / `List-Unsubscribe` / `Precedence: bulk` — most vendor and ministry-platform mail. An earlier draft made this a config flag defaulting OFF, i.e. a deferred decision dressed as a feature. It is not a decision worth deferring, because a second gate already does this job properly: `prepare.should_enrich()` cold-marks promotional email (embedded and searchable, never graph-extracted, fully reversible), and it has been shipping since 0.7.65 with ~40% of the corpus gated and **no recall impact**. The ingest-time drop is the same idea done worse — irreversibly, before anything can see the content. So Task 5 **deletes the drop** and moves its (stronger, header-based) signal into `should_enrich` as an additional cold trigger. One gate instead of two, no flag, nothing lost at the door, no Haiku spent on newsletters. This is a net *removal* of machinery.
 
-`.doc`, `.ppt`, `.xls` (legacy binary), `.pages`, `.numbers`, `.keynote`, `.zip`, `.eml`, and all image formats. Each needs either a new dependency of doubtful value or a different pipeline (images would need OCR of every logo and screenshot). What this plan fixes is that a sync no longer reports success while discarding them — every one is recorded via `ingest_report`. If the recorded counts show a type is actually common in your Drive, that is the evidence for adding it, and it will be a small change against these seams.
+**Unsupported file types are decided, not monitored.** An earlier draft recorded them and said the counts would be "the evidence for adding it" — a deferral. Each is now decided:
+
+| Type | Decision |
+|---|---|
+| `.xls` (legacy Excel) | **Add** (Task 2). `xlrd>=2` is small and pure-Python, and 2.0 exists specifically to read `.xls`. These are spreadsheets — B1 established that budgets and ledgers are the highest-value tabular content, so declining a spreadsheet format would be indefensible. Routes into the same `Table` path. |
+| `.eml` | **Add** (Task 2). Stdlib `email` parses it; extracted as a prose document with its headers as a preamble. Zero new dependencies. |
+| `.doc`, `.ppt` (legacy OLE) | **Decline, permanently.** Needs LibreOffice or antiword — a heavyweight external binary shipped to every install, for a format Google Drive itself converts on open. |
+| `.pages`, `.numbers`, `.keynote` | **Decline, permanently.** Proprietary zip containers that Drive cannot export either; the only reliable path is the embedded preview PDF, which is a lossy render, not the document. |
+| `.zip` | **Decline, permanently.** Recursive container extraction is a zip-bomb surface, and Drive syncs the contents separately when they are unzipped. |
+| Images | **Decline, permanently.** OCR of every logo, screenshot and signature graphic for speculative value. Scanned *documents* — where scanned content actually lives — are already OCR'd through the PDF path (A5). |
+
+The declined types are still recorded via `ingest_report` — but as **monitoring of a settled decision**, so a sync stops reporting success while discarding them. Not as pending work.
 
 ---
 
@@ -85,10 +97,14 @@ Agreed with Josh in the session that produced the findings register, and not to 
 | Flag | Default | Rationale |
 |---|---|---|
 | `gmail_attachments` | **ON** | Pure content gain, largest gap in the register. |
-| `gmail_ingest_bulk` | **OFF** | See above — the one open decision. Fleet-flippable. |
 | `sheet_char_budget` | `2_000_000` | Per-sheet backstop ≈ 16k typical rows. Only bites on genuinely enormous real content once empty rows are dropped. |
 
-`folder_path` (C5) ships **unconditionally, with no flag**. A first draft gated it behind `drive_folder_path`; that flag would never be turned off, and a kill switch nobody uses is complexity for its own sake. The cost is one cached `files().get` per unseen folder per sync round — 40 calls for a Drive with 5,000 files in 40 folders — and it degrades to `""` on any error.
+That is the whole list. Two other flags appeared in earlier drafts and are gone:
+
+- **`drive_folder_path`** — a kill switch nobody would ever flip. `folder_path` (C5) ships unconditionally. Cost is one cached `files().get` per unseen folder per sync round (40 calls for a Drive with 5,000 files in 40 folders), degrading to `""` on any error.
+- **`gmail_ingest_bulk`** — see above; the behaviour is now unconditional and the flag would only have preserved the defect.
+
+`gmail_attachments` survives on different grounds from those two: it is not hedging a decision, it is an operational kill switch on a path that makes an extra Gmail API call per attachment and could matter during a large backfill. If the API cost never bites, it can be removed later — but it is not gating a behaviour anyone is unsure about.
 
 ---
 
@@ -105,7 +121,7 @@ Everything downstream imports from here. Solo.
 - `chunking.has_content(text: str) -> bool`
 - `chunking.chunk_text(text, max_tokens=500, overlap=50) -> list[str]` — unchanged signature, new guarantees: no chunk empty, none over `max_tokens * 4` chars
 - `ingest_report.record_skip(store, kind: str, ref_id: str, detail: str = "") -> None`
-- `config.gmail_attachments(home) -> bool`, `config.gmail_ingest_bulk(home) -> bool`, `config.sheet_char_budget(home) -> int`
+- `config.gmail_attachments(home) -> bool`, `config.sheet_char_budget(home) -> int`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -364,31 +380,14 @@ In `mcpbrain/config.py`:
 def gmail_attachments(home) -> bool:
     """Whether email attachments are fetched and extracted.
 
-    Default TRUE. Unlike gmail_ingest_bulk this is pure content gain, not volume
-    risk: an emailed PDF is content the user already believes is in their brain,
-    and the byte-identical file in Drive is already extracted. It was the single
-    largest content gap in the 2026-07-27 ingestion audit.
+    Default TRUE. This is not hedging a decision — an emailed PDF is content
+    the user already believes is in their brain, and the byte-identical file in
+    Drive is already extracted. It is an operational kill switch on a path that
+    makes an extra Gmail API call per attachment, which could matter during a
+    large backfill. Attachments were the single largest content gap in the
+    2026-07-27 ingestion audit.
     """
     return bool(fleet_flag(home, "gmail_attachments", True))
-
-
-def gmail_ingest_bulk(home) -> bool:
-    """Whether list/bulk/auto-submitted mail is INGESTED (cold) rather than
-    dropped at the door.
-
-    `_is_bulk_or_auto` drops anything carrying List-Id, List-Unsubscribe or
-    Precedence: bulk — most vendor and ministry-platform mail, some of it
-    genuinely wanted. The salience gate already exists to hold exactly this
-    class (embedded and searchable, never graph-extracted), so ingesting-as-cold
-    is the coherent behaviour and dropping at ingest is the crude one.
-
-    Default FALSE — not because dropping is right, but because nobody yet knows
-    the volume and the store is already 11.9 GB. The per-sync 'bulk' counter
-    ships live in BOTH modes, so one sync round produces the number this
-    decision needs. Fleet-flippable via
-    org-config.json {"flags": {"gmail_ingest_bulk": true}}.
-    """
-    return bool(fleet_flag(home, "gmail_ingest_bulk", False))
 
 
 def sheet_char_budget(home) -> int:
@@ -412,6 +411,9 @@ In `pyproject.toml`, after the `openpyxl` line:
 
 ```toml
   "python-pptx>=1.0",      # PPTX extraction (A2 — .pptx was silently dropped)
+  "xlrd>=2",               # legacy .xls extraction (A2). xlrd 2.0 exists purely
+                           # to read .xls — it deliberately dropped .xlsx, which
+                           # openpyxl above already handles.
 ```
 
 Then: `uv sync`
@@ -458,7 +460,9 @@ Runs in parallel with Task 3. Owns `sync/extractors.py` and the new `sync/tabula
   - `tabular.tables_from_csv(text: str, *, sheet: str = "Sheet1", char_budget: int) -> list[Table]`
   - `tabular.render_chunks(tables: list[Table], *, file_name: str, max_chars: int) -> list[tuple[str, dict]]`
   - `extractors.extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[Table]`
+  - `extractors.extract_tables_from_xls(content_bytes: bytes, *, char_budget: int) -> list[Table]`
   - `extractors.extract_text_from_pptx(content_bytes: bytes) -> str`
+  - `extractors.extract_text_from_eml(content_bytes: bytes) -> str`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -693,6 +697,68 @@ def test_pptx_text_is_extracted():
     assert "Q3 Ministry Review" in extract_text_from_pptx(buf.getvalue())
 
 
+def test_legacy_xls_yields_the_same_table_shape_as_xlsx():
+    """A2: .xls was dropped entirely. Declining a SPREADSHEET format would be
+    indefensible after B1 established that budgets and ledgers are the
+    highest-value tabular content, and xlrd 2.0 exists purely to read .xls."""
+    import io
+
+    import xlwt  # dev-only helper; if unavailable, build the fixture with xlrd's
+                 # own test assets or check in a small .xls under tests/fixtures/
+
+    from mcpbrain.sync.extractors import extract_tables_from_xls
+
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Budget")
+    for c, v in enumerate(["Item", "Amount"]):
+        ws.write(0, c, v)
+    for c, v in enumerate(["Rent", "500"]):
+        ws.write(1, c, v)
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    tables = extract_tables_from_xls(buf.getvalue(), char_budget=1_000_000)
+
+    assert len(tables) == 1
+    assert tables[0].sheet == "Budget"
+    assert tables[0].header == ["Item", "Amount"]
+    assert tables[0].rows == [["Rent", "500"]]
+
+
+def test_eml_is_extracted_as_prose_with_its_headers():
+    """A2: .eml files in Drive were dropped. Stdlib `email` parses them — zero
+    new dependencies — and they become prose documents, NOT synthetic Gmail
+    threads (that would be scope creep into the sync layer's identity model)."""
+    from mcpbrain.sync.extractors import extract_text_from_eml
+
+    raw = (b"From: sam@example.com\r\n"
+           b"To: josh@centrepoint.church\r\n"
+           b"Subject: Hall B booking\r\n"
+           b"Date: Tue, 02 Jun 2026 16:30:01 +0800\r\n"
+           b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+           b"Confirmed for Sunday the 8th.\r\n")
+
+    text = extract_text_from_eml(raw)
+
+    assert "Subject: Hall B booking" in text
+    assert "sam@example.com" in text
+    assert "Confirmed for Sunday the 8th." in text
+
+
+def test_a_multipart_eml_prefers_the_plain_text_part():
+    from mcpbrain.sync.extractors import extract_text_from_eml
+
+    raw = (b"Subject: Multi\r\n"
+           b'Content-Type: multipart/alternative; boundary="b"\r\n\r\n'
+           b"--b\r\nContent-Type: text/plain\r\n\r\nplain body here\r\n"
+           b"--b\r\nContent-Type: text/html\r\n\r\n<p>html body</p>\r\n--b--\r\n")
+
+    text = extract_text_from_eml(raw)
+
+    assert "plain body here" in text
+    assert "<p>" not in text
+
+
 def test_pptx_extraction_failure_returns_empty_and_logs(caplog):
     from mcpbrain.sync.extractors import extract_text_from_pptx
 
@@ -802,6 +868,7 @@ log = logging.getLogger(__name__)
 TABLE_MIMES = frozenset({
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.google-apps.spreadsheet",
+    "application/vnd.ms-excel",   # legacy .xls (A2) — read via xlrd
     "text/csv",
     "application/csv",
     "text/tab-separated-values",
@@ -961,17 +1028,43 @@ def _emit(t: Table, header_line: str, sep_line: str, group: list[str],
 In `mcpbrain/sync/extractors.py`, add `import logging` / `log = logging.getLogger(__name__)` at the top if absent. Delete `_rows_to_markdown` (lines 181-202 — its only caller is `extract_text_from_xlsx`; DOCX tables keep their own `" | ".join` at line 171) and replace `extract_text_from_xlsx` with:
 
 ```python
+def _tables_from_grid(name: str, raw: list[list[str]],
+                      char_budget: int) -> list[Table]:
+    """Normalise one sheet's raw grid into at most one `Table`.
+
+    Shared by the .xlsx and .xls readers so the two formats cannot drift on
+    empty-row handling, column trimming or the budget rule.
+
+    `char_budget` bounds the sheet over NON-EMPTY rows and replaces the flat
+    200-rows-per-sheet cap (B1): 338 live files hit that cap, including several
+    budgets and a general ledger, losing everything past row 200 per sheet while
+    the same files bloated the store with empty cells.
+    """
+    rows = normalise_rows(raw)
+    if not rows:
+        return []
+    header, data = rows[0], rows[1:]
+    kept, used = [], 0
+    for row in data:
+        size = sum(len(c) + 1 for c in row)
+        if used + size > char_budget and kept:
+            break
+        kept.append(row)
+        used += size
+    truncated = len(kept) < len(data)
+    if truncated:
+        log.warning("sheet %r truncated at %d of %d rows (char budget %d)",
+                    name, len(kept), len(data), char_budget)
+    return [Table(sheet=name, header=header, rows=kept,
+                  rows_total=len(data), truncated=truncated)]
+
+
 def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[Table]:
     """Read every sheet as a `Table`.
 
     Replaces extract_text_from_xlsx. Deliberately does NOT render: chunk
     boundaries are decided by tabular.render_chunks, so each chunk can repeat
     the header rather than orphaning it in chunk 0 (B2).
-
-    `char_budget` bounds each sheet over NON-EMPTY rows and replaces the flat
-    200-rows-per-sheet cap (B1): 338 live files hit that cap, including several
-    budgets and a general ledger, losing everything past row 200 per sheet while
-    the same files bloated the store with empty cells.
     """
     try:
         import openpyxl
@@ -985,29 +1078,67 @@ def extract_tables_from_xlsx(content_bytes: bytes, *, char_budget: int) -> list[
         for name in wb.sheetnames:
             raw = [[str(c) if c is not None else "" for c in row]
                    for row in wb[name].iter_rows(values_only=True)]
-            rows = normalise_rows(raw)
-            if not rows:
-                continue
-            header, data = rows[0], rows[1:]
-            kept, used = [], 0
-            for row in data:
-                size = sum(len(c) + 1 for c in row)
-                if used + size > char_budget and kept:
-                    break
-                kept.append(row)
-                used += size
-            truncated = len(kept) < len(data)
-            if truncated:
-                log.warning("xlsx sheet %r truncated at %d of %d rows "
-                            "(char budget %d)", name, len(kept), len(data),
-                            char_budget)
-            tables.append(Table(sheet=name, header=header, rows=kept,
-                                rows_total=len(data), truncated=truncated))
+            tables.extend(_tables_from_grid(name, raw, char_budget))
     except Exception as exc:
         log.warning("xlsx: extraction failed after %d sheets: %s", len(tables), exc)
     finally:
         wb.close()
     return tables
+
+
+def extract_tables_from_xls(content_bytes: bytes, *, char_budget: int) -> list[Table]:
+    """Legacy .xls via xlrd, yielding the same `Table` shape as .xlsx.
+
+    A2: .xls was dropped entirely. Declining a spreadsheet format is not
+    defensible after B1 — budgets, ledgers and risk assessments are the
+    highest-value tabular content in the corpus — and xlrd 2.0 exists precisely
+    for this format (it dropped .xlsx, which openpyxl handles).
+    """
+    try:
+        import xlrd
+        book = xlrd.open_workbook(file_contents=content_bytes)
+    except Exception as exc:
+        log.warning("xls: workbook open failed: %s", exc)
+        return []
+    tables: list[Table] = []
+    try:
+        for sheet in book.sheets():
+            raw = [[("" if c is None else str(c)) for c in sheet.row_values(r)]
+                   for r in range(sheet.nrows)]
+            tables.extend(_tables_from_grid(sheet.name, raw, char_budget))
+    except Exception as exc:
+        log.warning("xls: extraction failed after %d sheets: %s", len(tables), exc)
+    return tables
+
+
+def extract_text_from_eml(content_bytes: bytes) -> str:
+    """A .eml file's headers and body as prose.
+
+    A2: .eml files in Drive were dropped. Stdlib `email` parses them with no new
+    dependency. Deliberately extracted as a PROSE DOCUMENT rather than turned
+    into a synthetic Gmail thread: a Drive file is not a mailbox message, and
+    minting message_id/thread_id for it would put a second, unauthoritative
+    identity into the same namespace the real Gmail sync owns.
+    """
+    try:
+        from email import policy
+        from email.parser import BytesParser
+        msg = BytesParser(policy=policy.default).parsebytes(content_bytes)
+    except Exception as exc:
+        log.warning("eml: parse failed: %s", exc)
+        return ""
+    try:
+        head = [f"{h}: {msg.get(h, '')}" for h in ("From", "To", "Cc", "Subject", "Date")
+                if msg.get(h)]
+        body = msg.get_body(preferencelist=("plain", "html"))
+        text = body.get_content() if body is not None else ""
+        if body is not None and body.get_content_type() == "text/html":
+            from mcpbrain.sync.normalise import strip_html
+            text = strip_html(text)
+        return "\n".join(head) + "\n\n" + (text or "").strip()
+    except Exception as exc:
+        log.warning("eml: extraction failed: %s", exc)
+        return ""
 
 
 def extract_text_from_pptx(content_bytes: bytes) -> str:
@@ -1191,6 +1322,68 @@ def test_an_email_derived_enrichment_keeps_its_existing_label():
     _text, meta = build_semantic_doc({"thread_id": "t-1234"}, {"subject": "s"})
 
     assert meta["source_type"] == "gmail_enriched_v2"
+
+
+def test_the_semantic_doc_never_exceeds_the_embedder_window():
+    """B3, closed at the source. The semantic doc is SYNTHESISED — its length is
+    ours to choose — and it is the one population chunk_text cannot bound,
+    because it is written whole to keep its enriched-<thread_id> doc_id. A
+    100-person thread with 60 actions used to produce a doc whose tail the
+    512-token BGE model silently discarded."""
+    from mcpbrain.semantic import SEMANTIC_MAX_CHARS, build_semantic_doc
+
+    extraction = {
+        "thread_id": "t1",
+        "summary": "Quarterly review. " * 40,
+        "entities": [{"type": "person", "name": f"Person Number {i}"}
+                     for i in range(100)],
+        "actions": [{"description": f"Do the thing number {i}", "due_date": "2026-07-01"}
+                    for i in range(60)],
+        "topics": [f"topic-{i}" for i in range(80)],
+    }
+
+    text, _meta = build_semantic_doc(extraction, {"subject": "Review",
+                                                  "sender": "a@b.com",
+                                                  "date": "Tue, 02 Jun 2026 16:30:01 +0800"})
+
+    assert len(text) <= SEMANTIC_MAX_CHARS, f"semantic doc is {len(text)} chars"
+
+
+def test_bounding_keeps_the_highest_value_content_first():
+    """Truncation order matters: subject and summary are what a query matches.
+    Dropping them to keep a Labels line would be worse than not bounding at all."""
+    from mcpbrain.semantic import build_semantic_doc
+
+    extraction = {
+        "thread_id": "t1",
+        "summary": "The Hall B booking is confirmed for Sunday.",
+        "entities": [{"type": "person", "name": f"Person Number {i}"}
+                     for i in range(400)],
+        "topics": [f"topic-{i}" for i in range(400)],
+    }
+
+    text, _meta = build_semantic_doc(extraction, {"subject": "Hall B",
+                                                  "sender": "a@b.com", "date": "x"})
+
+    assert "Hall B" in text
+    assert "The Hall B booking is confirmed for Sunday." in text
+    assert "…" in text or "Topics:" not in text, (
+        "over-budget sections must be visibly elided, not silently absent"
+    )
+
+
+def test_a_normal_thread_is_not_truncated():
+    """The discriminator: bounding must be invisible for the ordinary case."""
+    from mcpbrain.semantic import build_semantic_doc
+
+    text, _meta = build_semantic_doc(
+        {"thread_id": "t1", "summary": "Short summary.",
+         "entities": [{"type": "person", "name": "Sam Taylor"}],
+         "topics": ["booking"]},
+        {"subject": "Hall B", "sender": "a@b.com", "date": "x"})
+
+    assert "…" not in text
+    assert "Sam Taylor" in text and "booking" in text
 ```
 
 Add to `tests/test_retrieval_expand.py`:
@@ -1305,7 +1498,51 @@ def test_a_message_with_no_chunk_total_gets_no_tail_marker():
 Run: `uv run pytest tests/test_semantic.py tests/test_retrieval_expand.py tests/test_thread_enrich.py -q -p no:randomly`
 Expected: `KeyError: 'date'`, `KeyError: 'message_id'`, `assert 'gmail_enriched_v2' == 'calendar_enriched_v2'`, ordering `['third', 'first', 'second']`, and the two gap-marker tests.
 
-- [ ] **Step 3: Fix the enriched-chunk metadata**
+- [ ] **Step 3: Bound the semantic doc (B3)**
+
+In `mcpbrain/semantic.py`, add at module level:
+
+```python
+# The BGE window is 512 tokens ≈ 2,000 characters, and embed.contextual_prefix
+# (default ON) eats into the same budget — hence the headroom. Anything past it
+# is silently truncated by the model and its tail is unsearchable (B3).
+#
+# This is the ONE population chunk_text cannot bound, because the semantic doc
+# is written whole to keep its `enriched-<thread_id>` doc_id (mark_enriched,
+# doc_ids_for_messages and the stale-reextract sweep all key on it). Splitting
+# it is therefore off the table — but it does not need splitting, because the
+# doc is SYNTHESISED here, line by line, so its length is ours to choose.
+SEMANTIC_MAX_CHARS = 1800
+
+
+def _fit(lines: list[str], budget: int) -> list[str]:
+    """Keep whole lines while they fit, then stop and mark the elision.
+
+    Callers pass lines in DESCENDING value order — subject, From/Date, summary,
+    then People, Actions, Topics, Labels — because what gets dropped under
+    pressure must be the least query-relevant content. Dropping the summary to
+    keep a Labels line would be worse than not bounding at all.
+    """
+    out: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > budget:
+            out.append("…")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return out
+```
+
+and wrap the existing assembly's final join. The function currently ends its text build with `text = "\n".join(lines)`; replace that with:
+
+```python
+    text = "\n".join(_fit(lines, SEMANTIC_MAX_CHARS))
+```
+
+The existing `lines` list is already built in the right order (email line, From, Date, Type, blank, summary, People, Actions, Topics, Labels), so no reordering is needed — verify that when you make the edit, and reorder only if it has drifted.
+
+- [ ] **Step 4: Fix the enriched-chunk metadata**
 
 In `mcpbrain/semantic.py`, change the signature to
 
@@ -1352,7 +1589,7 @@ In `mcpbrain/graph_write.py` at the `build_semantic_doc` call (~line 1520), pass
             date_iso=lead_date_iso or "", message_id=lead_msg_id or "")
 ```
 
-- [ ] **Step 4: Fix thread ordering**
+- [ ] **Step 5: Fix thread ordering**
 
 In `mcpbrain/retrieval_expand.py`:
 
@@ -1390,7 +1627,7 @@ In `mcpbrain/store.py`, correct the `thread_chunks` docstring — the "Order is 
         """
 ```
 
-- [ ] **Step 5: Add the gap marker**
+- [ ] **Step 6: Add the gap marker**
 
 `reassemble_thread` (`mcpbrain/thread_enrich.py:143-148`) currently reads:
 
@@ -1440,7 +1677,7 @@ def _join_with_gaps(parts: list[dict]) -> str:
     return "".join(out)
 ```
 
-- [ ] **Step 6: Add the store count helper (consumed by Task 6)**
+- [ ] **Step 7: Add the store count helper (consumed by Task 6)**
 
 In `mcpbrain/store.py`, beside the other count helpers:
 
@@ -1453,12 +1690,12 @@ In `mcpbrain/store.py`, beside the other count helpers:
                               (int(n),)).fetchone()[0]
 ```
 
-- [ ] **Step 7: Run the tests and verify they discriminate**
+- [ ] **Step 8: Run the tests and verify they discriminate**
 
 Run: `uv run pytest tests/test_semantic.py tests/test_retrieval_expand.py tests/test_thread_enrich.py tests/test_graph_write.py tests/test_prepare.py tests/test_stale_reextract.py -q -p no:randomly`
 Expected: PASS. `tests/test_semantic.py:94` and `:118` assert `source_type == "gmail_enriched_v2"` — check each fixture's `thread_id` and update with a comment only if it is `cal-`-prefixed.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add mcpbrain/semantic.py mcpbrain/graph_write.py mcpbrain/retrieval_expand.py \
@@ -1708,20 +1945,25 @@ _DOWNLOAD_TEXT = {"text/plain", "text/markdown", "text/csv",
                   "application/rtf", "application/json", "text/html"}
 ```
 
-`_DOWNLOAD_BINARY` gains PPTX:
+`_DOWNLOAD_BINARY` gains PPTX and EML (legacy `.xls` is tabular and routed in Step 4 alongside `.xlsx`, not here):
 
 ```python
     "application/vnd.openxmlformats-officedocument.presentationml.presentation":
         extract_text_from_pptx,
+    "message/rfc822": extract_text_from_eml,
 ```
 
-`_MIME_EXTRACTION_META` gains labels for the three new prose types so they do not fall back to the default:
+`_MIME_EXTRACTION_META` gains labels for the new types so they do not fall back to the default:
 
 ```python
     "application/rtf": ("text", "prose", 0.9),
     "application/json": ("text", "prose", 1.0),
     "text/html": ("text", "prose", 0.9),
+    "message/rfc822": ("eml", "prose", 0.95),
+    "application/vnd.ms-excel": ("spreadsheet", "table", 1.0),   # legacy .xls
 ```
+
+**Note the `.xls` entry makes `test_table_mimes_agrees_with_the_drive_extraction_meta_table` (Task 2) fail unless `tabular.TABLE_MIMES` also gains `application/vnd.ms-excel`.** That is the guard working as designed — the two lists exist in modules that cannot import each other. Task 2 owns `tabular.py` and adds it there; if you are running Wave 3 and Task 2 did not, stop and raise it rather than editing `tabular.py` from this task.
 
 - [ ] **Step 4: Add `fetch_content` and structured tabular routing**
 
@@ -1760,10 +2002,15 @@ def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
     name = file_meta.get("name", "")
     budget = config.sheet_char_budget(str(config.app_dir()))
 
-    if mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+    binary_tables = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            extract_tables_from_xlsx,
+        "application/vnd.ms-excel": extract_tables_from_xls,   # legacy .xls
+    }
+    if mime in binary_tables:
         raw = service.files().get_media(fileId=fid, supportsAllDrives=True).execute()
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
-        tables = extract_tables_from_xlsx(data, char_budget=budget)
+        tables = binary_tables[mime](data, char_budget=budget)
         if not tables:
             ingest_report.record_skip(store, "extraction_empty", fid, f"{mime} ({name})")
         return Content(tables=tables)
@@ -1783,7 +2030,7 @@ def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
     return Content(text=text)
 ```
 
-with `from dataclasses import dataclass`, `from mcpbrain import config`, `from mcpbrain.sync import ingest_report, tabular`, `from mcpbrain.sync.tabular import Table` and `extract_tables_from_xlsx, extract_text_from_pptx` added to the imports.
+with `from dataclasses import dataclass`, `from mcpbrain import config`, `from mcpbrain.sync import ingest_report, tabular`, `from mcpbrain.sync.tabular import Table` and `extract_tables_from_xls, extract_tables_from_xlsx, extract_text_from_eml, extract_text_from_pptx` added to the imports.
 
 - [ ] **Step 5: Rewrite the tail of `normalise_drive`**
 
@@ -1957,11 +2204,11 @@ Runs in parallel with Tasks 4 and 6. Owns `sync/normalise.py`, `sync/gmail.py`, 
 
 **Files:**
 - Create: `mcpbrain/sync/attachments.py`
-- Modify: `mcpbrain/sync/normalise.py`, `mcpbrain/sync/gmail.py`
-- Test: `tests/test_normalise.py`, `tests/test_gmail_sync.py`, `tests/test_attachments.py` (create)
+- Modify: `mcpbrain/sync/normalise.py`, `mcpbrain/sync/gmail.py`, `mcpbrain/prepare.py` (`should_enrich` only)
+- Test: `tests/test_normalise.py`, `tests/test_gmail_sync.py`, `tests/test_salience_gate.py`, `tests/test_attachments.py` (create)
 
 **Interfaces:**
-- Consumes: `chunking.{chunk_text, content_hash, has_content}`, `config.{gmail_attachments, gmail_ingest_bulk}`, `ingest_report.record_skip` (Task 1); `extractors.*` and `tabular.*` (Task 2).
+- Consumes: `chunking.{chunk_text, content_hash, has_content}`, `config.gmail_attachments`, `ingest_report.record_skip` (Task 1); `extractors.*` and `tabular.*` (Task 2).
 - Produces: `normalise_gmail(raw, *, report: dict | None = None)`; `attachments.{iter_attachment_parts, normalise_attachment, fetch_and_normalise}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2036,37 +2283,60 @@ def test_html_mail_does_not_get_the_bottom_post_rescue():
     assert "repeated verbatim" not in body
 
 
-def test_bulk_mail_drop_is_reported():
-    """A4: _is_bulk_or_auto returns [] for anything with List-Id /
+def test_bulk_mail_is_ingested_and_marked_rather_than_dropped():
+    """A4: _is_bulk_or_auto returned [] for anything with List-Id /
     List-Unsubscribe / Precedence: bulk — most vendor and ministry-platform mail
-    — and sync_gmail counted it as processed anyway, so the drop was invisible."""
+    — and sync_gmail counted it as processed anyway, so the loss was invisible.
+
+    The drop is now gone entirely. prepare.should_enrich already cold-marks
+    promotional email (embedded and searchable, never graph-extracted, fully
+    reversible) and has shipped since 0.7.65 with ~40% of the corpus gated and
+    no recall impact. The ingest-time drop was the same idea done worse:
+    irreversibly, before anything could see the content."""
     from mcpbrain.sync.normalise import normalise_gmail
 
-    raw = _message(headers=[("Subject", "Weekly digest"),
-                            ("List-Unsubscribe", "<mailto:x@y.z>")],
-                   body="Some newsletter body text.")
-    report: dict = {}
-
-    assert normalise_gmail(raw, report=report) == []
-    assert report == {"bulk": 1}
-
-
-def test_bulk_mail_is_ingested_cold_when_the_flag_is_on(tmp_path, monkeypatch):
-    """The salience gate already exists to hold exactly this class — embedded
-    and searchable, never graph-extracted — so ingesting-as-cold is the coherent
-    behaviour and dropping at the door is the crude one."""
-    from mcpbrain.sync.normalise import normalise_gmail
-
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    (tmp_path / "config.json").write_text('{"gmail_ingest_bulk": true}')
     raw = _message(headers=[("Subject", "Weekly digest"),
                             ("List-Unsubscribe", "<mailto:x@y.z>")],
                    body="Some newsletter body text worth keeping.")
 
     chunks = normalise_gmail(raw)
 
-    assert chunks, "with the flag on, bulk mail must be ingested, not dropped"
-    assert chunks[0].metadata["bulk"] is True
+    assert chunks, "bulk mail must be ingested, not discarded at the door"
+    assert chunks[0].metadata["bulk"] is True, (
+        "and marked, so should_enrich can cold-mark it instead of spending "
+        "Haiku on a newsletter"
+    )
+
+
+def test_ordinary_mail_is_not_marked_bulk():
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    chunks = normalise_gmail(_message(headers=[("Subject", "Hall B")],
+                                      body="Can you confirm Sunday?"))
+
+    assert "bulk" not in chunks[0].metadata
+
+
+def test_the_salience_gate_cold_marks_header_bulk_mail():
+    """The other half: the signal has to be ACTED on, or removing the drop just
+    sends newsletters to Haiku. The header signal is strictly stronger than the
+    Gmail CATEGORY_* labels should_enrich already checks — Gmail's categoriser
+    misses plenty of list mail that carries List-Id."""
+    from mcpbrain.prepare import should_enrich
+
+    assert should_enrich({"metadata": {"source_type": "gmail", "bulk": True,
+                                       "labels": "INBOX"}}) is False
+    assert should_enrich({"metadata": {"source_type": "gmail",
+                                       "labels": "INBOX"}}) is True
+
+
+def test_empty_body_is_still_reported():
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    report: dict = {}
+    assert normalise_gmail(_message(headers=[("Subject", "s")], body=""),
+                           report=report) == []
+    assert report == {"empty_body": 1}
 
 
 def test_recipient_lists_are_not_clipped_at_300_chars():
@@ -2442,10 +2712,10 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
     payload = raw.get("payload", {})
     headers = payload.get("headers", [])
     subject = get_header(headers, "subject")
+    # A4: this used to `return []` for bulk mail. The drop is gone — see the
+    # `bulk` stamp below and prepare.should_enrich, which is the gate that
+    # actually belongs in this role.
     bulk = _is_bulk_or_auto(headers, subject)
-    if bulk and not config.gmail_ingest_bulk(str(config.app_dir())):
-        _note(report, "bulk")
-        return []
     body, signature_block = extract_body_with_signature(payload)
     if not body:
         _note(report, "empty_body")
@@ -2470,9 +2740,12 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
         "signature_block": signature_block[:500],
     }
     if bulk:
-        # Ingested because gmail_ingest_bulk is on. Marked so the salience gate
-        # cold-marks it (embedded + searchable, never graph-extracted) instead
-        # of spending Haiku on a newsletter.
+        # Marked, not dropped. prepare.should_enrich reads this and cold-marks
+        # the chunk: embedded and searchable, never graph-extracted, reversible.
+        # A header-based signal (List-Id / List-Unsubscribe / Precedence) is
+        # strictly stronger than the Gmail CATEGORY_* labels should_enrich
+        # already checks, so this improves that gate as well as replacing this
+        # one.
         base_metadata["bulk"] = True
     pieces = [c for c in chunk_text(body) if has_content(c)]
     out = []
@@ -2484,9 +2757,30 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
     return out
 ```
 
-adding `from mcpbrain import config` and `has_content` to the `mcpbrain.chunking` import.
+adding `has_content` to the `mcpbrain.chunking` import. `normalise_gmail` no longer needs `config` at all — if nothing else in the module uses it, do not add the import.
 
-- [ ] **Step 5: Create `mcpbrain/sync/attachments.py`**
+- [ ] **Step 5: Make the salience gate act on the bulk signal**
+
+Removing the drop without teaching `should_enrich` about it would send every newsletter to Haiku — strictly worse than before. In `mcpbrain/prepare.py`'s `should_enrich`, in the email branch (currently just above the `_PROMOTIONAL_LABELS` check at `:296`):
+
+```python
+    if source == "gmail" or meta.get("thread_id"):
+        # Header-based bulk signal (List-Id / List-Unsubscribe / Precedence),
+        # stamped at ingest by normalise_gmail. Checked BEFORE the Gmail
+        # CATEGORY_* labels because it is strictly stronger: Gmail's categoriser
+        # misses plenty of list mail that carries these headers, and this is the
+        # signal that used to DROP the message outright at ingest (A4). Now it
+        # cold-marks instead — embedded, searchable, never graph-extracted,
+        # and reversible.
+        if meta.get("bulk"):
+            return False
+        labels_raw = meta.get("labels") or ""
+        ...
+```
+
+**Scope note:** this is the only edit this plan makes to `prepare.py`, and it is in `should_enrich` — nowhere near the budget / `bulk_section` plumbing the global constraints protect. No other task in this wave owns `prepare.py`.
+
+- [ ] **Step 6: Create `mcpbrain/sync/attachments.py`**
 
 ```python
 """Email attachment ingestion.
@@ -2693,7 +2987,7 @@ def fetch_and_normalise(service, raw_message: dict, *, store=None) -> list[Chunk
     return out
 ```
 
-- [ ] **Step 6: Wire it into `gmail.py`**
+- [ ] **Step 7: Wire it into `gmail.py`**
 
 In `sync_gmail`, add `skips: dict = {}` before the fetch loop, and replace the message body of the loop:
 
@@ -2721,12 +3015,12 @@ and immediately before `return messages_processed`:
 
 Apply the same shape to `backfill_gmail`. Add `from mcpbrain import config` and `from mcpbrain.sync import attachments, ingest_report` to `gmail.py`.
 
-- [ ] **Step 7: Run the tests and verify they discriminate**
+- [ ] **Step 8: Run the tests and verify they discriminate**
 
 Run: `uv run pytest tests/test_normalise.py tests/test_attachments.py tests/test_gmail_sync.py tests/test_salience_gate.py -q -p no:randomly`
 Expected: PASS. Existing `test_normalise.py` tests asserting `to`/`cc` clip at 300 chars must be updated with a comment explaining C6.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add mcpbrain/sync/attachments.py mcpbrain/sync/normalise.py mcpbrain/sync/gmail.py \
@@ -2890,13 +3184,13 @@ would break the enriched-<thread_id> doc_id."
 | Finding | Issue | Task |
 |---|---|---|
 | A1 | Email attachments never ingested — CRITICAL | 5 |
-| A2 | .pptx / CSV / TSV advertised but dropped; .doc, images, .zip dropped silently | 2 (.pptx), 4 (MIME tables + reporting) |
+| A2 | .pptx / CSV / TSV advertised but dropped; .doc, .xls, .eml, images, .zip dropped silently | 2 (.pptx, .xls, .eml extractors), 4 (MIME routing + reporting). `.doc`/`.ppt`/iWork/`.zip`/images **declined permanently** — see "Nothing is deferred". |
 | A3 | Bottom-posted replies discarded | 5 |
-| A4 | Bulk mail dropped but counted as processed | 5 |
+| A4 | Bulk mail dropped but counted as processed | 5 — the drop is **deleted**, the signal moves into `should_enrich` |
 | A5 | Scanned PDFs vanish without a trace; `is_scanned_pdf` dead | 2 |
 | B1 | Spreadsheets keep empty rows, cap real rows at 200 — CRITICAL | 2 |
 | B2 | CSV / Google Sheets split mid-row with no header | 2 (renderer), 4 (routing) |
-| B3 | 15,576 chunks exceed the embedder window | 1 (prevented), 6 (counted) |
+| B3 | 15,576 chunks exceed the embedder window | 1 (`chunk_text` bounded), 3 (semantic doc bounded at build time — the one population chunk_text cannot reach), 6 (counter, as regression detector) |
 | B4 | Thread expansion emits scrambled paragraph order | 3 |
 | B5 | Stale chunks orphaned when a document shrinks | 4 |
 | B6 | `chunk_text` emits empty and oversize chunks | 1 |
