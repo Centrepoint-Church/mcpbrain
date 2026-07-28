@@ -313,3 +313,127 @@ def test_the_semantic_digest_chunk_does_not_merge_with_the_message_it_summarises
     digest_text = next(t for t in texts if t.startswith("People:"))
     assert "People:" not in raw_text
     assert "Raw lead message body." not in digest_text
+
+
+def test_an_attachment_does_not_merge_into_its_parent_message():
+    """C2: attachment chunks deliberately carry their PARENT's message_id
+    (sync/attachments.py), so _chunk_key's fallback chain resolved an attachment
+    and the parent's body to the same identity. reassemble_thread merged them
+    into one "message" and interleaved the two by chunk_index —
+    'BODY0 […] ATT0 BODY1 […] ATT1' — so every email with an attachment handed
+    the graph extractor a garbled, falsely gap-marked document.
+    """
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    body_meta = {"source_type": "gmail", "message_id": "m1", "thread_id": "t1",
+                 "sender": "a@b.com", "subject": "Budget", "date": "2026-06-01",
+                 "content_type": "email_body"}
+    att_meta = {"source_type": "gmail", "message_id": "m1", "thread_id": "t1",
+                "sender": "a@b.com", "subject": "Budget", "date": "2026-06-01",
+                "content_type": "email_attachment",
+                "attachment_name": "budget.xlsx"}
+    chunks = [
+        {"doc_id": "gmail-m1-body-0", "text": "BODY0",
+         "metadata": {**body_meta, "chunk_index": 0, "chunk_total": 2}},
+        {"doc_id": "gmail-m1-body-1", "text": "BODY1",
+         "metadata": {**body_meta, "chunk_index": 1, "chunk_total": 2}},
+        {"doc_id": "gmail-m1-att-0-0", "text": "ATT0",
+         "metadata": {**att_meta, "chunk_index": 0, "chunk_total": 2}},
+        {"doc_id": "gmail-m1-att-0-1", "text": "ATT1",
+         "metadata": {**att_meta, "chunk_index": 1, "chunk_total": 2}},
+    ]
+
+    messages = reassemble_thread(chunks)
+
+    assert len(messages) == 2, "the attachment must be its own message"
+    body = next(m for m in messages if "BODY0" in m["text"])
+    att = next(m for m in messages if "ATT0" in m["text"])
+    assert body["text"] == "BODY0\n\nBODY1"
+    assert att["text"] == "ATT0\n\nATT1"
+    assert "ATT" not in body["text"]
+    assert "BODY" not in att["text"]
+    # Both halves are complete, so nothing may be marked as elided.
+    assert "[…]" not in body["text"]
+    assert "[…]" not in att["text"]
+    # The EMITTED id stays the parent message id on both, because that is what
+    # store.doc_ids_for_messages resolves back to these chunks (an id derived
+    # from the attachment index would resolve to nothing and drain would discard
+    # the extraction — the 0.7.98 Drive defect).
+    assert [m["message_id"] for m in messages] == ["m1", "m1"]
+
+
+def test_two_attachments_on_one_message_stay_separate():
+    """The split is per ATTACHMENT, not "attachments vs body"."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    att_meta = {"source_type": "gmail", "message_id": "m1", "thread_id": "t1",
+                "content_type": "email_attachment", "date": "2026-06-01"}
+    chunks = [
+        {"doc_id": "gmail-m1-att-0-0", "text": "FIRST",
+         "metadata": {**att_meta, "chunk_index": 0, "chunk_total": 1}},
+        {"doc_id": "gmail-m1-att-1-0", "text": "SECOND",
+         "metadata": {**att_meta, "chunk_index": 0, "chunk_total": 1}},
+    ]
+
+    texts = [m["text"] for m in reassemble_thread(chunks)]
+
+    assert sorted(texts) == ["FIRST", "SECOND"]
+
+
+def test_a_split_calendar_event_reassembles_into_one_message():
+    """I6: calendar chunk metadata has no file_id and no message_id, so a long
+    agenda split into cal-<eid>-0..3 gave _chunk_key nothing but each chunk's own
+    doc_id — four singleton "messages", each one additionally stamped with a
+    truncated-tail `[…]` marker because a singleton sees itself as a fragment of
+    chunk_total. event_id is now in the chain, mirroring Drive's file_id."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": f"cal-evt9-{i}", "text": f"agenda part {i}",
+         "metadata": {"source_type": "calendar", "event_id": "evt9",
+                      "summary": "Leadership day", "start": "2026-06-01T09:00",
+                      "chunk_index": i, "chunk_total": 4}}
+        for i in range(4)
+    ]
+
+    messages = reassemble_thread(chunks)
+
+    assert len(messages) == 1, "a split calendar event is ONE document"
+    assert messages[0]["text"] == (
+        "agenda part 0\n\nagenda part 1\n\nagenda part 2\n\nagenda part 3")
+    assert "[…]" not in messages[0]["text"], (
+        "the full chunk set is present — a gap marker here is a lie the model "
+        "cannot check"
+    )
+    assert messages[0]["message_id"] == "evt9"
+
+
+def test_a_split_calendar_event_groups_into_one_batch(tmp_path):
+    """The other half of I6: _group_key also delegates to _chunk_key, so the four
+    chunks must form ONE batch rather than four."""
+    store = _store(tmp_path)
+    for i in range(4):
+        store.upsert_chunk(f"cal-evt9-{i}", f"agenda part {i}", f"h{i}",
+                           {"source_type": "calendar", "event_id": "evt9",
+                            "chunk_index": i, "chunk_total": 4})
+
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+
+    assert len(batches) == 1
+    assert batches[0].thread_id == "evt9"
+    assert len(batches[0].doc_ids) == 4
+
+
+def test_a_calendar_event_id_resolves_back_to_every_chunk_of_the_event(tmp_path):
+    """The message_id reassemble_thread emits for a split calendar event (its
+    event_id) MUST resolve in store.doc_ids_for_messages, or drain discards the
+    extraction and the chunks re-queue forever — the 0.7.98 Drive defect. Hence
+    the event_id arm in _doc_ids_query."""
+    store = _store(tmp_path)
+    for i in range(4):
+        store.upsert_chunk(f"cal-evt9-{i}", f"agenda part {i}", f"h{i}",
+                           {"source_type": "calendar", "event_id": "evt9",
+                            "chunk_index": i, "chunk_total": 4})
+
+    assert store.doc_ids_for_messages(["evt9"]) == [
+        "cal-evt9-0", "cal-evt9-1", "cal-evt9-2", "cal-evt9-3"]
