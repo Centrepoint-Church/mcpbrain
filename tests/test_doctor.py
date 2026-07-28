@@ -154,6 +154,31 @@ def test_doctor_reports_over_window_chunks(tmp_path, monkeypatch):
     assert store.count_chunks_longer_than(2000) == 1
 
 
+def test_run_doctor_reports_the_oversize_chunk_line(tmp_path, monkeypatch):
+    """When oversize chunks exist, the chunk window line should report them with
+    the ⚠️ glyph."""
+    from mcpbrain.store import Store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "y" * 3000, "h1", {"source_type": "gdrive"})
+
+    code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                  conns=_conns(), repairs={})
+    assert "⚠️ Chunk window" in msg
+    assert "1 chunk(s)" in msg
+
+
+def test_run_doctor_chunk_window_skip_on_no_store(tmp_path):
+    """When b.sqlite3 doesn't exist (fresh install), the chunk window line
+    should report ➖ skipped, not vanish entirely."""
+    code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                  conns=_conns(), repairs={})
+    assert "➖ Chunk window" in msg
+    assert "skipped" in msg
+
+
 def test_embedder_weights_present_reports_ok():
     # Weights cached → silent green line, no repair, no need_action.
     embedder = _Recorder()
