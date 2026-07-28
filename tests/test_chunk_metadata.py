@@ -1,7 +1,12 @@
 """patch_chunk_metadata + note_chunks: the expiry/index plumbing for memory notes."""
+import base64
 import json
 
 from mcpbrain.store import Store
+
+
+def _b64(text):
+    return base64.urlsafe_b64encode(text.encode()).decode()
 
 
 def _store(tmp_path):
@@ -78,3 +83,96 @@ def test_every_drive_chunk_records_how_many_chunks_its_document_has():
     assert len(chunks) > 1
     for c in chunks:
         assert c.metadata["chunk_total"] == len(chunks)
+
+
+def test_every_write_path_stamps_the_chunker_version():
+    """The store cannot currently answer 'which of my chunks predate the current
+    chunker' — chunker_version lives only in the org pin, where it keys the
+    ingest-cache fingerprint. That question is the whole repair selector, so it
+    has to be answerable from a chunk."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.calendar import normalise_calendar
+    from mcpbrain.sync.drive import normalise_drive
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    drive = normalise_drive({"id": "f1", "name": "D.txt", "mimeType": "text/plain"},
+                            "Some prose worth keeping.")
+    gmail = normalise_gmail({"id": "m1", "threadId": "t1", "labelIds": ["INBOX"],
+                             "payload": {"mimeType": "text/plain",
+                                         "headers": [{"name": "Subject", "value": "s"}],
+                                         "body": {"data": _b64("Body text here.")}}})
+    cal = normalise_calendar({"id": "e1", "summary": "Standup",
+                              "start": {"dateTime": "2026-06-02T09:00:00Z"}})
+
+    for label, chunks in (("drive", drive), ("gmail", gmail), ("calendar", cal)):
+        assert chunks, f"{label} fixture produced no chunks"
+        for c in chunks:
+            assert c.metadata["chunker_version"] == CHUNKER_VERSION, (
+                f"{label} chunk is not stamped with the chunker version"
+            )
+
+
+def test_an_attachment_chunk_is_also_stamped():
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync import attachments
+
+    raw = {"id": "m1", "threadId": "t1", "labelIds": [],
+           "payload": {"headers": [{"name": "Subject", "value": "Invoice"}],
+                       "parts": [{"filename": "n.txt", "mimeType": "text/plain",
+                                  "body": {"attachmentId": "a1", "size": 20}}]}}
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, b"Attachment prose body.")
+
+    assert chunks
+    assert chunks[0].metadata["chunker_version"] == CHUNKER_VERSION
+
+
+def test_the_chunker_version_is_ahead_of_the_pre_spec_2_chunker():
+    """Spec 2 changed chunking materially — the chunk_text empty/oversize fix,
+    row-group tabular chunks, the has_content guard — and left this unbumped. An
+    unbumped version means a fleet member still importing a pre-spec-2 cache
+    artifact gets old-shape chunks with no way to know."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    assert CHUNKER_VERSION >= 2
+
+
+def test_stale_chunker_file_ids_selects_only_out_of_date_drive_files(tmp_path):
+    """The level-triggered selector. No queue, no cursor: re-running walks
+    forward because each repaired file stops matching. Same shape as
+    reflow_outdated_chunks, which is the established pattern here."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-old-0", "legacy text", "h1",
+                       {"source_type": "gdrive", "file_id": "old"})          # no version
+    store.upsert_chunk("gdrive-mid-0", "half text", "h2",
+                       {"source_type": "gdrive", "file_id": "mid",
+                        "chunker_version": 1})
+    store.upsert_chunk("gdrive-new-0", "fresh text", "h3",
+                       {"source_type": "gdrive", "file_id": "new",
+                        "chunker_version": 2})
+
+    assert sorted(store.stale_chunker_file_ids(2, limit=10)) == ["mid", "old"]
+
+
+def test_stale_chunker_file_ids_respects_its_limit_and_is_gmail_free(tmp_path):
+    """Drive-only by design (decision 4): Gmail is 2% of the store and its
+    chunking defects are 75 rows the purge removes directly, so re-fetching a
+    mailbox is not a trade worth making."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    for i in range(5):
+        store.upsert_chunk(f"gdrive-f{i}-0", f"text {i}", f"h{i}",
+                           {"source_type": "gdrive", "file_id": f"f{i}"})
+    store.upsert_chunk("gmail-m1-body-0", "mail text", "hm",
+                       {"source_type": "gmail", "message_id": "m1"})
+
+    got = store.stale_chunker_file_ids(2, limit=3)
+
+    assert len(got) == 3
+    assert all(g.startswith("f") for g in got), f"non-Drive id leaked in: {got}"

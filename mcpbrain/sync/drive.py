@@ -31,7 +31,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 
 from mcpbrain import config
-from mcpbrain.chunking import chunk_text, content_hash, has_content
+from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
 from mcpbrain.org_contracts import DRIVE_ID_META_KEY
 from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.normalise import Chunk
@@ -315,6 +315,7 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
 
     base_meta = {
         "source_type": "gdrive",
+        "chunker_version": CHUNKER_VERSION,
         "file_id": fid,
         "file_name": file_meta.get("name", "")[:200],
         "mime_type": mime[:100],
