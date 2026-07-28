@@ -1047,3 +1047,87 @@ def test_merge_repoints_observations_email_and_carries_aliases(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM email_entities WHERE entity_id='al'").fetchone()[0] == 0
     aliases = s.get_entity("alice")["aliases"].split("|")
     assert "Alice A." in aliases and "Ali" in aliases   # loser name + loser's own alias carried
+
+
+# --- doc_root_content_hashes (content-hash dedup's document-cluster signal) --
+
+def test_doc_root_content_hashes_returns_full_set_per_root(tmp_path):
+    """Each root's returned set is the DISTINCT content_hash values across every
+    chunk under that root, not just one chunk's hash — the whole-document
+    fingerprint hybrid_search's dedup needs to tell a genuine duplicate FILE
+    from a document that merely shares one chunk with another."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
+    s.upsert_chunk("gdrive-p-1", "beta", "h1", {})
+    s.upsert_chunk("gdrive-q-0", "gamma", "h2", {})
+
+    result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
+
+    assert result["gdrive-p"] == frozenset({"h0", "h1"})
+    assert result["gdrive-q"] == frozenset({"h2"})
+
+
+def test_doc_root_content_hashes_equal_sets_for_true_duplicate_files(tmp_path):
+    """Two independently-chunked copies of the same whole file (identical text,
+    different file_ids) must resolve to EQUAL hash sets — this equality is
+    exactly what lets hybrid_search's dedup tell them apart from two merely
+    similar documents."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
+    s.upsert_chunk("gdrive-p-1", "beta", "h1", {})
+    s.upsert_chunk("gdrive-q-0", "alpha", "h0", {})
+    s.upsert_chunk("gdrive-q-1", "beta", "h1", {})
+
+    result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
+
+    assert result["gdrive-p"] == result["gdrive-q"] == frozenset({"h0", "h1"})
+
+
+def test_doc_root_content_hashes_unequal_sets_when_only_one_chunk_matches(tmp_path):
+    """Two documents that share only ONE chunk (e.g. a boilerplate/template
+    header) while the rest of their own chunks diverge must resolve to
+    UNEQUAL sets, so hybrid_search's dedup does not mistake them for a
+    duplicate whole file."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-p-0", "shared header", "hshared", {})
+    s.upsert_chunk("gdrive-p-1", "p body", "hp1", {})
+    s.upsert_chunk("gdrive-q-0", "shared header", "hshared", {})
+    s.upsert_chunk("gdrive-q-1", "q body", "hq1", {})
+
+    result = s.doc_root_content_hashes(["gdrive-p", "gdrive-q"])
+
+    assert result["gdrive-p"] != result["gdrive-q"]
+    assert result["gdrive-p"] & result["gdrive-q"] == frozenset({"hshared"})
+
+
+def test_doc_root_content_hashes_batches_many_roots_in_one_call(tmp_path):
+    """The whole point of batching (vs. one query per candidate) is that an
+    arbitrary number of roots resolve correctly from a SINGLE call."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    roots = [f"gdrive-r{i}" for i in range(12)]
+    for i, root in enumerate(roots):
+        s.upsert_chunk(f"{root}-0", f"text-{i}", f"hash-{i}", {})
+
+    result = s.doc_root_content_hashes(roots)
+
+    assert len(result) == 12
+    for i, root in enumerate(roots):
+        assert result[root] == frozenset({f"hash-{i}"})
+
+
+def test_doc_root_content_hashes_empty_input_returns_empty_dict(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    assert s.doc_root_content_hashes([]) == {}
+
+
+def test_doc_root_content_hashes_unknown_root_is_empty_set(tmp_path):
+    """A root with no matching chunks (e.g. a doc_id with no recognisable
+    '-<n>' chunk-index suffix, or one that was purged) resolves to an empty
+    set rather than raising or being omitted from the result."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("gdrive-p-0", "alpha", "h0", {})
+
+    result = s.doc_root_content_hashes(["gdrive-p", "gdrive-nonexistent"])
+
+    assert result["gdrive-p"] == frozenset({"h0"})
+    assert result["gdrive-nonexistent"] == frozenset()
