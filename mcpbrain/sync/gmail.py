@@ -166,6 +166,11 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     messages_processed = 0
     fetch_interrupted = False
     skips: dict = {}
+    # Read once: the value cannot change mid-loop, and config.read_config does
+    # an uncached exists()+read_text()+json.loads() per call — paying that once
+    # per message would be the same class of overhead the 0.7.105 fix removed
+    # from the per-chunk metadata queries.
+    fetch_attachments = config.gmail_attachments(str(config.app_dir()))
     for mid in new_message_ids:
         if mid in resumed_ids:
             continue
@@ -191,7 +196,7 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
         # section — the daemon-scheduling work established that _bulk_lock must
         # never be held across network calls (see _cache_first_extract_one).
         att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
-                      if config.gmail_attachments(str(config.app_dir())) else [])
+                      if fetch_attachments else [])
         with bulk_section():
             for chunk in normalise_gmail(raw, report=skips):
                 store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
@@ -242,6 +247,8 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
         q += f" before:{before}"
     page_token, processed = None, 0
     skips: dict = {}
+    # Read once — see sync_gmail for why this must not sit inside the loop.
+    fetch_attachments = config.gmail_attachments(str(config.app_dir()))
 
     def _flush_skips() -> None:
         for reason, count in sorted(skips.items()):
@@ -269,7 +276,7 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
             # bulk section — see sync_gmail for why _bulk_lock must never be
             # held across network calls.
             att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
-                          if config.gmail_attachments(str(config.app_dir())) else [])
+                          if fetch_attachments else [])
             with bulk_section():
                 for ch in normalise_gmail(raw, report=skips):
                     store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)

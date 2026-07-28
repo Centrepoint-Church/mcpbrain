@@ -316,7 +316,13 @@ def test_a_reply_written_below_the_quote_survives():
     reply was thrown away along with the quote it sat under."""
     from mcpbrain.sync.normalise import strip_reply_chains
 
-    text = ("On Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
+    # The leading '\n' is required: every _REPLY_CHAIN_PATTERNS entry anchors
+    # on a literal preceding newline, so without it the "On ... wrote:" line
+    # sitting at index 0 never matches at all — earliest stays len(text), and
+    # OLD and NEW code would return byte-identical output (a non-discriminating
+    # test). A real Gmail body commonly has this leading blank line when the
+    # quote is the very first thing in the message.
+    text = ("\nOn Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
             "> Can you confirm the Hall B booking for Sunday?\n"
             "> Sam\n\n"
             "Yes — Hall B is confirmed for Sunday the 8th, 9am to 1pm. "
@@ -326,6 +332,10 @@ def test_a_reply_written_below_the_quote_survives():
 
     assert "Hall B is confirmed" in out, "the bottom-posted reply was discarded"
     assert "Can you confirm" not in out, "the quote itself must still be stripped"
+    assert "wrote:" not in out, (
+        "the quote's own attribution line must be filtered out of the "
+        "rescued tail by _QUOTE_HEADER_LINE, not survive alongside the reply"
+    )
 
 
 def test_a_short_sign_off_below_a_quote_is_not_treated_as_a_reply():
@@ -355,6 +365,60 @@ def test_html_mail_does_not_get_the_bottom_post_rescue():
 
     assert "Short answer: yes." in body
     assert "repeated verbatim" not in body
+
+
+# ---------------------------------------------------------------------------
+# strip_html fallback: tag boundaries must become newlines, not spaces.
+#
+# bs4 is confirmed NOT a dependency of this project (absent from
+# pyproject.toml, uv.lock, and this venv), so the regex fallback below is the
+# only path that actually runs in any real deployment — "bs4 if available" is
+# effectively dead code. The fallback used to collapse every tag to a single
+# space, which fused an HTML message onto one line with no '\n' anywhere; every
+# _REPLY_CHAIN_PATTERNS entry and every _SIGNATURE_OPENERS entry require a
+# literal preceding '\n' to match at all, so reply-chain stripping AND
+# signature extraction were both structurally unreachable for HTML mail before
+# this fix — not just the one rescue-flag scenario above.
+# ---------------------------------------------------------------------------
+
+def test_strip_html_turns_tag_boundaries_into_newlines():
+    from mcpbrain.sync.normalise import strip_html
+
+    out = strip_html("<p>Line one</p><p>Line two</p>")
+
+    assert out == "Line one\nLine two"
+
+
+def test_strip_html_quote_boundary_is_stripped_by_the_reply_chain_regex():
+    """The newline strip_html now inserts at the closing </div> before the
+    <blockquote> is exactly what lets _REPLY_CHAIN_PATTERNS's '\\n...wrote:\\s*\\n'
+    fire on HTML-derived text — with the old space-joining fallback this never
+    matched, so the whole quoted blockquote survived as if it were new prose."""
+    from mcpbrain.sync.normalise import strip_html, strip_reply_chains
+
+    html = ("<p>Short answer: yes.</p>"
+            "<div>On Mon, 2 Jun 2026 at 09:14, Sam wrote:</div>"
+            "<blockquote>The whole previous thread, at length, "
+            "repeated verbatim for many lines.</blockquote>")
+
+    out = strip_reply_chains(strip_html(html), rescue_bottom_post=False)
+
+    assert out == "Short answer: yes."
+
+
+def test_strip_html_signature_opener_activates_after_a_tag_boundary():
+    """extract_signature_block's openers ('\\nregards,' etc.) also anchor on a
+    literal preceding '\\n' — with the old space-joining fallback, a signature
+    written as its own HTML paragraph could never be recognised as one."""
+    from mcpbrain.sync.normalise import extract_signature_block, strip_html
+
+    html = "<p>Quick note on the roster.</p><p>Regards,</p><p>Sam Chen</p>"
+
+    body, signature = extract_signature_block(strip_html(html))
+
+    assert body == "Quick note on the roster."
+    assert "Regards," in signature
+    assert "Sam Chen" in signature
 
 
 def test_bulk_mail_is_ingested_and_marked_rather_than_dropped():
