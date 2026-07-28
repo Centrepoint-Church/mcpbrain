@@ -66,14 +66,38 @@ def _find_part_text(payload: dict, mime_type: str) -> str:
     return ""
 
 
+# Tags that end a line of prose. Everything else is INLINE and is stripped to
+# nothing, keeping the surrounding words in one sentence (I5): the fallback used
+# to emit '\n' for EVERY tag, so `<p>Hi <b>Sam</b>, can you confirm
+# <a href=…>the booking</a>?</p>` came out as five separate lines — every bold
+# name, link and <span> shredded the sentence it sat in, which wrecks both the
+# embedding and the signature/quote heuristics that read whole lines.
+_BLOCK_TAGS = frozenset({
+    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+    "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre",
+    "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+})
+
+# One HTML tag: group 1 is its name when it has one (so `<!-- … -->` and stray
+# `<3` style junk fall through to the inline/strip branch).
+_HTML_TAG = re.compile(r"<\s*/?\s*([A-Za-z][A-Za-z0-9]*)?[^>]*>")
+
+
+def _tag_replacement(m: re.Match) -> str:
+    return "\n" if (m.group(1) or "").lower() in _BLOCK_TAGS else ""
+
+
 def strip_html(html: str) -> str:
     """Convert HTML email body to plain text. bs4 if available, else regex.
 
-    The regex fallback replaces EVERY tag with a newline (not a space): quoted
-    history in HTML mail is delimited by tag boundaries (a `<div>` "wrote:"
-    line, a `<blockquote>`), and `strip_reply_chains`'s patterns anchor on
-    literal '\\n' — collapsing tags to spaces would fuse the whole message
-    onto one line and make every quote boundary invisible to that regex.
+    The regex fallback replaces every BLOCK-level tag with a newline (not a
+    space): quoted history in HTML mail is delimited by tag boundaries (a
+    `<div>` "wrote:" line, a `<blockquote>`), and `strip_reply_chains`'s
+    patterns anchor on literal '\\n' — collapsing tags to spaces would fuse the
+    whole message onto one line and make every quote boundary invisible to that
+    regex. Inline tags (`<b>`, `<a>`, `<span>`, …) are stripped to nothing so a
+    sentence stays on one line — see _BLOCK_TAGS.
     """
     try:
         from bs4 import BeautifulSoup
@@ -82,7 +106,7 @@ def strip_html(html: str) -> str:
             tag.decompose()
         text = soup.get_text(separator="\n")
     except Exception:
-        text = re.sub(r"<[^>]+>", "\n", html)
+        text = _HTML_TAG.sub(_tag_replacement, html)
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 
@@ -100,16 +124,20 @@ _QUOTE_HEADER_LINE = re.compile(
 _MIN_BOTTOM_POST_CHARS = 40
 
 
-def _bottom_posted_reply(tail: str) -> str:
+def _bottom_posted_reply(lines: list[str]) -> str:
     """Prose written BELOW a quoted chain.
 
-    Only sound after '>' quoting has been stripped: what remains in the tail is
-    then the quote's attribution lines plus, if the sender bottom-posted, their
-    actual message. Callers must not apply this to HTML-derived text, where the
-    quote is markup rather than '>' prefixes and the whole quoted history would
-    survive as if it were new prose (see extract_body_with_signature).
+    `lines` are the text lines strictly after the LAST '>'-quoted line of the
+    quote (see strip_reply_chains): the quote's own body is therefore already
+    gone, and what is left is its trailing attribution lines plus, if the sender
+    bottom-posted, their actual message.
+
+    Only sound where the quote really was '>'-prefixed — the caller enforces
+    that. Callers must not apply this to HTML-derived text, where the quote is
+    markup rather than '>' prefixes and the whole quoted history would survive
+    as if it were new prose (see extract_body_with_signature).
     """
-    kept = [ln for ln in tail.splitlines()
+    kept = [ln for ln in lines
             if ln.strip() and not _QUOTE_HEADER_LINE.match(ln)]
     joined = "\n".join(kept).strip()
     return joined if len(joined) >= _MIN_BOTTOM_POST_CHARS else ""
@@ -122,18 +150,47 @@ def strip_reply_chains(text: str, *, rescue_bottom_post: bool = True) -> str:
     The old implementation returned `text[:earliest]`, correct for top-posting —
     the overwhelmingly common case — and silently discarding every bottom-posted
     reply along with the quote it sat under.
+
+    C1: the rescue only runs when the quote was demonstrably '>'-PREFIXED. Four
+    of the five _REPLY_CHAIN_PATTERNS match plain-text quoting that carries no
+    '>' at all (Outlook/Exchange `-----Original Message-----`, forwarded-message
+    banners, underscore rules, bare `From:/Sent:/To:` blocks — ordinary
+    inter-org and vendor mail). There, everything after the marker is the
+    ORIGINAL author's words, and rescuing it appended the entire quoted message
+    to the reply, attributed in the graph to the REPLYING sender: finding D's
+    duplication back, plus misattributed commitments — strictly worse than the
+    A3 defect the rescue fixes. So with no '>' evidence next to the marker we
+    fall back to the old `text[:earliest]` behaviour and lose the (rare) genuine
+    bottom-post, matching this function's stated preference elsewhere
+    (_MIN_BOTTOM_POST_CHARS: "err toward dropping").
     """
-    text = re.sub(r'(?m)^>.*$', '', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    earliest = len(text)
+    # Blank the '>' lines in place rather than deleting them, so the quote's
+    # EXTENT is still locatable below; `blanked` keeps one entry per input line.
+    raw_lines = text.split("\n")
+    quote_lines = {i for i, ln in enumerate(raw_lines) if ln.startswith(">")}
+    blanked = "\n".join("" if i in quote_lines else ln
+                        for i, ln in enumerate(raw_lines))
+
+    earliest = len(blanked)
     for pattern in _REPLY_CHAIN_PATTERNS:
-        m = pattern.search(text)
+        m = pattern.search(blanked)
         if m and m.start() < earliest:
             earliest = m.start()
-    head = text[:earliest].strip()
-    if not rescue_bottom_post or earliest == len(text):
+    # The \n{3,} collapse is applied to the head only (it used to run over the
+    # whole text before the search). It can never create or destroy a pattern
+    # match — it always leaves at least one blank line, so two non-blank lines
+    # never become adjacent — and the head is stripped either way.
+    head = re.sub(r'\n{3,}', '\n\n', blanked[:earliest]).strip()
+    if not rescue_bottom_post or earliest == len(blanked):
         return head
-    tail = _bottom_posted_reply(text[earliest:])
+    # Every _REPLY_CHAIN_PATTERNS entry anchors on a literal '\n', so `earliest`
+    # points AT that newline: it terminates line `marker_line`, and the marker's
+    # own text starts on the next one.
+    marker_line = blanked.count("\n", 0, earliest)
+    quoted_after = [i for i in quote_lines if i >= marker_line]
+    if not quoted_after:
+        return head          # no '>' evidence — do not rescue (see above)
+    tail = _bottom_posted_reply(raw_lines[max(quoted_after) + 1:])
     return f"{head}\n\n{tail}".strip() if tail else head
 
 
