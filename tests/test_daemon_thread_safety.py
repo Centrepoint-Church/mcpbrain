@@ -156,6 +156,53 @@ def test_pending_update_stops_the_maintenance_thread():
     assert not dm._maintenance_thread.is_alive()
 
 
+def test_shutdown_maintenance_logs_when_thread_survives_the_join_timeout(caplog):
+    """Important finding, final whole-branch review: the old join(timeout=...)
+    had no is_alive() check/log/escalation afterward. Since gated-pass
+    execution is deliberately unbounded once _bulk_lock is acquired (only the
+    ACQUIRE is bounded -- see BULK_LOCK_ACQUIRE_S), a mid-pass maintenance
+    thread surviving the join is a real, reachable case: run()'s
+    _pending_update path still proceeds to release SingleWriterLock right
+    after this returns, regardless, reopening the two-writers hazard this
+    method exists to prevent. This drives a thread that genuinely does NOT
+    stop within the timeout (blocks on an Event that is never set) and
+    asserts the escalation is logged, not silently swallowed.
+
+    The existing test above (test_pending_update_stops_the_maintenance_thread)
+    does not cover this: its thread target (_stop.wait) returns the instant
+    _stop is set, so the join always succeeds trivially and the escalation
+    branch is never entered.
+    """
+    import logging
+    import threading
+    from mcpbrain import daemon as d
+
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stop = threading.Event()
+    never = threading.Event()   # deliberately never set -- the thread outlives the join
+    dm._maintenance_thread = threading.Thread(target=never.wait, daemon=True)
+    dm._maintenance_thread.start()
+
+    with caplog.at_level(logging.ERROR, logger=d.log.name):
+        dm._shutdown_maintenance(timeout=0.05)
+
+    assert dm._stop.is_set()
+    assert dm._maintenance_thread.is_alive(), (
+        "precondition: the thread must genuinely still be running after the "
+        "join timed out, or this test proves nothing"
+    )
+    assert any(
+        r.levelno >= logging.ERROR and "did not stop" in r.message
+        for r in caplog.records
+    ), "expected an ERROR log naming the thread's failure to stop in time"
+
+    # Teardown: let the still-alive thread exit cleanly so it doesn't leak
+    # past this test.
+    never.set()
+    dm._maintenance_thread.join(timeout=5.0)
+    assert not dm._maintenance_thread.is_alive()
+
+
 def test_stash_delete_does_not_drop_a_fresh_batch():
     """run_one snapshots, the cycle runs, then it deletes drained keys. If a
     pass rewrote that key meanwhile, the fresh batch is deleted unattached."""
