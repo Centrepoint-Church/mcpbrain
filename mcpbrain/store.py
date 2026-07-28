@@ -275,6 +275,11 @@ class Store:
                        "ON chunks(json_extract(metadata,'$.message_id'))")
             db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fileid "
                        "ON chunks(json_extract(metadata,'$.file_id'))")
+            # I6: thread_enrich._chunk_key groups a split calendar event's chunks
+            # by event_id, so doc_ids_for_messages resolves that id too — same
+            # arm shape as file_id, so it needs the same expression index.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_eventid "
+                       "ON chunks(json_extract(metadata,'$.event_id'))")
             # thread_chunks (recall small-to-big expansion via retrieval_expand,
             # plus the stale-action / stale-reextract passes) filters chunks by
             # metadata.thread_id — a full SCAN (~4.3s on the live store) without
@@ -2598,21 +2603,27 @@ class Store:
             return []
         with self._connect() as db:
             rows = db.execute(self._doc_ids_query(len(ids)),
-                              ids + ids + ids).fetchall()
+                              ids * 4).fetchall()
         return [r["doc_id"] for r in rows]
 
     @staticmethod
     def _doc_ids_query(n: int) -> str:
         """SQL for doc_ids_for_messages resolving ``n`` ids per path.
 
-        A UNION of three single-path SELECTs, NOT one SELECT with an OR: SQLite
-        will not union expression-indexes (idx_chunks_msgid/idx_chunks_fileid)
-        across an OR, so the OR form plans as a full `SCAN chunks` — ~1.4s per
-        call on the ~108k-chunk live store. Each UNION arm filters on a single
-        indexed path so it plans as an index SEARCH. Params bind as ids*3
-        (message_id, file_id, then the doc_id fallback). Ordered by rowid for the
-        stable output drain relies on; UNION also dedups a chunk that matches two
-        arms."""
+        A UNION of four single-path SELECTs, NOT one SELECT with an OR: SQLite
+        will not union expression-indexes (idx_chunks_msgid/idx_chunks_fileid/
+        idx_chunks_eventid) across an OR, so the OR form plans as a full
+        `SCAN chunks` — ~1.4s per call on the ~108k-chunk live store. Each UNION
+        arm filters on a single indexed path so it plans as an index SEARCH.
+        Params bind as ids*4 (message_id, file_id, event_id, then the doc_id
+        fallback). Ordered by rowid for the stable output drain relies on; UNION
+        also dedups a chunk that matches two arms.
+
+        The event_id arm exists for the same reason as the file_id one (I6):
+        thread_enrich._chunk_key groups a split calendar event's chunks by
+        event_id, so that is the `message_id` the extraction carries, and it is
+        never any chunk's doc_id (those are cal-<event_id>[-<idx>]). Calendar
+        event ids don't collide with Gmail message/thread ids."""
         ph = ",".join("?" * n)
         return (
             f"SELECT doc_id, rowid FROM chunks "
@@ -2620,6 +2631,9 @@ class Store:
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE json_extract(metadata,'$.file_id') IN ({ph}) "
+            f"UNION "
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE json_extract(metadata,'$.event_id') IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE json_extract(metadata,'$.message_id') IS NULL "
