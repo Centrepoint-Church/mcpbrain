@@ -262,6 +262,39 @@ def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
     assert store.get_chunk("gmail-m1-body-0") is not None
 
 
+def test_run_one_builds_budget_from_cycle_budget_s_and_wires_on_progress(tmp_path, monkeypatch):
+    """run_one() must actually CONSTRUCT `Budget(self._cycle_budget_s, ...)`
+    and pass `on_progress=self._note_progress` through to run_cycle -- not
+    just resolve/store the tuning value on the instance.
+    test_daemon_cli_applies_tuning_config_overrides already pins that
+    `_cycle_budget_s` LANDS on a constructed Daemon; nothing pins that
+    run_one() actually USES it when building the cycle's Budget."""
+    from mcpbrain.budget import Budget
+
+    store = _make_store(tmp_path)
+    emb = FakeEmbedder()
+    daemon = Daemon(store, emb, services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+    daemon._cycle_budget_s = 12.5
+
+    captured = {}
+
+    def _fake_run_cycle(store_arg, embedder_arg, **kw):
+        captured.update(kw)
+        return {}
+
+    monkeypatch.setattr(daemon_module, "run_cycle", _fake_run_cycle)
+
+    daemon.run_one()
+
+    budget = captured.get("budget")
+    assert isinstance(budget, Budget), "run_one must pass a real Budget instance"
+    assert budget._deadline_s == 12.5, "the Budget must be built from self._cycle_budget_s"
+    assert captured.get("on_progress") == daemon._note_progress, (
+        "on_progress must be wired to self._note_progress so run_cycle's "
+        "on_progress('sync') call actually stamps the watchdog's clock")
+
+
 def test_paused_cycle_writes_nothing_including_no_enrich(tmp_path):
     """Paused run_one returns None and writes nothing — no sync, no enrich."""
     store = _make_store(tmp_path)
@@ -402,6 +435,124 @@ def test_lock_acquire_is_non_blocking_by_default(tmp_path):
         assert time.monotonic() - started < 0.2
     finally:
         held.release()
+
+
+def test_lock_acquire_retry_loop_calls_acquire_once_repeatedly_until_success(
+        tmp_path, monkeypatch):
+    """Unit-level test of acquire()'s OWN retry loop (the while/deadline/sleep
+    mechanics), independent of which platform backend `_acquire_once` uses --
+    the real-thread tests above (test_lock_acquire_retries_briefly_to_cover_a_
+    handover etc.) only exercise the retry loop indirectly through actual
+    concurrent fcntl file locking on this (POSIX) box; nothing pins the loop's
+    own attempt-count/backoff mechanics deterministically, independent of
+    fcntl vs. msvcrt vs. any future backend.
+    """
+    lock = SingleWriterLock(tmp_path / "d.lock")
+    attempts = []
+
+    def _fake_once():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise AlreadyRunningError("still held")
+        # third attempt succeeds -- no exception, no return value needed
+
+    monkeypatch.setattr(lock, "_acquire_once", _fake_once)
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+
+    lock.acquire(timeout_s=10.0, interval_s=0.05)  # must NOT raise
+
+    assert len(attempts) == 3, "acquire must retry _acquire_once until it succeeds"
+    assert sleeps == [0.05, 0.05], "must sleep interval_s between failed attempts"
+
+
+def test_lock_acquire_retry_loop_reraises_once_the_deadline_is_exceeded(
+        tmp_path, monkeypatch):
+    """The other side of the same unit-level retry loop: once the fake clock
+    (advanced only by the loop's own sleep calls, so this needs no real
+    timing/threads) passes the deadline, the loop must give up and re-raise
+    rather than retry forever."""
+    lock = SingleWriterLock(tmp_path / "d.lock")
+    calls = {"n": 0}
+    now = [1000.0]
+
+    def _fake_once():
+        calls["n"] += 1
+        raise AlreadyRunningError("still held")
+
+    def _fake_sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(lock, "_acquire_once", _fake_once)
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+    with pytest.raises(AlreadyRunningError):
+        lock.acquire(timeout_s=0.2, interval_s=0.1)
+
+    assert calls["n"] >= 2, "must have retried at least once before giving up"
+
+
+def test_lock_acquire_retries_through_the_actual_msvcrt_branch(tmp_path, monkeypatch):
+    """The Windows-specific `_acquire_once` branch (msvcrt) is `# pragma: no
+    cover` on this POSIX box, but acquire()'s bounded retry (timeout_s=...)
+    exists SPECIFICALLY for the Windows unsupervised-handover case (see
+    acquire()'s own docstring) -- the two retry-loop tests just above mock
+    `_acquire_once` entirely and so never actually enter this branch. Fakes
+    just enough of msvcrt to drive the REAL branch end-to-end: forces fcntl
+    off and msvcrt on, and makes `locking()` fail (as a real Windows
+    LK_NBLCK byte-range-lock conflict would) for the first two attempts
+    before succeeding on the third -- exercising both the w+b-create (no
+    pre-existing lockfile, first attempt) and the r+b-reopen (lockfile
+    already has the sentinel byte, later attempts) fallback paths, plus the
+    real retry loop bridging the gap on this platform-specific code path.
+    """
+    monkeypatch.setattr(daemon_module, "fcntl", None)
+
+    lock_calls = {"n": 0}
+    seen_opens: list = []
+
+    class _FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        def locking(self, fd, mode, nbytes):
+            if mode == self.LK_NBLCK:
+                lock_calls["n"] += 1
+                if lock_calls["n"] < 3:
+                    raise OSError("lock violation")
+                return
+            # LK_UNLCK (release): no-op for this fake.
+
+    monkeypatch.setattr(daemon_module, "msvcrt", _FakeMsvcrt())
+
+    lock_path = tmp_path / "d.lock"
+    orig_open = open
+
+    def _spy_open(path, mode="r", *a, **kw):
+        if path == lock_path:
+            seen_opens.append(mode)
+        return orig_open(path, mode, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", _spy_open)
+
+    lock = SingleWriterLock(lock_path)
+    lock.acquire(timeout_s=5.0, interval_s=0.05)   # must NOT raise
+    try:
+        assert lock_calls["n"] == 3, (
+            "expected the msvcrt branch's retry loop to keep calling "
+            "locking() until it succeeded"
+        )
+        assert "w+b" in seen_opens, (
+            "first attempt (no pre-existing lockfile) must create one and "
+            "write the sentinel byte"
+        )
+        assert "r+b" in seen_opens, (
+            "later attempts must reopen the now-existing lockfile rather "
+            "than recreating it"
+        )
+    finally:
+        lock.release()
 
 
 def test_lock_defaults_to_app_dir(tmp_path, monkeypatch):

@@ -3,6 +3,18 @@ from mcpbrain import auth
 
 
 def test_read_timeout_is_much_smaller_than_the_upload_timeout():
+    """Restored after a round-1 deletion that was too broad: this file's other
+    three tests exercise real behavior (they mock build_service's HTTP layer
+    and assert the resulting timeout), but NOTHING else in the suite pins
+    DEFAULT_READ_TIMEOUT_S's actual value -- without this, it could regress
+    all the way back to 600 (DEFAULT_HTTP_TIMEOUT_S, i.e. the exact Task 6
+    defect this module's docstring exists to prevent: routine API reads
+    inheriting the 600s backup-upload timeout) and the full suite would stay
+    green. The `<= 120` bound is an independent sanity ceiling, not a
+    self-comparison -- it fails if DEFAULT_READ_TIMEOUT_S is ever raised to
+    something no longer "read-sized" even while technically still less than
+    DEFAULT_HTTP_TIMEOUT_S.
+    """
     assert auth.DEFAULT_READ_TIMEOUT_S < auth.DEFAULT_HTTP_TIMEOUT_S
     assert auth.DEFAULT_READ_TIMEOUT_S <= 120
 
