@@ -124,6 +124,34 @@ _QUOTE_HEADER_LINE = re.compile(
 _MIN_BOTTOM_POST_CHARS = 40
 
 
+def _truncate_at_reply_marker(text: str) -> str:
+    """Cut `text` at the FIRST _REPLY_CHAIN_PATTERNS marker inside it.
+
+    The '>' gate in strip_reply_chains establishes that the message contains
+    '>'-quoting somewhere at/after the outermost reply marker, but a real message
+    can contain BOTH: a '>'-quoted line immediately followed by an unquoted
+    Outlook/forward block (thread crossing mail clients, or Gmail collapsing only
+    part of the history). Taking everything after the last '>' line then rescued
+    that unquoted block wholesale and attributed the ORIGINAL author's prose to
+    the replying sender — the very misattribution the C1 gate exists to prevent,
+    still reachable one level down.
+
+    So the marker patterns are re-applied to the rescued region itself, exactly as
+    they are at the top level. The search runs against a '\\n'-prefixed copy
+    because every pattern anchors on a literal preceding newline and the marker is
+    commonly the rescued tail's FIRST line (the offset is undone below); a match at
+    that synthetic newline means the whole region is quoted history and nothing
+    survives.
+    """
+    probe = "\n" + text
+    cut = len(probe)
+    for pattern in _REPLY_CHAIN_PATTERNS:
+        m = pattern.search(probe)
+        if m and m.start() < cut:
+            cut = m.start()
+    return text if cut == len(probe) else text[:max(cut - 1, 0)]
+
+
 def _bottom_posted_reply(lines: list[str]) -> str:
     """Prose written BELOW a quoted chain.
 
@@ -132,6 +160,12 @@ def _bottom_posted_reply(lines: list[str]) -> str:
     gone, and what is left is its trailing attribution lines plus, if the sender
     bottom-posted, their actual message.
 
+    The candidate region is then cut at any reply marker found INSIDE it
+    (_truncate_at_reply_marker) — mixed '>'-quoted / unquoted history otherwise
+    slips the caller's '>' gate — and the length floor is applied AFTER that cut,
+    so a region that is nothing but quoted history rescues nothing at all
+    (the same "err toward dropping" policy as _MIN_BOTTOM_POST_CHARS).
+
     Only sound where the quote really was '>'-prefixed — the caller enforces
     that. Callers must not apply this to HTML-derived text, where the quote is
     markup rather than '>' prefixes and the whole quoted history would survive
@@ -139,7 +173,7 @@ def _bottom_posted_reply(lines: list[str]) -> str:
     """
     kept = [ln for ln in lines
             if ln.strip() and not _QUOTE_HEADER_LINE.match(ln)]
-    joined = "\n".join(kept).strip()
+    joined = _truncate_at_reply_marker("\n".join(kept)).strip()
     return joined if len(joined) >= _MIN_BOTTOM_POST_CHARS else ""
 
 
@@ -163,6 +197,11 @@ def strip_reply_chains(text: str, *, rescue_bottom_post: bool = True) -> str:
     fall back to the old `text[:earliest]` behaviour and lose the (rare) genuine
     bottom-post, matching this function's stated preference elsewhere
     (_MIN_BOTTOM_POST_CHARS: "err toward dropping").
+
+    The '>' evidence is necessary but not sufficient: a message can mix
+    '>'-quoted history with an unquoted Outlook/forward block, which passes this
+    gate and then gets rescued from below the last '>' line. _bottom_posted_reply
+    re-applies the marker patterns inside the rescued region for that case.
     """
     # Blank the '>' lines in place rather than deleting them, so the quote's
     # EXTENT is still locatable below; `blanked` keeps one entry per input line.
