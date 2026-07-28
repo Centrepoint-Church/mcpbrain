@@ -333,14 +333,14 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # tails are silently truncated at embed time and become unsearchable.
     from pathlib import Path
     from mcpbrain.store import Store
-    store = Store(Path(home) / "b.sqlite3", dim=4)
+    store = Store(Path(home) / "b.sqlite3", dim=4, read_only=True)
     try:
         oversize = store.count_chunks_longer_than(2000)
-        lines.append(f"{'✅' if not oversize else '⚠️'} chunks over the embedder "
-                     f"window: {oversize}")
-    except Exception:  # noqa: BLE001
-        # Store not initialized or other issue — skip the check gracefully
-        pass
+        glyph = "✅" if not oversize else "⚠️"
+        lines.append(f"{glyph} {'Chunk window':<16} {oversize} chunk(s) over the "
+                     f"embedder window")
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        lines.append(f"➖ {'Chunk window':<16} skipped ({exc})")
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
