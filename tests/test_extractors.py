@@ -290,6 +290,34 @@ def test_legacy_xls_yields_the_same_table_shape_as_xlsx():
     assert tables[0].rows == [["Rent", "500"]]
 
 
+def test_legacy_xls_renders_real_numbers_and_dates_correctly():
+    """Important #3 (review): sheet.row_values() — the naive xlrd read — returns
+    raw Python floats for BOTH numbers and dates, so a real numeric/date .xls
+    (as opposed to the all-strings fixture above, which is exactly why this
+    slipped through) rendered as [['Item', 'Amount', 'Date'],
+    ['Rent', '500.0', '45352.0']] instead of a clean integer and an ISO date —
+    corrupting the "budgets, ledgers and risk assessments" this format exists
+    for. The fixture has a real numeric int-valued cell (500), a real
+    non-integral numeric cell (42.5) and a real Excel date cell (2024-03-01,
+    written with a date number format so xlrd types it XL_CELL_DATE), built
+    the same way as legacy_budget.xls (uv run --with xlwt ...).
+    """
+    from pathlib import Path
+
+    from mcpbrain.sync.extractors import extract_tables_from_xls
+
+    raw = (Path(__file__).parent / "fixtures" / "legacy_budget_typed.xls").read_bytes()
+
+    tables = extract_tables_from_xls(raw, char_budget=1_000_000)
+
+    assert len(tables) == 1
+    assert tables[0].header == ["Item", "Amount", "Date"]
+    rent, bus = tables[0].rows
+    assert rent[:2] == ["Rent", "500"], "integral amount must not read '500.0'"
+    assert rent[2] == "2024-03-01", "a date cell must render as a date, not an Excel serial"
+    assert bus[:2] == ["Bus fare", "42.5"], "a non-integral amount must round-trip cleanly"
+
+
 def test_eml_is_extracted_as_prose_with_its_headers():
     """A2: .eml files in Drive were dropped. Stdlib `email` parses them — zero
     new dependencies — and they become prose documents, NOT synthetic Gmail
