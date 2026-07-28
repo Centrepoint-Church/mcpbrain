@@ -64,38 +64,52 @@ def _backup(db_path: Path) -> Path:
     return snapshot(db_path, dest)
 
 
-def phase_status(store, apply: bool) -> None:
+def phase_status(store, apply: bool) -> int:
     empty = store.count_content_free()
     total = store.chunk_count()
     stale = len(store.stale_chunker_file_ids(CHUNKER_VERSION, limit=100_000))
     print(f"content-free chunks       : {empty} of {total} "
           f"({100 * empty / total:.1f}%)" if total else f"content-free: {empty}")
     print(f"Drive files to re-chunk   : {stale} (chunker_version < {CHUNKER_VERSION})")
+    return 0
 
 
-def phase_purge_empty(store, apply: bool) -> None:
+def phase_purge_empty(store, apply: bool) -> int:
     total = store.count_content_free()
     print(f"[purge-empty] {total} content-free chunk(s) match")
     if not apply:
         print("[purge-empty] dry run — nothing deleted; pass --apply to write")
-        return
+        return 0
     done = 0
     while True:
         batch = store.content_free_doc_ids(limit=_PURGE_BATCH)
         if not batch:
             break
-        # purge_doc_ids raises, deleting nothing, if the graph cites any id.
-        done += store.purge_doc_ids(batch)
+        # purge_doc_ids raises, deleting NOTHING in this batch, if the graph
+        # cites any id in it (all-or-nothing, by design — see tests/test_purge.py).
+        # This measured zero cited doc_ids among the 68,193 content-free chunks
+        # on the live store on 2026-07-28, but the check runs at apply time
+        # rather than trusting that measurement — a hard halt here is correct
+        # (the alternative is silently orphaning graph provenance), it just must
+        # not surface as a bare traceback: print which id(s) are cited and stop.
+        try:
+            done += store.purge_doc_ids(batch)
+        except ValueError as exc:
+            print(f"[purge-empty] refusing this batch: {exc}", file=sys.stderr)
+            print(f"[purge-empty] deleted {done} before halting; investigate the "
+                  "cited doc_id(s) above before re-running", file=sys.stderr)
+            return 4
         print(f"[purge-empty] {done}/{total}")
     print(f"[purge-empty] deleted {done}")
+    return 0
 
 
-def phase_reingest_stale(store, apply: bool, *, limit: int) -> None:
+def phase_reingest_stale(store, apply: bool, *, limit: int) -> int:
     ids = store.stale_chunker_file_ids(CHUNKER_VERSION, limit=limit)
     print(f"[reingest-stale] {len(ids)} Drive file(s) selected (limit {limit})")
     if not apply:
         print("[reingest-stale] dry run — nothing fetched; pass --apply to write")
-        return
+        return 0
     from mcpbrain.auth import build_google_services
     from mcpbrain.sync.drive import reingest_files
     services = build_google_services()
@@ -106,8 +120,9 @@ def phase_reingest_stale(store, apply: bool, *, limit: int) -> None:
         # a crash, and it must be said plainly.
         print("[reingest-stale] no drive_service (token lacks the Drive scope); "
               "re-authenticate with `mcpbrain setup`", file=sys.stderr)
-        return
+        return 0
     print(f"[reingest-stale] {reingest_files(drive, store, ids)}")
+    return 0
 
 
 _PHASES = {"status": phase_status, "purge-empty": phase_purge_empty,
@@ -144,9 +159,16 @@ def main(argv=None):
     store = Store(db_path, dim=get_embedder("bge-small").dim)
     fn = _PHASES[args.phase]
     if args.phase == "reingest-stale":
-        fn(store, args.apply, limit=args.limit)
+        rc = fn(store, args.apply, limit=args.limit)
     else:
-        fn(store, args.apply)
+        rc = fn(store, args.apply)
+
+    if rc:
+        # A phase halted deliberately (e.g. purge-empty hit a graph-cited
+        # batch) and already printed why. Surface that as this process's exit
+        # code rather than also printing the gold-gate reminder below, which
+        # only makes sense after a clean run.
+        return rc
 
     if args.apply:
         print("\n[repair] Run the gold gate now (PRODUCTION path):\n"
