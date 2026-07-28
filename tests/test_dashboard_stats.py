@@ -136,6 +136,44 @@ def test_stats_pct_zero_when_all_cold(tmp_path):
     assert out["index"]["enriched_pct"] == 0
 
 
+def test_stats_eligible_clamps_at_zero_rather_than_going_negative(tmp_path):
+    """`eligible = max(0, indexed - cold - enriched)` must actually clamp: a
+    store snapshot where enriched_count exceeds (indexed - cold) -- e.g. two
+    status()/graph reads taken at slightly different instants during a busy
+    cycle -- must read as "nothing outstanding" (idle), not silently go
+    negative and feed a nonsensical value into queue_state. Nothing in the
+    suite drove `stats()` with enriched > indexed - cold; the existing tests
+    only exercise the ordinary enriched <= indexed - cold case.
+    """
+    p = tmp_path / "b.sqlite3"
+    _seed(p, cold=5)
+    out = dashboard.stats(_Store(p), str(tmp_path),
+                          _status(chunk_count=10, enriched_count=20,
+                                  spool={"pending": 0, "inbox": 0}))
+    # eligible = max(0, 10 - 5 - 20) = max(0, -15) = 0 -> nothing outstanding,
+    # nothing queued -> idle (NOT "starved", which a negative eligible read as
+    # "== 0" would coincidentally still pass by luck -- the discriminator is
+    # the queue_state call actually receiving 0, not a negative number).
+    assert out["index"]["queue"] == "idle"
+
+
+def test_stats_queued_defaults_to_zero_when_spool_key_is_absent(tmp_path):
+    """`queued = status.get("spool", {}).get("pending", 0)` must default to 0
+    when the status snapshot has no "spool" key at all (not just when spool
+    is present but empty) -- otherwise a missing key would raise instead of
+    degrading."""
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    status = _status(chunk_count=100, enriched_count=0)
+    del status["spool"]
+    out = dashboard.stats(_Store(p), str(tmp_path), status)
+    # queued defaults to 0, eligible = 100 - 0 - 0 = 100 -> nothing queued but
+    # plenty outstanding -> starved (proves `queued` really did read 0, not
+    # crash and not silently default to something truthy).
+    assert out["index"]["queue"] == "starved"
+    assert out["spool"] == {"pending": 0, "inbox": 0}
+
+
 # --- GET /api/dashboard/stats route ------------------------------------------
 
 class _RouteDaemon:

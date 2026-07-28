@@ -99,6 +99,41 @@ def test_stats_omitted_is_still_supported(tmp_path):
     assert index_pending(s, _FakeEmbedder(), home=str(tmp_path)) == 3
 
 
+def test_index_pending_stops_mid_batch_when_budget_expires(tmp_path):
+    """The between-batches `break` (index.py's `for i in range(...): if
+    budget.expired(): break`) must actually execute. Both existing budget
+    tests above (test_index_pending_stops_at_expired_budget,
+    test_stats_report_no_cap_on_a_budget_cut) use an ALREADY-expired
+    Budget(deadline_s=0.0), which trips the ENTRY check (before the `for`
+    loop even starts) -- the loop's own per-batch check never runs in either
+    of them. This uses a clock that is NOT expired at construction or before
+    the first batch, but IS expired before the second, so embedding must
+    stop after exactly one batch, leaving the rest resumable.
+    """
+    s = _store_with_pending(tmp_path, 4)
+
+    class _Clock:
+        """Not-expired through the first batch, expired from the second on."""
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            # 1st call: Budget.__init__'s self._start.
+            # 2nd call: the entry check (index.py, before `if pending:`).
+            # 3rd call: the loop's check before batch 0 (i=0).
+            # 4th call: the loop's check before batch 1 (i=2) -> expired.
+            return {1: 0.0, 2: 0.0, 3: 0.0}.get(self.calls, 10.0)
+
+    budget = Budget(deadline_s=1.0, clock=_Clock())
+    done = index_pending(s, _FakeEmbedder(), batch_size=2, home=str(tmp_path),
+                         budget=budget)
+
+    assert done == 2, "must embed exactly the first batch, then stop"
+    assert len(s.unembedded_chunks()) == 2, (
+        "the second batch must remain pending, resumable next cycle")
+
+
 def test_run_sync_cycle_propagates_the_embed_cap(tmp_path, monkeypatch):
     """The signal has to survive the six index_pending call sites."""
     from mcpbrain import sync as sync_mod
@@ -123,6 +158,64 @@ def test_run_sync_cycle_leaves_embed_capped_unset_when_the_backlog_fits(tmp_path
     res = sync_mod.run_sync_cycle(s, _FakeEmbedder(), gmail_service=object(),
                                   home=str(tmp_path), embed_max_items=1000)
     assert res.get("embed_capped") is None
+
+
+def test_run_sync_cycle_stops_between_sources_once_the_budget_expires(tmp_path, monkeypatch):
+    """The inter-source `budget_spent` early return: once the budget expires
+    after gmail's own block finishes, run_sync_cycle must return immediately
+    -- calendar/drive must NEVER be reached this cycle, not just be bounded
+    internally. Nothing in the suite drove all three services through
+    run_sync_cycle with a budget that flips mid-cycle; the existing budget
+    tests here only check embed_capped propagation with gmail alone.
+
+    Each source function is patched at its SOURCE module (mcpbrain.sync.gmail /
+    .calendar / .drive / mcpbrain.index), matching run_sync_cycle's own
+    `from mcpbrain.sync.gmail import sync_gmail`-style local imports, which
+    re-resolve the attribute on that module at call time -- patching an
+    attribute on the `mcpbrain.sync` package itself (which doesn't define
+    these names) would silently not take effect.
+    """
+    from mcpbrain import sync as sync_mod
+
+    calendar_calls = []
+    drive_calls = []
+
+    class _FlipBudget:
+        def __init__(self):
+            self._expired = False
+
+        def expired(self):
+            return self._expired
+
+    budget = _FlipBudget()
+
+    def _fake_sync_gmail(svc, store, **kw):
+        # Simulate the budget running out during/after gmail's own work.
+        budget._expired = True
+        return 5
+
+    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", _fake_sync_gmail)
+    monkeypatch.setattr("mcpbrain.index.index_pending", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        "mcpbrain.sync.calendar.sync_calendar",
+        lambda *a, **kw: calendar_calls.append(1) or 0)
+    monkeypatch.setattr(
+        "mcpbrain.sync.drive.sync_drive",
+        lambda *a, **kw: drive_calls.append(1) or 0)
+    monkeypatch.setattr(sync_mod, "progressive_backfill_step",
+                        lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
+
+    res = sync_mod.run_sync_cycle(
+        object(), _FakeEmbedder(),
+        gmail_service=object(), calendar_service=object(), drive_service=object(),
+        budget=budget)
+
+    assert res["gmail"] == 5
+    assert res["budget_spent"] is True
+    assert calendar_calls == [], "calendar must not run once the budget expired after gmail"
+    assert drive_calls == [], "drive must not run once the budget expired after gmail"
+    assert "calendar" not in res or res["calendar"] == 0, (
+        "calendar's result slot must stay untouched -- proves the source never ran")
 
 
 def test_run_cycle_more_work_on_an_item_cap_not_only_budget_expiry(tmp_path, monkeypatch):

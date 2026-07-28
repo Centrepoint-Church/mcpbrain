@@ -1,4 +1,5 @@
 import threading
+import time
 
 from mcpbrain.daemon import Daemon
 
@@ -54,3 +55,50 @@ def test_migrate_embed_backend_safe_swallows_runtime_error():
     d = Daemon.__new__(Daemon)
     d.migrate_embed_backend = lambda: (_ for _ in ()).throw(RuntimeError("no factory"))
     d._migrate_embed_backend_safe()     # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Daemon._embedder's double-checked locking must actually be single-flight
+# under concurrency (Task 8, Step 2). test_embedder_not_built_until_accessed
+# above only exercises single-threaded access (build-once/memoise); nothing
+# in the suite races multiple threads through the property the way
+# test_embed_locking.py's test_get_embedder_build_is_single_flight_under_
+# concurrency does for the module-level get_embedder's own double-checked
+# locking.
+# ---------------------------------------------------------------------------
+
+def test_embedder_property_build_is_single_flight_under_concurrency():
+    build_count = {"n": 0}
+    count_lock = threading.Lock()
+
+    def _slow_factory():
+        with count_lock:
+            build_count["n"] += 1
+        time.sleep(0.2)  # widen the race window so racing threads overlap
+        return object()
+
+    d = _make_daemon(_slow_factory)
+
+    results: list = []
+    results_lock = threading.Lock()
+
+    def worker():
+        e = d._embedder
+        with results_lock:
+            results.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert not any(t.is_alive() for t in threads)
+
+    assert build_count["n"] == 1, (
+        f"expected exactly one factory build, got {build_count['n']} -- "
+        f"concurrent _embedder accesses raced past the double-checked lock"
+    )
+    assert len(results) == 10
+    assert len({id(r) for r in results}) == 1, (
+        "every concurrent caller must get back the SAME embedder instance"
+    )

@@ -10,6 +10,8 @@ MCPBRAIN_HOME points at an empty tmp dir so _enrich_client_from_config and
 _backup_from_config read no config (return None / (None, None)).
 """
 
+import pytest
+
 import mcpbrain.daemon as daemon_module
 import mcpbrain.embed as embed_module
 import mcpbrain.store as store_module
@@ -83,6 +85,41 @@ def test_main_loop_starts_and_stops_control_server(tmp_path, monkeypatch):
 
     # start() -> run() -> stop(), in that exact order.
     assert ctrl.events == ["start", "run", "stop"]
+
+
+def test_main_exits_cleanly_when_another_daemon_already_holds_the_lock(tmp_path, monkeypatch):
+    """main()'s loop-mode probe (`probe.acquire(timeout_s=tuning[...])`) must
+    raise SystemExit(1) -- and never construct the ControlServer or reach
+    daemon.run() -- when the single-writer lock is already held by a
+    genuinely running daemon. Nothing in the suite exercised this branch at
+    all: test_main_loop_starts_and_stops_control_server above only covers the
+    lock-is-free path.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    monkeypatch.setattr(embed_module, "get_embedder", lambda kind=None: FakeEmbedder())
+    monkeypatch.setattr(store_module, "Store", FakeStore)
+
+    FakeControlServer.instances = []
+    monkeypatch.setattr(daemon_module.control_api, "ControlServer", FakeControlServer)
+    monkeypatch.setattr(daemon_module.Daemon, "run",
+                        lambda self: pytest.fail("daemon.run() must never be reached"))
+
+    from mcpbrain import config as config_module
+
+    # A genuinely-running "other" daemon holding the SAME lock file main()
+    # will resolve to (config.app_dir() / "daemon.lock").
+    held = daemon_module.SingleWriterLock(config_module.app_dir() / "daemon.lock")
+    held.acquire()
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            daemon_module.main([])
+        assert exc_info.value.code == 1
+    finally:
+        held.release()
+
+    assert FakeControlServer.instances == [], "ControlServer must never be constructed"
 
 
 def test_apply_config_auto_enables_spool_when_configured(tmp_path, monkeypatch):

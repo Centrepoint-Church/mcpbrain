@@ -221,15 +221,20 @@ def test_recent_exits_drops_entries_outside_the_window(tmp_path, monkeypatch):
     assert dm._recent_watchdog_exits() == [950.0]
 
 
-def test_progress_seeded_with_cycle_so_a_first_cycle_wedge_is_visible():
+def test_progress_seeded_with_cycle_so_a_first_cycle_wedge_is_visible(tmp_path, monkeypatch):
     """_stalled_phase returns None on an empty _progress, and only the
     maintenance thread writes anything if the cycle wedges before its first
     run_one() returns — so an unseeded _progress makes a never-completed first
-    cycle look permanently healthy. That is the live incident's shape."""
-    dm = d.Daemon.__new__(d.Daemon)
-    dm._clock = lambda: 1000.0
-    dm._progress_lock = threading.Lock()
-    dm._progress = {"cycle": dm._clock()}          # what __init__ now does
+    cycle look permanently healthy. That is the live incident's shape.
+
+    Must construct a real Daemon (via __init__) rather than reimplementing
+    __init__'s seeding line by hand -- the old version's
+    `dm._progress = {"cycle": dm._clock()}` (its own comment: "what __init__
+    now does") would keep passing even if __init__ stopped seeding _progress
+    at all, since the test recreated the behavior instead of exercising it.
+    """
+    dm = _real_daemon(tmp_path, monkeypatch)
+    assert dm._progress["cycle"] == 1000.0, "the real __init__ must seed cycle progress"
     dm._clock = lambda: 1000.0 + d.STALL_S + 1.0   # first cycle never returned
     stalled = dm._stalled_phase()
     assert stalled is not None and stalled[0] == "cycle"
@@ -376,6 +381,60 @@ def test_run_restarts_maintenance_thread_if_it_dies(monkeypatch):
     # Once at startup (run() always starts it) + once more when the loop
     # notices the thread died and restarts it.
     assert restarted == [1, 1]
+
+
+def test_run_rewakes_quickly_when_more_work_reported(monkeypatch):
+    """run()'s wake wait must shrink to 1.0s when the cycle reports
+    `more_work`, so a large backlog keeps draining at close to full speed
+    instead of sleeping the full (possibly very long) interval between every
+    cycle. Nothing in the suite drove run()'s own loop and inspected the
+    actual timeout it waits with; test_index_bounded.py only covers
+    run_cycle's `more_work` VALUE, not run()'s consumption of it.
+    """
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._lock = threading.Lock()
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._wake = threading.Event()
+    dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    dm._clock = lambda: 0.0
+    # Deliberately huge: if the more_work branch didn't fire, the recorded
+    # wait would be this value instead of 1.0, and the assertion below would
+    # catch it.
+    dm._interval_s = 999.0
+    dm._pending_update = False
+    dm._maintenance_thread = None
+    dm._cycle_error_streak = 0
+
+    calls = {"n": 0}
+    wait_calls = []
+
+    def _run_one():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"more_work": True}
+        dm._stop.set()
+        return {"more_work": False}
+
+    monkeypatch.setattr(dm, "run_one", _run_one)
+    monkeypatch.setattr(dm, "ensure_services", lambda: {})
+    monkeypatch.setattr(dm, "_start_maintenance_thread", lambda: None)
+    monkeypatch.setattr(dm, "_backup_under_bulk_lock", lambda: None)
+    monkeypatch.setattr(d, "write_daemon_heartbeat", lambda home: None)
+    monkeypatch.setattr(dm._wake, "wait", lambda timeout=None: wait_calls.append(timeout))
+
+    dm.run()
+
+    # The break-out-of-the-loop iteration (more_work False + _stop.set())
+    # exits BEFORE reaching the wake.wait() line at all, so only the FIRST
+    # (more_work=True) cycle's wait is ever recorded.
+    assert wait_calls == [1.0], (
+        f"expected exactly one wake.wait(1.0) for the more_work cycle, got "
+        f"{wait_calls} -- the re-wake branch did not fire (or waited on the "
+        f"full {dm._interval_s}s interval instead)"
+    )
 
 
 def test_run_tracks_and_resets_consecutive_cycle_failures(monkeypatch):
