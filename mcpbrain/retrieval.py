@@ -194,6 +194,37 @@ def _three_axis_boost(chunk: dict, *,
     return boost
 
 
+def _dedupe_by_content(hits: list[dict]) -> list[dict]:
+    """Keep one hit per distinct `content_hash`, best-ranked first.
+
+    54% of the live store is redundant copies. The content-free purge removes
+    68,193 of the 106,357, but ~38,164 remain and are genuine duplicate FILES —
+    the fixed asset register exists three times in Drive (two identical names
+    plus a '(1)' copy), each chunked independently. Three identical hits
+    consuming three of ten slots is a real recall loss.
+
+    Deleting the duplicate chunks instead would be wrong: doc_ids are positional
+    (gdrive-<file_id>-<i>) and cited as graph provenance, so removing one file's
+    copy makes THAT file unfindable by name, folder or file_id and orphans its
+    rows. Crowding is a ranking problem, so it is fixed in the ranker —
+    reversibly, with nothing lost.
+
+    Hits are assumed already ordered best-first; a hit with no content_hash
+    passes through untouched (not every producer sets it, and collapsing on a
+    missing key would silently drop rows).
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for hit in hits:
+        h = hit.get("content_hash")
+        if h:
+            if h in seen:
+                continue
+            seen.add(h)
+        out.append(hit)
+    return out
+
+
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
                   kw_weight: float = _KW_WEIGHT, query_vec: list | None = None,
@@ -269,6 +300,38 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
         if new_top > 0:
             for c in candidates:
                 c["score"] = round(c["score"] / new_top, 4)
+
+    # Dedup by content_hash AFTER ranking (the order above must be preserved so
+    # the best-ranked copy of a duplicate survives) and BEFORE the limit
+    # truncation below, so a freed slot goes to genuinely different content
+    # instead of shortening the result set. Safe to do here because `candidates`
+    # is still the full fused-and-filtered pool (bounded by the limit*2 vec/kw
+    # retrieval above, not by `limit` itself) — truncating to `limit` first and
+    # deduping after would just make the list shorter (the same class of bug
+    # the 0.7.103 expansion fix and 0.7.110 open-actions fix each had to undo).
+    #
+    # A shared content_hash surfaces two different real-world shapes and only
+    # one of them is safe to collapse: a genuinely duplicate FILE (the whole
+    # document is a single chunk, or a couple — safe, and the shape the gold
+    # eval's asset-register case models) versus two DIFFERENT real documents
+    # that happen to share one boilerplate/template chunk (e.g. a shared board-
+    # charter letterhead) while the rest of each document's own chunks diverge.
+    # Measured against the live gold set: applying dedup unconditionally here
+    # DROPPED recall@10 0.700->0.600 by discarding exactly this second shape —
+    # two distinct AGM/charter documents sharing one templated header chunk,
+    # so the whole-file-duplicate assumption behind content_hash dedup broke.
+    # `sibling_chunk_count` distinguishes the two: a doc_id whose document has
+    # more than one known chunk is exempted from hash-collapsing (its
+    # content_hash is hidden from the dedup pass only — the true value is kept
+    # on the hit dict `_dedupe_by_content` returns), so a multi-chunk document
+    # is never dropped purely because ONE of its chunks textually matches
+    # another document's chunk.
+    protected = {c["doc_id"] for c in candidates
+                if c.get("content_hash") and store.sibling_chunk_count(c["doc_id"]) > 1}
+    probe = [{**c, "content_hash": None} if c["doc_id"] in protected else c
+            for c in candidates]
+    kept_ids = {c["doc_id"] for c in _dedupe_by_content(probe)}
+    candidates = [c for c in candidates if c["doc_id"] in kept_ids]
 
     results = []
     for c in candidates:
