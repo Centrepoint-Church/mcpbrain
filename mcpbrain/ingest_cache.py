@@ -27,7 +27,7 @@ from mcpbrain.org_contracts import (
     CacheArtifact, CacheChunk, DRIVE_ID_META_KEY,
     artifact_filename, pipeline_fingerprint,
 )
-from mcpbrain.store import ENRICH_LOGIC_VERSION
+from mcpbrain.store import ENRICH_LOGIC_VERSION, _like_escape
 
 log = logging.getLogger(__name__)
 
@@ -76,9 +76,12 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     All chunk vectors are decoded/validated UP FRONT, before anything is
     written; if any chunk is corrupt this returns False having written
     NOTHING (never a partial import). Once every chunk validates, all rows
-    are written in a single store transaction (Store.import_cached_chunks)
-    so the artifact lands completely or not at all. Callers treat False as
-    a cache miss (fall back to local extraction).
+    are written AND the file's now-orphaned tail chunks (B5, cache-import
+    half — see the inline comment below) are swept in one single transaction
+    (one `store._connect(write=True)` block, using the same per-row helper
+    `Store.import_cached_chunks` itself calls) so the artifact lands
+    completely, with no stale chunks left behind, or not at all. Callers
+    treat False as a cache miss (fall back to local extraction).
 
     `contextual_retrieval`, when not None, must match the artifact's stamped
     enrich["contextual_retrieval"] flag (when present) — see try_import."""
@@ -124,7 +127,45 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
         log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
         return False
     try:
-        store.import_cached_chunks(rows)
+        # B5, cache-import half. Spec 2 closed orphan-on-shrink for locally
+        # extracted files (drive.upsert_file_chunks) but skipped this path to
+        # avoid racing this function's own transaction. That transaction, it
+        # turns out, is `Store.import_cached_chunks` — which opens and commits
+        # its OWN `_connect(write=True)` block and returns; a sweep run after
+        # that call would be a SEPARATE transaction, not atomic with it. So
+        # instead of delegating to it, the row-write (`_write_cached_chunk_row`,
+        # the same per-row helper import_cached_chunks itself calls) and the
+        # orphan sweep both run against ONE connection opened here — genuinely
+        # one transaction: both land or neither does.
+        #
+        # Without it, a shared-drive file that shrank and is served from cache
+        # keeps indices n..m-1 searchable indefinitely, and expansion re-feeds
+        # them as current content.
+        written = {row["doc_id"] for row in rows}
+        with store._connect(write=True) as db:
+            for row in rows:
+                store._write_cached_chunk_row(
+                    db, row["doc_id"], row["text"], row["content_hash"],
+                    row["metadata"], row["vector"],
+                    enriched=row.get("enriched", False),
+                    enriched_version=row.get("enriched_version", 0))
+            existing = [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE doc_id LIKE ? ESCAPE '\\'",
+                (f"gdrive-{_like_escape(art.file_id)}-%",)).fetchall()]
+            stale = [d for d in existing if d not in written]
+            if stale:
+                log.info("ingest_cache: %s shrank; deleting %d orphaned chunk(s)",
+                         art.file_id, len(stale))
+                db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
+                               [(d,) for d in stale])
+                qs = ",".join("?" * len(stale))
+                stale_rowids = [r["rowid"] for r in db.execute(
+                    f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", stale).fetchall()]
+                if stale_rowids:
+                    ph = ",".join("?" * len(stale_rowids))
+                    db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", stale_rowids)
+                    db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", stale_rowids)
+                    db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", stale_rowids)
     except Exception as exc:  # noqa: BLE001 — real infra failure, not cache corruption
         log.warning(
             "ingest_cache: store write failed importing artifact for %s "
