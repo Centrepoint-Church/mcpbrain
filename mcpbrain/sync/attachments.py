@@ -28,8 +28,10 @@ from mcpbrain import config
 from mcpbrain.chunking import chunk_text, content_hash, has_content
 from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.extractors import (
+    extract_tables_from_xls,
     extract_tables_from_xlsx,
     extract_text_from_docx,
+    extract_text_from_eml,
     extract_text_from_pdf,
     extract_text_from_pptx,
 )
@@ -45,13 +47,19 @@ _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 _MAX_ATTACHMENTS_PER_MESSAGE = 10
 
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_XLS = "application/vnd.ms-excel"          # legacy .xls
 
+# Every type the Drive path extracts, this path must extract too. A1's whole
+# finding was that "a PDF emailed to the user is invisible to the brain, while
+# the byte-identical file in Drive is extracted normally"; supporting a format on
+# one side only reintroduces exactly that asymmetry on a narrower trigger.
 _EXTRACTORS = {
     "application/pdf": extract_text_from_pdf,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         extract_text_from_docx,
     "application/vnd.openxmlformats-officedocument.presentationml.presentation":
         extract_text_from_pptx,
+    "message/rfc822": extract_text_from_eml,   # a forwarded .eml attachment
     "text/plain": lambda b: b.decode("utf-8", errors="replace"),
     "text/markdown": lambda b: b.decode("utf-8", errors="replace"),
 }
@@ -59,7 +67,8 @@ _EXTRACTORS = {
 # Tabular attachments yield Tables, not text, so they get the row-group chunker
 # rather than chunk_text — an emailed budget must not be character-split any
 # more than a Drive one.
-_TABLE_EXTRACTORS = {_XLSX: extract_tables_from_xlsx}
+_TABLE_EXTRACTORS = {_XLSX: extract_tables_from_xlsx,
+                     _XLS: extract_tables_from_xls}
 
 _CSV_MIMES = ("text/csv", "application/csv", "text/tab-separated-values")
 
@@ -67,6 +76,8 @@ _EXTRACTION_METHOD = {
     "application/pdf": "pdf_layout",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     _XLSX: "spreadsheet",
+    _XLS: "spreadsheet",
+    "message/rfc822": "eml",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "slides",
 }
 
