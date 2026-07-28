@@ -122,6 +122,45 @@ def test_a_spreadsheet_attachment_uses_the_row_group_chunker(monkeypatch):
     assert "| Item | Amount |" in rowtext
 
 
+def test_an_emailed_legacy_xls_is_ingested_like_a_drive_one():
+    """Review finding: .xls and .eml were added to the DRIVE path (A2) but not to
+    the attachment path, so an emailed legacy budget was dropped while the
+    byte-identical file in Drive extracted fine.
+
+    That is A1's asymmetry — 'a PDF emailed to the user is invisible while the
+    byte-identical file in Drive is extracted normally' — reintroduced in
+    miniature by the very task that fixed it. Uses the real fixture rather than a
+    stub so it also pins that the xlrd path is genuinely reachable from here."""
+    import pathlib
+
+    data = (pathlib.Path(__file__).parent / "fixtures" / "legacy_budget.xls").read_bytes()
+    raw = _msg([_part("Budget.xls", "application/vnd.ms-excel")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, data)
+
+    assert chunks, ".xls attachment produced no chunks"
+    rowtext = next(c.text for c in chunks if c.metadata.get("table_role") == "rows")
+    assert "|" in rowtext, "an .xls attachment must use the row-group chunker"
+    assert chunks[0].metadata["extraction_method"] == "spreadsheet"
+
+
+def test_an_emailed_eml_is_ingested_like_a_drive_one():
+    """Same finding, prose half: a forwarded .eml attachment is common and was
+    dropped, while the same file in Drive extracted."""
+    raw_eml = (b"From: sam@example.com\r\nSubject: Hall B booking\r\n"
+               b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+               b"Confirmed for Sunday the 8th, 9am to 1pm.\r\n")
+    raw = _msg([_part("forwarded.eml", "message/rfc822")])
+    part = attachments.iter_attachment_parts(raw["payload"])[0]
+
+    chunks = attachments.normalise_attachment(raw, part, raw_eml)
+
+    assert chunks, ".eml attachment produced no chunks"
+    assert "Confirmed for Sunday" in chunks[0].text
+    assert "Hall B booking" in chunks[0].text
+
+
 def test_fetch_and_normalise_reports_an_unsupported_attachment_type():
     class _Store:
         def __init__(self):
