@@ -35,7 +35,22 @@ _GAP = "\n\n[…]\n\n"  # marks a break between non-adjacent span-stitch runs
 
 
 def _by_date(chunks: list[dict]) -> list[dict]:
-    return sorted(chunks, key=lambda c: (c.get("metadata") or {}).get("date", "") or "")
+    """Order a thread's chunks for stitching.
+
+    Sorting by date ALONE (the previous implementation) is not an ordering at
+    all within a message: every chunk of one message shares that message's date,
+    so a stable sort preserved raw SQLite scan order and any email over 2,000
+    chars was injected with its paragraphs scrambled (B4). message_id then
+    chunk_index restores intra-message order; date still orders messages
+    relative to each other.
+    """
+    def key(c: dict) -> tuple:
+        meta = c.get("metadata") or {}
+        return (meta.get("date", "") or "",
+                meta.get("message_id", "") or "",
+                int(meta.get("chunk_index", 0) or 0))
+
+    return sorted(chunks, key=key)
 
 
 def _stitch_with_gaps(chunks: list[dict]) -> str:

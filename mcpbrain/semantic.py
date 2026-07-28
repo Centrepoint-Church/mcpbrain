@@ -20,8 +20,39 @@ from mcpbrain.graph_write import (
 )
 
 
-def build_semantic_doc(extraction: dict, thread: dict, owner=None,
-                       taxonomy=None) -> tuple[str, dict]:
+# The BGE window is 512 tokens ≈ 2,000 characters, and embed.contextual_prefix
+# (default ON) eats into the same budget — hence the headroom. Anything past it
+# is silently truncated by the model and its tail is unsearchable (B3).
+#
+# This is the ONE population chunk_text cannot bound, because the semantic doc
+# is written whole to keep its `enriched-<thread_id>` doc_id (mark_enriched,
+# doc_ids_for_messages and the stale-reextract sweep all key on it). Splitting
+# it is therefore off the table — but it does not need splitting, because the
+# doc is SYNTHESISED here, line by line, so its length is ours to choose.
+SEMANTIC_MAX_CHARS = 1800
+
+
+def _fit(lines: list[str], budget: int) -> list[str]:
+    """Keep whole lines while they fit, then stop and mark the elision.
+
+    Callers pass lines in DESCENDING value order — subject, From/Date, summary,
+    then People, Actions, Topics, Labels — because what gets dropped under
+    pressure must be the least query-relevant content. Dropping the summary to
+    keep a Labels line would be worse than not bounding at all.
+    """
+    out: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > budget:
+            out.append("…")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return out
+
+
+def build_semantic_doc(extraction: dict, thread: dict, owner=None, taxonomy=None,
+                       *, date_iso: str = "", message_id: str = "") -> tuple[str, dict]:
     """Assemble the synthesised vector doc for one enriched thread.
 
     `extraction` is the thread's extraction JSON (org, summary, content_type,
@@ -35,6 +66,9 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None,
 
     owner: optional OwnerIdentity; None resolves from config.
     taxonomy: optional OrgTaxonomy; None resolves from config.
+    date_iso: optional ISO-normalised date for the lead message, if the caller
+    already has one.
+    message_id: the lead message's id, for message-level provenance (C3).
     """
     if owner is None:
         owner = owner_identity_from_config()
@@ -89,13 +123,30 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None,
     if custom_labels:
         lines.append(f"Labels: {', '.join(custom_labels)}")
 
-    text = "\n".join(lines)
+    text = "\n".join(_fit(lines, SEMANTIC_MAX_CHARS))
 
+    thread_id = extraction.get("thread_id", "") or ""
     metadata = {
-        "source_type": "gmail_enriched_v2",
-        "thread_id": extraction.get("thread_id", "") or "",
+        # C4: a calendar-sourced enrichment carries a cal-* thread id and was
+        # nonetheless labelled gmail_enriched_v2 — observed live on
+        # cal-e734d9f93c894a5a81e3230300748014. No consumer reads these values
+        # today beyond tests (grep: semantic.py is the only writer, and nothing
+        # in importance.py or retrieval.py branches on them), so correcting the
+        # label is safe.
+        "source_type": ("calendar_enriched_v2" if thread_id.startswith("cal-")
+                        else "gmail_enriched_v2"),
+        "thread_id": thread_id,
         "subject": subject[:200],
         "org": org,
         "content_type": content_type,
+        # C2: without a date, importance.recency_decay returns its neutral 0.5
+        # fallback for all 21,162 of these. `date` is the lead's RFC2822 header,
+        # which importance._parse_age_days already handles.
+        "date": date[:80],
+        # C3: thread-level provenance without message-level provenance means a
+        # fact can be traced to a thread but not to the message it came from.
+        "message_id": message_id[:200],
     }
+    if date_iso:
+        metadata["date_iso"] = date_iso[:40]
     return text, metadata
