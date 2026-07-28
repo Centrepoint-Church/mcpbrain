@@ -140,6 +140,32 @@ def test_a_runaway_cell_cannot_blow_the_chunk_budget():
         assert len(text) <= 2500, f"chunk of {len(text)} chars from one cell"
 
 
+def test_a_wide_table_cannot_blow_the_chunk_budget_on_a_single_row():
+    """Important #2 (review): 30 columns, each elided only down to
+    _MAX_CELL_CHARS(300), render a single row line alone longer than any
+    reasonable chunk budget — verified pre-fix at ~9,500 chars against a
+    2,000-char budget, with the packing loop unable to split a row across
+    chunks. Every emitted chunk must stay within a sane bound of max_chars,
+    not blow it by ~5x. (test_a_runaway_cell_cannot_blow_the_chunk_budget
+    above covers the one-column case only, which the old 300-char-per-cell
+    cap already handled — this is the many-columns case that slipped through.)
+    """
+    header = [f"Col{i}" for i in range(30)]
+    row = ["x" * 350 for _ in range(30)]
+    table = tabular.Table(sheet="Wide", header=header, rows=[row],
+                          rows_total=1, truncated=False)
+
+    chunks = tabular.render_chunks([table], file_name="Wide.xlsx", max_chars=2000)
+    rows = [(t, m) for t, m in chunks if m["table_role"] == "rows"]
+
+    assert rows, "expected at least one row-group chunk"
+    for text, _meta in rows:
+        assert len(text) <= 2500, (
+            f"wide-table row chunk of {len(text)} chars from a 2000 budget "
+            "— a single row line overflowed the chunk on its own"
+        )
+
+
 def test_table_mimes_agrees_with_the_drive_extraction_meta_table():
     """tabular.TABLE_MIMES and drive._MIME_EXTRACTION_META's 'table' subtype are
     two lists of the same thing in two modules (tabular cannot import drive —

@@ -227,14 +227,33 @@ def test_normalise_drive_all_chunks_carry_metadata():
 
 
 def test_xlsx_extracts_as_markdown_table():
-    """Q5: spreadsheets render as a markdown table (header + separator), not flat lines."""
-    import io, openpyxl
-    from mcpbrain.sync.extractors import extract_text_from_xlsx
+    """Q5: spreadsheets render as a markdown table (header + separator), not flat
+    lines. Third existing test broken by this plan's Task 2 (review Important #1):
+    `extract_text_from_xlsx` — which rendered a whole sheet to one markdown string
+    ahead of chunking — no longer exists, replaced by `extract_tables_from_xlsx`
+    (returns structured `Table`s) + `tabular.render_chunks` (decides chunk
+    boundaries, repeating the header per chunk instead of orphaning it in chunk 0,
+    the B2 defect). Rewritten as an integration test across both new calls instead
+    of deleted outright: `tests/test_tabular.py` covers render_chunks' shape in
+    isolation, but this is the only place that checks the two functions still
+    compose correctly for a real openpyxl-produced file end to end.
+    """
+    import io
+
+    import openpyxl
+
+    from mcpbrain.sync import tabular
+    from mcpbrain.sync.extractors import extract_tables_from_xlsx
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Budget"
     ws.append(["Item", "Cost"]); ws.append(["Camp", "500"]); ws.append(["Bus", "200"])
     buf = io.BytesIO(); wb.save(buf)
-    out = extract_text_from_xlsx(buf.getvalue())
-    assert "### Sheet: Budget" in out
-    assert "| Item | Cost |" in out
-    assert "| --- | --- |" in out
-    assert "| Camp | 500 |" in out
+
+    tables = extract_tables_from_xlsx(buf.getvalue(), char_budget=1_000_000)
+    chunks = tabular.render_chunks(tables, file_name="Budget.xlsx",
+                                   max_chars=tabular.CHUNK_CHARS)
+    rows_text = "\n".join(text for text, meta in chunks if meta["table_role"] == "rows")
+
+    assert "### Sheet: Budget" in rows_text
+    assert "| Item | Cost |" in rows_text
+    assert "| --- | --- |" in rows_text
+    assert "| Camp | 500 |" in rows_text

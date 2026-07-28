@@ -113,13 +113,13 @@ def tables_from_csv(text: str, *, sheet: str = "Sheet1",
                   rows_total=len(data), truncated=len(kept) < len(data))]
 
 
-def _cell(value: str) -> str:
+def _cell(value: str, max_cell_chars: int = _MAX_CELL_CHARS) -> str:
     out = (value or "").replace("|", "\\|").replace("\n", " ").strip()
-    return out[:_MAX_CELL_CHARS] + "…" if len(out) > _MAX_CELL_CHARS else out
+    return out[:max_cell_chars] + "…" if len(out) > max_cell_chars else out
 
 
-def _md_row(row: list[str], width: int) -> str:
-    cells = [_cell(c) for c in row] + [""] * (width - len(row))
+def _md_row(row: list[str], width: int, max_cell_chars: int = _MAX_CELL_CHARS) -> str:
+    cells = [_cell(c, max_cell_chars) for c in row] + [""] * (width - len(row))
     return "| " + " | ".join(cells[:width]) + " |"
 
 
@@ -147,6 +147,47 @@ def _summary_text(file_name: str, t: Table) -> str:
     return "\n".join(lines)
 
 
+def _title(t: Table, row_start: int, row_end: int) -> str:
+    return f"### Sheet: {t.sheet} — rows {row_start}–{row_end} of {t.rows_total}"
+
+
+def _rendered_size(title: str, header_line: str, sep_line: str,
+                   rows: list[str]) -> int:
+    """Exact length of a row-group chunk, not a guessed constant.
+
+    The title's length depends on `t.sheet` and the digit width of the row
+    range/total, so a fixed fudge factor either under- or over-estimates it —
+    on the brief's own max_chars=120 example a "+80" guess was itself larger
+    than the whole budget. Measuring the real joined text keeps the packing
+    decision honest.
+    """
+    return len("\n".join([title, header_line, sep_line, *rows]))
+
+
+def _fit_row(t: Table, header_line: str, sep_line: str, row: list[str],
+            width: int, row_start: int, row_end: int, max_chars: int) -> str:
+    """Render one row, shrinking its cells if the row ALONE — together with
+    this group's title/header/separator — would overflow max_chars.
+
+    Without this, a wide table (many columns, each cell elided only down to
+    `_MAX_CELL_CHARS`) can render a single row line longer than the entire
+    chunk budget: 30 long columns at the default 300-char-per-cell cap alone
+    produced a 9,500+ char chunk against a 2,000-char budget, with nothing in
+    the packing loop able to split a single row across chunks. Cell width is
+    halved until the row fits or hits a 5-char floor (never truncated to
+    nothing — a same-if-illegible cell still beats a missing column).
+    """
+    title = _title(t, row_start, row_end)
+    fixed = len(title) + 1 + len(header_line) + 1 + len(sep_line) + 1
+    budget = max_chars - fixed
+    cap = _MAX_CELL_CHARS
+    line = _md_row(row, width, cap)
+    while len(line) > budget and cap > 5:
+        cap = max(5, cap // 2)
+        line = _md_row(row, width, cap)
+    return line
+
+
 def render_chunks(tables: list[Table], *, file_name: str,
                   max_chars: int) -> list[tuple[str, dict]]:
     """Render Tables to (chunk_text, metadata_extras) pairs.
@@ -163,17 +204,20 @@ def render_chunks(tables: list[Table], *, file_name: str,
         width = max([len(t.header)] + [len(r) for r in t.rows]) if t.rows else len(t.header)
         header_line = _md_row(t.header, width)
         sep_line = "| " + " | ".join(["---"] * width) + " |"
-        # Reserve room for the title, header and separator that every group
-        # repeats, so a group's TOTAL size respects max_chars.
-        overhead = len(header_line) + len(sep_line) + 80
         group: list[str] = []
         start = 1
         for n, row in enumerate(t.rows, start=1):
-            line = _md_row(row, width)
-            if group and overhead + sum(len(g) + 1 for g in group) + len(line) > max_chars:
+            line = _fit_row(t, header_line, sep_line, row, width, start, n, max_chars)
+            candidate = group + [line]
+            if group and _rendered_size(_title(t, start, n), header_line, sep_line,
+                                        candidate) > max_chars:
                 out.append(_emit(t, header_line, sep_line, group, base,
                                  start, start + len(group) - 1))
                 start, group = n, []
+                # The group just reset, so re-fit against the new (smaller)
+                # row_start — the row_end digit width rarely changes, but this
+                # keeps the fit exact rather than reusing a stale estimate.
+                line = _fit_row(t, header_line, sep_line, row, width, start, n, max_chars)
             group.append(line)
         if group:
             out.append(_emit(t, header_line, sep_line, group, base,
@@ -183,7 +227,7 @@ def render_chunks(tables: list[Table], *, file_name: str,
 
 def _emit(t: Table, header_line: str, sep_line: str, group: list[str],
           base: dict, row_start: int, row_end: int) -> tuple[str, dict]:
-    title = f"### Sheet: {t.sheet} — rows {row_start}–{row_end} of {t.rows_total}"
+    title = _title(t, row_start, row_end)
     text = "\n".join([title, header_line, sep_line, *group])
     return text, {**base, "table_role": "rows",
                   "row_start": row_start, "row_end": row_end}
