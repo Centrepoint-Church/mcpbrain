@@ -367,6 +367,104 @@ def test_html_mail_does_not_get_the_bottom_post_rescue():
     assert "repeated verbatim" not in body
 
 
+def test_an_outlook_style_quote_with_no_angle_brackets_is_not_rescued():
+    """C1: the bottom-post rescue is only SOUND for '>'-prefixed quoting.
+
+    Four of the five _REPLY_CHAIN_PATTERNS match plain-text quoting that carries
+    no '>' at all — this Outlook/Exchange '-----Original Message-----' block is
+    the commonest, and ordinary in inter-org and vendor mail. Everything after
+    the marker is the ORIGINAL author's prose, so rescuing it appended the whole
+    quoted message to the reply and stamped it with the REPLYING sender's
+    metadata: finding D's duplication reintroduced, plus commitments
+    ("I need your approval before Friday") attributed to the wrong person in the
+    graph. Dropping a genuine bottom-post here is the cheaper failure and is
+    what strip_reply_chains now does.
+    """
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("Thanks Sam, approved.\n\n"
+            "-----Original Message-----\n"
+            "From: Sam Taylor <sam@example.com>\n"
+            "Sent: Monday, 2 June 2026 09:14\n"
+            "To: Josh Kemp\n"
+            "Subject: Hall B\n\n"
+            "Hi Josh, the quarterly budget for Hall B has been revised upward "
+            "and I need\nyour approval before Friday. The venue hire line moved "
+            "from 1200 to 1450.\n")
+
+    out = strip_reply_chains(text)
+
+    assert out.strip() == "Thanks Sam, approved."
+    assert "quarterly budget" not in out, (
+        "the original author's words were rescued as if the replying sender "
+        "had written them"
+    )
+    assert "venue hire" not in out
+
+
+def test_a_bottom_post_under_an_outlook_marker_is_rescued_when_the_quote_is_angle_quoted():
+    """The other side of C1: the marker style is irrelevant, the '>' evidence is
+    what matters. Same Outlook banner as above, but the quoted history IS
+    '>'-prefixed, so the prose below it is demonstrably the replying sender's."""
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("-----Original Message-----\n"
+            "From: Sam Taylor <sam@example.com>\n"
+            "> Hi Josh, can you approve the revised Hall B budget?\n"
+            "> Sam\n\n"
+            "Approved — Hall B goes ahead at 1450, and I have told Priya to "
+            "release the deposit.\n")
+
+    out = strip_reply_chains(text)
+
+    assert "Hall B goes ahead at 1450" in out
+    assert "can you approve" not in out
+
+
+def test_only_prose_after_the_last_quoted_line_is_rescued():
+    """The rescued lines must fall strictly AFTER the last '>' line: text sitting
+    between the reply marker and the quote body is part of the quote's own
+    attribution block, not a reply."""
+    from mcpbrain.sync.normalise import strip_reply_chains
+
+    text = ("\nOn Mon, 2 Jun 2026 at 09:14, Sam <sam@example.com> wrote:\n"
+            "Original author preamble that is long enough to pass the floor.\n"
+            "> Can you confirm the Hall B booking for Sunday?\n\n"
+            "Yes — Hall B is confirmed for Sunday the 8th, 9am to 1pm.\n")
+
+    out = strip_reply_chains(text)
+
+    assert "Hall B is confirmed" in out
+    assert "Original author preamble" not in out
+
+
+def test_inline_html_tags_do_not_fragment_a_sentence():
+    """I5: the fallback emitted '\\n' for EVERY tag, so a bolded name or a link
+    mid-sentence split it across lines ('Hi\\nSam\\n, can you confirm…'). Only
+    BLOCK-level tags end a line now."""
+    from mcpbrain.sync.normalise import strip_html
+
+    html = ('<p>Hi <b>Sam</b>, can you confirm <a href="https://x/y">the '
+            'booking</a> for <em>Sunday</em>?</p>')
+
+    assert strip_html(html) == "Hi Sam, can you confirm the booking for Sunday?"
+
+
+def test_block_tags_still_end_a_line_around_inline_ones():
+    """The I5 fix must not undo the boundary the reply-chain/signature regexes
+    need: a <div>…wrote:</div> boundary still produces the '\\n' those patterns
+    anchor on, even when the line contains inline markup."""
+    from mcpbrain.sync.normalise import strip_html, strip_reply_chains
+
+    html = ("<p>Short answer: <strong>yes</strong>.</p>"
+            "<div>On Mon, 2 Jun 2026 at 09:14, <b>Sam</b> wrote:</div>"
+            "<blockquote>The whole previous thread, repeated verbatim.</blockquote>")
+
+    out = strip_reply_chains(strip_html(html), rescue_bottom_post=False)
+
+    assert out == "Short answer: yes."
+
+
 # ---------------------------------------------------------------------------
 # strip_html fallback: tag boundaries must become newlines, not spaces.
 #
