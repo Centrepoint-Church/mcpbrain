@@ -329,6 +329,19 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
     lines.append(arch_line())
 
+    # Chunks that exceed the embedder window (512 tokens ≈ 2,000 chars). Their
+    # tails are silently truncated at embed time and become unsearchable.
+    from pathlib import Path
+    from mcpbrain.store import Store
+    store = Store(Path(home) / "b.sqlite3", dim=4)
+    try:
+        oversize = store.count_chunks_longer_than(2000)
+        lines.append(f"{'✅' if not oversize else '⚠️'} chunks over the embedder "
+                     f"window: {oversize}")
+    except Exception:  # noqa: BLE001
+        # Store not initialized or other issue — skip the check gracefully
+        pass
+
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
     enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above

@@ -6,6 +6,8 @@ from mcpbrain.embed import contextual_prefix
 
 log = logging.getLogger(__name__)
 
+EMBED_WINDOW_CHARS = 2000
+
 
 def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None,
                   budget=None, max_items: int | None = None,
@@ -64,6 +66,18 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
                 (contextual_prefix(c["metadata"]) + c["text"]) if use_prefix else c["text"]
                 for c in batch
             ]
+            oversize = sum(1 for t in texts if len(t) > EMBED_WINDOW_CHARS)
+            if oversize:
+                # The BGE window is 512 tokens ≈ 2,000 characters; anything
+                # longer is silently truncated by the model and its tail is
+                # unsearchable. 15,576 such chunks existed in the live store,
+                # uncounted and unlogged (B3). This measures the PREFIXED text:
+                # contextual_retrieval is default ON and its prefix eats into
+                # the same window, which is part of why chunks sized right at
+                # 2,000 chars still overflowed.
+                log.warning("index: %d of %d passages exceed the %d-char embedder "
+                            "window; their tails will not be searchable",
+                            oversize, len(texts), EMBED_WINDOW_CHARS)
             vectors = embedder.embed_passages(texts)
             with bulk_section():
                 for c, v in zip(batch, vectors):

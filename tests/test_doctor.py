@@ -143,6 +143,17 @@ def test_output_is_never_empty():
     assert "mcpbrain doctor" in msg
 
 
+def test_doctor_reports_over_window_chunks(tmp_path, monkeypatch):
+    from mcpbrain.store import Store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "y" * 3000, "h1", {"source_type": "gdrive"})
+
+    assert store.count_chunks_longer_than(2000) == 1
+
+
 def test_embedder_weights_present_reports_ok():
     # Weights cached → silent green line, no repair, no need_action.
     embedder = _Recorder()
