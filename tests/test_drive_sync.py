@@ -830,3 +830,137 @@ def test_upserting_an_unchanged_document_deletes_nothing(tmp_path):
     upsert_file_chunks(store, normalise_drive(fmeta, text), file_id="f1")
 
     assert sorted(store.doc_ids_for_file("f1")) == first
+
+
+# ---------------------------------------------------------------------------
+# Post-approval review finding: fetch_content's per-file record_skip floods
+# change_log. Aggregated over a sync round via a `report` dict instead.
+# ---------------------------------------------------------------------------
+
+def test_fetch_content_report_tallies_instead_of_writing_immediately():
+    """Unit-level: passing `report=` must switch fetch_content from an
+    immediate store.record_change per call to tallying {(kind, mime): count}
+    in the caller-owned dict, with nothing written to the store at all."""
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    report: dict = {}
+    fmeta_png = {"id": "f-1", "name": "a.png", "mimeType": "image/png"}
+    fmeta_jpg = {"id": "f-2", "name": "b.jpg", "mimeType": "image/jpeg"}
+
+    for _ in range(3):
+        drive.fetch_content(object(), fmeta_png, store=store, report=report)
+    drive.fetch_content(object(), fmeta_jpg, store=store, report=report)
+
+    assert store.changes == [], "report= must suppress the immediate write"
+    assert report == {("unsupported_mime", "image/png"): 3,
+                      ("unsupported_mime", "image/jpeg"): 1}
+
+
+def test_flush_skip_report_emits_one_bounded_row_per_kind():
+    """flush_skip_report must turn a multi-mime tally into one change_log row
+    per `kind`, with the per-mime breakdown folded into the detail text —
+    not one row per (kind, mime) and definitely not one row per file."""
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    report = {("unsupported_mime", "image/png"): 270,
+              ("unsupported_mime", "image/jpeg"): 70,
+              ("extraction_empty", "application/pdf"): 2}
+
+    drive.flush_skip_report(store, report)
+
+    assert len(store.changes) == 2, "one row per kind, not per (kind, mime)"
+    by_kind = {c[2].split(":")[0]: c[2] for c in store.changes}
+    assert "drive_unsupported_mime" in by_kind
+    assert "270" in by_kind["drive_unsupported_mime"]
+    assert "70" in by_kind["drive_unsupported_mime"]
+    assert "image/png" in by_kind["drive_unsupported_mime"]
+    assert "drive_extraction_empty" in by_kind
+    assert "2" in by_kind["drive_extraction_empty"]
+
+
+def test_flush_skip_report_is_a_noop_on_an_empty_report():
+    from mcpbrain.sync import drive
+
+    class _Store:
+        def __init__(self):
+            self.changes = []
+
+        def record_change(self, kind, ref_id="", summary=""):
+            self.changes.append((kind, ref_id, summary))
+
+    store = _Store()
+    drive.flush_skip_report(store, {})
+    assert store.changes == []
+
+
+def test_many_skipped_files_in_one_sync_round_produce_one_summary_row_not_one_per_file(tmp_path):
+    """Review finding (post-Task-4-approval): fetch_content used to call
+    ingest_report.record_skip once per skipped file inside sync_drive's
+    listing loop — one store.record_change write, one change_log row, per
+    file. change_log is pruned to 500 rows and doubles as the user-facing
+    change digest (dashboard.py's recent_changes); a Drive sync whose window
+    contains a few hundred images (a common real case) would evict the
+    entire genuine audit trail and fill the digest with per-file noise.
+    sync_drive must flush ONE aggregated row for the whole round instead."""
+    store = _store(tmp_path)
+    store.set_cursor("drive", "100")
+
+    n = 50
+    changes = [
+        {"fileId": f"img{i}", "removed": False,
+         "file": {"id": f"img{i}", "name": f"photo{i}.png", "mimeType": "image/png",
+                  "modifiedTime": "2026-05-01T10:00:00Z", "owners": []}}
+        for i in range(n)
+    ]
+    pages = [_page(changes, new_start_page_token="900")]
+    svc = FakeDriveService(pages=pages)
+
+    result = sync_drive(svc, store)
+
+    assert result == 0, "every file is an unsupported image; none should count as processed"
+    skip_rows = [c for c in store.recent_changes(limit=1000) if c["change_type"] == "ingest_skip"]
+    assert len(skip_rows) == 1, (
+        f"expected exactly one aggregated ingest_skip row for {n} skipped "
+        f"files, got {len(skip_rows)} — the per-file flood is back"
+    )
+    assert "unsupported_mime" in skip_rows[0]["summary"]
+    assert "image/png" in skip_rows[0]["summary"]
+    assert str(n) in skip_rows[0]["summary"]
+
+
+def test_backfill_drive_also_aggregates_skips_across_its_bounded_window(tmp_path):
+    """Same finding, backfill_drive path: it advances no cursor and re-lists
+    the same window every call, so per-file recording would re-flood on every
+    single re-run. Confirms the aggregation applies there too."""
+    store = _store(tmp_path)
+
+    n = 12
+    file_list = [
+        {"id": f"img{i}", "name": f"photo{i}.png", "mimeType": "image/png",
+         "modifiedTime": "2026-05-01T10:00:00Z", "owners": []}
+        for i in range(n)
+    ]
+    svc = FakeDriveService(file_list=file_list)
+
+    processed = backfill_drive(svc, store, "2020-01-01T00:00:00Z")
+
+    assert processed == 0
+    skip_rows = [c for c in store.recent_changes(limit=1000) if c["change_type"] == "ingest_skip"]
+    assert len(skip_rows) == 1, f"expected one aggregated row, got {len(skip_rows)}"
+    assert str(n) in skip_rows[0]["summary"]

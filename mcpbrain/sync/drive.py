@@ -145,7 +145,46 @@ def _fetch_text(service, file_meta: dict) -> str | None:
     return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
 
 
-def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
+def _note_skip(store, report: dict | None, kind: str, fid: str, mime: str, name: str) -> None:
+    """Record one skipped file — either immediately (today's behaviour, when
+    no `report` is given) or by tallying it into `report` for the caller to
+    flush as one bounded summary row per `kind` at the end of a sync round.
+
+    Important (review finding, post-Task-4-approval): `fetch_content` used to
+    call `ingest_report.record_skip` — one `store.record_change` write — per
+    skipped file. `change_log` is pruned to 500 rows and doubles as the
+    user-facing change digest (dashboard.py's recent_changes); a Drive sync
+    whose window contains a few hundred images would evict the entire genuine
+    audit trail and fill the digest with `ingest_skip: image/png` noise, plus
+    cost one write transaction per skip inside the (unbounded) fetch loop.
+    Mirrors the reviewed `report=` pattern in sync/gmail.py + normalise.py's
+    `_note`, adapted to key on (kind, mime) so the eventual summary can still
+    say WHICH mimes were skipped, not just a bare count.
+    """
+    if report is None:
+        ingest_report.record_skip(store, kind, fid, f"{mime} ({name})")
+        return
+    key = (kind, mime)
+    report[key] = report.get(key, 0) + 1
+
+
+def flush_skip_report(store, report: dict) -> None:
+    """Turn one sync round's `fetch_content` skip tally into a small, bounded
+    number of change_log rows — one per `kind` (today: at most
+    'unsupported_mime' and 'extraction_empty'), with a per-mime breakdown in
+    the detail string, instead of one row per skipped file. `report` is
+    typically empty (nothing skipped) — then this is a no-op.
+    """
+    by_kind: dict[str, list[tuple[str, int]]] = {}
+    for (kind, mime), count in report.items():
+        by_kind.setdefault(kind, []).append((mime, count))
+    for kind, mimes in sorted(by_kind.items()):
+        detail = ", ".join(f"{mime}: {count}" for mime, count in sorted(mimes))
+        ingest_report.record_skip(store, f"drive_{kind}", "", detail)
+
+
+def fetch_content(service, file_meta: dict, *, store=None,
+                  report: dict | None = None) -> Content | None:
     """Fetch one Drive file, and leave a durable trace when it yields nothing.
 
     Three outcomes, and they must stay distinguishable (B7 exists because they
@@ -160,6 +199,11 @@ def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
     and every image format. Each needs a new dependency of doubtful value or a
     different pipeline; what changes here is that a sync no longer reports
     success while discarding them.
+
+    `report`, when passed (by a sync-round caller — see `flush_skip_report`),
+    accumulates skips as {(kind, mime): count} instead of writing one
+    change_log row per file immediately. Direct callers (tests, one-off
+    lookups) that omit it keep today's immediate-write behaviour unchanged.
     """
     mime = file_meta.get("mimeType", "")
     fid = file_meta.get("id", "")
@@ -176,15 +220,15 @@ def fetch_content(service, file_meta: dict, *, store=None) -> Content | None:
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
         tables = binary_tables[mime](data, char_budget=budget)
         if not tables:
-            ingest_report.record_skip(store, "extraction_empty", fid, f"{mime} ({name})")
+            _note_skip(store, report, "extraction_empty", fid, mime, name)
         return Content(tables=tables)
 
     text = _fetch_text(service, file_meta)
     if text is None:
-        ingest_report.record_skip(store, "unsupported_mime", fid, f"{mime} ({name})")
+        _note_skip(store, report, "unsupported_mime", fid, mime, name)
         return None
     if not text.strip():
-        ingest_report.record_skip(store, "extraction_empty", fid, f"{mime} ({name})")
+        _note_skip(store, report, "extraction_empty", fid, mime, name)
         return Content()
     if tabular.is_tabular(mime):
         # Google Sheets export as text/csv, and CSV/TSV download verbatim — both
@@ -407,7 +451,7 @@ def _file_resume_key(fmeta: dict) -> str | None:
 def _cache_first_extract_one(
     service, store, fleet_storage, drive_id, fmeta, pin,
     *, contextual_retrieval: bool = False, bulk_section=None,
-    folder_cache: dict | None = None,
+    folder_cache: dict | None = None, report: dict | None = None,
 ) -> tuple[bool, tuple[str, str] | None]:
     """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
     (sync_shared_drive) and backfill (backfill_shared_drive) loops.
@@ -420,7 +464,9 @@ def _cache_first_extract_one(
     `folder_cache` (C5) is a dict the CALLER owns for a whole sync round (see
     `folder_path`'s docstring) — a fresh `{}` is used when a caller doesn't
     pass one, but callers that want cross-file caching within a round (both
-    real callers do) must pass their own.
+    real callers do) must pass their own. `report`, similarly caller-owned,
+    accumulates `fetch_content`'s skip tally for the round instead of writing
+    one change_log row per file — see `fetch_content`/`flush_skip_report`.
 
     `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
     default `contextlib.nullcontext`) brackets ONLY the final local-extraction
@@ -460,7 +506,7 @@ def _cache_first_extract_one(
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
                                contextual_retrieval=contextual_retrieval):
         return True, None
-    content = fetch_content(service, fmeta, store=store)
+    content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
         return False, None
     # Re-check right before extraction: another daemon may have just published.
@@ -566,6 +612,12 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     # cache contract, so a Drive with many files in few folders costs one
     # lookup per folder, not per file.
     folder_cache: dict = {}
+    # Review finding (post-Task-4-approval): fetch_content used to record one
+    # change_log row per skipped file. A window with a few hundred images
+    # would flood the 500-row-pruned, user-facing digest. Tallied here for
+    # this whole round and flushed as one bounded summary row per kind — see
+    # flush_skip_report.
+    skip_report: dict = {}
 
     while True:
         if budget is not None and budget.expired():
@@ -592,7 +644,7 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
             rkey = _file_resume_key(fmeta)
             if rkey and rkey in resumed_ids:
                 continue
-            content = fetch_content(service, fmeta, store=store)
+            content = fetch_content(service, fmeta, store=store, report=skip_report)
             if content is None or (not content.text and not content.tables):
                 continue
             folder = folder_path(service, fmeta, folder_cache)
@@ -643,6 +695,7 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
 
+    flush_skip_report(store, skip_report)
     return processed
 
 
@@ -714,6 +767,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     # C5: owned by this whole sync call, not per file — see folder_path's
     # docstring.
     folder_cache: dict = {}
+    # Aggregated skip tally for this round — see flush_skip_report.
+    skip_report: dict = {}
     source = f"drive:{drive_id}"
     cursor = store.get_cursor(source)
     if cursor is None:
@@ -816,7 +871,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                 did_process, file_miss = _cache_first_extract_one(
                     service, store, fleet_storage, drive_id, ev["fmeta"], pin,
                     contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-                    folder_cache=folder_cache)
+                    folder_cache=folder_cache, report=skip_report)
                 if did_process:
                     processed += 1
                 if file_miss:
@@ -884,6 +939,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
         store.set_cursor(resume_removed_key, "[]")
+    flush_skip_report(store, skip_report)
     return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
 
 
@@ -975,9 +1031,12 @@ def backfill_drive(service, store, modified_after: str,
 
     Uses `fetch_content`, which now covers structured tables (.xlsx/.xls) and
     every other type wired into `_DOWNLOAD_TEXT`/`_DOWNLOAD_BINARY`; a type
-    fetch_content doesn't handle is recorded (ingest_report.record_skip)
-    rather than silently skipped. Does NOT touch the changes cursor. Returns
-    the number of files indexed.
+    fetch_content doesn't handle is recorded as one bounded summary row per
+    kind (see `flush_skip_report`) rather than silently skipped or written
+    one row per file. Does NOT touch the changes cursor, so a call over an
+    unchanged window re-tallies (and re-flushes) the same skips — matching
+    backfill_gmail's equivalent per-call flush; still bounded, since it's one
+    row per kind per call, not per file. Returns the number of files indexed.
 
     `modified_before` optionally caps the upper bound (RFC 3339 timestamp) so
     callers can walk a historical window without re-fetching newer files.
@@ -998,6 +1057,7 @@ def backfill_drive(service, store, modified_after: str,
         q += f" and modifiedTime < '{modified_before}'"
     fields = "nextPageToken, files(id,name,mimeType,modifiedTime,owners,parents)"
     folder_cache: dict = {}
+    skip_report: dict = {}
     page_token, processed = None, 0
     while True:
         params = {"q": q, "fields": fields, "pageSize": 100, "spaces": "drive"}
@@ -1006,8 +1066,9 @@ def backfill_drive(service, store, modified_after: str,
         resp = service.files().list(**params).execute()
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
+                flush_skip_report(store, skip_report)
                 return processed
-            content = fetch_content(service, f, store=store)
+            content = fetch_content(service, f, store=store, report=skip_report)
             if content is None or (not content.text and not content.tables):
                 continue
             chunks = normalise_drive(f, content.text, tables=content.tables,
@@ -1019,6 +1080,7 @@ def backfill_drive(service, store, modified_after: str,
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    flush_skip_report(store, skip_report)
     return processed
 
 
@@ -1041,6 +1103,8 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     # C5: owned by this whole backfill call, not per file — see folder_path's
     # docstring.
     folder_cache: dict = {}
+    # Aggregated skip tally for this round — see flush_skip_report.
+    skip_report: dict = {}
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
@@ -1059,11 +1123,12 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         resp = service.files().list(**params).execute()
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
+                flush_skip_report(store, skip_report)
                 return {"processed": processed, "miss": miss}
             did_process, file_miss = _cache_first_extract_one(
                 service, store, fleet_storage, drive_id, f, pin,
                 contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-                folder_cache=folder_cache)
+                folder_cache=folder_cache, report=skip_report)
             if did_process:
                 processed += 1
             if file_miss:
@@ -1071,4 +1136,5 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    flush_skip_report(store, skip_report)
     return {"processed": processed, "miss": miss}
