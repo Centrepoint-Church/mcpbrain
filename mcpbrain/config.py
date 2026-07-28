@@ -1,4 +1,5 @@
 import json
+import math
 import logging
 import os
 import shutil
@@ -740,6 +741,12 @@ def daemon_tuning(home, defaults: dict, *, int_keys: frozenset = frozenset()) ->
         raw = block[key]
         try:
             val = int(raw) if key in int_keys else float(raw)
+            # NaN and +Inf both survive a `val <= 0` test (NaN compares False to
+            # everything; Inf is positive), so without this an "inf" would
+            # silently disable the watchdog (stall_s never elapses) and unbound
+            # the deliberately-bounded bulk-lock acquire.
+            if not math.isfinite(val):
+                raise ValueError("must be finite")
             if val <= 0:
                 raise ValueError("must be positive")
             result[key] = val
