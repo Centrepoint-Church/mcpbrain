@@ -230,3 +230,54 @@ def test_embedder_dim_does_not_import_onnxruntime():
     embed = importlib.import_module("mcpbrain.embed")
     embed.embedder_dim("bge-small")
     assert not any(m == "fastembed" or m.startswith("onnxruntime") for m in sys.modules)
+
+
+def test_an_over_window_passage_is_counted_and_logged(caplog, tmp_path, monkeypatch):
+    """B3: 15,576 chunks exceed the 512-token BGE window and are silently
+    truncated at embed time, so their tails are unsearchable — not logged, not
+    counted. chunk_text now bounds everything that goes through it; what remains
+    is the enriched semantic doc, written whole because splitting it would break
+    the enriched-<thread_id> doc_id."""
+    from mcpbrain.index import EMBED_WINDOW_CHARS, index_pending
+    from mcpbrain.store import Store
+
+    class _Embedder:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("enriched-t1", "x" * (EMBED_WINDOW_CHARS + 500), "h1",
+                       {"source_type": "gmail_enriched_v2"})
+
+    with caplog.at_level("WARNING"):
+        index_pending(store, _Embedder())
+
+    assert any("window" in r.message for r in caplog.records), (
+        f"the truncation was silent: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_a_within_window_passage_logs_nothing(caplog, tmp_path, monkeypatch):
+    """The discriminator: a warning on every batch would be noise nobody reads."""
+    from mcpbrain.index import index_pending
+    from mcpbrain.store import Store
+
+    class _Embedder:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "a short passage", "h1", {"source_type": "gmail"})
+
+    with caplog.at_level("WARNING"):
+        index_pending(store, _Embedder())
+
+    assert not any("window" in r.message for r in caplog.records)
