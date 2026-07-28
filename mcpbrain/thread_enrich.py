@@ -53,14 +53,32 @@ _ATTACHMENT_INDEX = re.compile(r"-att-(\d+)-\d+$")
 
 def _chunk_key(meta: dict, doc_id: str) -> str:
     """Message-identity key shared by _group_key and reassemble_thread: file_id,
-    else event_id, else message_id, else doc_id.
+    else ``cal-<event_id>``, else message_id, else doc_id.
 
     This is the value reassemble_thread emits as a message's `message_id`, so
     every branch must be resolvable by store.doc_ids_for_messages — drain
     recovers the chunks an extraction covers through it, and a key that resolves
     to nothing means the extraction is discarded and its chunks re-queue (the
-    0.7.98 Drive defect). `event_id` is in the chain for I6, and
-    store._doc_ids_query has a matching arm for it, exactly as file_id does.
+    0.7.98 Drive defect). The event_id branch is I6, and store._doc_ids_query has
+    a matching arm for it, exactly as file_id does.
+
+    The calendar branch emits the PREFIXED `cal-<event_id>`, not the bare id,
+    because that is the identity namespace every existing calendar row in the
+    store already uses (sync/calendar.py writes doc_id `cal-<eid>` /
+    `cal-<eid>-<i>` and evidence/source_doc_id `cal-<eid>`; a single-chunk event's
+    key is therefore literally its own doc_id, exactly as before I6). Emitting
+    the bare id instead would fork a second namespace for the same event and
+    silently break four things: store.meeting_series_for_old filters candidate
+    series on `email_entities.message_id LIKE 'cal-%'`; semantic.build_semantic_doc
+    labels a calendar digest `calendar_enriched_v2` only when the thread_id starts
+    `cal-`; and graph_write keys the synthesised digest chunk `enriched-<thread_id>`
+    and stores actions with that thread_id, so a re-extraction (routine — any
+    content edit resets enriched=0 and calendar re-syncs on a rolling window)
+    would write a duplicate digest/context/actions set under the bare-id
+    namespace beside the `cal-`-prefixed original, with nothing cleaning it up
+    and its actions no longer closeable. Prefixing solves I6's real problem — the
+    `cal-<eid>-0..N` chunks of one split event grouping together instead of
+    fragmenting into singletons — with no namespace change at all.
 
     This is the portion of the precedence chain that genuinely means the same
     thing at both call sites — "which message/document does this chunk belong
@@ -90,8 +108,11 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     """
     if doc_id.startswith("enriched-"):
         return doc_id
-    return (meta.get("file_id") or meta.get("event_id")
-            or meta.get("message_id") or doc_id)
+    if meta.get("file_id"):
+        return meta["file_id"]
+    if meta.get("event_id"):
+        return f"cal-{meta['event_id']}"
+    return meta.get("message_id") or doc_id
 
 
 def _reassembly_key(meta: dict, doc_id: str) -> str:
@@ -206,10 +227,11 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
     - Drive docs (chunks with ``file_id`` in metadata): grouped by ``file_id``
       so all chunks of the same document join into one body instead of
       appearing as N one-line stubs.
-    - Calendar events (chunks with ``event_id``): grouped by ``event_id``, same
-      reasoning — a long agenda split into cal-<eid>-0..N used to become N
+    - Calendar events (chunks with ``event_id``): grouped by ``cal-<event_id>``,
+      same reasoning — a long agenda split into cal-<eid>-0..N used to become N
       singleton "messages", each one wrongly carrying a truncated-tail `[…]`
-      marker (I6).
+      marker (I6). The key keeps the `cal-` prefix so the emitted id stays in the
+      namespace every existing calendar row uses — see _chunk_key.
     - Email messages: grouped by ``message_id``.
     - Email attachments: one group each, keyed finer than message identity —
       see _reassembly_key (C2).

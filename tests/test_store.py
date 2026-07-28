@@ -144,6 +144,38 @@ def test_doc_ids_for_messages_query_is_index_backed(tmp_path):
     assert "idx_chunks_eventid" in plan, f"event_id arm not index-backed: {plan}"
 
 
+def test_doc_ids_for_messages_strips_the_cal_prefix_for_the_event_arm(tmp_path):
+    """thread_enrich._chunk_key emits `cal-<event_id>` as a calendar event's
+    enrichment identity (the namespace every calendar row already uses), while
+    the chunks carry the BARE id in metadata.event_id — so the event arm has to
+    be bound with the prefix stripped or a split event resolves to nothing and
+    drain discards its extraction forever."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    for i in range(3):
+        s.upsert_chunk(f"cal-E7-{i}", f"part {i}", f"h{i}",
+                       {"source_type": "calendar", "event_id": "E7",
+                        "chunk_index": i, "chunk_total": 3})
+
+    assert s.doc_ids_for_messages(["cal-E7"]) == ["cal-E7-0", "cal-E7-1", "cal-E7-2"]
+    # The bare id is NOT the identity any more; nothing emits it, and it must not
+    # resolve as a second namespace for the same event.
+    assert s.doc_ids_for_messages(["E7"]) == []
+
+
+def test_doc_ids_for_messages_does_not_widen_a_recurring_instance(tmp_path):
+    """Only the `cal-` prefix is stripped, never the recurring-instance
+    `_YYYYMMDDTHHMMSSZ` suffix (_base_cal_event_id's job, for series matching):
+    each instance is its own document and must resolve to its own chunks only."""
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    for inst in ("R1_20260601T090000Z", "R1_20260608T090000Z"):
+        s.upsert_chunk(f"cal-{inst}-0", "agenda", f"h{inst}",
+                       {"source_type": "calendar", "event_id": inst,
+                        "chunk_index": 0, "chunk_total": 2})
+
+    assert s.doc_ids_for_messages(["cal-R1_20260601T090000Z"]) == [
+        "cal-R1_20260601T090000Z-0"]
+
+
 def test_init_indexes_thread_and_date_lookup_paths(tmp_path):
     """thread_chunks (recall expansion via retrieval_expand + stale passes)
     filters on metadata.thread_id; inbound_chunks_since (waiting-on, every cycle)

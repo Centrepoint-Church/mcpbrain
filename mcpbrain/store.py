@@ -111,15 +111,23 @@ def _open_db(path, read_only: bool = False, *,
 
 
 _CAL_INSTANCE_SUFFIX = re.compile(r"_\d{8}T\d{6}Z$")
+# Namespace prefix every Calendar-derived identifier carries: chunk doc_ids
+# (cal-<event_id>[-<chunk_idx>]), email_entities.message_id, evidence /
+# source_doc_id, and the enrichment identity thread_enrich._chunk_key emits.
+_CAL_PREFIX = "cal-"
 
 
 def _base_cal_event_id(value: str) -> str:
     """Strip a 'cal-' prefix and any recurring-instance date suffix
     ('_YYYYMMDDTHHMMSSZ') from a Calendar-derived identifier (a chunk doc_id
     or an entity_relations.evidence value), leaving the bare Calendar event id
-    shared by every instance of a recurring series."""
-    if value.startswith("cal-"):
-        value = value[len("cal-"):]
+    shared by every instance of a recurring series.
+
+    NOT for resolving a single event's own chunks — that needs the exact
+    per-instance id, so doc_ids_for_messages strips only _CAL_PREFIX.
+    """
+    if value.startswith(_CAL_PREFIX):
+        value = value[len(_CAL_PREFIX):]
     return _CAL_INSTANCE_SUFFIX.sub("", value)
 
 
@@ -2596,14 +2604,29 @@ class Store:
         chunk of that document. file_ids (~33-char base64) don't collide with
         email message/thread ids, so this branch only fires for real Drive ids.
 
+        Calendar events are the fourth: reassemble_thread keys them on
+        `cal-<event_id>` (the namespace their chunks' doc_ids already use), and a
+        split event's chunk doc_ids are cal-<event_id>-<i> — never the bare
+        `cal-<event_id>`. So the event arm is bound with the `cal-` prefix
+        STRIPPED, matching the raw `event_id` metadata field the chunks actually
+        carry (sync/calendar.py stamps the bare id there). A single-chunk event is
+        additionally resolvable through the doc_id fallback arm, since for it the
+        key and the doc_id coincide.
+
         Returns doc_ids ordered by the chunk rowid for stable output.
         """
         ids = [m for m in (message_ids or []) if m]
         if not ids:
             return []
+        # Same length as `ids` so the arm's placeholder count is unchanged. A
+        # non-calendar id binds as NULL rather than passing through: the calendar
+        # identity is ALWAYS prefixed, so an unprefixed id has no business
+        # matching an event_id, and `x IN (NULL)` never does.
+        event_ids = [m[len(_CAL_PREFIX):] if m.startswith(_CAL_PREFIX) else None
+                     for m in ids]
         with self._connect() as db:
             rows = db.execute(self._doc_ids_query(len(ids)),
-                              ids * 4).fetchall()
+                              ids + ids + event_ids + ids).fetchall()
         return [r["doc_id"] for r in rows]
 
     @staticmethod
@@ -2615,15 +2638,17 @@ class Store:
         idx_chunks_eventid) across an OR, so the OR form plans as a full
         `SCAN chunks` — ~1.4s per call on the ~108k-chunk live store. Each UNION
         arm filters on a single indexed path so it plans as an index SEARCH.
-        Params bind as ids*4 (message_id, file_id, event_id, then the doc_id
-        fallback). Ordered by rowid for the stable output drain relies on; UNION
-        also dedups a chunk that matches two arms.
+        Params bind per arm (message_id, file_id, event_id, then the doc_id
+        fallback) — the event_id arm gets the `cal-`-stripped ids, see the caller.
+        Ordered by rowid for the stable output drain relies on; UNION also dedups
+        a chunk that matches two arms.
 
         The event_id arm exists for the same reason as the file_id one (I6):
-        thread_enrich._chunk_key groups a split calendar event's chunks by
-        event_id, so that is the `message_id` the extraction carries, and it is
-        never any chunk's doc_id (those are cal-<event_id>[-<idx>]). Calendar
-        event ids don't collide with Gmail message/thread ids."""
+        thread_enrich._chunk_key groups a split calendar event's chunks under
+        `cal-<event_id>`, so that is the `message_id` the extraction carries, and
+        for a SPLIT event it is never any chunk's doc_id (those are
+        cal-<event_id>-<idx>). Calendar event ids don't collide with Gmail
+        message/thread ids."""
         ph = ",".join("?" * n)
         return (
             f"SELECT doc_id, rowid FROM chunks "
