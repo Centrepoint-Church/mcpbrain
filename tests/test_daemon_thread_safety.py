@@ -7,12 +7,138 @@ import threading
 import time
 
 from mcpbrain import daemon as d
+from mcpbrain.store import Store
 
 
-def test_locks_exist_on_a_real_daemon(tmp_path):
-    """The real constructor must create all three locks."""
+class _FakeEmb:
+    dim = 4
+
+    def embed_passages(self, texts):
+        return [[0.0] * 4 for _ in texts]
+
+    def embed_query(self, text):
+        return [0.0] * 4
+
+
+def test_locks_exist_on_a_real_daemon(tmp_path, monkeypatch):
+    """The real constructor must create WORKING locks, not just mention their
+    names somewhere in __init__.
+
+    The old assertion inspected `__init__.__code__.co_names`, which passes as
+    long as the attribute name is referenced ANYWHERE in __init__'s bytecode --
+    including e.g. a stray comment-adjacent reference or an attribute set to
+    None -- without proving a real, functioning lock was ever constructed.
+    This constructs a REAL Daemon and exercises each lock as a mutex: a
+    non-blocking acquire must succeed (proving it starts unlocked and is a
+    real Lock-like object with acquire/release), and a second non-blocking
+    acquire while the first is held must fail (proving it actually excludes).
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    dm = d.Daemon(store, _FakeEmb(), services={},
+                  lock=d.SingleWriterLock(tmp_path / "d.lock"))
     for name in ("_stash_lock", "_embedder_lock", "_bulk_lock"):
-        assert name in d.Daemon.__init__.__code__.co_names, f"{name} not set in __init__"
+        lock = getattr(dm, name, None)
+        assert lock is not None, f"{name} was never set on a real Daemon"
+        assert lock.acquire(blocking=False), f"{name} is not a working, unlocked Lock"
+        try:
+            assert not lock.acquire(blocking=False), (
+                f"{name} did not exclude a second acquire -- not a real mutex")
+        finally:
+            lock.release()
+
+
+# ---------------------------------------------------------------------------
+# _stash_lock must actually be ACQUIRED, not merely created (Task 8, Step 1
+# review round 2): the brief's literal complaint about the old co_names-based
+# test was "it passes if the locks are created but never used". The
+# behavioural rewrite above (test_locks_exist_on_a_real_daemon) proves each
+# lock is a real, working mutex in isolation, but does not prove
+# _stash_snapshot/_stash_clear_drained actually TAKE it -- a reviewer
+# confirmed replacing all `with self._stash_lock:` sites in daemon.py with
+# `if True:` still left that test (and the whole suite) green. These two
+# tests close that gap directly: hold the REAL _stash_lock in one thread and
+# time how long _stash_snapshot()/_stash_clear_drained() take to return on
+# another -- if the lock is genuinely acquired, the call must block for
+# close to the hold duration; if it were neutered, it returns almost
+# instantly regardless of the held lock (reproduced directly below).
+# ---------------------------------------------------------------------------
+
+def _hold_stash_lock(dm, hold_s, acquired_evt, release_evt):
+    def _hold():
+        with dm._stash_lock:
+            acquired_evt.set()
+            release_evt.wait(timeout=hold_s + 5)
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    assert acquired_evt.wait(timeout=2.0), "holder never acquired _stash_lock"
+    return t
+
+
+def test_stash_snapshot_actually_blocks_on_a_held_stash_lock():
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stash_lock = threading.Lock()
+    dm._pending_blocks = {}
+    dm._pending_audit = {}
+    dm._pending_synthesis = []
+    dm._stash_generation = {}
+
+    hold_s = 0.3
+    acquired = threading.Event()
+    release = threading.Event()
+    holder = _hold_stash_lock(dm, hold_s, acquired, release)
+
+    def _release_after_a_while():
+        time.sleep(hold_s)
+        release.set()
+    threading.Thread(target=_release_after_a_while, daemon=True).start()
+
+    started = time.monotonic()
+    dm._stash_snapshot()
+    elapsed = time.monotonic() - started
+
+    holder.join(timeout=5.0)
+    assert not holder.is_alive()
+
+    assert elapsed >= hold_s * 0.8, (
+        f"_stash_snapshot returned after only {elapsed:.2f}s while a real "
+        f"held _stash_lock should have blocked it for close to {hold_s}s -- "
+        f"the lock is not actually being acquired"
+    )
+
+
+def test_stash_clear_drained_actually_blocks_on_a_held_stash_lock():
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._stash_lock = threading.Lock()
+    dm._pending_blocks = {"k": ["old"]}
+    dm._pending_audit = {}
+    dm._pending_synthesis = []
+    dm._stash_generation = {"k": 1}
+    taken = {"blocks": {"k": ["old"]}, "audit": {}, "synthesis": [], "gen": {"k": 1}}
+
+    hold_s = 0.3
+    acquired = threading.Event()
+    release = threading.Event()
+    holder = _hold_stash_lock(dm, hold_s, acquired, release)
+
+    def _release_after_a_while():
+        time.sleep(hold_s)
+        release.set()
+    threading.Thread(target=_release_after_a_while, daemon=True).start()
+
+    started = time.monotonic()
+    dm._stash_clear_drained({"k_drained": 1}, taken)
+    elapsed = time.monotonic() - started
+
+    holder.join(timeout=5.0)
+    assert not holder.is_alive()
+
+    assert elapsed >= hold_s * 0.8, (
+        f"_stash_clear_drained returned after only {elapsed:.2f}s while a "
+        f"real held _stash_lock should have blocked it for close to "
+        f"{hold_s}s -- the lock is not actually being acquired"
+    )
 
 
 def test_pending_update_stops_the_maintenance_thread():

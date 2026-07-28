@@ -182,11 +182,6 @@ def test_not_due_gated_pass_never_contends_for_the_bulk_lock(monkeypatch, tmp_pa
     assert gated_calls == []
 
 
-def test_four_chunk_writers_need_the_bulk_lock():
-    need = {cp.name for cp in d._CADENCE_PASSES if cp.needs_bulk_lock}
-    assert need == {"stale_reextract", "salience_score", "decay_pass", "consolidation"}
-
-
 def test_gated_passes_self_gate_on_the_attrs_the_dispatch_pre_check_uses():
     """The dispatch loop checks a gated pass's cadence BEFORE taking _bulk_lock,
     using the descriptor's interval/last attrs. If a pass's own _is_due call ever

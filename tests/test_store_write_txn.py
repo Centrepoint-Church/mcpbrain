@@ -7,6 +7,7 @@ actually applies.
 """
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -66,11 +67,27 @@ def test_concurrent_writers_both_succeed(tmp_path):
 
 
 def test_write_txn_rolls_back_on_error(tmp_path):
+    """Must be IMMEDIATE-specific: this passed unchanged even with write=True
+    reverted to a plain `with db:` wrapper (Python's sqlite3 default deferred
+    autocommit also rolls back on exception), so the original version proved
+    nothing about THIS change specifically.
+
+    The discriminator: a transaction must already be ACTIVE the instant
+    `_connect(write=True)` yields -- before any statement runs -- because
+    BEGIN IMMEDIATE fires eagerly, up front. A reverted `with db:` wrapper
+    only starts a transaction lazily, on the first DML statement, so
+    `db.in_transaction` would read False here instead.
+    """
     s = _store(tmp_path)
     with s._connect(write=True) as db:
         db.execute("CREATE TABLE IF NOT EXISTS t2(k INTEGER PRIMARY KEY)")
     try:
         with s._connect(write=True) as db:
+            assert db.in_transaction, (
+                "a transaction must already be active before any statement "
+                "runs here -- proves BEGIN IMMEDIATE fired eagerly, not a "
+                "reverted `with db:` wrapper"
+            )
             db.execute("INSERT INTO t2(k) VALUES (1)")
             raise RuntimeError("boom")
     except RuntimeError:
@@ -261,3 +278,88 @@ def test_rollback_failure_of_any_exception_type_does_not_mask_the_original_error
     with pytest.raises(RuntimeError, match="disk is full"):
         with s._connect(write=True):
             raise RuntimeError("disk is full")
+
+
+# ---------------------------------------------------------------------------
+# _begin_immediate's retry/backoff must actually retry, not just be reachable
+# (Task 8, Step 2)
+# ---------------------------------------------------------------------------
+
+def test_begin_immediate_actually_retries_under_real_contention(tmp_path, monkeypatch):
+    """Forces a REAL held write lock (a second, genuine connection holding
+    BEGIN IMMEDIATE) so the first one or more attempts inside _begin_immediate
+    genuinely fail with "database is locked" and the loop's own jittered
+    time.sleep backoff runs, before a later attempt succeeds once the holder
+    releases. A small busy_timeout_ms means SQLite's own busy handler can't
+    quietly cover the whole wait -- _begin_immediate's retry loop has to.
+    Existing tests only prove the retries/busy_timeout_ms PARAMETERS are
+    forwarded (test_connect_retries_param_is_forwarded_to_begin_immediate);
+    none of them force a real contended lock and prove the retry loop
+    actually iterates more than once.
+    """
+    s = _store(tmp_path, name="retry.sqlite3")
+    with s._connect(write=True) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS t4(k INTEGER PRIMARY KEY)")
+
+    # sqlite3 connections are thread-affine (check_same_thread defaults True),
+    # so the holder connection must be created AND released on the SAME
+    # thread -- the contending _connect(write=True) attempt runs on a
+    # separate thread instead, so the main thread is free to hold, sleep,
+    # then release without ever touching the holder from another thread.
+    holder = store_module._open_db(s.path, False)
+    holder.isolation_level = None
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO t4(k) VALUES (1)")
+
+    sleep_calls = []
+    orig_sleep = time.sleep
+
+    def _spy_sleep(seconds):
+        sleep_calls.append(seconds)
+        orig_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", _spy_sleep)
+
+    hold_s = 0.3
+    errors = []
+
+    def _contend():
+        try:
+            # busy_timeout_ms deliberately small: SQLite's own busy handler
+            # must NOT be able to quietly wait out the whole hold_s window on
+            # a single attempt -- _begin_immediate's own retry loop has to
+            # bridge the gap.
+            with s._connect(write=True, retries=8, busy_timeout_ms=20) as db2:
+                db2.execute("SELECT 1")
+        except Exception as exc:  # noqa: BLE001 — surfaced via `errors`
+            errors.append(exc)
+
+    contender = threading.Thread(target=_contend, daemon=True)
+    contender.start()
+    try:
+        orig_sleep(hold_s)
+        holder.execute("COMMIT")
+    finally:
+        holder.close()
+    contender.join(timeout=10)
+    assert not contender.is_alive()
+    assert errors == [], f"contending write failed: {errors}"
+
+    assert sleep_calls, (
+        "expected _begin_immediate's backoff to sleep at least once -- the "
+        "held lock should have forced a real retry, not a first-attempt success"
+    )
+    with s._connect() as db3:
+        assert db3.execute("SELECT COUNT(*) c FROM t4").fetchone()["c"] == 1
+
+
+# ---------------------------------------------------------------------------
+# PRAGMA journal_size_limit must actually apply to the connection
+# (Task 8, Step 2)
+# ---------------------------------------------------------------------------
+
+def test_journal_size_limit_pragma_is_applied(tmp_path):
+    s = _store(tmp_path, name="jsl.sqlite3")
+    with s._connect() as db:
+        limit = db.execute("PRAGMA journal_size_limit").fetchone()[0]
+    assert limit == 67108864
