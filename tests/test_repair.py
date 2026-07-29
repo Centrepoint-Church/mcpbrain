@@ -273,3 +273,102 @@ def test_purge_apply_stops_when_a_batch_deletes_nothing(tmp_path, monkeypatch):
 
     assert rc == 0
     assert store.selects == 1
+
+
+def test_backfill_attachments_walks_years_backwards_and_resumes(tmp_path, monkeypatch):
+    """A1's fix works on NEW mail via sync_gmail, but Gmail sync is delta-driven
+    and never revisits history — measured live after spec 2/3 landed: 0
+    email_attachment chunks in a 148k-chunk store. This phase is what makes the
+    largest finding in the audit real for mail already in the mailbox.
+
+    Resumability is the whole design: one year per invocation, newest first, with
+    the last COMPLETED year in a cursor, so an interrupted run continues instead
+    of restarting a full-history walk.
+    """
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    calls: list = []
+
+    def _fake_backfill(service, store, after, before=None, max_messages=None,
+                       q_extra="", **kw):
+        calls.append({"after": after, "before": before, "q_extra": q_extra})
+        return 0  # under the limit -> the year counts as complete
+
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail", _fake_backfill)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, True, limit=500)
+    first_year = int(calls[0]["after"][:4])
+    assert calls[0]["q_extra"] == "has:attachment", (
+        "the pass must narrow server-side, not re-walk the whole mailbox"
+    )
+    assert calls[0]["before"] == f"{first_year + 1}/01/01"
+
+    repair.phase_backfill_attachments(store, True, limit=500)
+    assert int(calls[1]["after"][:4]) == first_year - 1, (
+        "the second run must move to the previous year, not repeat the first"
+    )
+
+
+def test_backfill_attachments_repeats_an_unfinished_year(tmp_path, monkeypatch):
+    """Hitting the message limit means the year is NOT done, so the cursor must
+    not advance past it — otherwise the tail of a heavy year is skipped forever."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    calls: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr(
+        "mcpbrain.sync.gmail.backfill_gmail",
+        lambda service, store, after, before=None, max_messages=None,
+        q_extra="", **kw: calls.append(after) or max_messages)  # == limit
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, True, limit=10)
+    repair.phase_backfill_attachments(store, True, limit=10)
+
+    assert calls[0] == calls[1], f"cursor advanced past an unfinished year: {calls}"
+
+
+def test_backfill_attachments_stops_at_the_floor(tmp_path, monkeypatch):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    called: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda *a, **kw: called.append(1) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.set_cursor(repair._ATT_CURSOR, "2008")
+
+    repair.phase_backfill_attachments(store, True, limit=10, floor_year=2008)
+
+    assert called == [], "walked past the floor year"
+
+
+def test_backfill_attachments_dry_run_fetches_nothing(tmp_path, monkeypatch):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    called: list = []
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda *a, **kw: called.append(1) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, False, limit=10)
+
+    assert called == []
+    assert store.get_cursor(repair._ATT_CURSOR) is None
