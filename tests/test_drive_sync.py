@@ -1,5 +1,7 @@
 """Tests for mcpbrain.sync.drive — fake service, no network."""
 
+import threading
+
 import pytest
 
 from mcpbrain.store import Store
@@ -1295,6 +1297,91 @@ def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monke
     summary = drive.reingest_files(_Service(), store, ["ok1", "bad", "ok2"])
 
     assert summary["files"] == 2
+    assert summary["failed"] == 1
+
+
+def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_path, monkeypatch):
+    """googleapiclient's Resource wraps a stateful httplib2.Http that is not
+    safe to share across threads, so max_workers>1 must never hand the same
+    service instance to two concurrent fetches. service_factory is called once
+    per WORKER (not once per file) via a thread-local, and the `service`
+    positional argument goes unused in this mode."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    built = []
+    lock = threading.Lock()
+
+    class _Service:
+        def __init__(self):
+            with lock:
+                built.append(self)
+
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            return {"id": self._fid, "name": f"{self._fid}.txt",
+                    "mimeType": "text/plain", "parents": []}
+
+    monkeypatch.setattr(drive, "_fetch_text",
+                        lambda service, meta: f"content for {meta['id']}")
+
+    file_ids = [f"f{i}" for i in range(8)]
+    summary = drive.reingest_files(
+        None, store, file_ids, max_workers=3, service_factory=_Service)
+
+    assert summary["files"] == 8
+    for fid in file_ids:
+        assert f"content for {fid}" in store.get_chunk(f"gdrive-{fid}-0")["text"]
+    # At most one service per worker (never one per file), and definitely more
+    # than one overall -- proof no single instance was shared across threads.
+    assert 1 < len(built) <= 3, (
+        f"expected 2-3 distinct service instances (one per worker, reused "
+        f"across that worker's files), got {len(built)}"
+    )
+
+
+def test_reingest_files_with_workers_isolates_a_per_file_failure(tmp_path, monkeypatch):
+    """Per-file isolation must hold in the concurrent path exactly as it does
+    in the sequential one: one file's failure must not lose or block any
+    other file's result."""
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            self._fid = fileId
+            return self
+
+        def execute(self):
+            return {"id": self._fid, "name": f"{self._fid}.txt",
+                    "mimeType": "text/plain", "parents": []}
+
+    def _boom(service, meta):
+        if meta["id"] == "bad":
+            raise RuntimeError("extraction exploded")
+        return "fine content"
+
+    monkeypatch.setattr(drive, "_fetch_text", _boom)
+
+    summary = drive.reingest_files(
+        None, store, ["ok1", "bad", "ok2", "ok3"],
+        max_workers=4, service_factory=_Service)
+
+    assert summary["files"] == 3
     assert summary["failed"] == 1
 
 

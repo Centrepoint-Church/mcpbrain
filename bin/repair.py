@@ -115,7 +115,7 @@ def phase_purge_empty(store, apply: bool) -> int:
     return 0
 
 
-def phase_reingest_stale(store, apply: bool, *, limit: int) -> int:
+def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) -> int:
     ids = store.stale_chunker_file_ids(CHUNKER_VERSION, limit=limit)
     print(f"[reingest-stale] {len(ids)} Drive file(s) selected (limit {limit})")
     if not apply:
@@ -132,7 +132,15 @@ def phase_reingest_stale(store, apply: bool, *, limit: int) -> int:
         print("[reingest-stale] no drive_service (token lacks the Drive scope); "
               "re-authenticate with `mcpbrain setup`", file=sys.stderr)
         return 0
-    print(f"[reingest-stale] {reingest_files(drive, store, ids)}")
+    # workers>1 parallelizes the network-bound fetch across a thread pool (see
+    # reingest_files' docstring); each worker builds its OWN service via this
+    # factory rather than sharing `drive`, because googleapiclient's Resource
+    # wraps a stateful httplib2.Http that is not safe to use from multiple
+    # threads at once.
+    service_factory = (
+        (lambda: build_google_services().get("drive_service"))
+        if workers > 1 else None)
+    print(f"[reingest-stale] {reingest_files(drive, store, ids, max_workers=workers, service_factory=service_factory)}")
     return 0
 
 
@@ -147,6 +155,16 @@ def main(argv=None):
                     help="actually write (default is a dry run)")
     ap.add_argument("--limit", type=int, default=500,
                     help="max Drive files per reingest-stale run")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="reingest-stale: concurrent Drive fetch workers "
+                         "(default 1 = sequential)")
+    ap.add_argument("--skip-backup", action="store_true",
+                    help="skip the pre-apply backup/disk-preflight for THIS "
+                         "invocation. For running many reingest-stale batches "
+                         "back to back under one backup taken up front, not for "
+                         "routine use: each batch is still write-through to the "
+                         "live store, so anything before the one backup you did "
+                         "take is what --skip-backup runs are gambling on.")
     args = ap.parse_args(argv)
 
     home = config.app_dir()
@@ -159,8 +177,10 @@ def main(argv=None):
     # copy of an ~11 GB store: minutes of I/O plus 2x the disk (which this
     # machine does not have to spare) for a read-only report. Preflight is
     # skipped with it, since its only purpose is proving the backup fits.
+    # --skip-backup skips the same way, on request, for a caller who already
+    # took one backup covering a whole sequence of --apply runs.
     backup = None
-    if args.apply and args.phase != "status":
+    if args.apply and args.phase != "status" and not args.skip_backup:
         ok, why = preflight(db_path)
         if not ok:
             print(f"[repair] refusing to apply: {why}", file=sys.stderr)
@@ -175,7 +195,7 @@ def main(argv=None):
     store = Store(db_path, dim=get_embedder("bge-small").dim)
     fn = _PHASES[args.phase]
     if args.phase == "reingest-stale":
-        rc = fn(store, args.apply, limit=args.limit)
+        rc = fn(store, args.apply, limit=args.limit, workers=args.workers)
     else:
         rc = fn(store, args.apply)
 
