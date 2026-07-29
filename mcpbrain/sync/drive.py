@@ -26,7 +26,9 @@ complete.
 import hashlib
 import json
 import logging
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -1228,8 +1230,58 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     return {"processed": processed, "miss": miss}
 
 
+def _reingest_one(service, store, fid, fields, folder_cache, report):
+    """One file's fetch+normalise, run either inline (max_workers=1) or on a
+    worker thread (max_workers>1). Returns (fid, outcome, payload):
+
+    outcome is "missing" (payload None), "failed" (payload None), or "ok"
+    (payload = (chunks, partial)). Never touches the store — the caller writes
+    (upsert_file_chunks) on its own thread, so DB access stays single-threaded
+    regardless of how many workers fetch concurrently.
+
+    Isolation is per FILE: a 404 (deleted since it was chunked) counts as
+    `missing` and its chunks are LEFT ALONE — removal is the delta sync's job,
+    not the repair's — and any other failure counts as `failed`. One unreadable
+    file in 9,351 must not end the run.
+    """
+    try:
+        # Nested so a 404 here can be reported as `missing` (see above) while
+        # any OTHER HttpError (403 permission-denied, 429 rate-limited, a
+        # transient 500/503 — all realistic across a 9,351-file batch)
+        # re-raises straight into the outer `except Exception` below, which is
+        # what actually gives it per-file isolation. Review finding: this used
+        # to `raise` out of a SIBLING try/except pair, which escaped the whole
+        # function on the first non-404 HttpError and aborted the run instead
+        # of moving on to the next file.
+        try:
+            fmeta = service.files().get(
+                fileId=fid, fields=fields, supportsAllDrives=True).execute()
+        except HttpError as exc:
+            resp = getattr(exc, "resp", None)
+            if resp is not None and resp.status == 404:
+                log.info("reingest: %s no longer exists in Drive; leaving "
+                         "its chunks for the delta sync's removal path", fid)
+                return fid, "missing", None
+            raise
+        content = fetch_content(service, fmeta, store=store, report=report)
+        if content is None or (not content.text and not content.tables):
+            log.info("reingest: %s yielded no content", fid)
+            return fid, "failed", None
+        chunks = normalise_drive(
+            fmeta, content.text, drive_id=fmeta.get("driveId"),
+            tables=content.tables,
+            folder=folder_path(service, fmeta, folder_cache))
+        if not chunks:
+            return fid, "failed", None
+        return fid, "ok", (chunks, content.partial)
+    except Exception as exc:  # noqa: BLE001 — one file must not end the run
+        log.warning("reingest: %s failed: %s", fid, exc)
+        return fid, "failed", None
+
+
 def reingest_files(service, store, file_ids, *, bulk_section=None,
-                   report: dict | None = None) -> dict:
+                   report: dict | None = None, max_workers: int = 1,
+                   service_factory=None) -> dict:
     """Re-fetch and re-chunk specific Drive files by id.
 
     The mechanism the repair needs and the sync layer lacked: `sync_drive` only
@@ -1256,6 +1308,19 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     not the repair's — and any other failure counts as `failed` and moves on.
     One unreadable file in 9,351 must not end the run.
 
+    `max_workers` parallelizes the network-bound half (files().get + fetch_content)
+    across a thread pool; `upsert_file_chunks` (the DB write) always runs on the
+    calling thread, one file at a time, as results complete — no new write-
+    concurrency risk, since SQLite serializes writes anyway. Requires
+    `service_factory` (a zero-arg callable building a FRESH service) because
+    googleapiclient's Resource wraps a stateful httplib2.Http that is not safe
+    to share across threads; each worker thread builds and caches its own via a
+    thread-local on first use, so a worker's earlier files reuse its own service
+    rather than rebuilding one per call. Falls back to the single-threaded path
+    (the `service` argument used directly, exactly as before) whenever
+    `max_workers <= 1` or `service_factory` is None — the default, and what
+    every existing caller/test still gets unchanged.
+
     Returns {"files": n_reingested, "missing": n, "failed": n, "orphans": n}.
     """
     if bulk_section is None:
@@ -1272,45 +1337,36 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     fields = "id,name,mimeType,modifiedTime,owners,parents,driveId"
     folder_cache: dict = {}
     summary = {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
-    for fid in file_ids:
-        try:
-            # Nested so a 404 here can `continue` without being counted as
-            # `failed` (it is `missing` instead — see the docstring) while any
-            # OTHER HttpError (403 permission-denied, 429 rate-limited, a
-            # transient 500/503 — all realistic across a 9,351-file batch)
-            # re-raises straight into the outer `except Exception` below,
-            # which is what actually gives it per-file isolation. Review
-            # finding: this used to `raise` out of a SIBLING try/except pair,
-            # which escaped the whole function on the first non-404 HttpError
-            # and aborted the run instead of moving on to the next file.
-            try:
-                fmeta = service.files().get(
-                    fileId=fid, fields=fields, supportsAllDrives=True).execute()
-            except HttpError as exc:
-                resp = getattr(exc, "resp", None)
-                if resp is not None and resp.status == 404:
-                    log.info("reingest: %s no longer exists in Drive; leaving "
-                             "its chunks for the delta sync's removal path", fid)
-                    summary["missing"] += 1
-                    continue
-                raise
-            content = fetch_content(service, fmeta, store=store, report=report)
-            if content is None or (not content.text and not content.tables):
-                log.info("reingest: %s yielded no content", fid)
-                summary["failed"] += 1
-                continue
-            chunks = normalise_drive(
-                fmeta, content.text, drive_id=fmeta.get("driveId"),
-                tables=content.tables,
-                folder=folder_path(service, fmeta, folder_cache))
-            if not chunks:
-                summary["failed"] += 1
-                continue
+
+    def _apply(fid, outcome, payload):
+        if outcome == "missing":
+            summary["missing"] += 1
+        elif outcome == "failed":
+            summary["failed"] += 1
+        else:
+            chunks, partial = payload
             with bulk_section():
                 summary["orphans"] += upsert_file_chunks(
-                    store, chunks, file_id=fid, partial=content.partial)
+                    store, chunks, file_id=fid, partial=partial)
             summary["files"] += 1
-        except Exception as exc:  # noqa: BLE001 — one file must not end the run
-            log.warning("reingest: %s failed: %s", fid, exc)
-            summary["failed"] += 1
+
+    if max_workers <= 1 or service_factory is None:
+        for fid in file_ids:
+            _apply(*_reingest_one(service, store, fid, fields, folder_cache, report))
+        return summary
+
+    _local = threading.local()
+
+    def _worker_service():
+        if not hasattr(_local, "service"):
+            _local.service = service_factory()
+        return _local.service
+
+    def _fetch(fid):
+        return _reingest_one(_worker_service(), store, fid, fields, folder_cache, report)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_fetch, fid) for fid in file_ids]
+        for future in as_completed(futures):
+            _apply(*future.result())
     return summary
