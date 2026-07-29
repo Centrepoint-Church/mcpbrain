@@ -8,7 +8,7 @@ source_ref derivation for the same doc is stable (curator-side dedup safety).
 """
 import json
 
-from mcpbrain.store import Store
+from mcpbrain.store import ENRICH_LOGIC_VERSION, Store
 
 
 def _store(tmp_path, name="a.sqlite3"):
@@ -45,7 +45,7 @@ def test_enrichment_payload_round_trips_publisher_to_importer(tmp_path):
         "entities": [{"name": "Ada Lovelace", "type": "person"}],
         "relations": [], "actions": [], "topics": [],
     }
-    A.set_enrich_payload(doc_id, json.dumps(extraction), 1)
+    A.set_enrich_payload(doc_id, json.dumps(extraction), ENRICH_LOGIC_VERSION)
 
     assert ingest_cache.publish_file(A, fs, "D1", "F1", "vh1", pin) is True
 
@@ -68,7 +68,7 @@ def test_purge_drive_drops_enrich_payloads(tmp_path):
     s = _store(tmp_path)
     s.import_cached_chunk("gdrive-F1-0", "t", "h",
                           {"source_type": "gdrive", "file_id": "F1", "drive_id": "D1"}, [0.0] * 4)
-    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1"}', 1)
+    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1"}', ENRICH_LOGIC_VERSION)
     assert s.get_enrich_payload("gdrive-F1-0") is not None
     ingest_cache.purge_drive(s, "D1")
     assert s.get_enrich_payload("gdrive-F1-0") is None

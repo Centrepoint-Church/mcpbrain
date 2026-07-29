@@ -538,3 +538,59 @@ def test_sync_gmail_skips_attachments_when_the_flag_is_off(tmp_path, monkeypatch
                store)
 
     assert called == []
+
+
+def test_backfill_gmail_can_narrow_the_query(tmp_path):
+    """A full-history attachment backfill must fetch ONLY attachment-bearing
+    mail. Gmail's `has:attachment` is a server-side filter, so the backfill costs
+    one list page per hundred matches instead of re-walking the whole mailbox —
+    the difference between a targeted repair and re-ingesting everything."""
+    from mcpbrain.sync.gmail import backfill_gmail
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    seen: dict = {}
+
+    class _Svc:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def list(self, **params):
+            seen["q"] = params.get("q")
+            return self
+
+        def execute(self):
+            return {"messages": []}
+
+    assert backfill_gmail(_Svc(), store, after="1970/01/01",
+                          q_extra="has:attachment") == 0
+    assert seen["q"] == "after:1970/01/01 has:attachment"
+
+
+def test_backfill_gmail_without_q_extra_is_unchanged(tmp_path):
+    from mcpbrain.sync.gmail import backfill_gmail
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    seen: dict = {}
+
+    class _Svc:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def list(self, **params):
+            seen["q"] = params.get("q")
+            return self
+
+        def execute(self):
+            return {"messages": []}
+
+    backfill_gmail(_Svc(), store, after="2026/01/01", before="2026/02/01")
+
+    assert seen["q"] == "after:2026/01/01 before:2026/02/01"

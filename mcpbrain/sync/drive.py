@@ -1234,10 +1234,19 @@ def _reingest_one(service, store, fid, fields, folder_cache, report):
     """One file's fetch+normalise, run either inline (max_workers=1) or on a
     worker thread (max_workers>1). Returns (fid, outcome, payload):
 
-    outcome is "missing" (payload None), "failed" (payload None), or "ok"
-    (payload = (chunks, partial)). Never touches the store — the caller writes
-    (upsert_file_chunks) on its own thread, so DB access stays single-threaded
-    regardless of how many workers fetch concurrently.
+    outcome is "missing" (payload None), "empty" (payload None), "failed"
+    (payload None), or "ok" (payload = (chunks, partial)). Never touches the
+    store — the caller writes (upsert_file_chunks) on its own thread, so DB
+    access stays single-threaded regardless of how many workers fetch
+    concurrently.
+
+    "empty" vs "failed" is the difference between PERMANENT and RETRYABLE, and
+    conflating them caused a live non-convergence loop: 465 `extraction_empty`
+    change_log rows across 10 files in 41 minutes (~46 re-fetches each), every
+    one still selected by stale_chunker_file_ids afterwards. A file that
+    deterministically yields nothing (verified on the real store: genuinely
+    EMPTY spreadsheets, which the new extractor correctly declines) must stop
+    being selected; a 429/503/timeout must stay retryable.
 
     Isolation is per FILE: a 404 (deleted since it was chunked) counts as
     `missing` and its chunks are LEFT ALONE — removal is the delta sync's job,
@@ -1265,14 +1274,17 @@ def _reingest_one(service, store, fid, fields, folder_cache, report):
             raise
         content = fetch_content(service, fmeta, store=store, report=report)
         if content is None or (not content.text and not content.tables):
+            # Deterministic: the fetch succeeded and there is nothing in it.
             log.info("reingest: %s yielded no content", fid)
-            return fid, "failed", None
+            return fid, "empty", None
         chunks = normalise_drive(
             fmeta, content.text, drive_id=fmeta.get("driveId"),
             tables=content.tables,
             folder=folder_path(service, fmeta, folder_cache))
         if not chunks:
-            return fid, "failed", None
+            # Also deterministic: content was fetched but nothing in it survived
+            # the has_content guard (an all-empty grid, a punctuation-only doc).
+            return fid, "empty", None
         return fid, "ok", (chunks, content.partial)
     except Exception as exc:  # noqa: BLE001 — one file must not end the run
         log.warning("reingest: %s failed: %s", fid, exc)
@@ -1336,11 +1348,29 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     # already expects.
     fields = "id,name,mimeType,modifiedTime,owners,parents,driveId"
     folder_cache: dict = {}
-    summary = {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
+    summary = {"files": 0, "missing": 0, "empty": 0, "failed": 0, "orphans": 0}
 
     def _apply(fid, outcome, payload):
         if outcome == "missing":
             summary["missing"] += 1
+        elif outcome == "empty":
+            # The file was read successfully and holds nothing extractable. Stamp
+            # the CURRENT chunker version onto the chunks it already has, so the
+            # level-triggered selector stops returning it — otherwise every
+            # `reingest-stale` run re-fetches it forever (measured live: ~46
+            # times each across 10 files in 41 minutes, burning Drive quota and
+            # evicting the 500-row change_log with skip noise).
+            #
+            # The existing chunks are KEPT: whatever the old extractor produced
+            # is the best available content for a file the current one cannot
+            # read. `reextract_empty` records why the stamp is there, so this is
+            # auditable rather than indistinguishable from a successful pass.
+            with bulk_section():
+                for doc_id in store.doc_ids_for_file(fid):
+                    store.patch_chunk_metadata(
+                        doc_id, chunker_version=CHUNKER_VERSION,
+                        reextract_empty=True)
+            summary["empty"] += 1
         elif outcome == "failed":
             summary["failed"] += 1
         else:

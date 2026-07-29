@@ -159,8 +159,79 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
     return 0
 
 
+# Cursor key for the attachment backfill's progress. Stored in the generic
+# sync_cursors table (same mechanism as gmail's "<source>:resume_ids"), so this
+# needs no schema change and survives an interrupted run.
+_ATT_CURSOR = "repair:attachments_year"
+
+# Oldest year worth walking. Gmail's `after:`/`before:` need real dates, and a
+# per-YEAR window makes the pass resumable at a natural granularity without
+# inventing a second cursor format.
+_ATT_FLOOR_YEAR = 2008
+
+
+def phase_backfill_attachments(store, apply: bool, *, limit: int,
+                               floor_year: int = _ATT_FLOOR_YEAR) -> int:
+    """Ingest attachments from mail already in the mailbox, newest year first.
+
+    A1 — "a PDF emailed to the user is invisible to the brain, while the
+    byte-identical file in Drive is extracted normally", the largest gap in the
+    2026-07-27 audit — was fixed in the ingest path, but Gmail sync is
+    DELTA-driven: it only ever sees new mail, so historical attachments stayed
+    invisible. Measured on the live store after the spec-2/3 work landed: 0
+    `email_attachment` chunks. This is the pass that makes the fix real.
+
+    Narrowed server-side with `has:attachment`, so it fetches only
+    attachment-bearing mail rather than re-walking the whole mailbox. Walks one
+    YEAR per invocation, newest first, recording the last completed year in a
+    cursor — so an interrupted run resumes instead of restarting, and each run is
+    bounded work. Re-running after completion is a cheap no-op.
+
+    Idempotent: attachment chunks are content-hash keyed, so a message processed
+    twice writes the same rows.
+    """
+    from datetime import datetime, timezone
+
+    done_through = store.get_cursor(_ATT_CURSOR)
+    this_year = datetime.now(timezone.utc).year
+    year = int(done_through) - 1 if done_through else this_year
+    if year < floor_year:
+        print(f"[backfill-attachments] complete: walked back to {floor_year}")
+        return 0
+    print(f"[backfill-attachments] year {year} "
+          f"(has:attachment, limit {limit}); floor {floor_year}")
+    if not apply:
+        print("[backfill-attachments] dry run — nothing fetched; "
+              "pass --apply to write")
+        return 0
+
+    from mcpbrain.auth import build_google_services
+    from mcpbrain.sync.gmail import backfill_gmail
+    gmail = build_google_services().get("gmail_service")
+    if gmail is None:
+        print("[backfill-attachments] no gmail_service (token lacks the Gmail "
+              "scope); re-authenticate with `mcpbrain setup`", file=sys.stderr)
+        return 0
+
+    n = backfill_gmail(gmail, store, after=f"{year}/01/01",
+                       before=f"{year + 1}/01/01", max_messages=limit,
+                       q_extra="has:attachment")
+    # Advance only after the window's writes are durable, mirroring sync_gmail's
+    # cursor discipline. If `n` hit the limit the year is NOT finished, so the
+    # cursor stays put and the next run re-walks it — messages already written
+    # are content-hash idempotent, so that costs fetches, not correctness.
+    if n < limit:
+        store.set_cursor(_ATT_CURSOR, str(year))
+        print(f"[backfill-attachments] year {year} complete: {n} message(s)")
+    else:
+        print(f"[backfill-attachments] year {year} hit the {limit}-message limit "
+              f"({n} done); re-run to continue the same year")
+    return 0
+
+
 _PHASES = {"status": phase_status, "purge-empty": phase_purge_empty,
-           "reingest-stale": phase_reingest_stale}
+           "reingest-stale": phase_reingest_stale,
+           "backfill-attachments": phase_backfill_attachments}
 
 
 def main(argv=None):
@@ -211,6 +282,8 @@ def main(argv=None):
     fn = _PHASES[args.phase]
     if args.phase == "reingest-stale":
         rc = fn(store, args.apply, limit=args.limit, workers=args.workers)
+    elif args.phase == "backfill-attachments":
+        rc = fn(store, args.apply, limit=args.limit)
     else:
         rc = fn(store, args.apply)
 

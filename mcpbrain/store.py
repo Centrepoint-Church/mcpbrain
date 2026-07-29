@@ -19,7 +19,17 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 # so the existing corpus re-extracts itself under current logic over time. Chunks
 # enriched before this stamp existed default to 0, so shipping at 1 schedules a
 # one-time gradual re-extraction of the whole already-enriched corpus.
-ENRICH_LOGIC_VERSION = 1
+# 1 -> 2 (2026-07-29): spec 2 gave the enriched semantic doc a `date`, a
+# `date_iso`, a `message_id` and a correct `source_type` for calendar-derived
+# digests (findings C2/C3/C4), but build_semantic_doc only runs when a thread is
+# re-enriched — so the fix reached NOTHING already in the store. Measured on the
+# live corpus: 0 of 22,324 enriched chunks carried a date, meaning
+# importance.recency_decay returned its neutral 0.5 fallback for every one of the
+# highest-value chunks in the store, exactly as C2 described. Bumping this is the
+# self-healing path: reflow_outdated_chunks resets REEXTRACT_CAP (50) chunks per
+# cycle, so ~40.7k enriched chunks re-extract gradually under current logic
+# rather than in one burst.
+ENRICH_LOGIC_VERSION = 2
 
 
 

@@ -768,6 +768,22 @@ def test_mark_enriched_stamps_logic_version(tmp_path):
     assert row["enriched"] == 1 and row["enriched_version"] == ENRICH_LOGIC_VERSION
 
 
+def test_enrich_logic_version_is_ahead_of_the_dateless_semantic_doc():
+    """Spec 2 gave the enriched semantic doc a date, date_iso, message_id and a
+    correct source_type for calendar digests (C2/C3/C4) — but build_semantic_doc
+    only runs on re-enrichment, so the fix reached nothing already stored.
+    Measured live before the bump: 0 of 22,324 enriched chunks had a date, so
+    importance.recency_decay returned its neutral 0.5 for every one of the
+    highest-value chunks in the store.
+
+    Bumping ENRICH_LOGIC_VERSION is the self-healing path (reflow_outdated_chunks
+    re-flows the corpus gradually). This pins that the bump happened, so the code
+    fix and the data can't silently diverge again."""
+    from mcpbrain.store import ENRICH_LOGIC_VERSION
+
+    assert ENRICH_LOGIC_VERSION >= 2
+
+
 def test_reflow_outdated_chunks_resets_only_old_versions(tmp_path):
     from mcpbrain.store import Store, ENRICH_LOGIC_VERSION
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
