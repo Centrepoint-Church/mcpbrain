@@ -139,6 +139,64 @@ def test_status_with_apply_takes_no_backup(tmp_path):
     assert "restore" not in out.stdout.lower()
 
 
+def test_skip_backup_takes_no_backup_and_skips_preflight(tmp_path, monkeypatch):
+    """For running many reingest-stale batches back to back under ONE backup
+    taken up front, rather than one full ~11 GB backup per batch (which fills
+    the disk after a handful of runs). --skip-backup must also skip preflight
+    -- its only purpose is proving a backup that isn't being taken will fit --
+    so this must succeed even when free disk is reported as far too low for a
+    backup, proving preflight was genuinely bypassed and not just quietly
+    passing."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    monkeypatch.setattr(repair, "_free_bytes", lambda path: 1024)  # far below any backup's need
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    for i in range(3):
+        store.upsert_chunk(f"d{i}", "|  |  |", f"h{i}", {})
+
+    out = _run("purge-empty", "--apply", "--skip-backup", home=tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "backup written" not in out.stdout.lower(), out.stdout
+    assert list(tmp_path.glob("brain.sqlite3.bak-*")) == []
+    assert Store(tmp_path / "brain.sqlite3", dim=4).count_content_free() == 0, (
+        "the purge itself must still run -- only the backup/preflight are skipped"
+    )
+
+
+def test_reingest_stale_wires_workers_into_reingest_files(tmp_path, monkeypatch):
+    """--workers N must reach reingest_files as max_workers, with a
+    service_factory only when N>1 (max_workers<=1 is the safe default that
+    keeps every existing single-threaded caller/test unchanged)."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    calls = []
+
+    def _fake_build_google_services():
+        return {"drive_service": "fake-drive-service"}
+
+    def _fake_reingest_files(service, store, ids, *, max_workers=1, service_factory=None, **kw):
+        calls.append({"max_workers": max_workers, "service_factory": service_factory})
+        return {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
+
+    monkeypatch.setattr("mcpbrain.auth.build_google_services", _fake_build_google_services)
+    monkeypatch.setattr("mcpbrain.sync.drive.reingest_files", _fake_reingest_files)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_reingest_stale(store, True, limit=500, workers=5)
+    repair.phase_reingest_stale(store, True, limit=500, workers=1)
+
+    assert calls[0]["max_workers"] == 5
+    assert calls[0]["service_factory"] is not None
+    assert calls[1]["max_workers"] == 1
+    assert calls[1]["service_factory"] is None
+
+
 def test_purge_apply_stops_when_a_batch_deletes_nothing(tmp_path, monkeypatch):
     """The purge loop re-selects until the selector comes back empty. A batch
     that selects rows but deletes none (a concurrent writer — the daemon —
