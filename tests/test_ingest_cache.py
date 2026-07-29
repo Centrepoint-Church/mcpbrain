@@ -4,7 +4,7 @@ import struct
 from mcpbrain import ingest_cache
 from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import FleetPin, CacheArtifact, CacheChunk, artifact_filename
-from mcpbrain.store import Store
+from mcpbrain.store import ENRICH_LOGIC_VERSION, Store
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
 # chunker_version tracks the CODE constant: ingest_cache floors the pin's value
@@ -137,11 +137,11 @@ def test_publish_file_includes_enrich_payload_when_present(tmp_path):
                           [0.1, 0.2, 0.3, 0.4])
     s.set_enrich_payload("gdrive-FID-0",
                          '{"thread_id":"gdrive-FID","org":"Acme","content_type":"reference","summary":"x","entities":[]}',
-                         1)  # PIN.enrich_logic_floor == 1
+                         ENRICH_LOGIC_VERSION)  # a payload at CURRENT logic
     assert ingest_cache.publish_file(s, fs, "D1", "FID", "vh1", PIN, published_by="p@x.org")
     art = CacheArtifact.from_dict(json.loads(gzip.decompress(
         fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}"))))
-    assert art.enrich.get("logic_version") == 1
+    assert art.enrich.get("logic_version") == ENRICH_LOGIC_VERSION
     assert art.enrich.get("extraction", {}).get("org") == "Acme"
 
 
@@ -474,7 +474,7 @@ def test_import_applies_cached_enrichment_payload(tmp_path):
         chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Joel Chelliah owns the plan", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
-        enrich={"logic_version": 1, "extraction": extraction},
+        enrich={"logic_version": ENRICH_LOGIC_VERSION, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",
                  gzip.compress(json.dumps(art.to_dict()).encode()))
@@ -557,7 +557,7 @@ def test_import_apply_coerces_float_idx_to_int_doc_id(tmp_path):
         chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
         chunks=(CacheChunk(idx=0, text="Joel Chelliah owns it", embedding_b64=vec,
                            metadata={"source_type":"gdrive","file_id":"FID","chunk_index":0}),),
-        enrich={"logic_version": 1, "extraction": extraction},
+        enrich={"logic_version": ENRICH_LOGIC_VERSION, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
     d = art.to_dict(); d["chunks"][0]["idx"] = 0.0        # float idx from a peer
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}",

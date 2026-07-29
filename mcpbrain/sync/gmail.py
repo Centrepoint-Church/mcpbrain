@@ -225,7 +225,8 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
 
 
 def backfill_gmail(service, store, after: str, before: str | None = None,
-                   max_messages: int | None = None, bulk_section=None) -> int:
+                   max_messages: int | None = None, bulk_section=None,
+                   q_extra: str = "") -> int:
     """One-shot bounded backfill via messages.list with an `after:YYYY/MM/DD` query.
 
     Fetches each matched message (format=full), normalises, upserts its chunks.
@@ -245,6 +246,13 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
     q = f"after:{after}"
     if before:
         q += f" before:{before}"
+    if q_extra:
+        # Server-side narrowing, appended verbatim. The attachment repair passes
+        # "has:attachment" so a full-history pass fetches ONLY attachment-bearing
+        # mail: A1's fix works on new mail via sync_gmail, but Gmail sync is
+        # delta-driven and never revisits history, so every attachment already in
+        # the mailbox stays invisible without a pass like this.
+        q += f" {q_extra}"
     page_token, processed = None, 0
     skips: dict = {}
     # Read once — see sync_gmail for why this must not sit inside the loop.

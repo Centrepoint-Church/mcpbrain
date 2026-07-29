@@ -1192,6 +1192,108 @@ def test_reingest_files_replaces_a_files_chunks_from_a_fresh_fetch(tmp_path, mon
     assert "Recovered" in store.get_chunk("gdrive-f1-0")["text"]
 
 
+def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path, monkeypatch):
+    """Live non-convergence bug, measured on the real store: 465
+    `extraction_empty` change_log rows across 10 files in a 41-minute window —
+    ~46 re-fetches of each — and all 10 were still in stale_chunker_file_ids
+    afterwards.
+
+    Cause: `_reingest_one` returned "failed" for BOTH a deterministic "there is
+    nothing in this file" and a transient network error, so a file that yields
+    zero chunks never got chunker_version stamped and the selector returned it
+    forever. Verified against the real files: they are genuinely EMPTY
+    spreadsheets — the old extractor emitted 41 chars of sheet names
+    ('Sheet: Sheet1\\nSheet: Sheet2...'), and the new one correctly declines
+    them. The extraction is right; only the convergence was wrong.
+
+    Same shape as drain.py's _EMPTY_ATTEMPT_CAP, which exists to "bound the
+    re-extract loop for genuinely content-empty docs".
+    """
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-empty1-0", "Sheet: Sheet1\nSheet: Sheet2", "h1",
+                       {"source_type": "gdrive", "file_id": "empty1",
+                        "chunk_index": 0})
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["empty1"]
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            return self
+
+        def get_media(self, fileId=None, **kw):
+            return self
+
+        def execute(self):
+            return {"id": "empty1", "name": "Guest Coffee Vouchers.xlsx",
+                    "mimeType": "text/plain", "parents": []}
+
+    # Deterministically no content — the real case is an .xlsx with no non-empty
+    # rows, which yields zero Tables.
+    monkeypatch.setattr(drive, "_fetch_text", lambda service, meta: "")
+
+    summary = drive.reingest_files(_Service(), store, ["empty1"])
+
+    assert summary["empty"] == 1, f"expected an 'empty' outcome, got {summary}"
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+        "the file is still selected, so reingest-stale will re-fetch it forever"
+    )
+    meta = store.get_chunk("gdrive-empty1-0")["metadata"]
+    assert meta["chunker_version"] == CHUNKER_VERSION
+    assert meta["reextract_empty"] is True, (
+        "the fact that re-extraction found nothing must be recorded on the data, "
+        "not just inferred from the absence of new chunks"
+    )
+    assert "Sheet: Sheet1" in store.get_chunk("gdrive-empty1-0")["text"], (
+        "the old chunks are the best available content and must be kept"
+    )
+
+
+def test_a_transient_failure_does_NOT_stop_the_file_being_selected(tmp_path, monkeypatch):
+    """The discriminator, and the reason this is not just 'stamp everything':
+    a 429/503/timeout must stay retryable. Conflating the two is what caused
+    the loop in the first place — in the other direction."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-flaky-0", "real content here", "h1",
+                       {"source_type": "gdrive", "file_id": "flaky",
+                        "chunk_index": 0})
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, fileId=None, **kw):
+            return self
+
+        def execute(self):
+            return {"id": "flaky", "name": "F.txt", "mimeType": "text/plain",
+                    "parents": []}
+
+    def _boom(service, meta):
+        raise RuntimeError("503 backend error")
+
+    monkeypatch.setattr(drive, "_fetch_text", _boom)
+
+    summary = drive.reingest_files(_Service(), store, ["flaky"])
+
+    assert summary["failed"] == 1
+    assert summary["empty"] == 0
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["flaky"], (
+        "a transient failure must remain retryable"
+    )
+
+
 def test_reingest_files_skips_a_file_that_no_longer_exists(tmp_path):
     """A file deleted from Drive since it was chunked must not abort the run or
     delete its chunks — that is the removal path's job, not the repair's."""
