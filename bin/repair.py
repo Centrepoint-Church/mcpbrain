@@ -122,7 +122,7 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
         print("[reingest-stale] dry run — nothing fetched; pass --apply to write")
         return 0
     from mcpbrain.auth import build_google_services
-    from mcpbrain.sync.drive import reingest_files
+    from mcpbrain.sync.drive import flush_skip_report, reingest_files
     services = build_google_services()
     drive = services.get("drive_service")
     if drive is None:
@@ -140,7 +140,22 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
     service_factory = (
         (lambda: build_google_services().get("drive_service"))
         if workers > 1 else None)
-    print(f"[reingest-stale] {reingest_files(drive, store, ids, max_workers=workers, service_factory=service_factory)}")
+    # Tally skipped files instead of writing one change_log row each, then flush
+    # once — the same `report=` pattern every other bulk Drive path uses
+    # (sync_drive, backfill_drive, sync_shared_drive all do this). Without it
+    # fetch_content's _note_skip takes its immediate-write branch, which would
+    # (a) issue store writes from WORKER THREADS, the one hole in
+    # reingest_files' otherwise careful "only _apply writes, on the main thread"
+    # design, and (b) evict the 500-row change_log — which doubles as the
+    # user-facing change digest — with one `ingest_skip` row per unreadable file
+    # across a 9,400-file run. Counts may undercount slightly under
+    # --workers > 1 (the tally is a plain dict incremented from several threads);
+    # they are diagnostics, and the aggregate row is what matters.
+    report: dict = {}
+    summary = reingest_files(drive, store, ids, max_workers=workers,
+                             service_factory=service_factory, report=report)
+    flush_skip_report(store, report, source="repair:reingest")
+    print(f"[reingest-stale] {summary}")
     return 0
 
 
