@@ -1352,6 +1352,23 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
 
     def _apply(fid, outcome, payload):
         if outcome == "missing":
+            # Gone from Drive. The chunks are KEPT — removal is the delta sync's
+            # job, and a 404 can be a permission change or a move rather than a
+            # deletion — but the file must stop being SELECTED, or the repair
+            # asks Drive about the same dead ids on every run. Measured on the
+            # first real run: {'files': 8, 'missing': 14, 'empty': 10} left
+            # exactly those 14 still selected, i.e. the same non-convergence
+            # loop as the `empty` case reached through the other branch.
+            #
+            # Stamping touches only the repair's selector, not the data: if the
+            # file reappears, the Changes API re-ingests it on its own terms; if
+            # it is genuinely deleted, the delta sync's removal path deletes the
+            # chunks.
+            with bulk_section():
+                for doc_id in store.doc_ids_for_file(fid):
+                    store.patch_chunk_metadata(
+                        doc_id, chunker_version=CHUNKER_VERSION,
+                        reextract_missing=True)
             summary["missing"] += 1
         elif outcome == "empty":
             # The file was read successfully and holds nothing extractable. Stamp

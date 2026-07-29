@@ -1569,3 +1569,57 @@ def test_reingest_keeps_the_drive_id_stamp_for_a_shared_drive_file(tmp_path, mon
 
     assert store.doc_ids_for_drive("SHARED1") == ["gdrive-f1-0"]
     assert store.get_chunk("gdrive-f1-0")["metadata"]["drive_id"] == "SHARED1"
+
+
+def test_a_file_gone_from_drive_also_stops_being_selected(tmp_path, monkeypatch):
+    """The same non-convergence loop as the `empty` case, via the OTHER branch —
+    found by running the real repair: `{'files': 8, 'missing': 14, 'empty': 10}`
+    left exactly 14 files still selected, so every future run re-fetches and
+    re-404s the same 14 forever.
+
+    Leaving the CHUNKS alone on a 404 is still right: removal is the delta sync's
+    job, and a 404 can be a permission change or a moved file rather than a
+    deletion. But "don't delete the content" is not the same as "keep asking
+    Drive about it forever". Stamping converges the repair selector without
+    touching the data — if the file reappears, the Changes API re-ingests it on
+    its own terms; if it is genuinely deleted, the delta sync's removal path
+    deletes the chunks.
+    """
+    from googleapiclient.errors import HttpError
+
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.store import Store
+    from mcpbrain.sync import drive
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-gone-0", "content worth keeping", "h1",
+                       {"source_type": "gdrive", "file_id": "gone",
+                        "chunk_index": 0})
+
+    class _Resp:
+        status = 404
+        reason = "Not Found"
+
+    class _Service:
+        def files(self):
+            return self
+
+        def get(self, **kw):
+            return self
+
+        def execute(self):
+            raise HttpError(_Resp(), b"not found")
+
+    summary = drive.reingest_files(_Service(), store, ["gone"])
+
+    assert summary["missing"] == 1
+    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+        "the 404'd file is still selected, so every run re-fetches it forever"
+    )
+    chunk = store.get_chunk("gdrive-gone-0")
+    assert chunk is not None, "a 404 must NOT delete content — that is the delta sync's job"
+    assert chunk["text"] == "content worth keeping"
+    assert chunk["metadata"]["reextract_missing"] is True, (
+        "why the stamp is there must be recorded, not inferred"
+    )
