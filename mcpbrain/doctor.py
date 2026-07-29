@@ -116,9 +116,19 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         except DaemonUnavailable:
             return {"status": "skipped", "reason": "daemon not running"}
 
+    def _repair_ocr():
+        # Install the tesseract CLI. Scanned, image-only PDFs have no text layer,
+        # so OCR is the only way to read them, and extractors.py degrades to an
+        # empty text layer without it — silently, which is why this needs to be
+        # both reported and repairable rather than left to a log line during
+        # ingestion. Best-effort: returns why, never raises.
+        from mcpbrain import ocr
+        ok, msg = ocr.install_tesseract(platform)
+        return {"status": "ok" if ok else "skipped", "reason": msg}
+
     return {"daemon": _repair_daemon, "agent": _repair_agent,
             "records": _repair_records, "embedder": _repair_embedder,
-            "baseline": _repair_baseline}
+            "baseline": _repair_baseline, "ocr": _repair_ocr}
 
 
 def _is_problem(key: str, state: str) -> bool:
@@ -328,6 +338,21 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             lines.append(f"✅ {'Watchdog':<16} no stall restarts")
 
     lines.append(arch_line())
+
+    # OCR availability. Without tesseract, scanned/image-only PDFs are indexed
+    # with an empty text layer and nothing says so outside a per-file log line
+    # during ingestion — which is how this stayed off on every install for
+    # months. A warning, not an error: everything except scanned-PDF text works
+    # without it, and `mcpbrain doctor --repair` installs it.
+    try:
+        from mcpbrain import ocr
+        if ocr.tesseract_available():
+            lines.append(f"✅ {'OCR':<16} tesseract available (scanned PDFs readable)")
+        else:
+            lines.append(f"⚠️  {'OCR':<16} tesseract missing — scanned PDFs index "
+                         f"with no text; run 'mcpbrain doctor --repair'")
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not break doctor
+        lines.append(f"⚠️  {'OCR':<16} could not check tesseract ({exc})")
 
     # Chunks that exceed the embedder window (512 tokens ≈ 2,000 chars). Their
     # tails are silently truncated at embed time and become unsearchable.
