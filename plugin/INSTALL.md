@@ -63,6 +63,24 @@ If something goes wrong after logon, check that file first.
 
 ---
 
+## OCR for scanned PDFs
+
+`mcpbrain setup` also installs the `tesseract` OCR engine (Homebrew on macOS,
+winget on Windows). Scanned, image-only PDFs — signed contracts, letters,
+invoices, forms — have no text layer, so OCR is the only way to read them.
+
+It is best-effort and never blocks setup. If it is skipped (no Homebrew, no
+winget, or Linux, where every route needs root) everything else works normally;
+scanned PDFs are simply indexed without their text. `mcpbrain doctor` reports
+whether OCR is available, and `mcpbrain doctor --repair` installs it later:
+
+- **macOS** — `brew install tesseract`
+- **Windows** — `winget install UB-Mannheim.TesseractOCR`
+- **Linux** — `sudo apt-get install -y tesseract-ocr` (or `sudo dnf install -y tesseract`)
+
+Already-indexed scanned PDFs are not revisited automatically — installing OCR
+affects documents ingested from then on.
+
 ## After setup
 
 The brain runs in the background and is available wherever the mcpbrain plugin is
