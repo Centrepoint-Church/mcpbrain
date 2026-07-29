@@ -197,6 +197,54 @@ def test_reingest_stale_wires_workers_into_reingest_files(tmp_path, monkeypatch)
     assert calls[1]["service_factory"] is None
 
 
+def test_reingest_stale_aggregates_skips_instead_of_writing_per_file(tmp_path, monkeypatch):
+    """Review finding. Every other bulk Drive path passes a `report` dict and
+    calls flush_skip_report once; reingest-stale passed neither, so
+    fetch_content's _note_skip took its immediate-write branch — one
+    store.record_change PER skipped file, from inside a WORKER THREAD.
+
+    Two problems, both of which the report pattern exists to prevent:
+
+    1. Writes escape the main thread. reingest_files deliberately confines every
+       store write to _apply on the main thread (its own _reingest_one docstring
+       says 'Never touches the store'), because the store is single-writer. The
+       skip path was the one hole in that.
+    2. change_log is pruned to 500 rows and doubles as the user-facing change
+       digest. A 9,400-file re-ingest containing a few hundred images or
+       unreadable files would evict the entire genuine audit trail and fill the
+       digest with `ingest_skip: image/png` — exactly what _note_skip's own
+       docstring says the aggregation was introduced to stop.
+    """
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    seen: dict = {}
+
+    def _fake_reingest_files(service, store, ids, *, report=None, **kw):
+        seen["report"] = report
+        return {"files": 0, "missing": 0, "failed": 0, "orphans": 0}
+
+    flushed: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"drive_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.drive.reingest_files", _fake_reingest_files)
+    monkeypatch.setattr("mcpbrain.sync.drive.flush_skip_report",
+                        lambda store, report, **kw: flushed.append(report))
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_reingest_stale(store, True, limit=10, workers=4)
+
+    assert seen["report"] is not None, (
+        "reingest-stale did not pass a report dict, so each skipped file writes "
+        "change_log directly from a worker thread"
+    )
+    assert flushed and flushed[0] is seen["report"], (
+        "the tally was collected but never flushed, so the skips vanish"
+    )
+
+
 def test_purge_apply_stops_when_a_batch_deletes_nothing(tmp_path, monkeypatch):
     """The purge loop re-selects until the selector comes back empty. A batch
     that selects rows but deletes none (a concurrent writer — the daemon —
