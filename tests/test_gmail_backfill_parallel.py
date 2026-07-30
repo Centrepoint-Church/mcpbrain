@@ -133,19 +133,73 @@ def test_parallel_and_sequential_produce_identical_results(tmp_path, monkeypatch
     assert any("-att-" in d for d in _ids(par_store)), "attachments must be included"
 
 
-def test_every_worker_builds_its_own_service(tmp_path, monkeypatch):
-    """googleapiclient's Resource wraps a stateful httplib2.Http that is NOT
-    thread-safe. Sharing one across workers corrupts responses under load —
-    the reason reingest_files takes a service_factory rather than a service."""
+def test_every_worker_builds_its_OWN_service(tmp_path, monkeypatch):
+    """One Resource PER FETCH THREAD — not one, shared.
+
+    googleapiclient's Resource wraps a stateful httplib2.Http. Sharing it across
+    threads interleaves reads on one socket, which surfaces as
+    `'NoneType' object has no attribute 'read'` and `IncompleteRead(N bytes
+    read)` — observed on the first real 8-worker run, which then died because the
+    corruption also hit the main thread's own pagination call.
+
+    Cause: `pool.submit(_fetch_one, _worker_service(), mid, ...)` evaluates
+    `_worker_service()` EAGERLY, on the submitting thread, so every worker got
+    the main thread's thread-local Resource. The lookup has to happen INSIDE the
+    worker (as sync/drive.reingest_files does via a closure).
+
+    The previous version of this test asserted only that the factory was CALLED,
+    which a single main-thread build satisfies — so it passed against the bug.
+    This one records the calling thread of every build.
+    """
+    import threading
+
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    msgs = {f"m{i:02d}": _msg(f"m{i:02d}") for i in range(20)}
+    msgs = {f"m{i:02d}": _msg(f"m{i:02d}") for i in range(40)}
     store = _store(tmp_path)
-    built: list = []
+    main = threading.get_ident()
+    build_threads: list = []
+
+    def _factory():
+        build_threads.append(threading.get_ident())
+        return _FakeGmail(msgs)
 
     backfill_gmail(_FakeGmail(msgs), store, after="1970/01/01", max_workers=4,
-                   service_factory=lambda: built.append(1) or _FakeGmail(msgs))
+                   service_factory=_factory)
 
-    assert built, "service_factory was never called; workers shared one Resource"
+    assert build_threads, "service_factory was never called"
+    assert main not in build_threads, (
+        "a Resource was built on the SUBMITTING thread — _worker_service() is "
+        "being evaluated eagerly at submit time, so every worker shares one "
+        "httplib2.Http (the IncompleteRead / NoneType.read failure)"
+    )
+    assert len(set(build_threads)) > 1, (
+        f"only {len(set(build_threads))} distinct thread(s) built a Resource; "
+        "workers are sharing one"
+    )
+
+
+def test_one_service_is_reused_per_thread_not_per_message(tmp_path, monkeypatch):
+    """Thread-local, not per-call: rebuilding a Resource for each of thousands of
+    messages would re-do OAuth discovery every time."""
+    import threading
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    msgs = {f"m{i:02d}": _msg(f"m{i:02d}") for i in range(60)}
+    store = _store(tmp_path)
+    build_threads: list = []
+
+    def _factory():
+        build_threads.append(threading.get_ident())
+        return _FakeGmail(msgs)
+
+    backfill_gmail(_FakeGmail(msgs), store, after="1970/01/01", max_workers=4,
+                   service_factory=_factory)
+
+    assert len(build_threads) == len(set(build_threads)), (
+        f"{len(build_threads)} builds across {len(set(build_threads))} threads — "
+        "the thread-local cache is not being reused"
+    )
+    assert len(build_threads) <= 4, "more services than workers"
 
 
 def test_writes_only_happen_on_the_calling_thread(tmp_path, monkeypatch):

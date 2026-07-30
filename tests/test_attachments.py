@@ -321,3 +321,32 @@ def test_a_tsv_attachment_is_parsed_on_tabs(monkeypatch):
 
     assert "| Account | Description | Amount |" in rowtext
     assert "| 4521 | Venue hire | 1450.00 |" in rowtext
+
+
+def test_a_calendar_invite_is_skipped_silently():
+    """Decision (2026-07-30): .ics attachments are not extracted, because the
+    meeting is already ingested first-hand by the calendar sync — with attendees,
+    times and recurrence. Parsing the attached copy would duplicate that content
+    under a second identity, the same two-namespaces problem that broke calendar
+    enrichment in 0.7.98.
+
+    Silently, not via the skip report: Google attaches BOTH text/calendar and
+    application/ics to every invite, so a reported skip is two log rows per
+    invite — hundreds of rows of noise across a full-history backfill for a
+    settled decision."""
+    for mime in ("text/calendar", "application/ics"):
+        found = attachments.iter_attachment_parts(
+            {"parts": [_part("invite.ics", mime)]})
+        assert found == [], f"{mime} should not even be listed as an attachment"
+
+
+def test_a_real_attachment_beside_an_invite_still_arrives():
+    """The discriminator: skipping .ics must not skip the agenda PDF that came
+    with it."""
+    found = attachments.iter_attachment_parts({"parts": [
+        _part("invite.ics", "text/calendar", attachment_id="a0"),
+        _part("Agenda.pdf", "application/pdf", attachment_id="a1"),
+    ]})
+
+    assert [p["filename"] for p in found] == ["Agenda.pdf"]
+    assert found[0]["index"] == 0, "the surviving attachment must be index 0"
