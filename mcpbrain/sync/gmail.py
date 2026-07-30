@@ -350,6 +350,21 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
             _local.service = service_factory()
         return _local.service
 
+    def _fetch(mid):
+        """Runs ON the worker thread — which is the point.
+
+        `_worker_service()` MUST be called here, not passed in at submit time:
+        `pool.submit(_fetch_one, _worker_service(), mid)` evaluates it eagerly on
+        the SUBMITTING thread, handing every worker the same Resource. That
+        interleaves reads on one httplib2.Http socket and surfaces as
+        `'NoneType' object has no attribute 'read'` / `IncompleteRead(N bytes
+        read)` — and corrupts the main thread's own pagination call too, killing
+        the run. Same closure shape as drive.reingest_files._fetch.
+        """
+        return _fetch_one(_worker_service(), mid,
+                          fetch_attachments=fetch_attachments,
+                          att_report=att_report)
+
     try:
         while True:
             params = {"userId": "me", "q": q, "maxResults": 100}
@@ -372,10 +387,7 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
                     if raw is not None:
                         _write(raw, att)
             else:
-                futures = [pool.submit(_fetch_one, _worker_service(), mid,
-                                       fetch_attachments=fetch_attachments,
-                                       att_report=att_report)
-                           for mid in ids]
+                futures = [pool.submit(_fetch, mid) for mid in ids]
                 for future in as_completed(futures):
                     try:
                         raw, att = future.result()

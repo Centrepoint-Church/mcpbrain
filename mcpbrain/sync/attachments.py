@@ -92,6 +92,17 @@ _EXTRACTION_METHOD = {
 # always signature logos rather than content.
 _SKIP_PREFIXES = ("image/", "audio/", "video/")
 
+# Calendar invites are DELIBERATELY not extracted (decision, 2026-07-30). Google
+# attaches both types to every invite, so each one otherwise logs two
+# `attachment_unsupported` skips. Extracting them was considered and rejected:
+# the meeting they describe is already ingested first-hand by the calendar sync
+# (sync/calendar.py, with attendees, times and recurrence), so parsing the
+# attached copy would duplicate that content under a second identity — the same
+# two-namespaces-for-one-thing problem that broke calendar enrichment in 0.7.98.
+# Listed explicitly so the skip is silent rather than noisy across a
+# full-history backfill, and so this is not re-argued from the log volume.
+_SILENT_SKIP_MIMES = ("text/calendar", "application/ics")
+
 
 def _supported(mime: str) -> bool:
     return mime in _EXTRACTORS or mime in _TABLE_EXTRACTORS or mime in _CSV_MIMES
@@ -113,7 +124,8 @@ def iter_attachment_parts(payload: dict) -> list[dict]:
         body = part.get("body") or {}
         attachment_id = body.get("attachmentId")
         mime = part.get("mimeType", "")
-        if filename and attachment_id and not mime.startswith(_SKIP_PREFIXES):
+        if (filename and attachment_id and not mime.startswith(_SKIP_PREFIXES)
+                and mime not in _SILENT_SKIP_MIMES):
             size = int(body.get("size") or 0)
             if size <= _MAX_ATTACHMENT_BYTES:
                 # `index` is assigned HERE, not by the caller: it is part of the
