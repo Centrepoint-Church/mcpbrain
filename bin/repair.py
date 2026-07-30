@@ -170,8 +170,10 @@ _ATT_CURSOR = "repair:attachments_year"
 _ATT_FLOOR_YEAR = 2008
 
 
-def phase_backfill_attachments(store, apply: bool, *, limit: int,
-                               floor_year: int = _ATT_FLOOR_YEAR) -> int:
+def phase_backfill_attachments(store, apply: bool, *, limit: int | None,
+                               floor_year: int = _ATT_FLOOR_YEAR,
+                               all_years: bool = False,
+                               workers: int = 1) -> int:
     """Ingest attachments from mail already in the mailbox, newest year first.
 
     A1 — "a PDF emailed to the user is invisible to the brain, while the
@@ -182,24 +184,34 @@ def phase_backfill_attachments(store, apply: bool, *, limit: int,
     `email_attachment` chunks. This is the pass that makes the fix real.
 
     Narrowed server-side with `has:attachment`, so it fetches only
-    attachment-bearing mail rather than re-walking the whole mailbox. Walks one
-    YEAR per invocation, newest first, recording the last completed year in a
-    cursor — so an interrupted run resumes instead of restarting, and each run is
-    bounded work. Re-running after completion is a cheap no-op.
+    attachment-bearing mail rather than re-walking the whole mailbox.
 
-    Idempotent: attachment chunks are content-hash keyed, so a message processed
-    twice writes the same rows.
+    `all_years` walks every year from now back to `floor_year` in ONE run;
+    otherwise one year per invocation. Either way the last COMPLETED year is
+    recorded in a cursor, so the year loop stays the resume granularity: an
+    interrupted --all-years run continues from the year it died in rather than
+    restarting the whole history. `limit=None` means "the whole year".
+
+    `workers` > 1 fetches each page of messages concurrently (see
+    backfill_gmail): the pass is entirely network-bound — one `messages.get` per
+    message plus one `attachments.get` per attachment — so this is the difference
+    between minutes and hours over a full mailbox.
+
+    Idempotent throughout: attachment chunks are content-hash keyed, so a message
+    processed twice writes the same rows.
     """
     from datetime import datetime, timezone
 
     done_through = store.get_cursor(_ATT_CURSOR)
     this_year = datetime.now(timezone.utc).year
-    year = int(done_through) - 1 if done_through else this_year
-    if year < floor_year:
+    start_year = int(done_through) - 1 if done_through else this_year
+    if start_year < floor_year:
         print(f"[backfill-attachments] complete: walked back to {floor_year}")
         return 0
-    print(f"[backfill-attachments] year {year} "
-          f"(has:attachment, limit {limit}); floor {floor_year}")
+
+    span = (f"{start_year}..{floor_year}" if all_years else str(start_year))
+    print(f"[backfill-attachments] years {span} (has:attachment, "
+          f"limit {limit if limit is not None else 'none'}, workers {workers})")
     if not apply:
         print("[backfill-attachments] dry run — nothing fetched; "
               "pass --apply to write")
@@ -212,20 +224,36 @@ def phase_backfill_attachments(store, apply: bool, *, limit: int,
         print("[backfill-attachments] no gmail_service (token lacks the Gmail "
               "scope); re-authenticate with `mcpbrain setup`", file=sys.stderr)
         return 0
+    # Each worker needs its OWN Resource: googleapiclient wraps a stateful
+    # httplib2.Http that is not safe to share across threads. Same reason
+    # bin/repair.py's reingest-stale passes a factory.
+    factory = ((lambda: build_google_services().get("gmail_service"))
+               if workers > 1 else None)
 
-    n = backfill_gmail(gmail, store, after=f"{year}/01/01",
-                       before=f"{year + 1}/01/01", max_messages=limit,
-                       q_extra="has:attachment")
-    # Advance only after the window's writes are durable, mirroring sync_gmail's
-    # cursor discipline. If `n` hit the limit the year is NOT finished, so the
-    # cursor stays put and the next run re-walks it — messages already written
-    # are content-hash idempotent, so that costs fetches, not correctness.
-    if n < limit:
+    total = 0
+    years = (range(start_year, floor_year - 1, -1) if all_years else [start_year])
+    for year in years:
+        n = backfill_gmail(gmail, store, after=f"{year}/01/01",
+                           before=f"{year + 1}/01/01", max_messages=limit,
+                           q_extra="has:attachment", max_workers=workers,
+                           service_factory=factory)
+        total += n
+        # Advance only after the window's writes are durable, mirroring
+        # sync_gmail's cursor discipline. A year that hit its limit is NOT
+        # finished, so the cursor stays put and the next run re-walks it —
+        # already-written messages are content-hash idempotent, so that costs
+        # fetches, not correctness.
+        if limit is not None and n >= limit:
+            print(f"[backfill-attachments] year {year} hit the {limit}-message "
+                  f"limit ({n} done); re-run to continue the same year")
+            break
         store.set_cursor(_ATT_CURSOR, str(year))
-        print(f"[backfill-attachments] year {year} complete: {n} message(s)")
+        print(f"[backfill-attachments] year {year}: {n} message(s) "
+              f"(running total {total})")
     else:
-        print(f"[backfill-attachments] year {year} hit the {limit}-message limit "
-              f"({n} done); re-run to continue the same year")
+        if all_years:
+            print(f"[backfill-attachments] complete: walked back to {floor_year}; "
+                  f"{total} message(s) total")
     return 0
 
 
@@ -240,10 +268,18 @@ def main(argv=None):
     ap.add_argument("--apply", action="store_true",
                     help="actually write (default is a dry run)")
     ap.add_argument("--limit", type=int, default=500,
-                    help="max Drive files per reingest-stale run")
+                    help="max items per run (Drive files for reingest-stale, "
+                         "messages per year for backfill-attachments). "
+                         "0 means no limit.")
     ap.add_argument("--workers", type=int, default=1,
-                    help="reingest-stale: concurrent Drive fetch workers "
-                         "(default 1 = sequential)")
+                    help="concurrent fetch workers for reingest-stale and "
+                         "backfill-attachments (default 1 = sequential). Both are "
+                         "network-bound; writes always stay on one thread.")
+    ap.add_argument("--all-years", action="store_true",
+                    help="backfill-attachments: walk every year back to the floor "
+                         "in ONE run instead of one year per invocation. The "
+                         "per-year cursor still advances, so an interrupted run "
+                         "resumes from the year it stopped in.")
     ap.add_argument("--skip-backup", action="store_true",
                     help="skip the pre-apply backup/disk-preflight for THIS "
                          "invocation. For running many reingest-stale batches "
@@ -252,6 +288,11 @@ def main(argv=None):
                          "live store, so anything before the one backup you did "
                          "take is what --skip-backup runs are gambling on.")
     args = ap.parse_args(argv)
+    # `--limit 0` means "no limit". argparse cannot express None on an int, and
+    # 0 is meaningless as a real bound (it would do nothing), so it is the
+    # natural sentinel — `--limit 0 --all-years` is "the entire mailbox, one run".
+    if args.limit == 0:
+        args.limit = None
 
     home = config.app_dir()
     db_path = Path(home) / "brain.sqlite3"
@@ -283,7 +324,8 @@ def main(argv=None):
     if args.phase == "reingest-stale":
         rc = fn(store, args.apply, limit=args.limit, workers=args.workers)
     elif args.phase == "backfill-attachments":
-        rc = fn(store, args.apply, limit=args.limit)
+        rc = fn(store, args.apply, limit=args.limit, all_years=args.all_years,
+                workers=args.workers)
     else:
         rc = fn(store, args.apply)
 

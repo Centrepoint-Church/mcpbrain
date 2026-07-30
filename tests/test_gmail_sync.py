@@ -42,7 +42,7 @@ class _Req:
     def __init__(self, result):
         self._r = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._r
 
 
@@ -562,7 +562,7 @@ def test_backfill_gmail_can_narrow_the_query(tmp_path):
             seen["q"] = params.get("q")
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"messages": []}
 
     assert backfill_gmail(_Svc(), store, after="1970/01/01",
@@ -588,7 +588,7 @@ def test_backfill_gmail_without_q_extra_is_unchanged(tmp_path):
             seen["q"] = params.get("q")
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"messages": []}
 
     backfill_gmail(_Svc(), store, after="2026/01/01", before="2026/02/01")

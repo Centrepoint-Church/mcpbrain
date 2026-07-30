@@ -372,3 +372,113 @@ def test_backfill_attachments_dry_run_fetches_nothing(tmp_path, monkeypatch):
 
     assert called == []
     assert store.get_cursor(repair._ATT_CURSOR) is None
+
+
+def test_all_years_walks_the_whole_history_in_one_run(tmp_path, monkeypatch):
+    """--all-years: 'run it at once' rather than one invocation per year. The
+    per-year cursor still advances, so this stays resumable — the point is one
+    command, not one giant unresumable window."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    years: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda service, store, after, before=None, **kw:
+                        years.append(int(after[:4])) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, True, limit=None, all_years=True,
+                                      floor_year=2020)
+
+    assert years == [2026, 2025, 2024, 2023, 2022, 2021, 2020], years
+    assert store.get_cursor(repair._ATT_CURSOR) == "2020", (
+        "the cursor must land on the floor year so a re-run is a no-op"
+    )
+
+
+def test_all_years_resumes_from_the_cursor(tmp_path, monkeypatch):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    years: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda service, store, after, before=None, **kw:
+                        years.append(int(after[:4])) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.set_cursor(repair._ATT_CURSOR, "2024")   # 2024 already done
+
+    repair.phase_backfill_attachments(store, True, limit=None, all_years=True,
+                                      floor_year=2022)
+
+    assert years == [2023, 2022], f"re-walked completed years: {years}"
+
+
+def test_all_years_stops_at_a_year_that_hit_its_limit(tmp_path, monkeypatch):
+    """A limited year is unfinished, so the walk must NOT move past it — otherwise
+    --all-years would silently skip the tail of a heavy year."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    years: list = []
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda service, store, after, before=None,
+                        max_messages=None, **kw:
+                        years.append(int(after[:4])) or max_messages)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, True, limit=10, all_years=True,
+                                      floor_year=2020)
+
+    assert years == [2026], f"walked past an unfinished year: {years}"
+    assert store.get_cursor(repair._ATT_CURSOR) is None
+
+
+def test_workers_and_a_service_factory_reach_backfill_gmail(tmp_path, monkeypatch):
+    """Workers need their OWN Resource — googleapiclient's is not thread-safe."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    seen: dict = {}
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"gmail_service": "fake"})
+    monkeypatch.setattr("mcpbrain.sync.gmail.backfill_gmail",
+                        lambda service, store, after, before=None,
+                        max_workers=1, service_factory=None, **kw:
+                        seen.update(w=max_workers, f=service_factory) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_backfill_attachments(store, True, limit=None, workers=8)
+    assert seen["w"] == 8
+    assert seen["f"] is not None
+
+    repair.phase_backfill_attachments(store, True, limit=None, workers=1)
+    assert seen["f"] is None, "no factory when sequential"
+
+
+def test_limit_zero_means_no_limit(tmp_path):
+    """`--limit 0 --all-years` is 'the entire mailbox, one run'. argparse cannot
+    express None on an int, and 0 is meaningless as a real bound, so it is the
+    natural sentinel."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    out = _run("backfill-attachments", "--limit", "0", home=tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "limit none" in out.stdout, out.stdout

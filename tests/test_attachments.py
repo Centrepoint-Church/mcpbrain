@@ -197,7 +197,7 @@ def test_fetch_and_normalise_pulls_the_bytes_and_extracts(monkeypatch):
             assert (messageId, id) == ("m1", "att-1")
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"data": payload, "size": 20}
 
     chunks = attachments.fetch_and_normalise(
@@ -224,7 +224,7 @@ def test_one_failing_attachment_does_not_kill_the_others(monkeypatch):
             self._id = id
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             if self._id == "a0":
                 raise RuntimeError("network")
             return {"data": base64.urlsafe_b64encode(b"fine").decode()}
