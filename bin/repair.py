@@ -257,9 +257,88 @@ def phase_backfill_attachments(store, apply: bool, *, limit: int | None,
     return 0
 
 
+def phase_embed_pending(store, apply: bool, *, limit: int | None,
+                        batch_size: int = 32) -> int:
+    """Embed every pending chunk in one pass, at full speed.
+
+    Why this exists. Measured on this machine: the embedder does ~66 chunks/sec
+    in isolation (batch size is irrelevant — 32/64/128/256 all land within noise
+    of each other), while the daemon achieves ~5. The daemon is not doing
+    anything wrong; index_pending simply gets a slice of a 60s cycle that is
+    mostly sync, drain, prepare, cadences and periodic backup, and it is
+    deliberately bounded (EMBED_MAX_ITEMS, CYCLE_BUDGET_S) so recall stays
+    responsive. That is right for steady state and wrong for a backlog: 15,307
+    attachment chunks arriving at once is ~50 minutes of CPU spread over hours of
+    daemon uptime, during which the new content is not searchable.
+
+    So this drains in one attended pass — no cycle budget, no item cap, looping
+    until nothing is pending.
+
+    The daemon is PAUSED for the duration. SQLite here is single-writer, and
+    running a second embedding writer alongside the daemon's own is exactly the
+    contention the architecture exists to avoid; pausing is cheaper and more
+    honest than racing it and relying on busy_timeout. It always resumes, even if
+    embedding raises — a repair that leaves the brain paused has broken the thing
+    it was fixing. A daemon that is not running at all is the easy case, not an
+    error.
+    """
+    from mcpbrain import config
+    from mcpbrain.index import index_pending
+
+    pending = store.count_pending_embeddings() if hasattr(
+        store, "count_pending_embeddings") else None
+    print(f"[embed-pending] {pending if pending is not None else 'unknown'} "
+          f"chunk(s) awaiting embedding (batch {batch_size})")
+    if not apply:
+        print("[embed-pending] dry run — nothing embedded; pass --apply to write")
+        return 0
+
+    from mcpbrain.control_client import ControlClient, DaemonUnavailable
+    client = None
+    try:
+        client = ControlClient(str(config.app_dir()), timeout=30)
+        client.pause()
+        print("[embed-pending] daemon paused (single-writer store)")
+    except DaemonUnavailable:
+        client = None
+        print("[embed-pending] daemon not running — no contention to avoid")
+    except Exception as exc:  # noqa: BLE001 — pausing is an optimisation
+        client = None
+        print(f"[embed-pending] could not pause the daemon ({exc}); continuing — "
+              f"expect slower progress while both processes write", file=sys.stderr)
+
+    total = 0
+    try:
+        from mcpbrain.embed import get_embedder
+        embedder = get_embedder()
+        while True:
+            n = index_pending(store, embedder, batch_size,
+                              home=str(config.app_dir()),
+                              budget=None, max_items=None)
+            if not n:
+                break
+            total += n
+            print(f"[embed-pending] {total} embedded")
+            if limit is not None and total >= limit:
+                print(f"[embed-pending] stopping at the {limit}-chunk limit")
+                break
+    finally:
+        if client is not None:
+            try:
+                client.resume()
+                print("[embed-pending] daemon resumed")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[embed-pending] COULD NOT RESUME THE DAEMON ({exc}) — "
+                      f"run `mcpbrain doctor --repair` or restart it",
+                      file=sys.stderr)
+    print(f"[embed-pending] done: {total} chunk(s) embedded")
+    return 0
+
+
 _PHASES = {"status": phase_status, "purge-empty": phase_purge_empty,
            "reingest-stale": phase_reingest_stale,
-           "backfill-attachments": phase_backfill_attachments}
+           "backfill-attachments": phase_backfill_attachments,
+           "embed-pending": phase_embed_pending}
 
 
 def main(argv=None):
@@ -326,6 +405,8 @@ def main(argv=None):
     elif args.phase == "backfill-attachments":
         rc = fn(store, args.apply, limit=args.limit, all_years=args.all_years,
                 workers=args.workers)
+    elif args.phase == "embed-pending":
+        rc = fn(store, args.apply, limit=args.limit)
     else:
         rc = fn(store, args.apply)
 

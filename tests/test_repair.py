@@ -5,6 +5,8 @@ logic in the library.
 """
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 _BIN = Path(__file__).resolve().parents[1] / "bin" / "repair.py"
@@ -482,3 +484,118 @@ def test_limit_zero_means_no_limit(tmp_path):
 
     assert out.returncode == 0, out.stderr
     assert "limit none" in out.stdout, out.stdout
+
+
+def test_embed_phase_drains_the_whole_backlog(tmp_path, monkeypatch):
+    """Measured on the live store: the embedder does ~66 chunks/sec in isolation,
+    but the daemon achieves ~5 — it gets only a slice of a cycle that is mostly
+    sync, drain, prepare and cadences. So a large backlog (15,307 attachment
+    chunks arrived at once) takes hours of daemon uptime for work the CPU can do
+    in minutes.
+
+    This phase is that work, done in one attended pass: no per-cycle budget, no
+    item cap, one loop until nothing is pending."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    calls: list = []
+
+    def _fake_index_pending(store, embedder, batch_size=32, **kw):
+        calls.append(kw)
+        # First call drains everything, second finds nothing (loop terminates).
+        return 0 if len(calls) > 1 else 500
+
+    monkeypatch.setattr("mcpbrain.index.index_pending", _fake_index_pending)
+    monkeypatch.setattr("mcpbrain.embed.get_embedder", lambda *a, **kw: object())
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_embed_pending(store, True, limit=None)
+
+    assert calls, "index_pending was never called"
+    assert calls[0].get("budget") is None, (
+        "a cycle budget would re-impose the daemon's own throttle"
+    )
+    assert calls[0].get("max_items") is None, "the point is to drain, not sample"
+
+
+def test_embed_phase_dry_run_embeds_nothing(tmp_path, monkeypatch):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    called: list = []
+    monkeypatch.setattr("mcpbrain.index.index_pending",
+                        lambda *a, **kw: called.append(1) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "some text", "h1", {})
+
+    repair.phase_embed_pending(store, False, limit=None)
+
+    assert called == []
+
+
+def test_embed_phase_pauses_and_always_resumes_the_daemon(tmp_path, monkeypatch):
+    """Two writers on one SQLite store is what the whole architecture avoids, so
+    the drain pauses the daemon first. It MUST resume even if embedding raises —
+    a repair that leaves the daemon paused has broken the user's brain to fix
+    their backlog."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    events: list = []
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def pause(self):
+            events.append("pause")
+            return {"status": "paused"}
+
+        def resume(self):
+            events.append("resume")
+            return {"status": "running"}
+
+    monkeypatch.setattr("mcpbrain.control_client.ControlClient", _Client)
+    monkeypatch.setattr("mcpbrain.embed.get_embedder", lambda *a, **kw: object())
+
+    def _boom(*a, **kw):
+        events.append("embed")
+        raise RuntimeError("onnx exploded")
+
+    monkeypatch.setattr("mcpbrain.index.index_pending", _boom)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    with pytest.raises(RuntimeError):
+        repair.phase_embed_pending(store, True, limit=None)
+
+    assert events == ["pause", "embed", "resume"], events
+
+
+def test_embed_phase_survives_an_unreachable_daemon(tmp_path, monkeypatch):
+    """A stopped daemon means no contention at all — that is the easy case, not
+    an error. It must not stop the drain."""
+    import bin.repair as repair
+    from mcpbrain.control_client import DaemonUnavailable
+    from mcpbrain.store import Store
+
+    def _unavailable(*a, **kw):
+        raise DaemonUnavailable("not running")
+
+    monkeypatch.setattr("mcpbrain.control_client.ControlClient", _unavailable)
+    monkeypatch.setattr("mcpbrain.embed.get_embedder", lambda *a, **kw: object())
+    drained: list = []
+    monkeypatch.setattr("mcpbrain.index.index_pending",
+                        lambda *a, **kw: drained.append(1) or 0)
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    repair.phase_embed_pending(store, True, limit=None)
+
+    assert drained, "an unreachable daemon must not stop the drain"
