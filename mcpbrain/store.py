@@ -1453,6 +1453,13 @@ class Store:
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM chunks WHERE enriched=1").fetchone()[0]
 
+    def count_pending_embeddings(self) -> int:
+        """Chunks written but not yet embedded — i.e. not yet searchable by
+        meaning. `embedded` is indexed, so this is cheap."""
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE embedded=0").fetchone()[0]
+
     def count_chunks_longer_than(self, n: int) -> int:
         """Chunks whose stored text exceeds n characters — i.e. whose tail the
         512-token embedder silently discards (B3). 15,576 in the live store."""
