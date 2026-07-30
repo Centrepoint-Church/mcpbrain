@@ -46,6 +46,13 @@ _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 # One message with 40 attachments must not spend a whole cycle's budget.
 _MAX_ATTACHMENTS_PER_MESSAGE = 10
 
+# googleapiclient's own exponential backoff, for transient 5xx / 429 / quota
+# errors. The same value fleet_storage.py and backup.py use. It matters more on
+# the parallel backfill path, which deliberately pushes Gmail's per-user quota
+# (attachments.get costs 5 units of a 250/sec budget) far harder than the
+# one-message-at-a-time delta sync ever does.
+_NUM_RETRIES = 5
+
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _XLS = "application/vnd.ms-excel"          # legacy .xls
 
@@ -197,33 +204,82 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
     return out
 
 
-def fetch_and_normalise(service, raw_message: dict, *, store=None) -> list[Chunk]:
+def _note_skip(store, report: dict | None, kind: str, msg_id: str,
+               mime: str, detail: str) -> None:
+    """Record one skipped attachment — immediately, or tallied for the caller.
+
+    With `report`, tally into {(kind, mime): count} and write nothing; the caller
+    flushes one summary row per kind at the end (see `flush_skip_report`). This
+    matters for two independent reasons, and a full-history attachment backfill
+    hits both at once:
+
+    1. `change_log` is pruned to 500 rows and doubles as the user-facing change
+       digest, so one row per skipped attachment across a whole mailbox — every
+       image, every .zip — evicts the entire genuine audit trail. Exactly the
+       defect already fixed on the Drive path (drive._note_skip).
+    2. `store.record_change` is a WRITE, and the parallel backfill calls this
+       from fetch workers. The store is single-writer.
+
+    Without `report`, behaviour is unchanged (one row, written now) so the
+    existing per-message sync path keeps working as before.
+    """
+    if report is None:
+        ingest_report.record_skip(store, kind, msg_id, detail)
+        return
+    key = (kind, mime or "unknown")
+    report[key] = report.get(key, 0) + 1
+
+
+def flush_skip_report(store, report: dict, *, source: str = "gmail") -> None:
+    """Turn an attachment-skip tally into one change_log row per kind.
+
+    Mirrors drive.flush_skip_report: a per-mime breakdown in the detail string so
+    the aggregate still says WHICH types were skipped, not just how many.
+    Typically a no-op (nothing skipped).
+    """
+    by_kind: dict[str, list[tuple[str, int]]] = {}
+    for (kind, mime), count in sorted(report.items()):
+        by_kind.setdefault(kind, []).append((mime, count))
+    for kind, items in by_kind.items():
+        total = sum(c for _m, c in items)
+        detail = ", ".join(f"{m} x{c}" for m, c in items)
+        ingest_report.record_skip(store, kind, source, f"{total} ({detail})")
+
+
+def fetch_and_normalise(service, raw_message: dict, *, store=None,
+                        report: dict | None = None) -> list[Chunk]:
     """Fetch every attachment of one message and normalise it.
 
     Best-effort per attachment: a 404 or a failed extraction skips that one and
     is recorded, rather than aborting the message or the sync.
+
+    Pass `report` (a dict the caller owns) to TALLY skips instead of writing them
+    — required when calling this from a fetch worker, and strongly preferable for
+    any bulk pass. See `_note_skip`.
     """
     payload = raw_message.get("payload") or {}
     msg_id = raw_message["id"]
     out: list[Chunk] = []
     for part in iter_attachment_parts(payload):
-        if not _supported(part["mime"]):
-            ingest_report.record_skip(store, "attachment_unsupported", msg_id,
-                                      f"{part['mime']} ({part['filename']})")
+        mime = part["mime"]
+        if not _supported(mime):
+            _note_skip(store, report, "attachment_unsupported", msg_id, mime,
+                       f"{mime} ({part['filename']})")
             continue
         try:
             resp = service.users().messages().attachments().get(
-                userId="me", messageId=msg_id, id=part["attachment_id"]).execute()
+                userId="me", messageId=msg_id, id=part["attachment_id"]
+            ).execute(num_retries=_NUM_RETRIES)
             data = base64.urlsafe_b64decode(resp.get("data") or "")
         except Exception as exc:  # noqa: BLE001 — one attachment must not kill a sync
             log.warning("attachment fetch failed for %s/%s: %s",
                         msg_id, part["filename"], exc)
-            ingest_report.record_skip(store, "attachment_fetch_failed", msg_id,
-                                      part["filename"])
+            _note_skip(store, report, "attachment_fetch_failed", msg_id, mime,
+                       part["filename"])
             continue
         chunks = normalise_attachment(raw_message, part, data)
         if not chunks:
-            ingest_report.record_skip(store, "attachment_empty", msg_id,
-                                      f"{part['mime']} ({part['filename']})")
+            _note_skip(store, report, "attachment_empty", msg_id, mime,
+                       f"{mime} ({part['filename']})")
         out.extend(chunks)
     return out

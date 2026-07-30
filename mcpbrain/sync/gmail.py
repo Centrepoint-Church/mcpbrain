@@ -5,6 +5,9 @@ The initial bulk backfill (messages.list over recent mail) is a separate task.
 """
 
 import json
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 
 from googleapiclient.errors import HttpError
@@ -12,6 +15,15 @@ from googleapiclient.errors import HttpError
 from mcpbrain import config
 from mcpbrain.sync import attachments, ingest_report
 from mcpbrain.sync.normalise import normalise_gmail
+
+log = logging.getLogger(__name__)
+
+# googleapiclient's own exponential backoff for transient 5xx / 429 / quota
+# errors, matching fleet_storage.py and backup.py. The parallel backfill pushes
+# Gmail's 250-units/user/second budget far harder than the delta sync does
+# (messages.get is 5 units, each attachments.get another 5), so leaving retries
+# to the library is what keeps a wide fan-out from failing on rate limits.
+_NUM_RETRIES = 5
 
 
 def sync_gmail(service, store, source: str = "gmail", *, budget=None,
@@ -224,9 +236,36 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     return messages_processed
 
 
+def _fetch_one(service, mid: str, *, fetch_attachments: bool,
+               att_report: dict | None) -> tuple[dict | None, list]:
+    """Fetch one message and its attachments. Returns (raw, attachment_chunks).
+
+    Pure network + pure transformation: touches the STORE not at all, so this is
+    safe to run on a worker thread while the caller does every write. Returns
+    (None, []) for a message that 404s (deleted between list and get — normal,
+    not an error).
+
+    Attachment skips are TALLIED into `att_report` rather than written, because a
+    write from here would break the single-writer rule and, over a whole
+    mailbox's images and .zips, evict the 500-row change_log.
+    """
+    try:
+        raw = service.users().messages().get(
+            userId="me", id=mid, format="full").execute(num_retries=_NUM_RETRIES)
+    except HttpError as e:
+        resp_err = getattr(e, "resp", None)
+        if resp_err is not None and resp_err.status == 404:
+            return None, []
+        raise
+    att = (attachments.fetch_and_normalise(service, raw, report=att_report)
+           if fetch_attachments else [])
+    return raw, att
+
+
 def backfill_gmail(service, store, after: str, before: str | None = None,
                    max_messages: int | None = None, bulk_section=None,
-                   q_extra: str = "") -> int:
+                   q_extra: str = "", max_workers: int = 1,
+                   service_factory=None) -> int:
     """One-shot bounded backfill via messages.list with an `after:YYYY/MM/DD` query.
 
     Fetches each matched message (format=full), normalises, upserts its chunks.
@@ -236,10 +275,36 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
     historical window without re-fetching newer mail. Omit it for the original
     "everything since X" semantics.
 
-    Already item-bounded by `max_messages` (the progressive-backfill step caps
-    this at `_BACKFILL_MAX_PER_SOURCE`, default 200) and touches no cursor, so
-    no budget/checkpoint logic is needed — `bulk_section` (default
-    `contextlib.nullcontext`) still brackets each message's writes.
+    `max_messages` bounds the run (the progressive-backfill step caps it at
+    `_BACKFILL_MAX_PER_SOURCE`, default 200); pass None for "the whole window".
+    No cursor is touched either way, so an interrupted run simply re-runs and the
+    content-hash keying makes re-processing a no-op.
+
+    Parallelism
+    -----------
+    `max_workers` > 1 (with a `service_factory`) fetches a PAGE of messages
+    concurrently — each message costs a `messages.get` plus one
+    `attachments.get` per attachment, so a full-history attachment pass is
+    entirely network-bound and sequential fetching wastes hours.
+
+    The split is the one proven in sync/drive.reingest_files: workers FETCH,
+    the calling thread WRITES. Two hard constraints drive it —
+      * the store is single-writer, so every `upsert_chunk` must stay on one
+        thread; and
+      * googleapiclient's Resource wraps a stateful httplib2.Http that is not
+        safe to share across threads, hence `service_factory` (one Resource per
+        worker, built lazily and reused via thread-local storage) rather than
+        passing `service` in.
+    `max_workers` > 1 WITHOUT a factory stays sequential rather than silently
+    sharing one Resource.
+
+    Work is fanned out one page (<=100 messages) at a time, not over the whole
+    mailbox: it bounds both memory and how much re-fetching an interruption
+    costs, while still keeping every worker busy.
+
+    `bulk_section` (default `contextlib.nullcontext`) still brackets each
+    message's writes, and attachment fetching stays OUTSIDE it — see sync_gmail
+    for why `_bulk_lock` must never be held across network I/O.
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -255,44 +320,77 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
         q += f" {q_extra}"
     page_token, processed = None, 0
     skips: dict = {}
+    att_report: dict = {}
     # Read once — see sync_gmail for why this must not sit inside the loop.
     fetch_attachments = config.gmail_attachments(str(config.app_dir()))
+    parallel = max_workers > 1 and service_factory is not None
 
     def _flush_skips() -> None:
         for reason, count in sorted(skips.items()):
             ingest_report.record_skip(store, f"gmail_{reason}", "gmail", str(count))
+        attachments.flush_skip_report(store, att_report)
 
-    while True:
-        params = {"userId": "me", "q": q, "maxResults": 100}
-        if page_token:
-            params["pageToken"] = page_token
-        resp = service.users().messages().list(**params).execute()
-        for m in resp.get("messages", []):
-            if max_messages is not None and processed >= max_messages:
-                _flush_skips()
-                return processed
-            try:
-                raw = service.users().messages().get(
-                    userId="me", id=m["id"], format="full"
-                ).execute()
-            except HttpError as e:
-                resp_err = getattr(e, "resp", None)
-                if resp_err is not None and resp_err.status == 404:
-                    continue
-                raise
-            # Attachment fetch is NETWORK I/O and must be hoisted OUT of the
-            # bulk section — see sync_gmail for why _bulk_lock must never be
-            # held across network calls.
-            att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
-                          if fetch_attachments else [])
-            with bulk_section():
-                for ch in normalise_gmail(raw, report=skips):
-                    store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-                for ch in att_chunks:
-                    store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
-                processed += 1
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
+    def _write(raw, att_chunks) -> None:
+        """The ONLY writer. Always runs on the calling thread."""
+        nonlocal processed
+        with bulk_section():
+            for ch in normalise_gmail(raw, report=skips):
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            for ch in att_chunks:
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            processed += 1
+
+    pool = _local = None
+    if parallel:
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        _local = threading.local()
+
+    def _worker_service():
+        if not hasattr(_local, "service"):
+            _local.service = service_factory()
+        return _local.service
+
+    try:
+        while True:
+            params = {"userId": "me", "q": q, "maxResults": 100}
+            if page_token:
+                params["pageToken"] = page_token
+            resp = service.users().messages().list(
+                **params).execute(num_retries=_NUM_RETRIES)
+            ids = [m["id"] for m in resp.get("messages", [])]
+            if max_messages is not None:
+                # Trim to what is still wanted. The page is the fan-out unit, so
+                # a parallel run can overshoot by less than one page; bounding
+                # here keeps that to zero.
+                ids = ids[:max(0, max_messages - processed)]
+
+            if not parallel:
+                for mid in ids:
+                    raw, att = _fetch_one(service, mid,
+                                          fetch_attachments=fetch_attachments,
+                                          att_report=att_report)
+                    if raw is not None:
+                        _write(raw, att)
+            else:
+                futures = [pool.submit(_fetch_one, _worker_service(), mid,
+                                       fetch_attachments=fetch_attachments,
+                                       att_report=att_report)
+                           for mid in ids]
+                for future in as_completed(futures):
+                    try:
+                        raw, att = future.result()
+                    except Exception as exc:  # noqa: BLE001 — one message must not end the run
+                        log.warning("backfill: message fetch failed: %s", exc)
+                        continue
+                    if raw is not None:
+                        _write(raw, att)
+
+            page_token = resp.get("nextPageToken")
+            if not page_token or (max_messages is not None
+                                  and processed >= max_messages):
+                break
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     _flush_skips()
     return processed

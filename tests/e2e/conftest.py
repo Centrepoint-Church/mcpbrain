@@ -14,7 +14,9 @@ class _Req:
     def __init__(self, result):
         self._result = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        # googleapiclient's real execute() takes num_retries, and the parallel
+        # backfill passes it so the library handles 5xx/429/quota backoff itself.
         return self._result
 
 
