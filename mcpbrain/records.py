@@ -84,7 +84,7 @@ If a sentence could appear in any document on any topic, remove it. Phrases like
 
 ## Banned Words
 
-Do not use: crucial, pivotal, vital, vibrant, rich (figurative), tapestry, landscape (abstract), testament, underscore (verb), highlight (verb), foster, cultivate (figurative), garner, showcase, exemplify, delve, intricate, enduring, interplay, nestled, groundbreaking (figurative), renowned, utilize, leverage (verb), synergy, realm, transformative, streamline, robust (outside engineering), cutting-edge, holistic, multifaceted, elevate (figurative), empower, reimagine, spearhead, enhance
+Do not use: crucial, pivotal, vital, vibrant, rich (figurative), tapestry, landscape (abstract), testament, underscore (verb), highlight (verb), foster, cultivate (figurative), garner, showcase, exemplify, delve, intricate, enduring, interplay, nestled, breathtaking, stunning, groundbreaking (figurative), renowned, utilize, leverage (verb), synergy, realm, transformative, streamline, robust (outside engineering), cutting-edge, holistic, multifaceted, elevate (figurative), empower, reimagine, spearhead, enhance
 
 **Banned sentence-starters:** Additionally, Moreover, Furthermore, Consequently. Use and, but, so, still, though, because, then, instead.
 
@@ -92,10 +92,13 @@ Do not use: crucial, pivotal, vital, vibrant, rich (figurative), tapestry, lands
 
 **Use instead:** is, are, has, was, shows, means, helps, changes, works, matters, needs. Plain verbs, direct statements.
 
+**Hyphenation:** third-party, cross-functional, data-driven, real-time, end-to-end, long-term, well-known and similar compounds hyphenate only in attributive position ("a data-driven report"); drop the hyphen when the compound follows the noun ("the report is data driven", "the team is cross functional"). Hyphenating uniformly in both positions is a common AI tell.
+
 ## Banned Phrases
 
 - "it's worth noting," "let's delve into," "in the realm of," "navigate the complexities," "at the end of the day," "it goes without saying," "in an era of," "the landscape of"
 - "in order to" (say "to"); "due to the fact that" (say "because"); "Whether it's X, Y, or Z" (just list them)
+- "in the heart of," "must-visit," "a rich tapestry of," "a testament to" — promotional/travel-brochure language. State the plain fact instead ("in [city]" not "nestled in the heart of [city]").
 
 ## Banned Patterns
 
@@ -111,6 +114,8 @@ Do not use: crucial, pivotal, vital, vibrant, rich (figurative), tapestry, lands
 - **Elegant variation** — cycling synonyms to avoid repetition. Reuse the same word.
 - **"Not only... but also"** and similar negative parallelisms.
 - **Vague attributions** without naming sources.
+- **False ranges** — "from the boardroom to the shop floor" when the two ends aren't actually on a meaningful scale. Name the real span, or cut the frame.
+- **Passive voice and subjectless fragments** — "No configuration needed," "the report is generated automatically" hides who's doing what. Prefer the active form ("you don't need to configure anything," "the system generates the report automatically") unless the actor is genuinely unknown or irrelevant.
 - **Future prospects speculation** unless asked.
 - **Unnecessary bold, Title Case headings, emoji** in professional writing.
 - **Collaborative filler** — "I hope this helps," "Certainly!", "Would you like me to..."
@@ -124,7 +129,11 @@ Do not use: crucial, pivotal, vital, vibrant, rich (figurative), tapestry, lands
 
 ## Punctuation and Formatting
 
-Never use em dashes — they are one of the strongest AI-writing markers. Use commas, full stops, or parentheses. Prefer plain connectives (and, but, so, still, though, because, then, instead) over formal transitions. Use bold sparingly. Headings only when they aid navigation. Lists only for genuinely list-shaped content. No emoji in professional or academic writing unless the audience welcomes it.
+Never use em dashes. They are one of the strongest AI-writing markers; use commas, full stops, or parentheses instead. Prefer plain connectives (and, but, so, still, though, because, then, instead) over formal transitions. Use bold sparingly. Headings only when they aid navigation. Lists only for genuinely list-shaped content, and don't fake list-shape with bold-label bullets that just restate themselves in the sentence that follows ("**Performance:** Performance has been improved with optimised queries" — fold the label into the sentence, or cut it: "Optimised queries cut load time"). No emoji in professional or academic writing unless the audience welcomes it. Use straight quotation marks (") and apostrophes ('), not curly/smart quotes ("" ''); many editors auto-curl by default, so check pasted text explicitly.
+
+## Never Invent Facts
+
+Specificity beats vagueness, but only when the specifics are real. Never state a fact, name, number, date, quote, statistic, or citation that isn't already known, sourced, or given by the owner. If a genuine specific isn't available, say so plainly ("the source doesn't give a date," "I don't have a verified figure for this") rather than inventing one to sound concrete — a true but vague sentence beats a fabricated specific one, every time. This matters most exactly where the next section pushes hardest for concreteness: named sources, statistics, and examples must be real or explicitly flagged as illustrative, never invented to fill a gap.
 
 ## Be Specific
 
