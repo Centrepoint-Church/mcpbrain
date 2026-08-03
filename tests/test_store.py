@@ -1297,3 +1297,70 @@ def test_doc_root_content_hashes_ignores_metadata_free_gdrive_doc_ids(tmp_path):
     result = s.doc_root_content_hashes(["gdrive-orphan"])
 
     assert result["gdrive-orphan"] == frozenset()
+
+
+def _rowid_for(store, doc_id):
+    with store._connect() as db:
+        return db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()["rowid"]
+
+
+def test_fts_search_falls_back_to_or_when_the_strict_and_match_finds_nothing(tmp_path):
+    """Real natural-language queries rarely contain every one of their own
+    words verbatim in the matching document (paraphrase, different word
+    forms, form-field text). Requiring literal-AND-of-all-tokens then finds
+    nothing for the majority of realistic queries (14/20 on the live gold
+    set) even though a real match exists. Falling back to OR only when AND
+    finds zero rows recovers those without ever touching a query AND already
+    satisfies."""
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-a-0",
+                   "CPKIDS Volunteer Onboarding Submitted Brisa Rojas Bibra Lake campus",
+                   "h1", {})
+    s.write_embedding(_rowid_for(s, "gdrive-a-0"), [0.0, 0.0, 0.0, 0.0])
+
+    # None of these words co-occur verbatim as a full phrase set with the doc
+    # text's exact tokens plus extra query words the doc doesn't contain.
+    hits = [d for d, _ in s.fts_search(
+        "Centrepoint church kids ministry volunteer application Brisa Rojas Bibra Lake", 10)]
+
+    assert "gdrive-a-0" in hits
+
+
+def test_fts_search_and_or_fallback_never_regresses_a_query_that_already_matches(tmp_path):
+    """A query whose strict AND match already finds the right document must
+    not be displaced by looser OR-only noise (the gold-set regression a naive
+    always-OR approach caused: a generic term like 'financial statement'
+    flooded in unrelated documents that outscored the one true AND match)."""
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-a-0",
+                   "Harvest Net 2025 special purpose financial statement accounting policies",
+                   "h1", {})
+    s.write_embedding(_rowid_for(s, "gdrive-a-0"), [0.0, 0.0, 0.0, 0.0])
+    for i in range(5):
+        doc_id = f"gdrive-noise-{i}-0"
+        s.upsert_chunk(doc_id,
+                       f"Generic financial statement policies document number {i}",
+                       f"noise-{i}", {})
+        s.write_embedding(_rowid_for(s, doc_id), [0.0, 0.0, 0.0, 0.0])
+
+    hits = [d for d, _ in s.fts_search(
+        "Harvest Net 2025 special purpose financial statement accounting policies", 10)]
+
+    assert hits[0] == "gdrive-a-0"
+
+
+def test_fts_search_still_returns_empty_for_a_query_with_no_usable_tokens(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-a-0", "some content", "h1", {})
+
+    assert s.fts_search("-", 10) == []
+
+
+def test_fts_match_query_require_all_false_joins_with_or(tmp_path):
+    from mcpbrain.store import _fts_match_query
+
+    assert _fts_match_query("alpha beta") == '"alpha" "beta"'
+    assert _fts_match_query("alpha beta", require_all=False) == '"alpha" OR "beta"'
