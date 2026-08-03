@@ -599,3 +599,121 @@ def test_embed_phase_survives_an_unreachable_daemon(tmp_path, monkeypatch):
     repair.phase_embed_pending(store, True, limit=None)
 
     assert drained, "an unreachable daemon must not stop the drain"
+
+
+def test_digest_provenance_patches_without_re_embedding(tmp_path):
+    """The whole point: fix C2/C4 on stored digests with no model call, and
+    without disturbing content_hash or embedded — otherwise "free" metadata
+    repair silently re-queues 22k chunks for embedding."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("enriched-cal-abc",
+                       "[ACC] Email: Leaders Gathering\nFrom: \nDate: 2026-05-10\n",
+                       "h1", {"source_type": "gmail_enriched_v2",
+                              "thread_id": "cal-abc"})
+    with store._connect() as db:
+        rowid = db.execute("SELECT rowid FROM chunks WHERE doc_id=?",
+                           ("enriched-cal-abc",)).fetchone()[0]
+    store.write_embedding(rowid, [0.1, 0.2, 0.3, 0.4])
+    before = store.get_chunk("enriched-cal-abc")
+
+    repair.phase_digest_provenance(store, True, limit=None)
+
+    after = store.get_chunk("enriched-cal-abc")
+    assert after["metadata"]["date"] == "2026-05-10", "C2: date not recovered"
+    assert after["metadata"]["source_type"] == "calendar_enriched_v2", "C4: label"
+    assert after["content_hash"] == before["content_hash"], "content_hash changed"
+    with store._connect() as db:
+        assert db.execute("SELECT embedded FROM chunks WHERE doc_id=?",
+                          ("enriched-cal-abc",)).fetchone()[0] == 1, (
+            "the chunk was re-queued for embedding by a metadata patch")
+
+
+def test_digest_provenance_is_idempotent(tmp_path):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("enriched-t1", "Date: 2026-05-10", "h1",
+                       {"source_type": "gmail_enriched_v2", "thread_id": "t1"})
+
+    repair.phase_digest_provenance(store, True, limit=None)
+    first = store.get_chunk("enriched-t1")["metadata"]
+    repair.phase_digest_provenance(store, True, limit=None)
+
+    assert store.get_chunk("enriched-t1")["metadata"] == first
+
+
+def test_digest_provenance_dry_run_writes_nothing(tmp_path):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("enriched-t1", "Date: 2026-05-10", "h1",
+                       {"source_type": "gmail_enriched_v2", "thread_id": "t1"})
+
+    repair.phase_digest_provenance(store, False, limit=None)
+
+    assert "date" not in store.get_chunk("enriched-t1")["metadata"]
+
+
+def test_digest_chunks_finds_mislabelled_rows(tmp_path):
+    """Selection is on the doc_id prefix, not metadata.source_type — filtering on
+    the field being corrected would skip exactly the rows that need it."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("enriched-cal-x", "t", "h1",
+                       {"source_type": "gmail_enriched_v2", "thread_id": "cal-x"})
+    store.upsert_chunk("gmail-m1-body-0", "t", "h2", {"source_type": "gmail"})
+
+    got = store.digest_chunks()
+
+    assert [d["doc_id"] for d in got] == ["enriched-cal-x"]
+
+
+def test_digest_provenance_defaults_to_unbounded_from_the_cli(tmp_path):
+    """digest-provenance is pure local metadata patching — no network call, no
+    model call — so there is no cost reason to cap it at the shared 500 default.
+    Silently inheriting that default would mean a user running
+    `digest-provenance --apply` (the natural first command) believed they had
+    fixed everything when only the first 500 (by rowid) were touched."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    for i in range(600):
+        store.upsert_chunk(f"enriched-t{i}", f"Date: 2026-05-{(i % 28) + 1:02d}",
+                           f"h{i}", {"source_type": "gmail_enriched_v2",
+                                     "thread_id": f"t{i}"})
+
+    out = _run("digest-provenance", "--apply", home=tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "600" in out.stdout, out.stdout
+    reopened = Store(tmp_path / "brain.sqlite3", dim=4)
+    assert reopened.get_chunk("enriched-t599")["metadata"]["date"], (
+        "the 600th digest was left unpatched — the shared --limit 500 default "
+        "leaked into a phase that should be unbounded by default"
+    )
+
+
+def test_reingest_stale_still_defaults_to_500(tmp_path):
+    """The opposite direction: reingest-stale spends real Drive API quota per
+    file, so its default cap must be UNCHANGED by the digest-provenance/
+    embed-pending carve-out."""
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+
+    out = _run("reingest-stale", home=tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "limit 500" in out.stdout, out.stdout

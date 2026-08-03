@@ -93,7 +93,7 @@ def test_build_semantic_doc_text():
     # message_id were added by this plan's C2/C3 fix — the enriched chunk had
     # no date-recency or message-level provenance before.
     assert set(metadata) == {"source_type", "thread_id", "subject", "org",
-                              "content_type", "date", "message_id"}
+                              "content_type", "date"}
     assert metadata["source_type"] == "gmail_enriched_v2"
     assert metadata["thread_id"] == "t-sem-001"
     assert metadata["subject"] == "Hall B for Wednesday college"
@@ -214,15 +214,22 @@ def test_the_enriched_chunk_carries_a_date():
     assert recency_decay(meta) != 0.5, "still date-blind to the ranker"
 
 
-def test_the_enriched_chunk_keeps_the_message_level_link():
-    """C3: enriched chunks retained thread_id but no message_id, so a fact could
-    be traced to a thread but not to the message it came from."""
+def test_the_enriched_chunk_carries_no_message_id():
+    """C3 REVERTED (2026-07-30). The field was added for "which message did this
+    fact come from", then removed on review because nothing read it (semantic.py
+    was the only writer anywhere), because attributing a THREAD-level digest to
+    the lead message's id is false precision, and because it collided with that
+    lead's own raw chunk in thread_enrich._chunk_key — merging the synthesised
+    People/Actions/Topics text into the raw email body handed back for
+    re-extraction, which is why the special-case there exists.
+
+    Real per-fact provenance lives in entity_relations.source_doc_id and
+    email_entities, at fact granularity rather than one id per thread."""
     from mcpbrain.semantic import build_semantic_doc
 
-    _text, meta = build_semantic_doc({"thread_id": "t1"}, {"subject": "s"},
-                                     message_id="msg-9")
+    _text, meta = build_semantic_doc({"thread_id": "t1"}, {"subject": "s"})
 
-    assert meta["message_id"] == "msg-9"
+    assert "message_id" not in meta
 
 
 def test_a_calendar_derived_enrichment_is_not_labelled_as_gmail():

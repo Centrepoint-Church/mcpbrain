@@ -69,7 +69,7 @@ def _fit(lines: list[str], budget: int) -> list[str]:
 
 
 def build_semantic_doc(extraction: dict, thread: dict, owner=None, taxonomy=None,
-                       *, date_iso: str = "", message_id: str = "") -> tuple[str, dict]:
+                       *, date_iso: str = "") -> tuple[str, dict]:
     """Assemble the synthesised vector doc for one enriched thread.
 
     `extraction` is the thread's extraction JSON (org, summary, content_type,
@@ -85,7 +85,6 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None, taxonomy=None
     taxonomy: optional OrgTaxonomy; None resolves from config.
     date_iso: optional ISO-normalised date for the lead message, if the caller
     already has one.
-    message_id: the lead message's id, for message-level provenance (C3).
     """
     if owner is None:
         owner = owner_identity_from_config()
@@ -160,9 +159,21 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None, taxonomy=None
         # fallback for all 21,162 of these. `date` is the lead's RFC2822 header,
         # which importance._parse_age_days already handles.
         "date": date[:80],
-        # C3: thread-level provenance without message-level provenance means a
-        # fact can be traced to a thread but not to the message it came from.
-        "message_id": message_id[:200],
+        # NO `message_id` here, deliberately (C3 reverted, 2026-07-30). It was
+        # added for "which message did this fact come from", but:
+        #   * nothing read it — semantic.py was the only writer anywhere;
+        #   * a digest summarises a whole THREAD, so attributing it to the lead
+        #     message's id is false precision that would mislead any reader who
+        #     did trace it;
+        #   * it made the digest collide with the lead's own raw chunk in
+        #     thread_enrich._chunk_key, merging the synthesised People/Actions/
+        #     Topics text into the raw email body handed back for re-extraction —
+        #     the special-case there exists solely because of this field; and
+        #   * real per-fact provenance already lives in
+        #     entity_relations.source_doc_id and email_entities, at fact
+        #     granularity rather than one id per thread.
+        # `_chunk_key`'s special-case is KEPT regardless: it guards the digest
+        # against colliding on any identity field, not just this one.
     }
     if date_iso:
         metadata["date_iso"] = date_iso[:40]

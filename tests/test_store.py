@@ -768,20 +768,23 @@ def test_mark_enriched_stamps_logic_version(tmp_path):
     assert row["enriched"] == 1 and row["enriched_version"] == ENRICH_LOGIC_VERSION
 
 
-def test_enrich_logic_version_is_ahead_of_the_dateless_semantic_doc():
-    """Spec 2 gave the enriched semantic doc a date, date_iso, message_id and a
-    correct source_type for calendar digests (C2/C3/C4) — but build_semantic_doc
-    only runs on re-enrichment, so the fix reached nothing already stored.
-    Measured live before the bump: 0 of 22,324 enriched chunks had a date, so
-    importance.recency_decay returned its neutral 0.5 for every one of the
-    highest-value chunks in the store.
+def test_enrich_logic_version_is_not_bumped_for_derivable_metadata():
+    """Guard on a decision, not on a number.
 
-    Bumping ENRICH_LOGIC_VERSION is the self-healing path (reflow_outdated_chunks
-    re-flows the corpus gradually). This pins that the bump happened, so the code
-    fix and the data can't silently diverge again."""
+    ENRICH_LOGIC_VERSION was bumped 1->2 on 2026-07-29 to push spec 2's C2/C4
+    metadata fixes through the whole corpus, and reverted a day later: `date` is
+    recoverable from each digest's own "Date:" line (~70%) and `source_type`
+    entirely from `thread_id`, so the bump would have re-enriched ~56.6k chunks
+    through Haiku for what mcpbrain/digest_provenance.py does for free — and for
+    the other 30% it could not have worked either, their source chunks having been
+    pruned by retention.
+
+    Bump this when the enrichment LOGIC changes, i.e. when the model's OUTPUT
+    would differ. This test is here to make anyone bumping it for a metadata
+    backfill stop and read that reasoning first."""
     from mcpbrain.store import ENRICH_LOGIC_VERSION
 
-    assert ENRICH_LOGIC_VERSION >= 2
+    assert ENRICH_LOGIC_VERSION == 1
 
 
 def test_reflow_outdated_chunks_resets_only_old_versions(tmp_path):

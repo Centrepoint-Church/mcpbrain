@@ -33,6 +33,12 @@ from mcpbrain.backup import snapshot            # noqa: E402
 from mcpbrain.chunking import CHUNKER_VERSION   # noqa: E402
 from mcpbrain.store import Store                # noqa: E402
 
+# Shared --limit default. Meaningful for reingest-stale/backfill-attachments
+# (bounds real per-item API cost); overridden to unbounded for
+# digest-provenance/embed-pending in main() (see there) since those are pure
+# local work with no cost reason to cap.
+_DEFAULT_LIMIT = 500
+
 _PURGE_BATCH = 5000
 
 
@@ -335,10 +341,51 @@ def phase_embed_pending(store, apply: bool, *, limit: int | None,
     return 0
 
 
+def phase_digest_provenance(store, apply: bool, *, limit: int | None) -> int:
+    """Repair enriched-digest date/source_type deterministically — no model calls.
+
+    C2 and C4 were fixed in build_semantic_doc, which only runs on RE-enrichment,
+    so neither reached the 22,357 digests already stored: 0 of them carried a
+    date, so importance.recency_decay returned its neutral 0.5 for the
+    LLM-digested summaries — the highest-value chunks in the store.
+
+    Forcing re-enrichment to fix that was the wrong instrument. `date` is
+    recoverable from the digest's own "Date:" line for ~70% of them, and
+    `source_type` is 100% derivable from `thread_id`; meanwhile 19,934 of 21,029
+    email digests have had their source chunks pruned by retention, so
+    re-enrichment could not recover a date for the remainder either. This costs
+    nothing and fixes the same population.
+
+    Uses patch_chunk_metadata, so `content_hash` and `embedded` are untouched:
+    nothing re-embeds and nothing re-queues. Idempotent — derive_patch returns {}
+    for an already-correct digest, so a second run is a no-op.
+    """
+    from mcpbrain.digest_provenance import derive_patch
+
+    digests = store.digest_chunks(limit=limit)
+    print(f"[digest-provenance] {len(digests)} digest chunk(s) to examine")
+    patches = [(d["doc_id"], derive_patch(d)) for d in digests]
+    todo = [(doc_id, p) for doc_id, p in patches if p]
+    dates = sum(1 for _d, p in todo if "date" in p)
+    labels = sum(1 for _d, p in todo if "source_type" in p)
+    print(f"[digest-provenance] {len(todo)} need a patch "
+          f"({dates} gain a date, {labels} a corrected source_type)")
+    if not apply:
+        print("[digest-provenance] dry run — nothing written; pass --apply to write")
+        return 0
+    done = 0
+    for doc_id, patch in todo:
+        if store.patch_chunk_metadata(doc_id, **patch):
+            done += 1
+    print(f"[digest-provenance] patched {done} digest(s)")
+    return 0
+
+
 _PHASES = {"status": phase_status, "purge-empty": phase_purge_empty,
            "reingest-stale": phase_reingest_stale,
            "backfill-attachments": phase_backfill_attachments,
-           "embed-pending": phase_embed_pending}
+           "embed-pending": phase_embed_pending,
+           "digest-provenance": phase_digest_provenance}
 
 
 def main(argv=None):
@@ -346,10 +393,12 @@ def main(argv=None):
     ap.add_argument("phase", choices=sorted(_PHASES))
     ap.add_argument("--apply", action="store_true",
                     help="actually write (default is a dry run)")
-    ap.add_argument("--limit", type=int, default=500,
+    ap.add_argument("--limit", type=int, default=_DEFAULT_LIMIT,
                     help="max items per run (Drive files for reingest-stale, "
                          "messages per year for backfill-attachments). "
-                         "0 means no limit.")
+                         "0 means no limit. digest-provenance and embed-pending "
+                         "are unbounded by default regardless (pure local work, "
+                         "no API cost) — pass --limit explicitly to cap them.")
     ap.add_argument("--workers", type=int, default=1,
                     help="concurrent fetch workers for reingest-stale and "
                          "backfill-attachments (default 1 = sequential). Both are "
@@ -367,10 +416,18 @@ def main(argv=None):
                          "live store, so anything before the one backup you did "
                          "take is what --skip-backup runs are gambling on.")
     args = ap.parse_args(argv)
-    # `--limit 0` means "no limit". argparse cannot express None on an int, and
-    # 0 is meaningless as a real bound (it would do nothing), so it is the
-    # natural sentinel — `--limit 0 --all-years` is "the entire mailbox, one run".
+    # `--limit 0` means "no limit" for any phase — 0 as a real bound would do
+    # nothing, so it is the natural sentinel.
     if args.limit == 0:
+        args.limit = None
+    elif args.limit == _DEFAULT_LIMIT and args.phase in (
+            "digest-provenance", "embed-pending"):
+        # These two are pure local work: no network call, no model call, so
+        # there is no cost reason to cap them. The shared 500 default exists for
+        # reingest-stale/backfill-attachments, which spend real API quota per
+        # item — applying it here silently would leave a user who ran
+        # `digest-provenance --apply` believing they had fixed all 22,357
+        # digests when only the first 500 (by rowid) were touched.
         args.limit = None
 
     home = config.app_dir()
@@ -405,7 +462,7 @@ def main(argv=None):
     elif args.phase == "backfill-attachments":
         rc = fn(store, args.apply, limit=args.limit, all_years=args.all_years,
                 workers=args.workers)
-    elif args.phase == "embed-pending":
+    elif args.phase in ("embed-pending", "digest-provenance"):
         rc = fn(store, args.apply, limit=args.limit)
     else:
         rc = fn(store, args.apply)
