@@ -235,6 +235,73 @@ def _doc_root(doc_id: str) -> str:
     return m.group(1) if m else doc_id
 
 
+def _cluster_key(chunk: dict) -> str | None:
+    """Identity of the information-cluster a chunk belongs to: the whole
+    thread/file/calendar-event it's part of. Shared by a thread's raw message
+    chunks AND its own digest (`enriched-<thread_id>`) chunk, since both are
+    stamped with the same `thread_id`/`file_id`/`event_id` metadata.
+
+    Normalises a legacy inconsistency found on the live store: one old digest
+    had `thread_id` stamped as a raw chunk's full doc_id shape
+    (`gdrive-<file_id>-<n>`) instead of the bare file_id current writers use —
+    stripping the same 'gdrive-' prefix and trailing '-<n>' suffix as
+    `_doc_root` makes it collapse to the same key a plain file_id would.
+    """
+    meta = chunk.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    key = meta.get("thread_id") or meta.get("file_id")
+    if not key:
+        event_id = meta.get("event_id")
+        if event_id:
+            key = f"cal-{event_id}"
+    if not key:
+        return None
+    key = re.sub(r"^gdrive-", "", key)
+    key = re.sub(r"-\d+$", "", key)
+    return key
+
+
+def _dedupe_by_cluster(hits: list[dict]) -> list[dict]:
+    """Drop a digest (`enriched-<cluster>`) when its own cluster's raw chunk
+    is also in the pool.
+
+    A digest is a synthesized summary of its own thread/file's raw chunks —
+    pure derived output, never independent information. When both are in the
+    results it is redundant, and because a digest is synthetic text it can
+    never itself match a query's actual expected source document — so
+    letting it occupy a slot ahead of its own raw sibling only pushes the
+    real answer down a rank for no benefit (confirmed on the gold set: a
+    digest outranking its own thread's raw chunk by one position turned a
+    correct #1 hit into a #2 miss).
+
+    Kept unconditionally when no raw sibling of its cluster is in THIS pool
+    (filtered out, beyond the retrieval boundary, etc.) — dropping it then
+    would be content loss, not duplicate removal. Two raw chunks of the same
+    cluster are never collapsed against each other; only a digest-vs-raw
+    pair is redundant.
+    """
+    raw_clusters: set[str] = set()
+    for hit in hits:
+        if hit.get("doc_id", "").startswith("enriched-"):
+            continue
+        key = _cluster_key(hit)
+        if key:
+            raw_clusters.add(key)
+
+    out: list[dict] = []
+    for hit in hits:
+        if hit.get("doc_id", "").startswith("enriched-"):
+            key = _cluster_key(hit)
+            if key and key in raw_clusters:
+                continue
+        out.append(hit)
+    return out
+
+
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
                   kw_weight: float = _KW_WEIGHT, query_vec: list | None = None,
@@ -310,6 +377,12 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
         if new_top > 0:
             for c in candidates:
                 c["score"] = round(c["score"] / new_top, 4)
+
+    # Drop a digest that's redundant with its own thread/file's raw chunk
+    # BEFORE the content-hash dedup below: a digest's content_hash never
+    # matches its raw sibling's (it's synthesized text, not a copy), so the
+    # content-hash pass can't see this redundancy on its own.
+    candidates = _dedupe_by_cluster(candidates)
 
     # Dedup by content_hash AFTER ranking (the order above must be preserved so
     # the best-ranked copy of a duplicate survives) and BEFORE the limit
