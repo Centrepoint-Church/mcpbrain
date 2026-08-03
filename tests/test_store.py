@@ -456,6 +456,44 @@ def test_unenriched_chunks_limit_caps_rows(tmp_path):
     assert len(s.unenriched_chunks()) == 5
 
 
+def test_unenriched_chunks_never_returns_a_digest_chunk(tmp_path):
+    """A digest chunk (doc_id "enriched-<thread_id>") is enrichment OUTPUT, never
+    input — it must never be selected as backlog for (re-)extraction, regardless
+    of how it ended up with enriched=0.
+
+    Found while investigating whether a version-bump-triggered reflow could
+    corrupt the entity graph: reflow_outdated_chunks resets enriched=0 on ANY
+    chunk below the target version, including the digest chunks themselves
+    (graph_write.apply calls store.mark_enriched([semantic_doc_id]) at whatever
+    ENRICH_LOGIC_VERSION was current when the thread was enriched). Before this
+    fix, group_unenriched_threads then pulled the digest into the SAME batch as
+    its own thread's real messages (both share thread_id), and
+    thread_enrich.reassemble_thread's own enriched- special-case split it back
+    out into a fake extra "message" — subject and date intact, sender empty,
+    body = the synthesized "People: .../Actions: .../Topics: ..." text — hands
+    the model its own PRIOR SUMMARY presented as if it were another email in the
+    thread. That risks re-deriving near-duplicate entities that the anti-
+    hallucination grounding check (_name_grounded) cannot catch, because the
+    digest text trivially contains the exact names being "grounded" against
+    itself.
+    """
+    s = _store(tmp_path)
+    s.upsert_chunk("gmail-m1-body-0", "real message content", "h1",
+                   {"thread_id": "t1", "source_type": "gmail"})
+    s.upsert_chunk("enriched-t1", "[Org] Email: Subject\n\nSummary here.", "h2",
+                   {"thread_id": "t1", "source_type": "gmail_enriched_v2"})
+    # Simulate the version-bump reset: BOTH the raw message and its own digest
+    # sitting at enriched=0 at the same time.
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=0")
+
+    doc_ids = [r["doc_id"] for r in s.unenriched_chunks()]
+
+    assert doc_ids == ["gmail-m1-body-0"], (
+        f"the digest chunk leaked into the extraction backlog: {doc_ids}"
+    )
+
+
 def test_unenriched_chunks_independent_of_embedding(tmp_path):
     """Gated on enriched=0 only — an embedded-but-unenriched chunk still shows."""
     s = _store(tmp_path)
@@ -802,6 +840,36 @@ def test_reflow_outdated_chunks_resets_only_old_versions(tmp_path):
     assert rows["old"]["enriched"] == 0 and rows["old"]["embedded"] == 1   # re-flowed, embedding kept
     assert rows["cur"]["enriched"] == 1                                    # current stays
     assert s.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, cap=10) == 0     # nothing left outdated
+
+
+def test_reflow_outdated_chunks_never_resets_a_digest_chunk(tmp_path):
+    """A digest (doc_id enriched-<thread_id>) is enrichment OUTPUT, never input:
+    there is nothing to "re-flow" for the digest ITSELF — when its thread is
+    genuinely re-extracted, graph_write.apply regenerates and re-stamps this
+    exact chunk anyway. Resetting it here only manufactures backlog noise and
+    (before unenriched_chunks' own doc_id guard) risked the digest text being
+    fed back to the model as if it were a real thread message. Belt-and-
+    suspenders: this is the WRITE-side half of that fix, so a future
+    ENRICH_LOGIC_VERSION bump cannot reintroduce the reset even if the
+    unenriched_chunks guard were ever removed."""
+    from mcpbrain.store import Store, ENRICH_LOGIC_VERSION
+    s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
+    s.upsert_chunk("old", "x", "h1", {})
+    s.upsert_chunk("enriched-t1", "[Org] Email: s\n\nSummary.", "h2",
+                  {"thread_id": "t1", "source_type": "gmail_enriched_v2"})
+    s.mark_enriched(["old"], version=0)
+    s.mark_enriched(["enriched-t1"], version=0)
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1")
+
+    reset = s.reflow_outdated_chunks(ENRICH_LOGIC_VERSION, cap=10)
+
+    assert reset == 1, "only the real chunk should have been reset"
+    with s._connect() as db:
+        rows = {r["doc_id"]: r["enriched"] for r in
+                db.execute("SELECT doc_id, enriched FROM chunks").fetchall()}
+    assert rows["old"] == 0
+    assert rows["enriched-t1"] == 1, "the digest chunk must never be reset"
 
 
 # --- reversible entity suppression (Session-4, Task 2.1) -----------------

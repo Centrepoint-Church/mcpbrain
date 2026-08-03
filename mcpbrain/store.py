@@ -1543,8 +1543,26 @@ class Store:
         """
         # Exclude 'cold' chunks: they are deliberately gated by the salience gate
         # and must not re-queue for extraction while in cold state.
+        #
+        # Exclude 'enriched-%' doc_ids: these are the synthesised semantic
+        # digest chunks (build_semantic_doc's enriched-<thread_id> docs) —
+        # enrichment OUTPUT, never input. A digest can end up at enriched=0
+        # (graph_write.apply stamps it via mark_enriched at whatever
+        # ENRICH_LOGIC_VERSION was current, so a version bump's reflow resets it
+        # exactly like any other chunk) with no real content to extract FROM.
+        # Without this guard, group_unenriched_threads groups the digest into
+        # the SAME batch as its own thread's real messages (both carry
+        # thread_id via _group_key), and reassemble_thread's own enriched-
+        # special-case then splits it back out as a fake extra "message" —
+        # subject and date intact, body = the thread's own prior synthesized
+        # summary — handed to the model alongside the genuine messages. That
+        # risks re-deriving near-duplicate entities that the anti-
+        # hallucination grounding check cannot catch, because the digest text
+        # trivially contains the exact names being "grounded" against itself.
+        # Found and fixed 2026-08-03, before it had fired in production.
         sql = ("SELECT rowid,doc_id,text,metadata FROM chunks "
                "WHERE enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
+               "AND doc_id NOT LIKE 'enriched-%' "
                "ORDER BY rowid DESC")
         params: tuple = ()
         if limit is not None:
@@ -1580,11 +1598,23 @@ class Store:
         current logic. The embedding is kept (only enriched is cleared). Returns the
         number reset. This is the change-driven re-extraction lever: bump
         ENRICH_LOGIC_VERSION when enrichment improves and the corpus re-extracts
-        itself gradually as the daemon calls this each cycle."""
+        itself gradually as the daemon calls this each cycle.
+
+        Never resets a digest chunk (doc_id 'enriched-<thread_id>'): it is
+        enrichment OUTPUT, not input, and there is nothing to re-flow FOR it —
+        graph_write.apply regenerates and re-stamps this exact chunk the moment
+        its thread is genuinely re-extracted. Reset one anyway (a 2026-08-03
+        version bump did, since this exclusion did not exist yet) and it
+        manufactures pure backlog noise; worse, unenriched_chunks' own doc_id
+        guard is the only thing standing between that and the digest's prior
+        summary being handed back to the model as a fake extra thread message.
+        This is the write-side half of that fix.
+        """
         with self._connect(write=True) as db:
             rows = db.execute(
                 "SELECT doc_id FROM chunks "
                 "WHERE enriched=1 AND COALESCE(enriched_version,0) < ? "
+                "AND doc_id NOT LIKE 'enriched-%' "
                 "ORDER BY rowid LIMIT ?",
                 (version, cap),
             ).fetchall()
