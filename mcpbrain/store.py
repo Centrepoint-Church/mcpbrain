@@ -19,17 +19,38 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 # so the existing corpus re-extracts itself under current logic over time. Chunks
 # enriched before this stamp existed default to 0, so shipping at 1 schedules a
 # one-time gradual re-extraction of the whole already-enriched corpus.
-# 1 -> 2 (2026-07-29): spec 2 gave the enriched semantic doc a `date`, a
-# `date_iso`, a `message_id` and a correct `source_type` for calendar-derived
-# digests (findings C2/C3/C4), but build_semantic_doc only runs when a thread is
-# re-enriched — so the fix reached NOTHING already in the store. Measured on the
-# live corpus: 0 of 22,324 enriched chunks carried a date, meaning
-# importance.recency_decay returned its neutral 0.5 fallback for every one of the
-# highest-value chunks in the store, exactly as C2 described. Bumping this is the
-# self-healing path: reflow_outdated_chunks resets REEXTRACT_CAP (50) chunks per
-# cycle, so ~40.7k enriched chunks re-extract gradually under current logic
-# rather than in one burst.
-ENRICH_LOGIC_VERSION = 2
+# Deliberately still 1. A 1 -> 2 bump was made on 2026-07-29 and REVERTED on
+# 2026-07-30, before its re-extraction finished. Recording why, because the
+# reasoning is the useful part:
+#
+# The bump existed to make spec 2's C2/C3/C4 fixes reach the 22,357 digests
+# already stored — build_semantic_doc only runs on re-enrichment, so 0 of them
+# carried a date and importance.recency_decay returned its neutral 0.5 for the
+# highest-value chunks in the store. That problem was real. Forcing the whole
+# corpus back through the model was the wrong solution:
+#
+#   * `source_type` (C4) is 100% derivable from `thread_id`, and `date` (C2) is
+#     recoverable from the digest's own "Date:" line for ~70% of them — both with
+#     no model call. See mcpbrain/digest_provenance.py and
+#     `bin/repair.py digest-provenance`.
+#   * 19,934 of 21,029 email digests have had their source chunks pruned by the
+#     retention job, so re-enrichment could NOT have recovered a date for the
+#     remaining 30% either. The spend bought nothing exactly where the
+#     deterministic route falls short.
+#   * `message_id` (C3) was the only field genuinely needing re-extraction, and
+#     it was removed instead — nothing read it, a thread-level digest carrying
+#     one message's id is false precision, and it collided with that message's
+#     own raw chunk in thread_enrich._chunk_key.
+#
+# Net: the bump would have re-enriched ~56.6k chunks through Haiku for a result
+# two deterministic passes deliver for free. Reverting restores enriched=1 on
+# everything reflow_outdated_chunks had reset; no graph rows or embeddings were
+# ever touched by that reset, so nothing was lost in either direction.
+#
+# Bump this when the enrichment LOGIC changes — when the model's OUTPUT would
+# differ. Do not bump it to backfill metadata that is derivable from data already
+# in the store.
+ENRICH_LOGIC_VERSION = 1
 
 
 
@@ -1452,6 +1473,25 @@ class Store:
         """Number of chunks that have been enriched into the graph."""
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM chunks WHERE enriched=1").fetchone()[0]
+
+    def digest_chunks(self, *, limit: int | None = None) -> list[dict]:
+        """Every enriched-digest chunk as {doc_id, text, metadata}.
+
+        The `enriched-<thread_id>` synthesised docs build_semantic_doc writes.
+        Selected on the doc_id prefix rather than on metadata.source_type,
+        because correcting that very field is one of the things the caller does
+        (C4) — filtering on it would skip the mislabelled rows.
+        """
+        sql = ("SELECT doc_id, text, metadata FROM chunks "
+               "WHERE doc_id LIKE 'enriched-%' ORDER BY rowid")
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        with self._connect() as db:
+            return [{"doc_id": r["doc_id"], "text": r["text"],
+                     "metadata": json.loads(r["metadata"])}
+                    for r in db.execute(sql, params)]
 
     def count_pending_embeddings(self) -> int:
         """Chunks written but not yet embedded — i.e. not yet searchable by
