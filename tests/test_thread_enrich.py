@@ -86,6 +86,38 @@ def test_group_unenriched_by_thread(tmp_path):
     assert all("metadata" in c for c in by_id["thread-A"].chunks)
 
 
+def test_a_reset_digest_never_re_enters_its_own_threads_batch(tmp_path):
+    """Integration-level proof: a digest chunk that ends up at enriched=0 (e.g.
+    from a version-bump reflow that does not distinguish source content from
+    synthesized output) must not be handed back to the extractor as a fake
+    extra "message" in its own thread. That is exactly what group_unenriched_
+    threads + reassemble_thread produced before the fix: _group_key routes the
+    digest into the SAME batch as the thread's real messages (both carry
+    thread_id), and reassemble_thread's own enriched- special-case then splits
+    it back out as a separate message dict — subject and date intact, body =
+    the prior synthesized summary text — sitting alongside the genuine ones.
+    """
+    store = _store(tmp_path)
+    _seed(store, "gmail-a-body-0", thread_id="thread-A", message_id="a", chunk_index=0)
+    store.upsert_chunk("enriched-thread-A",
+                       "[Org] Email: Subject\n\nSummary of thread-A.", "hdigest",
+                       {"thread_id": "thread-A", "source_type": "gmail_enriched_v2",
+                        "subject": "Subject", "date": "2026-06-02"})
+
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+
+    assert len(batches) == 1
+    batch = batches[0]
+    assert batch.doc_ids == ["gmail-a-body-0"], (
+        f"the digest re-entered its own thread's batch: {batch.doc_ids}"
+    )
+    messages = thread_enrich.reassemble_thread(batch.chunks)
+    assert len(messages) == 1, (
+        f"the extractor would see {len(messages)} messages, including the "
+        "thread's own prior summary as a fake extra one"
+    )
+
+
 def _seed_drive(store, doc_id, *, file_id, text="body", chunk_index=0):
     """Insert one unenriched Drive chunk: file_id set, no message_id/thread_id
     (mirrors real Drive chunk metadata)."""
