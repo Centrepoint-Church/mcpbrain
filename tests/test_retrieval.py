@@ -485,3 +485,108 @@ def test_dedup_keeps_content_the_surviving_copy_does_not_contribute(tmp_path):
     assert sorted(hashes) == ["body-hash", "cover-hash"], hashes
     assert [h["doc_id"] for h in hits if h["content_hash"] == "body-hash"] == \
         ["gdrive-q-1"], "the only unexpired copy of that content must survive"
+
+
+def test_cluster_key_prefers_thread_id_then_file_id_then_calendar_event(tmp_path):
+    from mcpbrain import retrieval
+
+    assert retrieval._cluster_key({"metadata": {"thread_id": "t1", "file_id": "f1"}}) == "t1"
+    assert retrieval._cluster_key({"metadata": {"file_id": "f1"}}) == "f1"
+    assert retrieval._cluster_key({"metadata": {"event_id": "e1"}}) == "cal-e1"
+    assert retrieval._cluster_key({"metadata": {}}) is None
+
+
+def test_cluster_key_normalises_legacy_gdrive_prefixed_thread_id(tmp_path):
+    """One live digest had its `thread_id` stamped as a raw chunk's full doc_id
+    shape (`gdrive-<file_id>-<n>`) instead of the bare file_id current writers
+    use — normalise both to the same key so it still clusters correctly."""
+    from mcpbrain import retrieval
+
+    a = retrieval._cluster_key({"metadata": {"thread_id": "gdrive-abc123-0"}})
+    b = retrieval._cluster_key({"metadata": {"file_id": "abc123"}})
+    assert a == b == "abc123"
+
+
+def test_dedup_by_cluster_drops_a_digest_when_its_own_raw_sibling_is_present(tmp_path):
+    """A digest (`enriched-<thread_id>`) is a synthesized summary of its own
+    thread's raw chunks — pure derived output. When both are in the pool it is
+    redundant, and since a digest can never itself match a gold/expected
+    source document, letting it occupy a slot ahead of its own raw sibling
+    only pushes the real answer down. The raw chunk must survive."""
+    from mcpbrain import retrieval
+
+    hits = [
+        {"doc_id": "enriched-t1", "metadata": {"thread_id": "t1"}, "score": 0.9},
+        {"doc_id": "gdrive-t1-0", "metadata": {"thread_id": "t1"}, "score": 0.5},
+        {"doc_id": "gdrive-z-0", "metadata": {"thread_id": "z"}, "score": 0.7},
+    ]
+
+    out = retrieval._dedupe_by_cluster(hits)
+
+    assert [h["doc_id"] for h in out] == ["gdrive-t1-0", "gdrive-z-0"]
+
+
+def test_dedup_by_cluster_keeps_a_digest_with_no_raw_sibling_in_the_pool(tmp_path):
+    """If a thread's raw chunks aren't in THIS pool (filtered out, beyond the
+    retrieval boundary, etc.) its digest is the only representation present —
+    dropping it would be content loss, not duplicate removal."""
+    from mcpbrain import retrieval
+
+    hits = [
+        {"doc_id": "enriched-t1", "metadata": {"thread_id": "t1"}, "score": 0.9},
+        {"doc_id": "gdrive-z-0", "metadata": {"thread_id": "z"}, "score": 0.7},
+    ]
+
+    out = retrieval._dedupe_by_cluster(hits)
+
+    assert [h["doc_id"] for h in out] == ["enriched-t1", "gdrive-z-0"]
+
+
+def test_dedup_by_cluster_does_not_collapse_two_raw_chunks_of_the_same_thread(tmp_path):
+    """Only a digest-vs-raw pair is redundant. Two different raw messages in
+    the same thread carry genuinely distinct content and must both survive."""
+    from mcpbrain import retrieval
+
+    hits = [
+        {"doc_id": "gdrive-t1-0", "metadata": {"thread_id": "t1"}, "score": 0.9},
+        {"doc_id": "gdrive-t1-1", "metadata": {"thread_id": "t1"}, "score": 0.5},
+    ]
+
+    assert retrieval._dedupe_by_cluster(hits) == hits
+
+
+def test_hybrid_search_does_not_let_a_digest_crowd_out_its_own_thread(tmp_path):
+    """Integration-level: a thread's digest and its own raw source chunk both
+    ranking near the top must not both survive — the raw chunk (the one that
+    can actually match an expected/gold document) must be the one kept."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    store.upsert_chunk("gdrive-t1-0", "Fixed asset register review meeting notes.",
+                       "raw-hash", {"source_type": "gdrive", "file_id": "t1",
+                                    "thread_id": "t1"})
+    store.upsert_chunk("enriched-t1", "Fixed asset register review meeting notes summary.",
+                       "digest-hash", {"source_type": "gdrive_enriched_v2",
+                                       "thread_id": "t1"})
+    store.upsert_chunk("gdrive-z-0", "Unrelated minutes of the board meeting.",
+                       "other-hash", {"source_type": "gdrive", "file_id": "z"})
+    store.embed_doc("gdrive-t1-0", emb, home=str(tmp_path))
+    store.embed_doc("enriched-t1", emb, home=str(tmp_path))
+    store.embed_doc("gdrive-z-0", emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "asset register", limit=10)
+
+    doc_ids = [h["doc_id"] for h in hits]
+    assert "gdrive-t1-0" in doc_ids, f"raw source chunk was crowded out: {doc_ids}"
+    assert "enriched-t1" not in doc_ids, (
+        f"digest survived alongside its own raw sibling: {doc_ids}"
+    )
