@@ -59,6 +59,25 @@ largest payloads in the surface for a consumer that wants prose).
    `functools` are fine; do not let the record's type annotations pull anything new in at module
    scope.
 
+3. **Caching removes an accidental safety property — restore it deliberately.** The four current
+   accessors each build and return a **fresh dict per call**, and that is exactly why the 0.7.113
+   review judged the shared-by-reference `_queued` output-schema dict harmless: *"the aliasing
+   cannot outlive one call."* A cached `TOOL_SPECS` shares every schema dict globally and
+   permanently, so an in-place mutation anywhere would silently corrupt what the server advertises
+   for the rest of the process's life — and this process is long-lived (see the sibling lifecycle
+   spec: an MCP server runs for as long as its client stays open).
+
+   Resolve it explicitly rather than relying on nobody mutating:
+   - `ToolSpec` is `frozen=True`, so the *record* cannot be rebound.
+   - `frozen` does **not** freeze the nested `dict`s, so also assert the invariant with a test:
+     obtain a schema from `TOOL_SPECS`, mutate the returned object, and prove a second read is
+     unaffected — whichever way you achieve that (returning copies at the boundary, or
+     `MappingProxyType`, or a deep-freeze helper). Pick one mechanism and apply it uniformly;
+     don't protect `input_schema` and leave `output_schema` exposed.
+   - Verified non-issue today: `jsonschema.validate` does not mutate the schema it is given, and
+     `_validate_tool_arguments` is required never to mutate the *arguments* dict either. The risk
+     is a future edit, which is what the test is for.
+
 **Delete the four accessors rather than keeping adapters.** Leaving `tool_schemas()` as a shim
 over `TOOL_SPECS` would preserve two ways to read the same data, which is precisely the defect
 being removed. Update the ~6 call sites (`on_list_tools`, `_validate_tool_arguments`,
@@ -76,6 +95,7 @@ a vague "still works":
 - `destructive_hint` true for **exactly** `brain_gardener_apply` and `brain_enrich_advance`
 - all 26 tool descriptions **byte-identical** to their current values
 - `brain_enrich_push`'s advertised schema still contains one property per `_PUSH_BLOCKS` entry
+- mutating a schema read out of `TOOL_SPECS` does not affect a subsequent read (constraint 3)
 
 Plus the existing protocol round-trip over real stdio (all 26 tools + both resource handlers),
 and a re-run of the live handshake against the installed wheel before any release that carries
