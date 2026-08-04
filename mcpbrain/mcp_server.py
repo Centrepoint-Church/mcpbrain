@@ -1215,6 +1215,92 @@ def tool_annotations() -> dict:
     }
 
 
+def tool_output_schemas() -> dict[str, dict]:
+    """name -> outputSchema, for tools whose result is a machine-read envelope.
+
+    Deliberately partial (13 of 26) — absence is meaningful and tested
+    (test_mcp_structured_output.py). `structured_content` ships *alongside*
+    `content`, not instead of it, so declaring it doubles the payload; that's
+    a real cost on brain_routine and brain_enrich_pull, which carry markdown/a
+    ~11.5KB rules blob meant to be read verbatim by an LLM, not parsed. Every
+    other tool's output is a small, stable, machine-consumed envelope, so the
+    trade is worth it there.
+
+    The inconsistent success keys below (queued/written/ok/applied/resolved)
+    are described as-is, not normalised — renaming them breaks every caller
+    and is a separate change.
+
+    brain_draft_save's `error` branch omits `draft_record_id` (see
+    make_brain_draft_save), so unlike the other envelopes here its schema
+    does not mark any field `required` — a `required: ["draft_record_id"]`
+    would reject the tool's own error responses.
+    """
+    _queued = {
+        "type": "object",
+        "properties": {
+            "queued": {"type": "boolean"},
+            "path": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "required": ["queued"],
+    }
+    return {
+        "brain_ingest": _queued,
+        "brain_action_create": _queued,
+        "brain_action_update": _queued,
+        "brain_decision": _queued,
+        "brain_note": _queued,
+        "brain_memory_write": _queued,
+        "brain_enrich_push": {
+            "type": "object",
+            "properties": {
+                "written": {"type": "boolean"},
+                "path": {"type": "string"},
+                "error": {"type": "string"},
+            },
+            "required": ["written"],
+        },
+        "brain_gardener_apply": {
+            "type": "object",
+            "properties": {
+                "applied": {"type": "boolean"},
+                "committed": {"type": "boolean"},
+                "error": {"type": "string"},
+            },
+            "required": ["applied"],
+        },
+        "brain_finding_resolve": {
+            "type": "object",
+            "properties": {
+                "resolved": {"type": "boolean"},
+                "error": {"type": "string"},
+            },
+            "required": ["resolved"],
+        },
+        "brain_enrich_advance": {
+            "type": "object",
+            "properties": {"woken": {"type": "boolean"}, "error": {"type": "string"}},
+        },
+        "brain_enrich_pending": {
+            "type": "object",
+            "properties": {"pending": {"type": "integer"}},
+            "required": ["pending"],
+        },
+        "brain_draft_save": {
+            "type": "object",
+            "properties": {
+                "draft_record_id": {"type": "integer"},
+                "error": {"type": "string"},
+            },
+        },
+        "brain_meeting_pack_upsert": {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}},
+            "required": ["ok"],
+        },
+    }
+
+
 # name -> description, the parallel half of tool_schemas(). These strings are the
 # documentation the model reads before choosing a tool, so they are kept verbatim;
 # brain_gardener_apply's in particular carries a real usage constraint.
@@ -1379,11 +1465,17 @@ def build_server(store, draft_store, client, home: str):
         # _validate_tool_arguments reads, so what the server advertises and what
         # it enforces cannot drift apart.
         annotations = tool_annotations()
-        return types.ListToolsResult(tools=[
-            types.Tool(name=tool_name, description=_TOOL_DESCRIPTIONS[tool_name],
-                       inputSchema=schema, annotations=annotations[tool_name])
-            for tool_name, schema in tool_schemas().items()
-        ])
+        out_schemas = tool_output_schemas()
+        tools = []
+        for tool_name, schema in tool_schemas().items():
+            kwargs = {}
+            if tool_name in out_schemas:
+                kwargs["outputSchema"] = out_schemas[tool_name]
+            tools.append(types.Tool(
+                name=tool_name, description=_TOOL_DESCRIPTIONS[tool_name],
+                inputSchema=schema, annotations=annotations[tool_name], **kwargs,
+            ))
+        return types.ListToolsResult(tools=tools)
 
     async def on_call_tool(ctx, params) -> types.CallToolResult:
         import json
@@ -1414,21 +1506,25 @@ def build_server(store, draft_store, client, home: str):
                 content=[types.TextContent(type="text", text=str(exc))],
                 isError=True,
             )
+        # Single return point below: every branch here assigns `out` and falls
+        # through, rather than each constructing its own CallToolResult. This
+        # collapses what was 26 separate `return types.CallToolResult(...)`
+        # statements (one per branch) into 26 assignments — removing the class
+        # of bug where a missed/miscopied branch returns a bare, unwrapped
+        # value instead of a proper result. brain_actions' early
+        # "not configured" response is the one deliberate exception: its
+        # payload is a hardcoded JSON *string* literal, not a dict produced by
+        # a handler, so it stays its own explicit return rather than flowing
+        # through the `json.dumps(out)` at the bottom.
         if name == "brain_read":
-            chunk = store.get_chunk(arguments["doc_id"])
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(chunk))]
-            )
-        if name == "brain_context":
+            out = store.get_chunk(arguments["doc_id"])
+        elif name == "brain_context":
             out = await context(
                 entity=arguments.get("entity", ""),
                 mode=arguments.get("mode", "profile"),
                 community_id=arguments.get("community_id"),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_actions":
+        elif name == "brain_actions":
             # null-coalesce: explicit None/empty defaults to the configured owner
             owner = arguments.get("owner") or _default_owner()
             if not owner:
@@ -1437,31 +1533,19 @@ def build_server(store, draft_store, client, home: str):
                 )
             status = arguments.get("status") or "open"
             out = await actions(owner, status)
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_graph":
+        elif name == "brain_graph":
             out = await graph(arguments["entity"], arguments.get("hops", 1),
                               at_time=arguments.get("at_time"),
                               include_invalidated=arguments.get("include_invalidated", False))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_proactive":
+        elif name == "brain_proactive":
             out = await proactive(arguments.get("finding_type", ""), arguments.get("severity", ""))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_finding_resolve":
+        elif name == "brain_finding_resolve":
             out = await finding_resolve(
                 finding_id=arguments.get("finding_id", 0),
                 outcome=arguments.get("outcome", ""),
                 note=arguments.get("note", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_ingest":
+        elif name == "brain_ingest":
             out = await ingest(
                 title=arguments.get("title", ""),
                 content=arguments.get("content", ""),
@@ -1469,10 +1553,7 @@ def build_server(store, draft_store, client, home: str):
                 observation_type=arguments.get("observation_type", "note"),
                 org=arguments.get("org", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_action_create":
+        elif name == "brain_action_create":
             out = await action_create(
                 text=arguments.get("text", ""),
                 owner=arguments.get("owner") or _default_owner(),
@@ -1481,18 +1562,12 @@ def build_server(store, draft_store, client, home: str):
                 project_id=arguments.get("project_id", ""),
                 area_id=arguments.get("area_id", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_action_update":
+        elif name == "brain_action_update":
             out = await action_update(
                 action_id=arguments.get("action_id", 0),
                 status=arguments.get("status", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_decision":
+        elif name == "brain_decision":
             out = await decision(
                 text=arguments.get("text", ""),
                 rationale=arguments.get("rationale", ""),
@@ -1500,27 +1575,18 @@ def build_server(store, draft_store, client, home: str):
                 supersedes=arguments.get("supersedes", ""),
                 org=arguments.get("org", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_note":
+        elif name == "brain_note":
             out = await note(
                 text=arguments.get("text", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_memory_write":
+        elif name == "brain_memory_write":
             out = await memory_write(
                 slug=arguments.get("slug", ""),
                 description=arguments.get("description", ""),
                 body=arguments.get("body", ""),
                 memory_type=arguments.get("memory_type", "project"),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_gardener_apply":
+        elif name == "brain_gardener_apply":
             out = await gardener_apply(
                 lane=arguments.get("lane", ""),
                 filename=arguments.get("filename", ""),
@@ -1530,18 +1596,12 @@ def build_server(store, draft_store, client, home: str):
                 attribution_quote=arguments.get("attribution_quote", ""),
                 attribution_doc_id=arguments.get("attribution_doc_id", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_draft_context":
+        elif name == "brain_draft_context":
             out = await draft_context_fn(
                 email_id=arguments.get("email_id", ""),
                 intent=arguments.get("intent", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_draft_save":
+        elif name == "brain_draft_save":
             out = await draft_save_fn(
                 email_id=arguments.get("email_id", ""),
                 thread_id=arguments.get("thread_id", ""),
@@ -1549,29 +1609,17 @@ def build_server(store, draft_store, client, home: str):
                 final_draft=arguments.get("final_draft", ""),
                 parent_draft_id=arguments.get("parent_draft_id"),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_routine":
+        elif name == "brain_routine":
             rname = (arguments or {}).get("name", "")
             instructions = _routine_instructions(rname)
             out = ({"name": rname, "instructions": instructions} if instructions
                    else {"error": f"unknown routine {rname!r}", "available": list(_ROUTINES)})
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_units":
+        elif name == "brain_enrich_units":
             out = await enrich_units()
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_pull":
+        elif name == "brain_enrich_pull":
             out = await enrich_pull(unit_id=arguments.get("unit_id", ""),
                                     with_rules=arguments.get("with_rules", True))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_push":
+        elif name == "brain_enrich_push":
             # Do NOT coerce extractions=None to [] here — the handler must see None
             # when the field is absent so the block-unit vs thread-unit guard works.
             out = await enrich_push(
@@ -1580,35 +1628,17 @@ def build_server(store, draft_store, client, home: str):
                 merge_answers=arguments.get("merge_answers") or [],
                 **{k: arguments[k] for k in _PUSH_BLOCKS if arguments.get(k)},
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_advance":
+        elif name == "brain_enrich_advance":
             out = await enrich_advance()
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_claim":
+        elif name == "brain_enrich_claim":
             out = await enrich_claim(with_rules=arguments.get("with_rules", False))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_enrich_pending":
+        elif name == "brain_enrich_pending":
             out = await enrich_pending()
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_meetings_today":
+        elif name == "brain_meetings_today":
             out = await meetings_today()
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_meeting_pack_get":
+        elif name == "brain_meeting_pack_get":
             out = await meeting_pack_get(arguments.get("event_id", ""))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_meeting_pack_upsert":
+        elif name == "brain_meeting_pack_upsert":
             out = await meeting_pack_upsert(
                 event_id=arguments.get("event_id", ""),
                 event_title=arguments.get("event_title", ""),
@@ -1617,15 +1647,24 @@ def build_server(store, draft_store, client, home: str):
                 attendees=arguments.get("attendees") or [],
                 context_hash=arguments.get("context_hash", ""),
             )
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(out))]
-            )
-        if name == "brain_search":
-            results = await search(arguments["query"], arguments.get("limit", 10))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(results))]
-            )
-        raise ValueError(f"unknown tool: {name}")
+        elif name == "brain_search":
+            out = await search(arguments["query"], arguments.get("limit", 10))
+        else:
+            raise ValueError(f"unknown tool: {name}")
+
+        # structured_content ships *alongside* content (never instead of it), so
+        # clients that ignore structured output see the exact same response as
+        # before this task. Only set for the tools with a declared outputSchema,
+        # and only when `out` is actually the dict-shaped envelope that schema
+        # describes — a declared schema the tool then violates (e.g. by
+        # returning a list) would be worse than no schema at all.
+        result_kwargs = {}
+        if name in tool_output_schemas() and isinstance(out, dict):
+            result_kwargs["structured_content"] = out
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(out))],
+            **result_kwargs,
+        )
 
     # Standing instructions read by every session that connects this server —
     # the owner's identity/role/orgs + the brain tools + the capture loop. Rendered
