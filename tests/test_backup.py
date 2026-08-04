@@ -508,6 +508,153 @@ def _split_frames(blob):
     return frames, _ARCHIVE_MAGIC
 
 
+# --- bounded temp disk during snapshot ----------------------------------------
+#
+# make_encrypted_snapshot wrote a full plaintext bundle.tar.gz next to the store
+# copy, so peak temp was ~2x the store. On the live 11.9GB store that is ~15GB
+# of transient cleartext, and it is the mechanism behind the 2026-08-03 ENOSPC
+# storm (57 backups failed in a day with "No space left on device", each leaving
+# another orphaned work dir). Streaming the tar straight into the encryptor
+# removes the intermediate copy entirely; a pre-flight free-space check turns
+# what is left into a clean, backed-off failure instead of a filled disk.
+
+
+def _fat_store(path, mb):
+    """A valid Store padded to roughly `mb` megabytes of INCOMPRESSIBLE data,
+    so the tar.gz is about the same size as the store (a compressible filler
+    would hide the second copy this test is looking for)."""
+    import os
+    import sqlite3
+
+    store = Store(path, dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE IF NOT EXISTS _bulk (b BLOB)")
+    for _ in range(mb):
+        con.execute("INSERT INTO _bulk VALUES (?)", (os.urandom(1024 * 1024),))
+    con.commit()
+    con.close()
+    return store
+
+
+def _dir_bytes(d):
+    from pathlib import Path as _P
+    total = 0
+    for p in _P(d).rglob("*"):
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def test_snapshot_never_materialises_a_plaintext_bundle(tmp_path, monkeypatch):
+    """Peak temp usage must be about ONE copy of the store, not two."""
+    import tempfile as _tf
+    import threading
+
+    from mcpbrain import backup as _bk
+
+    mb = 16
+    store = _fat_store(tmp_path / "fat.sqlite3", mb)
+    records = tmp_path / "records"          # force the bundle path
+    records.mkdir()
+    (records / "note.md").write_text("hello")
+
+    created = []
+    real_mkdtemp = _tf.mkdtemp
+
+    def _spy(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        created.append(d)
+        return d
+
+    monkeypatch.setattr(_bk.tempfile, "mkdtemp", _spy)
+
+    peak = {"v": 0}
+    stop = threading.Event()
+
+    def _sampler():
+        while not stop.is_set():
+            if created:
+                peak["v"] = max(peak["v"], _dir_bytes(created[0]))
+            stop.wait(0.002)
+
+    t = threading.Thread(target=_sampler, daemon=True)
+    t.start()
+    try:
+        out = make_encrypted_snapshot(
+            store.path, tmp_path / "snap.enc", generate_escrow_key(),
+            records_dir=records)
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert out.exists()
+    one_copy = mb * 1024 * 1024
+    assert peak["v"] < one_copy * 1.5, (
+        f"peak temp {peak['v'] / 1e6:.0f}MB for a {mb}MB store — a second full "
+        "plaintext copy (bundle.tar.gz) was materialised alongside it")
+
+
+def test_snapshot_bundle_still_round_trips_when_streamed(tmp_path):
+    """Streaming the tar must not change what comes back out."""
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-latest", "the annual budget review", "h1", {})
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "world.md").write_text("world model contents")
+    cfgp = tmp_path / "config.json"
+    cfgp.write_text('{"owner_name": "Josh"}')
+
+    key = generate_escrow_key()
+    out = make_encrypted_snapshot(store.path, tmp_path / "snap.enc", key,
+                                  records_dir=records, config_path=cfgp)
+
+    from mcpbrain.backup import restore
+    dest_records = tmp_path / "restored_records"
+    dest_cfg = tmp_path / "restored_config.json"
+    restore(out, tmp_path / "restored.sqlite3", key,
+            records_dir=dest_records, config_path=dest_cfg)
+
+    assert Store(tmp_path / "restored.sqlite3", dim=4).get_chunk("d-latest") is not None
+    assert (dest_records / "world.md").read_text() == "world model contents"
+    assert dest_cfg.read_text() == '{"owner_name": "Josh"}'
+
+
+def test_snapshot_refuses_to_start_without_free_space(tmp_path, monkeypatch):
+    """Fail fast and clean rather than filling the disk.
+
+    On 2026-08-03 the retry storm ran the system disk to zero, which takes down
+    far more than the backup. Checking first turns that into one logged, backed
+    off failure per interval.
+    """
+    import errno
+
+    import pytest
+
+    from mcpbrain import backup as _bk
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "x", "h1", {})
+    out = tmp_path / "snap.enc"
+
+    class _Cramped:
+        f_bavail = 1
+        f_frsize = 4096  # 4KB free
+
+    monkeypatch.setattr(_bk.os, "statvfs", lambda p: _Cramped())
+
+    with pytest.raises(OSError) as ei:
+        make_encrypted_snapshot(store.path, out, generate_escrow_key())
+
+    assert ei.value.errno == errno.ENOSPC
+    assert not out.exists(), "wrote a partial artifact despite refusing to start"
+
+
 # --- Task 5.3: upload encrypted snapshot to a Shared Drive --------------------
 
 
