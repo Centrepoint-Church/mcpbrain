@@ -57,21 +57,46 @@ The version the server reports is its own start-time version, which is now corre
 (`serverInfo.version` = mcpbrain's version, fixed in the migration) — so a **client** can
 see the drift even though nothing acts on it.
 
-### Options (not chosen)
+### Chosen design (approved 2026-08-04)
 
-- **Server-side self-check.** Record the installed distribution's version/mtime at startup;
-  on some cheap cadence (or per request) compare, and if it changed, exit cleanly so the
-  client re-spawns. stdio clients generally restart a server that exits — needs verifying per
-  client, and an exit mid-tool-call would be user-visible, so it should only fire when idle.
-- **Updater-side signal.** Have `update.py` find and terminate live `mcpbrain mcp-server`
-  processes after a successful wheel swap. Blunter, and racy against an in-flight tool call.
-- **Surface it instead of fixing it.** Have `doctor` compare `mcp_heartbeat.json`'s process
-  vintage against the installed version and warn. Cheapest, and honest, but leaves the user
-  to act.
+**The pivotal unknown is whether a client respawns an exited stdio MCP server.** Both
+"real fix" options depend on it, and the outage logs suggest it may not happen: after
+`Server transport closed unexpectedly` / `Server disconnected`, nothing restarted until a new
+Desktop launch ~50 minutes later. **If clients do not respawn, self-exit and updater-kill both
+make things strictly worse** — they downgrade a user from "stale but working" to "no mcpbrain
+until they restart". So that question is settled by experiment *before* any fix is built.
 
-The self-check-when-idle option looks best; it is the only one that closes the loop without
-the updater reaching into another client's process. Wants a decision, not just an
-implementation.
+**1. Experiment (gates the fix).** Kill a live `mcpbrain mcp-server` and observe whether
+Claude Desktop and Claude Code respawn it, on the same connection. Record the answer for both
+clients; they are separate implementations and may differ.
+
+**2. `doctor` surfaces the drift — ships regardless of the experiment.**
+
+Originally this was framed as "record the version in `mcp_heartbeat.json` and have `doctor`
+compare". **That is the wrong mechanism**, for a reason Finding 2 makes concrete: the heartbeat
+is a *single* file and there are *multiple* live servers, so last-writer-wins and the file
+describes whichever server started most recently — not whether *any* live server is stale.
+
+Instead `doctor` enumerates live `mcpbrain mcp-server` processes and compares each one's
+**process start time** against the installed package's mtime. Any server started before the
+currently-installed `mcp_server.py` is running superseded code. This needs **no server-side
+change at all**, is correct for N servers, and is exactly the check performed by hand on
+2026-08-04. It reports the actionable line, e.g. *"1 MCP server is running older code —
+restart Claude to pick up 0.7.113."*
+
+Known limitation, accepted: start-time-vs-mtime is a proxy. Touching the installed file
+without reinstalling would false-positive. That is a strictly better failure than the current
+silence, and no cheap way exists to read the version a foreign process actually imported.
+
+**3. The fix branches on the experiment.**
+- *Clients respawn* → the server self-checks on a cheap cadence and exits cleanly when it is
+  both **drifted and idle**. Idleness is load-bearing: exiting mid-tool-call is user-visible.
+- *Clients do not respawn* → the `doctor` warning **is** the fix, and it should also surface
+  where the user will see it without running `doctor` (the tray). Do **not** build self-exit.
+
+Deliberately rejected either way: having `update.py` reach into another client's process to
+kill it. It is racy against in-flight calls and the updater has no way to know whether a tool
+call is running.
 
 ---
 
@@ -124,8 +149,25 @@ stalled since 2026-07-23 (`_run_periodic_passes` early-returns wholesale when
   workstream touched (unused imports/variables, multiple-imports-on-one-line). The migration
   branch's own 9 changed files are clean.
 
-## Suggested order
+## Scope and order (approved 2026-08-04)
 
-1. Decide Finding 1 — it is the one with fleet-wide delivery consequences.
-2. Establish whether Finding 2 is intended client behaviour before changing anything.
-3. Re-test Finding 3 under concurrent writes before attributing any backup failure to it.
+All three findings are in scope for one plan — they are all "how the MCP server process
+behaves", and Findings 2 and 3 are cheap measurements whose value is mostly in closing off
+wrong explanations.
+
+1. **Finding 1, experiment first** (§ Chosen design step 1) — gates step 3.
+2. **Finding 1, `doctor` drift check** (step 2) — independent of the experiment, ships either way.
+3. **Finding 1, the branched fix** (step 3) — shape determined by step 1's measured result.
+4. **Finding 2** — bounded measurement: confirm both Desktop servers actually complete
+   `initialize` (the logs suggest they do), measure each one's RSS, and establish whether the
+   count tracks windows/workspaces. A documented *"this is client behaviour, nothing to
+   change"* is a legitimate and expected outcome; the point is to stop guessing.
+5. **Finding 3** — real experiment: with two servers connected, invoke a **writing** tool
+   (e.g. `brain_note`) in each concurrently, then attempt `wal_checkpoint(TRUNCATE)` and see
+   whether it returns busy. This either identifies the cause of the observed backup failures or
+   refutes the hypothesis with evidence. Note the refutation already established under idle
+   conditions (§ Finding 3) — this tests the *loaded* case that was never tested.
+
+**Success criterion for the plan as a whole:** every one of the three findings ends either
+fixed or **explicitly closed with evidence**. "Still unexplained" is a failure for Finding 3
+specifically, because live backups were failing and the cause is currently unattributed.
