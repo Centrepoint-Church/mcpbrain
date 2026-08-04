@@ -15,20 +15,23 @@ EXPECTED_TOOLS = {
 
 
 async def list_tools_via_handler(server):
-    """Invoke the registered ListToolsRequest handler directly and return the
-    tool list, without an event loop-driven transport or a real MCP session.
+    """Invoke the registered tools/list handler directly and return the tool
+    list, without an event loop-driven transport or a real MCP session.
 
-    On mcp 1.x, @server.list_tools() stores its wrapped coroutine in
-    server.request_handlers[types.ListToolsRequest]; that coroutine takes a
-    constructed request and returns a types.ServerResult wrapping a
-    ListToolsResult. Task 8 (tool annotations) reuses this helper, so it lives
-    at module level rather than inline in a single test body.
+    On mcp 2.x, handlers are looked up by method string
+    (`server.get_request_handler("tools/list")` -> a HandlerEntry carrying
+    `.params_type` and `.handler`) and invoked as `handler(ctx, params)`
+    returning a full `types.ListToolsResult`. build_server()'s handlers ignore
+    `ctx` entirely, so None is a faithful stand-in for the per-request
+    ServerRequestContext the runner would build. Task 8 (tool annotations)
+    reuses this helper, so it lives at module level rather than inline in a
+    single test body.
     """
     from mcp import types
 
-    handler = server.request_handlers[types.ListToolsRequest]
-    result = await handler(types.ListToolsRequest())
-    return result.root.tools
+    entry = server.get_request_handler("tools/list")
+    result = await entry.handler(None, types.PaginatedRequestParams())
+    return result.tools
 
 
 def test_build_server_registers_every_tool(mcp_env):
@@ -42,11 +45,9 @@ def test_build_server_registers_every_tool(mcp_env):
 
 
 def test_build_server_registers_resource_handlers(mcp_env):
-    from mcp import types
-
     server = build_server(**mcp_env)
-    assert types.ListResourcesRequest in server.request_handlers
-    assert types.ReadResourceRequest in server.request_handlers
+    assert server.get_request_handler("resources/list") is not None
+    assert server.get_request_handler("resources/read") is not None
 
 
 def test_build_server_reports_mcpbrain_version(mcp_env):
