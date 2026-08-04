@@ -4,7 +4,11 @@ version = "0.7.112"
 requires-python = ">=3.12"
 dependencies = [
   "sqlite-vec>=0.1.6",
-  "mcp>=1.2",
+  "mcp>=1.2,<2",   # mcp 2.0 rewrote Server's low-level API (no more list_resources/
+                   # read_resource/list_tools/call_tool decorators) — mcp_server.py
+                   # targets the 1.x decorator API; unpinned, an unattended
+                   # `uv tool install` re-resolve (incl. daily fleet auto-update)
+                   # picks up 2.0 and the MCP server crashes on every connect.
   "numpy>=1.26",
   "nameparser>=1.1",       # HumanName title-stripping in graph_write.strip_title
   "dateparser>=1.4",       # date inference in graph_write._infer_deadline
