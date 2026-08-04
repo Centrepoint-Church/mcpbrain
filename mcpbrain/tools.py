@@ -922,13 +922,6 @@ declare(
 )
 
 
-# The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
-# merge_answers (_PUSH_BLOCKS, imported at module top). Each is drained
-# by the daemon from the inbox object under this exact key (see drain.py
-# BLOCK_DRAINERS + synthesise_threads). Without forwarding them, the
-# synthesis/profile/community/memory/audit/review/curator work the batch
-# requested is silently dropped on the MCP path.
-
 _LEASE_TTL_S = 15 * 60  # a claimed unit is re-listable after this (covers crashed subagents)
 _UNITS_BATCH_DEFAULT = 30  # max units handed out (and claimed) per brain_enrich_units call
 
@@ -1112,6 +1105,13 @@ def make_brain_enrich_pull(home: str):
         return _unit_payload(home, d, unit_id, with_rules)
     return brain_enrich_pull
 
+
+# The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
+# merge_answers (_PUSH_BLOCKS, imported at module top). Each is drained
+# by the daemon from the inbox object under this exact key (see drain.py
+# BLOCK_DRAINERS + synthesise_threads). Without forwarding them, the
+# synthesis/profile/community/memory/audit/review/curator work the batch
+# requested is silently dropped on the MCP path.
 
 def push_input_schema() -> dict:
     """brain_enrich_push's inputSchema, with one property per push block.
