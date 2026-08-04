@@ -3,7 +3,7 @@ import asyncio
 import json
 import pathlib
 
-from mcpbrain.mcp_server import (
+from mcpbrain.tools import (
     make_brain_ingest, make_brain_action_create, make_brain_action_update,
     make_brain_decision, make_brain_note, make_brain_memory_write,
     _capture_envelope,

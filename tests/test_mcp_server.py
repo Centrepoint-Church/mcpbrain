@@ -9,7 +9,7 @@ from mcpbrain.mcp_server import make_brain_search
 def _push_tool_schema():
     """Pull brain_enrich_push's declared inputSchema out of the module-level
     builder, so the test reads exactly what the MCP client is offered."""
-    from mcpbrain.mcp_server import push_input_schema
+    from mcpbrain.tools import push_input_schema
     return push_input_schema()
 
 

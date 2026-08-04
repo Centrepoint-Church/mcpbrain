@@ -181,6 +181,65 @@ def test_tool_registry_imports_nothing_heavy():
     assert not forbidden, f"tool_registry.py imports {forbidden}"
 
 
+def test_tools_module_imports_nothing_heavy():
+    """The DECLARATION half of the seam must stay mcp-free too, source-level.
+
+    tool_registry being stdlib-only was necessary but not sufficient: every
+    @tool(...) in mcpbrain/tools.py evaluates at import, so while the factories
+    lived beside the Server construction, reading the registry meant importing
+    the protocol stack. Same AST guard as above, one module further out --
+    function-body imports included, since these factories import their heavy
+    dependencies lazily and one hoisted to module scope would undo the split.
+    """
+    import ast
+    from pathlib import Path
+
+    import mcpbrain.tools as mt
+
+    tree = ast.parse(Path(mt.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    forbidden = imported & {"mcp", "fastembed", "onnxruntime", "jsonschema",
+                            "sqlite_vec", "numpy"}
+    assert not forbidden, f"tools.py imports {forbidden}"
+
+
+def test_importing_tools_does_not_pull_the_mcp_protocol_stack():
+    """The measurement that matters, in a clean interpreter.
+
+    The AST guard above only sees DIRECT imports; this catches a transitive one
+    (a new `from mcpbrain.<x> import ...` whose target imports mcp). Subprocess,
+    not this process: pytest has already imported mcp via other test modules, so
+    an in-process sys.modules check would pass vacuously.
+    """
+    import json
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, time;"
+        "t=time.perf_counter();"
+        "import mcpbrain.tools;"
+        "dt=time.perf_counter()-t;"
+        "import json;"
+        "print(json.dumps({'mcp': [m for m in sys.modules if m.split('.')[0] in "
+        "('mcp','pydantic','starlette','uvicorn')][:5],"
+        "'n': len(sys.modules), 'ms': dt*1000}))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True, check=True)
+    got = json.loads(out.stdout.strip().splitlines()[-1])
+    assert got["mcp"] == [], f"mcpbrain.tools pulled the protocol stack: {got['mcp']}"
+    # Generous ceiling (measured ~142): this asserts "no heavy stack crept in",
+    # not a performance budget, so it must not fail on a slower box or a new
+    # small stdlib dependency. mcp alone takes it to ~600.
+    assert got["n"] < 300, f"import graph ballooned to {got['n']} modules"
+
+
 def test_registry_stores_stdlib_annotations_not_sdk_models():
     """The VALUE, not just the type hint, must be mcp-free.
 
