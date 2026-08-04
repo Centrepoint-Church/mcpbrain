@@ -181,6 +181,61 @@ def test_tool_registry_imports_nothing_heavy():
     assert not forbidden, f"tool_registry.py imports {forbidden}"
 
 
+def test_registry_stores_stdlib_annotations_not_sdk_models():
+    """The VALUE, not just the type hint, must be mcp-free.
+
+    This is the whole seam. A `mcp.types.ToolAnnotations` instance stored here
+    would drag mcp + pydantic + starlette + uvicorn into every importer of the
+    registry (601 modules vs 142) no matter how the field is annotated -- and
+    would pin the 24 factories' @tool declarations to a module that can import
+    mcp at load time.
+    """
+    from mcpbrain import mcp_server  # noqa: F401 - import populates the registry
+    from mcpbrain.tool_registry import ToolAnnotations
+
+    wrong = {n: type(s.annotations).__module__ for n, s in registry().items()
+             if not isinstance(s.annotations, ToolAnnotations)}
+    assert not wrong, f"annotations are not the stdlib type: {wrong}"
+
+
+def test_sdk_annotation_conversion_is_wire_exact():
+    """Every advertised tool's annotations serialise exactly as the SDK's own.
+
+    Field-by-field, then the camelCase payload `model_dump(by_alias=True)`
+    actually puts on the wire: same five keys, same values, nothing dropped and
+    nothing invented. This is what makes storing a stdlib value instead of the
+    SDK model a pure representation change.
+    """
+    import dataclasses
+
+    from mcpbrain import mcp_server
+    from mcpbrain.tool_registry import ToolAnnotations
+
+    assert [f.name for f in dataclasses.fields(ToolAnnotations)] == [
+        "title", "read_only_hint", "destructive_hint", "idempotent_hint",
+        "open_world_hint",
+    ], "field set/order drifted from mcp.types.ToolAnnotations"
+
+    for name, s in registry().items():
+        ours = dataclasses.asdict(s.annotations)
+        sdk = mcp_server._sdk_annotations(s.annotations)
+        assert {f: getattr(sdk, f) for f in ours} == ours, name
+        assert sdk.model_dump(by_alias=True) == {
+            "title": s.annotations.title,
+            "readOnlyHint": s.annotations.read_only_hint,
+            "destructiveHint": s.annotations.destructive_hint,
+            "idempotentHint": s.annotations.idempotent_hint,
+            "openWorldHint": s.annotations.open_world_hint,
+        }, name
+
+
+def test_sdk_annotation_conversion_passes_none_through():
+    """An unannotated spec must still advertise as annotations=None, not crash."""
+    from mcpbrain import mcp_server
+
+    assert mcp_server._sdk_annotations(None) is None
+
+
 def test_deep_mutation_of_a_read_schema_cannot_affect_a_later_read():
     """Nested, not just top-level: the sharing hazard is a mutated inner dict.
 
