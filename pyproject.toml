@@ -31,6 +31,11 @@ dependencies = [
   "google-auth>=2",               # google.auth.transport.requests / oauth2.credentials (auth.py)
   "google-auth-oauthlib>=1",      # google_auth_oauthlib OAuth flow (auth.py)
   "google-auth-httplib2>=0.1",    # httplib2 transport for google-auth
+  # Direct dependency: auth.py imports httplib2 itself and reads the module
+  # constant httplib2.REDIRECT_CODES (_google_http un-registers 308). It only
+  # arrived transitively via google-auth-httplib2, and an unbounded transitive
+  # range is precisely what this branch exists to clean up.
+  "httplib2>=0.19",
   # Graph cadences (communities.py / lint_graph.py import these at module top;
   # the daemon lazy-imports the modules, but an installed tool venv needs them
   # the moment communities_interval_s / lint_interval_s are enabled).
