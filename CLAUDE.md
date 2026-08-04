@@ -54,8 +54,46 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **Current state (2026-07-26):** the **five** version files (+ `uv.lock`) are at `0.7.110`,
-  releasing (source + dist wheel + plugin marketplace). **0.7.110 is a session-context +
+- **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
+  **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
+  `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
+  and it was URGENT:** the published 0.7.112 wheel was built with an unbounded `"mcp>=1.2"`, and
+  `update.py` scopes its index override to `mcpbrain=` only — so every machine's daily
+  auto-update resolved `mcp` fresh from PyPI with `--upgrade` and could pull **2.0.0**, which
+  deleted the 1.x low-level decorator API (`@server.list_tools()` etc.) with no shim and crashed
+  the MCP server on every connect (`AttributeError: 'Server' object has no attribute
+  'list_resources'`). That happened live on the author box on 2026-08-04.
+  **What shipped:** the port to 2.x's `on_*` constructor-kwarg handlers returning full
+  `types.*Result` models, pinned `mcp>=2.0,<3` — **plus a re-implementation of the input
+  validation 2.x silently drops** (1.x's `call_tool(validate_input=True)` was the default and the
+  code relied on it implicitly; 2.x's low-level server validates *nothing*, so `tool_schemas()`
+  is now the single source both the advertised list and `_validate_tool_arguments` read, and it
+  must never inject defaults or mutate the args dict — `brain_enrich_push` distinguishes an absent
+  `extractions` from an empty one). Validation failures return `isError`, **not** a raised
+  exception: a bare `ValueError` gets `code=0` plus a ~20-line traceback into the fleet's MCP log.
+  2.x is **dual-era**, so this stays wire-compatible with clients negotiating `2025-11-25` (which
+  is what Claude Desktop still sends — verified). Surface upgrades: safety annotations on all 26
+  tools, `outputSchema` on 13, MCP **prompts** (4 routines + `draft-reply`, whose body is canonical
+  at `mcpbrain/prompts/draft-reply.md` and generated into the plugin SKILL.md by
+  `bin/sync_agents.py`), `resources/list_changed`, and progress notifications for `brain_graph`
+  /`brain_draft_context`. Backup side: resumable upload (the old multipart path flattened a 4.24 GB
+  body into one `BytesIO` — **97 failures vs 52 successes** since 2026-06-25), streaming
+  encryption, `shutil.disk_usage` instead of POSIX-only `os.statvfs` (**every Windows backup
+  previously raised, was swallowed, and silently never ran**), abort-safe close, archive-id frames
+  as **v3 with a legacy v2 read path** (the v2 archives already on Drive stay restorable — a
+  same-magic header change would have made them *silently misparse*), and `num_retries=0` because
+  googleapiclient cannot re-seek a retried chunk. Verified live end-to-end from the **published**
+  wheel: real Desktop handshake incl. `prompts/list`, and a full backup cycle on the real 11.92 GB
+  store (4.25 GB v3 artifact, byte-exact upload, peak RSS 226 MB, peak temp exactly one store
+  copy). Evidence: `docs/superpowers/specs/2026-08-04-release-verification-record.md`.
+  **Open:** the **Windows HARDWARE QA GATE remains OPEN** — do not onboard Windows users. Two
+  follow-ups are specced, not done: `docs/superpowers/specs/2026-08-04-mcp-server-process-lifecycle.md`
+  (a live MCP server runs its **start-time code forever** — nothing signals it on update — so a
+  shipped fix reaches each user on their *next client restart*, not when the wheel lands; this also
+  staggered the 2026-08-04 outage) and consolidating the now-**four** parallel per-tool mappings
+  (`tool_schemas`/`_TOOL_DESCRIPTIONS`/`tool_annotations`/`tool_output_schemas`) into one
+  `TOOL_SPECS` record — deliberately deferred so it wouldn't invalidate this release's live
+  verification. Earlier: **0.7.110 was a session-context +
   actions-hygiene release.** Three threads, all driven by observed live-store behaviour:
   **(1) SessionStart policy block** — the MCP server's connect-time `instructions` already ask
   Claude to use the brain tools/@-resources, but that text gets lost in a long system prompt and
