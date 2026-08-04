@@ -1320,6 +1320,7 @@ def build_server(store, draft_store, client, home: str):
     @server.call_tool()
     async def _call(name, arguments):
         import json
+        arguments = arguments or {}
         if name == "brain_read":
             chunk = store.get_chunk(arguments["doc_id"])
             return [types.TextContent(type="text", text=json.dumps(chunk))]
@@ -1474,8 +1475,10 @@ def build_server(store, draft_store, client, home: str):
                 context_hash=arguments.get("context_hash", ""),
             )
             return [types.TextContent(type="text", text=json.dumps(out))]
-        results = await search(arguments["query"], arguments.get("limit", 10))
-        return [types.TextContent(type="text", text=json.dumps(results))]
+        if name == "brain_search":
+            results = await search(arguments["query"], arguments.get("limit", 10))
+            return [types.TextContent(type="text", text=json.dumps(results))]
+        raise ValueError(f"unknown tool: {name}")
 
     return server
 

@@ -2,6 +2,79 @@ import pytest
 
 
 @pytest.fixture
+def protocol_session(tmp_path):
+    """An async-context-manager FACTORY for a real ClientSession over a real
+    stdio subprocess (`python -m mcpbrain.mcp_server`), with the child's
+    stderr captured to a file the caller can print on failure.
+
+    Shared here (not in test_mcp_protocol_surface.py) because Tasks 9, 10, 12
+    need the exact same subprocess-over-stdio harness for their own protocol
+    round-trips.
+
+    This repo's suite has no pytest-asyncio (see test_mcp_server_stdio.py,
+    which drives its own session with a plain `asyncio.run(...)` rather than
+    `@pytest.mark.asyncio`), so this fixture is a regular (sync) fixture that
+    hands back an `@asynccontextmanager` factory instead of a live session --
+    callers open it inside their own `asyncio.run(...)`:
+
+        async def _body():
+            async with protocol_session() as (session, stderr_path):
+                await session.list_tools()
+        asyncio.run(_body())
+
+    Also pre-initializes the store schema (`Store(...).init()`) before the
+    subprocess ever spawns. In a real install the daemon always runs
+    `store.init()` (creates the sqlite file + WAL + tables) long before the
+    MCP server's first client connects; a fresh MCPBRAIN_HOME with no
+    brain.sqlite3 at all makes the MCP server's *read-only* `Store(...,
+    read_only=True)` fail outright ("unable to open database file") the
+    moment any store-touching tool runs its first query -- a fixture gap
+    (this suite never ran a daemon), not a genuine dispatch bug. Initializing
+    here mirrors the real ordering instead of tainting Task 3's dispatch-layer
+    coverage with an unrelated environment-setup failure.
+    """
+    import contextlib
+    import os
+    import sys
+    from datetime import timedelta
+    from pathlib import Path
+
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.store import Store
+
+    home = tmp_path / "home"
+    (home / "context").mkdir(parents=True)
+    (home / "context" / "memory.md").write_text("# memory\n", encoding="utf-8")
+
+    Store(home / "brain.sqlite3", dim=embedder_dim("bge-small"), read_only=False).init()
+
+    stderr_path = tmp_path / "server-stderr.log"
+    env = {
+        "HOME": str(tmp_path),
+        "PATH": os.environ.get("PATH", ""),
+        "MCPBRAIN_HOME": str(home),
+        "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
+    }
+
+    @contextlib.asynccontextmanager
+    async def _open():
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        params = StdioServerParameters(
+            command=sys.executable, args=["-m", "mcpbrain.mcp_server"], env=env,
+        )
+        timeout = timedelta(seconds=15)
+        with open(stderr_path, "wb") as errlog:
+            async with stdio_client(params, errlog=errlog) as (read, write):
+                async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
+                    await session.initialize()
+                    yield session, str(stderr_path)
+
+    return _open
+
+
+@pytest.fixture
 def mcp_env(tmp_path, monkeypatch):
     """A temp app-dir + stores + control client, matching build_server()'s
     keyword arguments (store, draft_store, client, home).
