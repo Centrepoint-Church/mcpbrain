@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 import httplib2
@@ -261,8 +262,78 @@ def build_service(api: str, version: str, creds: Credentials,
     default credentials= path so the timeout actually applies (the library's
     default is too short for large resumable uploads / slow reads).
     """
-    authed_http = AuthorizedHttp(creds, http=_google_http(timeout_s))
+    authed_http = _ThreadLocalHttp(
+        lambda: AuthorizedHttp(creds, http=_google_http(timeout_s)))
     return build(api, version, http=authed_http)
+
+
+class _ThreadLocalHttp:
+    """One object presenting a SEPARATE underlying http to each thread.
+
+    ``httplib2.Http`` is not thread-safe — Google's client docs say so outright
+    ("The httplib2.Http() objects are not thread-safe") — and the failure mode is
+    not a clean exception. Two threads writing TLS records onto one shared
+    connection corrupt OpenSSL's internal state, which surfaces as
+    ``[SSL] record layer failure`` and then a **SIGTRAP inside libmalloc**, when
+    OpenSSL allocates a buffer for the fatal alert it is trying to send about the
+    corruption it just noticed. That killed this daemon five times on
+    2026-08-04; launchd's KeepAlive restart-looped it each time. One crash report
+    caught two threads in the SSL stack at the same instant (thread #0 in
+    ``_ssl__SSLSocket_read``, thread #2 faulting in ``ssl3_dispatch_alert``).
+
+    Sharing was systemic rather than incidental: ``Daemon._services`` resolves
+    the service objects once and they are used from the cycle thread, the
+    maintenance thread, backfill threads, and every ``ThreadingHTTPServer``
+    control-API handler thread.
+
+    googleapiclient exposes no per-request http factory, so rather than touch
+    every ``.execute()`` call site this stands in for the http object itself.
+    Resolution happens inside ``request`` — not once at construction — so a
+    resumable upload's ``next_chunk`` loop is routed by whichever thread
+    actually runs it.
+
+    Attribute access forwards in BOTH directions. The attributes callers care
+    about (``credentials``, ``timeout``, ``redirect_codes``, ``connections``)
+    live on the wrapped object, and a write that landed on this proxy instead
+    would silently apply to nothing.
+
+    Each thread pays its own TLS handshake, which is the unavoidable price of
+    not sharing a connection. ``Credentials`` IS still shared: its 401-refresh
+    path mutates only in-memory state (the token file is written solely by
+    ``load_credentials``, on one thread), so concurrent refresh is wasteful at
+    worst, never corrupting.
+    """
+
+    def __init__(self, factory):
+        object.__setattr__(self, "_factory", factory)
+        object.__setattr__(self, "_local", threading.local())
+        # Prime the constructing thread so a bad factory raises here rather than
+        # at some later first request, and so build()'s own discovery fetch has
+        # a ready object.
+        self._get()
+
+    def _get(self):
+        http = getattr(self._local, "http", None)
+        if http is None:
+            http = self._factory()
+            self._local.http = http
+        return http
+
+    def request(self, *args, **kwargs):
+        return self._get().request(*args, **kwargs)
+
+    def close(self):
+        """Close only THIS thread's http; other threads' remain theirs."""
+        http = getattr(self._local, "http", None)
+        closer = getattr(http, "close", None) if http is not None else None
+        if closer is not None:
+            closer()
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._get(), name, value)
 
 
 def _google_http(timeout_s: float):
