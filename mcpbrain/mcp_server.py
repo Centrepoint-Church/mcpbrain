@@ -904,17 +904,19 @@ def make_brain_meeting_pack_upsert(store):
     return brain_meeting_pack_upsert
 
 
-def main() -> None:  # stdio entry point, exercised manually + in P3 integration
-    import mcp.server.stdio
+def build_server(store, draft_store, client, home: str):
+    """Construct the MCP Server with every handler registered, no transport started.
+
+    Split out of main() so the registration layer is reachable from tests without
+    spawning a subprocess or starting an event loop: an import-only smoke test
+    never evaluates the handler registrations, which is how the mcp 2.0 API break
+    reached production unseen (see tests/test_mcp_sdk_contract.py).
+    """
     from mcp.server import Server
     from mcp import types
-    from mcpbrain import config
-    from mcpbrain.store import Store
-    from mcpbrain.embed import embedder_dim
-    from mcpbrain.control_client import ControlClient
-    _store_path, _store_dim = config.store_path(), embedder_dim("bge-small")
-    store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
-    client = ControlClient()
+
+    from mcpbrain import __version__, config
+
     search = make_brain_search(client)
     context = make_brain_context(store)
     actions = make_brain_actions(store)
@@ -930,9 +932,6 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     # Draft tools write to draft_records, so they need a writable store handle.
     # the read-only store cannot INSERT; this writable handle is scoped to draft_records
     # writes by the MCP server (serialised via WAL + busy_timeout).
-    draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
-    home = str(config.app_dir())
-    write_heartbeat(home)
     draft_context_fn = make_brain_draft_context(draft_store, home)
     draft_save_fn = make_brain_draft_save(draft_store, home)
     # Autonomous-loop tools (host-native). Reads use the RO store; pack upsert
@@ -954,6 +953,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     # for the life of the connection; a config change is picked up on reconnect.
     server = Server(
         "mcpbrain",
+        version=__version__,
         instructions=config.render_project_instructions(config.read_config(home)),
     )
 
@@ -1476,6 +1476,24 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
             return [types.TextContent(type="text", text=json.dumps(out))]
         results = await search(arguments["query"], arguments.get("limit", 10))
         return [types.TextContent(type="text", text=json.dumps(results))]
+
+    return server
+
+
+def main() -> None:  # stdio entry point, exercised manually + in P3 integration
+    import mcp.server.stdio
+
+    from mcpbrain import config
+    from mcpbrain.control_client import ControlClient
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.store import Store
+
+    _store_path, _store_dim = config.store_path(), embedder_dim("bge-small")
+    store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
+    draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
+    home = str(config.app_dir())
+    write_heartbeat(home)
+    server = build_server(store, draft_store, ControlClient(), home)
 
     async def _run():
         async with mcp.server.stdio.stdio_server() as (r, w):
