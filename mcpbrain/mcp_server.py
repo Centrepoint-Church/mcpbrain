@@ -146,17 +146,28 @@ async def watch_resources(session, interval_s: float = _RESOURCE_POLL_INTERVAL_S
     """
     import asyncio
 
-    previous = _resource_fingerprint()
+    # The ENTIRE poll is inside the try, fingerprinting included. It used to sit
+    # outside, so any OSError/ValueError escaping _resource_entries() (a glob
+    # permission blip, config.records_dir() reading a config.json torn mid-write
+    # by apply_config or a restore, a relative_to surprise) killed the watcher
+    # for the rest of the session and printed "Task exception was never
+    # retrieved" to the server's stderr -- the one channel this server is
+    # expected to keep silent. A transient poll failure must cost one poll.
+    #
+    # previous starts as None ("no baseline yet") rather than being seeded before
+    # the loop, so a first fingerprint that raises just retries next tick instead
+    # of taking the whole watcher down before it starts. None never notifies.
+    previous = None
     while True:
-        await asyncio.sleep(interval_s)
-        current = _resource_fingerprint()
-        if current == previous:
-            continue
-        previous = current   # update first: a failed send must not re-fire forever
         try:
-            await session.send_resource_list_changed()
-        except Exception:  # noqa: BLE001 - client may have gone away mid-poll
-            _log.debug("resources/list_changed notification failed", exc_info=True)
+            current = _resource_fingerprint()
+            changed = previous is not None and current != previous
+            previous = current  # update first: a failed send must not re-fire forever
+            if changed:
+                await session.send_resource_list_changed()
+        except Exception:  # noqa: BLE001 - client may have gone away / poll blipped
+            _log.debug("resource watch poll failed", exc_info=True)
+        await asyncio.sleep(interval_s)
 
 
 def init_options(server):
@@ -1476,22 +1487,30 @@ def tool_output_schemas() -> dict[str, dict]:
     does not mark any field `required` — a `required: ["draft_record_id"]`
     would reject the tool's own error responses.
     """
-    _queued = {
-        "type": "object",
-        "properties": {
-            "queued": {"type": "boolean"},
-            "path": {"type": "string"},
-            "error": {"type": "string"},
-        },
-        "required": ["queued"],
-    }
+    def _queued():
+        """A fresh queued-envelope schema per entry.
+
+        A factory rather than one shared dict: six entries below use this shape,
+        and a single object referenced six times means an in-place edit to any
+        one of them silently rewrites all six.
+        """
+        return {
+            "type": "object",
+            "properties": {
+                "queued": {"type": "boolean"},
+                "path": {"type": "string"},
+                "error": {"type": "string"},
+            },
+            "required": ["queued"],
+        }
+
     return {
-        "brain_ingest": _queued,
-        "brain_action_create": _queued,
-        "brain_action_update": _queued,
-        "brain_decision": _queued,
-        "brain_note": _queued,
-        "brain_memory_write": _queued,
+        "brain_ingest": _queued(),
+        "brain_action_create": _queued(),
+        "brain_action_update": _queued(),
+        "brain_decision": _queued(),
+        "brain_note": _queued(),
+        "brain_memory_write": _queued(),
         "brain_enrich_push": {
             "type": "object",
             "properties": {
@@ -1976,7 +1995,18 @@ def build_server(store, draft_store, client, home: str):
         elif name == "brain_search":
             out = await search(arguments["query"], arguments.get("limit", 10))
         else:
-            raise ValueError(f"unknown tool: {name}")
+            # Unreachable for a name ABSENT from tool_schemas() — validation
+            # above already returned isError for those. What lands here is a
+            # schema entry added without a matching dispatch branch, and it
+            # reports the SAME way as a validation failure on purpose: raising
+            # would fall through the SDK's handler_exception_to_error_data
+            # ladder to logger.exception() + ErrorData(code=0), i.e. the
+            # traceback-in-the-fleet-log outcome deliberately eliminated above.
+            return types.CallToolResult(
+                content=[types.TextContent(
+                    type="text", text=f"unknown tool: {name}")],
+                isError=True,
+            )
 
         # structured_content ships *alongside* content (never instead of it), so
         # clients that ignore structured output see the exact same response as
