@@ -26,9 +26,15 @@ the 26/26 annotation test, and the partiality assertion on output schemas). A to
 mapping fails tests before it reaches users. So this is friction and future-risk, not a live bug —
 which is why it is a deliberate follow-up rather than a hotfix.
 
-## Design
+## Design — colocated declarations, not a central mapping
 
-One record per tool, one mapping, built once.
+**A single `TOOL_SPECS` dict was considered and rejected as the end state.** It fixes "four
+mappings → one" but leaves a tool's metadata ~1000 lines from the handler it describes:
+`make_brain_graph` sits around line 200, its schema around line 1300. Consolidating the
+*separation* is not the same as removing it.
+
+Instead each tool declares itself **next to its implementation**, and the registry is assembled
+from those declarations:
 
 ```python
 @dataclass(frozen=True)
@@ -37,35 +43,63 @@ class ToolSpec:
     input_schema: dict
     annotations: "types.ToolAnnotations"
     output_schema: dict | None = None   # None => tool declares no outputSchema
+
+
+@tool(
+    "brain_graph",
+    description="Traverse the relationship graph …",   # verbatim from today's value
+    input_schema={...},
+    annotations=_ro("Traverse the graph"),
+)
+def make_brain_graph(store):
+    async def brain_graph(entity, hops=1, *, at_time=None, on_hop=None): ...
+    return brain_graph
 ```
 
-`TOOL_SPECS: dict[str, ToolSpec]` replaces all four mappings. Omission becomes **structurally
-impossible** for the three required fields — a new tool cannot be added without supplying
-description, schema and annotations, because they are constructor arguments. `output_schema`
-keeps a `None` default because its absence is meaningful and tested (`brain_routine` and
-`brain_enrich_pull` carry markdown; shipping `structured_content` there would double the two
-largest payloads in the surface for a consumer that wants prose).
+The decorator registers the spec and returns the factory unchanged, so nothing about how factories
+are called changes. Reading one screen tells you a tool's description, schema, safety annotations,
+output schema **and** behaviour.
 
-**Two constraints shape the implementation, and both are easy to get wrong:**
+Why this is the better end state:
+- **Omission becomes structurally impossible.** A new tool cannot exist without its metadata,
+  because the decorator supplies it — versus a central dict where a 27th entry must be *remembered*
+  in a second location (which is the current defect, merely reduced from four places to one).
+- `output_schema` keeps a `None` default because its absence is meaningful and tested
+  (`brain_routine` and `brain_enrich_pull` carry markdown; shipping `structured_content` there
+  would double the two largest payloads in the surface for a consumer that wants prose).
+- It is the seam the **thin-adapter** work needs (see
+  `2026-08-04-mcp-server-process-lifecycle.md`): once tool definition and execution are declared
+  together in one module, the daemon can execute from the registry while the MCP server reads it
+  for `tools/list` — or fetches the list from the daemon and holds no tool knowledge at all.
+  **This project should land first for that reason**, independently of its own merits.
+
+Cost, stated plainly: the decorator touches all 20 `make_brain_*` factories. The work is
+mechanical, but it is 20 edits rather than one new function, and the diff will look large for a
+change that must provably alter no behaviour — hence the gate below.
+
+**Three constraints shape the implementation, and each is easy to get wrong:**
 
 1. **`brain_enrich_push`'s `inputSchema` is generated**, not literal — `push_input_schema()`
-   builds it from `_PUSH_BLOCKS` so a new block cannot be forgotten. `TOOL_SPECS` therefore
-   cannot be a module-level literal evaluated at import; it must be a **cached accessor**
-   (`functools.cache`) so `push_input_schema()` is called once, lazily. Build-once is also the
-   point of the exercise — the four current accessors are rebuilt on *every* `list_tools` and
-   `call_tool`, which means ~30 dict literals per tool invocation.
+   builds it from `_PUSH_BLOCKS` so a new block cannot be forgotten. A decorator argument is
+   evaluated **at import**, which is acceptable here only because `push_input_schema()` is pure
+   and depends on nothing but a module-level tuple — verify that still holds before relying on it.
+   If it ever gains a dependency on config or the filesystem, the decorator must accept a
+   **callable** for `input_schema` and resolve it lazily on first read rather than at import.
+   Either way the schema is built **once**, which is itself part of the point: the four current
+   accessors are rebuilt on *every* `list_tools` and `call_tool`, roughly 30 dict literals per
+   tool invocation.
 2. **`mcp_server.py` must stay free of native/heavy imports** — `tests/test_mcp_server_no_native.py`
    AST-scans it and asserts no `fastembed`/`onnxruntime` loads on import. A `dataclass` and
    `functools` are fine; do not let the record's type annotations pull anything new in at module
    scope.
 
-3. **Caching removes an accidental safety property — restore it deliberately.** The four current
-   accessors each build and return a **fresh dict per call**, and that is exactly why the 0.7.113
-   review judged the shared-by-reference `_queued` output-schema dict harmless: *"the aliasing
-   cannot outlive one call."* A cached `TOOL_SPECS` shares every schema dict globally and
-   permanently, so an in-place mutation anywhere would silently corrupt what the server advertises
-   for the rest of the process's life — and this process is long-lived (see the sibling lifecycle
-   spec: an MCP server runs for as long as its client stays open).
+3. **A module-scope registry removes an accidental safety property — restore it deliberately.**
+   The four current accessors each build and return a **fresh dict per call**, and that is exactly
+   why the 0.7.113 review judged the shared-by-reference `_queued` output-schema dict harmless:
+   *"the aliasing cannot outlive one call."* A registry populated at import shares every schema
+   dict globally and permanently, so an in-place mutation anywhere would silently corrupt what the
+   server advertises for the rest of the process's life — and this process is long-lived (see the
+   sibling lifecycle spec: an MCP server runs for as long as its client stays open).
 
    Resolve it explicitly rather than relying on nobody mutating:
    - `ToolSpec` is `frozen=True`, so the *record* cannot be rebound.
