@@ -468,6 +468,98 @@ def test_reordered_frames_are_rejected(tmp_path):
         decrypt_file(enc, tmp_path / "back.bin", key)
 
 
+def test_spliced_frames_from_two_archives_are_rejected(tmp_path):
+    """A chimera built from two archives under the SAME key must be rejected.
+
+    The daily cadence reuses one escrow key, so "two archives under one key" is
+    the steady state, and the escrow key lives in an all-members-readable fleet
+    folder. With only (index, is_final) inside the authenticated plaintext,
+    frames 0..k of archive A followed by frames k+1..final of archive B form a
+    perfectly ordered, final-flagged run — so splicing two stores together
+    needed NO key at all. Each frame must also bind the archive it belongs to.
+    """
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    key = generate_escrow_key()
+    a_src = tmp_path / "a.bin"
+    b_src = tmp_path / "b.bin"
+    a_src.write_bytes(b"A" * 20_000)
+    b_src.write_bytes(b"B" * 20_000)
+    a = encrypt_file(a_src, tmp_path / "a.enc", key, chunk_size=4096)
+    b = encrypt_file(b_src, tmp_path / "b.enc", key, chunk_size=4096)
+
+    a_frames, magic = _split_frames(a.read_bytes())
+    b_frames, _ = _split_frames(b.read_bytes())
+    assert len(a_frames) == len(b_frames) >= 3
+    # First half of A, second half of B: indices stay 0..n, final flag intact.
+    cut = len(a_frames) // 2
+    chimera = tmp_path / "chimera.enc"
+    chimera.write_bytes(magic + b"".join(a_frames[:cut] + b_frames[cut:]))
+
+    with pytest.raises(InvalidToken):
+        decrypt_file(chimera, tmp_path / "back.bin", key)
+
+
+def test_each_archive_gets_a_distinct_id(tmp_path):
+    """Two archives of identical bytes under one key must not share an id.
+
+    A constant or derived id would re-open the splice, so the id has to be
+    random per archive.
+    """
+    key = generate_escrow_key()
+    src = tmp_path / "same.bin"
+    src.write_bytes(b"identical payload" * 100)
+    one = encrypt_file(src, tmp_path / "one.enc", key)
+    two = encrypt_file(src, tmp_path / "two.enc", key)
+
+    assert _first_archive_id(one, key) != _first_archive_id(two, key)
+
+
+def _first_archive_id(path, key):
+    """The archive id bound into a framed archive's first frame."""
+    from cryptography.fernet import Fernet
+
+    from mcpbrain.backup import _FRAME_HEADER
+
+    frames, _magic = _split_frames(path.read_bytes())
+    plain = Fernet(key).decrypt(frames[0][4:])
+    return _FRAME_HEADER.unpack(plain[:_FRAME_HEADER.size])[0]
+
+
+def test_aborted_write_leaves_an_artifact_decrypt_rejects(tmp_path):
+    """An abort mid-archive must NOT leave a valid-looking archive behind.
+
+    open_encrypted's cleanup used to close the writer in a `finally`, and
+    close() emits the final frame — so a body that raised for any non-I/O
+    reason (a records file removed mid-`tar.add`, KeyboardInterrupt) produced a
+    complete, correctly-indexed, final-flagged archive wrapping a TRUNCATED
+    tar.gz, which decrypt_file happily accepted. The final frame must be the
+    marker of a clean exit, nothing less.
+    """
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    from mcpbrain.backup import open_encrypted
+
+    key = generate_escrow_key()
+    out = tmp_path / "aborted.enc"
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with open_encrypted(out, key, chunk_size=4096) as enc:
+            enc.write(b"C" * 12_000)   # several whole frames land on disk
+            raise _Boom("records file vanished mid-tar")
+
+    assert out.exists(), "test needs the partial artifact to still be there"
+    with pytest.raises(InvalidToken):
+        decrypt_file(out, tmp_path / "back.bin", key)
+
+
 def test_restore_does_not_buffer_the_whole_artifact(tmp_path):
     """Restore is the emergency path — it must not OOM on a large snapshot.
 
@@ -642,17 +734,53 @@ def test_snapshot_refuses_to_start_without_free_space(tmp_path, monkeypatch):
     store.upsert_chunk("d1", "x", "h1", {})
     out = tmp_path / "snap.enc"
 
-    class _Cramped:
-        f_bavail = 1
-        f_frsize = 4096  # 4KB free
-
-    monkeypatch.setattr(_bk.os, "statvfs", lambda p: _Cramped())
+    monkeypatch.setattr(_bk.shutil, "disk_usage",
+                        lambda p: _FakeUsage(free=4096))  # 4KB free
 
     with pytest.raises(OSError) as ei:
         make_encrypted_snapshot(store.path, out, generate_escrow_key())
 
     assert ei.value.errno == errno.ENOSPC
     assert not out.exists(), "wrote a partial artifact despite refusing to start"
+
+
+class _FakeUsage:
+    """Stands in for shutil.disk_usage()'s named tuple (only .free is read)."""
+
+    def __init__(self, free):
+        self.free = free
+
+
+def test_free_space_check_does_not_need_statvfs(tmp_path, monkeypatch):
+    """The pre-flight check must work on Windows, which has no os.statvfs.
+
+    _require_free_space ran os.statvfs, which does not exist on Windows at all.
+    make_encrypted_snapshot calls it before any work, so on every Windows
+    install the whole backup raised AttributeError, the daemon's broad
+    `except Exception` swallowed it, the cadence backed off one interval — and
+    backups never ran, forever, with nothing surfaced. The test suite could not
+    catch it either, because the old test monkeypatched os.statvfs (itself an
+    AttributeError on the platform that matters).
+    """
+    import os
+
+    from mcpbrain import backup as _bk
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "x", "h1", {})
+    out = tmp_path / "snap.enc"
+
+    # Simulate Windows: os.statvfs simply isn't there, and shutil.disk_usage is
+    # the nt._getdiskfree-backed implementation that does not consult it. Any
+    # os.statvfs call from backup.py's own code now raises AttributeError.
+    monkeypatch.setattr(_bk.shutil, "disk_usage",
+                        lambda p: _FakeUsage(free=10 ** 12))
+    monkeypatch.delattr(os, "statvfs", raising=False)
+
+    # Plenty of room -> the check passes and the snapshot completes.
+    _bk.make_encrypted_snapshot(store.path, out, generate_escrow_key())
+    assert out.exists() and out.stat().st_size > 0
 
 
 # --- Task 5.3: upload encrypted snapshot to a Shared Drive --------------------
@@ -663,11 +791,13 @@ class _FakeCreate:
     id from .execute(). The fake distinguishes a folder-create (body has
     mimeType == folder) from a file-upload create by inspecting the body."""
 
-    def __init__(self, calls, canned_id):
+    def __init__(self, calls, canned_id, executes=None):
         self.calls = calls
         self.canned_id = canned_id
+        self.executes = executes if executes is not None else []
 
     def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         return {"id": self.canned_id}
 
 
@@ -694,6 +824,8 @@ class FakeFiles:
         self.file_id = file_id
         self.list_calls = []
         self.create_calls = []
+        # num_retries passed to each create(...).execute(), in call order.
+        self.execute_retries = []
 
     def list(self, **kw):
         self.list_calls.append(kw)
@@ -703,8 +835,9 @@ class FakeFiles:
         self.create_calls.append(kw)
         body = kw.get("body", {})
         if body.get("mimeType") == self.FOLDER_MIME:
-            return _FakeCreate(self.create_calls, self.folder_id)
-        return _FakeCreate(self.create_calls, self.file_id)
+            return _FakeCreate(self.create_calls, self.folder_id,
+                               self.execute_retries)
+        return _FakeCreate(self.create_calls, self.file_id, self.execute_retries)
 
 
 class FakeService:
@@ -757,6 +890,44 @@ def test_upload_creates_folder_when_missing_then_uploads(tmp_path):
     assert up.get("media_body") is not None
 
     assert result == "file-123"
+
+
+def test_upload_does_not_ask_the_library_to_retry_media_chunks(tmp_path):
+    """num_retries MUST be 0 now that the upload is resumable.
+
+    googleapiclient's media-retry loop (HttpRequest.next_chunk:
+    `for retry_num in range(num_retries + 1)`) re-sends the SAME _StreamSlice
+    object, and _StreamSlice seeks only in __init__ — so a retried chunk reads
+    b"" and puts 0 bytes on the wire against a Content-Length of up to 100MB.
+    The connection then blocks until the socket timeout, which for the Drive
+    service is 600s. maybe_backup runs on the cycle thread holding the bulk
+    lock with _backup_in_progress set, which tells the watchdog to DEFER
+    recovery — so one transient 5xx would wedge the daemon for ~10 minutes with
+    the watchdog explicitly muzzled. The cadence retry is the real backoff.
+    """
+    src = tmp_path / "snap.enc"
+    src.write_bytes(b"ciphertext")
+    files = FakeFiles(list_response={"files": [{"id": "folder-1", "name": "sam"}]})
+
+    upload_snapshot(FakeService(files), src, "drive-XYZ", "sam",
+                    media_factory=_fake_media)
+
+    assert files.execute_retries == [0], (
+        "media create asked the library to retry chunks it cannot re-seek")
+
+
+def test_upload_to_folder_does_not_ask_the_library_to_retry_media_chunks(tmp_path):
+    """Same defect, same fix, on the folder-based upload path."""
+    from mcpbrain.backup import upload_to_folder
+
+    src = tmp_path / "cache.enc"
+    src.write_bytes(b"ciphertext")
+    files = FakeFiles(list_response={"files": []})
+
+    upload_to_folder(FakeService(files), src, "folder-1",
+                     media_factory=_fake_media)
+
+    assert files.execute_retries == [0]
 
 
 def test_upload_reuses_existing_folder_no_folder_create(tmp_path):

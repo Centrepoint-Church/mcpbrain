@@ -54,18 +54,35 @@ log = logging.getLogger(__name__)
 #
 #   archive := MAGIC || frame+
 #   frame   := uint32be len(token) || token
-#   token   := Fernet(uint32be index || uint8 is_final || chunk)
+#   token   := Fernet(16-byte archive_id || uint32be index || uint8 is_final || chunk)
 #
-# Fernet has no AAD, so the ordinal and the end-of-stream flag go INSIDE the
+# Fernet has no AAD, so everything binding a frame to its place goes INSIDE the
 # authenticated plaintext. That preserves what the single-token format got for
 # free: dropping, duplicating, reordering or splicing frames all fail, rather
-# than silently yielding a short or scrambled store. Archives written before
-# v2 lack the magic and are still read as one token (see decrypt_file) -- the
-# format may only change additively while old snapshots remain restorable.
+# than silently yielding a short or scrambled store.
+#
+# The archive_id is why the ordinal alone is not enough. The daily cadence
+# reuses ONE escrow key, and that key lives in the all-members-readable fleet
+# folder, so "two archives under the same key" is the steady state. With only
+# (index, is_final) authenticated, frames 0..k of archive A followed by frames
+# k+1..final of archive B form a run with correct indices and a correct final
+# flag -- a chimera store that decrypt_file accepts, assemblable with NO key at
+# all. A random per-archive id, required constant across every frame of a read,
+# closes that. It is generated per _FrameWriter, never derived from content or
+# key (a derived id two identical archives would share re-opens the splice).
+#
+# Archives written before v2 lack the magic and are still read as one token
+# (see decrypt_file) -- the format may only change additively while old
+# snapshots remain restorable. The archive_id was added to the v2 header before
+# any v2 artifact was ever deployed (no v2 snapshot has reached Drive), so v2
+# has exactly one shape and there is no third read path; once a v2 archive
+# exists off-machine, a header change would need a v3 magic instead.
 _ARCHIVE_MAGIC = b"MCPBRAIN-ENC-v2\n"
 _ENCRYPT_CHUNK = 8 * 1024 * 1024
-_FRAME_LEN = struct.Struct(">I")      # length prefix of each frame
-_FRAME_HEADER = struct.Struct(">IB")  # (index, is_final) inside each token
+_ARCHIVE_ID_LEN = 16
+_FRAME_LEN = struct.Struct(">I")           # length prefix of each frame
+# (archive_id, index, is_final) inside each token
+_FRAME_HEADER = struct.Struct(f">{_ARCHIVE_ID_LEN}sIB")
 
 
 def snapshot(store_path, out_path) -> Path:
@@ -146,6 +163,8 @@ class _FrameWriter:
         self._buf = bytearray()
         self._index = 0
         self._closed = False
+        # Random, per-archive, never derived: see the archive_id note above.
+        self._archive_id = os.urandom(_ARCHIVE_ID_LEN)
         fh.write(_ARCHIVE_MAGIC)
 
     def write(self, data) -> int:
@@ -160,16 +179,29 @@ class _FrameWriter:
 
     def _emit(self, payload: bytes, *, final: bool) -> None:
         token = self._fernet.encrypt(
-            _FRAME_HEADER.pack(self._index, 1 if final else 0) + payload)
+            _FRAME_HEADER.pack(self._archive_id, self._index,
+                               1 if final else 0) + payload)
         self._fh.write(_FRAME_LEN.pack(len(token)))
         self._fh.write(token)
         self._index += 1
 
     def close(self) -> None:
+        """Emit the FINAL frame. Only ever called on a clean exit."""
         if self._closed:
             return
         self._closed = True
         self._emit(bytes(self._buf), final=True)
+        self._buf.clear()
+
+    def abandon(self) -> None:
+        """Give up without emitting the final frame, leaving a SHORT archive.
+
+        The end-of-stream flag is the only thing that makes truncation
+        detectable, so an aborted archive must not carry one -- see
+        open_encrypted. Marks itself closed so a later stray close() cannot
+        retroactively bless the partial artifact.
+        """
+        self._closed = True
         self._buf.clear()
 
     # tarfile/gzip poke at these on the wrapped object.
@@ -188,9 +220,18 @@ class _FrameWriter:
 def open_encrypted(out_path, key: bytes, *, chunk_size: int = _ENCRYPT_CHUNK):
     """Context manager yielding a writable, encrypting file object at out_path.
 
-    The archive is only well-formed once the block exits (that is when the
-    final frame is written), so treat an artifact from an aborted block as
+    The archive is only well-formed once the block exits CLEANLY (that is when
+    the final frame is written), so treat an artifact from an aborted block as
     garbage — ``decrypt_file`` will reject it as truncated, which is the point.
+
+    That guarantee is why ``close()`` is in an ``else`` and not a ``finally``.
+    Closing unconditionally emitted the final frame even when the body raised,
+    which turned an abort for any non-I/O reason (a records file removed
+    mid-``tar.add``, a git operation in the records repo, ``KeyboardInterrupt``)
+    into a complete, correctly-indexed, final-flagged archive wrapping a
+    TRUNCATED tar.gz — an artifact ``decrypt_file`` accepted and a restore would
+    happily unpack. Catching ``BaseException`` is deliberate: KeyboardInterrupt
+    and SystemExit are exactly the aborts that must not produce a valid archive.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +239,10 @@ def open_encrypted(out_path, key: bytes, *, chunk_size: int = _ENCRYPT_CHUNK):
         writer = _FrameWriter(fh, key, chunk_size)
         try:
             yield writer
-        finally:
+        except BaseException:
+            writer.abandon()
+            raise
+        else:
             writer.close()
 
 
@@ -237,12 +281,14 @@ def _require_free_space(work_dir, out_path, store_path) -> None:
     out_need = int(store_bytes * 0.5)     # compressed+encrypted ceiling
     out_dir = Path(out_path).parent
 
-    def _free(p):
-        st = os.statvfs(str(p))
-        return st.f_bavail * st.f_frsize
-
     def _check(p, need):
-        free = _free(p)
+        # shutil.disk_usage, NOT os.statvfs: statvfs does not exist on Windows,
+        # so it raised AttributeError before any work — and since this runs
+        # first, the daemon's broad `except Exception` swallowed it and backed
+        # the cadence off one interval, meaning Windows installs never backed
+        # up at all and nothing surfaced. disk_usage is cross-platform and
+        # .free is the same number (f_bavail * f_frsize on POSIX).
+        free = shutil.disk_usage(str(p)).free
         if free < need:
             raise OSError(
                 errno.ENOSPC,
@@ -269,8 +315,8 @@ def decrypt_file(in_path, out_path, key: bytes) -> Path:
     the smaller sizes that format was ever written at.
 
     Raises cryptography.fernet.InvalidToken if the key is wrong, the ciphertext
-    was tampered with, or the frame sequence is not a complete, in-order run
-    ending in a final frame.
+    was tampered with, or the frame sequence is not a complete, in-order run of
+    ONE archive's frames ending in a final frame.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -285,6 +331,7 @@ def decrypt_file(in_path, out_path, key: bytes) -> Path:
 
         with out_path.open("wb") as dst:
             expected_index = 0
+            archive_id = None
             saw_final = False
             while True:
                 raw_len = src.read(_FRAME_LEN.size)
@@ -297,8 +344,17 @@ def decrypt_file(in_path, out_path, key: bytes) -> Path:
                 if len(token) != size:
                     raise InvalidToken()  # frame cut short
                 plain = fernet.decrypt(token)
-                index, final_flag = _FRAME_HEADER.unpack(
+                if len(plain) < _FRAME_HEADER.size:
+                    raise InvalidToken()  # not a v2 frame (e.g. a foreign token)
+                frame_id, index, final_flag = _FRAME_HEADER.unpack(
                     plain[:_FRAME_HEADER.size])
+                if archive_id is None:
+                    archive_id = frame_id
+                elif frame_id != archive_id:
+                    # A frame from a DIFFERENT archive under the same key: the
+                    # cross-archive splice. Indices and the final flag can both
+                    # line up, so this is the only check that catches it.
+                    raise InvalidToken()
                 if index != expected_index:
                     raise InvalidToken()  # dropped / duplicated / reordered
                 dst.write(plain[_FRAME_HEADER.size:])
@@ -468,6 +524,30 @@ def _default_media(path):
     return MediaFileUpload(str(path), resumable=True)
 
 
+# num_retries for a RESUMABLE media create. Zero, deliberately.
+#
+# googleapiclient's media-retry loop cannot retry a streamed chunk correctly.
+# `HttpRequest.next_chunk` builds one `_StreamSlice` and then loops
+# `for retry_num in range(num_retries + 1)`, re-sending that SAME object;
+# `_StreamSlice` seeks only in `__init__`, and once the first attempt has read
+# the slice, `read()` computes `n = end - cur == 0` and returns b"". So a
+# retried chunk puts 0 bytes on the wire against a `Content-Length` of up to
+# 100MB, and the connection blocks until the socket timeout —
+# `auth.DEFAULT_HTTP_TIMEOUT_S` (600s) for the Drive service.
+#
+# That cost lands in the worst possible place: `daemon.maybe_backup` runs on the
+# cycle thread HOLDING the bulk lock, with `_backup_in_progress` set, which the
+# watchdog's `_recover_from_stall` reads as "do not recover". One transient 5xx
+# mid-upload would therefore wedge the daemon for ~10 minutes with the watchdog
+# explicitly muzzled. This is a regression the non-resumable path did not have:
+# it built `self.body` once, so its retries genuinely re-sent the bytes.
+#
+# The real backoff is the cadence: a failed backup is logged, backed off one
+# interval, and retried from scratch. Raising this above 0 requires driving
+# `next_chunk` by hand so each attempt re-seeks.
+_MEDIA_NUM_RETRIES = 0
+
+
 def upload_snapshot(
     service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None
 ) -> str:
@@ -533,9 +613,10 @@ def upload_snapshot(
 
     # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
     # — see _default_media). execute() drives the chunk loop for a resumable
-    # media body. num_retries gives the library's exponential backoff on
-    # transient 5xx. Pass a str path to the factory (matches
+    # media body. Pass a str path to the factory (matches
     # MediaFileUpload(str(path))).
+    #
+    # num_retries=0 IS THE FIX, not an oversight — see _MEDIA_NUM_RETRIES.
     media = media_factory(str(file_path))
     created = (
         service.files()
@@ -545,7 +626,7 @@ def upload_snapshot(
             supportsAllDrives=True,
             fields="id",
         )
-        .execute(num_retries=5)
+        .execute(num_retries=_MEDIA_NUM_RETRIES)
     )
     return created["id"]
 
@@ -771,13 +852,18 @@ def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
 def upload_to_folder(service, file_path, parent_folder_id: str, *,
                      name=None, media_factory=None) -> str:
     """Upload file_path directly into parent_folder_id (a folder anywhere, incl.
-    inside a Shared Drive). Returns the created file id."""
+    inside a Shared Drive). Returns the created file id.
+
+    num_retries=0 for the same reason upload_snapshot uses it — the media body
+    is resumable and the library cannot re-seek a retried chunk. See
+    _MEDIA_NUM_RETRIES.
+    """
     file_path = Path(file_path)
     media = (media_factory or _default_media)(str(file_path))
     created = service.files().create(
         body={"name": name or file_path.name, "parents": [parent_folder_id]},
         media_body=media, supportsAllDrives=True, fields="id",
-    ).execute(num_retries=5)
+    ).execute(num_retries=_MEDIA_NUM_RETRIES)
     return created["id"]
 
 
