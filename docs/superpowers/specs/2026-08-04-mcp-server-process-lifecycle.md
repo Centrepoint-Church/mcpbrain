@@ -57,14 +57,69 @@ The version the server reports is its own start-time version, which is now corre
 (`serverInfo.version` = mcpbrain's version, fixed in the migration) — so a **client** can
 see the drift even though nothing acts on it.
 
-### Chosen design (approved 2026-08-04)
+### Chosen design (approved 2026-08-04) — fix the cause, don't manage the symptom
 
-**The pivotal unknown is whether a client respawns an exited stdio MCP server.** Both
-"real fix" options depend on it, and the outage logs suggest it may not happen: after
-`Server transport closed unexpectedly` / `Server disconnected`, nothing restarted until a new
-Desktop launch ~50 minutes later. **If clients do not respawn, self-exit and updater-kill both
-make things strictly worse** — they downgrade a user from "stale but working" to "no mcpbrain
-until they restart". So that question is settled by experiment *before* any fix is built.
+**Superseded:** an earlier revision of this spec chose *experiment, then self-exit-when-idle*.
+That is now the fallback, not the plan. It manages a symptom; the cause is that the updater owns
+the **daemon's** lifecycle (via launchd) but has no relationship with MCP server processes, which
+clients own.
+
+**The cause, precisely.** Staleness only matters because tool logic *executes inside the MCP
+server process*. `brain_search` already delegates to the daemon via `ControlClient`, but
+`brain_graph`, `brain_context`, the captures and the enrichment tools all run in-process against
+the server's own `Store` handles. Make the MCP server a **thin protocol adapter** and stale code
+stops mattering: tool fixes then land with the daemon restart the updater already controls.
+
+**The seam is Store access, not "everything".** Routing *all* tools through the daemon would
+regress real behaviour — six capture tools (`brain_note`, `brain_decision`, `brain_ingest`,
+`brain_action_create`, `brain_action_update`, `brain_memory_write`) work **with the daemon down
+today**, because `capture.write_capture` only writes a JSON envelope into `capture_inbox/`. Those
+are exactly the tools you most want working when things are broken. So:
+
+- **Stays in the MCP server:** stdio/protocol, `initialize`, `tools/list`, prompts, resources,
+  progress — plus the six filesystem-only capture tools.
+- **Moves behind the control API:** every tool holding a `Store` handle — `brain_read`,
+  `brain_context`, `brain_actions`, `brain_graph`, `brain_proactive`, `brain_finding_resolve`,
+  `brain_draft_context`, `brain_draft_save`, `brain_meeting_pack_get`/`upsert`.
+  (`brain_search` is already there.)
+
+What that buys, by construction rather than by measurement:
+- The MCP server ends up holding **no `Store` handle at all** — removing Finding 3's entire class
+  and the writable-`draft_store` concern outright.
+- A stale server then affects only **protocol handling and spool writes**, the parts that change
+  rarely.
+- Captures keep working daemon-down.
+
+**Prerequisite: the colocated tool registry** (`2026-08-04-tool-specs-consolidation-design.md`).
+It is the seam — once each tool's metadata is declared beside its handler in one module, the daemon
+can execute from the registry while the MCP server reads it for `tools/list`, or fetches the list
+from the daemon and holds no tool knowledge at all. Land that first.
+
+**Latency is the gate, and it can veto this.** The daemon is a single process under a GIL, and
+routing store reads through it adds load to the component whose contention already caused two
+incidents (0.7.105 recall timeouts from the drain pinning the process; 0.7.110 raising
+`prompt_recall`'s timeout to 3.0s after measuring 1.3-2.6s cold). Measure per-tool latency before
+and after; if it regresses recall, the move does not ship for the affected tools.
+
+**Not a prerequisite after all — verified 2026-08-04.** An earlier revision proposed fixing daemon
+concurrency first (CLAUDE.md's finding #3 and a claimed cadence stall since 2026-07-23). **Both
+were already fixed**, in commits `693a8cd` / `e55880b` on 2026-07-28: `_backfill_active` is now
+checked per-pass (ten guards) rather than as one wholesale early-return, `BULK_LOCK_ACQUIRE_S`
+bounds the acquire so a stuck pass cannot park the watchdog, and `BULK_LOCK_YIELD_S` fixes the
+lock unfairness behind "183 consecutive skip warnings, live". Evidence the cadences run:
+`action_hygiene` logged 2026-07-29, twice 2026-08-03, and 2026-08-04 11:06;
+`decay_pass`/`tier_pass` at 2026-08-04 20:25. What survives is the latency *measurement* above,
+as a gate inside this work — not a separate project.
+
+**Still worth doing independently: the `doctor` drift warning.** Even a thin shim contains
+version-sensitive code, and the warning is useful while the migration is partial. Use **per-process
+version records** (`mcp_heartbeat/<pid>.json` carrying version + start time, pruned by pid
+liveness) rather than the single shared `mcp_heartbeat.json`, which is last-writer-wins and cannot
+answer "is *any* live server stale?" — see Finding 2. This reports the actual version rather than
+inferring it from a process-start-time vs file-mtime proxy.
+
+**Fallback, only if the thin adapter is vetoed by the latency gate:** the original
+experiment-then-self-exit design below.
 
 **1. Experiment (gates the fix).** Kill a live `mcpbrain mcp-server` and observe whether
 Claude Desktop and Claude Code respawn it, on the same connection. Record the answer for both
@@ -151,22 +206,44 @@ stalled since 2026-07-23 (`_run_periodic_passes` early-returns wholesale when
 
 ## Scope and order (approved 2026-08-04)
 
-All three findings are in scope for one plan — they are all "how the MCP server process
-behaves", and Findings 2 and 3 are cheap measurements whose value is mostly in closing off
-wrong explanations.
+Two projects, in dependency order. Each gets its own plan.
 
-1. **Finding 1, experiment first** (§ Chosen design step 1) — gates step 3.
-2. **Finding 1, `doctor` drift check** (step 2) — independent of the experiment, ships either way.
-3. **Finding 1, the branched fix** (step 3) — shape determined by step 1's measured result.
-4. **Finding 2** — bounded measurement: confirm both Desktop servers actually complete
-   `initialize` (the logs suggest they do), measure each one's RSS, and establish whether the
-   count tracks windows/workspaces. A documented *"this is client behaviour, nothing to
-   change"* is a legitimate and expected outcome; the point is to stop guessing.
-5. **Finding 3** — real experiment: with two servers connected, invoke a **writing** tool
-   (e.g. `brain_note`) in each concurrently, then attempt `wal_checkpoint(TRUNCATE)` and see
-   whether it returns busy. This either identifies the cause of the observed backup failures or
-   refutes the hypothesis with evidence. Note the refutation already established under idle
-   conditions (§ Finding 3) — this tests the *loaded* case that was never tested.
+**Project 1 — colocated tool registry.** `2026-08-04-tool-specs-consolidation-design.md`. Lands
+the metadata win on its own merits and creates the seam Project 2 needs. No behaviour change.
+
+**Project 2 — thin adapter (this spec).** In order:
+
+1. **`doctor` drift warning** with per-process version records. Independent of everything else,
+   useful while the migration is partial, and the honest answer for whatever version-sensitive code
+   remains in the shim.
+2. **Latency baseline** — measure per-tool latency *before* moving anything, so the gate in step 4
+   has something to compare against. Without this the gate is unfalsifiable.
+3. **Move the Store-touching tools behind the control API**, one group at a time, so a regression
+   is attributable. The MCP server must end holding **no `Store` handle**; that is the observable
+   success criterion, not a vibe.
+4. **Latency gate.** Compare against step 2. A tool whose latency regresses materially does not
+   move; recall paths (`brain_context`, `brain_actions`, `brain_graph`) are the ones to watch,
+   given the 0.7.105 and 0.7.110 incidents.
+5. **Finding 2, folded in as a measurement** — confirm both Desktop servers complete `initialize`
+   (the logs suggest they do) and measure each one's RSS. This gets *cheaper* to care about after
+   step 3, since a shim without a `Store` is a much smaller process. A documented "this is client
+   behaviour, nothing to change" is a legitimate outcome; the point is to stop guessing.
+6. **Finding 3, folded in as a measurement** — with two servers connected, invoke a **writing** tool
+   in each concurrently, then attempt `wal_checkpoint(TRUNCATE)` and see whether it returns busy.
+   Run it **before** step 3 (so it still reproduces the current arrangement) and **after** (to
+   confirm the class is gone once the shim holds no writable handle). Note the refutation already
+   established under *idle* conditions in § Finding 3 — this tests the loaded case that was never
+   tested.
+
+**Success criterion:** each of the three findings ends fixed or **explicitly closed with
+evidence**. "Still unexplained" is a failure for Finding 3 specifically, because live backups were
+failing and the cause is currently unattributed.
+
+**Release shaping — decide before implementing.** Project 2 is a larger behavioural change than
+anything in 0.7.113, on a package that auto-updates unattended, with the Windows hardware QA gate
+still open. Options worth weighing: put the daemon-routing behind a feature flag defaulting OFF (the
+established pattern here — cf. `retrieval_expand`, `salience_gate`), or hold it until the Windows
+gate closes. A flag also makes the latency gate reversible in the field rather than only in review.
 
 **Success criterion for the plan as a whole:** every one of the three findings ends either
 fixed or **explicitly closed with evidence**. "Still unexplained" is a failure for Finding 3
