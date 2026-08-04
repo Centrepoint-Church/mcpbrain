@@ -81,6 +81,74 @@ async def read_context_resource(uri) -> str:
     return path.read_text(encoding="utf-8")
 
 
+_RESOURCE_POLL_INTERVAL_S = 5.0
+
+
+def _resource_fingerprint() -> frozenset[str]:
+    """The advertised resource SET, as a comparable value.
+
+    Paths only, deliberately: notifications/resources/list_changed is about the
+    LIST changing, not content. Re-reading an existing URI after an in-place edit
+    (hot.md, decisions.md) is what resources/subscribe is for, and Claude does not
+    support subscribe — so we do not track content or mtimes here. Including them
+    would emit list_changed for changes a client cannot act on.
+    """
+    return frozenset(str(p) for _, p in _resource_entries())
+
+
+async def watch_resources(session, interval_s: float = _RESOURCE_POLL_INTERVAL_S) -> None:
+    """Emit notifications/resources/list_changed when the resource set changes.
+
+    mcpbrain's own tools add resource files mid-session (brain_memory_write →
+    memory/<slug>.md, brain_gardener_apply → reference/*.md); without this a
+    long-lived client never learns they exist.
+
+    Polls rather than watching the filesystem: a native watcher (watchfiles) would
+    add a binary dependency to a fleet-shipped package with an open Windows QA
+    gate, while _resource_entries() is a handful of globs over a few dozen files.
+    5s is far below human reaction time for "I just saved a memory".
+
+    Never cancelled, deliberately: this is a stdio server, so the process lifetime
+    IS the connection lifetime — a leaked poller dies with the process. Building a
+    cancellation mechanism for a lifetime that doesn't exist would be ceremony,
+    not safety.
+    """
+    import asyncio
+
+    previous = _resource_fingerprint()
+    while True:
+        await asyncio.sleep(interval_s)
+        current = _resource_fingerprint()
+        if current == previous:
+            continue
+        previous = current   # update first: a failed send must not re-fire forever
+        try:
+            await session.send_resource_list_changed()
+        except Exception:  # noqa: BLE001 - client may have gone away mid-poll
+            _log.debug("resources/list_changed notification failed", exc_info=True)
+
+
+def init_options(server):
+    """InitializationOptions for `server`, advertising resources/list_changed.
+
+    A module-level helper rather than a second return value from build_server():
+    the contract `build_server(store, draft_store, client, home) -> Server` is
+    already depended on by main() and four test modules, and bolting an attribute
+    onto the SDK's Server object would be worse. One way to build the options.
+
+    resources_changed=True is backed by watch_resources(). Deliberately does NOT
+    advertise subscribe: we never send resources/updated, and promising per-URI
+    updates we don't implement is worse than not advertising them (the SDK derives
+    subscribe from whether a resources/subscribe handler is registered, and we
+    register none).
+    """
+    from mcp.server.lowlevel.server import NotificationOptions
+
+    return server.create_initialization_options(
+        notification_options=NotificationOptions(resources_changed=True)
+    )
+
+
 def make_brain_search(client):
     async def brain_search(query: str, limit: int = 10) -> list[dict]:
         try:
@@ -1544,7 +1612,27 @@ def build_server(store, draft_store, client, home: str):
     # Writable handle: resolving a finding UPDATEs proactive_findings.
     finding_resolve = make_brain_finding_resolve(draft_store)
 
+    # watch_resources() needs a live ServerSession, which only exists once a client
+    # has connected — so it cannot start in main(). It starts from the first
+    # resources/list instead: a client that never lists resources has no use for
+    # list_changed. Guarded by a closure variable (one Server per process on stdio,
+    # so this is per-connection). There is no await between the guard check and the
+    # assignment, so a second concurrent resources/list cannot slip past it.
+    _watcher_task = None
+
+    async def _ensure_watcher(ctx) -> None:
+        nonlocal _watcher_task
+        session = getattr(ctx, "session", None)
+        if _watcher_task is not None or session is None:
+            return
+        import asyncio
+
+        # Hold a strong reference: asyncio only tracks tasks weakly, so a bare
+        # create_task() result can be garbage-collected mid-poll.
+        _watcher_task = asyncio.create_task(watch_resources(session))
+
     async def on_list_resources(ctx, params) -> types.ListResourcesResult:
+        await _ensure_watcher(ctx)
         return types.ListResourcesResult(resources=await list_context_resources())
 
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
@@ -1834,7 +1922,11 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
 
     async def _run():
         async with mcp.server.stdio.stdio_server() as (r, w):
-            await server.run(r, w, server.create_initialization_options())
+            # init_options(), not create_initialization_options() bare: the bare
+            # call leaves NotificationOptions.resources_changed False, so
+            # resources/list_changed would never be advertised. The watcher itself
+            # needs a live session and so starts from the first resources/list.
+            await server.run(r, w, init_options(server))
 
     import asyncio
     asyncio.run(_run())
