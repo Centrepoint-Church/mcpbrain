@@ -560,6 +560,51 @@ def test_aborted_write_leaves_an_artifact_decrypt_rejects(tmp_path):
         decrypt_file(out, tmp_path / "back.bin", key)
 
 
+def test_aborted_bundle_snapshot_leaves_an_artifact_decrypt_rejects(tmp_path,
+                                                                   monkeypatch):
+    """The same guarantee through the REAL producer, tarfile and all.
+
+    This is the path that actually aborts in the field (a records file removed
+    mid-`tar.add`, a git operation in the records repo), and the tarfile
+    interaction is the subtle half: on an exception TarFile.__exit__ skips the
+    end-of-archive blocks but _Stream still flushes the gzip trailer into the
+    encrypting sink, so bytes keep arriving after the failure. The final frame
+    must still never be emitted.
+    """
+    import tarfile
+
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "x" * 5000, "h1", {})
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "world.md").write_text("world model", encoding="utf-8")
+    out = tmp_path / "snap.enc"
+    key = generate_escrow_key()
+
+    real_add = tarfile.TarFile.add
+    calls = {"n": 0}
+
+    def _add(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] > 1:            # the store went in; the records repo dies
+            raise OSError("records file vanished mid-tar")
+        return real_add(self, *a, **kw)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", _add)
+
+    with pytest.raises(OSError):
+        make_encrypted_snapshot(store.path, out, key, records_dir=records)
+
+    assert out.exists(), "test needs the partial artifact to still be there"
+    with pytest.raises(InvalidToken):
+        decrypt_file(out, tmp_path / "back.bin", key)
+
+
 def test_restore_does_not_buffer_the_whole_artifact(tmp_path):
     """Restore is the emergency path — it must not OOM on a large snapshot.
 
