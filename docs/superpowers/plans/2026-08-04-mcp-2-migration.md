@@ -2211,6 +2211,20 @@ Report the evidence: negotiated protocol revision, `serverInfo.version`, prompts
 
 ---
 
+## Known divergence found during Task 11 — `server/discover` vs `initialize`
+
+Worth recording because it is the concrete tripwire for the eventual stateless-era migration, and because the first characterisation of it was wrong in a way a future reader would repeat.
+
+`server/discover` is registered **unconditionally** in every `Server.__init__` (`mcp/server/lowlevel/server.py:446-462`) — it is not gated by any constructor kwarg we could omit, and `MODERN_PROTOCOL_VERSIONS = ("2026-07-28",)` is already supported by the SDK version we pin. **So this server already serves `server/discover` today.**
+
+On that endpoint, under a `2026-07-28`-era connection, `get_capabilities` **ignores `NotificationOptions` entirely** and derives resource capabilities from whether a `subscriptions/listen` handler is registered. We register none, so it would report `resources.listChanged=False` — contradicting the `True` we advertise at `initialize`.
+
+Two things bound the blast radius, and both matter:
+- `init_options()` → `create_initialization_options()` never passes `protocol_version`, so the `initialize` handshake capabilities are computed **once at startup**, independent of what a client later negotiates. The `list_changed` advertisement therefore does **not** silently vanish on the primary handshake path when clients move era.
+- No Claude client calls `server/discover` today (zero occurrences across the local MCP logs).
+
+**Deliberately NOT fixed:** adding `on_subscriptions_listen` purely to make the modern branch report `True` would advertise a `subscriptions/listen` capability we do not implement — exactly the mistake Task 11 avoided by refusing to advertise `subscribe`. **Trigger to revisit:** a client that actually calls `server/discover`, or an SDK bump that changes the handshake path to be protocol-version-dependent.
+
 ## Follow-up plan (genuinely separate subsystem)
 
 **`brain_search` progress + cancellation** needs progress plumbed daemon → control API → MCP server. `brain_search` is one opaque `ControlClient.recall` HTTP call with a 5s timeout, and the daemon is single-process — a cadence pass can pin it for minutes and starve the control API (the 0.7.105 finding). Adding progress means touching `daemon.py`, `control_api.py`, and `control_client.py`, which is a different subsystem with its own risks. It also overlaps the still-unfixed cadence/GIL contention (finding #3) and the stalled-cadence bug noted in 0.7.110. Worth doing, worth doing on its own.
