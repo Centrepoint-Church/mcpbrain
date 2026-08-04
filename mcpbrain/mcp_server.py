@@ -141,6 +141,32 @@ def init_options(server):
     updates we don't implement is worse than not advertising them (the SDK derives
     subscribe from whether a resources/subscribe handler is registered, and we
     register none).
+
+    KNOWN DIVERGENCE (measured, not theoretical). The SDK has a second
+    capability-reporting surface that disagrees with this one:
+
+      initialize                    -> {'subscribe': False, 'listChanged': True}
+      server/discover @ 2026-07-28  -> {'subscribe': False, 'listChanged': False}
+
+    `Server.get_capabilities` takes a `protocol_version`, and at
+    MODERN_PROTOCOL_VERSIONS (currently just "2026-07-28") it IGNORES
+    notification_options entirely, deriving every listChanged flag from whether a
+    `subscriptions/listen` handler is registered. We register none, so that branch
+    reports False. It is reached only from `server/discover` — which
+    `Server.__init__` registers UNCONDITIONALLY (lowlevel/server.py:446-462), so
+    this server already serves it; it is not gated behind a kwarg we omit.
+
+    Bounded by two facts. create_initialization_options() never passes
+    protocol_version, so the handshake capabilities below are computed once at
+    startup and do NOT change when a client negotiates a newer era — the
+    list_changed advertisement cannot silently vanish on the path clients actually
+    use. And no Claude client calls server/discover today.
+
+    Deliberately NOT "fixed": registering on_subscriptions_listen just to flip
+    that branch would advertise a capability we do not implement — the same
+    mistake we refuse to make with subscribe. REVISIT WHEN: a client actually
+    calls server/discover, or an SDK bump makes the handshake path
+    protocol-version-dependent.
     """
     from mcp.server.lowlevel.server import NotificationOptions
 
