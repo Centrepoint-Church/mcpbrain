@@ -41,38 +41,34 @@ def test_installed_mcp_satisfies_declared_range():
 def test_lowlevel_server_exposes_the_api_mcp_server_targets():
     """mcp_server.py's registration layer must actually be callable.
 
-    Asserts the API surface, not the version number, so this stays meaningful
-    across the 1.x -> 2.x port (only the expected-attribute list changes).
-    """
-    from mcp.server import Server
-
-    server = Server("contract-probe")
-    missing = [
-        attr for attr in ("list_resources", "read_resource", "list_tools", "call_tool")
-        if not hasattr(server, attr)
-    ]
-    assert not missing, (
-        f"mcp.server.Server is missing {missing} — mcp_server.py's registration "
-        "layer will raise AttributeError at startup"
-    )
-
-
-def test_call_tool_validates_input_by_default():
-    """We rely on the SDK validating arguments against inputSchema.
-
-    mcp 1.x `call_tool(validate_input=True)` is the default and mcp_server.py uses
-    the bare decorator, so all 26 tools get free jsonschema validation. mcp 2.x's
-    low-level server validates NOTHING. If this assertion ever fails, validation
-    must be re-implemented in mcpbrain before the tool surface is trusted.
+    Asserts the API surface, not the version number. Retargeted for the 2.x port:
+    the four 1.x decorators became `on_*` constructor keyword arguments, so what
+    build_server() needs to exist is now a signature, not an attribute.
     """
     import inspect
 
     from mcp.server import Server
 
-    sig = inspect.signature(Server.call_tool)
-    param = sig.parameters.get("validate_input")
-    assert param is not None, "Server.call_tool no longer takes validate_input"
-    assert param.default is True, (
-        "Server.call_tool no longer validates input by default — mcpbrain must "
-        "validate arguments against inputSchema itself"
+    params = inspect.signature(Server.__init__).parameters
+    missing = [
+        kw for kw in ("on_list_resources", "on_read_resource", "on_list_tools", "on_call_tool")
+        if kw not in params
+    ]
+    assert not missing, (
+        f"mcp.server.Server no longer accepts {missing} — build_server() will fail"
     )
+
+
+def test_mcpbrain_validates_tool_arguments_itself():
+    """mcp 2.x's low-level server validates nothing; we must.
+
+    Replaces the 1.x test_call_tool_validates_input_by_default guard (mcp 1.x's
+    `call_tool(validate_input=True)` default gave all 26 tools free jsonschema
+    validation; 2.x's low-level server has no such parameter and validates
+    NOTHING). If this ever fails, all 26 tools are accepting unvalidated
+    arguments.
+    """
+    from mcpbrain.mcp_server import _validate_tool_arguments
+
+    with pytest.raises(ValueError, match="unit_id"):
+        _validate_tool_arguments("brain_enrich_push", {})

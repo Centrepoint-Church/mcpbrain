@@ -13,7 +13,6 @@ server as a subprocess over stdio, real ClientSession, no mocking).
 """
 
 import asyncio
-import datetime as _dt
 import json
 import os
 import sys
@@ -51,7 +50,7 @@ async def _run_session(home: Path):
         env=env,
     )
 
-    timeout = _dt.timedelta(seconds=15)
+    timeout = 15.0  # mcp 2.x: read_timeout_seconds is a float, not a timedelta
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
@@ -61,7 +60,7 @@ async def _run_session(home: Path):
             no_rules_result = await session.call_tool(
                 "brain_enrich_pull", {"unit_id": "u-abc", "with_rules": False}
             )
-            assert not no_rules_result.isError, (
+            assert not no_rules_result.is_error, (
                 f"brain_enrich_pull returned error: {no_rules_result.content}"
             )
             payload_no_rules = json.loads(no_rules_result.content[0].text)
@@ -69,7 +68,7 @@ async def _run_session(home: Path):
             default_result = await session.call_tool(
                 "brain_enrich_pull", {"unit_id": "u-abc"}
             )
-            assert not default_result.isError, (
+            assert not default_result.is_error, (
                 f"brain_enrich_pull returned error: {default_result.content}"
             )
             payload_default = json.loads(default_result.content[0].text)
@@ -85,7 +84,7 @@ def test_pull_schema_declares_and_dispatch_forwards_with_rules(tmp_path):
     pull_tool, payload_no_rules, payload_default = asyncio.run(_run_session(home))
 
     # Schema gap: the tool's inputSchema must declare with_rules as an accepted arg.
-    assert "with_rules" in pull_tool.inputSchema["properties"]
+    assert "with_rules" in pull_tool.input_schema["properties"]
 
     # Dispatch gap: with_rules=False over the protocol must actually suppress
     # the rules block (not silently stay True).

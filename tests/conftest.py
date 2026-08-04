@@ -36,7 +36,6 @@ def protocol_session(tmp_path):
     import contextlib
     import os
     import sys
-    from datetime import timedelta
     from pathlib import Path
 
     from mcpbrain.embed import embedder_dim
@@ -64,7 +63,9 @@ def protocol_session(tmp_path):
         params = StdioServerParameters(
             command=sys.executable, args=["-m", "mcpbrain.mcp_server"], env=env,
         )
-        timeout = timedelta(seconds=15)
+        # mcp 2.x's ClientSession takes read_timeout_seconds as a float
+        # (1.x took a datetime.timedelta).
+        timeout = 15.0
         with open(stderr_path, "wb") as errlog:
             async with stdio_client(params, errlog=errlog) as (read, write):
                 async with ClientSession(read, write, read_timeout_seconds=timeout) as session:

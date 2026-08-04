@@ -15,7 +15,6 @@ makes the test fast: no bge cold start, so it no longer needs @pytest.mark.slow.
 """
 
 import asyncio
-import datetime as _dt
 import json
 import os
 import sys
@@ -65,7 +64,7 @@ async def _run_session(home: Path):
         env=env,
     )
 
-    timeout = _dt.timedelta(seconds=15)
+    timeout = 15.0  # mcp 2.x: read_timeout_seconds is a float, not a timedelta
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
@@ -78,7 +77,7 @@ async def _run_session(home: Path):
             assert call_result.content, (
                 f"brain_search returned empty content: {call_result}"
             )
-            assert not call_result.isError, (
+            assert not call_result.is_error, (
                 f"brain_search returned error: {call_result.content}"
             )
             text = call_result.content[0].text

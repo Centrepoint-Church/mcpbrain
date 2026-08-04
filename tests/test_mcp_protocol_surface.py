@@ -69,7 +69,7 @@ def test_every_tool_round_trips_over_stdio(protocol_session):
             failures = []
             for name, args in TOOL_CALLS.items():
                 result = await session.call_tool(name, args)
-                if result.isError:
+                if result.is_error:
                     failures.append((name, [c.text for c in result.content]))
                     continue
                 payload = result.content[0].text
@@ -89,15 +89,26 @@ def test_unknown_tool_reports_unknown_tool(protocol_session):
 
     Regression guard: brain_search was the unguarded fallthrough in _call, so any
     unknown name hit arguments["query"] and raised KeyError.
+
+    How the failure SURFACES changed with the 2.x port: 1.x converted a handler
+    exception into `CallToolResult(isError=True)`; 2.x lets it propagate as a
+    JSON-RPC error, so the client raises instead. Either shape is accepted here
+    (the SDK owns that choice) but the assertion on the MESSAGE is unchanged --
+    it must still name the offending tool, which is what proves no
+    fallthrough-to-brain_search happened.
     """
     async def _body():
         async with protocol_session() as (session, stderr_path):
-            result = await session.call_tool("brain_nonexistent", {})
-            assert result.isError, (
-                f"expected an error result for an unknown tool; got {result}\n"
-                f"server stderr:\n{Path(stderr_path).read_text()}"
-            )
-            text = " ".join(c.text for c in result.content).lower()
+            try:
+                result = await session.call_tool("brain_nonexistent", {})
+            except Exception as exc:          # 2.x: propagates as a protocol error
+                text = str(exc).lower()
+            else:                             # 1.x-style: an isError result
+                assert result.is_error, (
+                    f"expected an error for an unknown tool; got {result}\n"
+                    f"server stderr:\n{Path(stderr_path).read_text()}"
+                )
+                text = " ".join(c.text for c in result.content).lower()
             assert "unknown tool" in text and "brain_nonexistent" in text, (
                 f"expected 'unknown tool ... brain_nonexistent', got: {text}\n"
                 f"server stderr:\n{Path(stderr_path).read_text()}"
@@ -115,7 +126,8 @@ def test_resources_round_trip_over_stdio(protocol_session):
             )
             first = resources[0]
             assert str(first.uri).startswith("file://")
-            contents = (await session.read_resource(first.uri)).contents
+            # mcp 2.x's ClientSession.read_resource takes a plain str uri.
+            contents = (await session.read_resource(str(first.uri))).contents
             assert contents and contents[0].text is not None
     asyncio.run(_body())
 
