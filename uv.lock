@@ -823,7 +823,7 @@ requires-dist = [
     { name = "igraph", specifier = ">=0.11" },
     { name = "inflect", specifier = ">=7" },
     { name = "leidenalg", specifier = ">=0.10" },
-    { name = "mcp", specifier = ">=1.2" },
+    { name = "mcp", specifier = ">=1.2,<2" },
     { name = "nameparser", specifier = ">=1.1" },
     { name = "networkx", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.26" },
