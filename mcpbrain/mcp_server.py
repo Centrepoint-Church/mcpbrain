@@ -1115,6 +1115,88 @@ def tool_schemas() -> dict[str, dict]:
     }
 
 
+def tool_annotations() -> dict:
+    """name -> ToolAnnotations for every tool.
+
+    open_world_hint is False everywhere: each tool touches only the local store,
+    local files, or the loopback control API. The daemon reaches Gmail/Drive/
+    Calendar, but no MCP tool does directly.
+    """
+    from mcp import types
+
+    def _ro(title: str) -> "types.ToolAnnotations":
+        return types.ToolAnnotations(
+            title=title, read_only_hint=True, destructive_hint=False,
+            idempotent_hint=True, open_world_hint=False,
+        )
+
+    def _append(title: str) -> "types.ToolAnnotations":
+        # Queued capture: each call appends a new envelope, so two calls create two.
+        return types.ToolAnnotations(
+            title=title, read_only_hint=False, destructive_hint=False,
+            idempotent_hint=False, open_world_hint=False,
+        )
+
+    def _idempotent(title: str) -> "types.ToolAnnotations":
+        return types.ToolAnnotations(
+            title=title, read_only_hint=False, destructive_hint=False,
+            idempotent_hint=True, open_world_hint=False,
+        )
+
+    def _lease(title: str) -> "types.ToolAnnotations":
+        # Reads work but claims a 15-minute lease: not a safe read, not idempotent
+        # (two calls hand out different units, by design).
+        return types.ToolAnnotations(
+            title=title, read_only_hint=False, destructive_hint=False,
+            idempotent_hint=False, open_world_hint=False,
+        )
+
+    def _destructive(title: str) -> "types.ToolAnnotations":
+        return types.ToolAnnotations(
+            title=title, read_only_hint=False, destructive_hint=True,
+            idempotent_hint=False, open_world_hint=False,
+        )
+
+    return {
+        # --- read-only (12) ---
+        "brain_search": _ro("Search the brain"),
+        "brain_read": _ro("Read a chunk"),
+        "brain_context": _ro("Profile an entity"),
+        "brain_actions": _ro("List open actions"),
+        "brain_graph": _ro("Traverse the graph"),
+        "brain_proactive": _ro("List findings"),
+        "brain_routine": _ro("Get routine instructions"),
+        "brain_enrich_pull": _ro("Pull a named unit's payload"),
+        "brain_enrich_pending": _ro("Count pending units"),
+        "brain_meetings_today": _ro("Today's meetings"),
+        "brain_meeting_pack_get": _ro("Get a meeting pack"),
+        "brain_draft_context": _ro("Gather drafting context"),
+        # --- additive, non-idempotent (6) ---
+        "brain_ingest": _append("Capture a note or document"),
+        "brain_action_create": _append("Create an action"),
+        "brain_decision": _append("Record a decision"),
+        "brain_note": _append("Record a note"),
+        "brain_memory_write": _append("Write a memory"),
+        "brain_draft_save": _append("Save a draft"),
+        # --- mutating but idempotent (4) ---
+        "brain_action_update": _idempotent("Update an action's status"),
+        "brain_meeting_pack_upsert": _idempotent("Upsert a meeting pack"),
+        "brain_finding_resolve": _idempotent("Resolve a finding"),
+        # atomic tmp.replace(target) keyed on unit_id, so a repeat is a no-op
+        "brain_enrich_push": _idempotent("Push extractions for a unit"),
+        # --- lease-acquiring (2) ---
+        "brain_enrich_units": _lease("Lease a batch of work units"),
+        "brain_enrich_claim": _lease("Claim one work unit"),
+        # --- destructive (2) ---
+        # Overwrites an existing records file with caller-supplied content and
+        # git-commits it, synchronously.
+        "brain_gardener_apply": _destructive("Apply a gardener edit"),
+        # Triggers an unbounded daemon drain+prepare cycle: the widest blast radius
+        # of any tool.
+        "brain_enrich_advance": _destructive("Wake the daemon to drain"),
+    }
+
+
 # name -> description, the parallel half of tool_schemas(). These strings are the
 # documentation the model reads before choosing a tool, so they are kept verbatim;
 # brain_gardener_apply's in particular carries a real usage constraint.
@@ -1278,9 +1360,10 @@ def build_server(store, draft_store, client, home: str):
         # Schemas come from tool_schemas(), the same mapping
         # _validate_tool_arguments reads, so what the server advertises and what
         # it enforces cannot drift apart.
+        annotations = tool_annotations()
         return types.ListToolsResult(tools=[
             types.Tool(name=tool_name, description=_TOOL_DESCRIPTIONS[tool_name],
-                       inputSchema=schema)
+                       inputSchema=schema, annotations=annotations[tool_name])
             for tool_name, schema in tool_schemas().items()
         ])
 
