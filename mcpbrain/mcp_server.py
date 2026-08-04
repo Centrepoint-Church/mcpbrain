@@ -1,12 +1,89 @@
 import logging
 from pathlib import Path
 
+# Module-level, unlike the other `from mcp import types` imports in this file:
+# every tool's ToolAnnotations is built at import time now that metadata is
+# declared on the handler (see the @tool decorators below), so it cannot wait for
+# a function body. Pulls no native dependency -- test_mcp_server_no_native.py
+# still passes, and the guard there is about fastembed/onnxruntime, not mcp.
+from mcp import types
+
 from mcpbrain import config
 from mcpbrain.enrich_blocks import PUSH_BLOCKS as _PUSH_BLOCKS
 
 from mcpbrain.retrieval import annotate_action_freshness
+from mcpbrain.tool_registry import declare, tool
 
 _log = logging.getLogger("mcpbrain.mcp_server")
+
+
+# --- Tool annotation shorthands ---------------------------------------------
+# The five safety-annotation shapes every tool falls into. Module-level (they
+# were nested inside the old tool_annotations()) because each @tool declaration
+# below evaluates at import.
+#
+# open_world_hint is False for 25 of the 26: each of those touches only the local
+# store, local files, or the loopback control API. The one exception is
+# brain_meetings_today, which calls dashboard.calendar_today(home) ->
+# auth.build_google_services(...) + a live Calendar events().list(...),
+# in-process and synchronously as part of the tool call -- a real trust-boundary
+# crossing, not something the daemon does on its behalf. It spells its
+# annotations out at its declaration rather than using a shorthand.
+
+
+def _ro(title: str) -> "types.ToolAnnotations":
+    return types.ToolAnnotations(
+        title=title, read_only_hint=True, destructive_hint=False,
+        idempotent_hint=True, open_world_hint=False,
+    )
+
+
+def _append(title: str) -> "types.ToolAnnotations":
+    # Queued capture: each call appends a new envelope, so two calls create two.
+    return types.ToolAnnotations(
+        title=title, read_only_hint=False, destructive_hint=False,
+        idempotent_hint=False, open_world_hint=False,
+    )
+
+
+def _idempotent(title: str) -> "types.ToolAnnotations":
+    return types.ToolAnnotations(
+        title=title, read_only_hint=False, destructive_hint=False,
+        idempotent_hint=True, open_world_hint=False,
+    )
+
+
+def _lease(title: str) -> "types.ToolAnnotations":
+    # Reads work but claims a 15-minute lease: not a safe read, not idempotent
+    # (two calls hand out different units, by design).
+    return types.ToolAnnotations(
+        title=title, read_only_hint=False, destructive_hint=False,
+        idempotent_hint=False, open_world_hint=False,
+    )
+
+
+def _destructive(title: str) -> "types.ToolAnnotations":
+    return types.ToolAnnotations(
+        title=title, read_only_hint=False, destructive_hint=True,
+        idempotent_hint=False, open_world_hint=False,
+    )
+
+
+# The queued-capture envelope, shared by the six write-through-capture tools.
+# Still a factory, for the reason it always was: one object referenced six times
+# means an in-place edit to any of them silently rewrites all six. (The registry
+# now deep-freezes what it stores, so that edit would raise rather than corrupt --
+# belt and braces.)
+def _queued_output_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "queued": {"type": "boolean"},
+            "path": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "required": ["queued"],
+    }
 
 
 def write_heartbeat(home: str, *, now=None) -> None:
@@ -225,6 +302,21 @@ def make_brain_search(client):
             _log.exception("brain_search failed for query %r", query)
             return []
     return brain_search
+
+
+# brain_read has no factory -- it is dispatched inline in on_call_tool as a bare
+# store.get_chunk(...) -- so it declares itself here, in the position it is
+# advertised in (registration order == tools/list order).
+declare(
+    "brain_read",
+    description="Fetch the full text + metadata of a chunk by doc_id.",
+    input_schema={
+        "type": "object",
+        "properties": {"doc_id": {"type": "string"}},
+        "required": ["doc_id"],
+    },
+    annotations=_ro("Read a chunk"),
+)
 
 
 def make_brain_context(store):
@@ -482,6 +574,23 @@ def make_brain_decision():
     return brain_decision
 
 
+@tool(
+    "brain_note",
+    description=(
+        "Record a continuity note. "
+        "QUEUED: the daemon prepends a dated entry to state/hot.md in your records repo "
+        "and commits (one daemon cycle), not instantly."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+        },
+        "required": ["text"],
+    },
+    annotations=_append("Record a note"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_note():
     async def brain_note(text: str) -> dict:
         """Record a continuity note. QUEUED: the daemon prepends a dated entry to
@@ -974,6 +1083,33 @@ def push_input_schema() -> dict:
     }, "required": ["unit_id"]}
 
 
+@tool(
+    "brain_enrich_push",
+    description=(
+        "Submit a unit's enrichment result by unit_id → enrich_inbox/<unit_id>.json; "
+        "the daemon applies it, marks chunks enriched, and deletes the unit. Pass "
+        "`extractions` (one per thread, for a thread unit) and/or the block answer "
+        "field for a block unit: merge_answers (merge_review), or the block's own "
+        "name for " + ", ".join(_PUSH_BLOCKS) + "."
+    ),
+    # GENERATED, never inlined: a new push block must reach both the advertised
+    # schema and the validator from the one registry (see push_input_schema).
+    # Evaluated once at import, which is safe because push_input_schema() is pure --
+    # it reads only the module-level _PUSH_BLOCKS tuple and touches no config or
+    # filesystem, so there is nothing for a later config change to invalidate.
+    input_schema=push_input_schema(),
+    annotations=_idempotent("Push extractions for a unit"),
+    # atomic tmp.replace(target) keyed on unit_id, so a repeat is a no-op
+    output_schema={
+        "type": "object",
+        "properties": {
+            "written": {"type": "boolean"},
+            "path": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "required": ["written"],
+    },
+)
 def make_brain_enrich_push(home: str):
     async def brain_enrich_push(unit_id: str = "", extractions: list | None = None,
                                 merge_answers: list | None = None,
@@ -1376,42 +1512,11 @@ def tool_annotations() -> dict:
     auth.build_google_services(...) + a live Calendar events().list(...),
     in-process and synchronously as part of the tool call — a real trust-boundary
     crossing, not something the daemon does on its behalf. See its entry below.
+
+    The _ro/_append/_idempotent/_lease/_destructive shorthands moved to module
+    level (the @tool declarations need them at import time); this mapping reads
+    the same ones, so the two cannot disagree while the migration is partial.
     """
-    from mcp import types
-
-    def _ro(title: str) -> "types.ToolAnnotations":
-        return types.ToolAnnotations(
-            title=title, read_only_hint=True, destructive_hint=False,
-            idempotent_hint=True, open_world_hint=False,
-        )
-
-    def _append(title: str) -> "types.ToolAnnotations":
-        # Queued capture: each call appends a new envelope, so two calls create two.
-        return types.ToolAnnotations(
-            title=title, read_only_hint=False, destructive_hint=False,
-            idempotent_hint=False, open_world_hint=False,
-        )
-
-    def _idempotent(title: str) -> "types.ToolAnnotations":
-        return types.ToolAnnotations(
-            title=title, read_only_hint=False, destructive_hint=False,
-            idempotent_hint=True, open_world_hint=False,
-        )
-
-    def _lease(title: str) -> "types.ToolAnnotations":
-        # Reads work but claims a 15-minute lease: not a safe read, not idempotent
-        # (two calls hand out different units, by design).
-        return types.ToolAnnotations(
-            title=title, read_only_hint=False, destructive_hint=False,
-            idempotent_hint=False, open_world_hint=False,
-        )
-
-    def _destructive(title: str) -> "types.ToolAnnotations":
-        return types.ToolAnnotations(
-            title=title, read_only_hint=False, destructive_hint=True,
-            idempotent_hint=False, open_world_hint=False,
-        )
-
     return {
         # --- read-only (12) ---
         "brain_search": _ro("Search the brain"),
@@ -1487,23 +1592,7 @@ def tool_output_schemas() -> dict[str, dict]:
     does not mark any field `required` — a `required: ["draft_record_id"]`
     would reject the tool's own error responses.
     """
-    def _queued():
-        """A fresh queued-envelope schema per entry.
-
-        A factory rather than one shared dict: six entries below use this shape,
-        and a single object referenced six times means an in-place edit to any
-        one of them silently rewrites all six.
-        """
-        return {
-            "type": "object",
-            "properties": {
-                "queued": {"type": "boolean"},
-                "path": {"type": "string"},
-                "error": {"type": "string"},
-            },
-            "required": ["queued"],
-        }
-
+    _queued = _queued_output_schema  # module-level now; the @tool declarations need it
     return {
         "brain_ingest": _queued(),
         "brain_action_create": _queued(),
