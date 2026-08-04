@@ -1,7 +1,7 @@
 # tests/test_gardener_routine.py
 from pathlib import Path
 
-from mcpbrain import mcp_server
+from mcpbrain import tools as _tools
 
 _ROUTINE = Path(__file__).parent.parent / "mcpbrain" / "routines" / "gardener.md"
 
@@ -19,10 +19,10 @@ def test_gardener_works_the_promotion_queue():
     """The gardener must ACT on memory_promotion findings, not just read them:
     the finding type was write-only until this step existed."""
     section = _promotion_section(_ROUTINE.read_text())
-    for finding_type in mcp_server.MANUAL_RESOLVE_TYPES:
+    for finding_type in _tools.MANUAL_RESOLVE_TYPES:
         assert finding_type in section
     assert (
-        f'brain_proactive(finding_type="{mcp_server.MANUAL_RESOLVE_TYPES[0]}")'
+        f'brain_proactive(finding_type="{_tools.MANUAL_RESOLVE_TYPES[0]}")'
         in section
     )
     assert "brain_read" in section
@@ -33,7 +33,7 @@ def test_gardener_closes_every_promotion_finding():
     queue would silently refill, which is the bug being fixed."""
     section = _promotion_section(_ROUTINE.read_text())
     assert "brain_finding_resolve" in section
-    for outcome in mcp_server._RESOLVE_OUTCOMES:
+    for outcome in _tools._RESOLVE_OUTCOMES:
         assert outcome in section, f"outcome {outcome} not documented"
 
 

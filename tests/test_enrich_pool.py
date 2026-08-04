@@ -3,7 +3,7 @@ import json
 import os
 import time
 
-from mcpbrain import mcp_server
+from mcpbrain import mcp_server, tools
 
 
 def _write_unit(home, uid, kind="thread", threads=None):
@@ -60,7 +60,7 @@ def test_claim_with_rules_inlines_rules(tmp_path):
     _write_unit(tmp_path, "u-a")
     claim = mcp_server.make_brain_enrich_claim(str(tmp_path))
     out = asyncio.run(claim(with_rules=True))
-    assert out.get("rules") and out["rules"] == mcp_server._enrich_rules()
+    assert out.get("rules") and out["rules"] == tools._enrich_rules()
 
 
 def test_claim_reclaims_a_stale_lease(tmp_path):
@@ -69,7 +69,7 @@ def test_claim_reclaims_a_stale_lease(tmp_path):
     claims.mkdir(parents=True, exist_ok=True)
     stale = claims / "u-a"
     stale.touch()
-    old = time.time() - mcp_server._LEASE_TTL_S - 10
+    old = time.time() - tools._LEASE_TTL_S - 10
     os.utime(stale, (old, old))                      # lease older than TTL
     out = asyncio.run(mcp_server.make_brain_enrich_claim(str(tmp_path))())
     assert out["unit_id"] == "u-a"                   # stale lease reclaimed
