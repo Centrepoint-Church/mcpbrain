@@ -1921,7 +1921,8 @@ class Daemon:
         daemon loop keeps running — it returns {"backed_up": False, "error": ...}
         rather than propagating. The cadence clock (_last_backup) advances on
         every ATTEMPT, success or failure, so a failing backup retries once per
-        interval rather than on every cycle.
+        interval rather than on every cycle, and is advanced AGAIN on success so
+        the interval is spacing from completion rather than from start.
         """
         if self._backfill_active.is_set():
             return None  # single-writer: yield to the backfill
@@ -1970,6 +1971,16 @@ class Daemon:
             write_backup_state(home, ok=False, error=str(exc))
             return {"backed_up": False, "error": str(exc)}
 
+        # Re-stamp on SUCCESS as well, so the interval is measured from
+        # COMPLETION. The attempt stamp above is a floor, not the spacing: with
+        # only that stamp, effective spacing was max(interval, duration) from
+        # START, so a snapshot+upload slower than interval_s (3600s default; the
+        # live store is ~11.9GB / ~4.2GB compressed) saw elapsed > interval the
+        # instant it finished and immediately began another — back-to-back
+        # multi-GB uploads, continuously holding the bulk lock. Both stamps are
+        # needed: the attempt one bounds a FAILING backup, this one spaces a
+        # SUCCEEDING but slow one.
+        self._last_backup = self._clock()
         write_backup_state(home, ok=True)
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 

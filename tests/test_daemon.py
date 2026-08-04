@@ -987,6 +987,58 @@ def test_failed_backup_backs_off_for_the_full_interval(tmp_path):
     assert retried is not None and retried["backed_up"] is True
 
 
+def test_slow_successful_backup_is_spaced_from_completion(tmp_path, monkeypatch):
+    """A backup slower than the interval must NOT restart the instant it ends.
+
+    The cadence clock was stamped only at the START of a run, so effective
+    spacing was max(interval, duration) measured from start — i.e. `interval`
+    from START, not from COMPLETION. DEFAULT_BACKUP_INTERVAL_S is 3600 and
+    backup_setup writes interval_s: 3600 for new installs, while the live store
+    is ~11.9GB (~4.2GB artifact). Any install whose snapshot+upload exceeds an
+    hour saw elapsed > interval the moment it finished and immediately started
+    again: back-to-back multi-GB uploads, continuously holding the bulk lock.
+    The start stamp still has to stay (it is what bounds a FAILING backup to one
+    attempt per interval) — success must ADDITIONALLY re-stamp.
+    """
+    from mcpbrain import daemon as dm
+
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    clock = _Clock()
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=100.0, clock=clock)
+
+    real_upload = dm.upload_snapshot
+
+    def _slow_upload(*a, **kw):
+        clock.advance(250.0)  # the upload alone outlasts the interval 2.5x
+        return real_upload(*a, **kw)
+
+    monkeypatch.setattr(dm, "upload_snapshot", _slow_upload)
+
+    first = daemon.maybe_backup()
+    assert first is not None and first["backed_up"] is True
+
+    def _file_create_count():
+        return len([c for c in files.create_calls
+                    if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME])
+
+    assert _file_create_count() == 1
+
+    # No time has passed since the backup COMPLETED, so it is not due.
+    assert daemon.maybe_backup() is None, (
+        "a slow backup restarted immediately — spacing measured from start, "
+        "not completion")
+    assert _file_create_count() == 1
+
+    # A full interval after completion, it is due again.
+    clock.advance(100.0)
+    again = daemon.maybe_backup()
+    assert again is not None and again["backed_up"] is True
+
+
 def _backup_state(home):
     from pathlib import Path
     p = Path(home) / "backup_state.json"
