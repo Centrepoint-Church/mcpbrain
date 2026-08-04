@@ -19,6 +19,18 @@
 - **Version lives in FIVE files** (`pyproject.toml`, `mcpbrain/__init__.py`, `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`, `plugin/mcpb/manifest.json`) plus `uv.lock`. Do not bump as part of this plan; release is a separate explicit step.
 - **Do NOT release.** Per `CLAUDE.md`, pushing/releasing is an all-users action requiring explicit instruction. This plan ends at "verified locally"; Task 12 is the gate, not a release.
 - **Test scope:** run edited + directly impacted test files only. Josh runs full-repo `pytest tests/` himself.
+- **NO `pytest-asyncio` IN THIS REPO — this constraint overrides every `@pytest.mark.asyncio` snippet below.** Discovered during Task 3: `pytest_asyncio` is not installed and `pyproject.toml` has no asyncio config, so `@pytest.mark.asyncio` is an **unknown mark** — the async body is never awaited and the test **passes while asserting nothing**. Every async snippet in Tasks 9–12 is written with that decorator and must NOT be implemented literally. Use the convention Task 3 established in `tests/conftest.py` (matching the pre-existing `tests/test_mcp_server_stdio.py`): a plain sync test driving its own `asyncio.run(...)`, with `protocol_session` as an `@asynccontextmanager` **factory** rather than a live-session fixture:
+  ```python
+  def test_something(protocol_session):
+      async def _body():
+          async with protocol_session() as (session, stderr_path):
+              result = await session.call_tool("brain_note", {"text": "x"})
+              assert not result.isError
+      asyncio.run(_body())
+  ```
+  Keep each snippet's assertions exactly as written; change only the async plumbing. Do **not** add `pytest-asyncio` as a dependency to make the snippets work as-published — adding a test-runner plugin to a fleet-shipped package is not this plan's call.
+- **Shared fixtures live in `tests/conftest.py`.** `mcp_env` (Task 2) and `protocol_session` (Task 3) are already there and are consumed by Tasks 8–12. Use them; do not duplicate or relocate them. (Ruled on explicitly during Task 2.)
+- **This working tree is SHARED with concurrent Claude sessions.** Stage only your own named files — never `git add -A`/`git add .`/`git commit -a`. Review diffs must be scoped to your own commit's parent, because other sessions' commits interleave on `main`.
 
 ---
 
@@ -850,6 +862,20 @@ def _validate_tool_arguments(name: str, arguments: dict) -> None:
     guards depend on distinguishing an absent field (None) from a present-but-
     empty one ([]), which default-injection would destroy.
     """
+    # RULING (Josh, 2026-08-04, during the port): `on_call_tool` must CATCH this
+    # ValueError and return `types.CallToolResult(..., isError=True)` rather than
+    # letting it propagate. This plan originally mandated a bare raise; that turned
+    # out to REGRESS the error path against mcp 1.x, which returned a clean
+    # `_make_error_result("Input validation error: …")`. In 2.x a bare ValueError
+    # falls through `handler_exception_to_error_data` (which maps only MCPError and
+    # pydantic ValidationError) to `logger.exception(...)` + `ErrorData(code=0, …)`
+    # — so every malformed model call writes a ~20-line traceback into the MCP log
+    # and reads as an internal fault. An isError result also returns the message to
+    # the conversation so the model can retry with corrected arguments.
+    #
+    # Scope the catch to THIS call only, never around the 26-branch dispatch: a
+    # blanket `except ValueError` there would swallow a genuine ValueError raised
+    # inside a handler and convert a real bug into a tidy error result.
     import jsonschema
 
     schemas = tool_schemas()
@@ -942,7 +968,10 @@ Expected: both resolve. A native-wheel gap here would compound the already-open 
 - [ ] **Step 4: Reinstall locally and run the impacted tests on the real venv**
 
 ```bash
-uv sync --extra dev
+# BOTH extras: a bare `uv sync --extra dev` STRIPS fastembed/onnxruntime from the
+# shared dev venv (found during the port), which silently breaks the embedder for
+# every other test and for local recall.
+uv sync --extra dev --extra daemon
 .venv/bin/python -m pytest tests/test_mcp_sdk_contract.py tests/test_mcp_build_server.py \
   tests/test_mcp_protocol_surface.py tests/test_mcp_input_validation.py \
   tests/test_mcp_server_stdio.py tests/test_mcp_enrich_with_rules.py tests/test_mcp_server.py \
