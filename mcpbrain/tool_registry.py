@@ -74,6 +74,38 @@ def _freeze(value):
 
 
 @dataclass(frozen=True)
+class ToolAnnotations:
+    """A tool's safety hints, as a stdlib value rather than an SDK model.
+
+    THE SEAM IS THE POINT. `mcp.types.ToolAnnotations` is a pydantic model, so
+    holding an INSTANCE of it here would drag `mcp` (plus pydantic, starlette,
+    uvicorn) into every importer of this registry -- measured at 601 modules /
+    ~0.26s against 142 / ~12ms without it. Annotating the field as the SDK type
+    while storing the SDK type would have been the same import either way: the
+    cost is in the VALUE, not the type hint. The daemon, which will execute
+    Store-touching tools by reading this registry, is already under known GIL/DB
+    contention (see the 0.7.105/0.7.110 recall-timeout work) and must not pay it.
+
+    WIRE-EXACT BY CONSTRUCTION: the same five field NAMES as the SDK model, in
+    the same order, with the same `None` defaults. `mcp_server._sdk_annotations`
+    converts back with `types.ToolAnnotations(**dataclasses.asdict(...))` -- the
+    SDK's `alias_generator=to_camel` + `populate_by_name=True` accept these
+    snake_case names, and its `model_dump(by_alias=True)` then emits the same
+    `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`/`title`
+    payload it always did. Adding a field HERE without adding it there (or vice
+    versa) breaks that conversion loudly (TypeError on an unexpected kwarg), not
+    silently -- which is why this deliberately mirrors the model rather than
+    inventing its own shape.
+    """
+
+    title: str | None = None
+    read_only_hint: bool | None = None
+    destructive_hint: bool | None = None
+    idempotent_hint: bool | None = None
+    open_world_hint: bool | None = None
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     """One tool's advertised metadata.
 
@@ -84,8 +116,8 @@ class ToolSpec:
     """
 
     description: str
-    input_schema: Any          # deep-frozen by __post_init__; see _freeze
-    annotations: Any = None    # types.ToolAnnotations, kept untyped to avoid importing mcp
+    input_schema: Any                        # deep-frozen by __post_init__; see _freeze
+    annotations: ToolAnnotations | None = None
     output_schema: Any = None  # None => this tool declares no outputSchema (meaningful)
 
     def __post_init__(self):

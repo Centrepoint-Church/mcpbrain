@@ -1,25 +1,43 @@
 import logging
 from pathlib import Path
 
-# Module-level, unlike the other `from mcp import types` imports in this file:
-# every tool's ToolAnnotations is built at import time now that metadata is
-# declared on the handler (see the @tool decorators below), so it cannot wait for
-# a function body. Pulls no native dependency -- test_mcp_server_no_native.py
-# still passes, and the guard there is about fastembed/onnxruntime, not mcp.
-from mcp import types
-
 from mcpbrain import config
 from mcpbrain.enrich_blocks import PUSH_BLOCKS as _PUSH_BLOCKS
 
 from mcpbrain.retrieval import annotate_action_freshness
-from mcpbrain.tool_registry import declare, registry, spec, tool
+from mcpbrain.tool_registry import ToolAnnotations, declare, registry, spec, tool
 
 _log = logging.getLogger("mcpbrain.mcp_server")
+
+
+def _sdk_annotations(ann):
+    """Convert a registry `ToolAnnotations` into the SDK's pydantic model.
+
+    The one place the stdlib seam type crosses back into `mcp`. Field names and
+    defaults are identical on both sides (see tool_registry.ToolAnnotations), so
+    the kwargs splat is total -- a field added on one side and not the other
+    raises TypeError here rather than silently dropping a hint from the wire.
+
+    None passes through as None: `annotations` is an optional ToolSpec field
+    (tests register probes without it), and `types.Tool(annotations=None)` is
+    exactly what such a tool advertised before this conversion existed.
+    """
+    import dataclasses
+
+    from mcp import types
+    if ann is None:
+        return None
+    return types.ToolAnnotations(**dataclasses.asdict(ann))
 
 
 # --- Tool annotation shorthands ---------------------------------------------
 # The five safety-annotation shapes every tool falls into. Module-level because
 # each @tool declaration below evaluates at import.
+#
+# These build the stdlib tool_registry.ToolAnnotations, NOT mcp.types'. That is
+# what keeps the declaration path -- and so this whole block of factories --
+# importable without the MCP protocol stack; _sdk_annotations converts at the
+# tools/list boundary. Do not "simplify" these back to the SDK model.
 #
 # open_world_hint is False for 25 of the 26: each of those touches only the local
 # store, local files, or the loopback control API. The one exception is
@@ -30,39 +48,39 @@ _log = logging.getLogger("mcpbrain.mcp_server")
 # annotations out at its declaration rather than using a shorthand.
 
 
-def _ro(title: str) -> "types.ToolAnnotations":
-    return types.ToolAnnotations(
+def _ro(title: str) -> ToolAnnotations:
+    return ToolAnnotations(
         title=title, read_only_hint=True, destructive_hint=False,
         idempotent_hint=True, open_world_hint=False,
     )
 
 
-def _append(title: str) -> "types.ToolAnnotations":
+def _append(title: str) -> ToolAnnotations:
     # Queued capture: each call appends a new envelope, so two calls create two.
-    return types.ToolAnnotations(
+    return ToolAnnotations(
         title=title, read_only_hint=False, destructive_hint=False,
         idempotent_hint=False, open_world_hint=False,
     )
 
 
-def _idempotent(title: str) -> "types.ToolAnnotations":
-    return types.ToolAnnotations(
+def _idempotent(title: str) -> ToolAnnotations:
+    return ToolAnnotations(
         title=title, read_only_hint=False, destructive_hint=False,
         idempotent_hint=True, open_world_hint=False,
     )
 
 
-def _lease(title: str) -> "types.ToolAnnotations":
+def _lease(title: str) -> ToolAnnotations:
     # Reads work but claims a 15-minute lease: not a safe read, not idempotent
     # (two calls hand out different units, by design).
-    return types.ToolAnnotations(
+    return ToolAnnotations(
         title=title, read_only_hint=False, destructive_hint=False,
         idempotent_hint=False, open_world_hint=False,
     )
 
 
-def _destructive(title: str) -> "types.ToolAnnotations":
-    return types.ToolAnnotations(
+def _destructive(title: str) -> ToolAnnotations:
+    return ToolAnnotations(
         title=title, read_only_hint=False, destructive_hint=True,
         idempotent_hint=False, open_world_hint=False,
     )
@@ -1626,7 +1644,7 @@ def make_brain_enrich_pending(home: str):
     # in-process, synchronously, as part of this call. Keep open_world_hint
     # True here even though the tool is otherwise a plain, idempotent read —
     # do not "tidy" this back to _ro() / False.
-    annotations=types.ToolAnnotations(
+    annotations=ToolAnnotations(
         title="Today's meetings", read_only_hint=True, destructive_hint=False,
         idempotent_hint=True, open_world_hint=True,
     ),
@@ -1854,13 +1872,25 @@ def build_server(store, draft_store, client, home: str):
         # dict(...) on the schemas hands pydantic a plain mapping rather than the
         # registry's frozen one; the stored schema itself is never handed out
         # mutable.
+        #
+        # _sdk_annotations converts the registry's stdlib ToolAnnotations into
+        # the SDK model here, at the protocol boundary -- the registry itself
+        # stays mcp-free so the daemon can read it (see tool_registry).
+        #
+        # `is not None`, not a truthiness test: ToolSpec's contract is that None
+        # and {} are DIFFERENT (None = declares no outputSchema), and the
+        # structured_content check in on_call_tool already reads `is not None`.
+        # A tool declaring `output_schema={}` under a truthy test advertised no
+        # outputSchema yet still emitted structured_content -- the two halves of
+        # one decision disagreeing.
         return types.ListToolsResult(tools=[
             types.Tool(
                 name=name,
                 description=s.description,
                 inputSchema=dict(s.input_schema),
-                annotations=s.annotations,
-                **({"outputSchema": dict(s.output_schema)} if s.output_schema else {}),
+                annotations=_sdk_annotations(s.annotations),
+                **({"outputSchema": dict(s.output_schema)}
+                   if s.output_schema is not None else {}),
             )
             for name, s in registry().items()
         ])
