@@ -89,6 +89,7 @@ exclude = ["mcpbrain.maintenance*"]
     "google_oauth_client.json",
     "enrich_prompt.md",
     "routines/*.md",
+    "prompts/*.md",
     "wizard/img/*",
     "wizard/vendor/*",
     "records_templates/*",
