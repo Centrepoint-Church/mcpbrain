@@ -993,6 +993,91 @@ def _backup_state(home):
     return json.loads(p.read_text()) if p.exists() else None
 
 
+# ---------------------------------------------------------------------------
+# the backup cadence must survive a restart
+#
+# _last_backup lived only in memory, so every daemon start looked like a first
+# run and triggered a full snapshot+upload regardless of interval_s. On
+# 2026-08-04 that meant 9 starts and 12.75GB uploaded where the configured
+# daily cadence calls for 4.25GB -- plus three more attempts that copied and
+# encrypted the whole 11.9GB store before failing at the upload.
+# ---------------------------------------------------------------------------
+
+
+def test_recent_recorded_attempt_is_not_due_after_a_restart(tmp_path):
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
+                    last_backup_attempt_epoch=time.time() - 60)  # 1 min ago
+
+    assert daemon.maybe_backup() is None, "a restart re-armed a full backup"
+
+
+def test_stale_recorded_attempt_is_still_due_after_a_restart(tmp_path):
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
+                    last_backup_attempt_epoch=time.time() - 7200)  # 2h ago
+
+    summary = daemon.maybe_backup()
+    assert summary is not None and summary["backed_up"] is True
+
+
+def test_no_recorded_attempt_still_backs_up_immediately(tmp_path):
+    """A fresh install must not wait a whole interval for its first backup."""
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
+                    last_backup_attempt_epoch=None)
+
+    summary = daemon.maybe_backup()
+    assert summary is not None and summary["backed_up"] is True
+
+
+def test_recorded_attempt_in_the_future_does_not_wedge_the_cadence(tmp_path):
+    """Clock skew must not park backups forever.
+
+    The persisted stamp is wall-clock while _last_backup is monotonic; a
+    backwards system-clock adjustment can make the recorded attempt look like
+    it is in the future. Clamp rather than compute a negative elapsed.
+    """
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
+                    last_backup_attempt_epoch=time.time() + 86400)
+
+    # Treated as "just attempted": not due now, and never further than one
+    # interval away.
+    assert daemon.maybe_backup() is None
+
+
+def test_last_backup_attempt_epoch_reads_the_state_file(tmp_path):
+    """The wiring helper the daemon entry point uses to seed the cadence."""
+    from mcpbrain.daemon import last_backup_attempt_epoch
+
+    assert last_backup_attempt_epoch(str(tmp_path)) is None  # no file yet
+
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_attempt": 1785817648.95, "last_success": 1785817648.95,
+        "consecutive_failures": 0, "last_error": None}))
+    assert last_backup_attempt_epoch(str(tmp_path)) == 1785817648.95
+
+    (tmp_path / "backup_state.json").write_text("{not json")
+    assert last_backup_attempt_epoch(str(tmp_path)) is None
+
+
 def test_maybe_backup_records_a_failed_upload(tmp_path, monkeypatch):
     """A failing backup must leave a durable, countable trace.
 

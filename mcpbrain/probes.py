@@ -139,6 +139,8 @@ def verify_connections(home, store=None) -> dict:
 
 
 _BACKUP_DEFAULT_WINDOW = 7 * 86400  # 7 days in seconds
+# Tolerate one missed run before flagging; see probe_backup's window comment.
+_BACKUP_WINDOW_MULTIPLE = 2
 
 
 def probe_backup(home) -> dict:
@@ -154,12 +156,28 @@ def probe_backup(home) -> dict:
         return _state("needs_action", "Cannot read backup snapshot")
     if st.st_size == 0:
         return _state("needs_action", "Backup file is empty")
-    # Determine staleness window: use configured interval if available, else 7 days
+    # Staleness window: 2x the configured backup interval, else 7 days.
+    #
+    # Reads `interval_s` — the key backup_setup writes and the daemon's own
+    # loader reads. This branch used to read `interval_seconds`, which NOTHING
+    # in the repo has ever written, so it was dead from the day it landed
+    # (2026-06-10) and the window silently stayed at the 7-day default: 7x more
+    # lenient than a configured 86400, meaning a backup could be six days stale
+    # and still report "On".
+    #
+    # 2x, not 1x, deliberately: a single failed run is routine and self-corrects
+    # on the next attempt (2026-08-04 saw transient WAL-busy and broken-pipe
+    # failures that did), and flagging every one of those trains people to
+    # ignore the indicator. Two consecutive misses is the real signal.
     backup_cfg = cfg["backup"]
-    if isinstance(backup_cfg, dict) and backup_cfg.get("interval_seconds"):
-        window = int(backup_cfg["interval_seconds"])
-    else:
-        window = _BACKUP_DEFAULT_WINDOW
+    window = _BACKUP_DEFAULT_WINDOW
+    if isinstance(backup_cfg, dict):
+        try:
+            configured = float(backup_cfg["interval_s"])
+        except (KeyError, TypeError, ValueError):
+            configured = 0.0
+        if configured > 0:
+            window = int(configured * _BACKUP_WINDOW_MULTIPLE)
     import time
 
     # Prefer the recorded UPLOAD outcome over snapshot.enc's mtime. The artifact
