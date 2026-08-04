@@ -133,12 +133,19 @@ wrong and MUST be right:
   deliberately NOT changed** — raising 0.80→0.85 recovers **zero** on-topic queries (both misses
   measured 0.864/0.878, above 0.85) while taking off-topic noise 1/8 → 5/8; note the gold harness
   calls `hybrid_search` directly so it never exercises this gate (same blind spot as the removed
-  sufficiency gate). **Known/open:** daemon cadence passes appear **stalled** since 2026-07-23
-  (`_run_periodic_passes` early-returns wholesale when `_backfill_active` is set), which would
-  also block the new `action_hygiene` cadence — the 0.7.110 live sweep was therefore applied
-  directly, and the underlying daemon single-process contention (finding #3: ~20 cadence passes
-  vs control-API threads on GIL+DB) remains unfixed. The **Windows HARDWARE QA GATE from 0.7.97
-  remains OPEN.** Earlier: **0.7.109** shipped the findings pipeline + closure durability +
+  sufficiency gate). ~~**Known/open:** daemon cadence passes appear **stalled** since
+  2026-07-23~~ — **RESOLVED, and this note was stale: do not re-derive it.** Verified on the live
+  install 2026-08-04: `_backfill_active` is now checked **per-pass** (ten individual guards) rather
+  than as one wholesale early-return in `_run_periodic_passes`, which now iterates
+  `_CADENCE_PASSES` with each `_run_X` individually wrapped so one raise cannot block the rest.
+  The contention that motivated finding #3 was also addressed: `BULK_LOCK_ACQUIRE_S` bounds the
+  bulk-lock acquire so a stuck pass can't park the watchdog that exists to detect it, and
+  `BULK_LOCK_YIELD_S` fixes the CPython lock-unfairness that previously starved the gated passes
+  ("183 consecutive skip warnings, live"). **Evidence the cadences run:** `action_hygiene` — the
+  0.7.110 addition this note claimed was blocked — logged on 2026-07-29, twice on 2026-08-03, and
+  2026-08-04 11:06; `decay_pass`/`tier_pass` at 2026-08-04 20:25. Occasional skip lines are
+  by-design (a not-due or lock-contended pass stays due and retries), not a stall. The **Windows
+  HARDWARE QA GATE from 0.7.97 remains OPEN.** Earlier: **0.7.109** shipped the findings pipeline + closure durability +
   memory keep window; **0.7.108** zero-touch onboarding + Windows install fixes. **0.7.107 replaces enrichment's
   one-subagent-per-unit fan-out with a work-stealing drainer pool** — cutting subagent cold-start
   and coordinator↔subagent comms overhead. Two new MCP tools: **`brain_enrich_claim`** atomically
