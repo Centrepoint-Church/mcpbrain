@@ -29,12 +29,14 @@ schema and performs no data writes beyond the checkpoint PRAGMA. Sync logic is
 NOT reimplemented here: the delta-sync step reuses run_sync_cycle.
 """
 
+import errno
 import logging
 import os
 import shutil
 import struct
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -124,6 +126,82 @@ def generate_escrow_key() -> bytes:
     return Fernet.generate_key()
 
 
+class _FrameWriter:
+    """A write-only file object that emits the v2 framed archive as it is fed.
+
+    Exists so a producer can be encrypted *as it runs* — notably
+    ``make_encrypted_snapshot``, which pipes a streaming tar straight in rather
+    than first materialising a whole plaintext bundle on disk.
+
+    Buffers just over one chunk: ``close()`` must always have something left to
+    emit as the FINAL frame, because the end-of-stream flag is what makes
+    truncation detectable, and a streaming producer cannot know which frame is
+    last until it stops writing.
+    """
+
+    def __init__(self, fh, key: bytes, chunk_size: int = _ENCRYPT_CHUNK):
+        self._fh = fh
+        self._fernet = Fernet(key)
+        self._chunk = chunk_size
+        self._buf = bytearray()
+        self._index = 0
+        self._closed = False
+        fh.write(_ARCHIVE_MAGIC)
+
+    def write(self, data) -> int:
+        self._buf += data
+        # Strictly greater: never drain the buffer to empty here, or an input
+        # that is an exact multiple of the chunk size would leave close() with
+        # nothing to flag as final.
+        while len(self._buf) > self._chunk:
+            self._emit(bytes(self._buf[:self._chunk]), final=False)
+            del self._buf[:self._chunk]
+        return len(data)
+
+    def _emit(self, payload: bytes, *, final: bool) -> None:
+        token = self._fernet.encrypt(
+            _FRAME_HEADER.pack(self._index, 1 if final else 0) + payload)
+        self._fh.write(_FRAME_LEN.pack(len(token)))
+        self._fh.write(token)
+        self._index += 1
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._emit(bytes(self._buf), final=True)
+        self._buf.clear()
+
+    # tarfile/gzip poke at these on the wrapped object.
+    def flush(self) -> None:
+        pass
+
+    def writable(self) -> bool:
+        return True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+
+@contextmanager
+def open_encrypted(out_path, key: bytes, *, chunk_size: int = _ENCRYPT_CHUNK):
+    """Context manager yielding a writable, encrypting file object at out_path.
+
+    The archive is only well-formed once the block exits (that is when the
+    final frame is written), so treat an artifact from an aborted block as
+    garbage — ``decrypt_file`` will reject it as truncated, which is the point.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as fh:
+        writer = _FrameWriter(fh, key, chunk_size)
+        try:
+            yield writer
+        finally:
+            writer.close()
+
+
 def encrypt_file(in_path, out_path, key: bytes, *,
                  chunk_size: int = _ENCRYPT_CHUNK) -> Path:
     """Encrypt in_path -> out_path with the Fernet escrow key. Returns out_path.
@@ -133,31 +211,53 @@ def encrypt_file(in_path, out_path, key: bytes, *,
     a knob for tests; callers should leave the default.
     """
     in_path = Path(in_path)
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with in_path.open("rb") as src, \
+            open_encrypted(out_path, key, chunk_size=chunk_size) as dst:
+        shutil.copyfileobj(src, dst, chunk_size)
+    return Path(out_path)
 
-    # One Fernet instance per call; callers doing batch ops should construct
-    # Fernet(key) once and reuse it rather than calling this in a tight loop.
-    fernet = Fernet(key)
-    with in_path.open("rb") as src, out_path.open("wb") as dst:
-        dst.write(_ARCHIVE_MAGIC)
-        index = 0
-        chunk = src.read(chunk_size)
-        while True:
-            # Read ahead so the last chunk can be flagged. An empty input still
-            # produces exactly one (empty, final) frame, so every archive ends
-            # with a final frame and truncation is always detectable.
-            nxt = src.read(chunk_size)
-            is_final = not nxt
-            token = fernet.encrypt(
-                _FRAME_HEADER.pack(index, 1 if is_final else 0) + chunk)
-            dst.write(_FRAME_LEN.pack(len(token)))
-            dst.write(token)
-            if is_final:
-                break
-            chunk = nxt
-            index += 1
-    return out_path
+
+def _require_free_space(work_dir, out_path, store_path) -> None:
+    """Refuse to start a snapshot that cannot fit. Raises OSError(ENOSPC).
+
+    make_encrypted_snapshot's dominant cost is one full copy of the store in
+    the temp dir; the encrypted artifact then lands at out_path. Neither is
+    small — on the live store that is ~11.9GB and ~4.2GB. Running the system
+    disk to zero takes down far more than the backup (2026-08-03: 57 failures
+    in a day, each an ENOSPC part-way through, each leaving an orphaned work
+    dir). Checking up front converts that into one clean, logged, backed-off
+    failure per interval.
+
+    The output ceiling is deliberately generous: on the live store the
+    compressed+encrypted artifact is ~36% of the raw store, so 50% leaves room
+    for a less compressible corpus without demanding space we will not use.
+    """
+    store_bytes = Path(store_path).stat().st_size
+    temp_need = int(store_bytes * 1.15)   # the store copy, plus slack
+    out_need = int(store_bytes * 0.5)     # compressed+encrypted ceiling
+    out_dir = Path(out_path).parent
+
+    def _free(p):
+        st = os.statvfs(str(p))
+        return st.f_bavail * st.f_frsize
+
+    def _check(p, need):
+        free = _free(p)
+        if free < need:
+            raise OSError(
+                errno.ENOSPC,
+                f"snapshot needs ~{need // 1024**2}MB free at {p} but only "
+                f"{free // 1024**2}MB is available; skipping this backup")
+
+    try:
+        same_device = os.stat(work_dir).st_dev == os.stat(out_dir).st_dev
+    except OSError:
+        same_device = False
+    if same_device:
+        _check(work_dir, temp_need + out_need)
+    else:
+        _check(work_dir, temp_need)
+        _check(out_dir, out_need)
 
 
 def decrypt_file(in_path, out_path, key: bytes) -> Path:
@@ -230,6 +330,12 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
     encrypted with the escrow key, and all intermediate cleartext is written to a
     private temp dir and removed in a finally — only the encrypted out_path
     remains.
+
+    Peak temp usage is ONE copy of the store. The bundle used to be written to
+    the temp dir in full and then encrypted in a second pass, which doubled that
+    (~15GB on the live store) and is the mechanism behind the 2026-08-03 ENOSPC
+    storm; the tar now streams straight into the encryptor. A pre-flight
+    free-space check refuses outright rather than filling the disk part-way.
     """
     import tarfile
 
@@ -243,20 +349,25 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
 
     work = Path(tempfile.mkdtemp(prefix="mcpbrain-snap-"))
     try:
+        # Before anything heavy, and before out_path is truncated.
+        _require_free_space(work, out_path, store_path)
         if not bundle:
             plain = work / "store.sqlite3"
             snapshot(store_path, plain)
+            encrypt_file(plain, out_path, key)
         else:
             store_snap = work / "brain.sqlite3"
             snapshot(store_path, store_snap)
-            plain = work / "bundle.tar.gz"
-            with tarfile.open(plain, "w:gz") as tar:
-                tar.add(store_snap, arcname=_STORE_ARC)
-                if records_dir and records_dir.exists():
-                    tar.add(records_dir, arcname=_RECORDS_ARC)
-                if config_path and config_path.exists():
-                    tar.add(config_path, arcname=_CONFIG_ARC)
-        encrypt_file(plain, out_path, key)
+            # "w|gz" is tarfile's STREAMING mode — it never seeks, so it can
+            # write into a forward-only encrypting sink. The plaintext bundle
+            # is therefore never materialised.
+            with open_encrypted(out_path, key) as enc:
+                with tarfile.open(fileobj=enc, mode="w|gz") as tar:
+                    tar.add(store_snap, arcname=_STORE_ARC)
+                    if records_dir and records_dir.exists():
+                        tar.add(records_dir, arcname=_RECORDS_ARC)
+                    if config_path and config_path.exists():
+                        tar.add(config_path, arcname=_CONFIG_ARC)
     finally:
         # Promptly destroy all transient cleartext, regardless of outcome.
         shutil.rmtree(work, ignore_errors=True)
