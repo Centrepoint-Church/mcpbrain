@@ -139,6 +139,62 @@ def test_capability_reaches_the_wire(protocol_session):
     asyncio.run(_body())
 
 
+def test_list_changed_is_delivered_to_a_real_client(tmp_path, protocol_session):
+    """The actual deliverable, end to end: a real client RECEIVES the notification.
+
+    The watcher tests above drive stub sessions, and test_capability_reaches_the_wire
+    only proves the capability is negotiated -- neither covers delivery. This one
+    runs the real subprocess and a real ClientSession, so it exercises the whole
+    chain: the lazy start off ctx.session, ServerSession.send_resource_list_changed()
+    on the wire, and the client parsing it as ResourceListChangedNotification.
+    """
+    from mcp import types
+
+    # protocol_session's MCPBRAIN_HOME (same tmp_path fixture instance).
+    ctx_dir = tmp_path / "home" / "context"
+
+    async def _body():
+        got = asyncio.Event()
+
+        async def _on_message(msg):
+            if isinstance(msg, types.ResourceListChangedNotification):
+                got.set()
+
+        async with protocol_session(message_handler=_on_message) as (session, stderr_path):
+            assert ctx_dir.is_dir(), f"protocol_session's context dir moved: {ctx_dir}"
+            before = {r.name for r in (await session.list_resources()).resources}
+            assert "brand-new.md" not in before
+
+            # Two round-trips before the change, deliberately. resources/list is
+            # what lazily starts the watcher, and create_task only SCHEDULES it --
+            # asyncio defers a handle queued during the current ready-drain to the
+            # next loop iteration, so the watcher takes its baseline fingerprint
+            # after that handler returns. The ping forces a further full server
+            # loop iteration, so by the time it answers the baseline is taken and
+            # the write below is guaranteed to look like a CHANGE. Without this the
+            # test would race the same way the first draft of
+            # test_watcher_survives_a_send_failure did.
+            await session.send_ping()
+
+            (ctx_dir / "brand-new.md").write_text("# new\n", encoding="utf-8")
+
+            # Wait on the event rather than sleeping past the server's 5s poll: a
+            # fixed sleep would be timing-lucky, and the generous ceiling only
+            # trips if delivery is genuinely broken.
+            try:
+                await asyncio.wait_for(got.wait(), timeout=60)
+            except TimeoutError:
+                raise AssertionError(
+                    "no resources/list_changed within 60s; server stderr:\n"
+                    + Path(stderr_path).read_text()
+                ) from None
+
+            after = {r.name for r in (await session.list_resources()).resources}
+            assert "brand-new.md" in after, "notified, but the new resource isn't listed"
+
+    asyncio.run(_body())
+
+
 def test_watcher_starts_once_across_repeated_list_resources(mcp_env, monkeypatch):
     """The lazy start must be guarded: a client lists resources many times."""
     from mcp import types

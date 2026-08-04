@@ -56,7 +56,15 @@ def protocol_session(tmp_path):
     }
 
     @contextlib.asynccontextmanager
-    async def _open():
+    async def _open(message_handler=None):
+        """`message_handler` is an optional async callable receiving the server
+        NOTIFICATIONS this session surfaces (ClientSession tees every parsed
+        server notification to it). Needed by
+        test_mcp_resource_notifications.py to observe
+        resources/list_changed arriving; None keeps the SDK's default no-op, so
+        every existing caller is unaffected. Passed through here rather than
+        rebuilding this subprocess harness in one test module.
+        """
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
@@ -68,7 +76,8 @@ def protocol_session(tmp_path):
         timeout = 15.0
         with open(stderr_path, "wb") as errlog:
             async with stdio_client(params, errlog=errlog) as (read, write):
-                async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
+                async with ClientSession(read, write, read_timeout_seconds=timeout,
+                                         message_handler=message_handler) as session:
                     await session.initialize()
                     yield session, str(stderr_path)
 
