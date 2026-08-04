@@ -90,27 +90,54 @@ def test_unknown_tool_reports_unknown_tool(protocol_session):
     Regression guard: brain_search was the unguarded fallthrough in _call, so any
     unknown name hit arguments["query"] and raised KeyError.
 
-    How the failure SURFACES changed with the 2.x port: 1.x converted a handler
-    exception into `CallToolResult(isError=True)`; 2.x lets it propagate as a
-    JSON-RPC error, so the client raises instead. Either shape is accepted here
-    (the SDK owns that choice) but the assertion on the MESSAGE is unchanged --
-    it must still name the offending tool, which is what proves no
-    fallthrough-to-brain_search happened.
+    An unknown name is rejected by _validate_tool_arguments before dispatch, and
+    on_call_tool returns that as an isError result (mcp 1.x's behaviour, kept
+    deliberately -- see the comment at the call site), so this is a single
+    well-defined shape. No broad `except` here on purpose: a transport or timeout
+    failure must surface as itself, not be absorbed and then re-reported as a
+    message-assertion failure.
     """
     async def _body():
         async with protocol_session() as (session, stderr_path):
-            try:
-                result = await session.call_tool("brain_nonexistent", {})
-            except Exception as exc:          # 2.x: propagates as a protocol error
-                text = str(exc).lower()
-            else:                             # 1.x-style: an isError result
-                assert result.is_error, (
-                    f"expected an error for an unknown tool; got {result}\n"
-                    f"server stderr:\n{Path(stderr_path).read_text()}"
-                )
-                text = " ".join(c.text for c in result.content).lower()
+            result = await session.call_tool("brain_nonexistent", {})
+            assert result.is_error, (
+                f"expected an error result for an unknown tool; got {result}\n"
+                f"server stderr:\n{Path(stderr_path).read_text()}"
+            )
+            text = " ".join(c.text for c in result.content).lower()
             assert "unknown tool" in text and "brain_nonexistent" in text, (
                 f"expected 'unknown tool ... brain_nonexistent', got: {text}\n"
+                f"server stderr:\n{Path(stderr_path).read_text()}"
+            )
+    asyncio.run(_body())
+
+
+def test_malformed_arguments_are_rejected_over_the_protocol(protocol_session):
+    """The _validate_tool_arguments CALL SITE in on_call_tool must be wired.
+
+    Every test in tests/test_mcp_input_validation.py calls
+    _validate_tool_arguments directly, so deleting its call from on_call_tool
+    would leave all of them green -- all 26 tools silently unvalidated, the exact
+    regression this migration exists to prevent. And
+    test_unknown_tool_reports_unknown_tool cannot catch it either: the surviving
+    tail `raise ValueError(f"unknown tool: {name}")` emits the identical message,
+    so it passes with or without the validator.
+
+    brain_graph with `{"hops": 2}` omits its required `entity`. Unvalidated, that
+    reaches the handler and dies as `KeyError: 'entity'` -- an error whose message
+    names the field but never says "invalid arguments". Requiring BOTH strings is
+    what makes this test fail when the call site is removed.
+    """
+    async def _body():
+        async with protocol_session() as (session, stderr_path):
+            result = await session.call_tool("brain_graph", {"hops": 2})
+            assert result.is_error, (
+                f"schema-violating arguments were accepted: {result}\n"
+                f"server stderr:\n{Path(stderr_path).read_text()}"
+            )
+            text = " ".join(c.text for c in result.content).lower()
+            assert "invalid arguments" in text and "entity" in text, (
+                f"expected a validation error naming 'entity', got: {text}\n"
                 f"server stderr:\n{Path(stderr_path).read_text()}"
             )
     asyncio.run(_body())

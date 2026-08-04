@@ -1288,11 +1288,31 @@ def build_server(store, draft_store, client, home: str):
         import json
         name, arguments = params.name, (params.arguments or {})
         # mcp 2.x's low-level server validates NOTHING (1.x's
-        # call_tool(validate_input=True) default did), so this is the only
-        # inputSchema enforcement between a client and the handlers below. It
-        # raises ValueError, which the runner turns into a protocol error
-        # carrying the message.
-        _validate_tool_arguments(name, arguments)
+        # call_tool(validate_input=True) default did), so this call is the only
+        # inputSchema enforcement between a client and the handlers below.
+        #
+        # Returned as isError rather than raised, restoring mcp 1.x behaviour
+        # exactly (1.29.0: _make_error_result(f"Input validation error: ...")).
+        # A bare ValueError falls through the SDK's
+        # handler_exception_to_error_data ladder to logger.exception() +
+        # ErrorData(code=0), so every malformed model call would write a ~20-line
+        # traceback into the MCP log and be indistinguishable from a genuine
+        # internal fault — bad on a fleet-shipped server. An isError result also
+        # goes back into the conversation, so the model can retry with corrected
+        # arguments.
+        #
+        # Scoped to THIS call only, deliberately: a blanket `except ValueError`
+        # around the dispatch below would swallow a genuine ValueError raised
+        # deep inside a handler (store code, date parsing, …) and dress a real
+        # bug up as a tidy error result — trading one silent-failure class for
+        # another.
+        try:
+            _validate_tool_arguments(name, arguments)
+        except ValueError as exc:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))],
+                isError=True,
+            )
         if name == "brain_read":
             chunk = store.get_chunk(arguments["doc_id"])
             return types.CallToolResult(
