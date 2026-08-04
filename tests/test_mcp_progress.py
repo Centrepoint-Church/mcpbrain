@@ -103,6 +103,29 @@ def test_brain_graph_reports_progress_per_hop(protocol_session_with_progress):
     assert [p.progress for p in progress] == [1, 2, 3], progress
 
 
+def test_brain_graph_progress_total_is_capped_not_raw_hops(protocol_session_with_progress):
+    """hops=5 (above GRAPH_MAX_HOPS=3) must still report total=3, not total=5.
+
+    make_brain_graph caps the actual traversal at GRAPH_MAX_HOPS regardless of
+    a larger `hops` argument -- so the genuinely-known bound to report is the
+    capped value, not the raw argument. A caller reporting the raw `hops`
+    would emit 3 progress events but every one claiming total=5: a client
+    rendering progress would sit at "3 of 5" and never see completion. The
+    hops=3 test above can't catch this because raw and capped coincide there.
+    """
+    async def _body():
+        async with protocol_session_with_progress(seed=_seed_graph_chain) as (session, progress):
+            result = await session.call_tool("brain_graph", {"entity": "Someone", "hops": 5})
+            assert not result.is_error, result.content
+        return progress
+    progress = asyncio.run(_body())
+
+    assert len(progress) == 3, f"expected exactly 3 hops (the cap), got {progress}"
+    assert all(p.total == 3 for p in progress), (
+        f"total must be the capped hop count (3), not the raw hops argument (5): {progress}"
+    )
+
+
 def _seed_draftable_email(store, home):
     """A real email_context row + draft_critic enabled, so draft_context's
     full stage sequence (email lookup -> voice rules -> samples -> critique)
