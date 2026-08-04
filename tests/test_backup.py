@@ -329,6 +329,185 @@ def test_tampered_ciphertext_raises_invalid_token(tmp_path):
         decrypt_file(enc, tmp_path / "back.bin", key)
 
 
+# --- streaming encryption (bounded memory) ------------------------------------
+#
+# Live incident 2026-08-04: encrypt_file did Fernet(key).encrypt(read_bytes()),
+# holding the WHOLE artifact plus several Fernet copies in RAM. At 4.24GB on a
+# 16GB box that meant swap exhaustion and an OOM kill mid-backup. restore() had
+# the same shape, which is worse -- that is the emergency path. Encryption is
+# now framed so memory is bounded by one chunk, while archives written by the
+# old code must still decrypt (7 of them are live on Drive).
+
+
+def _peak_bytes(fn):
+    """Run fn() and return peak Python allocation during it."""
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        fn()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak
+
+
+def test_encrypt_file_does_not_buffer_the_whole_artifact(tmp_path):
+    import os
+
+    key = generate_escrow_key()
+    src = tmp_path / "big.bin"
+    src.write_bytes(os.urandom(4 * 1024 * 1024))  # 4MB
+
+    peak = _peak_bytes(
+        lambda: encrypt_file(src, tmp_path / "big.enc", key, chunk_size=64 * 1024))
+
+    assert peak < 1_500_000, (
+        f"peak {peak} bytes — encryption buffered the artifact instead of "
+        "streaming it in chunks")
+
+
+def test_decrypt_file_does_not_buffer_the_whole_artifact(tmp_path):
+    import os
+
+    key = generate_escrow_key()
+    src = tmp_path / "big.bin"
+    src.write_bytes(os.urandom(4 * 1024 * 1024))
+    enc = encrypt_file(src, tmp_path / "big.enc", key, chunk_size=64 * 1024)
+
+    peak = _peak_bytes(lambda: decrypt_file(enc, tmp_path / "back.bin", key))
+
+    assert peak < 1_500_000, (
+        f"peak {peak} bytes — decryption buffered the artifact instead of "
+        "streaming it in chunks")
+
+
+def test_multi_frame_archive_round_trips_exactly(tmp_path):
+    import os
+
+    key = generate_escrow_key()
+    original = os.urandom(500_000)
+    src = tmp_path / "plain.bin"
+    src.write_bytes(original)
+
+    enc = encrypt_file(src, tmp_path / "c.bin", key, chunk_size=4096)  # ~123 frames
+    dec = decrypt_file(enc, tmp_path / "back.bin", key)
+
+    assert dec.read_bytes() == original
+
+
+def test_empty_file_round_trips(tmp_path):
+    key = generate_escrow_key()
+    src = tmp_path / "empty.bin"
+    src.write_bytes(b"")
+
+    enc = encrypt_file(src, tmp_path / "c.bin", key)
+    dec = decrypt_file(enc, tmp_path / "back.bin", key)
+
+    assert dec.read_bytes() == b""
+
+
+def test_decrypt_reads_legacy_single_token_archives(tmp_path):
+    """The 7 snapshots already on Drive were written as one Fernet token.
+
+    Losing the ability to read them would silently invalidate every existing
+    backup — the artifact format may change, but only additively.
+    """
+    from cryptography.fernet import Fernet
+
+    key = generate_escrow_key()
+    original = b"legacy snapshot bytes \x00\xff"
+    legacy = tmp_path / "legacy.enc"
+    legacy.write_bytes(Fernet(key).encrypt(original))
+
+    dec = decrypt_file(legacy, tmp_path / "back.bin", key)
+
+    assert dec.read_bytes() == original
+
+
+def test_truncated_archive_is_rejected(tmp_path):
+    """Dropping trailing frames must fail loudly, not yield a short store.
+
+    A single Fernet token authenticated the whole artifact, so truncation was
+    impossible to miss. Framing must not quietly lose that property: a half
+    restored store is far worse than a failed restore.
+    """
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    key = generate_escrow_key()
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"A" * 40_000)
+    enc = encrypt_file(src, tmp_path / "c.bin", key, chunk_size=4096)
+
+    raw = enc.read_bytes()
+    enc.write_bytes(raw[: len(raw) // 2])  # lop off the tail, whole frames and all
+
+    with pytest.raises(InvalidToken):
+        decrypt_file(enc, tmp_path / "back.bin", key)
+
+
+def test_reordered_frames_are_rejected(tmp_path):
+    """Swapping two frames must be detected — each frame binds its own index."""
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    key = generate_escrow_key()
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"B" * 12_000)
+    enc = encrypt_file(src, tmp_path / "c.bin", key, chunk_size=4096)
+
+    frames, rest = _split_frames(enc.read_bytes())
+    assert len(frames) >= 3, "test needs at least 3 frames to swap two"
+    frames[0], frames[1] = frames[1], frames[0]
+    enc.write_bytes(rest + b"".join(frames))
+
+    with pytest.raises(InvalidToken):
+        decrypt_file(enc, tmp_path / "back.bin", key)
+
+
+def test_restore_does_not_buffer_the_whole_artifact(tmp_path):
+    """Restore is the emergency path — it must not OOM on a large snapshot.
+
+    restore() decrypted the entire artifact into one bytes object and then
+    wrote that back out again, so recovering a multi-GB snapshot needed several
+    times its size in RAM at the exact moment the machine is least healthy.
+    """
+    import os
+
+    from mcpbrain.backup import restore
+
+    key = generate_escrow_key()
+    store_src = tmp_path / "plain.sqlite3"
+    store_src.write_bytes(SQLITE_MAGIC + os.urandom(4 * 1024 * 1024))
+    enc = encrypt_file(store_src, tmp_path / "snap.enc", key, chunk_size=64 * 1024)
+
+    dest = tmp_path / "restored.sqlite3"
+    peak = _peak_bytes(lambda: restore(enc, dest, key))
+
+    assert dest.read_bytes() == store_src.read_bytes()
+    assert peak < 1_500_000, (
+        f"peak {peak} bytes — restore buffered the whole artifact")
+
+
+def _split_frames(blob):
+    """Split a framed archive into (list_of_raw_frames, header)."""
+    import struct
+
+    from mcpbrain.backup import _ARCHIVE_MAGIC
+
+    assert blob.startswith(_ARCHIVE_MAGIC)
+    pos = len(_ARCHIVE_MAGIC)
+    frames = []
+    while pos < len(blob):
+        (n,) = struct.unpack(">I", blob[pos:pos + 4])
+        frames.append(blob[pos:pos + 4 + n])
+        pos += 4 + n
+    return frames, _ARCHIVE_MAGIC
+
+
 # --- Task 5.3: upload encrypted snapshot to a Shared Drive --------------------
 
 

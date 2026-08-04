@@ -161,6 +161,34 @@ def probe_backup(home) -> dict:
     else:
         window = _BACKUP_DEFAULT_WINDOW
     import time
+
+    # Prefer the recorded UPLOAD outcome over snapshot.enc's mtime. The artifact
+    # is encrypted locally before the upload, so a failed run still leaves a
+    # fresh snapshot.enc and the mtime check reads "On" regardless -- it stayed
+    # green straight through the 2026-08-03 failure storm (57 failed uploads in
+    # a day) because each failure refreshed the very file being probed. Absent
+    # the state file (pre-existing installs, or before the first attempt) fall
+    # back to the mtime heuristic below.
+    bstate = _read_backup_state(home)
+    if bstate is not None:
+        failures = bstate.get("consecutive_failures") or 0
+        # A hand-edited or half-written state file must degrade to the mtime
+        # heuristic below, never take the whole status endpoint down with it.
+        try:
+            last_success = float(bstate["last_success"])
+        except (KeyError, TypeError, ValueError):
+            last_success = None
+        if not last_success:
+            return _state("needs_action",
+                          f"Backup has never completed ({failures} failed attempts)")
+        success_age = time.time() - last_success
+        if success_age > window:
+            days = int(success_age // 86400)
+            return _state("needs_action",
+                          f"Backup upload failing — last success {days}d ago "
+                          f"({failures} failed attempts)")
+        return _state("ok", "On", last_verified=_iso(last_success))
+
     age_seconds = time.time() - st.st_mtime
     if age_seconds > window:
         age_days = int(age_seconds // 86400)
@@ -198,6 +226,28 @@ def _mtime(p: Path):
         return datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat()
     except OSError:
         return None
+
+
+def _iso(epoch: float):
+    try:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _read_backup_state(home) -> dict | None:
+    """The daemon's record of the last backup ATTEMPT, or None if absent.
+
+    Written by ``daemon.write_backup_state``. None means "no record yet" —
+    callers fall back to the older snapshot.enc-mtime heuristic rather than
+    treating a missing file as a failure.
+    """
+    p = Path(home) / "backup_state.json"
+    try:
+        state = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
 
 
 def _read_cache(home) -> dict:
