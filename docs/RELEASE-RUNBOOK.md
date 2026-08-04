@@ -104,15 +104,26 @@ fine — but keep the index to the current wheel for clarity.
 
 The Windows installer script and `.mcpb` plugin package must also be published:
 
+**⚠️ The pack output is named after the DIRECTORY, not the package.** `mcpb pack plugin/mcpb`
+writes `./mcpb.mcpb` in the repo root — *not* `mcpbrain-<version>.mcpb`, even though the archive's
+own manifest says `mcpbrain` / `<version>`. Rename on copy, as below, or you will copy a file that
+does not exist. (`mcpb.mcpb` in the repo root is a throwaway build artifact — delete it after.)
+
 ```bash
 cp plugin/scripts/install.ps1 ~/GitHub/mcpbrain-dist/
-npx @anthropic-ai/mcpb pack plugin/mcpb
-cp mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/
+npx --yes @anthropic-ai/mcpb pack plugin/mcpb     # -> ./mcpb.mcpb
+cp mcpb.mcpb ~/GitHub/mcpbrain-dist/mcpbrain-<version>.mcpb
 cp ~/GitHub/mcpbrain-dist/mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/mcpbrain.mcpb
+rm -f mcpb.mcpb                                    # don't leave it in the source tree
+# Confirm the archive really carries the new version before publishing:
+python -c "import zipfile,json;print(json.loads(zipfile.ZipFile('$HOME/GitHub/mcpbrain-dist/mcpbrain.mcpb').read('manifest.json'))['version'])"
 cd ~/GitHub/mcpbrain-dist
 git add install.ps1 mcpbrain-<version>.mcpb mcpbrain.mcpb \
   && git commit -m "release: mcpbrain <version> (install.ps1 + .mcpb)" && git push origin main
 ```
+
+`install.ps1` is often byte-identical between releases; `git add` then simply stages nothing for
+it, which is fine.
 
 Both the versioned and unversioned `.mcpb` are now served at `https://centrepoint-church.github.io/mcpbrain-dist/`. The unversioned URL `mcpbrain.mcpb` ensures install instructions remain stable across releases.
 
@@ -142,9 +153,53 @@ in a `.DS_Store`, `git rm --cached` it before pushing.
 ```bash
 curl -fsS https://centrepoint-church.github.io/mcpbrain-dist/simple/mcpbrain/ \
   | grep -o 'mcpbrain-[0-9.]*-py3-none-any.whl' | sort -u    # expect the new version only
+curl -fsSI https://centrepoint-church.github.io/mcpbrain-dist/mcpbrain.mcpb | head -1   # 200
+curl -fsSI https://centrepoint-church.github.io/mcpbrain-dist/install.ps1   | head -1   # 200
 ```
 
 GitHub Pages can lag ~1 min. Installed daemons auto-update on their next ~daily check.
+
+**Verify the WHEEL CONTENTS, never the build output.** `uv build` reports success for a wheel
+built from a stale tree just as happily as a fresh one. Open it and look for something unique to
+this release — the same discipline as the local-install stale-wheel trap:
+
+```bash
+python - <<'PY'
+import zipfile, glob
+z = zipfile.ZipFile(glob.glob("dist/mcpbrain-*-py3-none-any.whl")[-1])
+meta = z.read([n for n in z.namelist() if n.endswith("METADATA")][0]).decode()
+print([l for l in meta.splitlines() if l.startswith(("Version:", "Requires-Dist: mcp"))])
+# then assert a string only this release introduced, e.g.:
+# assert "GRAPH_MAX_HOPS" in z.read("mcpbrain/mcp_server.py").decode()
+PY
+```
+
+**Then resolve exactly as the fleet will.** This is the single best end-of-release gate: it proves
+what a machine's auto-update actually gets, dependencies included. It is how you'd have caught the
+0.7.112 exposure (an unbounded `mcp>=1.2` that let a daily update pull a breaking major):
+
+```bash
+printf 'mcpbrain[daemon]\n' > /tmp/fleet-req.in
+uv pip compile /tmp/fleet-req.in \
+  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" \
+  --quiet -o /tmp/fleet-resolved.txt
+grep -iE '^(mcpbrain|mcp|mcp-types|fastembed)==' /tmp/fleet-resolved.txt
+```
+
+Expect the new `mcpbrain==`, and every pinned dependency to match what you actually validated
+locally. A transitive that resolves differently here than on your box is the release's real risk.
+
+Finally, **install from the published index** (not `.`) and restart the client — the artifact users
+get is the only one that counts:
+
+```bash
+launchctl bootout gui/$(id -u)/com.mcpbrain
+uv tool install --python 3.12 \
+  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" \
+  "mcpbrain[daemon]" --upgrade --reinstall-package mcpbrain
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
+mcpbrain doctor
+```
 
 ### 1e. (0.7.99 one-shot) Relocate legacy in-drive ingest-cache folders
 
