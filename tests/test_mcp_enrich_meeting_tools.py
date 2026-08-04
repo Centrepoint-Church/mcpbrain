@@ -9,7 +9,7 @@ import asyncio
 import json
 
 from mcpbrain.store import Store
-from mcpbrain import mcp_server
+from mcpbrain import mcp_server, tools
 
 
 def _store(tmp_path):
@@ -69,7 +69,7 @@ def test_enrich_agent_rules_in_sync():
     text = _agent_file().read_text()
     b, e = "<!-- SHARED-EXTRACTION-RULES:BEGIN -->", "<!-- SHARED-EXTRACTION-RULES:END -->"
     embedded = text[text.index(b) + len(b):text.index(e)].strip()
-    assert embedded and embedded == mcp_server._enrich_rules()
+    assert embedded and embedded == tools._enrich_rules()
 
 
 def test_enrich_agent_is_haiku_and_loops_over_claims():
@@ -138,7 +138,7 @@ def test_units_relists_after_lease_expiry(tmp_path, monkeypatch):
     first = asyncio.run(units_tool())["units"]
     assert first
     # age the claim past the lease -> reclaimable (covers a crashed subagent)
-    monkeypatch.setattr(mcp_server, "_LEASE_TTL_S", -1)
+    monkeypatch.setattr(tools, "_LEASE_TTL_S", -1)
     assert asyncio.run(units_tool())["units"]
 
 
@@ -166,9 +166,9 @@ def test_units_batch_caps_handout_and_leaves_rest(tmp_path, monkeypatch):
 
 def test_units_batch_default(monkeypatch):
     monkeypatch.delenv("MCPBRAIN_ENRICH_UNITS_BATCH", raising=False)
-    assert mcp_server._units_batch() == 30
+    assert tools._units_batch() == 30
     monkeypatch.setenv("MCPBRAIN_ENRICH_UNITS_BATCH", "garbage")
-    assert mcp_server._units_batch() == 30                        # invalid override -> default
+    assert tools._units_batch() == 30                        # invalid override -> default
 
 
 def test_pull_unit_attaches_rules_and_context(tmp_path):

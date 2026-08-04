@@ -6,7 +6,7 @@ Two independent pairs, each with its own delimited region and canonical
 source:
 
 1. Extraction rules. The canonical rules live in `mcpbrain/enrich_prompt.md`
-   (SHARED-EXTRACTION-RULES block), exposed via `mcp_server._enrich_rules()`.
+   (SHARED-EXTRACTION-RULES block), exposed via `tools._enrich_rules()`.
    The `enrich-batch` subagent carries a *copy* of those rules in its SYSTEM
    PROMPT (`plugin/agents/enrich-batch.md`) so that across the enrichment
    fan-out every sibling subagent shares one byte-identical, cacheable prefix
@@ -40,7 +40,7 @@ DRAFT_REPLY_TARGETS = [REPO / "plugin" / "skills" / "mcpbrain-draft-reply" / "SK
 
 def canonical_rules() -> str:
     sys.path.insert(0, str(REPO))
-    from mcpbrain.mcp_server import _enrich_rules
+    from mcpbrain.tools import _enrich_rules
     return _enrich_rules()
 
 
