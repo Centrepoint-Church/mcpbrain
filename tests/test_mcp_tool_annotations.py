@@ -7,7 +7,8 @@ safe reads leaks leases.
 """
 import pytest
 
-from mcpbrain.mcp_server import tool_annotations, tool_schemas
+from mcpbrain import mcp_server  # noqa: F401 - import populates the tool registry
+from mcpbrain.tool_registry import registry, spec
 
 READ_ONLY = {
     "brain_search", "brain_read", "brain_context", "brain_actions", "brain_graph",
@@ -27,19 +28,23 @@ ADDITIVE = {
 
 
 def test_every_tool_is_annotated():
-    assert set(tool_annotations()) == set(tool_schemas())
+    """Structural now, not a cross-check: annotations are a required @tool
+    argument, so a tool cannot be registered without them. Assert the value is
+    real rather than a None slipped past the keyword."""
+    unannotated = [n for n, s in registry().items() if s.annotations is None]
+    assert not unannotated, f"registered without annotations: {unannotated}"
 
 
 @pytest.mark.parametrize("name", sorted(READ_ONLY))
 def test_read_only_tools_are_marked_read_only(name):
-    ann = tool_annotations()[name]
+    ann = spec(name).annotations
     assert ann.read_only_hint is True
     assert ann.destructive_hint is False
 
 
 @pytest.mark.parametrize("name", sorted(DESTRUCTIVE))
 def test_destructive_tools_are_marked_destructive(name):
-    ann = tool_annotations()[name]
+    ann = spec(name).annotations
     assert ann.read_only_hint is False
     assert ann.destructive_hint is True
 
@@ -47,7 +52,7 @@ def test_destructive_tools_are_marked_destructive(name):
 @pytest.mark.parametrize("name", sorted(LEASE_ACQUIRING))
 def test_lease_acquiring_tools_are_not_read_only_and_not_idempotent(name):
     """The subtle case: these read work but their side effect is claiming a lease."""
-    ann = tool_annotations()[name]
+    ann = spec(name).annotations
     assert ann.read_only_hint is False, f"{name} acquires a lease; not a safe read"
     assert ann.idempotent_hint is False, f"{name} returns a different unit each call"
     assert ann.destructive_hint is False
@@ -55,7 +60,7 @@ def test_lease_acquiring_tools_are_not_read_only_and_not_idempotent(name):
 
 @pytest.mark.parametrize("name", sorted(IDEMPOTENT_MUTATORS))
 def test_idempotent_mutators_are_marked_idempotent(name):
-    ann = tool_annotations()[name]
+    ann = spec(name).annotations
     assert ann.read_only_hint is False
     assert ann.idempotent_hint is True
 
@@ -66,7 +71,7 @@ def test_additive_tools_are_marked_non_idempotent_writes(name):
     so these must never read as read-only, destructive, or idempotent. Guards
     against e.g. brain_ingest's read_only_hint silently flipping True even
     though it writes via write_capture."""
-    ann = tool_annotations()[name]
+    ann = spec(name).annotations
     assert ann.read_only_hint is False
     assert ann.destructive_hint is False
     assert ann.idempotent_hint is False
@@ -85,7 +90,7 @@ def test_open_world_reach_is_declared_accurately():
     that UNDERSTATES its reach, not just one that overstates it.
     """
     reaches_open_world = {"brain_meetings_today"}
-    for name, ann in tool_annotations().items():
+    for name, ann in ((n, s.annotations) for n, s in registry().items()):
         assert ann.open_world_hint is (name in reaches_open_world), (
             f"{name}: open_world_hint={ann.open_world_hint} misdeclares its reach"
         )
