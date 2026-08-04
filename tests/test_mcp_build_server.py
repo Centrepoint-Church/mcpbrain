@@ -2,6 +2,7 @@
 import asyncio
 
 from mcpbrain.mcp_server import build_server
+from tests.conftest import list_tools_via_handler
 
 EXPECTED_TOOLS = {
     "brain_search", "brain_read", "brain_context", "brain_actions", "brain_graph",
@@ -12,26 +13,6 @@ EXPECTED_TOOLS = {
     "brain_enrich_advance", "brain_enrich_claim", "brain_enrich_pending",
     "brain_meetings_today", "brain_meeting_pack_get", "brain_meeting_pack_upsert",
 }
-
-
-async def list_tools_via_handler(server):
-    """Invoke the registered tools/list handler directly and return the tool
-    list, without an event loop-driven transport or a real MCP session.
-
-    On mcp 2.x, handlers are looked up by method string
-    (`server.get_request_handler("tools/list")` -> a HandlerEntry carrying
-    `.params_type` and `.handler`) and invoked as `handler(ctx, params)`
-    returning a full `types.ListToolsResult`. build_server()'s handlers ignore
-    `ctx` entirely, so None is a faithful stand-in for the per-request
-    ServerRequestContext the runner would build. Task 8 (tool annotations)
-    reuses this helper, so it lives at module level rather than inline in a
-    single test body.
-    """
-    from mcp import types
-
-    entry = server.get_request_handler("tools/list")
-    result = await entry.handler(None, types.PaginatedRequestParams())
-    return result.tools
 
 
 def test_build_server_registers_every_tool(mcp_env):
