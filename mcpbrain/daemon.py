@@ -742,6 +742,7 @@ class Daemon:
                  interval_s: float = 300.0,
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
                  backup_interval_s: float | None = None,
+                 last_backup_attempt_epoch: float | None = None,
                  communities_interval_s: float | None = None,
                  lint_interval_s: float | None = None,
                  synthesise_interval_s: float | None = None,
@@ -802,7 +803,27 @@ class Daemon:
         if self._backup is not None and self._backup_interval_s is None:
             raise ValueError("backup_interval_s is required when backup is configured")
         self._clock = clock
+        # Seed the cadence clock from the PERSISTED attempt stamp so a restart
+        # is not mistaken for a first run. Without this, _last_backup started
+        # None on every boot and maybe_backup treated that as "due now": on
+        # 2026-08-04, 9 daemon starts uploaded 12.75GB where the configured
+        # daily cadence calls for 4.25GB.
+        #
+        # The stamp arrives as an explicit argument rather than being read from
+        # app_dir() here on purpose: conftest does not isolate MCPBRAIN_HOME
+        # globally, so a constructor that read it would make the daemon tests
+        # depend on the developer's real backup history. See
+        # last_backup_attempt_epoch for the wiring the entry point uses.
         self._last_backup = None
+        if last_backup_attempt_epoch is not None:
+            # Convert wall-clock (persisted) into this process's clock frame --
+            # self._clock defaults to time.monotonic, whose epoch is arbitrary
+            # per process, so the raw value is meaningless here. Clamp at 0 so a
+            # backwards system-clock adjustment, which makes the stamp look
+            # future-dated, reads as "just attempted" instead of yielding a
+            # negative elapsed that would park the cadence indefinitely.
+            elapsed = max(0.0, time.time() - float(last_backup_attempt_epoch))
+            self._last_backup = self._clock() - elapsed
         # Set for the duration of _backup_under_bulk_lock's maybe_backup() call
         # (Task 3). The watchdog's _recover_from_stall checks this and defers
         # recovery while it is set: os._exit bypasses `finally`, so firing mid
@@ -3692,6 +3713,25 @@ class Daemon:
                 log.error("auto-update install failed: %s", exc)
 
 
+def last_backup_attempt_epoch(home) -> float | None:
+    """Wall-clock time of the last backup ATTEMPT, or None if unknown.
+
+    Seeds ``Daemon``'s in-memory cadence clock at startup so a restart does not
+    read as a first run (see the constructor).
+
+    Reads ``last_attempt``, NOT ``last_success``: the cadence clock advances on
+    attempt, and seeding from the last success would let a failure storm resume
+    across restarts — precisely what the attempt-based cadence exists to stop.
+    A missing or unreadable file returns None, which correctly means "back up
+    now" for a fresh install.
+    """
+    try:
+        state = json.loads((Path(home) / "backup_state.json").read_text())
+        return float(state["last_attempt"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
     """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
 
@@ -4019,6 +4059,8 @@ def main(argv=None) -> None:
     daemon = Daemon(store, embedder=None, interval_s=args.interval,
                     enrich_mode=enrich_mode,
                     backup=backup_cfg, backup_interval_s=backup_interval,
+                    last_backup_attempt_epoch=last_backup_attempt_epoch(
+                        str(config.app_dir())),
                     communities_interval_s=cadences["communities_interval_s"],
                     lint_interval_s=cadences["lint_interval_s"],
                     synthesise_interval_s=cadences["synthesise_interval_s"],
