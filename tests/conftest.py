@@ -234,9 +234,16 @@ async def list_tools_via_handler(server):
     On mcp 2.x, handlers are looked up by method string
     (`server.get_request_handler("tools/list")` -> a HandlerEntry carrying
     `.params_type` and `.handler`) and invoked as `handler(ctx, params)`
-    returning a full `types.ListToolsResult`. build_server()'s handlers ignore
-    `ctx` entirely, so None is a faithful stand-in for the per-request
-    ServerRequestContext the runner would build. Originally lived inline in
+    returning a full `types.ListToolsResult`. The tools/list handler ignores
+    `ctx`, so None is a faithful stand-in there for the per-request
+    ServerRequestContext the runner would build.
+
+    SCOPE: tools/list ONLY. Do not generalise this to the other handlers —
+    `on_list_resources` reads `ctx` (via `_ensure_watcher`, which tolerates
+    None) and `on_call_tool` reads it too (via `_progress_reporter`, which does
+    `(ctx.meta or {})` and raises AttributeError on None). A call_tool test
+    either needs a real session (see the `protocol_session` fixtures) or must
+    justify None for the specific branch it exercises. Originally lived inline in
     test_mcp_build_server.py; moved here (Task 8) because
     test_mcp_tool_annotations.py needs the exact same accessor and cross-
     importing test-module helpers between test files is worse than a shared

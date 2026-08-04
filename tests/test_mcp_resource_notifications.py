@@ -71,6 +71,60 @@ def test_watcher_notifies_once_per_change(tmp_path, monkeypatch):
     asyncio.run(_body())
 
 
+def test_watcher_survives_a_fingerprint_error(tmp_path, monkeypatch):
+    """An OSError from the poll itself must not kill the watcher.
+
+    _resource_fingerprint() was called OUTSIDE the try, so any OSError/ValueError
+    escaping _resource_entries() — a glob permission blip, config.records_dir()
+    reading a config.json torn mid-write by apply_config or a restore, a
+    relative_to surprise — ended the watcher for the rest of the session AND
+    surfaced as "Task exception was never retrieved" on the MCP server's stderr,
+    the one channel this migration's acceptance criteria measured at 0 bytes.
+    """
+    from mcpbrain import mcp_server
+
+    (tmp_path / "context").mkdir()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    class _RecordingSession:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_resource_list_changed(self):
+            self.calls += 1
+
+    session = _RecordingSession()
+    real_entries = mcp_server._resource_entries
+    state = {"fail": 0}
+
+    def _flaky_entries():
+        if state["fail"] > 0:
+            state["fail"] -= 1
+            raise OSError("config.json torn mid-write")
+        return real_entries()
+
+    monkeypatch.setattr(mcp_server, "_resource_entries", _flaky_entries)
+
+    async def _body():
+        task = asyncio.create_task(
+            mcp_server.watch_resources(session, interval_s=0.01))
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            state["fail"] = 3           # several consecutive failed polls
+            await asyncio.sleep(0.08)
+            assert not task.done(), "watcher died on a fingerprint error"
+            # ...and it still notices a change once the transient blip clears.
+            (tmp_path / "context" / "after.md").write_text("x", encoding="utf-8")
+            await asyncio.sleep(0.08)
+            assert session.calls == 1
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_body())
+
+
 def test_watcher_survives_a_send_failure(tmp_path, monkeypatch):
     """A dead client must not kill the watcher or crash the server."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
