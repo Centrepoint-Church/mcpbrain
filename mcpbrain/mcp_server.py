@@ -12,15 +12,14 @@ from mcpbrain import config
 from mcpbrain.enrich_blocks import PUSH_BLOCKS as _PUSH_BLOCKS
 
 from mcpbrain.retrieval import annotate_action_freshness
-from mcpbrain.tool_registry import declare, tool
+from mcpbrain.tool_registry import declare, registry, spec, tool
 
 _log = logging.getLogger("mcpbrain.mcp_server")
 
 
 # --- Tool annotation shorthands ---------------------------------------------
-# The five safety-annotation shapes every tool falls into. Module-level (they
-# were nested inside the old tool_annotations()) because each @tool declaration
-# below evaluates at import.
+# The five safety-annotation shapes every tool falls into. Module-level because
+# each @tool declaration below evaluates at import.
 #
 # open_world_hint is False for 25 of the 26: each of those touches only the local
 # store, local files, or the loopback control API. The one exception is
@@ -294,6 +293,19 @@ def init_options(server):
     )
 
 
+@tool(
+    "brain_search",
+    description="Search your Gmail/Calendar/Drive index.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+        },
+        "required": ["query"],
+    },
+    annotations=_ro("Search the brain"),
+)
 def make_brain_search(client):
     async def brain_search(query: str, limit: int = 10) -> list[dict]:
         try:
@@ -319,6 +331,29 @@ declare(
 )
 
 
+@tool(
+    "brain_context",
+    description=(
+        "Profile an entity or list community clusters. "
+        "mode='profile' (default): entity is required — returns record, relations, "
+        "actions, projects, and areas. "
+        "mode='communities': returns all community summaries, or the member entities "
+        "for a specific community when community_id is supplied."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entity": {"type": "string"},
+            "mode": {
+                "type": "string",
+                "default": "profile",
+                "enum": ["profile", "communities"],
+            },
+            "community_id": {"type": "integer"},
+        },
+    },
+    annotations=_ro("Profile an entity"),
+)
 def make_brain_context(store):
     async def brain_context(entity: str = "", mode: str = "profile",
                             community_id: int | None = None) -> dict | list:
@@ -366,6 +401,19 @@ def make_brain_context(store):
     return brain_context
 
 
+@tool(
+    "brain_actions",
+    description="Action items from the unified actions table, filtered by owner + status, with freshness.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "owner": {"type": "string", "default": "",
+                      "description": "Empty defaults to the configured install owner."},
+            "status": {"type": "string", "default": "open"},
+        },
+    },
+    annotations=_ro("List open actions"),
+)
 def make_brain_actions(store):
     async def brain_actions(owner: str = "", status: str = "open") -> list[dict]:
         """Action items from the unified actions table, filtered by owner and
@@ -388,6 +436,21 @@ GRAPH_MAX_HOPS = 3  # traversal cap; on_call_tool's brain_graph branch reads
                     # from the depth the BFS below actually runs.
 
 
+@tool(
+    "brain_graph",
+    description="Traverse the relationship graph from an entity up to `hops` (max 3).",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entity": {"type": "string"},
+            "hops": {"type": "integer", "default": 1},
+            "at_time": {"type": "string"},
+            "include_invalidated": {"type": "boolean", "default": False},
+        },
+        "required": ["entity"],
+    },
+    annotations=_ro("Traverse the graph"),
+)
 def make_brain_graph(store):
     async def brain_graph(entity: str, hops: int = 1, *, at_time: str | None = None,
                           include_invalidated: bool = False, on_hop=None) -> dict:
@@ -438,6 +501,21 @@ def make_brain_graph(store):
     return brain_graph
 
 
+@tool(
+    "brain_proactive",
+    description="Open proactive findings: projects without next actions, areas overdue, lint issues.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "finding_type": {
+                "type": "string",
+                "description": "Filter by type (e.g. 'project_no_next_action', 'lint:missing_org')",
+            },
+            "severity": {"type": "string"},
+        },
+    },
+    annotations=_ro("List findings"),
+)
 def make_brain_proactive(store):
     async def brain_proactive(finding_type: str = "", severity: str = "") -> list:
         """Return open proactive findings, optionally filtered by type and/or severity."""
@@ -464,6 +542,38 @@ MANUAL_RESOLVE_TYPES = ("memory_promotion",)
 _RESOLVE_OUTCOMES = ("promoted", "merged", "dismissed")
 
 
+@tool(
+    "brain_finding_resolve",
+    description=(
+        "Close one proactive finding you have acted on. Only "
+        "memory_promotion findings may be closed this way — every other "
+        "type is resolved automatically. outcome: 'promoted' (a memory "
+        "file was written), 'merged' (folded into an existing memory "
+        "file), or 'dismissed' (not durable)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "finding_id": {"type": "integer",
+                           "description": "the finding's id, from brain_proactive"},
+            "outcome": {"type": "string",
+                        "enum": list(_RESOLVE_OUTCOMES),
+                        "description": "what you did about it"},
+            "note": {"type": "string",
+                     "description": "short free text for the change log"},
+        },
+        "required": ["finding_id", "outcome"],
+    },
+    annotations=_idempotent("Resolve a finding"),
+    output_schema={
+        "type": "object",
+        "properties": {
+            "resolved": {"type": "boolean"},
+            "error": {"type": "string"},
+        },
+        "required": ["resolved"],
+    },
+)
 def make_brain_finding_resolve(store):
     async def brain_finding_resolve(finding_id: int, outcome: str,
                                     note: str = "") -> dict:
@@ -511,6 +621,31 @@ def _capture_envelope(kind: str, source: str = "mcp", **fields) -> dict:
             **fields}
 
 
+@tool(
+    "brain_ingest",
+    description=(
+        "Save a note, decision, or memory to your knowledge base. "
+        "QUEUED: the item is searchable after the next sync cycle (~5 min), "
+        "not immediately."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "tags": {"type": "string", "default": ""},
+            "observation_type": {
+                "type": "string",
+                "default": "note",
+                "enum": ["note", "decision", "memory", "reference"],
+            },
+            "org": {"type": "string", "default": ""},
+        },
+        "required": ["title", "content"],
+    },
+    annotations=_append("Capture a note or document"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_ingest():
     async def brain_ingest(title: str, content: str, tags: str = "",
                            observation_type: str = "note", org: str = "") -> dict:
@@ -527,6 +662,28 @@ def make_brain_ingest():
     return brain_ingest
 
 
+@tool(
+    "brain_action_create",
+    description=(
+        "Create a new action item. "
+        "QUEUED: appears in brain_actions after the next sync cycle (~5 min). "
+        "Empty owner defaults to the configured install owner."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "owner": {"type": "string", "default": ""},
+            "deadline": {"type": "string", "default": ""},
+            "org": {"type": "string", "default": ""},
+            "project_id": {"type": "string", "default": ""},
+            "area_id": {"type": "string", "default": ""},
+        },
+        "required": ["text"],
+    },
+    annotations=_append("Create an action"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_action_create():
     async def brain_action_create(text: str, owner: str = "", deadline: str = "",
                                   org: str = "", project_id: str = "",
@@ -544,6 +701,27 @@ def make_brain_action_create():
     return brain_action_create
 
 
+@tool(
+    "brain_action_update",
+    description=(
+        "Mark an action done or reopen it. "
+        "QUEUED: applies on the next sync cycle (~5 min)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "action_id": {"type": "integer"},
+            "status": {"type": "string", "enum": ["done", "open"]},
+        },
+        "required": ["action_id", "status"],
+    },
+    # Goes through write_capture like the non-idempotent _append tools;
+    # idempotence is a drain-side property (drain.py's action_update apply is a
+    # set-status-by-key no-op when already in the target state), not a property
+    # of the write step itself.
+    annotations=_idempotent("Update an action's status"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_action_update():
     async def brain_action_update(action_id: int, status: str) -> dict:
         """Mark an action done or reopen it ('done'|'open'). QUEUED: applies
@@ -558,6 +736,27 @@ def make_brain_action_update():
     return brain_action_update
 
 
+@tool(
+    "brain_decision",
+    description=(
+        "Record a decision. "
+        "QUEUED: the daemon appends a row to state/decisions.md in your records repo "
+        "and commits (one daemon cycle, ~seconds-minutes), not instantly."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "rationale": {"type": "string", "default": ""},
+            "owner": {"type": "string", "default": ""},
+            "supersedes": {"type": "string", "default": ""},
+            "org": {"type": "string", "default": ""},
+        },
+        "required": ["text"],
+    },
+    annotations=_append("Record a decision"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_decision():
     async def brain_decision(text: str, rationale: str = "", owner: str = "",
                              supersedes: str = "", org: str = "") -> dict:
@@ -605,6 +804,26 @@ def make_brain_note():
     return brain_note
 
 
+@tool(
+    "brain_memory_write",
+    description=(
+        "Write a durable auto-memory file. "
+        "QUEUED: the daemon writes memory/<slug>.md + a MEMORY.md pointer "
+        "in your records repo and commits (one daemon cycle), not instantly."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string"},
+            "description": {"type": "string"},
+            "body": {"type": "string"},
+            "memory_type": {"type": "string", "default": "project"},
+        },
+        "required": ["slug", "description", "body"],
+    },
+    annotations=_append("Write a memory"),
+    output_schema=_queued_output_schema(),
+)
 def make_brain_memory_write():
     async def brain_memory_write(slug: str, description: str, body: str,
                                  memory_type: str = "project") -> dict:
@@ -621,6 +840,47 @@ def make_brain_memory_write():
     return brain_memory_write
 
 
+@tool(
+    "brain_gardener_apply",
+    description=(
+        "Apply a reference-gardener change directly to the records repo through "
+        "the role-attribution guard and per-run change cap. Synchronous (not "
+        "queued): commits immediately and returns the result so the gardener gets "
+        "enforcement feedback. Use only from the reference-gardener routine in "
+        "auto-apply mode."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "lane": {"type": "string", "enum": ["reference", "context"],
+                     "description": "'reference' (drift) or 'context' (constitution)"},
+            "filename": {"type": "string", "description": "basename of an existing file in that dir"},
+            "content": {"type": "string", "description": "full new file content"},
+            "asserts_person_role": {"type": "boolean", "default": False,
+                                    "description": "True only if assigning a role/title to a person"},
+            "attribution_source": {"type": "string",
+                                   "enum": ["owner_statement", "signature", "owner_confirmation"],
+                                   "description": "required when asserts_person_role"},
+            "attribution_quote": {"type": "string",
+                                  "description": "verbatim supporting text; required for a role claim and verified against the cited source"},
+            "attribution_doc_id": {"type": "string",
+                                   "description": "stored chunk id the quote lives in; required for owner_statement/signature"},
+        },
+        "required": ["lane", "filename", "content"],
+    },
+    # Overwrites an existing records file with caller-supplied content and
+    # git-commits it, synchronously.
+    annotations=_destructive("Apply a gardener edit"),
+    output_schema={
+        "type": "object",
+        "properties": {
+            "applied": {"type": "boolean"},
+            "committed": {"type": "boolean"},
+            "error": {"type": "string"},
+        },
+        "required": ["applied"],
+    },
+)
 def make_brain_gardener_apply(store):
     async def brain_gardener_apply(lane: str, filename: str, content: str,
                                    asserts_person_role: bool = False,
@@ -699,6 +959,15 @@ def _verify_role_attribution(store, source: str, quote: str, doc_id: str) -> str
     return None
 
 
+@tool(
+    "brain_draft_context",
+    description="Get email context for drafting a reply (subject, body, sender, voice rules, thread samples). Returns context dict to use in the draft-reply skill.",
+    input_schema={"type": "object", "properties": {
+        "email_id": {"type": "string", "description": "message_id from email_context"},
+        "intent": {"type": "string", "description": "optional intent override"},
+    }, "required": ["email_id"]},
+    annotations=_ro("Gather drafting context"),
+)
 def make_brain_draft_context(store, home: str):
     async def brain_draft_context(email_id: str, intent: str = "", *, on_stage=None) -> dict:
         """Return context for drafting a reply (subject, body, sender, voice_rules, samples).
@@ -716,6 +985,28 @@ def make_brain_draft_context(store, home: str):
     return brain_draft_context
 
 
+@tool(
+    "brain_draft_save",
+    description="Persist a completed draft to draft history. Call after the Cowork draft-reply skill has finished. Returns draft_record_id.",
+    input_schema={"type": "object", "properties": {
+        "email_id": {"type": "string"},
+        "thread_id": {"type": "string"},
+        "intent": {"type": "string"},
+        "final_draft": {"type": "string", "description": "The finished draft text to save"},
+        "parent_draft_id": {"type": "integer", "description": "optional: id of prior draft being replaced"},
+    }, "required": ["email_id", "thread_id", "intent", "final_draft"]},
+    annotations=_append("Save a draft"),
+    # The `error` branch omits draft_record_id (see make_brain_draft_save), so
+    # unlike the other envelopes this schema marks NO field required -- a
+    # `required: ["draft_record_id"]` would reject the tool's own error responses.
+    output_schema={
+        "type": "object",
+        "properties": {
+            "draft_record_id": {"type": "integer"},
+            "error": {"type": "string"},
+        },
+    },
+)
 def make_brain_draft_save(store, home: str):
     async def brain_draft_save(email_id: str, thread_id: str, intent: str,
                                 final_draft: str, parent_draft_id: int | None = None) -> dict:
@@ -793,6 +1084,23 @@ def _routine_instructions(name: str) -> str | None:
         return (Path(__file__).parent / "routines" / f"{name}.md").read_text()
     except OSError:
         return None
+
+
+# brain_routine, like brain_read, has no factory -- on_call_tool calls
+# _routine_instructions directly -- so it declares itself here, beside that
+# function and in its advertised position. It deliberately declares NO
+# output_schema: it carries routine markdown, and structured_content ships
+# ALONGSIDE content, so declaring one would double one of the two largest
+# payloads in the surface for a consumer that reads prose, not JSON.
+declare(
+    "brain_routine",
+    description="Return the full instructions for a recurring mcpbrain routine, to follow verbatim. Use this as the FIRST step of a scheduled task: call it, then do exactly what it returns. name is one of: enrich, meeting-packs, gardener, reference-gardener. Self-contained — do not look for a skill or command or read files.",
+    input_schema={"type": "object", "properties": {
+        "name": {"type": "string", "enum": list(_ROUTINES),
+                 "description": "the routine to run"},
+    }, "required": ["name"]},
+    annotations=_ro("Get routine instructions"),
+)
 
 
 def _draft_reply_canonical_body() -> str:
@@ -998,6 +1306,12 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
     return out
 
 
+@tool(
+    "brain_enrich_units",
+    description="List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the caller stays context-flat) and claim each with a short lease. Recipe: call this, then for each unit_id, brain_enrich_pull(unit_id) to fetch its payload, extract, and brain_enrich_push(unit_id, …) to write the result. Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
+    input_schema={"type": "object", "properties": {}},
+    annotations=_lease("Lease a batch of work units"),
+)
 def make_brain_enrich_units(home: str):
     async def brain_enrich_units() -> dict:
         """List up to a wave's worth of ready work units and CLAIM each with a short
@@ -1037,6 +1351,23 @@ def make_brain_enrich_units(home: str):
     return brain_enrich_units
 
 
+@tool(
+    "brain_enrich_pull",
+    description="Fetch one work unit's payload by unit_id (from brain_enrich_units), with a `rules` field carrying the FULL extraction protocol to follow (envelope schema, entity/relation/merge rules) and the standing `context`. A `kind` \"thread\" unit returns `threads`; a `kind` \"block\" unit returns `block` + `items`. Returns {\"empty\": true} if the unit is gone. Follow `rules` from this response; do not read skill files or source.",
+    input_schema={"type": "object", "properties": {
+        "unit_id": {"type": "string",
+                    "description": "the unit to fetch (from brain_enrich_units)"},
+        "with_rules": {"type": "boolean",
+                       "description": "include the full extraction rules in the "
+                                      "response (default true). enrich-batch workers "
+                                      "pass false — they already carry the rules in "
+                                      "their cached system prompt, so re-sending here "
+                                      "would pay for them twice."},
+    }, "required": ["unit_id"]},
+    annotations=_ro("Pull a named unit's payload"),
+    # NO output_schema, deliberately: the response carries the ~11.5KB rules blob,
+    # and structured_content would ship a second copy alongside `content`.
+)
 def make_brain_enrich_pull(home: str):
     async def brain_enrich_pull(unit_id: str, with_rules: bool = True) -> dict:
         """Return one work unit's payload (from brain_enrich_units) with the current
@@ -1178,6 +1509,21 @@ def make_brain_enrich_push(home: str):
     return brain_enrich_push
 
 
+@tool(
+    "brain_enrich_advance",
+    description="Nudge the daemon to apply pushed unit results and produce the next units immediately (instead of waiting for its normal cycle). Use between backfill rounds, then call brain_enrich_units again.",
+    input_schema={"type": "object", "properties": {}},
+    # Triggers an unbounded daemon drain+prepare cycle: the widest blast radius
+    # of any tool. open_world_hint stays False -- this call itself only hits
+    # the loopback control API; it's the *daemon* that then reaches Google,
+    # one indirection away from this tool, which is deliberately not counted
+    # as this tool's own open-world reach.
+    annotations=_destructive("Wake the daemon to drain"),
+    output_schema={
+        "type": "object",
+        "properties": {"woken": {"type": "boolean"}, "error": {"type": "string"}},
+    },
+)
 def make_brain_enrich_advance(home: str):
     async def brain_enrich_advance() -> dict:
         """Nudge the daemon to run an immediate drain + prepare cycle, so newly
@@ -1193,25 +1539,21 @@ def make_brain_enrich_advance(home: str):
     return brain_enrich_advance
 
 
-def make_brain_enrich_pending(home: str):
-    async def brain_enrich_pending() -> dict:
-        """Count enrichment units not under a live lease, WITHOUT claiming any.
-
-        The coordinator calls this to decide whether to spawn another drainer
-        wave — keeping done-ness a function of queue state, never reply text.
-        Drainers self-serve work via brain_enrich_claim; this only observes.
-        """
-        import time as _time
-        claims, now = _claims_dir(home), _time.time()
-        try:
-            files = sorted(_units_dir(home).glob("*.json"))
-        except OSError:
-            return {"pending": 0}
-        n = sum(1 for f in files if not _lease_is_live(claims / f.stem, now))
-        return {"pending": n}
-    return brain_enrich_pending
-
-
+# brain_enrich_claim is declared BEFORE brain_enrich_pending because
+# registration order is the order tools/list advertises, and the surface
+# 0.7.113 verified live has claim ahead of pending. Do not reorder these two
+# functions without expecting test_advertised_order_is_registration_order to
+# say so.
+@tool(
+    "brain_enrich_claim",
+    description="Atomically lease ONE enrichment unit and return its payload (kind + threads/items + context) in a single call — units+pull folded. For the enrich-batch drain loop: call it, extract per your system-prompt rules, brain_enrich_push, and repeat until it returns {\"empty\": true}. Concurrent drainers never get the same unit. Rules are omitted by default (they're in your prompt); pass with_rules=true only for a self-contained caller.",
+    input_schema={"type": "object", "properties": {
+        "with_rules": {"type": "boolean",
+                       "description": "inline the full extraction rules (default false; "
+                                      "enrich-batch workers carry them in their prompt)"},
+    }},
+    annotations=_lease("Claim one work unit"),
+)
 def make_brain_enrich_claim(home: str):
     async def brain_enrich_claim(with_rules: bool = False) -> dict:
         """Atomically lease ONE ready unit and return its payload (units + pull,
@@ -1245,6 +1587,50 @@ def make_brain_enrich_claim(home: str):
     return brain_enrich_claim
 
 
+@tool(
+    "brain_enrich_pending",
+    description="Count enrichment units still waiting (not under a live lease), WITHOUT claiming any. The coordinator calls this to decide whether to spawn another drainer wave: {\"pending\": N}. pending==0 means the queue is drained.",
+    input_schema={"type": "object", "properties": {}},
+    annotations=_ro("Count pending units"),
+    output_schema={
+        "type": "object",
+        "properties": {"pending": {"type": "integer"}},
+        "required": ["pending"],
+    },
+)
+def make_brain_enrich_pending(home: str):
+    async def brain_enrich_pending() -> dict:
+        """Count enrichment units not under a live lease, WITHOUT claiming any.
+
+        The coordinator calls this to decide whether to spawn another drainer
+        wave — keeping done-ness a function of queue state, never reply text.
+        Drainers self-serve work via brain_enrich_claim; this only observes.
+        """
+        import time as _time
+        claims, now = _claims_dir(home), _time.time()
+        try:
+            files = sorted(_units_dir(home).glob("*.json"))
+        except OSError:
+            return {"pending": 0}
+        n = sum(1 for f in files if not _lease_is_live(claims / f.stem, now))
+        return {"pending": n}
+    return brain_enrich_pending
+
+
+@tool(
+    "brain_meetings_today",
+    description="Today's calendar events, each with has_pack. Use in the meeting-packs task instead of curl /api/dashboard/today.",
+    input_schema={"type": "object", "properties": {}},
+    # NOT _ro(): dashboard.calendar_today(home) calls
+    # auth.build_google_services(...) and a live Calendar events().list(...)
+    # in-process, synchronously, as part of this call. Keep open_world_hint
+    # True here even though the tool is otherwise a plain, idempotent read —
+    # do not "tidy" this back to _ro() / False.
+    annotations=types.ToolAnnotations(
+        title="Today's meetings", read_only_hint=True, destructive_hint=False,
+        idempotent_hint=True, open_world_hint=True,
+    ),
+)
 def make_brain_meetings_today(store, home: str):
     async def brain_meetings_today() -> list:
         """Today's calendar events, each annotated with has_pack. Same data the
@@ -1258,6 +1644,14 @@ def make_brain_meetings_today(store, home: str):
     return brain_meetings_today
 
 
+@tool(
+    "brain_meeting_pack_get",
+    description="Get the stored meeting pack for an event (incl. context_hash for change detection), or {\"found\": false}.",
+    input_schema={"type": "object", "properties": {
+        "event_id": {"type": "string"},
+    }, "required": ["event_id"]},
+    annotations=_ro("Get a meeting pack"),
+)
 def make_brain_meeting_pack_get(store):
     async def brain_meeting_pack_get(event_id: str) -> dict:
         """Return the stored pack for event_id (incl. context_hash), or
@@ -1270,6 +1664,24 @@ def make_brain_meeting_pack_get(store):
     return brain_meeting_pack_get
 
 
+@tool(
+    "brain_meeting_pack_upsert",
+    description="Create or update a meeting pack. Always pass context_hash so the next hourly run can skip it when unchanged.",
+    input_schema={"type": "object", "properties": {
+        "event_id": {"type": "string"},
+        "event_title": {"type": "string"},
+        "event_date": {"type": "string", "description": "YYYY-MM-DD"},
+        "pack_text": {"type": "string", "description": "the markdown pack"},
+        "attendees": {"type": "array", "items": {"type": "string"}},
+        "context_hash": {"type": "string", "description": "fingerprint of the pack's inputs"},
+    }, "required": ["event_id", "event_title", "event_date", "pack_text"]},
+    annotations=_idempotent("Upsert a meeting pack"),
+    output_schema={
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}},
+        "required": ["ok"],
+    },
+)
 def make_brain_meeting_pack_upsert(store):
     async def brain_meeting_pack_upsert(event_id: str, event_title: str,
                                         event_date: str, pack_text: str,
@@ -1292,459 +1704,30 @@ def make_brain_meeting_pack_upsert(store):
     return brain_meeting_pack_upsert
 
 
-def tool_schemas() -> dict[str, dict]:
-    """name -> inputSchema for every tool, the single source both the advertised
-    tool list and argument validation read.
-
-    Hoisted out of the tool literals so validation can never drift from what the
-    server advertises: mcp 2.x's low-level server does no validation of its own
-    (mcp 1.x's call_tool(validate_input=True) default did), so this mapping is
-    the only thing standing between a malformed call and a handler KeyError.
-
-    Insertion order is the order tools are advertised in tools/list.
-    """
-    return {
-        "brain_search": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "default": 10},
-            },
-            "required": ["query"],
-        },
-        "brain_read": {
-            "type": "object",
-            "properties": {"doc_id": {"type": "string"}},
-            "required": ["doc_id"],
-        },
-        "brain_context": {
-            "type": "object",
-            "properties": {
-                "entity": {"type": "string"},
-                "mode": {
-                    "type": "string",
-                    "default": "profile",
-                    "enum": ["profile", "communities"],
-                },
-                "community_id": {"type": "integer"},
-            },
-        },
-        "brain_actions": {
-            "type": "object",
-            "properties": {
-                "owner": {"type": "string", "default": "",
-                          "description": "Empty defaults to the configured install owner."},
-                "status": {"type": "string", "default": "open"},
-            },
-        },
-        "brain_graph": {
-            "type": "object",
-            "properties": {
-                "entity": {"type": "string"},
-                "hops": {"type": "integer", "default": 1},
-                "at_time": {"type": "string"},
-                "include_invalidated": {"type": "boolean", "default": False},
-            },
-            "required": ["entity"],
-        },
-        "brain_proactive": {
-            "type": "object",
-            "properties": {
-                "finding_type": {
-                    "type": "string",
-                    "description": "Filter by type (e.g. 'project_no_next_action', 'lint:missing_org')",
-                },
-                "severity": {"type": "string"},
-            },
-        },
-        "brain_finding_resolve": {
-            "type": "object",
-            "properties": {
-                "finding_id": {"type": "integer",
-                               "description": "the finding's id, from brain_proactive"},
-                "outcome": {"type": "string",
-                            "enum": list(_RESOLVE_OUTCOMES),
-                            "description": "what you did about it"},
-                "note": {"type": "string",
-                         "description": "short free text for the change log"},
-            },
-            "required": ["finding_id", "outcome"],
-        },
-        "brain_ingest": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "content": {"type": "string"},
-                "tags": {"type": "string", "default": ""},
-                "observation_type": {
-                    "type": "string",
-                    "default": "note",
-                    "enum": ["note", "decision", "memory", "reference"],
-                },
-                "org": {"type": "string", "default": ""},
-            },
-            "required": ["title", "content"],
-        },
-        "brain_action_create": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "owner": {"type": "string", "default": ""},
-                "deadline": {"type": "string", "default": ""},
-                "org": {"type": "string", "default": ""},
-                "project_id": {"type": "string", "default": ""},
-                "area_id": {"type": "string", "default": ""},
-            },
-            "required": ["text"],
-        },
-        "brain_action_update": {
-            "type": "object",
-            "properties": {
-                "action_id": {"type": "integer"},
-                "status": {"type": "string", "enum": ["done", "open"]},
-            },
-            "required": ["action_id", "status"],
-        },
-        "brain_decision": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "rationale": {"type": "string", "default": ""},
-                "owner": {"type": "string", "default": ""},
-                "supersedes": {"type": "string", "default": ""},
-                "org": {"type": "string", "default": ""},
-            },
-            "required": ["text"],
-        },
-        "brain_note": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-            },
-            "required": ["text"],
-        },
-        "brain_memory_write": {
-            "type": "object",
-            "properties": {
-                "slug": {"type": "string"},
-                "description": {"type": "string"},
-                "body": {"type": "string"},
-                "memory_type": {"type": "string", "default": "project"},
-            },
-            "required": ["slug", "description", "body"],
-        },
-        "brain_gardener_apply": {
-            "type": "object",
-            "properties": {
-                "lane": {"type": "string", "enum": ["reference", "context"],
-                         "description": "'reference' (drift) or 'context' (constitution)"},
-                "filename": {"type": "string", "description": "basename of an existing file in that dir"},
-                "content": {"type": "string", "description": "full new file content"},
-                "asserts_person_role": {"type": "boolean", "default": False,
-                                        "description": "True only if assigning a role/title to a person"},
-                "attribution_source": {"type": "string",
-                                       "enum": ["owner_statement", "signature", "owner_confirmation"],
-                                       "description": "required when asserts_person_role"},
-                "attribution_quote": {"type": "string",
-                                      "description": "verbatim supporting text; required for a role claim and verified against the cited source"},
-                "attribution_doc_id": {"type": "string",
-                                       "description": "stored chunk id the quote lives in; required for owner_statement/signature"},
-            },
-            "required": ["lane", "filename", "content"],
-        },
-        "brain_draft_context": {"type": "object", "properties": {
-            "email_id": {"type": "string", "description": "message_id from email_context"},
-            "intent": {"type": "string", "description": "optional intent override"},
-        }, "required": ["email_id"]},
-        "brain_draft_save": {"type": "object", "properties": {
-            "email_id": {"type": "string"},
-            "thread_id": {"type": "string"},
-            "intent": {"type": "string"},
-            "final_draft": {"type": "string", "description": "The finished draft text to save"},
-            "parent_draft_id": {"type": "integer", "description": "optional: id of prior draft being replaced"},
-        }, "required": ["email_id", "thread_id", "intent", "final_draft"]},
-        "brain_routine": {"type": "object", "properties": {
-            "name": {"type": "string", "enum": list(_ROUTINES),
-                     "description": "the routine to run"},
-        }, "required": ["name"]},
-        "brain_enrich_units": {"type": "object", "properties": {}},
-        "brain_enrich_pull": {"type": "object", "properties": {
-            "unit_id": {"type": "string",
-                        "description": "the unit to fetch (from brain_enrich_units)"},
-            "with_rules": {"type": "boolean",
-                           "description": "include the full extraction rules in the "
-                                          "response (default true). enrich-batch workers "
-                                          "pass false — they already carry the rules in "
-                                          "their cached system prompt, so re-sending here "
-                                          "would pay for them twice."},
-        }, "required": ["unit_id"]},
-        # Generated, never inlined: a new push block must reach both the advertised
-        # schema and the validator from the one registry (see push_input_schema).
-        "brain_enrich_push": push_input_schema(),
-        "brain_enrich_advance": {"type": "object", "properties": {}},
-        "brain_enrich_claim": {"type": "object", "properties": {
-            "with_rules": {"type": "boolean",
-                           "description": "inline the full extraction rules (default false; "
-                                          "enrich-batch workers carry them in their prompt)"},
-        }},
-        "brain_enrich_pending": {"type": "object", "properties": {}},
-        "brain_meetings_today": {"type": "object", "properties": {}},
-        "brain_meeting_pack_get": {"type": "object", "properties": {
-            "event_id": {"type": "string"},
-        }, "required": ["event_id"]},
-        "brain_meeting_pack_upsert": {"type": "object", "properties": {
-            "event_id": {"type": "string"},
-            "event_title": {"type": "string"},
-            "event_date": {"type": "string", "description": "YYYY-MM-DD"},
-            "pack_text": {"type": "string", "description": "the markdown pack"},
-            "attendees": {"type": "array", "items": {"type": "string"}},
-            "context_hash": {"type": "string", "description": "fingerprint of the pack's inputs"},
-        }, "required": ["event_id", "event_title", "event_date", "pack_text"]},
-    }
-
-
-def tool_annotations() -> dict:
-    """name -> ToolAnnotations for every tool.
-
-    open_world_hint is False for 25 of the 26: each of those touches only the
-    local store, local files, or the loopback control API. The one exception is
-    brain_meetings_today, which calls dashboard.calendar_today(home) ->
-    auth.build_google_services(...) + a live Calendar events().list(...),
-    in-process and synchronously as part of the tool call — a real trust-boundary
-    crossing, not something the daemon does on its behalf. See its entry below.
-
-    The _ro/_append/_idempotent/_lease/_destructive shorthands moved to module
-    level (the @tool declarations need them at import time); this mapping reads
-    the same ones, so the two cannot disagree while the migration is partial.
-    """
-    return {
-        # --- read-only (12) ---
-        "brain_search": _ro("Search the brain"),
-        "brain_read": _ro("Read a chunk"),
-        "brain_context": _ro("Profile an entity"),
-        "brain_actions": _ro("List open actions"),
-        "brain_graph": _ro("Traverse the graph"),
-        "brain_proactive": _ro("List findings"),
-        "brain_routine": _ro("Get routine instructions"),
-        "brain_enrich_pull": _ro("Pull a named unit's payload"),
-        "brain_enrich_pending": _ro("Count pending units"),
-        # NOT _ro(): dashboard.calendar_today(home) calls
-        # auth.build_google_services(...) and a live Calendar events().list(...)
-        # in-process, synchronously, as part of this call. Keep open_world_hint
-        # True here even though the tool is otherwise a plain, idempotent read —
-        # do not "tidy" this back to _ro() / False.
-        "brain_meetings_today": types.ToolAnnotations(
-            title="Today's meetings", read_only_hint=True, destructive_hint=False,
-            idempotent_hint=True, open_world_hint=True,
-        ),
-        "brain_meeting_pack_get": _ro("Get a meeting pack"),
-        "brain_draft_context": _ro("Gather drafting context"),
-        # --- additive, non-idempotent (6) ---
-        "brain_ingest": _append("Capture a note or document"),
-        "brain_action_create": _append("Create an action"),
-        "brain_decision": _append("Record a decision"),
-        "brain_note": _append("Record a note"),
-        "brain_memory_write": _append("Write a memory"),
-        "brain_draft_save": _append("Save a draft"),
-        # --- mutating but idempotent (4) ---
-        # Goes through write_capture like the non-idempotent _append tools below;
-        # idempotence is a drain-side property (drain.py's action_update apply is
-        # a set-status-by-key no-op when already in the target state), not a
-        # property of the write step itself.
-        "brain_action_update": _idempotent("Update an action's status"),
-        "brain_meeting_pack_upsert": _idempotent("Upsert a meeting pack"),
-        "brain_finding_resolve": _idempotent("Resolve a finding"),
-        # atomic tmp.replace(target) keyed on unit_id, so a repeat is a no-op
-        "brain_enrich_push": _idempotent("Push extractions for a unit"),
-        # --- lease-acquiring (2) ---
-        "brain_enrich_units": _lease("Lease a batch of work units"),
-        "brain_enrich_claim": _lease("Claim one work unit"),
-        # --- destructive (2) ---
-        # Overwrites an existing records file with caller-supplied content and
-        # git-commits it, synchronously.
-        "brain_gardener_apply": _destructive("Apply a gardener edit"),
-        # Triggers an unbounded daemon drain+prepare cycle: the widest blast radius
-        # of any tool. open_world_hint stays False -- this call itself only hits
-        # the loopback control API; it's the *daemon* that then reaches Google,
-        # one indirection away from this tool, which is deliberately not counted
-        # as this tool's own open-world reach.
-        "brain_enrich_advance": _destructive("Wake the daemon to drain"),
-    }
-
-
-def tool_output_schemas() -> dict[str, dict]:
-    """name -> outputSchema, for tools whose result is a machine-read envelope.
-
-    Deliberately partial (13 of 26) — absence is meaningful and tested
-    (test_mcp_structured_output.py). `structured_content` ships *alongside*
-    `content`, not instead of it, so declaring it doubles the payload; that's
-    a real cost on brain_routine and brain_enrich_pull, which carry markdown/a
-    ~11.5KB rules blob meant to be read verbatim by an LLM, not parsed. Every
-    other tool's output is a small, stable, machine-consumed envelope, so the
-    trade is worth it there.
-
-    The inconsistent success keys below (queued/written/ok/applied/resolved)
-    are described as-is, not normalised — renaming them breaks every caller
-    and is a separate change.
-
-    brain_draft_save's `error` branch omits `draft_record_id` (see
-    make_brain_draft_save), so unlike the other envelopes here its schema
-    does not mark any field `required` — a `required: ["draft_record_id"]`
-    would reject the tool's own error responses.
-    """
-    _queued = _queued_output_schema  # module-level now; the @tool declarations need it
-    return {
-        "brain_ingest": _queued(),
-        "brain_action_create": _queued(),
-        "brain_action_update": _queued(),
-        "brain_decision": _queued(),
-        "brain_note": _queued(),
-        "brain_memory_write": _queued(),
-        "brain_enrich_push": {
-            "type": "object",
-            "properties": {
-                "written": {"type": "boolean"},
-                "path": {"type": "string"},
-                "error": {"type": "string"},
-            },
-            "required": ["written"],
-        },
-        "brain_gardener_apply": {
-            "type": "object",
-            "properties": {
-                "applied": {"type": "boolean"},
-                "committed": {"type": "boolean"},
-                "error": {"type": "string"},
-            },
-            "required": ["applied"],
-        },
-        "brain_finding_resolve": {
-            "type": "object",
-            "properties": {
-                "resolved": {"type": "boolean"},
-                "error": {"type": "string"},
-            },
-            "required": ["resolved"],
-        },
-        "brain_enrich_advance": {
-            "type": "object",
-            "properties": {"woken": {"type": "boolean"}, "error": {"type": "string"}},
-        },
-        "brain_enrich_pending": {
-            "type": "object",
-            "properties": {"pending": {"type": "integer"}},
-            "required": ["pending"],
-        },
-        "brain_draft_save": {
-            "type": "object",
-            "properties": {
-                "draft_record_id": {"type": "integer"},
-                "error": {"type": "string"},
-            },
-        },
-        "brain_meeting_pack_upsert": {
-            "type": "object",
-            "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}},
-            "required": ["ok"],
-        },
-    }
-
-
-# name -> description, the parallel half of tool_schemas(). These strings are the
-# documentation the model reads before choosing a tool, so they are kept verbatim;
-# brain_gardener_apply's in particular carries a real usage constraint.
-_TOOL_DESCRIPTIONS: dict[str, str] = {
-    "brain_search": "Search your Gmail/Calendar/Drive index.",
-    "brain_read": "Fetch the full text + metadata of a chunk by doc_id.",
-    "brain_context": (
-        "Profile an entity or list community clusters. "
-        "mode='profile' (default): entity is required — returns record, relations, "
-        "actions, projects, and areas. "
-        "mode='communities': returns all community summaries, or the member entities "
-        "for a specific community when community_id is supplied."
-    ),
-    "brain_actions": "Action items from the unified actions table, filtered by owner + status, with freshness.",
-    "brain_graph": "Traverse the relationship graph from an entity up to `hops` (max 3).",
-    "brain_proactive": "Open proactive findings: projects without next actions, areas overdue, lint issues.",
-    "brain_finding_resolve": (
-        "Close one proactive finding you have acted on. Only "
-        "memory_promotion findings may be closed this way — every other "
-        "type is resolved automatically. outcome: 'promoted' (a memory "
-        "file was written), 'merged' (folded into an existing memory "
-        "file), or 'dismissed' (not durable)."
-    ),
-    "brain_ingest": (
-        "Save a note, decision, or memory to your knowledge base. "
-        "QUEUED: the item is searchable after the next sync cycle (~5 min), "
-        "not immediately."
-    ),
-    "brain_action_create": (
-        "Create a new action item. "
-        "QUEUED: appears in brain_actions after the next sync cycle (~5 min). "
-        "Empty owner defaults to the configured install owner."
-    ),
-    "brain_action_update": (
-        "Mark an action done or reopen it. "
-        "QUEUED: applies on the next sync cycle (~5 min)."
-    ),
-    "brain_decision": (
-        "Record a decision. "
-        "QUEUED: the daemon appends a row to state/decisions.md in your records repo "
-        "and commits (one daemon cycle, ~seconds-minutes), not instantly."
-    ),
-    "brain_note": (
-        "Record a continuity note. "
-        "QUEUED: the daemon prepends a dated entry to state/hot.md in your records repo "
-        "and commits (one daemon cycle), not instantly."
-    ),
-    "brain_memory_write": (
-        "Write a durable auto-memory file. "
-        "QUEUED: the daemon writes memory/<slug>.md + a MEMORY.md pointer "
-        "in your records repo and commits (one daemon cycle), not instantly."
-    ),
-    "brain_gardener_apply": (
-        "Apply a reference-gardener change directly to the records repo through "
-        "the role-attribution guard and per-run change cap. Synchronous (not "
-        "queued): commits immediately and returns the result so the gardener gets "
-        "enforcement feedback. Use only from the reference-gardener routine in "
-        "auto-apply mode."
-    ),
-    "brain_draft_context": "Get email context for drafting a reply (subject, body, sender, voice rules, thread samples). Returns context dict to use in the draft-reply skill.",
-    "brain_draft_save": "Persist a completed draft to draft history. Call after the Cowork draft-reply skill has finished. Returns draft_record_id.",
-    "brain_routine": "Return the full instructions for a recurring mcpbrain routine, to follow verbatim. Use this as the FIRST step of a scheduled task: call it, then do exactly what it returns. name is one of: enrich, meeting-packs, gardener, reference-gardener. Self-contained — do not look for a skill or command or read files.",
-    "brain_enrich_units": "List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the caller stays context-flat) and claim each with a short lease. Recipe: call this, then for each unit_id, brain_enrich_pull(unit_id) to fetch its payload, extract, and brain_enrich_push(unit_id, …) to write the result. Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
-    "brain_enrich_pull": "Fetch one work unit's payload by unit_id (from brain_enrich_units), with a `rules` field carrying the FULL extraction protocol to follow (envelope schema, entity/relation/merge rules) and the standing `context`. A `kind` \"thread\" unit returns `threads`; a `kind` \"block\" unit returns `block` + `items`. Returns {\"empty\": true} if the unit is gone. Follow `rules` from this response; do not read skill files or source.",
-    "brain_enrich_push": (
-        "Submit a unit's enrichment result by unit_id → enrich_inbox/<unit_id>.json; "
-        "the daemon applies it, marks chunks enriched, and deletes the unit. Pass "
-        "`extractions` (one per thread, for a thread unit) and/or the block answer "
-        "field for a block unit: merge_answers (merge_review), or the block's own "
-        "name for " + ", ".join(_PUSH_BLOCKS) + "."
-    ),
-    "brain_enrich_advance": "Nudge the daemon to apply pushed unit results and produce the next units immediately (instead of waiting for its normal cycle). Use between backfill rounds, then call brain_enrich_units again.",
-    "brain_enrich_claim": "Atomically lease ONE enrichment unit and return its payload (kind + threads/items + context) in a single call — units+pull folded. For the enrich-batch drain loop: call it, extract per your system-prompt rules, brain_enrich_push, and repeat until it returns {\"empty\": true}. Concurrent drainers never get the same unit. Rules are omitted by default (they're in your prompt); pass with_rules=true only for a self-contained caller.",
-    "brain_enrich_pending": "Count enrichment units still waiting (not under a live lease), WITHOUT claiming any. The coordinator calls this to decide whether to spawn another drainer wave: {\"pending\": N}. pending==0 means the queue is drained.",
-    "brain_meetings_today": "Today's calendar events, each with has_pack. Use in the meeting-packs task instead of curl /api/dashboard/today.",
-    "brain_meeting_pack_get": "Get the stored meeting pack for an event (incl. context_hash for change detection), or {\"found\": false}.",
-    "brain_meeting_pack_upsert": "Create or update a meeting pack. Always pass context_hash so the next hourly run can skip it when unchanged.",
-}
-
-
 def _validate_tool_arguments(name: str, arguments: dict) -> None:
     """Validate arguments against the tool's declared inputSchema.
+
+    The schema comes from the registry -- the SAME object on_list_tools
+    advertises, so validation cannot drift from the advertised surface. mcp 2.x's
+    low-level server does no validation of its own (mcp 1.x's
+    call_tool(validate_input=True) default did), so this is the only thing
+    standing between a malformed call and a handler KeyError.
 
     Raises ValueError with a readable, field-naming message. Deliberately does
     NOT fill in defaults or otherwise mutate `arguments`: brain_enrich_push's
     guards depend on distinguishing an absent field (None) from a present-but-
-    empty one ([]), which default-injection would destroy.
+    empty one ([]), which default-injection would destroy. The registry's frozen
+    schemas make the other direction structurally impossible too -- validation
+    cannot mutate the schema it validates against.
     """
     import jsonschema
 
-    schemas = tool_schemas()
-    if name not in schemas:
-        raise ValueError(f"unknown tool: {name}")
     try:
-        jsonschema.validate(arguments, schemas[name])
+        schema = spec(name).input_schema
+    except KeyError:
+        raise ValueError(f"unknown tool: {name}") from None
+    try:
+        jsonschema.validate(arguments, schema)
     except jsonschema.ValidationError as exc:
         field = ".".join(str(p) for p in exc.absolute_path) or (
             # a `required` violation reports the field in the message, not the path
@@ -1863,21 +1846,24 @@ def build_server(store, draft_store, client, home: str):
         )
 
     async def on_list_tools(ctx, params) -> types.ListToolsResult:
-        # Schemas come from tool_schemas(), the same mapping
-        # _validate_tool_arguments reads, so what the server advertises and what
-        # it enforces cannot drift apart.
-        annotations = tool_annotations()
-        out_schemas = tool_output_schemas()
-        tools = []
-        for tool_name, schema in tool_schemas().items():
-            kwargs = {}
-            if tool_name in out_schemas:
-                kwargs["outputSchema"] = out_schemas[tool_name]
-            tools.append(types.Tool(
-                name=tool_name, description=_TOOL_DESCRIPTIONS[tool_name],
-                inputSchema=schema, annotations=annotations[tool_name], **kwargs,
-            ))
-        return types.ListToolsResult(tools=tools)
+        # The registry is the single source: what we advertise and what
+        # _validate_tool_arguments enforces cannot drift, because they are the
+        # same object. Iteration order is registration order, which is the order
+        # each tool's declaration appears in this module.
+        #
+        # dict(...) on the schemas hands pydantic a plain mapping rather than the
+        # registry's frozen one; the stored schema itself is never handed out
+        # mutable.
+        return types.ListToolsResult(tools=[
+            types.Tool(
+                name=name,
+                description=s.description,
+                inputSchema=dict(s.input_schema),
+                annotations=s.annotations,
+                **({"outputSchema": dict(s.output_schema)} if s.output_schema else {}),
+            )
+            for name, s in registry().items()
+        ])
 
     async def on_call_tool(ctx, params) -> types.CallToolResult:
         import json
@@ -2084,7 +2070,7 @@ def build_server(store, draft_store, client, home: str):
         elif name == "brain_search":
             out = await search(arguments["query"], arguments.get("limit", 10))
         else:
-            # Unreachable for a name ABSENT from tool_schemas() — validation
+            # Unreachable for a name ABSENT from the registry — validation
             # above already returned isError for those. What lands here is a
             # schema entry added without a matching dispatch branch, and it
             # reports the SAME way as a validation failure on purpose: raising
@@ -2104,7 +2090,7 @@ def build_server(store, draft_store, client, home: str):
         # describes — a declared schema the tool then violates (e.g. by
         # returning a list) would be worse than no schema at all.
         result_kwargs = {}
-        if name in tool_output_schemas() and isinstance(out, dict):
+        if spec(name).output_schema is not None and isinstance(out, dict):
             result_kwargs["structured_content"] = out
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(out))],

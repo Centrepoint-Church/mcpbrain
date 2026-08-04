@@ -43,27 +43,26 @@ def test_build_server_reports_mcpbrain_version(mcp_env):
 def test_declared_tool_with_no_dispatch_branch_returns_is_error(mcp_env, monkeypatch):
     """A declared-but-undispatched tool must return isError, not raise.
 
-    on_call_tool's trailing `else` is unreachable for names ABSENT from
-    tool_schemas() (validation already returns isError for those). The one case
-    it does cover is the real risk: a 27th schema entry added without a matching
+    on_call_tool's trailing `else` is unreachable for names ABSENT from the
+    registry (validation already returns isError for those). The one case it does
+    cover is the real risk: a 27th REGISTERED tool added without a matching
     dispatch branch. Raising there produces exactly the traceback-in-the-fleet-log
     outcome that was deliberately eliminated for validation failures — the SDK's
     handler_exception_to_error_data ladder logger.exception()s a bare ValueError
     and returns ErrorData(code=0), indistinguishable from a genuine internal
     fault. Both paths must report the same way.
+
+    The orphan is injected into a COPY of the registry (not the real dict), so it
+    cannot leak into the advertised surface of any later test in this process.
     """
     from mcp import types
 
-    from mcpbrain import mcp_server
+    from mcpbrain import tool_registry
 
-    real_schemas = mcp_server.tool_schemas
-
-    def _with_orphan():
-        schemas = dict(real_schemas())
-        schemas["brain_orphan"] = {"type": "object", "properties": {}}
-        return schemas
-
-    monkeypatch.setattr(mcp_server, "tool_schemas", _with_orphan)
+    monkeypatch.setattr(tool_registry, "_REGISTRY", dict(tool_registry._REGISTRY))
+    tool_registry.declare("brain_orphan", description="an undispatched tool",
+                          input_schema={"type": "object", "properties": {}},
+                          annotations=None)
 
     server = build_server(**mcp_env)
     entry = server.get_request_handler("tools/call")
