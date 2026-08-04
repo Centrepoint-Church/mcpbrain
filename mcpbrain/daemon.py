@@ -1898,8 +1898,9 @@ class Daemon:
 
         A backup failure (e.g. a Drive error) is logged and swallowed so the
         daemon loop keeps running — it returns {"backed_up": False, "error": ...}
-        rather than propagating. _last_backup advances only on a clean run, so a
-        failed attempt retries on the next due tick.
+        rather than propagating. The cadence clock (_last_backup) advances on
+        every ATTEMPT, success or failure, so a failing backup retries once per
+        interval rather than on every cycle.
         """
         if self._backfill_active.is_set():
             return None  # single-writer: yield to the backfill
@@ -1918,10 +1919,19 @@ class Daemon:
                 return None
 
         cfg = backup
+        # Stamp the cadence clock on ATTEMPT, before the work, not on success
+        # after it. A backup that can never succeed (artifact too large for the
+        # upload path, Drive persistently erroring, disk full) would otherwise
+        # stay permanently "due" and be retried on EVERY cycle. Live incident
+        # 2026-08-04: that re-snapshotted the 11.9GB store roughly every 60s,
+        # filling the temp filesystem until ENOSPC, exhausting swap, and parking
+        # the cycle thread so no heartbeat or maintenance pass ran for an hour.
+        # Backing off on attempt bounds a broken backup to one attempt/interval.
+        self._last_backup = self._clock()
+        home = str(app_dir())
         try:
             # Bundle the whole system: store + the local records repo (world-model,
             # continuity, memory — its only off-machine copy) + config.json.
-            home = str(app_dir())
             path = make_encrypted_snapshot(
                 self._store.path, cfg.out_path, cfg.key,
                 records_dir=config.records_dir(home),
@@ -1936,10 +1946,10 @@ class Daemon:
                             keep=cfg.retain)
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
             log.warning("periodic backup failed: %s", exc, exc_info=True)
+            write_backup_state(home, ok=False, error=str(exc))
             return {"backed_up": False, "error": str(exc)}
 
-        # Advance the cadence clock only after a clean backup.
-        self._last_backup = self._clock()
+        write_backup_state(home, ok=True)
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 
     @contextmanager
@@ -3680,6 +3690,46 @@ class Daemon:
                 upd.update_from_index(upd._index_url())  # uv install + restart, lock released
             except Exception as exc:  # noqa: BLE001
                 log.error("auto-update install failed: %s", exc)
+
+
+def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
+    """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
+
+    The encrypted artifact is written locally BEFORE the upload, so
+    ``snapshot.enc``'s mtime is refreshed by every failed run and cannot
+    distinguish "backed up" from "encrypted, then failed to upload". Uploads
+    fail intermittently rather than outright (97 failures / 52 successes,
+    2026-06-25 -> 2026-08-04, arriving in storms of dozens), which is exactly
+    the shape an mtime check cannot see: the probe read "Backup: On" straight
+    through the 2026-08-03 storm when nothing was reaching Drive. This file is
+    the only durable record of whether a backup actually LANDED;
+    ``probes.probe_backup`` keys off it.
+
+    Wall-clock, not the injected monotonic clock: the value is persisted and
+    compared across restarts, where a monotonic epoch is meaningless (same
+    reasoning as ``_recent_watchdog_exits``). Best-effort — a write failure must
+    never fail an otherwise-good backup.
+    """
+    path = Path(home) / "backup_state.json"
+    try:
+        prev = json.loads(path.read_text())
+    except (OSError, ValueError):
+        prev = {}
+    now = time.time()
+    try:
+        prev_failures = int(prev.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        prev_failures = 0
+    state = {
+        "last_attempt": now,
+        "last_success": now if ok else prev.get("last_success"),
+        "consecutive_failures": 0 if ok else prev_failures + 1,
+        "last_error": None if ok else error,
+    }
+    try:
+        path.write_text(json.dumps(state))
+    except OSError as exc:
+        log.warning("backup state write failed (continuing): %s", exc)
 
 
 def write_daemon_heartbeat(home) -> None:

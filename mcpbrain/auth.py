@@ -261,8 +261,29 @@ def build_service(api: str, version: str, creds: Credentials,
     default credentials= path so the timeout actually applies (the library's
     default is too short for large resumable uploads / slow reads).
     """
-    authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout_s))
+    authed_http = AuthorizedHttp(creds, http=_google_http(timeout_s))
     return build(api, version, http=authed_http)
+
+
+def _google_http(timeout_s: float):
+    """An ``httplib2.Http`` configured for the Google APIs.
+
+    Beyond the timeout, this un-registers **308** as a redirect code. httplib2
+    ships 308 in ``REDIRECT_CODES`` and its redirect branch fires even for
+    non-safe methods (``response.status in (303, 308)``), so Google's
+    "308 Resume Incomplete" — which carries a ``Range`` header and deliberately
+    NO ``Location`` — raises ``RedirectMissingLocation`` and kills every
+    resumable upload on its very first chunk. googleapiclient handles 308
+    itself in ``HttpRequest._process_response``, so the transport must hand it
+    back untouched. httplib2 documents this attribute as the supported knob
+    ("To change, assign to ``Http().redirect_codes``").
+
+    Read the base set from the module constant rather than the instance so the
+    override does not depend on ``Http.__init__`` having run.
+    """
+    http = httplib2.Http(timeout=timeout_s)
+    http.redirect_codes = httplib2.REDIRECT_CODES - {308}
+    return http
 
 
 def _granted_scopes(creds, token_file: Path | None = None) -> set[str] | None:

@@ -955,6 +955,89 @@ def test_backup_failure_does_not_crash_and_loop_continues(tmp_path):
     assert ok["file_id"] == "file-123"
 
 
+def test_failed_backup_backs_off_for_the_full_interval(tmp_path):
+    """A FAILED backup must wait interval_s before retrying, not retry at once.
+
+    Regression (live incident 2026-08-04): the cadence clock advanced only on
+    SUCCESS, so a backup that could never succeed was "due" on every cycle. The
+    daemon re-snapshotted the 11.9GB store every ~60s -- filling /var/folders
+    until ENOSPC, exhausting swap, and wedging the cycle thread so no heartbeat
+    or maintenance pass ran for an hour. Backing off on ATTEMPT bounds the cost
+    of a persistently broken backup to one attempt per interval.
+    """
+    store = _store_with_chunk(tmp_path)
+    files = _RaisingFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    clock = _Clock()
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=100.0, clock=clock)
+
+    first = daemon.maybe_backup()
+    assert first is not None and first["backed_up"] is False
+
+    # Well inside the interval: the failed attempt must NOT be retried.
+    clock.advance(50.0)
+    assert daemon.maybe_backup() is None, "failed backup hot-looped instead of backing off"
+
+    # Past the interval: it is due again.
+    clock.advance(60.0)  # total 110 >= 100
+    files.heal()
+    retried = daemon.maybe_backup()
+    assert retried is not None and retried["backed_up"] is True
+
+
+def _backup_state(home):
+    from pathlib import Path
+    p = Path(home) / "backup_state.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def test_maybe_backup_records_a_failed_upload(tmp_path, monkeypatch):
+    """A failing backup must leave a durable, countable trace.
+
+    Nothing recorded upload outcomes, so repeated failure was invisible to
+    doctor/status (probe_backup only saw a freshly-written local snapshot.enc,
+    which a FAILED run leaves behind too). The consecutive count is what makes
+    a failure storm legible -- 57 uploads failed on 2026-08-03 and the status
+    line read "Backup: On" throughout.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _store_with_chunk(tmp_path)
+    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
+
+    daemon.maybe_backup()
+    daemon.maybe_backup()
+
+    state = _backup_state(tmp_path)
+    assert state is not None, "no backup_state.json written"
+    assert state["consecutive_failures"] == 2
+    assert "simulated Drive error" in state["last_error"]
+
+
+def test_maybe_backup_records_success_and_clears_the_failure_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _store_with_chunk(tmp_path)
+    files = _RaisingFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
+
+    daemon.maybe_backup()
+    assert _backup_state(tmp_path)["consecutive_failures"] == 1
+
+    files.heal()
+    daemon.maybe_backup()
+
+    state = _backup_state(tmp_path)
+    assert state["consecutive_failures"] == 0
+    assert state["last_success"] is not None
+
+
 def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
     # Isolate the home so the bundle reflects this test's data, not the dev box.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
