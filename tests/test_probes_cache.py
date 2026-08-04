@@ -139,6 +139,47 @@ def test_backup_ok_when_last_upload_succeeded_recently(tmp_path):
     assert probes.probe_backup(home)["state"] == "ok"
 
 
+def test_backup_probe_uses_the_configured_interval(tmp_path):
+    """The staleness window must derive from backup.interval_s.
+
+    probe_backup read `interval_seconds`, a key NOTHING in the repo has ever
+    written (the writer at backup_setup.py and the daemon's loader both use
+    `interval_s`). The branch has been dead since it landed on 2026-06-10, so
+    the window was always the 7-day default -- on this box, 7x more lenient
+    than the configured 86400. A backup could be six days stale and read "On".
+    """
+    import json
+    import time
+    home = _home(tmp_path, {"backup": {"dest": "x", "interval_s": 3600}})
+    (tmp_path / "snapshot.enc").write_bytes(b"data")
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_success": time.time() - (3 * 3600),   # 3h, past 2x the 1h interval
+        "consecutive_failures": 2,
+    }))
+
+    assert probes.probe_backup(home)["state"] == "needs_action"
+
+
+def test_backup_probe_tolerates_a_single_missed_interval(tmp_path):
+    """One transient miss must not flag — two consecutive should.
+
+    Deliberately 2x the interval, not 1x: a single failed run is routine (on
+    2026-08-04 alone there were transient WAL-busy and broken-pipe failures
+    that self-corrected on the next attempt), and flagging each one trains
+    people to ignore the indicator.
+    """
+    import json
+    import time
+    home = _home(tmp_path, {"backup": {"dest": "x", "interval_s": 3600}})
+    (tmp_path / "snapshot.enc").write_bytes(b"data")
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_success": time.time() - 5400,   # 1.5h — one interval missed
+        "consecutive_failures": 1,
+    }))
+
+    assert probes.probe_backup(home)["state"] == "ok"
+
+
 def test_backup_needs_action_stale_snapshot(tmp_path):
     """A snapshot older than the staleness window → needs_action."""
     import os
