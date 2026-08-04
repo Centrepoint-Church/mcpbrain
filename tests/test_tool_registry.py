@@ -8,29 +8,42 @@ the process -- and an MCP server process lives as long as its client stays open.
 """
 import pytest
 
+from mcpbrain import tool_registry
 from mcpbrain.tool_registry import ToolSpec, registry, spec, tool
 
 
 @pytest.fixture(autouse=True)
-def _shared_probe():
-    """Guarantee the shared `t_probe` registration in EVERY worker process.
+def _isolated_registry(monkeypatch):
+    """Register this module's probes into a THROWAWAY copy of the registry.
 
-    The suite runs `-n auto` with xdist's default `--dist load`, which hands
-    individual tests to different worker processes -- so a probe registered by
-    one test is simply absent in the process that runs the next one. Registering
-    it here (idempotently, once per process) makes each test below independent of
-    which worker it lands on, instead of silently depending on same-process
-    top-down ordering.
+    The registry is a process-wide singleton populated at import, and
+    on_list_tools now advertises everything in it -- so a probe registered by a
+    test would become an advertised tool for the rest of the session (that is
+    exactly what test_every_advertised_tool_is_registered caught). Swapping the
+    dict for a copy keeps probes out of the real one, and restores it after.
     """
-    if "t_probe" not in registry():
-        tool("t_probe", description="d", input_schema={"type": "object"},
-             annotations=None)(lambda: None)
+    monkeypatch.setattr(tool_registry, "_REGISTRY", dict(tool_registry._REGISTRY))
+
+
+@pytest.fixture
+def probe():
+    """The shared `t_probe` registration, per test.
+
+    NOT autouse and NOT module-level state: the suite runs `-n auto` with
+    xdist's default `--dist load`, which hands individual tests to different
+    worker processes, so a probe registered by one test is simply absent in the
+    process that runs the next. Requesting it explicitly makes each test below
+    independent of which worker it lands on -- and keeps it out of the two tests
+    that assert on the real advertised surface.
+    """
+    return tool_registry.declare("t_probe", description="d",
+                                 input_schema={"type": "object"}, annotations=None)
 
 
 def test_decorator_returns_the_factory_unchanged():
     marker = object()
 
-    @tool("t_returns_factory", description="d", input_schema={"type": "object"},
+    @tool("t_probe", description="d", input_schema={"type": "object"},
           annotations=None)
     def make_probe():
         return marker
@@ -38,11 +51,11 @@ def test_decorator_returns_the_factory_unchanged():
     assert make_probe() is marker
 
 
-def test_decorator_registers_the_spec():
+def test_decorator_registers_the_spec(probe):
     assert spec("t_probe").description == "d"
 
 
-def test_duplicate_registration_is_rejected():
+def test_duplicate_registration_is_rejected(probe):
     """Two tools cannot claim one name -- silent overwrite would lose a tool."""
     with pytest.raises(ValueError, match="t_probe"):
         @tool("t_probe", description="x", input_schema={}, annotations=None)
@@ -50,7 +63,7 @@ def test_duplicate_registration_is_rejected():
             return None
 
 
-def test_identical_re_registration_is_a_no_op():
+def test_identical_re_registration_is_a_no_op(probe):
     """A module can be imported twice in one process; that must not be fatal.
 
     test_mcp_server_no_native.py drops mcpbrain.mcp_server from sys.modules and
@@ -79,12 +92,12 @@ def test_unknown_name_raises_with_the_name_in_the_message():
         spec("t_nonexistent")
 
 
-def test_spec_is_frozen():
+def test_spec_is_frozen(probe):
     with pytest.raises(Exception):
         spec("t_probe").description = "mutated"
 
 
-def test_mutating_a_schema_read_from_the_registry_cannot_affect_a_later_read():
+def test_mutating_a_schema_read_from_the_registry_cannot_affect_a_later_read(probe):
     """The invariant the four fresh-dict accessors provided by accident."""
     got = spec("t_probe").input_schema
     try:
@@ -99,21 +112,50 @@ def test_registry_is_not_directly_mutable():
         registry()["t_smuggled"] = None
 
 
-def test_output_schema_defaults_to_none_and_absence_is_distinguishable():
+def test_output_schema_defaults_to_none_and_absence_is_distinguishable(probe):
     assert spec("t_probe").output_schema is None
 
 
-@pytest.mark.parametrize("name", ["brain_read", "brain_note", "brain_enrich_push"])
-def test_decorated_slice_matches_the_legacy_mappings(name):
-    """The decorator must reproduce the four mappings bit-for-bit for these three."""
+def test_the_four_legacy_mappings_are_gone():
+    """One source of truth means the old accessors must not linger as aliases."""
     from mcpbrain import mcp_server as ms
 
-    s = spec(name)
-    assert s.description == ms._TOOL_DESCRIPTIONS[name]
-    assert dict(s.input_schema) == ms.tool_schemas()[name]
-    assert s.annotations == ms.tool_annotations()[name]
-    assert (dict(s.output_schema) if s.output_schema else None) == \
-           ms.tool_output_schemas().get(name)
+    for gone in ("tool_schemas", "_TOOL_DESCRIPTIONS",
+                 "tool_annotations", "tool_output_schemas"):
+        assert not hasattr(ms, gone), f"{gone} still exists — two ways to read one thing"
+
+
+def test_every_advertised_tool_is_registered(mcp_env):
+    """What tools/list advertises and what the registry holds are the same set.
+
+    Exact equality, both directions: nothing may be advertised without a spec
+    (that is what _validate_tool_arguments enforces against), and nothing may sit
+    in the registry unadvertised. This is the test that caught probe leakage into
+    the advertised surface, which _isolated_registry now prevents.
+    """
+    import asyncio
+
+    from mcpbrain.mcp_server import build_server
+    from tests.conftest import list_tools_via_handler
+
+    tools = asyncio.run(list_tools_via_handler(build_server(**mcp_env)))
+    assert {t.name for t in tools} == set(registry())
+
+
+def test_advertised_order_is_registration_order(mcp_env):
+    """Registration order IS tools/list order; the model sees this sequence.
+
+    Pinned because the declarations now live next to 24 scattered factories
+    instead of in one ordered literal, so a moved function silently reorders the
+    advertised surface.
+    """
+    import asyncio
+
+    from mcpbrain.mcp_server import build_server
+    from tests.conftest import list_tools_via_handler
+
+    tools = asyncio.run(list_tools_via_handler(build_server(**mcp_env)))
+    assert [t.name for t in tools] == list(registry())
 
 
 def test_tool_registry_imports_nothing_heavy():

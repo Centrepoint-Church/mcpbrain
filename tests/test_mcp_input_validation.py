@@ -57,9 +57,10 @@ def test_declared_defaults_are_never_written_into_arguments():
     chain is what encodes each tool's real default, so a validator that
     pre-filled them would silently change behaviour across the whole surface.
     """
-    from mcpbrain.mcp_server import tool_schemas
+    from mcpbrain.tool_registry import registry
 
-    for name, schema in tool_schemas().items():
+    for name, s in registry().items():
+        schema = s.input_schema
         args = {}
         for field in schema.get("required", []):
             spec = schema["properties"][field]
@@ -79,19 +80,22 @@ def test_unknown_tool_is_rejected():
 
 def test_every_tool_has_a_schema_to_validate_against():
     """No tool may silently skip validation for lack of a registered schema."""
-    from mcpbrain.mcp_server import tool_schemas
+    from mcpbrain.tool_registry import registry
 
     from tests.test_mcp_protocol_surface import TOOL_CALLS
 
-    assert set(tool_schemas()) == set(TOOL_CALLS)
+    assert set(registry()) == set(TOOL_CALLS)
 
 
 def test_every_advertised_tool_has_a_description():
-    """on_list_tools reads _TOOL_DESCRIPTIONS[name] for every schema key, so a
-    missing entry is a KeyError at connect time rather than a missing docstring."""
-    from mcpbrain.mcp_server import _TOOL_DESCRIPTIONS, tool_schemas
+    """on_list_tools reads spec.description for every registered tool, so an
+    empty one is a silently undocumented tool rather than a missing docstring.
+    `description` is a required @tool argument, so this now asserts the value is
+    real -- not merely present."""
+    from mcpbrain.tool_registry import registry
 
-    assert set(tool_schemas()) == set(_TOOL_DESCRIPTIONS)
+    blank = [n for n, s in registry().items() if not s.description.strip()]
+    assert not blank, f"registered with an empty description: {blank}"
 
 
 def test_every_protocol_surface_call_validates_clean():
