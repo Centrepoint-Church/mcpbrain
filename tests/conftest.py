@@ -107,6 +107,28 @@ def mcp_env(tmp_path, monkeypatch):
     }
 
 
+async def list_tools_via_handler(server):
+    """Invoke the registered tools/list handler directly and return the tool
+    list, without an event loop-driven transport or a real MCP session.
+
+    On mcp 2.x, handlers are looked up by method string
+    (`server.get_request_handler("tools/list")` -> a HandlerEntry carrying
+    `.params_type` and `.handler`) and invoked as `handler(ctx, params)`
+    returning a full `types.ListToolsResult`. build_server()'s handlers ignore
+    `ctx` entirely, so None is a faithful stand-in for the per-request
+    ServerRequestContext the runner would build. Originally lived inline in
+    test_mcp_build_server.py; moved here (Task 8) because
+    test_mcp_tool_annotations.py needs the exact same accessor and cross-
+    importing test-module helpers between test files is worse than a shared
+    conftest.
+    """
+    from mcp import types
+
+    entry = server.get_request_handler("tools/list")
+    result = await entry.handler(None, types.PaginatedRequestParams())
+    return result.tools
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _stable_model_cache():
     """Pin the embedding-model cache to one stable directory for the whole test
