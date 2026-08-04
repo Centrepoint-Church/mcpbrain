@@ -45,7 +45,7 @@ def test_brain_search_clean_error_when_empty(tmp_path):
 def test_brain_search_logs_on_failure(tmp_path, caplog):
     client = FakeControlClient(error=RuntimeError("boom"))
     tool = make_brain_search(client)
-    with caplog.at_level(logging.ERROR, logger="mcpbrain.mcp_server"):
+    with caplog.at_level(logging.ERROR, logger="mcpbrain.tools"):
         out = asyncio.run(tool("anything", 5))
     assert out == []
     assert any("brain_search failed" in r.message for r in caplog.records)
@@ -527,7 +527,7 @@ def test_brain_proactive_error_returns_empty_list(tmp_path, caplog):
         # Patch open_findings on the store to raise
         original = s.open_findings
         s.open_findings = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db-boom"))
-        with caplog.at_level(logging.ERROR, logger="mcpbrain.mcp_server"):
+        with caplog.at_level(logging.ERROR, logger="mcpbrain.tools"):
             out = asyncio.run(tool())
         s.open_findings = original
     assert out == []
