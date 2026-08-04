@@ -1,3 +1,5 @@
+import asyncio
+
 from mcpbrain.store import Store
 from mcpbrain import draft
 
@@ -11,8 +13,11 @@ def _store(tmp_path):
 
 
 def test_draft_context_assembles(tmp_path, monkeypatch):
+    # draft_context is async (Task 12: on_stage progress reporting needs real
+    # await points between stages), so this drives it with a plain asyncio.run
+    # -- no pytest-asyncio in this repo.
     s=_store(tmp_path); monkeypatch.setattr(draft,"_load_voice_rules",lambda h:"Warm, concise.")
-    c=draft.draft_context(s,str(tmp_path),"m1",intent="confirm")
+    c=asyncio.run(draft.draft_context(s,str(tmp_path),"m1",intent="confirm"))
     assert c["subject"]=="Hall B" and c["sender"].startswith("Sam") and c["voice_rules"]=="Warm, concise."
 
 

@@ -28,6 +28,37 @@ def _default_owner() -> str:
     return config.owner_name(str(config.app_dir()))
 
 
+def _progress_reporter(ctx):
+    """Return an async progress reporter for `ctx`, or a genuine no-op.
+
+    Progress notifications exist only because Claude resets its idle timer on
+    receipt (it reportedly doesn't render them) -- the point is keeping a slow
+    call from being reaped, not UI. So this is deliberately narrow: no token in
+    the request's `_meta` means the client never asked, and sending anything
+    unsolicited would be noise, so the no-op path sends nothing at all. And a
+    failed send must never fail the tool call -- progress is advisory -- so
+    the real path swallows any exception from the send and logs at debug.
+
+    `ctx.meta` is a `RequestParamsMeta` TypedDict (`{"progress_token": ...}`)
+    and can itself be None, hence the `(ctx.meta or {})` guard.
+    """
+    token = (ctx.meta or {}).get("progress_token")
+    if token is None:
+        async def _noop(progress, total=None, message=None) -> None:
+            return None
+        return _noop
+
+    async def _report(progress, total=None, message=None) -> None:
+        try:
+            await ctx.session.send_progress_notification(
+                token, progress, total=total, message=message
+            )
+        except Exception:  # noqa: BLE001 - advisory only; never fail the call
+            _log.debug("progress notification failed", exc_info=True)
+
+    return _report
+
+
 def _resource_entries() -> list[tuple[str, Path]]:
     """(name, resolved_path) for every context resource we expose.
 
@@ -251,11 +282,19 @@ def make_brain_actions(store):
 
 def make_brain_graph(store):
     async def brain_graph(entity: str, hops: int = 1, *, at_time: str | None = None,
-                          include_invalidated: bool = False) -> dict:
+                          include_invalidated: bool = False, on_hop=None) -> dict:
         """Traverse the relationship graph from an entity up to `hops` (capped at 3).
         at_time scopes the traversal to relations valid at that ISO date;
         include_invalidated also follows superseded edges.
-        Returns {center, nodes:[entity dicts], edges:[{entity_a,relation,entity_b}]}; {} if unknown."""
+        Returns {center, nodes:[entity dicts], edges:[{entity_a,relation,entity_b}]}; {} if unknown.
+
+        on_hop, if given, is awaited once per completed hop with the 1-based hop
+        number -- optional and keyword-only so every existing direct caller
+        (test_mcp_server.py calls this inner function without it) is unaffected.
+        A hub entity's traversal can be hundreds of store queries per hop; this
+        lets the MCP layer emit a progress notification between hops so the
+        client's idle timer resets instead of staying silent for the whole walk.
+        """
         try:
             center = store.find_entity(entity)
             if not center:
@@ -264,7 +303,7 @@ def make_brain_graph(store):
             visited = {center["id"]}
             edges = {}  # (entity_a, relation, entity_b) -> dict, dedup
             frontier = {center["id"]}
-            for _ in range(depth):
+            for hop in range(1, depth + 1):
                 next_frontier = set()
                 for ent_id in frontier:
                     for r in store.relations_for(ent_id, at_time=at_time,
@@ -278,6 +317,8 @@ def make_brain_graph(store):
                                 visited.add(nbr)
                                 next_frontier.add(nbr)
                 frontier = next_frontier
+                if on_hop is not None:
+                    await on_hop(hop)
                 if not frontier:
                     break
             nodes = [n for n in (store.get_entity(i) for i in visited) if n]
@@ -533,15 +574,19 @@ def _verify_role_attribution(store, source: str, quote: str, doc_id: str) -> str
 
 
 def make_brain_draft_context(store, home: str):
-    async def brain_draft_context(email_id: str, intent: str = "") -> dict:
+    async def brain_draft_context(email_id: str, intent: str = "", *, on_stage=None) -> dict:
         """Return context for drafting a reply (subject, body, sender, voice_rules, samples).
 
         email_id: message_id from email_context.
         intent: optional — 'reply' | 'acknowledge' | 'decline' | 'decide' | 'inform'.
         Returns context dict or {"error": "email not found"}.
+
+        on_stage, if given, is awaited with a stage name as draft_context moves
+        through email lookup -> voice rules -> samples -> (optional) critique.
+        Optional and keyword-only so every existing caller is unaffected.
         """
         from mcpbrain import draft as _draft
-        return _draft.draft_context(store, home, email_id, intent=intent)
+        return await _draft.draft_context(store, home, email_id, intent=intent, on_stage=on_stage)
     return brain_draft_context
 
 
@@ -1777,9 +1822,16 @@ def build_server(store, draft_store, client, home: str):
             status = arguments.get("status") or "open"
             out = await actions(owner, status)
         elif name == "brain_graph":
-            out = await graph(arguments["entity"], arguments.get("hops", 1),
+            report = _progress_reporter(ctx)
+            hops = arguments.get("hops", 1)
+
+            async def _on_hop(completed: int) -> None:
+                await report(completed, hops, f"hop {completed} of {hops}")
+
+            out = await graph(arguments["entity"], hops,
                               at_time=arguments.get("at_time"),
-                              include_invalidated=arguments.get("include_invalidated", False))
+                              include_invalidated=arguments.get("include_invalidated", False),
+                              on_hop=_on_hop)
         elif name == "brain_proactive":
             out = await proactive(arguments.get("finding_type", ""), arguments.get("severity", ""))
         elif name == "brain_finding_resolve":
@@ -1840,9 +1892,23 @@ def build_server(store, draft_store, client, home: str):
                 attribution_doc_id=arguments.get("attribution_doc_id", ""),
             )
         elif name == "brain_draft_context":
+            report = _progress_reporter(ctx)
+            # 1-based step matching each stage draft_context actually moves
+            # through; "critique" only fires when draft_critic is enabled, so
+            # total is fixed at the 4 possible stages rather than recomputed.
+            _DRAFT_STAGES = {"email_lookup": (1, "looking up email"),
+                             "voice_rules": (2, "loading voice rules"),
+                             "samples": (3, "gathering thread samples"),
+                             "critique": (4, "running voice/coverage critique")}
+
+            async def _on_stage(stage: str) -> None:
+                step, message = _DRAFT_STAGES.get(stage, (0, stage))
+                await report(step, len(_DRAFT_STAGES), message)
+
             out = await draft_context_fn(
                 email_id=arguments.get("email_id", ""),
                 intent=arguments.get("intent", ""),
+                on_stage=_on_stage,
             )
         elif name == "brain_draft_save":
             out = await draft_save_fn(
