@@ -960,10 +960,13 @@ Expected: `mcp` resolves to 2.x; roughly **+5 new packages** (`httpx2`, `httpcor
 - [ ] **Step 3: Confirm cross-platform resolution, including the open Windows gate**
 
 ```bash
-uv pip compile pyproject.toml --python-platform windows --quiet -o /dev/null && echo "windows x86_64 OK"
-uv pip compile pyproject.toml --python-platform aarch64-pc-windows-msvc --quiet -o /dev/null && echo "windows arm64 OK"
+uv pip compile pyproject.toml --python-platform windows --quiet -o "$SCRATCH/win64.txt" && echo "windows x86_64 OK"
 ```
-Expected: both resolve. A native-wheel gap here would compound the already-open Windows HARDWARE QA GATE from 0.7.97.
+Expected: resolves. A native-wheel gap here would compound the already-open Windows HARDWARE QA GATE from 0.7.97.
+
+**Two corrections to this step, both found by running it:**
+1. Do NOT write to `-o /dev/null` — it fails with `Operation not permitted (os error 1)`. Use a real temp path.
+2. **Do NOT check `--python-platform aarch64-pc-windows-msvc`.** It fails, and it is *supposed* to: `sqlite-vec` publishes no `win_arm64` wheel (nor do `cryptography`/`pymupdf`/`leidenalg`), which is precisely the finding behind 0.7.97's rework — **native Windows ARM64 is not a supported target.** ARM64 Windows installs run **x86_64 CPython under Prism emulation**, so `--python-platform windows` IS the ARM64 coverage check. Asserting arm64-native resolution would be asserting something the project deliberately does not support, and a naive reader would misread the failure as a blocker.
 
 - [ ] **Step 4: Reinstall locally and run the impacted tests on the real venv**
 
