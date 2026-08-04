@@ -84,6 +84,117 @@ def protocol_session(tmp_path):
     return _open
 
 
+class _Progress:
+    """One `notifications/progress` delivery, as (progress, total, message).
+
+    `ClientSession.call_tool`'s `progress_callback` (mcp 2.x's `ProgressFnT`)
+    is `async def(progress, total, message)` -- this just gives the collected
+    values names so a test can write `p.total`/`p.message` instead of
+    `p[1]`/`p[2]`.
+    """
+    def __init__(self, progress, total, message):
+        self.progress = progress
+        self.total = total
+        self.message = message
+
+    def __repr__(self):
+        return f"_Progress(progress={self.progress!r}, total={self.total!r}, message={self.message!r})"
+
+
+@pytest.fixture
+def protocol_session_with_progress(tmp_path):
+    """Variant of `protocol_session` (see its docstring for the shared stdio-
+    subprocess rationale) for Task 12's progress-notification tests.
+
+    Two things `protocol_session` doesn't provide, both needed here:
+
+    1. A way to observe `notifications/progress`: `session.call_tool` is
+       wrapped so every call passes a `progress_callback` (mcp 2.x mints a
+       fresh `progressToken` automatically whenever one is supplied -- see
+       `JSONRPCDispatcher.send_raw_request`), and each delivery is collected
+       into a plain list of `_Progress` as it arrives.
+    2. A way to SEED the store/config before the subprocess spawns: an empty
+       store makes a 3-hop `brain_graph` traversal terminate after hop 1 (the
+       BFS frontier goes empty with nothing to expand), and a missing
+       `email_id` makes `brain_draft_context` fail at its first stage before
+       voice_rules/samples/critique ever run -- neither exercises genuine
+       per-hop / per-stage progress. So the returned factory takes an
+       optional `seed(store, home)` callable, invoked against the same
+       writable `Store` the fixture initializes, before `stdio_client` spawns
+       the child (which then opens its own handle onto the same sqlite file
+       and sees whatever `seed` committed).
+
+    `CLAUDE_BIN` is pointed at a path that cannot exist, so if a seed enables
+    `draft_critic`, the critique stage's own subprocess call fails fast and
+    deterministically (caught internally by draft_critic, never raises)
+    instead of shelling out to a real `claude` CLI from inside a unit test.
+
+    Usage:
+        async def _body():
+            async with protocol_session_with_progress(seed=my_seed) as (session, progress):
+                await session.call_tool("brain_graph", {...})
+                assert progress  # list of _Progress
+        asyncio.run(_body())
+    """
+    import contextlib
+    import os
+    import sys
+    from pathlib import Path
+
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.store import Store
+
+    home = tmp_path / "home"
+    (home / "context").mkdir(parents=True)
+    (home / "context" / "memory.md").write_text("# memory\n", encoding="utf-8")
+
+    store = Store(home / "brain.sqlite3", dim=embedder_dim("bge-small"), read_only=False)
+    store.init()
+
+    stderr_path = tmp_path / "server-stderr-progress.log"
+    env = {
+        "HOME": str(tmp_path),
+        "PATH": os.environ.get("PATH", ""),
+        "MCPBRAIN_HOME": str(home),
+        "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
+        "CLAUDE_BIN": str(tmp_path / "no-such-claude-binary"),
+    }
+
+    @contextlib.asynccontextmanager
+    async def _open(seed=None):
+        if seed is not None:
+            seed(store, home)
+
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        params = StdioServerParameters(
+            command=sys.executable, args=["-m", "mcpbrain.mcp_server"], env=env,
+        )
+        progress: list[_Progress] = []
+
+        async def _collect(value, total, message) -> None:
+            progress.append(_Progress(value, total, message))
+
+        with open(stderr_path, "wb") as errlog:
+            async with stdio_client(params, errlog=errlog) as (read, write):
+                async with ClientSession(read, write, read_timeout_seconds=15.0) as session:
+                    await session.initialize()
+
+                    # Every call through this session gets progress_callback wired
+                    # in, rather than making each test pass it at every call site.
+                    _real_call_tool = session.call_tool
+
+                    async def call_tool(name, arguments=None, **kwargs):
+                        kwargs.setdefault("progress_callback", _collect)
+                        return await _real_call_tool(name, arguments, **kwargs)
+
+                    session.call_tool = call_tool
+                    yield session, progress
+
+    return _open
+
+
 @pytest.fixture
 def mcp_env(tmp_path, monkeypatch):
     """A temp app-dir + stores + control client, matching build_server()'s
