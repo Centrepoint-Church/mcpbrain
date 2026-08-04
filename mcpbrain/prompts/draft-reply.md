@@ -1,9 +1,3 @@
----
-name: mcpbrain-draft-reply
-description: Draft a reply to an email using the 4-stage plan/draft/critique/voice pipeline, then save it to the brain.
----
-
-<!-- DRAFT-REPLY-BODY:BEGIN -->
 # draft-reply
 
 Draft a contextual reply to an email using a four-stage pipeline: plan, draft,
@@ -78,4 +72,3 @@ This pipeline uses two MCP tools registered by mcpbrain:
 
 - `brain_draft_context(email_id, intent="")` — returns `{subject, body, sender, thread_id, voice_rules, samples, intent}`
 - `brain_draft_save(email_id, thread_id, intent, final_draft, parent_draft_id=None)` — returns `{draft_record_id}`
-<!-- DRAFT-REPLY-BODY:END -->

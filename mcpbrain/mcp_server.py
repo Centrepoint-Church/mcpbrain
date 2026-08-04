@@ -530,6 +530,102 @@ def _routine_instructions(name: str) -> str | None:
         return None
 
 
+def _draft_reply_canonical_body() -> str:
+    """The canonical draft-reply prompt body, shipped inside the wheel at
+    mcpbrain/prompts/draft-reply.md (package-data — see pyproject.toml). This
+    is the single source of truth for the draft-reply pipeline instructions;
+    plugin/skills/mcpbrain-draft-reply/SKILL.md carries a byte-identical copy
+    between markers for the plugin loader, because plugin/ does not ship in
+    the wheel and so cannot be the canonical location. bin/sync_agents.py
+    regenerates that copy; test_draft_reply_skill_in_sync pins the two
+    byte-equal. Returns '' if the bundled file is somehow missing (never
+    raises)."""
+    from pathlib import Path
+    try:
+        return (Path(__file__).parent / "prompts" / "draft-reply.md").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _draft_reply_prompt_body(email_id: str, intent: str) -> str:
+    """Render the draft-reply prompt: the canonical pipeline body, followed by
+    the caller-supplied arguments interpolated at the end."""
+    body = _draft_reply_canonical_body()
+    return (
+        f"{body}\n\n---\n"
+        f"email_id: {email_id}\n"
+        f"intent: {intent or '(none given — infer from the thread)'}\n"
+    )
+
+
+def prompt_definitions() -> dict[str, dict]:
+    """name -> {title, description, arguments} for every MCP prompt.
+
+    The 4 routines mirror what brain_routine serves (same _routine_instructions
+    source, so they cannot drift); draft-reply is the parameterized reply
+    pipeline, exposed here so it also reaches installs without the plugin.
+    Deliberately does NOT add draft-reply to _ROUTINES -- that allowlist
+    governs brain_routine (a scheduled-task tool) and draft-reply is not a
+    scheduled routine.
+    """
+    return {
+        **{
+            name: {
+                "title": f"Run the {name} routine",
+                "description": (
+                    f"Full instructions for the {name} routine, to follow verbatim. "
+                    "Self-contained: no skill or command resolution needed."
+                ),
+                "arguments": [],
+            }
+            for name in _ROUTINES
+        },
+        "draft-reply": {
+            "title": "Draft a reply in the owner's voice",
+            "description": (
+                "Draft a reply to an email using the 4-stage plan/draft/critique/"
+                "voice pipeline, then save it to the brain."
+            ),
+            "arguments": [
+                {
+                    "name": "email_id",
+                    "description": "The message id to reply to.",
+                    "required": True,
+                },
+                {
+                    "name": "intent",
+                    "description": "Optional steer, e.g. 'decline politely'.",
+                    "required": False,
+                },
+            ],
+        },
+    }
+
+
+async def get_prompt_body(name: str, arguments: dict) -> str:
+    """Return a prompt's rendered text, rejecting unknown names and missing
+    required arguments.
+
+    A required argument is rejected both when the key is absent AND when it
+    is present but empty/whitespace: `arguments.get(name)` is falsy for both
+    None and "", so an empty string is treated the same as an omitted key
+    rather than being passed through to fail later (e.g. inside
+    brain_draft_context) with a less useful error.
+    """
+    defs = prompt_definitions()
+    if name not in defs:
+        raise ValueError(f"unknown prompt: {name}")
+    for arg in defs[name]["arguments"]:
+        if arg["required"] and not arguments.get(arg["name"]):
+            raise ValueError(f"missing required argument for {name}: {arg['name']}")
+    if name in _ROUTINES:
+        return _routine_instructions(name)
+    return _draft_reply_prompt_body(
+        arguments.get("email_id", ""), arguments.get("intent", "")
+    )
+
+
 # The optional answer blocks brain_enrich_pull may ask for, beyond extractions +
 # merge_answers (_PUSH_BLOCKS, imported at module top). Each is drained
 # by the daemon from the inbox object under this exact key (see drain.py
@@ -1460,6 +1556,39 @@ def build_server(store, draft_store, client, home: str):
                 uri=params.uri, mimeType="text/markdown", text=text)
         ])
 
+    async def on_list_prompts(ctx, params) -> types.ListPromptsResult:
+        # prompt_definitions() is the single source both this list and
+        # on_get_prompt read, so the advertised prompt set and its argument
+        # schema can never drift from what get_prompt_body actually enforces.
+        return types.ListPromptsResult(prompts=[
+            types.Prompt(
+                name=name,
+                title=spec["title"],
+                description=spec["description"],
+                arguments=[
+                    types.PromptArgument(
+                        name=a["name"], description=a["description"], required=a["required"]
+                    )
+                    for a in spec["arguments"]
+                ],
+            )
+            for name, spec in prompt_definitions().items()
+        ])
+
+    async def on_get_prompt(ctx, params) -> types.GetPromptResult:
+        # get_prompt_body raises ValueError for an unknown name or a missing
+        # required argument; the SDK's dispatcher turns that into a JSON-RPC
+        # error the client sees as an exception from session.get_prompt(...).
+        body = await get_prompt_body(params.name, dict(params.arguments or {}))
+        return types.GetPromptResult(
+            description=prompt_definitions()[params.name]["description"],
+            messages=[
+                types.PromptMessage(
+                    role="user", content=types.TextContent(type="text", text=body)
+                )
+            ],
+        )
+
     async def on_list_tools(ctx, params) -> types.ListToolsResult:
         # Schemas come from tool_schemas(), the same mapping
         # _validate_tool_arguments reads, so what the server advertises and what
@@ -1682,6 +1811,8 @@ def build_server(store, draft_store, client, home: str):
         on_read_resource=on_read_resource,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
+        on_list_prompts=on_list_prompts,
+        on_get_prompt=on_get_prompt,
     )
     return server
 
