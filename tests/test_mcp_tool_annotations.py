@@ -20,6 +20,10 @@ IDEMPOTENT_MUTATORS = {
     "brain_action_update", "brain_meeting_pack_upsert", "brain_finding_resolve",
     "brain_enrich_push",
 }
+ADDITIVE = {
+    "brain_ingest", "brain_action_create", "brain_decision", "brain_note",
+    "brain_memory_write", "brain_draft_save",
+}
 
 
 def test_every_tool_is_annotated():
@@ -56,14 +60,35 @@ def test_idempotent_mutators_are_marked_idempotent(name):
     assert ann.idempotent_hint is True
 
 
-def test_no_tool_touches_the_open_world():
-    """Every tool is local store, local files, or loopback HTTP.
+@pytest.mark.parametrize("name", sorted(ADDITIVE))
+def test_additive_tools_are_marked_non_idempotent_writes(name):
+    """Each call creates a new distinct record (a new note/action/draft/...),
+    so these must never read as read-only, destructive, or idempotent. Guards
+    against e.g. brain_ingest's read_only_hint silently flipping True even
+    though it writes via write_capture."""
+    ann = tool_annotations()[name]
+    assert ann.read_only_hint is False
+    assert ann.destructive_hint is False
+    assert ann.idempotent_hint is False
 
-    The daemon reaches Gmail/Drive/Calendar, but no MCP tool does directly. If a
-    tool ever gains real external reach, this test must be updated deliberately.
+
+def test_open_world_reach_is_declared_accurately():
+    """open_world_hint must match each tool's REAL reach, not default to False.
+
+    brain_meetings_today's handler calls dashboard.calendar_today(home), which
+    calls auth.build_google_services(...) + a live Calendar events().list(...)
+    in-process, synchronously -- a genuine trust-boundary crossing. Every other
+    tool touches only the local store, local files, or the loopback control API
+    (brain_enrich_advance only wakes the daemon over loopback; it's the *daemon*
+    that then reaches Google, one indirection away from this tool's own reach).
+    This is stronger than a blanket "all False" check: it also catches a tool
+    that UNDERSTATES its reach, not just one that overstates it.
     """
+    reaches_open_world = {"brain_meetings_today"}
     for name, ann in tool_annotations().items():
-        assert ann.open_world_hint is False, f"{name} claims external reach"
+        assert ann.open_world_hint is (name in reaches_open_world), (
+            f"{name}: open_world_hint={ann.open_world_hint} misdeclares its reach"
+        )
 
 
 def test_annotations_are_attached_to_the_advertised_tools(mcp_env):

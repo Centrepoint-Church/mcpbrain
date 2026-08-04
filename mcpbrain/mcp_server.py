@@ -1118,9 +1118,12 @@ def tool_schemas() -> dict[str, dict]:
 def tool_annotations() -> dict:
     """name -> ToolAnnotations for every tool.
 
-    open_world_hint is False everywhere: each tool touches only the local store,
-    local files, or the loopback control API. The daemon reaches Gmail/Drive/
-    Calendar, but no MCP tool does directly.
+    open_world_hint is False for 25 of the 26: each of those touches only the
+    local store, local files, or the loopback control API. The one exception is
+    brain_meetings_today, which calls dashboard.calendar_today(home) ->
+    auth.build_google_services(...) + a live Calendar events().list(...),
+    in-process and synchronously as part of the tool call — a real trust-boundary
+    crossing, not something the daemon does on its behalf. See its entry below.
     """
     from mcp import types
 
@@ -1168,7 +1171,15 @@ def tool_annotations() -> dict:
         "brain_routine": _ro("Get routine instructions"),
         "brain_enrich_pull": _ro("Pull a named unit's payload"),
         "brain_enrich_pending": _ro("Count pending units"),
-        "brain_meetings_today": _ro("Today's meetings"),
+        # NOT _ro(): dashboard.calendar_today(home) calls
+        # auth.build_google_services(...) and a live Calendar events().list(...)
+        # in-process, synchronously, as part of this call. Keep open_world_hint
+        # True here even though the tool is otherwise a plain, idempotent read —
+        # do not "tidy" this back to _ro() / False.
+        "brain_meetings_today": types.ToolAnnotations(
+            title="Today's meetings", read_only_hint=True, destructive_hint=False,
+            idempotent_hint=True, open_world_hint=True,
+        ),
         "brain_meeting_pack_get": _ro("Get a meeting pack"),
         "brain_draft_context": _ro("Gather drafting context"),
         # --- additive, non-idempotent (6) ---
@@ -1179,6 +1190,10 @@ def tool_annotations() -> dict:
         "brain_memory_write": _append("Write a memory"),
         "brain_draft_save": _append("Save a draft"),
         # --- mutating but idempotent (4) ---
+        # Goes through write_capture like the non-idempotent _append tools below;
+        # idempotence is a drain-side property (drain.py's action_update apply is
+        # a set-status-by-key no-op when already in the target state), not a
+        # property of the write step itself.
         "brain_action_update": _idempotent("Update an action's status"),
         "brain_meeting_pack_upsert": _idempotent("Upsert a meeting pack"),
         "brain_finding_resolve": _idempotent("Resolve a finding"),
@@ -1192,7 +1207,10 @@ def tool_annotations() -> dict:
         # git-commits it, synchronously.
         "brain_gardener_apply": _destructive("Apply a gardener edit"),
         # Triggers an unbounded daemon drain+prepare cycle: the widest blast radius
-        # of any tool.
+        # of any tool. open_world_hint stays False -- this call itself only hits
+        # the loopback control API; it's the *daemon* that then reaches Google,
+        # one indirection away from this tool, which is deliberately not counted
+        # as this tool's own open-world reach.
         "brain_enrich_advance": _destructive("Wake the daemon to drain"),
     }
 
