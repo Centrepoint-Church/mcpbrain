@@ -1,6 +1,38 @@
 import pytest
 
 
+@pytest.fixture
+def mcp_env(tmp_path, monkeypatch):
+    """A temp app-dir + stores + control client, matching build_server()'s
+    keyword arguments (store, draft_store, client, home).
+
+    Mirrors the temp-MCPBRAIN_HOME + Store pattern in
+    test_mcp_server_stdio.py's stdio integration test (see that file's
+    _run_session/test_stdio_spawn_initialize_and_brain_search), lifted into a
+    shared fixture here because test_mcp_build_server.py and the later
+    protocol-coverage / surface-upgrade tests (Tasks 3, 8-11) all need the
+    same store+client wiring rather than each reinventing it. Composes with
+    this file's autouse fixtures (_stable_model_cache pins FASTEMBED_CACHE_PATH
+    before MCPBRAIN_HOME moves; _isolate_daemon_tempdir/_no_real_exit don't
+    touch MCPBRAIN_HOME at all), so setting it here doesn't fight them.
+    """
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    from mcpbrain.control_client import ControlClient
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.store import Store
+
+    dim = embedder_dim("bge-small")
+    path = config.store_path()
+    store = Store(path, dim=dim, read_only=False)  # created here so a second open succeeds
+    return {
+        "store": store,
+        "draft_store": Store(path, dim=dim, read_only=False),
+        "client": ControlClient(),
+        "home": str(tmp_path),
+    }
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _stable_model_cache():
     """Pin the embedding-model cache to one stable directory for the whole test
