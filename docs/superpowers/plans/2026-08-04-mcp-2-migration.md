@@ -2126,13 +2126,22 @@ def _progress_reporter(ctx):
 
 Thread it into the two handlers. `make_brain_graph`'s BFS loop (`mcp_server.py:173-188`, `for _ in range(depth)`) gains an optional `on_hop` callback; `make_brain_draft_context` gains an optional `on_stage`. Both default to `None` so every existing caller and test is unaffected:
 
+> **CORRECTION (found in review): the snippet below reported the WRONG `total`.** It passed the
+> raw `hops` argument, but `make_brain_graph` caps the traversal at `depth = max(0, min(hops, 3))`.
+> So `hops=10` emits **3** progress events each claiming `total=10` — a rendered progress bar
+> would stall at "3 of 10" and never complete. `total` must be the **capped** depth, which is the
+> only genuinely-known bound. Source the cap from one place rather than hardcoding `3` a second
+> time in `on_call_tool`, or the two can drift. Pin it with a test passing `hops` **above** the cap
+> (a test at exactly `hops=3` cannot catch this, because raw and capped coincide there).
+
 ```python
         if name == "brain_graph":
             report = _progress_reporter(ctx)
             hops = arguments.get("hops", 1)
+            total_hops = min(hops, _GRAPH_MAX_HOPS)   # the real, capped bound
 
             async def _on_hop(completed: int) -> None:
-                await report(completed, hops, f"hop {completed} of {hops}")
+                await report(completed, total_hops, f"hop {completed} of {total_hops}")
 
             out = await graph(
                 arguments["entity"], hops,
