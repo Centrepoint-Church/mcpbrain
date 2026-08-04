@@ -280,10 +280,16 @@ def make_brain_actions(store):
     return brain_actions
 
 
+GRAPH_MAX_HOPS = 3  # traversal cap; on_call_tool's brain_graph branch reads
+                    # this too, so a reported progress `total` can never drift
+                    # from the depth the BFS below actually runs.
+
+
 def make_brain_graph(store):
     async def brain_graph(entity: str, hops: int = 1, *, at_time: str | None = None,
                           include_invalidated: bool = False, on_hop=None) -> dict:
-        """Traverse the relationship graph from an entity up to `hops` (capped at 3).
+        """Traverse the relationship graph from an entity up to `hops` (capped at
+        GRAPH_MAX_HOPS).
         at_time scopes the traversal to relations valid at that ISO date;
         include_invalidated also follows superseded edges.
         Returns {center, nodes:[entity dicts], edges:[{entity_a,relation,entity_b}]}; {} if unknown.
@@ -299,7 +305,7 @@ def make_brain_graph(store):
             center = store.find_entity(entity)
             if not center:
                 return {}
-            depth = max(0, min(hops, 3))  # cap; guard against runaway traversal
+            depth = max(0, min(hops, GRAPH_MAX_HOPS))  # cap; guard against runaway traversal
             visited = {center["id"]}
             edges = {}  # (entity_a, relation, entity_b) -> dict, dedup
             frontier = {center["id"]}
@@ -1824,9 +1830,14 @@ def build_server(store, draft_store, client, home: str):
         elif name == "brain_graph":
             report = _progress_reporter(ctx)
             hops = arguments.get("hops", 1)
+            # The BFS below caps at GRAPH_MAX_HOPS regardless of a larger
+            # `hops` argument, so the reported total must be the capped value
+            # too -- otherwise a hops=10 call would report "3 of 10" forever
+            # and a client rendering progress would never see it complete.
+            total_hops = max(0, min(hops, GRAPH_MAX_HOPS))
 
             async def _on_hop(completed: int) -> None:
-                await report(completed, hops, f"hop {completed} of {hops}")
+                await report(completed, total_hops, f"hop {completed} of {total_hops}")
 
             out = await graph(arguments["entity"], hops,
                               at_time=arguments.get("at_time"),
@@ -1902,7 +1913,13 @@ def build_server(store, draft_store, client, home: str):
                              "critique": (4, "running voice/coverage critique")}
 
             async def _on_stage(stage: str) -> None:
-                step, message = _DRAFT_STAGES.get(stage, (0, stage))
+                # Direct index, no silent fallback: draft.draft_context's _emit
+                # (the only caller) only ever passes one of these 4 literal
+                # names, so a `.get(..., (0, stage))` default here would be
+                # dead code that could only ever silently misreport step 0 --
+                # indistinguishable from a genuine first stage -- if draft.py
+                # ever drifted out of sync with this table.
+                step, message = _DRAFT_STAGES[stage]
                 await report(step, len(_DRAFT_STAGES), message)
 
             out = await draft_context_fn(
