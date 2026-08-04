@@ -45,44 +45,78 @@ from mcpbrain.store import _open_db
 
 log = logging.getLogger(__name__)
 
-# Framed archive format (v2).
+# Framed archive format. THREE shapes are readable; only v3 is ever written.
 #
 # A single Fernet token authenticates the whole artifact, but producing or
 # reading one requires holding all of it -- plus several transient copies --
 # in memory. At multi-GB snapshot sizes that OOMs the daemon: live incident
-# 2026-08-04, a 4.24GB snapshot on a 16GB box.
+# 2026-08-04, a 4.24GB snapshot on a 16GB box. Hence framing.
 #
-#   archive := MAGIC || frame+
-#   frame   := uint32be len(token) || token
-#   token   := Fernet(16-byte archive_id || uint32be index || uint8 is_final || chunk)
+#   archive  := MAGIC || frame+
+#   frame    := uint32be len(token) || token
+#   token v3 := Fernet(16-byte archive_id || uint32be index || uint8 is_final || chunk)
+#   token v2 := Fernet(                      uint32be index || uint8 is_final || chunk)
 #
 # Fernet has no AAD, so everything binding a frame to its place goes INSIDE the
-# authenticated plaintext. That preserves what the single-token format got for
-# free: dropping, duplicating, reordering or splicing frames all fail, rather
-# than silently yielding a short or scrambled store.
+# authenticated plaintext. Both framed shapes therefore detect dropping,
+# duplicating, reordering and truncating frames rather than silently yielding a
+# short or scrambled store.
 #
-# The archive_id is why the ordinal alone is not enough. The daily cadence
-# reuses ONE escrow key, and that key lives in the all-members-readable fleet
-# folder, so "two archives under the same key" is the steady state. With only
-# (index, is_final) authenticated, frames 0..k of archive A followed by frames
-# k+1..final of archive B form a run with correct indices and a correct final
-# flag -- a chimera store that decrypt_file accepts, assemblable with NO key at
-# all. A random per-archive id, required constant across every frame of a read,
-# closes that. It is generated per _FrameWriter, never derived from content or
-# key (a derived id two identical archives would share re-opens the splice).
+# WHAT v3 ADDS, AND WHAT v2 DOES NOT HAVE. The ordinal alone is not enough. The
+# daily cadence reuses ONE escrow key, and that key lives in the
+# all-members-readable fleet folder, so "two archives under the same key" is the
+# steady state. With only (index, is_final) authenticated -- i.e. in v2 --
+# frames 0..k of archive A followed by frames k+1..final of archive B form a run
+# with correct indices and a correct final flag: a chimera store the reader
+# accepts, assemblable with NO key at all. v3's random per-archive id, required
+# constant across every frame of a read, closes that. It is generated per
+# _FrameWriter and never derived from content or key (a derived id that two
+# identical archives would share re-opens the splice).
 #
-# Archives written before v2 lack the magic and are still read as one token
-# (see decrypt_file) -- the format may only change additively while old
-# snapshots remain restorable. The archive_id was added to the v2 header before
-# any v2 artifact was ever deployed (no v2 snapshot has reached Drive), so v2
-# has exactly one shape and there is no third read path; once a v2 archive
-# exists off-machine, a header change would need a v3 magic instead.
-_ARCHIVE_MAGIC = b"MCPBRAIN-ENC-v2\n"
+# v2 GENUINELY CANNOT PROVIDE THAT, and is read-only legacy: its frames bind
+# ORDER ONLY, and the reader does not and cannot enforce archive identity on
+# them. Do not describe v2 as splice-protected. It stays readable because real
+# v2 archives exist off-machine -- the author box held a 4.2GB v2 snapshot with
+# retain=7 more on the Shared Drive -- and losing the ability to read them would
+# silently invalidate every existing backup.
+#
+# WHY THE MAGIC HAD TO CHANGE. Both framed headers are self-describing only via
+# the magic: a v2 archive read with the v3 header struct consumes 21 bytes of
+# header where the frame carries 5, which MISPARSES rather than fails. Adding
+# the archive id under the v2 magic did exactly that to the real archives above.
+# So: a header change gets a NEW MAGIC, always, and an unrecognised magic is an
+# explicit error (UnsupportedArchive) rather than a fallback guess. All magics
+# are the same length so the reader can dispatch on one fixed-size read.
+#
+# Archives written before v2 lack a magic entirely and are a single Fernet token
+# over the whole file; they are still read as one token, identified by Fernet's
+# own version-byte prefix (see decrypt_file).
+_ARCHIVE_MAGIC_V3 = b"MCPBRAIN-ENC-v3\n"
+_ARCHIVE_MAGIC_V2 = b"MCPBRAIN-ENC-v2\n"   # legacy, READ-ONLY: no archive id
+_ARCHIVE_MAGIC = _ARCHIVE_MAGIC_V3         # what new archives are written as
+_MAGIC_LEN = len(_ARCHIVE_MAGIC_V3)
+assert len(_ARCHIVE_MAGIC_V2) == _MAGIC_LEN, "magics must be one fixed length"
+# urlsafe-base64 of Fernet's 0x80 version byte + a 32-bit-range timestamp. Every
+# Fernet token starts with this, and no framed archive can (the magics above are
+# ASCII "MCPBRAIN-..."), so it identifies a pre-v2 single-token archive.
+_FERNET_PREFIX = b"gAAAAA"
 _ENCRYPT_CHUNK = 8 * 1024 * 1024
 _ARCHIVE_ID_LEN = 16
 _FRAME_LEN = struct.Struct(">I")           # length prefix of each frame
-# (archive_id, index, is_final) inside each token
+# v3: (archive_id, index, is_final) inside each token
 _FRAME_HEADER = struct.Struct(f">{_ARCHIVE_ID_LEN}sIB")
+_FRAME_HEADER_V2 = struct.Struct(">IB")    # v2 legacy: (index, is_final)
+
+
+class UnsupportedArchive(ValueError):
+    """The artifact is not an archive shape this build knows how to read.
+
+    A distinct type, not InvalidToken: InvalidToken means "this IS one of our
+    archives and it failed authentication", which a caller may reasonably read
+    as a wrong key or tampering. This means "I do not know what this file is",
+    and it exists so an unrecognised format can never again be silently
+    misparsed as a known one.
+    """
 
 
 def snapshot(store_path, out_path) -> Path:
@@ -144,7 +178,9 @@ def generate_escrow_key() -> bytes:
 
 
 class _FrameWriter:
-    """A write-only file object that emits the v2 framed archive as it is fed.
+    """A write-only file object that emits a v3 framed archive as it is fed.
+
+    v3 is the ONLY shape written; v2 is read-only legacy (see the format notes).
 
     Exists so a producer can be encrypted *as it runs* — notably
     ``make_encrypted_snapshot``, which pipes a streaming tar straight in rather
@@ -306,13 +342,73 @@ def _require_free_space(work_dir, out_path, store_path) -> None:
         _check(out_dir, out_need)
 
 
+def _read_frames(src, dst, fernet, header: struct.Struct, *,
+                 bind_archive_id: bool) -> None:
+    """Stream one framed archive's frames from `src` into `dst`.
+
+    Shared by the v3 and v2 read paths; `header` is that version's plaintext
+    header struct and `bind_archive_id` says whether it carries an archive id to
+    enforce. Both versions get identical ordering/completeness checks -- only
+    the splice check is version-dependent, because only v3 has the field.
+
+    Raises InvalidToken on any frame that is short, out of order, from another
+    archive (v3), or on a run that does not end in a final frame.
+    """
+    expected_index = 0
+    archive_id = None
+    saw_final = False
+    while True:
+        raw_len = src.read(_FRAME_LEN.size)
+        if not raw_len:
+            break
+        if saw_final or len(raw_len) != _FRAME_LEN.size:
+            raise InvalidToken()  # trailing garbage / short length prefix
+        (size,) = _FRAME_LEN.unpack(raw_len)
+        token = src.read(size)
+        if len(token) != size:
+            raise InvalidToken()  # frame cut short
+        plain = fernet.decrypt(token)
+        if len(plain) < header.size:
+            raise InvalidToken()  # too short to be a frame of this version
+        fields = header.unpack(plain[:header.size])
+        if bind_archive_id:
+            frame_id, index, final_flag = fields
+            if archive_id is None:
+                archive_id = frame_id
+            elif frame_id != archive_id:
+                # A frame from a DIFFERENT archive under the same key: the
+                # cross-archive splice. Indices and the final flag can both line
+                # up, so this is the only check that catches it.
+                raise InvalidToken()
+        else:
+            index, final_flag = fields
+        if index != expected_index:
+            raise InvalidToken()  # dropped / duplicated / reordered
+        dst.write(plain[header.size:])
+        expected_index += 1
+        saw_final = bool(final_flag)
+    if not saw_final:
+        raise InvalidToken()  # truncated before the end of the stream
+
+
 def decrypt_file(in_path, out_path, key: bytes) -> Path:
     """Decrypt in_path -> out_path with the Fernet escrow key. Returns out_path.
 
-    Reads both archive shapes: the v2 framed format (streamed, bounded memory)
-    and pre-v2 archives, which are a single Fernet token over the whole file
-    and must be held in memory to authenticate — unavoidable, and bounded by
-    the smaller sizes that format was ever written at.
+    Reads all three archive shapes, dispatching on the leading magic:
+      - v3 framed (what this build writes): streamed, bounded memory, archive-id
+        enforced so a cross-archive splice is rejected;
+      - v2 framed (LEGACY, read-only): streamed the same way, order and
+        completeness enforced, but archive identity is NOT enforced because v2
+        frames do not carry it. Real v2 archives exist off-machine, so this path
+        must stay;
+      - pre-v2: a single Fernet token over the whole file, identified by
+        Fernet's own version-byte prefix. Must be held in memory to
+        authenticate — unavoidable, and bounded by the smaller sizes that format
+        was ever written at.
+
+    Anything else raises UnsupportedArchive. That refusal is the point: a v2
+    archive read with v3's header struct misparses instead of failing, so an
+    unrecognised magic must never fall back to a guess.
 
     Raises cryptography.fernet.InvalidToken if the key is wrong, the ciphertext
     was tampered with, or the frame sequence is not a complete, in-order run of
@@ -324,44 +420,26 @@ def decrypt_file(in_path, out_path, key: bytes) -> Path:
 
     fernet = Fernet(key)
     with in_path.open("rb") as src:
-        magic = src.read(len(_ARCHIVE_MAGIC))
-        if magic != _ARCHIVE_MAGIC:
+        magic = src.read(_MAGIC_LEN)
+        if magic == _ARCHIVE_MAGIC_V3:
+            header, bind = _FRAME_HEADER, True
+        elif magic == _ARCHIVE_MAGIC_V2:
+            log.info("%s is a legacy v2 archive: frames bind order only, so it "
+                     "predates cross-archive splice protection (v3 adds it). "
+                     "Reading it anyway.", in_path.name)
+            header, bind = _FRAME_HEADER_V2, False
+        elif magic.startswith(_FERNET_PREFIX):
+            # Pre-v2: no magic at all, the whole file is one token.
             out_path.write_bytes(fernet.decrypt(magic + src.read()))
             return out_path
+        else:
+            raise UnsupportedArchive(
+                f"{in_path.name}: unsupported archive format (leading bytes "
+                f"{magic[:_MAGIC_LEN]!r}); expected {_ARCHIVE_MAGIC_V3!r}, "
+                f"{_ARCHIVE_MAGIC_V2!r}, or a pre-v2 single Fernet token")
 
         with out_path.open("wb") as dst:
-            expected_index = 0
-            archive_id = None
-            saw_final = False
-            while True:
-                raw_len = src.read(_FRAME_LEN.size)
-                if not raw_len:
-                    break
-                if saw_final or len(raw_len) != _FRAME_LEN.size:
-                    raise InvalidToken()  # trailing garbage / short length prefix
-                (size,) = _FRAME_LEN.unpack(raw_len)
-                token = src.read(size)
-                if len(token) != size:
-                    raise InvalidToken()  # frame cut short
-                plain = fernet.decrypt(token)
-                if len(plain) < _FRAME_HEADER.size:
-                    raise InvalidToken()  # not a v2 frame (e.g. a foreign token)
-                frame_id, index, final_flag = _FRAME_HEADER.unpack(
-                    plain[:_FRAME_HEADER.size])
-                if archive_id is None:
-                    archive_id = frame_id
-                elif frame_id != archive_id:
-                    # A frame from a DIFFERENT archive under the same key: the
-                    # cross-archive splice. Indices and the final flag can both
-                    # line up, so this is the only check that catches it.
-                    raise InvalidToken()
-                if index != expected_index:
-                    raise InvalidToken()  # dropped / duplicated / reordered
-                dst.write(plain[_FRAME_HEADER.size:])
-                expected_index += 1
-                saw_final = bool(final_flag)
-            if not saw_final:
-                raise InvalidToken()  # truncated before the end of the stream
+            _read_frames(src, dst, fernet, header, bind_archive_id=bind)
     return out_path
 
 

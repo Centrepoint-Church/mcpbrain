@@ -425,6 +425,119 @@ def test_decrypt_reads_legacy_single_token_archives(tmp_path):
     assert dec.read_bytes() == original
 
 
+def _write_v2_archive(path, payload, key, *, chunk_size=4096):
+    """Write a LEGACY v2 framed archive (5-byte `>IB` header, no archive id).
+
+    A fixture generator, deliberately independent of _FrameWriter: _FrameWriter
+    only writes v3 now, so the legacy read path has to be tested against bytes
+    built to the old spec rather than against the current writer.
+    """
+    import struct
+    from pathlib import Path
+
+    from cryptography.fernet import Fernet
+
+    from mcpbrain.backup import _ARCHIVE_MAGIC_V2
+
+    fernet = Fernet(key)
+    frames = [payload[i:i + chunk_size]
+              for i in range(0, len(payload), chunk_size)] or [b""]
+    blob = bytearray(_ARCHIVE_MAGIC_V2)
+    for i, part in enumerate(frames):
+        token = fernet.encrypt(
+            struct.pack(">IB", i, 1 if i == len(frames) - 1 else 0) + part)
+        blob += struct.pack(">I", len(token)) + token
+    Path(path).write_bytes(bytes(blob))
+    return Path(path)
+
+
+def test_decrypt_reads_legacy_v2_framed_archives(tmp_path):
+    """v2 archives EXIST off-machine and must stay readable.
+
+    The author box held a 4.2GB v2 snapshot (magic MCPBRAIN-ENC-v2\\n, 8MiB
+    frames, `>IB` headers) with retain=7 more on the Shared Drive. Adding the
+    archive id under the v2 magic MISPARSED all of them — 21 bytes of header
+    consumed where the frame carries 5 — which is why v3 got its own magic and
+    v2 keeps a read path.
+    """
+    key = generate_escrow_key()
+    original = b"legacy v2 payload \x00\xff" * 900     # several 4KB frames
+    arc = _write_v2_archive(tmp_path / "v2.enc", original, key)
+
+    dec = decrypt_file(arc, tmp_path / "back.bin", key)
+
+    assert dec.read_bytes() == original
+
+
+def test_legacy_v2_archive_still_rejects_truncation_and_reordering(tmp_path):
+    """v2 loses only the SPLICE check — order and completeness still hold.
+
+    v2 frames bind order, just not archive identity, so the legacy path must
+    keep enforcing what v2 can actually prove. A read path that waved these
+    through would turn "old format" into "unchecked format".
+    """
+    from cryptography.fernet import InvalidToken
+
+    import pytest
+
+    key = generate_escrow_key()
+    original = b"C" * 20_000
+    arc = _write_v2_archive(tmp_path / "v2.enc", original, key)
+    frames, magic = _split_frames(arc.read_bytes())
+    assert len(frames) >= 3
+
+    truncated = tmp_path / "v2-trunc.enc"
+    truncated.write_bytes(magic + b"".join(frames[:-1]))   # drop the final frame
+    with pytest.raises(InvalidToken):
+        decrypt_file(truncated, tmp_path / "a.bin", key)
+
+    swapped = tmp_path / "v2-swap.enc"
+    reordered = list(frames)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    swapped.write_bytes(magic + b"".join(reordered))
+    with pytest.raises(InvalidToken):
+        decrypt_file(swapped, tmp_path / "b.bin", key)
+
+
+def test_unknown_magic_raises_unsupported_archive(tmp_path):
+    """An unrecognised format must be REFUSED, never guessed at.
+
+    This is the property whose absence caused the v2 misparse: the v2 magic was
+    reused for a changed header, so the reader accepted the file and then
+    consumed the wrong number of header bytes. Anything that is not a magic we
+    know, and not a Fernet token, has to stop the read.
+    """
+    import pytest
+
+    from mcpbrain.backup import UnsupportedArchive
+
+    key = generate_escrow_key()
+    bogus = tmp_path / "future.enc"
+    bogus.write_bytes(b"MCPBRAIN-ENC-v9\n" + b"whatever follows")
+
+    with pytest.raises(UnsupportedArchive) as ei:
+        decrypt_file(bogus, tmp_path / "back.bin", key)
+    assert "unsupported archive format" in str(ei.value)
+
+    # Not a magic and not a Fernet token either -> same refusal, not InvalidToken.
+    garbage = tmp_path / "garbage.enc"
+    garbage.write_bytes(b"\x00" * 64)
+    with pytest.raises(UnsupportedArchive):
+        decrypt_file(garbage, tmp_path / "back2.bin", key)
+
+
+def test_new_archives_are_written_as_v3(tmp_path):
+    """The writer must emit the v3 magic — a header change needs a new magic."""
+    from mcpbrain.backup import _ARCHIVE_MAGIC_V3
+
+    key = generate_escrow_key()
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"x" * 100)
+    enc = encrypt_file(src, tmp_path / "c.bin", key)
+
+    assert enc.read_bytes()[:16] == _ARCHIVE_MAGIC_V3
+
+
 def test_truncated_archive_is_rejected(tmp_path):
     """Dropping trailing frames must fail loudly, not yield a short store.
 
@@ -468,19 +581,24 @@ def test_reordered_frames_are_rejected(tmp_path):
         decrypt_file(enc, tmp_path / "back.bin", key)
 
 
-def test_spliced_frames_from_two_archives_are_rejected(tmp_path):
-    """A chimera built from two archives under the SAME key must be rejected.
+def test_spliced_frames_from_two_v3_archives_are_rejected(tmp_path):
+    """A chimera built from two v3 archives under the SAME key must be rejected.
 
     The daily cadence reuses one escrow key, so "two archives under one key" is
     the steady state, and the escrow key lives in an all-members-readable fleet
     folder. With only (index, is_final) inside the authenticated plaintext,
     frames 0..k of archive A followed by frames k+1..final of archive B form a
     perfectly ordered, final-flagged run — so splicing two stores together
-    needed NO key at all. Each frame must also bind the archive it belongs to.
+    needed NO key at all. Each v3 frame must also bind the archive it belongs to.
+
+    v2 cannot be held to this (its frames carry no archive id); that is exactly
+    why v3 exists and why v2 is read-only legacy.
     """
     from cryptography.fernet import InvalidToken
 
     import pytest
+
+    from mcpbrain.backup import _ARCHIVE_MAGIC_V3
 
     key = generate_escrow_key()
     a_src = tmp_path / "a.bin"
@@ -492,6 +610,7 @@ def test_spliced_frames_from_two_archives_are_rejected(tmp_path):
 
     a_frames, magic = _split_frames(a.read_bytes())
     b_frames, _ = _split_frames(b.read_bytes())
+    assert magic == _ARCHIVE_MAGIC_V3, "this test is about the v3 guarantee"
     assert len(a_frames) == len(b_frames) >= 3
     # First half of A, second half of B: indices stay 0..n, final flag intact.
     cut = len(a_frames) // 2
@@ -630,19 +749,25 @@ def test_restore_does_not_buffer_the_whole_artifact(tmp_path):
 
 
 def _split_frames(blob):
-    """Split a framed archive into (list_of_raw_frames, header)."""
+    """Split a framed archive into (list_of_raw_frames, magic).
+
+    Version-agnostic: the length prefixes are identical in v2 and v3 (only the
+    plaintext header inside each token differs), and every magic is the same
+    fixed length, so this works for either shape.
+    """
     import struct
 
-    from mcpbrain.backup import _ARCHIVE_MAGIC
+    from mcpbrain.backup import _MAGIC_LEN
 
-    assert blob.startswith(_ARCHIVE_MAGIC)
-    pos = len(_ARCHIVE_MAGIC)
+    magic = blob[:_MAGIC_LEN]
+    assert magic.startswith(b"MCPBRAIN-ENC-v"), magic
+    pos = _MAGIC_LEN
     frames = []
     while pos < len(blob):
         (n,) = struct.unpack(">I", blob[pos:pos + 4])
         frames.append(blob[pos:pos + 4 + n])
         pos += 4 + n
-    return frames, _ARCHIVE_MAGIC
+    return frames, magic
 
 
 # --- bounded temp disk during snapshot ----------------------------------------
@@ -1254,6 +1379,56 @@ def test_restore_decrypts_artifact_to_dest_and_opens_as_store(tmp_path):
     assert dest.exists()
     loaded = Store(dest, dim=4)
     assert loaded.get_chunk("d-budget") is not None
+
+
+def test_restore_handles_a_mixed_format_folder(tmp_path):
+    """A snapshot folder holds BOTH formats — restore must handle either.
+
+    retain=7 with a daily cadence means the Shared Drive carries up to 7 legacy
+    v2 archives alongside new v3 ones for a week after this change. restore()
+    itself is format-agnostic (it only inspects _SQLITE_MAGIC on the DECRYPTED
+    output), so this pins that decrypt_file's magic dispatch is what carries it,
+    for the real bundle shape (gzip tar) rather than a bare store.
+    """
+    import io
+    import tarfile
+    from pathlib import Path
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-budget", "the annual budget review", "h1", {})
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "world.md").write_text("world model contents", encoding="utf-8")
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"owner_name": "Josh"}', encoding="utf-8")
+    key = generate_escrow_key()
+
+    # --- v3: written by the current producer.
+    v3 = make_encrypted_snapshot(store.path, tmp_path / "new.enc", key,
+                                 records_dir=records, config_path=cfg)
+    assert v3.read_bytes()[:16] == b"MCPBRAIN-ENC-v3\n"
+
+    # --- v2: the same bundle shape, framed the legacy way.
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w|gz") as tar:
+        tar.add(store.path, arcname="store/brain.sqlite3")
+        tar.add(records, arcname="records")
+        tar.add(cfg, arcname="config.json")
+    v2 = _write_v2_archive(tmp_path / "old.enc", raw.getvalue(), key,
+                           chunk_size=8192)
+    assert v2.read_bytes()[:16] == b"MCPBRAIN-ENC-v2\n"
+
+    for name, arc in (("v3", v3), ("v2", v2)):
+        dest = tmp_path / name / "brain.sqlite3"
+        dest_records = tmp_path / name / "records"
+        dest_cfg = tmp_path / name / "config.json"
+        result = restore(arc, dest, key,
+                         records_dir=dest_records, config_path=dest_cfg)
+        assert result == Path(dest), name
+        assert Store(dest, dim=4).get_chunk("d-budget") is not None, name
+        assert (dest_records / "world.md").read_text() == "world model contents", name
+        assert dest_cfg.read_text() == '{"owner_name": "Josh"}', name
 
 
 def test_restore_wrong_key_raises_before_overwriting_dest(tmp_path):
