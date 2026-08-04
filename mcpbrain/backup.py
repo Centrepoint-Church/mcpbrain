@@ -32,15 +32,38 @@ NOT reimplemented here: the delta-sync step reuses run_sync_cycle.
 import logging
 import os
 import shutil
+import struct
 import tempfile
 import time
 from pathlib import Path
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from mcpbrain.store import _open_db
 
 log = logging.getLogger(__name__)
+
+# Framed archive format (v2).
+#
+# A single Fernet token authenticates the whole artifact, but producing or
+# reading one requires holding all of it -- plus several transient copies --
+# in memory. At multi-GB snapshot sizes that OOMs the daemon: live incident
+# 2026-08-04, a 4.24GB snapshot on a 16GB box.
+#
+#   archive := MAGIC || frame+
+#   frame   := uint32be len(token) || token
+#   token   := Fernet(uint32be index || uint8 is_final || chunk)
+#
+# Fernet has no AAD, so the ordinal and the end-of-stream flag go INSIDE the
+# authenticated plaintext. That preserves what the single-token format got for
+# free: dropping, duplicating, reordering or splicing frames all fail, rather
+# than silently yielding a short or scrambled store. Archives written before
+# v2 lack the magic and are still read as one token (see decrypt_file) -- the
+# format may only change additively while old snapshots remain restorable.
+_ARCHIVE_MAGIC = b"MCPBRAIN-ENC-v2\n"
+_ENCRYPT_CHUNK = 8 * 1024 * 1024
+_FRAME_LEN = struct.Struct(">I")      # length prefix of each frame
+_FRAME_HEADER = struct.Struct(">IB")  # (index, is_final) inside each token
 
 
 def snapshot(store_path, out_path) -> Path:
@@ -101,11 +124,13 @@ def generate_escrow_key() -> bytes:
     return Fernet.generate_key()
 
 
-def encrypt_file(in_path, out_path, key: bytes) -> Path:
+def encrypt_file(in_path, out_path, key: bytes, *,
+                 chunk_size: int = _ENCRYPT_CHUNK) -> Path:
     """Encrypt in_path -> out_path with the Fernet escrow key. Returns out_path.
 
-    Reads the whole file into memory (fine at this scale — the derived store is
-    modest), encrypts with the supplied key, and writes the ciphertext.
+    Streams the input in ``chunk_size`` frames (see the format notes above), so
+    peak memory is one chunk rather than the whole artifact. ``chunk_size`` is
+    a knob for tests; callers should leave the default.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -113,23 +138,74 @@ def encrypt_file(in_path, out_path, key: bytes) -> Path:
 
     # One Fernet instance per call; callers doing batch ops should construct
     # Fernet(key) once and reuse it rather than calling this in a tight loop.
-    token = Fernet(key).encrypt(in_path.read_bytes())
-    out_path.write_bytes(token)
+    fernet = Fernet(key)
+    with in_path.open("rb") as src, out_path.open("wb") as dst:
+        dst.write(_ARCHIVE_MAGIC)
+        index = 0
+        chunk = src.read(chunk_size)
+        while True:
+            # Read ahead so the last chunk can be flagged. An empty input still
+            # produces exactly one (empty, final) frame, so every archive ends
+            # with a final frame and truncation is always detectable.
+            nxt = src.read(chunk_size)
+            is_final = not nxt
+            token = fernet.encrypt(
+                _FRAME_HEADER.pack(index, 1 if is_final else 0) + chunk)
+            dst.write(_FRAME_LEN.pack(len(token)))
+            dst.write(token)
+            if is_final:
+                break
+            chunk = nxt
+            index += 1
     return out_path
 
 
 def decrypt_file(in_path, out_path, key: bytes) -> Path:
     """Decrypt in_path -> out_path with the Fernet escrow key. Returns out_path.
 
-    Raises cryptography.fernet.InvalidToken if the key is wrong or the
-    ciphertext has been tampered with (Fernet authenticates the token).
+    Reads both archive shapes: the v2 framed format (streamed, bounded memory)
+    and pre-v2 archives, which are a single Fernet token over the whole file
+    and must be held in memory to authenticate — unavoidable, and bounded by
+    the smaller sizes that format was ever written at.
+
+    Raises cryptography.fernet.InvalidToken if the key is wrong, the ciphertext
+    was tampered with, or the frame sequence is not a complete, in-order run
+    ending in a final frame.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    plaintext = Fernet(key).decrypt(in_path.read_bytes())
-    out_path.write_bytes(plaintext)
+    fernet = Fernet(key)
+    with in_path.open("rb") as src:
+        magic = src.read(len(_ARCHIVE_MAGIC))
+        if magic != _ARCHIVE_MAGIC:
+            out_path.write_bytes(fernet.decrypt(magic + src.read()))
+            return out_path
+
+        with out_path.open("wb") as dst:
+            expected_index = 0
+            saw_final = False
+            while True:
+                raw_len = src.read(_FRAME_LEN.size)
+                if not raw_len:
+                    break
+                if saw_final or len(raw_len) != _FRAME_LEN.size:
+                    raise InvalidToken()  # trailing garbage / short length prefix
+                (size,) = _FRAME_LEN.unpack(raw_len)
+                token = src.read(size)
+                if len(token) != size:
+                    raise InvalidToken()  # frame cut short
+                plain = fernet.decrypt(token)
+                index, final_flag = _FRAME_HEADER.unpack(
+                    plain[:_FRAME_HEADER.size])
+                if index != expected_index:
+                    raise InvalidToken()  # dropped / duplicated / reordered
+                dst.write(plain[_FRAME_HEADER.size:])
+                expected_index += 1
+                saw_final = bool(final_flag)
+            if not saw_final:
+                raise InvalidToken()  # truncated before the end of the stream
     return out_path
 
 
@@ -253,19 +329,32 @@ def _default_media(path):
     """Lazy default media factory — imports googleapiclient only when an upload
     actually runs, so `import mcpbrain.backup` does not require the SDK.
 
-    Non-resumable single PUT: the encrypted snapshot (~750MB) uploads in one
-    request. This is deliberate — googleapiclient's resumable path rides on
-    httplib2, which mishandles the 308 "Resume Incomplete" responses and raises
-    RedirectMissingLocation (a long-standing httplib2 bug). A single PUT avoids
-    308s entirely; the real fix for the original failure was the socket timeout
-    (callers must explicitly pass timeout_s=DEFAULT_HTTP_TIMEOUT_S or
-    drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S to build_service/build_google_services
-    for upload/download operations). A mid-upload network blip simply fails this
-    run and the daily cadence retries.
+    RESUMABLE. Google caps simple and multipart upload at **5 MB**; anything
+    larger must go up resumably. This used to pass ``resumable=False`` on the
+    theory that a single PUT dodged httplib2's 308 bug — but that made
+    googleapiclient take the multipart path, which reads the whole artifact via
+    ``getbytes(0, size)`` and flattens the entire request body into one
+    ``io.BytesIO``. Once the store outgrew the "~750MB" this was sized for, a
+    4.24 GB single PUT became multi-GB of allocation and a coin-flip on the
+    wire: 97 failures against 52 successes between 2026-06-25 and 2026-08-04,
+    arriving in storms (57 in one day) rather than steadily.
+
+    Resumable fixes both halves: ``MediaFileUpload`` exposes a stream, so
+    googleapiclient sends bounded ``_StreamSlice`` chunks instead of buffering
+    the artifact, and each request is a legal size. The httplib2 308 bug is
+    real, and is handled at the transport instead — see ``auth._google_http``,
+    which un-registers 308 as a redirect code so googleapiclient's own
+    ``_process_response`` sees it. ``execute()`` drives the chunk loop itself.
+
+    Callers must still pass the long socket timeout
+    (``timeout_s=DEFAULT_HTTP_TIMEOUT_S`` /
+    ``drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S``) to
+    ``build_service``/``build_google_services``. A mid-upload network blip fails
+    this run and the cadence retries.
     """
     from googleapiclient.http import MediaFileUpload
 
-    return MediaFileUpload(str(path), resumable=False)
+    return MediaFileUpload(str(path), resumable=True)
 
 
 def upload_snapshot(
@@ -331,10 +420,11 @@ def upload_snapshot(
             .execute()["id"]
         )
 
-    # 3. Upload the artifact into the per-user folder (single PUT — see
-    # _default_media for why non-resumable). num_retries gives the library's
-    # exponential backoff on transient 5xx. Pass a str path to the factory
-    # (matches MediaFileUpload(str(path))).
+    # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
+    # — see _default_media). execute() drives the chunk loop for a resumable
+    # media body. num_retries gives the library's exponential backoff on
+    # transient 5xx. Pass a str path to the factory (matches
+    # MediaFileUpload(str(path))).
     media = media_factory(str(file_path))
     created = (
         service.files()
@@ -373,17 +463,23 @@ def restore(encrypted_path, dest_store_path, key: bytes, *,
 
     dest_store_path = Path(dest_store_path)
     dest_store_path.parent.mkdir(parents=True, exist_ok=True)
-    # Decrypt fully first — authenticates the token before any destination write.
-    plaintext = Fernet(key).decrypt(Path(encrypted_path).read_bytes())
-
-    if plaintext[:len(_SQLITE_MAGIC)] == _SQLITE_MAGIC:
-        dest_store_path.write_bytes(plaintext)  # bare store snapshot
-        return dest_store_path
 
     work = Path(tempfile.mkdtemp(prefix="mcpbrain-restore-"))
     try:
+        # Decrypt to a temp file FIRST. Streaming keeps peak memory to one
+        # frame instead of several times the artifact — restore runs when the
+        # machine is already in trouble. Writing to temp (not the destination)
+        # preserves the guarantee that a wrong key or tampered/truncated
+        # archive raises before anything at the destination is touched.
         arc = work / "bundle.tar.gz"
-        arc.write_bytes(plaintext)
+        decrypt_file(encrypted_path, arc, key)
+
+        with arc.open("rb") as fh:
+            head = fh.read(len(_SQLITE_MAGIC))
+        if head == _SQLITE_MAGIC:
+            shutil.copy2(arc, dest_store_path)  # bare store snapshot
+            return dest_store_path
+
         xroot = work / "x"
         xroot.mkdir()
         with tarfile.open(arc, "r:gz") as tar:

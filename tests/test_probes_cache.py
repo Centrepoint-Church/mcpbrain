@@ -100,6 +100,45 @@ def test_backup_needs_action_zero_byte_snapshot(tmp_path):
     assert "empty" in r["detail"].lower()
 
 
+def test_backup_needs_action_when_uploads_keep_failing(tmp_path):
+    """A fresh snapshot.enc does NOT mean the backup reached Drive.
+
+    The artifact is encrypted locally BEFORE the upload, so every failed
+    attempt still refreshes snapshot.enc's mtime -- the probe stayed green
+    through the 2026-08-03 storm (57 failed uploads in one day) because each
+    failure refreshed the very file being probed. The probe must key off the
+    last recorded SUCCESS.
+    """
+    import json
+    import time
+    home = _home(tmp_path, _BACKUP_CFG)
+    (tmp_path / "snapshot.enc").write_bytes(b"data")  # fresh, as a failed run leaves it
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_success": time.time() - (30 * 86400),
+        "consecutive_failures": 412,
+        "last_error": "Broken pipe",
+    }))
+
+    r = probes.probe_backup(home)
+
+    assert r["state"] == "needs_action"
+    assert "412" in r["detail"] or "fail" in r["detail"].lower()
+
+
+def test_backup_ok_when_last_upload_succeeded_recently(tmp_path):
+    """A recorded recent success is the positive signal."""
+    import json
+    import time
+    home = _home(tmp_path, _BACKUP_CFG)
+    (tmp_path / "snapshot.enc").write_bytes(b"data")
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_success": time.time() - 3600,
+        "consecutive_failures": 0,
+    }))
+
+    assert probes.probe_backup(home)["state"] == "ok"
+
+
 def test_backup_needs_action_stale_snapshot(tmp_path):
     """A snapshot older than the staleness window → needs_action."""
     import os
