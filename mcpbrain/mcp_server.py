@@ -88,6 +88,86 @@ def write_heartbeat(home: str, *, now=None) -> None:
         pass
 
 
+def write_version_record(home: str, *, now=None) -> None:
+    """Record this process's version + start time under mcp_heartbeat/<pid>.json.
+
+    Why not mcp_heartbeat.json: that file is a SINGLE file and there are
+    MULTIPLE live MCP servers (three observed on 2026-08-04), so
+    last-writer-wins describes only the newest and cannot answer "is *any*
+    live server stale?". This is a per-process sibling, not a replacement --
+    the existing single-file "Claude Desktop connected" contract that
+    write_heartbeat serves is untouched.
+
+    Best-effort, same contract as write_heartbeat: never raise into startup.
+    """
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    from mcpbrain import __version__
+    now = now or datetime.now(timezone.utc)
+    try:
+        d = Path(home) / "mcp_heartbeat"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{os.getpid()}.json").write_text(
+            json.dumps({"pid": os.getpid(), "version": __version__,
+                        "started": now.timestamp()})
+        )
+    except OSError:
+        pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True if `pid` is a live process (ours or anyone else's).
+
+    os.kill(pid, 0) sends no signal, just checks existence/permission:
+    ProcessLookupError means the pid is dead, PermissionError means it's
+    alive but owned by someone else (still alive from our point of view).
+    No dependency needed for this.
+    """
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def live_version_records(home: str) -> list[dict]:
+    """Return the version records for every live MCP server, pruning dead ones.
+
+    Reads mcp_heartbeat/<pid>.json for each file, drops (and deletes) any
+    record whose pid is no longer alive, and returns the rest. Best-effort:
+    a malformed record file or a permission blip is skipped, not raised.
+    """
+    import json
+
+    d = Path(home) / "mcp_heartbeat"
+    if not d.is_dir():
+        return []
+    records = []
+    try:
+        entries = sorted(d.glob("*.json"))
+    except OSError:
+        return []
+    for p in entries:
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        pid = rec.get("pid")
+        if not isinstance(pid, int) or not _pid_is_alive(pid):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            continue
+        records.append(rec)
+    return records
+
+
 def _default_owner() -> str:
     """The install owner for MCP-initiated writes, from config (empty if unset)."""
     return config.owner_name(str(config.app_dir()))
@@ -818,6 +898,7 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
     draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
     home = str(config.app_dir())
     write_heartbeat(home)
+    write_version_record(home)
     server = build_server(store, draft_store, ControlClient(), home)
 
     async def _run():
