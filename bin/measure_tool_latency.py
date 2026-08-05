@@ -22,14 +22,28 @@ Session setup (spawn + `initialize`) is measured once and reported separately
 under `_session`; the per-tool numbers are steady-state call latency inside an
 already-open session, which is what a client actually experiences.
 
-WRITES IT PERFORMS
-------------------
+WRITES IT PERFORMS -- THESE ROWS PERSIST AND NEED CLEANING UP
+-------------------------------------------------------------
 Two of the twelve genuinely write to the Store, and they are measured writing,
 not short-circuited: `brain_meeting_pack_upsert` and `brain_draft_save`. Both
 use identifiers prefixed `sdd-probe-latency-` so the rows are unmistakably
 synthetic and can never be confused with real records. `brain_meeting_pack_get`
 then reads the row the upsert just wrote, so it measures a real row read with
 no dependence on the user's real calendar.
+
+The rows are **not** removed afterwards -- deleting from a user's live store
+unasked is a bigger liberty than writing an obviously-tagged row -- so they
+accumulate across runs. `brain_meeting_pack_upsert` is idempotent (one row per
+event_id no matter how many runs), but `brain_draft_save` **appends**, so each
+run at the default n=5 leaves 5 more `draft_records` rows. This script prints
+the cleanup SQL when it exits:
+
+    DELETE FROM draft_records WHERE email_id LIKE 'sdd-probe-%';
+    DELETE FROM meeting_packs WHERE event_id LIKE 'sdd-probe-%';
+
+Both predicates are precise: no real Gmail message id or Calendar event id
+begins `sdd-probe-`. Nothing else is written -- the three tools below that
+*could* mutate are deliberately routed down non-mutating paths.
 
 Three more are deliberately routed down a path that reaches the Store and then
 declines to mutate, because mutating real data to time it is not acceptable:
@@ -77,6 +91,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 SYNTH = "sdd-probe-latency"  # every identifier this script writes starts here
+
+# Mirrored verbatim in bin/probe_wal_contention.py -- both scripts tag every row
+# they write with the same `sdd-probe-` prefix, so one cleanup covers both. Kept
+# duplicated rather than shared because these are two standalone entry points
+# with no common module; if you change the prefix, change it in both.
+CLEANUP_SQL = (
+    "DELETE FROM draft_records WHERE email_id LIKE 'sdd-probe-%';\n"
+    "DELETE FROM meeting_packs WHERE event_id LIKE 'sdd-probe-%';"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -297,6 +320,16 @@ def main() -> int:
     print(f"\nwrote {ns.out}")
     print(f"spawn+initialize: {results['_session']['spawn_plus_initialize_ms']:.1f} ms, "
           f"{results['_session']['tools_advertised']} tools advertised")
+
+    # Printed, never executed: see the WRITES IT PERFORMS section above for why
+    # this script does not clean up after itself on a user's live store.
+    print("\n== cleanup: SYNTHETIC ROWS PERSIST IN THE LIVE STORE ==")
+    print(f"  store: {store_path}")
+    print(f"  {ns.n} draft_records row(s) appended this run, plus 1 upserted "
+          "meeting_packs row (idempotent across runs).")
+    print("  run this to remove them (the LIKE patterns cannot match real data):")
+    for line in CLEANUP_SQL.splitlines():
+        print(f"    {line}")
     return 0
 
 
