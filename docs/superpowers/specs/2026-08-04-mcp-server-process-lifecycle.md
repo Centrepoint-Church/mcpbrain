@@ -84,8 +84,11 @@ are exactly the tools you most want working when things are broken. So:
   (`brain_search` is already there.)
 
 What that buys, by construction rather than by measurement:
-- The MCP server ends up holding **no `Store` handle at all** — removing Finding 3's entire class
-  and the writable-`draft_store` concern outright.
+- The MCP server ends up holding **no `Store` handle at all** — removing the
+  writable-`draft_store` concern outright. ⚠️ **Amended 2026-08-05:** this does *not* remove
+  Finding 3's entire class, as originally claimed. Measurement found a second cause — an open
+  READ transaction on an older snapshot blocks `TRUNCATE` absolutely — and Phase 4 *relocates*
+  the multi-second recall reads into the daemon rather than eliminating them. See § Finding 3.
 - A stale server then affects only **protocol handling and spool writes**, the parts that change
   rarely.
 - Captures keep working daemon-down.
@@ -262,24 +265,38 @@ and importing no store/embedding graph makes an abandoned server a small process
 a 77 MB one. Worth **re-measuring this table after Phase 4** — the delta on pid-20868-shaped
 processes is the clearest single number for what the thin adapter buys.
 
-## Finding 3 — the writable-handle / WAL-checkpoint hypothesis is NOT supported by current evidence
+## Finding 3 — the writable-handle / WAL-checkpoint hypothesis: CONFIRMED under load, but a MINORITY cause of backup failures
+
+> **Status: closed with evidence, 2026-08-05.** The hypothesis is **supported** — see
+> § *MEASURED UNDER LOAD* below, which supersedes the idle measurement recorded first.
+> But size it before prioritising it: of 98 `periodic backup failed` events in
+> `com.mcpbrain.err` (2026-06-27 → 2026-08-04), only **3 (3%)** are `wal_checkpoint`.
+> **57% are `[Errno 28] No space left on device`** and 39% are network/transport. Disk-space
+> headroom is the backup fix that matters; this one is real but small.
+> Do **not** cite the "97 failures vs 52 successes" figure here — that is the aggregate
+> across all causes and it motivated 0.7.113's *resumable-upload* rework, not this.
+
+### First measurement, 2026-08-04 — idle only, and it appeared to refute the hypothesis
 
 Backups have been failing with `wal_checkpoint(TRUNCATE) busy=1`
 (`backup_state.json`: `consecutive_failures: 1`, newest good archive 12:27). The obvious
 hypothesis was that the MCP servers' writable handles block a TRUNCATE checkpoint, which
 requires no other connections.
 
-**Measured, and it does not hold up:** `lsof` on `brain.sqlite3` shows exactly **one**
-holder — the daemon (65882) — and there is **no `-wal` or `-shm` file** present, i.e. the DB
-is in a checkpointed state. The `Store` handles in the MCP servers are constructed but
-connect lazily, so an idle server holds nothing.
+**Measured with the system idle, and on that evidence it appeared not to hold up:** `lsof` on
+`brain.sqlite3` showed exactly **one** holder — the daemon (65882) — and **no `-wal` or `-shm`
+file** present, i.e. the DB in a checkpointed state. The `Store` handles in the MCP servers are
+constructed but connect lazily, so an idle server holds nothing.
 
-So the 13:31 failure was transient — plausibly a concurrent writer at that instant (the
-daemon's own drain, or an MCP write landing mid-checkpoint) — not a standing block. Worth
-re-testing under load: call a writing MCP tool (`brain_note`) in two servers concurrently and
-attempt a checkpoint. **Do not** assume this cause without that evidence.
+The conclusion drawn at the time was that the 13:31 failure was transient — plausibly a
+concurrent writer at that instant — and not a standing block, with a note to re-test under
+load before assuming the cause. **That re-test has now been done, and it inverts the reading of
+the observations above**: "no `-wal`, one holder" turns out to be what *nothing in flight*
+looks like, and an empty WAL makes the checkpoint succeed unconditionally, so the idle
+measurement could never have discriminated between the hypotheses. Read the next subsection,
+not this one, for the current conclusion.
 
-### MEASURED UNDER LOAD, 2026-08-05 (Task 7) — the hypothesis IS supported; this section's conclusion is SUPERSEDED
+### MEASURED UNDER LOAD, 2026-08-05 (Task 7) — the hypothesis IS supported; the idle measurement above is SUPERSEDED
 
 `bin/probe_wal_contention.py` (see its module docstring for the full design) tested the
 loaded case this section asked for. **The idle refutation above was a null instrument, not a
@@ -373,7 +390,8 @@ the metadata win on its own merits and creates the seam Project 2 needs. No beha
    move; recall paths (`brain_context`, `brain_actions`, `brain_graph`) are the ones to watch,
    given the 0.7.105 and 0.7.110 incidents.
 5. **Finding 2, folded in as a measurement** — confirm both Desktop servers complete `initialize`
-   (the logs suggest they do) and measure each one's RSS. This gets *cheaper* to care about after
+   (the logs suggest they do) and measure each one's RSS. ✅ **Done 2026-08-05 — and only ONE
+   completes `initialize`; see § Finding 2.** This gets *cheaper* to care about after
    step 3, since a shim without a `Store` is a much smaller process. A documented "this is client
    behaviour, nothing to change" is a legitimate outcome; the point is to stop guessing.
 6. **Finding 3, folded in as a measurement** — with two servers connected, invoke a **writing** tool
@@ -381,11 +399,14 @@ the metadata win on its own merits and creates the seam Project 2 needs. No beha
    Run it **before** step 3 (so it still reproduces the current arrangement) and **after** (to
    confirm the class is gone once the shim holds no writable handle). Note the refutation already
    established under *idle* conditions in § Finding 3 — this tests the loaded case that was never
-   tested.
+   tested. ✅ **"Before" done 2026-08-05: CONFIRMED, see § Finding 3. Note the step-6 "after" run
+   must NOT be read as confirming "the class is gone" — the read-transaction cause survives
+   Phase 4.**
 
 **Success criterion:** each of the three findings ends fixed or **explicitly closed with
 evidence**. "Still unexplained" is a failure for Finding 3 specifically, because live backups were
-failing and the cause is currently unattributed.
+failing and the cause is currently unattributed. ✅ **Met for Findings 2 and 3 on 2026-08-05 —
+both closed with evidence.**
 
 **Release shaping — decide before implementing.** Project 2 is a larger behavioural change than
 anything in 0.7.113, on a package that auto-updates unattended, with the Windows hardware QA gate

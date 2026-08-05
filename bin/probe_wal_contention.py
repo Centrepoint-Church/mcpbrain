@@ -3,13 +3,37 @@
 
 THE QUESTION
 ------------
-Backups aborted for real -- 97 failures vs 52 successes between 2026-06-25 and
-2026-08-04, and `backup_state.json` on this machine still carries
-`"last_error": "wal_checkpoint(TRUNCATE) busy=1"` -- at `backup.snapshot()`'s
-very first statement:
+Real backups abort at `backup.snapshot()`'s very first statement:
 
     row = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     busy = row[0]; if busy != 0: raise RuntimeError(...)
+
+and `backup_state.json` on this machine still carries
+`"last_error": "wal_checkpoint(TRUNCATE) busy=1"`.
+
+HOW BIG A PROBLEM IS IT? SMALLER THAN IT LOOKS -- SIZE IT BEFORE PRIORITISING IT
+-------------------------------------------------------------------------------
+Do **not** cite the "97 failures vs 52 successes since 2026-06-25" figure as
+evidence for this defect. That is the AGGREGATE backup-failure count across all
+causes, and it motivated 0.7.113's *resumable-upload* rework (the old multipart
+path flattening a 4.24 GB body into one `BytesIO`). Attributing it to
+`wal_checkpoint` inflates this defect ~30x.
+
+Counted directly out of `com.mcpbrain.err` (98 `periodic backup failed` events,
+2026-06-27 to 2026-08-04):
+
+    56  (57%)  [Errno 28] No space left on device      <- DOMINANT CAUSE
+    38  (39%)  network/transport (oauth2.googleapis.com and www.googleapis.com
+               unreachable, broken pipe, write timeout, Errno 49, HTTP 502,
+               SSL UNEXPECTED_EOF)
+     3   (3%)  wal_checkpoint(TRUNCATE) busy=1         <- what this probe is about
+     1   (1%)  disk I/O error
+
+So WAL contention is **real but a minority cause**, and anyone ranking backup
+work should fix disk-space headroom first. This probe exists because a 3%
+minority cause that is about to become *unmeasurable* is worth measuring while
+it still can be: Phase 4 removes the writable handles, and an unattributed
+failure mode outlives the evidence needed to attribute it.
 
 The 0.7.113 investigation looked for a second WRITER and found none: `lsof`
 showed one holder and there was no `-wal` file. But that was measured with the
@@ -80,9 +104,34 @@ SAFETY
 * The loaded sessions are this script's OWN subprocesses. It never touches the
   `mcpbrain mcp-server` processes Claude Desktop has connected -- those belong
   to the user's live app.
-* No write lock is ever held on the live store; that is what the scratch arm is
-  for.
+* No write lock is held OPEN on the live store. The checkpointer does briefly
+  contend for the writer lock -- that is unavoidable, it is what a checkpoint
+  does, and it is what the daemon's own backup does every cycle. What never
+  happens here is an *uncommitted transaction held across* the busy handler;
+  that is what the scratch arm is for, because on the live store it would block
+  the daemon's writer for seconds.
 * Every row written is tagged `sdd-probe-wal-`, so it is unmistakably synthetic.
+
+WRITES IT PERFORMS -- THESE ROWS PERSIST AND NEED CLEANING UP
+-------------------------------------------------------------
+The `mcp_writes` and `pinned_reader` arms exist to put frames in the WAL, so
+they genuinely INSERT/UPDATE against the live Store. `brain_draft_save`
+**appends** a row per call, so an unbudgeted run leaves ~1,300 synthetic
+`draft_records` rows behind -- on a real install that swamps the handful of
+genuine drafts. `WRITE_CALL_BUDGET` therefore caps each write loop (see its
+comment); the rows are still **not** removed automatically, because deleting
+from a user's live store without being asked is worse than leaving auditable,
+obviously-tagged rows.
+
+This script prints the exact cleanup SQL when it exits. Run it after a probe
+session:
+
+    DELETE FROM draft_records WHERE email_id LIKE 'sdd-probe-%';
+    DELETE FROM meeting_packs WHERE event_id LIKE 'sdd-probe-%';
+
+Both predicates are precise: no real Gmail message id or Calendar event id
+begins `sdd-probe-`. Nothing else is written -- no chunks, entities, relations,
+records-repo files, commits or Drive traffic.
 
 USAGE
 -----
@@ -138,6 +187,35 @@ def lsof_holders(store_path: str) -> dict:
         if len(parts) >= 2:
             holders[parts[1]] = parts[0]  # pid -> command
     return {"pids": holders, "holder_count": len(holders)}
+
+
+# Mirrored verbatim in bin/measure_tool_latency.py -- both scripts tag every row
+# they write with the same `sdd-probe-` prefix, so one cleanup covers both. Kept
+# duplicated rather than shared because these are two standalone entry points
+# with no common module; if you change the prefix, change it in both.
+CLEANUP_SQL = (
+    "DELETE FROM draft_records WHERE email_id LIKE 'sdd-probe-%';\n"
+    "DELETE FROM meeting_packs WHERE event_id LIKE 'sdd-probe-%';"
+)
+
+
+def print_cleanup_sql(store_path: str, *, wrote_rows: bool) -> None:
+    """Tell the runner what was left behind and how to remove it.
+
+    Printed rather than executed: this script's whole safety story is that it
+    only ever writes obviously-tagged synthetic rows to a user's live store, and
+    silently DELETEing from that store on exit would be a bigger liberty than
+    the writes were. Printing keeps the decision with the human and leaves the
+    rows auditable in the meantime.
+    """
+    if not wrote_rows:
+        print("\n== cleanup ==\n  no write arms ran; nothing to clean up")
+        return
+    print("\n== cleanup: SYNTHETIC ROWS PERSIST IN THE LIVE STORE ==")
+    print(f"  store: {store_path}")
+    print("  run this to remove them (the LIKE patterns cannot match real data):")
+    for line in CLEANUP_SQL.splitlines():
+        print(f"    {line}")
 
 
 def sidecars(store_path: str) -> dict:
@@ -256,6 +334,17 @@ def _server_params(home: str):
         command=sys.executable, args=["-m", "mcpbrain.mcp_server"], env=env)
 
 
+# Call budget for the one load that GROWS a table. brain_draft_save APPENDS a
+# row per call, so left unbudgeted it added ~1,300 synthetic rows to a live
+# draft_records holding 2 real ones. brain_meeting_pack_upsert is deliberately
+# left unbudgeted (None) because it UPSERTs over 3 rotating event_ids: it emits
+# WAL frames forever at a fixed cost of 3 rows, which is exactly what the arm
+# needs. So the budget bounds the pollution WITHOUT starving the WAL -- capping
+# both loads would risk the checkpoint landing on an empty WAL, which is the
+# null-instrument failure this whole probe was rebuilt to avoid.
+WRITE_CALL_BUDGET = 200
+
+# (tool, args_for, call_budget) -- budget None means "until the arm ends".
 WRITE_LOADS = [
     # Two DIFFERENT writing tools, one per session, so both writable
     # draft_store handles are genuinely issuing INSERT/UPDATE at once.
@@ -266,28 +355,33 @@ WRITE_LOADS = [
         "pack_text": f"# {SYNTH}\n\n" + ("synthetic wal-contention probe row. " * 40),
         "attendees": [f"{SYNTH}-attendee"],
         "context_hash": f"{SYNTH}-{i}",
-    }),
+    }, None),
     ("brain_draft_save", lambda i: {
         "email_id": f"{SYNTH}-email",
         "thread_id": f"{SYNTH}-thread",
         "intent": f"{SYNTH} probe {i}",
         "final_draft": f"{SYNTH}: synthetic wal-contention probe draft {i}.",
-    }),
+    }, WRITE_CALL_BUDGET),
 ]
 
 READ_LOADS = [
-    ("brain_graph", lambda i: {"entity": "Josh Kemp", "hops": 1}),
-    ("brain_graph", lambda i: {"entity": "Josh Kemp", "hops": 2}),
+    ("brain_graph", lambda i: {"entity": "Josh Kemp", "hops": 1}, None),
+    ("brain_graph", lambda i: {"entity": "Josh Kemp", "hops": 2}, None),
 ]
 
 
 async def _load_session(home: str, tool: str, args_for, stop: asyncio.Event,
-                        log: list) -> None:
+                        log: list, budget: int | None = None) -> None:
     """Hammer one tool through one real MCP session until `stop` is set.
 
     A real session over a real stdio subprocess, because the point is that the
     handle lives in a separate PROCESS holding the same sqlite file -- an
     in-process Store would not reproduce that.
+
+    `budget` caps the number of calls for loads that grow a table (see
+    WRITE_CALL_BUDGET). On exhaustion the session stays OPEN and idle rather
+    than closing: closing it would drop the process's handle, and the arm's
+    `lsof`/holder observation is part of the measurement.
     """
     from mcp import ClientSession
     from mcp.client.stdio import stdio_client
@@ -297,6 +391,10 @@ async def _load_session(home: str, tool: str, args_for, stop: asyncio.Event,
             await session.initialize()
             i = 0
             while not stop.is_set():
+                if budget is not None and i >= budget:
+                    log.append("budget_exhausted")
+                    await asyncio.sleep(0.1)
+                    continue
                 try:
                     await session.call_tool(tool, args_for(i))
                 except Exception as exc:  # noqa: BLE001
@@ -333,10 +431,12 @@ async def _run_live_arm(home: str, store_path: str, arm: str, checkpoints: int,
 
     stop = asyncio.Event()
     logs: list[list] = [[] for _ in loads]
-    tasks = [asyncio.create_task(_load_session(home, tool, fn, stop, logs[i]))
-             for i, (tool, fn) in enumerate(loads)]
+    tasks = [asyncio.create_task(
+                 _load_session(home, tool, fn, stop, logs[i], budget))
+             for i, (tool, fn, budget) in enumerate(loads)]
 
-    result: dict = {"arm": arm, "load": [t for t, _ in loads],
+    result: dict = {"arm": arm,
+                    "load": [f"{t} (budget {b})" if b else t for t, _, b in loads],
                     "pinned_read_txn": pin_reader}
     pinned = None
     try:
@@ -369,7 +469,9 @@ async def _run_live_arm(home: str, store_path: str, arm: str, checkpoints: int,
             if k + 1 < checkpoints:
                 await asyncio.sleep(gap_s)
         result["checkpoints"] = attempts
-        result["calls_completed"] = [len(c) for c in logs]
+        # Count only real completions -- the log also carries budget_exhausted
+        # markers, and reporting those as calls would overstate the load.
+        result["calls_completed"] = [sum(1 for e in c if e == "ok") for c in logs]
         result["call_errors"] = [e for c in logs for e in c
                                  if e.startswith("error:")][:5]
     finally:
@@ -448,6 +550,9 @@ def main() -> int:
     if ns.out:
         Path(ns.out).write_text(json.dumps(report, indent=2))
         print(f"\nwrote {ns.out}")
+
+    print_cleanup_sql(store_path, wrote_rows=any(
+        arm in ns.arms for arm in ("mcp_writes", "mcp_mixed", "pinned_reader")))
     return 0
 
 
