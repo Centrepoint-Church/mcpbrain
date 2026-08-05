@@ -173,6 +173,95 @@ Unknowns worth establishing before treating this as a defect:
   heartbeats and both answered `initialize` in the logs, so both appear live.)
 - Cost: each is a full Python process with the mcpbrain import graph — measure RSS.
 
+### MEASURED, 2026-08-05 (Task 8) — one of the two is spawned and then abandoned
+
+All three unknowns above are now answered, and one of them is answered the **opposite** way
+to what this section assumed.
+
+**The pair, on the live box.** Claude Desktop (pid 20818) → two `Helpers/disclaimer`
+wrappers → two servers, one second apart:
+
+```
+20856 20818 Wed  5 Aug 14:56:36 2026   Helpers/disclaimer … mcpbrain mcp-server
+20861 20856 Wed  5 Aug 14:56:36 2026   …/bin/python3 …/mcpbrain mcp-server
+20864 20818 Wed  5 Aug 14:56:37 2026   Helpers/disclaimer … mcpbrain mcp-server
+20868 20864 Wed  5 Aug 14:56:37 2026   …/bin/python3 …/mcpbrain mcp-server
+```
+
+**Only ONE completes `initialize`.** `~/Library/Logs/Claude/mcp-server-mcpbrain.log` and
+`mcp.log` contain exactly **one** `initialize` for this pair, and nothing has been written to
+either log since:
+
+```
+06:56:36.863Z [mcpbrain] Server started and connected successfully
+06:56:37.185Z [mcpbrain] Message from client: method="initialize" id=0
+06:56:39.016Z [mcpbrain] Message from server: id=0 result
+06:56:39.017Z [mcpbrain] method="notifications/initialized"
+06:56:39.021Z [mcpbrain] method="tools/list" / "prompts/list" / "resources/list"
+06:56:39.026Z [mcpbrain] Message from server: id=3 result      <- last line in the file
+```
+
+Accumulated CPU corroborates which is which: **20861 = 0:05.24** (imports + serving
+`initialize`, `tools/list` over 26 schemas, `prompts/list`, `resources/list`) versus
+**20868 = 0:01.60** (imports only, then blocked on a stdin that never spoke). So this
+section's parenthetical — "*both answered `initialize` in the logs, so both appear live*" —
+was wrong. **The second server is spawned, pays the full import cost, and is then
+abandoned.** It is not a probe that connects; it is a process nobody ever talks to.
+
+**Why two, and it is NOT one-per-window.** `main.log` shows two *different* launch paths
+firing 1-2 s apart for the same single config entry:
+
+```
+14:56:35 [info] MCP Server connection requested for: mcpbrain
+14:56:35 [info] Launching MCP Server: mcpbrain                      <- launcher #1 -> pid 20861
+…
+14:56:37 [info] [LocalMcpServerManager] Connecting to plugin:pdf-viewer:pdf
+14:56:37 [info] [LocalMcpServerManager] Connecting to PowerPoint (By Anthropic)
+14:56:37 [info] [LocalMcpServerManager] Connecting to mcpbrain       <- launcher #2 -> pid 20868
+14:56:37 [info] [LocalMcpServerManager] Connecting to pieces
+```
+
+Launcher #2 is `LocalMcpServerManager`'s bulk sweep over **every** configured server, which
+does not notice that #1 already launched this one. The doubling is systematic, not
+incidental: across `main.log` the paired lines recur on essentially every reconnect —
+`MCP Server connection requested for: mcpbrain` twice at 10:10:43, 10:14:28, 14:32:24,
+20:25:38, 14:06:38 and 14:07:10, and `[LocalMcpServerManager] mcpbrain disconnected` twice at
+14:32:19, 16:18:40 and 14:56:07.
+
+The window hypothesis is **structurally impossible**, not merely unobserved: Claude
+Desktop's File menu offers only *New Conversation* (⌘N) and its Window menu has no *New
+Window* item at all — only *Show Main Window*. It is a single-window app, and the window
+count stayed at 1 throughout while two servers ran. (An attempted ⌘N during the measurement
+opened a new **conversation**, not a window, and changed no process.) Both servers are also
+torn down together on disconnect, so this is a steady 2× cost while connected, not an
+unbounded leak.
+
+**Cost.** `ps` RSS badly understates it for a process idle two hours; `vmmap --summary` is
+the honest number:
+
+| pid | role | RSS (`ps`) | Physical footprint | peak footprint | CPU |
+|---|---|---|---|---|---|
+| 20861 | initialized, serving | 11 408 KB | **77.8 M** | 85.2 M | 0:05.24 |
+| 20868 | spawned, never initialized | 4 400 KB | **77.0 M** | 83.3 M | 0:01.60 |
+
+So the abandoned server costs ~**77 MB** of real memory for nothing — the import graph is
+paid whether or not a client ever speaks.
+
+**Correction to Finding 3's premise.** `lsof -p` on both shows **zero** open
+`brain.sqlite3` file descriptors. `main()` constructs both `Store` objects eagerly but
+`Store._connect` opens (and closes) a connection per call, so an idle server — and *a
+fortiori* a never-initialized one — holds no SQLite handle at all. The "up to three writable
+SQLite handles on an 11.9 GB store" framing above overstates the real exposure: at most one
+Desktop server is ever live, and even that one holds a handle only for the duration of a
+call.
+
+**Verdict: this is Claude Desktop client behaviour, and there is nothing to change on our
+side.** We cannot stop a client from spawning a server it then ignores. What we *can* do is
+make the wasted spawn cheap, which is exactly what Phase 4 does: a shim holding no `Store`
+and importing no store/embedding graph makes an abandoned server a small process instead of
+a 77 MB one. Worth **re-measuring this table after Phase 4** — the delta on pid-20868-shaped
+processes is the clearest single number for what the thin adapter buys.
+
 ## Finding 3 — the writable-handle / WAL-checkpoint hypothesis is NOT supported by current evidence
 
 Backups have been failing with `wal_checkpoint(TRUNCATE) busy=1`
@@ -189,6 +278,65 @@ So the 13:31 failure was transient — plausibly a concurrent writer at that ins
 daemon's own drain, or an MCP write landing mid-checkpoint) — not a standing block. Worth
 re-testing under load: call a writing MCP tool (`brain_note`) in two servers concurrently and
 attempt a checkpoint. **Do not** assume this cause without that evidence.
+
+### MEASURED UNDER LOAD, 2026-08-05 (Task 7) — the hypothesis IS supported; this section's conclusion is SUPERSEDED
+
+`bin/probe_wal_contention.py` (see its module docstring for the full design) tested the
+loaded case this section asked for. **The idle refutation above was a null instrument, not a
+refutation.** `TRUNCATE` needs no writer *and* every reader on the newest snapshot — but if
+the `-wal` is **empty** it returns busy=0 regardless of how much concurrency is running, and
+because `Store` opens and closes a connection per call, an idle store's WAL is empty and the
+sidecars are deleted. Hence "no `-wal` file, one holder": that is what *nothing in flight*
+looks like, and it cannot discriminate between the hypotheses.
+
+Every arm below was run against the real 11.92 GB store with the daemon and the user's
+Desktop servers up. `log_frames` is reported alongside `busy` precisely because
+`log_frames=0` makes a `busy=0` meaningless.
+
+| arm | busy per attempt | log_frames | verdict |
+|---|---|---|---|
+| `mechanism` (scratch DB, positive control) | (R) 1 → cleared 0; (W) 1 → cleared 0 | 3 / 1 | instrument can detect busy |
+| `idle` | 0 ×6 | 0 ×6 | reproduces the 0.7.113 result — and shows why it proves nothing |
+| `mcp_writes` (2 sessions writing) | **1**, then 0 ×5 | **4907**, then 0 ×5 | **hypothesis CONFIRMED** |
+| `mcp_reads` (2 sessions `brain_graph`) | 0 ×6 | 0 ×6 | inconclusive (empty WAL again), not a refutation |
+| `pinned_reader` (1 held read txn + writes) | **1 ×6** | 1474→2456, growing | **(R) blocks absolutely** |
+
+Two distinct causes, both real:
+
+**(W) Concurrent MCP writes do it.** `mcp_writes` — two of the probe's own MCP sessions
+looping `brain_meeting_pack_upsert` / `brain_draft_save` (~230 calls/s combined) — produced
+`{'busy': 1, 'log_frames': 4907, 'checkpointed_frames': 4907, 'elapsed_ms': 5199.6}`: the
+busy handler was exhausted for its full 5000 ms. Note `checkpointed_frames == log_frames`:
+every committed frame *was* folded into the main DB and only the WAL **reset** failed, yet
+`backup.snapshot()` raises on `busy != 0` and aborts. Some real aborted backups were
+therefore aborting on a store that had in fact been fully checkpointed.
+
+**(R) A single open read transaction blocks it absolutely.** `pinned_reader` — one
+**read-only** connection holding one `BEGIN` + `SELECT` while an MCP session appended frames
+— returned busy=1 on **6 of 6** attempts with `checkpointed_frames: 0` every time (not even
+the passive part progressed) while the WAL grew monotonically 1474 → 2456 frames. This is the
+more dangerous cause, because Task 6 measured `brain_graph` at a **6.3 s median / 8.3 s p95**
+on this store and `brain_actions` at 3.1 s / 4.4 s — ordinary recall read transactions that
+**outlive the 5000 ms busy_timeout** `_open_db` sets. One recall overlapping a backup is
+sufficient.
+
+Attribution for the real failures matches. All three recorded events in `com.mcpbrain.err`
+sit immediately after heavy daemon activity, i.e. exactly when the WAL is non-empty — most
+starkly `2026-07-29 15:52:12,249 block review_ownerless answers drained (2); stash cleared`
+followed **2 ms later** by `15:52:12,251 periodic backup failed: wal_checkpoint(TRUNCATE)
+busy=1`; likewise `2026-08-03 13:25:46` (salience-gate batch) → `13:26:12`, and
+`2026-08-04 13:31:32` (`org_import` completing) → `13:31:42`. `_bulk_lock` serialises the
+cycle thread and the gated maintenance passes, but it is a *threading* lock inside one
+process: it does not gate the daemon's control-API handler threads (the 0.7.105 starvation
+path) and cannot gate the MCP server *processes* at all.
+
+**Consequence for Phase 4, and it is not the comforting one.** Removing the writable
+`draft_store` handles kills cause (W) *as sourced from the MCP servers* — but it does **not**
+kill cause (R), and it moves those multi-second recall reads *into* the daemon process, where
+they still are not covered by `_bulk_lock`. So Phase 4 must not be treated as the backup fix.
+The backup fix is a separate change to `backup.snapshot()`: distinguish "frames remained in
+the WAL" from "the WAL could not be truncated" (`checkpointed_frames == log_frames` is a
+complete artifact), and/or checkpoint with a longer busy_timeout under the bulk lock.
 
 Related and separately recorded: `CLAUDE.md` notes daemon cadence passes have appeared
 stalled since 2026-07-23 (`_run_periodic_passes` early-returns wholesale when
