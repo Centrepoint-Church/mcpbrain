@@ -284,6 +284,16 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     CadencePass("action_hygiene", "_action_hygiene_interval_s",
                 "_last_action_hygiene", "_run_action_hygiene",
                 needs_configured=False),
+    # Prune dead-pid mcp_heartbeat/<pid>.json files. Before this, the only thing
+    # that pruned them was doctor.py's version_drift_line, and run_doctor has no
+    # caller anywhere else -- so a dead MCP server's heartbeat file only got
+    # cleaned up if a user manually ran `mcpbrain doctor`. Same unbounded-growth
+    # shape as the ~24GB of orphaned mcpbrain-snap-* dirs found live on
+    # 2026-07-27 (see backup.sweep_orphan_snapshots). needs_configured=False:
+    # sweeping our own heartbeat files needs no Google identity.
+    CadencePass("mcp_heartbeat_sweep", "_mcp_heartbeat_sweep_interval_s",
+                "_last_mcp_heartbeat_sweep", "_run_mcp_heartbeat_sweep",
+                needs_configured=False),
     # B3 salience scoring: structural importance per chunk.
     # needs_configured=False: salience is identity-agnostic.
     CadencePass("salience_score", "_salience_score_interval_s",
@@ -896,6 +906,11 @@ class Daemon:
         # in the cadences config to disable.
         self._action_hygiene_interval_s: float | None = None
         self._last_action_hygiene = None
+        # Prune dead-pid mcp_heartbeat/<pid>.json files (hourly). Default 3600s
+        # via _CADENCE_DEFAULTS; set mcp_heartbeat_sweep_interval_s: 0 in the
+        # cadences config to disable.
+        self._mcp_heartbeat_sweep_interval_s: float | None = None
+        self._last_mcp_heartbeat_sweep = None
         # B3 salience scoring: structural importance per chunk (daily).
         self._salience_score_interval_s: float | None = None
         self._last_salience_score = None
@@ -1506,6 +1521,7 @@ class Daemon:
             self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
             self._review_interval_s = cadences["review_interval_s"]
             self._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
+            self._mcp_heartbeat_sweep_interval_s = cadences["mcp_heartbeat_sweep_interval_s"]
             self._salience_score_interval_s = cadences["salience_score_interval_s"]
             self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
             self._consolidation_interval_s = cadences["consolidation_interval_s"]
@@ -2671,6 +2687,28 @@ class Daemon:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
+
+    def _run_mcp_heartbeat_sweep(self) -> dict | None:
+        """Hourly prune of dead-pid mcp_heartbeat/<pid>.json files.
+
+        live_version_records(home) already prunes as a side effect of listing,
+        so this pass is just calling it and reporting the surviving count. Before
+        this cadence existed, that pruning only ever ran when a user manually
+        invoked `mcpbrain doctor` -- so on a real install these tiny per-process
+        files accumulated indefinitely, one per MCP server process lifetime.
+        """
+        if not self._is_due("_mcp_heartbeat_sweep_interval_s", "_last_mcp_heartbeat_sweep"):
+            return None
+        now = self._clock()
+        try:
+            from mcpbrain import config as _config
+            from mcpbrain.mcp_server import live_version_records
+            recs = live_version_records(str(_config.app_dir()))
+        except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
+            log.warning("mcp_heartbeat_sweep failed: %s", exc, exc_info=True)
+            return {"mcp_heartbeat_sweep": False, "error": str(exc)}
+        self._last_mcp_heartbeat_sweep = now
+        return {"mcp_heartbeat_live": len(recs)}
 
     # -- Session-4 AI-adjudication review (graph-hygiene findings) ------------
 
@@ -3922,6 +3960,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "resolve_entities_interval_s":    86400.0,   # Task 3.3: daily deterministic entity dedup (issue #23-fix validated)
     "review_interval_s":              86400.0,   # Session-4: daily AI-adjudicated graph-hygiene review
     "action_hygiene_interval_s":      86400.0,   # daily actions sweep: TTL + duplicate collapse
+    "mcp_heartbeat_sweep_interval_s": 3600.0,    # hourly: prune dead-pid mcp_heartbeat/*.json
     "salience_score_interval_s":      86400.0,   # B3: daily structural salience
     "decay_pass_interval_s":          86400.0,   # B5: nightly decay pass
     "consolidation_interval_s":       86400.0,   # B4: nightly consolidation
@@ -3953,6 +3992,7 @@ _CADENCE_KEYS = (
     "resolve_entities_interval_s",
     "review_interval_s",
     "action_hygiene_interval_s",
+    "mcp_heartbeat_sweep_interval_s",
     "salience_score_interval_s",
     "decay_pass_interval_s",
     "consolidation_interval_s",
@@ -4090,6 +4130,7 @@ def main(argv=None) -> None:
     daemon._org_backfill_interval_s = cadences["org_backfill_interval_s"]
     daemon._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
     daemon._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
+    daemon._mcp_heartbeat_sweep_interval_s = cadences["mcp_heartbeat_sweep_interval_s"]
     daemon._review_interval_s = cadences["review_interval_s"]
     daemon._salience_score_interval_s = cadences["salience_score_interval_s"]
     daemon._decay_pass_interval_s = cadences["decay_pass_interval_s"]
