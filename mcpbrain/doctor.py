@@ -25,6 +25,8 @@ import shutil
 import sys
 from datetime import datetime, timezone
 
+from mcpbrain.mcp_server import live_version_records
+
 # Probe key -> disposition. "auto" keys carry the repair-dispatch key to call;
 # "guided" keys carry the remedy string to print. Keys absent here are reported
 # verbatim with no action.
@@ -339,6 +341,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
     lines.append(arch_line())
 
+    drift_line = version_drift_line(home)
+    if drift_line is not None:
+        lines.append(drift_line)
+
     # OCR availability. Without tesseract, scanned/image-only PDFs are indexed
     # with an empty text layer and nothing says so outside a per-file log line
     # during ingestion — which is how this stayed off on every install for
@@ -481,6 +487,36 @@ def arch_line(os_arch: str | None = None) -> str:
     else:
         glyph, state = "⚠️", "MISMATCH (emulated interpreter?)"
     return f"{glyph} {'Architecture':<16} OS={os_arch} interpreter={interp} → {state}"
+
+
+def version_drift_line(home, installed: str | None = None) -> str | None:
+    """One doctor line naming any live MCP server(s) running superseded code,
+    or None when there is nothing to say.
+
+    A live MCP server executes the code it started with for its whole life —
+    nothing signals it on update — so a shipped fix reaches a user only on
+    their next client restart, not when the wheel lands. doctor previously
+    reported only the installed version and looked green while a connected
+    server ran stale code underneath it.
+
+    Silent (None) both when no MCP server is currently running (that is not a
+    drift problem — doctor's other checks already cover connectivity) and
+    when every live server matches `installed`. `installed` defaults to the
+    installed package version.
+    """
+    if installed is None:
+        import importlib.metadata
+        installed = importlib.metadata.version("mcpbrain")
+    recs = live_version_records(home)
+    if not recs:
+        return None
+    stale_versions = sorted({r.get("version") for r in recs if r.get("version") != installed})
+    if not stale_versions:
+        return None
+    stale_count = sum(1 for r in recs if r.get("version") != installed)
+    return (f"⚠️  {'MCP version':<16} {stale_count} live server(s) on "
+            f"{', '.join(stale_versions)}, installed is {installed} — "
+            f"restart Claude Desktop to pick up {installed}")
 
 
 def _agent_installed(home, platform) -> bool:
