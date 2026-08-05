@@ -10,13 +10,28 @@
 
 **Specs:** `docs/superpowers/specs/2026-08-04-tool-specs-consolidation-design.md`, `docs/superpowers/specs/2026-08-04-mcp-server-process-lifecycle.md`
 
+## Status as of 2026-08-05 — Phase 1 (Tasks 1-3) is DONE, plus an unplanned seam fix
+
+**A fresh session must not re-run Tasks 1-3.** They landed as `c3dba07`, `b62a1d6`, `4288dc3`, reviewed and approved. **Read this section before touching anything** — it changes facts later tasks were written against.
+
+**The Phase 1 review found the registry seam was only partial** (`ToolSpec.annotations` held live `mcp.types.ToolAnnotations` instances, which forced the 24 factories to stay in an `mcp`-importing module). That was fixed as an **unplanned addition**, `4635616` + `6a9d7cb` + a follow-up `cc4b139`, before Phase 2/3 work began:
+
+- **`mcpbrain/tools.py` is a new file** (not in this plan's original File Structure table) holding all **24 `make_brain_*` factories** and all 26 `@tool`/`declare()` registrations. It is `mcp`-free, AST-guarded (`tests/test_tool_registry.py`'s `test_tools_module_imports_nothing_heavy`), and importing it costs **143 modules / ~11ms with zero `mcp`/pydantic/starlette/uvicorn/anyio** — measured, not estimated.
+- **`mcpbrain/mcp_server.py` shrank from 2151 → 835 lines** and now contains *only* protocol/dispatch (`build_server`, `on_call_tool`, `main`, resources, prompts, the progress reporter, the resource watcher). It imports `mcpbrain.tools` to reach the factories and the populated registry.
+- **`ToolSpec.annotations` is a stdlib frozen dataclass** (`mcpbrain.tool_registry.ToolAnnotations`, same 5 field names as the SDK type), converted to the real `mcp.types.ToolAnnotations` only at the `tools/list` wire boundary in `on_call_tool`/`on_list_tools`. `from mcp import types` is back to function-local everywhere in `mcp_server.py`.
+- **The corrected `on_call_tool` return count is 4, not 3** — see the Global Constraints fix below.
+
+**This directly answers Task 9 Step 3's open question** ("decide where the handler functions live so the daemon can reach them without importing the MCP surface") — see that task for the resolution.
+
+Anywhere below this line still says `mcpbrain/mcp_server.py:220-1150` for factory locations, or a bare `grep ... mcpbrain/mcp_server.py` for `make_brain_`, that is now **`mcpbrain/tools.py`** — fixed inline below where it mattered, but if you find another stale reference, trust `tools.py`, not the old text.
+
 ## Global Constraints
 
 - **NO `pytest-asyncio` in this repo.** `@pytest.mark.asyncio` is an unknown mark — the async body is never awaited and the test **passes while asserting nothing**. Use plain sync tests driving `asyncio.run(...)`. Prove it with `-W error::RuntimeWarning`.
 - **Shared test machinery lives in `tests/conftest.py`**: `mcp_env`, `protocol_session` (an `@asynccontextmanager` **factory**, optional `message_handler`), `protocol_session_with_progress`, `list_tools_via_handler`. Use them; do not duplicate or relocate.
 - **`brain_enrich_push`'s `inputSchema` is GENERATED** from `_PUSH_BLOCKS` via `push_input_schema()`, and its handler absorbs keys via `**blocks`. Never replace with type-hint inference.
 - **The `None` vs `[]` distinction must survive.** `extractions` stays `None` when absent (four guards depend on it). `_validate_tool_arguments` must never inject defaults or mutate the arguments dict.
-- **`on_call_tool` invariant:** exactly 3 `return`s (validation early-return, `brain_actions` early-return, one final) and exactly 1 `except ValueError`, wrapping **only** the `_validate_tool_arguments` call. A blanket catch around the dispatch would dress a real handler bug as a tidy error result.
+- **`on_call_tool` invariant:** exactly **4** `return`s (validation early-return, `brain_actions` early-return, the unknown-tool `isError` return, one final — corrected from this plan's original "3" during the Phase 1 review, which found and pinned the real count by AST) and exactly 1 `except ValueError`, wrapping **only** the `_validate_tool_arguments` call. A blanket catch around the dispatch would dress a real handler bug as a tidy error result.
 - **Validation failures return `isError`, not a raised exception** (a bare `ValueError` gets `code=0` plus a ~20-line traceback into the fleet's MCP log). Ruled 2026-08-04.
 - **`mcpbrain/mcp_server.py` must stay free of native/heavy imports.** `tests/test_mcp_server_no_native.py` AST-scans it for `get_embedder`/`hybrid_search` and asserts no `fastembed`/`onnxruntime` loads on import; `embedder_dim` stays function-local in `main()`.
 - **All 26 tool descriptions preserved byte-identical.** They are the documentation the model reads; `brain_gardener_apply`'s carries a real usage constraint.
@@ -55,7 +70,7 @@ stderr:       0 bytes
 **Move behind `/api/tool` (hold a `Store` handle today):**
 `brain_read`, `brain_context`, `brain_actions`, `brain_graph`, `brain_proactive`, `brain_finding_resolve`, `brain_draft_context`, `brain_draft_save`, `brain_meetings_today`, `brain_meeting_pack_get`, `brain_meeting_pack_upsert`, `brain_gardener_apply`
 
-> **Verify this list against the code before relying on it** (Task 6 Step 1). It was derived from which `make_brain_*` factories take a `store`/`draft_store` argument at `mcpbrain/mcp_server.py:220-1150`. `brain_gardener_apply` takes `store` only for `_verify_role_attribution`; `brain_meetings_today` takes both `store` and `home`. If a tool's real Store usage differs from this list, **report it and stop** — the whole design rests on this seam.
+> **Verify this list against the code before relying on it** (Task 6 Step 1). It was derived from which `make_brain_*` factories take a `store`/`draft_store` argument, originally at `mcp_server.py:220-1150` — **that code now lives in `mcpbrain/tools.py`** (moved by the post-Phase-1 seam fix; re-verify against that file, not `mcp_server.py`, which no longer contains any `make_brain_*` factory). `brain_gardener_apply` takes `store` only for `_verify_role_attribution`; `brain_meetings_today` takes both `store` and `home`. If a tool's real Store usage differs from this list, **report it and stop** — the whole design rests on this seam.
 
 ---
 
@@ -63,16 +78,17 @@ stderr:       0 bytes
 
 | File | Responsibility | Change |
 |---|---|---|
-| `mcpbrain/tool_registry.py` | **New.** `ToolSpec`, the `@tool` decorator, the registry, and the immutability guard. No MCP or Store imports — importable by both the MCP server and the daemon. | Create |
-| `mcpbrain/mcp_server.py` | Protocol surface. Gains `@tool` decorations; loses the four mappings; loses unconditional `Store` construction. | Modify |
+| `mcpbrain/tool_registry.py` | `ToolSpec`, the `@tool`/`declare` decorator, the registry, the immutability guard, and (added by the seam fix) a stdlib `ToolAnnotations` dataclass mirroring the SDK type's 5 fields. `mcp`-free, AST-guarded. | **DONE** (Phase 1 + seam fix) |
+| `mcpbrain/tools.py` | **DONE, not in the original plan.** All 24 `make_brain_*` factories + all 26 declarations, moved out of `mcp_server.py` by the seam fix so a daemon-side importer pays zero `mcp`/protocol cost (measured: 143 modules/~11ms). `mcp`-free, AST-guarded the same way as `tool_registry.py`. **Phase 4 (Task 9-10) modifies THIS file**, not `mcp_server.py`, to add daemon-execution wiring — update every "Modify: mcpbrain/mcp_server.py" below that actually means routing/dispatch changes to read "and/or `mcpbrain/tools.py`" and decide per-task which file the change belongs in. | Modify (Phase 4) |
+| `mcpbrain/mcp_server.py` | Protocol surface only (`build_server`, `on_call_tool`, `main`, resources, prompts, progress). Already shrank 2151→835 lines when the factories moved out. Loses unconditional `Store` construction (Phase 4). | Modify |
 | `mcpbrain/control_api.py` | Gains `POST /api/tool`. | Modify |
 | `mcpbrain/control_client.py` | Gains `call_tool(name, arguments)`. | Modify |
-| `mcpbrain/daemon.py` | Executes registry handlers for the endpoint. | Modify |
+| `mcpbrain/daemon.py` | Imports `mcpbrain.tools` directly to execute registry handlers for the endpoint — this is now concretely possible and measured cheap; see Task 9 Step 3. | Modify |
 | `mcpbrain/doctor.py` | Gains the version-drift check. | Modify |
-| `tests/test_tool_registry.py` | **New.** Registry semantics + immutability. | Create |
-| `tests/test_mcp_wire_snapshot.py` | **New.** The snapshot gate above, as assertions. | Create |
-| `tests/test_tool_exec_routing.py` | **New.** Flag on/off routing, daemon-down behaviour. | Create |
-| `tests/test_doctor_version_drift.py` | **New.** Drift check with faked records. | Create |
+| `tests/test_tool_registry.py` | Registry semantics + immutability + the `mcp`-free AST guards for both `tool_registry.py` and `tools.py`. | **DONE** (Phase 1 + seam fix) |
+| `tests/test_mcp_wire_snapshot.py` | The snapshot gate, as assertions. | **DONE** (Phase 1) |
+| `tests/test_tool_exec_routing.py` | Flag on/off routing, daemon-down behaviour. | Create (Phase 4) |
+| `tests/test_doctor_version_drift.py` | Drift check with faked records. | Create (Phase 2) |
 
 ---
 
@@ -621,16 +637,16 @@ Without a baseline the Task 11 gate is unfalsifiable. And because the flag defau
 - [ ] **Step 1: Verify the move-list against the code**
 
 ```bash
-grep -n "^def make_brain_" mcpbrain/mcp_server.py
+grep -n "^def make_brain_" mcpbrain/tools.py
 ```
-For each of the 24 factories, record whether it takes `store`/`draft_store`. Compare against the plan's **Tool inventory** section. **If the lists disagree, stop and report** — the whole design rests on this seam. Write the finding into `tests/test_tool_seam.py` as an executable assertion:
+(**Not** `mcp_server.py` — the seam fix moved all 24 factories to `mcpbrain/tools.py`; `mcp_server.py` now contains zero `make_brain_*` definitions. If this grep against `tools.py` returns fewer than 24, something has changed since this note was written — stop and re-read `## Status as of 2026-08-05` above.) For each of the 24 factories, record whether it takes `store`/`draft_store`. Compare against the plan's **Tool inventory** section. **If the lists disagree, stop and report** — the whole design rests on this seam. Write the finding into `tests/test_tool_seam.py` as an executable assertion:
 
 ```python
 def test_the_store_touching_set_is_exactly_what_the_plan_assumes():
     """Pins the seam. If a tool gains or loses Store access, this fails loudly
     rather than silently changing which side of the adapter it belongs on."""
     import inspect
-    from mcpbrain import mcp_server as ms
+    from mcpbrain import tools as ms   # factories live here, not mcp_server, since the seam fix
 
     STORE_TOUCHING = {
         "brain_read", "brain_context", "brain_actions", "brain_graph",
@@ -725,8 +741,10 @@ Append the finding to `docs/superpowers/specs/2026-08-04-mcp-server-process-life
 ### Task 9: `POST /api/tool`, `ControlClient.call_tool`, and one tool routed
 
 **Files:**
-- Modify: `mcpbrain/control_api.py`, `mcpbrain/control_client.py`, `mcpbrain/daemon.py`, `mcpbrain/mcp_server.py`, `mcpbrain/config.py`
+- Modify: `mcpbrain/control_api.py`, `mcpbrain/control_client.py`, `mcpbrain/daemon.py`, `mcpbrain/mcp_server.py`, `mcpbrain/tools.py`, `mcpbrain/config.py`
 - Create: `tests/test_tool_exec_routing.py`
+
+`mcpbrain/tools.py` is in scope because it holds the 24 factories `daemon.py` needs to call — decide per-tool whether the routing branch belongs in `mcp_server.py`'s dispatch (calling `ControlClient.call_tool` instead of the local factory) or in `tools.py` itself, and be consistent across Task 9 and Task 10.
 
 **Interfaces:**
 - Produces: `POST /api/tool` accepting `{"name": str, "arguments": dict}` → `200 {"result": <handler return>}` or an error body; `ControlClient.call_tool(name, arguments) -> Any` raising `DaemonUnavailable`; `config.tool_exec_in_daemon(home) -> bool` delegating to `fleet_flag(home, "tool_exec_in_daemon", default=True)`.
@@ -781,7 +799,9 @@ Expected: FAIL — `config.tool_exec_in_daemon` does not exist.
 
 - [ ] **Step 3: Implement the endpoint, the client method, and the flag**
 
-Follow the existing `control_api.py` shape (`if h.path == "/api/tool":` beside the others at `:323-380`) and return via the same `h_json(h, 200, {...})` helper. The daemon executes by looking the handler up in the registry — it must **not** import `mcp_server`'s protocol layer to do so; that is what `tool_registry.py` being MCP-free is for. Decide and document where the handler *functions* live so the daemon can reach them without importing the MCP surface, and report the choice.
+Follow the existing `control_api.py` shape (`if h.path == "/api/tool":` beside the others at `:323-380`) and return via the same `h_json(h, 200, {...})` helper.
+
+**This step's original open question — "decide and document where the handler functions live so the daemon can reach them without importing the MCP surface" — is now answered by the post-Phase-1 seam fix**, before this task ever ran: the handler factories already live in `mcpbrain/tools.py`, which is `mcp`-free and AST-guarded, and importing it measures **143 modules / ~11ms with zero mcp/pydantic/starlette/uvicorn/anyio**. So `daemon.py` should `import mcpbrain.tools` (and, to read tool metadata, `mcpbrain.tool_registry`) directly — nothing more to design here. Confirm this still holds (`grep -n "^def make_brain_" mcpbrain/tools.py` should show 24, and `python -c "import mcpbrain.tools"` should stay cheap) before wiring the endpoint; if either has drifted, stop and report rather than assuming the seam is still intact.
 
 Validation stays at the **MCP server** boundary (it is the protocol boundary, and failures must return `isError`). The daemon re-validates defensively; a mismatch between the two is a bug worth failing loudly on.
 
