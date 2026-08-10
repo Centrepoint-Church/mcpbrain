@@ -378,22 +378,49 @@ def encrypt_file(in_path, out_path, key: bytes, *,
     return Path(out_path)
 
 
+def _live_bytes(store_path) -> int:
+    """Bytes of LIVE data in the store — page_count minus freelist, times
+    page_size.
+
+    snapshot() uses VACUUM INTO, whose output contains only live pages, so this
+    is what the temp copy will cost. The file's own size is the wrong number:
+    re-keying enrich_payloads frees ~11.3GB onto the freelist without shrinking
+    the file, and sizing from stat() would keep refusing backups that now fit.
+    Falls back to the file size if the PRAGMAs cannot be read — refusing to
+    back up is worse than over-estimating.
+    """
+    try:
+        db = _open_db(store_path, read_only=False)
+    except sqlite3.DatabaseError:
+        return Path(store_path).stat().st_size
+    try:
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        page_count = db.execute("PRAGMA page_count").fetchone()[0]
+        freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+    except sqlite3.DatabaseError:
+        return Path(store_path).stat().st_size
+    finally:
+        db.close()
+    return max(0, page_count - freelist) * page_size
+
+
 def _require_free_space(work_dir, out_path, store_path) -> None:
     """Refuse to start a snapshot that cannot fit. Raises OSError(ENOSPC).
 
-    make_encrypted_snapshot's dominant cost is one full copy of the store in
-    the temp dir; the encrypted artifact then lands at out_path. Neither is
-    small — on the live store that is ~11.9GB and ~4.2GB. Running the system
-    disk to zero takes down far more than the backup (2026-08-03: 57 failures
-    in a day, each an ENOSPC part-way through, each leaving an orphaned work
-    dir). Checking up front converts that into one clean, logged, backed-off
-    failure per interval.
+    make_encrypted_snapshot's dominant cost is one snapshot of the store in the
+    temp dir; the encrypted artifact then lands at out_path. Neither is small.
+    Both are sized from LIVE data (see _live_bytes), not the store file: after
+    the enrich_payloads re-key the file keeps ~11.3GB of freelist that
+    VACUUM INTO never copies. Running the system disk to zero takes down far
+    more than the backup (2026-08-03: 57 failures in a day, each an ENOSPC
+    part-way through, each leaving an orphaned work dir). Checking up front
+    converts that into one clean, logged, backed-off failure per interval.
 
     The output ceiling is deliberately generous: on the live store the
     compressed+encrypted artifact is ~36% of the raw store, so 50% leaves room
     for a less compressible corpus without demanding space we will not use.
     """
-    store_bytes = Path(store_path).stat().st_size
+    store_bytes = _live_bytes(store_path)
     temp_need = int(store_bytes * 1.15)   # the store copy, plus slack
     out_need = int(store_bytes * 0.5)     # compressed+encrypted ceiling
     out_dir = Path(out_path).parent
