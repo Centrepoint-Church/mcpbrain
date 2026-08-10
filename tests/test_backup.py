@@ -2055,3 +2055,28 @@ def test_verify_artifact_no_ops_when_the_store_has_no_vec0_table_at_all(tmp_path
 
     out = snapshot(store.path, tmp_path / "snap.sqlite3")
     assert out.exists()
+
+
+def test_free_space_preflight_sizes_from_live_pages_not_file_size(tmp_path, monkeypatch):
+    """After the enrich_payloads re-key the store file stays large while most
+    of it is freelist. VACUUM INTO's output tracks LIVE pages, so an estimate
+    based on stat().st_size would keep refusing a backup that now fits."""
+    import mcpbrain.backup as backup_mod
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    for i in range(4000):
+        store.upsert_chunk(f"d-{i}", "x" * 2000, f"h{i}", {})
+    store.delete_chunks([f"d-{i}" for i in range(3600)])   # big freelist, no VACUUM
+
+    file_bytes = Path(store.path).stat().st_size
+    live_bytes = backup_mod._live_bytes(store.path)
+    assert live_bytes < file_bytes * 0.7, (
+        f"NULL INSTRUMENT: freelist too small to tell the two apart "
+        f"(live={live_bytes} file={file_bytes})")
+
+    class _Usage:
+        free = int(live_bytes * 2.0)       # room for live data, not for the file
+
+    monkeypatch.setattr(backup_mod.shutil, "disk_usage", lambda p: _Usage)
+    backup_mod._require_free_space(tmp_path, tmp_path / "out.enc", store.path)
