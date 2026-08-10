@@ -490,8 +490,8 @@ def _validate_tool_arguments(name: str, arguments: dict) -> None:
         raise ValueError(f"invalid arguments for {name}: {field}: {exc.message}") from exc
 
 
-class _DaemonUnreachable:
-    """A routed tool's "the daemon is not running" outcome, carried as a VALUE.
+class _RoutedCallFailed:
+    """A routed tool's "no result from the daemon" outcome, carried as a VALUE.
 
     Not an exception, and not an early return, because `on_call_tool` holds a
     deliberate invariant: exactly four `return`s and exactly one `except
@@ -503,10 +503,18 @@ class _DaemonUnreachable:
     treatment a validation failure gets, for the same reason (a raised exception
     would put a ~20-line traceback in the fleet's MCP log with code=0).
 
-    Only ever produced for DaemonUnavailable. A daemon-side handler fault raises
-    ToolExecutionError and propagates exactly as a local handler's exception
-    would, so routing does not change what a genuine bug looks like -- and the
-    daemon has already logged that traceback on its own side.
+    Only ever produced for DaemonUnavailable -- including its DaemonTimeout
+    subclass, which carries a DIFFERENT message (see `run_tool`): "the daemon is
+    not running, run doctor" is the wrong advice for a daemon that answered the
+    connection and then blocked inside one handler, and the two are told apart
+    here rather than in the message the model reads. Hence the deliberately
+    outcome-shaped name: this carries either, and a name asserting "unreachable"
+    would be a lie for one of them.
+
+    A daemon-side handler fault raises ToolExecutionError and propagates exactly
+    as a local handler's exception would, so routing does not change what a
+    genuine bug looks like -- and the daemon has already logged that traceback on
+    its own side.
     """
 
     __slots__ = ("message",)
@@ -750,23 +758,43 @@ def build_server(store, draft_store, client, home: str):
         stays connected, so a kill switch latched at construction would not take
         effect until every user restarted their client.
 
-        Never raises for an absent daemon -- it returns _DaemonUnreachable; see
+        Never raises for an absent daemon -- it returns _RoutedCallFailed; see
         that class for why the error is a value and not a fifth `return`.
         """
         import asyncio
         import inspect
 
         if config.tool_exec_in_daemon(home):
-            from mcpbrain.control_client import DaemonUnavailable
+            from mcpbrain.control_client import DaemonTimeout, DaemonUnavailable
             try:
                 # to_thread, not a bare call: client.call_tool is a blocking
                 # urllib request with a 120s ceiling, and running it on the event
                 # loop would stall this session's progress notifications and
                 # every other in-flight request for its whole duration.
                 return await asyncio.to_thread(client.call_tool, name, arguments)
+            # DaemonTimeout FIRST: it subclasses DaemonUnavailable, so the broader
+            # handler below would otherwise claim the daemon is not running when
+            # in fact it accepted the call and never came back. Two routed tools
+            # can genuinely block past the 120s ceiling -- brain_gardener_apply
+            # shells out to git (indefinite on a stale records-repo
+            # `.git/index.lock`) and brain_meetings_today makes a live Calendar
+            # call -- and in both cases `mcpbrain doctor` reports a HEALTHY daemon,
+            # so the unreachable advice sends the user chasing a restart that does
+            # not address the stuck child process.
+            except DaemonTimeout as exc:
+                _log.warning("tool %s: daemon reached, no answer in time (%s)",
+                             name, exc)
+                return _RoutedCallFailed(
+                    f"{name} runs in the mcpbrain daemon, which accepted the call "
+                    f"but did not answer in time ({exc}). The daemon itself is "
+                    "running -- this call is slow or stuck. Likely causes: a stale "
+                    "`.git/index.lock` in the records repo (blocks the git-backed "
+                    "writes indefinitely), or a hung network call. Other tools, "
+                    "and the capture tools, keep working."
+                )
             except DaemonUnavailable as exc:
                 _log.warning("tool %s: daemon unreachable (%s)", name, exc)
-                return _DaemonUnreachable(
+                return _RoutedCallFailed(
                     f"{name} runs in the mcpbrain daemon, which is not reachable "
                     f"({exc}). Check the daemon is running (`mcpbrain doctor`). "
                     "The capture tools keep working without it."
@@ -1045,13 +1073,14 @@ def build_server(store, draft_store, client, home: str):
         # describes — a declared schema the tool then violates (e.g. by
         # returning a list) would be worse than no schema at all.
         #
-        # _DaemonUnreachable is the routed path's "the daemon is not running"
-        # value (see the class). It is reported here rather than by a return of
-        # its own so on_call_tool keeps its four-return invariant, and its text is
-        # the plain message -- not json.dumps'd -- matching the validation
+        # _RoutedCallFailed is the routed path's "the daemon returned no result"
+        # value (see the class; it carries either the unreachable or the
+        # timed-out-mid-call message). It is reported here rather than by a return
+        # of its own so on_call_tool keeps its four-return invariant, and its text
+        # is the plain message -- not json.dumps'd -- matching the validation
         # failure above, which is the other isError this function produces.
         result_kwargs = {}
-        if isinstance(out, _DaemonUnreachable):
+        if isinstance(out, _RoutedCallFailed):
             text = out.message
             result_kwargs["isError"] = True
         else:

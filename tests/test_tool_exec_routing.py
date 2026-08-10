@@ -277,6 +277,49 @@ def test_the_client_reports_an_absent_daemon_as_unavailable(tmp_path):
         ControlClient(home=tmp_path).call_tool("brain_read", {"doc_id": "d-4"})
 
 
+def test_a_stuck_handler_is_a_timeout_not_an_absent_daemon(tmp_path, monkeypatch):
+    """A running daemon that never answers must not be reported as missing.
+
+    `socket.timeout` IS `TimeoutError` IS `OSError`, so the read timeout lands in
+    the same handler as ECONNREFUSED unless it is classified first -- and Task 10
+    routed two tools that can genuinely block past TOOL_CALL_TIMEOUT_S:
+    brain_gardener_apply shells out to git with NO timeout (indefinite on a stale
+    records-repo `.git/index.lock`, as drain.py's own comment documents) and
+    brain_meetings_today makes a live Calendar call.
+
+    The blocked handler thread here IS the production shape: ThreadingHTTPServer
+    means one wedged call does not wedge the control API, which is exactly why
+    "the daemon is not running" would be a false diagnosis.
+    """
+    import threading
+
+    from mcpbrain.control_client import ControlClient, DaemonTimeout, DaemonUnavailable
+
+    released = threading.Event()
+
+    class _Stuck:
+        def call_tool(self, name, arguments):
+            released.wait(30)   # like git on a stale index.lock; bounded so a
+            return {"applied": True}   # failing test cannot hang the suite
+
+    monkeypatch.setattr(ControlClient, "TOOL_CALL_TIMEOUT_S", 0.5)
+    srv = ControlServer(_Stuck(), home=str(tmp_path))
+    srv.start()
+    try:
+        with pytest.raises(DaemonTimeout) as caught:
+            ControlClient(home=tmp_path).call_tool(
+                "brain_gardener_apply", _MINIMAL_ARGS["brain_gardener_apply"])
+    finally:
+        released.set()
+        srv.stop()
+
+    # Still a DaemonUnavailable: the tray, is_running() and recall() all act on
+    # "did I get an answer?" alone, and turning this into a sibling class would
+    # convert their `except DaemonUnavailable` into an uncaught raise.
+    assert isinstance(caught.value, DaemonUnavailable)
+    assert "0.5s" in str(caught.value), caught.value
+
+
 # --- 3. the MCP-side routing decision, over a real stdio session ------------
 
 def test_routed_tool_reaches_the_daemon(protocol_session):
@@ -846,3 +889,65 @@ def test_a_progress_tool_still_works_with_the_flag_on_and_no_daemon(protocol_ses
             assert json.loads(result.content[0].text) == {}
 
     asyncio.run(_run())
+
+
+# --- 7. a stuck routed call must not be diagnosed as an absent daemon -------
+
+def test_the_stuck_and_absent_diagnoses_differ_at_the_mcp_boundary(tmp_path, monkeypatch):
+    """The two failure modes must be told apart in what the MODEL/user reads.
+
+    Both are isError results, so a caller can only act on the text. If a stuck
+    call said "not reachable, check the daemon is running (`mcpbrain doctor`)" the
+    user would restart a daemon that doctor reports healthy, while the real cause
+    -- a git child blocked on a stale `.git/index.lock`, or a hung Calendar call
+    -- sat there untouched. Driven through the real dispatch layer so the
+    classification is proven where it is consumed, not just where it is raised.
+    """
+    import threading
+
+    from mcpbrain.control_client import ControlClient
+
+    released = threading.Event()
+
+    class _Stuck:
+        def call_tool(self, name, arguments):
+            released.wait(30)
+            return {"applied": True}
+
+    monkeypatch.setattr(ControlClient, "TOOL_CALL_TIMEOUT_S", 0.5)
+    _counter, call = _lazy_env(tmp_path, monkeypatch)
+    args = _MINIMAL_ARGS["brain_gardener_apply"]
+
+    srv = ControlServer(_Stuck(), home=str(tmp_path))
+    srv.start()
+    try:
+        stuck = asyncio.run(call("brain_gardener_apply", args))
+    finally:
+        released.set()
+        srv.stop()
+    # Same home, same tool, same arguments -- only the daemon is gone now, so any
+    # difference below is the classification and nothing else. Repointed at a
+    # port nothing listens on rather than relying on srv.stop(), which only ends
+    # the serve_forever loop and leaves the listening socket accepting into its
+    # backlog -- so the client would time out again instead of being refused.
+    # ECONNREFUSED is also the case that must NOT be read as a timeout, so this
+    # exercises both sides of the new branch.
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    (tmp_path / "control_port").write_text(str(dead_port))
+    absent = asyncio.run(call("brain_gardener_apply", args))
+
+    stuck_text = " ".join(c.text for c in stuck.content)
+    absent_text = " ".join(c.text for c in absent.content)
+    assert stuck.is_error and absent.is_error, (stuck, absent)
+    assert stuck_text != absent_text, stuck_text
+    # The stuck message says the daemon IS up and points at the real causes...
+    assert "did not answer in time" in stuck_text, stuck_text
+    assert "index.lock" in stuck_text, stuck_text
+    # ...and must NOT repeat the absent-daemon advice, which is the actual bug.
+    assert "not reachable" not in stuck_text, stuck_text
+    assert "mcpbrain doctor" not in stuck_text, stuck_text
+    # The absent case is unchanged: still the doctor advice it has always given.
+    assert "not reachable" in absent_text and "mcpbrain doctor" in absent_text, absent_text
