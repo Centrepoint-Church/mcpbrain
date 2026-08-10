@@ -215,6 +215,12 @@ def _verify_artifact(out_path) -> None:
         if not rowids:
             return
 
+        has_vec_table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+        ).fetchone()
+        if not has_vec_table:
+            return                      # no vec0 table: nothing to verify
+
         lengths = set()
         for rid in rowids:
             try:
