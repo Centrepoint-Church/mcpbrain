@@ -386,19 +386,26 @@ def _live_bytes(store_path) -> int:
     is what the temp copy will cost. The file's own size is the wrong number:
     re-keying enrich_payloads frees ~11.3GB onto the freelist without shrinking
     the file, and sizing from stat() would keep refusing backups that now fit.
-    Falls back to the file size if the PRAGMAs cannot be read — refusing to
-    back up is worse than over-estimating.
+    Falls back to the file size if the store doesn't exist or the PRAGMAs cannot
+    be read — refusing to back up is worse than over-estimating.
     """
+    store_path = Path(store_path)
+    # Don't call sqlite3.connect if the path doesn't exist, since connect()
+    # auto-creates an empty file immediately, and the PRAGMAs then succeed
+    # against that empty DB (page_count=0, freelist=0), returning 0 -- which is
+    # wrong and unsafe. Let stat().st_size raise FileNotFoundError naturally.
+    if not store_path.exists():
+        return store_path.stat().st_size
     try:
         db = _open_db(store_path, read_only=False)
     except sqlite3.DatabaseError:
-        return Path(store_path).stat().st_size
+        return store_path.stat().st_size
     try:
         page_size = db.execute("PRAGMA page_size").fetchone()[0]
         page_count = db.execute("PRAGMA page_count").fetchone()[0]
         freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
     except sqlite3.DatabaseError:
-        return Path(store_path).stat().st_size
+        return store_path.stat().st_size
     finally:
         db.close()
     return max(0, page_count - freelist) * page_size
