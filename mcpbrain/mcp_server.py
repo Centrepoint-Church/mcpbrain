@@ -776,8 +776,13 @@ def build_server(store, draft_store, client, home: str):
             # handler below would otherwise claim the daemon is not running when
             # in fact it accepted the call and never came back. Two routed tools
             # can genuinely block past the 120s ceiling -- brain_gardener_apply
-            # shells out to git (indefinite on a stale records-repo
-            # `.git/index.lock`) and brain_meetings_today makes a live Calendar
+            # shells out to git with no subprocess timeout (a stale records-repo
+            # `.git/index.lock` is NOT that hang: records_write._git runs only
+            # add/commit, so the lock makes git fail fast with CalledProcessError,
+            # which the handler already reports as "git busy (retry next run)" --
+            # the genuine, low-probability hangs are an interactive gpg-signing
+            # pinentry prompt and a blocking repo hook) and
+            # brain_meetings_today makes a live Calendar
             # call -- and in both cases `mcpbrain doctor` reports a HEALTHY daemon,
             # so the unreachable advice sends the user chasing a restart that does
             # not address the stuck child process.
