@@ -2023,3 +2023,35 @@ def test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve(tmp_path, mon
     with pytest.raises(RuntimeError, match="vector"):
         snapshot(store.path, out)
     assert not out.exists(), "a failed artifact must not be left behind"
+
+
+def test_verify_artifact_no_ops_when_the_store_has_no_vec0_table_at_all(tmp_path):
+    """A store can have embedded=1 chunks with NO vec0 table at all -- e.g. a
+    pre-vec0 schema, or one where the virtual table was dropped/never created.
+    That is exactly the "already-broken store" case the docstring calls out
+    (bin/repair.py must still be able to snapshot it): the probe has nothing
+    to say and must no-op, not raise.
+
+    Distinct from test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve,
+    where vec_chunks EXISTS but a specific row's vector is missing -- that is a
+    real hazard and must keep raising. Here the table itself never existed.
+    """
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+
+    db = _open_db(store.path, read_only=False)
+    try:
+        db.execute("UPDATE chunks SET embedded=1 WHERE doc_id='d1'")
+        db.execute("DROP TABLE vec_chunks")
+        db.commit()
+    finally:
+        db.close()
+
+    _verify_artifact(store.path)   # must not raise
+
+    out = snapshot(store.path, tmp_path / "snap.sqlite3")
+    assert out.exists()
