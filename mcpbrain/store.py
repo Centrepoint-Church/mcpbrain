@@ -2754,6 +2754,76 @@ class Store:
                            "WHERE file_id=?", (file_id,)).fetchone()
         return {"payload": r["payload"], "logic_version": r["logic_version"]} if r else None
 
+    def migrate_enrich_payloads_batch(self, limit: int = 200) -> dict:
+        """Move up to `limit` Drive files' cached payloads out of the legacy
+        doc_id-keyed table, deleting the legacy rows as it goes. Drops the
+        legacy table once empty. Returns {"migrated", "deleted", "done"}.
+
+        Incremental because the work is genuinely large: on the live store the
+        legacy table is 13.5GB, and deleting a row means freeing its overflow
+        chain. Runs on the daemon's maintenance cadence, never on init() and
+        never inside the backup path.
+
+        THE KEEPER IS THE HIGHEST CHUNK INDEX PER FILE, NOT THE HIGHEST
+        logic_version, and that is deliberate. Reading logic_version means
+        reading past the `payload` column and traversing the very overflow
+        pages this exists to reclaim, whereas ordering on doc_id alone is
+        served by the primary-key index. Every row for a file is written in one
+        loop and shares a logic_version in the normal case; where they differ
+        (the file grew between enrichments) the highest chunk index is the
+        newer. Worst case is one cache miss and one re-enrichment -- the table
+        is a regenerable cache, not user data.
+        """
+        with self._connect(write=True) as db:
+            if db.execute("SELECT count(*) FROM sqlite_schema WHERE type='table' "
+                          "AND name='enrich_payloads_legacy'").fetchone()[0] == 0:
+                return {"migrated": 0, "deleted": 0, "done": True}
+
+            # doc_id only: covered by the primary-key index, so this does not
+            # touch the payload overflow pages.
+            doc_ids = [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM enrich_payloads_legacy ORDER BY doc_id").fetchall()]
+            if not doc_ids:
+                db.execute("DROP TABLE enrich_payloads_legacy")
+                return {"migrated": 0, "deleted": 0, "done": True}
+
+            keeper: dict[str, str] = {}
+            unkeyed: list[str] = []
+            for d in doc_ids:
+                fid = _file_key_from_doc_id(d)
+                if fid is None:
+                    unkeyed.append(d)
+                elif fid not in keeper or d > keeper[fid]:
+                    keeper[fid] = d
+
+            batch = sorted(keeper.items())[:limit]
+            migrated = 0
+            for fid, doc_id in batch:
+                row = db.execute("SELECT payload, logic_version FROM "
+                                 "enrich_payloads_legacy WHERE doc_id=?",
+                                 (doc_id,)).fetchone()
+                if row is None:
+                    continue
+                # INSERT OR IGNORE, not REPLACE: a row written since the rename
+                # is current and a legacy row for the same file is stale.
+                db.execute("INSERT OR IGNORE INTO enrich_payloads"
+                           "(file_id, payload, logic_version) VALUES(?,?,?)",
+                           (fid, row["payload"], row["logic_version"]))
+                migrated += 1
+
+            done_keys = {fid for fid, _ in batch}
+            drop = [d for d in doc_ids
+                    if (_file_key_from_doc_id(d) in done_keys) or d in unkeyed]
+            db.executemany("DELETE FROM enrich_payloads_legacy WHERE doc_id=?",
+                           [(d,) for d in drop])
+
+            remaining = db.execute(
+                "SELECT count(*) FROM enrich_payloads_legacy").fetchone()[0]
+            if remaining == 0:
+                db.execute("DROP TABLE enrich_payloads_legacy")
+            return {"migrated": migrated, "deleted": len(drop),
+                    "done": remaining == 0}
+
     def get_unified_action(self, action_id: int) -> dict | None:
         with self._connect() as db:
             r = db.execute("SELECT * FROM actions WHERE id = ?",
