@@ -65,7 +65,8 @@ def preflight(db_path: Path, *, db_bytes: int | None = None) -> tuple[bool, str]
 
 def _backup(db_path: Path) -> Path:
     # WAL-safe: the store runs journal_mode=WAL, so a plain file copy can MISS
-    # committed transactions. backup.snapshot uses the SQLite backup API.
+    # committed transactions. backup.snapshot() uses VACUUM INTO, which is
+    # consistent by construction and cannot be blocked by a held reader.
     dest = db_path.with_suffix(db_path.suffix + f".bak-{int(time.time())}")
     return snapshot(db_path, dest)
 

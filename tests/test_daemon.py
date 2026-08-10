@@ -1230,13 +1230,15 @@ def test_run_loop_runs_a_backup_within_the_loop(tmp_path):
 
 
 def test_run_loop_holds_the_bulk_lock_across_the_backup(tmp_path):
-    """backup.snapshot() runs PRAGMA wal_checkpoint(TRUNCATE) and aborts with
-    RuntimeError on a busy checkpoint — its docstring rests on a single-writer
-    invariant that the maintenance thread removed. A racing chunk-writing pass
-    either silently stops backups advancing (_last_backup never moves; only
-    discovered during a restore) or writes enough during the subsequent copy2 to
-    trip wal_autocheckpoint and tear the snapshot. maybe_backup must therefore be
-    held under _bulk_lock, exactly as run_one() already is."""
+    """maybe_backup must run under _bulk_lock, exactly as run_one() does.
+
+    The original reason (a busy wal_checkpoint aborting, or a racing write
+    tripping wal_autocheckpoint mid-copy2 and tearing the snapshot) no longer
+    applies — snapshot() uses VACUUM INTO and does neither. The lock is still
+    required because that rebuild pins a read transaction for minutes, during
+    which no checkpoint can advance and the WAL grows; holding the
+    chunk-writing passes off bounds it.
+    """
     store = _make_store(tmp_path)
     daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
                     lock=SingleWriterLock(tmp_path / "d.lock"))

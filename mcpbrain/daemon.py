@@ -3865,18 +3865,14 @@ class Daemon:
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
                 #
-                # Held under _bulk_lock for the same reason run_one()'s
-                # chunk-mutating phases are (_cycle_bulk_section):
-                # backup.snapshot() runs PRAGMA wal_checkpoint(TRUNCATE) and
-                # aborts with RuntimeError when the checkpoint reports busy,
-                # resting on a single-writer invariant that the maintenance
-                # thread broke. Uncontended, a racing pass either silently stops
-                # backups advancing (_last_backup never moves; only discovered
-                # during a restore) or writes enough during the subsequent
-                # copy2 to trigger wal_autocheckpoint mid-copy and tear the
-                # snapshot. This closes the four chunk-writing passes — the most
-                # probable contenders — the same way the rest of this plan
-                # scopes _bulk_lock.
+                # Held under _bulk_lock, but NOT for the reason this comment
+                # used to give. snapshot() no longer runs wal_checkpoint and no
+                # longer copies the DB file, so neither the busy-abort nor the
+                # torn-copy hazard exists any more. What remains is that
+                # VACUUM INTO pins a read transaction for the whole multi-minute
+                # rebuild: no checkpoint can advance past it, so the WAL grows
+                # for that window. Holding the four chunk-writing passes off
+                # bounds that growth and the I/O contention alongside it.
                 #
                 # The acquire itself is BOUNDED (_backup_under_bulk_lock), the
                 # same shape as the gated passes' own acquire on the other side
