@@ -346,6 +346,25 @@ class ControlServer:
                     session_id = (body.get("session_id") or "").strip()
                     _log_recall_exposures(self.store, results, session_id)
                 return h_json(h, 200, {"results": results})
+            if h.path == "/api/tool":
+                # Execute a Store-touching MCP tool in THIS process (the thin
+                # adapter's daemon half). Argument validation happens at the MCP
+                # protocol boundary; Daemon.call_tool re-checks defensively and
+                # raises ValueError, which is a 400 rather than the generic 500
+                # below because it means the two halves disagree about the
+                # advertised schema -- a bug in us, not a fault in the handler.
+                # A handler that genuinely raises falls through to the 500 +
+                # log.exception, so a real fault keeps its traceback.
+                name = body.get("name")
+                arguments = body.get("arguments") or {}
+                if not isinstance(name, str) or not isinstance(arguments, dict):
+                    return h_json(h, 400, {"error": "name must be a string and "
+                                                    "arguments an object"})
+                try:
+                    return h_json(h, 200, {"result": d.call_tool(name, arguments)})
+                except ValueError as exc:
+                    log.error("control API /api/tool refused %r: %s", name, exc)
+                    return h_json(h, 400, {"error": str(exc)})
             if h.path == "/api/recall-feedback":
                 # The accept signal (S2/S4/S5 keystone): the hook reports doc_ids
                 # that stayed relevant across the session (recalled again) as 'used'.

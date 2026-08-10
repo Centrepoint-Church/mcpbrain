@@ -25,7 +25,27 @@ class DaemonUnavailable(Exception):
     """The control API could not be reached (daemon not running / no port)."""
 
 
+class ToolExecutionError(Exception):
+    """The daemon WAS reached and it refused or failed a tool call.
+
+    Deliberately not a DaemonUnavailable: "the daemon is not running" is an
+    environment condition a caller can explain to a user, while this is the
+    remote analogue of a local handler raising. Collapsing the two would report
+    a genuine daemon-side fault as an absent daemon and lose the real cause --
+    the message here is the endpoint's own error text, and the daemon has
+    already logged the full traceback on its side.
+    """
+
+
 class ControlClient:
+    # Tool calls get their own, far longer timeout than the 5s the tray's
+    # status/pause/resume calls use. Measured on the live store, brain_graph is
+    # 6.3s median / 8.3s p95 and brain_draft_context can invoke a ~30s critique
+    # subprocess, so the tray default would report the fleet's slowest tools as
+    # an absent daemon on every call. This is a ceiling for a wedged daemon, not
+    # a target.
+    TOOL_CALL_TIMEOUT_S = 120.0
+
     def __init__(self, home=None, timeout: float = 5.0):
         self._home = app_dir() if home is None else Path(home)
         self._timeout = timeout
@@ -41,7 +61,17 @@ class ControlClient:
             raise DaemonUnavailable("control port/token not found") from exc
         return f"http://127.0.0.1:{port}", token
 
-    def _request(self, path: str, method: str = "GET", body: dict | None = None):
+    def _request(self, path: str, method: str = "GET", body: dict | None = None,
+                 *, timeout: float | None = None, error_body: bool = False):
+        """Call the control API. Raises DaemonUnavailable for anything that means
+        "could not talk to the daemon".
+
+        `error_body=True` opts INTO reading a 4xx/5xx response's JSON body and
+        returning it, instead of collapsing it into DaemonUnavailable. Only
+        call_tool wants that (see ToolExecutionError); every other method keeps
+        the original behaviour untouched, because the tray's callers act on
+        "reachable or not" and nothing else.
+        """
         base, token = self._endpoint()
         req = urllib.request.Request(base + path, method=method)
         req.add_header("Authorization", f"Bearer {token}")
@@ -49,8 +79,21 @@ class ControlClient:
             req.add_header("Content-Type", "application/json")
             req.data = json.dumps(body or {}).encode()
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(
+                    req, timeout=self._timeout if timeout is None else timeout) as resp:
                 raw = resp.read()
+        # HTTPError FIRST: it subclasses both URLError and OSError, so the
+        # broader handler below would otherwise swallow it and its body.
+        except urllib.error.HTTPError as exc:
+            if not error_body:
+                raise DaemonUnavailable(str(exc)) from exc
+            try:
+                return json.loads(exc.read() or b"{}")
+            except (ValueError, OSError) as read_exc:
+                # No readable JSON body (a 401 from the auth gate, a truncated
+                # response): the caller has nothing to act on, so this is
+                # indistinguishable from not reaching the daemon at all.
+                raise DaemonUnavailable(str(exc)) from read_exc
         except (urllib.error.URLError, OSError) as exc:
             raise DaemonUnavailable(str(exc)) from exc
         return json.loads(raw) if raw else {}
@@ -73,6 +116,26 @@ class ControlClient:
         except DaemonUnavailable:
             return []
         return r.get("results", [])
+
+    def call_tool(self, name: str, arguments: dict):
+        """Execute a Store-touching MCP tool IN the daemon and return its result.
+
+        The thin-adapter path: the MCP server holds the protocol, the daemon
+        holds the Store. Two failure modes, kept apart on purpose --
+        DaemonUnavailable (not running / unreachable, which the MCP server turns
+        into a readable isError result) and ToolExecutionError (reached, but the
+        call was refused or the handler raised).
+
+        Returns the handler's return value verbatim, including None: `"result"`
+        is present in every success body, so absence -- not falsiness -- is what
+        marks an error.
+        """
+        r = self._request("/api/tool", method="POST",
+                          body={"name": name, "arguments": arguments},
+                          timeout=self.TOOL_CALL_TIMEOUT_S, error_body=True)
+        if "result" not in r:
+            raise ToolExecutionError(r.get("error") or f"tool call failed: {name}")
+        return r["result"]
 
     def pause(self) -> dict:
         return self._request("/api/pause", method="POST")
