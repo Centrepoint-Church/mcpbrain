@@ -579,28 +579,28 @@ def test_enrich_payloads_roundtrip_and_purge(tmp_path):
         names = {r["name"] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "enrich_payloads" in names
-    # set/get round-trip
-    assert s.get_enrich_payload("gdrive-F1-0") is None
-    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1","entities":[]}', 1)
-    got = s.get_enrich_payload("gdrive-F1-0")
+    # set/get round-trip -- keyed on the bare Drive file_id, not a chunk doc_id
+    assert s.get_enrich_payload("F1") is None
+    s.set_enrich_payload("F1", '{"thread_id":"gdrive-F1","entities":[]}', 1)
+    got = s.get_enrich_payload("F1")
     assert got["logic_version"] == 1 and "thread_id" in got["payload"]
     # INSERT OR REPLACE (no duplicate)
-    s.set_enrich_payload("gdrive-F1-0", '{"thread_id":"gdrive-F1","entities":[1]}', 2)
-    assert s.get_enrich_payload("gdrive-F1-0")["logic_version"] == 2
-    # delete_chunks cleans the payload row
+    s.set_enrich_payload("F1", '{"thread_id":"gdrive-F1","entities":[1]}', 2)
+    assert s.get_enrich_payload("F1")["logic_version"] == 2
+    # delete_chunks cleans the payload row once the file's LAST chunk goes
     with s._connect() as db:
         db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
                    "VALUES('gdrive-F1-0','t','h','{}')")
     s.delete_chunks(["gdrive-F1-0"])
-    assert s.get_enrich_payload("gdrive-F1-0") is None
+    assert s.get_enrich_payload("F1") is None
 
 
 def test_delete_chunks_purges_orphan_enrich_payload(tmp_path):
     """Regression: enrich_payload row with NO matching chunk row must still be
-    deleted when delete_chunks is called on that doc_id."""
+    deleted when delete_chunks is called on a doc_id resolving to that file."""
     from mcpbrain.store import Store
     s = Store(tmp_path / "g.sqlite3", dim=4); s.init()
     # payload row with NO matching chunk row
-    s.set_enrich_payload("gdrive-F9-0", '{"thread_id":"gdrive-F9"}', 1)
+    s.set_enrich_payload("F9", '{"thread_id":"gdrive-F9"}', 1)
     s.delete_chunks(["gdrive-F9-0"])          # no chunk exists for this doc_id
-    assert s.get_enrich_payload("gdrive-F9-0") is None
+    assert s.get_enrich_payload("F9") is None

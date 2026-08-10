@@ -135,7 +135,7 @@ def test_publish_file_includes_enrich_payload_when_present(tmp_path):
     s.import_cached_chunk("gdrive-FID-0", "body", "vh1",
                           {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0},
                           [0.1, 0.2, 0.3, 0.4])
-    s.set_enrich_payload("gdrive-FID-0",
+    s.set_enrich_payload("FID",
                          '{"thread_id":"gdrive-FID","org":"Acme","content_type":"reference","summary":"x","entities":[]}',
                          ENRICH_LOGIC_VERSION)  # a payload at CURRENT logic
     assert ingest_cache.publish_file(s, fs, "D1", "FID", "vh1", PIN, published_by="p@x.org")
@@ -158,6 +158,20 @@ def test_publish_file_omits_payload_when_unenriched(tmp_path):
     art = CacheArtifact.from_dict(json.loads(gzip.decompress(
         fs.get_bytes(f"{ingest_cache.CACHE_DIR}/{artifact_filename('FID','vh1','bge-small',4,str(CHUNKER_VERSION))}"))))
     assert "extraction" not in art.enrich
+
+
+def test_shrinking_a_file_keeps_its_cached_payload(tmp_path):
+    """The shrink path deletes a file's stale chunks; the file still exists and
+    must keep its cached extraction."""
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    for i in range(3):
+        store.upsert_chunk(f"gdrive-FILE1-{i}", f"t{i}", f"h{i}", {"file_id": "FILE1"})
+    store.set_enrich_payload("FILE1", "{}", 1)
+
+    store.delete_chunks(["gdrive-FILE1-2"])       # what the shrink path does
+
+    assert store.get_enrich_payload("FILE1") is not None
 
 
 def test_try_import_content_hash_mismatch_falls_back(tmp_path):
