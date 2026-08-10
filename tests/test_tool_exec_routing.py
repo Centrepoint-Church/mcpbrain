@@ -168,6 +168,72 @@ def test_a_daemon_side_failure_is_not_reported_as_an_absent_daemon(tmp_path):
     assert not issubclass(ToolExecutionError, DaemonUnavailable)
 
 
+def test_a_refused_tool_stays_a_tool_failure(tmp_path):
+    """The counterweight to the parametrised test below: /api/tool's own 400.
+
+    A ValueError out of `Daemon.call_tool` (unknown tool, or arguments the two
+    halves disagree about) is a named, actionable refusal OF the call -- 400 is
+    therefore deliberately not in _TRANSPORT_STATUSES, so this must not be
+    softened into "the daemon is not running" along with them.
+    """
+    from mcpbrain.control_client import ControlClient, ToolExecutionError
+
+    class _Refuses:
+        def call_tool(self, name, arguments):
+            raise ValueError(f"{name} is not executed in the daemon")
+
+    srv = ControlServer(_Refuses(), home=str(tmp_path))
+    srv.start()
+    try:
+        with pytest.raises(ToolExecutionError, match="not executed in the daemon"):
+            ControlClient(home=tmp_path).call_tool("brain_note", {"text": "x"})
+    finally:
+        srv.stop()
+
+
+@pytest.mark.parametrize("status,body", [
+    # The auth gate: bare headers, NO body. `exc.read() or b"{}"` parses that
+    # into a clean `{}`, which is why a body-shape check alone is not enough --
+    # `{}` is indistinguishable from a handler error with no message.
+    (401, b""),
+    # Version skew: an MCP server on a newer wheel calling a daemon with no
+    # /api/tool route. A well-formed error envelope that no handler produced.
+    (404, b'{"error": "not found"}'),
+    (403, b""),                            # the non-loopback guard
+    (413, b'{"error": "body too large"}'),  # over the 1 MiB body cap
+])
+def test_a_pre_handler_rejection_is_unavailable_not_a_tool_failure(
+        tmp_path, monkeypatch, status, body):
+    """401/403/404/413 never reached a handler, so they are NOT ToolExecutionError.
+
+    Every one of them is reachable in production without any handler bug: a
+    daemon restart that rewrites control_port/control_token non-atomically (401),
+    a non-loopback caller (403), an MCP server newer than the daemon it calls
+    (404), an argument payload over the control API's 1 MiB cap (413). None has a
+    local-execution analogue, and ToolExecutionError is caught NOWHERE -- so
+    misclassifying these would propagate a raised exception out of on_call_tool
+    and put a code=0 traceback in the fleet's MCP log, instead of the readable
+    "daemon not reachable" isError result `run_tool` produces for
+    DaemonUnavailable.
+    """
+    import io
+    import urllib.error
+
+    from mcpbrain.control_client import ControlClient, DaemonUnavailable, ToolExecutionError
+
+    (tmp_path / "control_port").write_text("9")
+    (tmp_path / "control_token").write_text("t")
+
+    def _raise(*_a, **_kw):
+        raise urllib.error.HTTPError("http://127.0.0.1:9/api/tool", status,
+                                     "rejected", {}, io.BytesIO(body))
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+    with pytest.raises(DaemonUnavailable) as caught:
+        ControlClient(home=tmp_path).call_tool("brain_read", {"doc_id": "d-5"})
+    assert not isinstance(caught.value, ToolExecutionError)
+
+
 def test_the_client_reports_an_absent_daemon_as_unavailable(tmp_path):
     """No control_port/control_token in home == daemon not running."""
     from mcpbrain.control_client import ControlClient, DaemonUnavailable

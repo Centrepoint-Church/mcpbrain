@@ -134,14 +134,19 @@ def test_the_dispatch_chain_is_parseable():
 
 
 def test_brain_read_is_store_touching_via_inline_dispatch():
-    """brain_read has no factory, so mechanism 1 cannot see it. It still belongs
-    on the daemon side of the adapter, because on_call_tool reaches straight into
-    the Store for it. If that branch stops touching `store`, brain_read leaves
-    the move-list and this fails."""
+    """brain_read has no factory, so mechanism 1 cannot see it. It IS routed
+    through /api/tool (Task 9), and this pins the reason it has to be: the local
+    fallback branch in on_call_tool reaches straight into the Store for it.
+
+    A failure means that branch stopped touching `store` directly -- so the
+    parser below has lost the only tool it can see, and mechanism 2 is silently
+    blind. Re-point the parser at wherever brain_read's local read went; do not
+    drop brain_read from the move-list to go green."""
     inline = _inline_store_touching_branches()
     assert "brain_read" in inline, (
-        "brain_read's dispatch branch no longer touches the Store directly -- it "
-        f"may not belong behind /api/tool any more. Found: {sorted(inline)}")
+        "brain_read's dispatch branch no longer touches the Store directly -- the "
+        "inline-dispatch parser can no longer see it, so the sweep below is "
+        f"blind. Found: {sorted(inline)}")
 
 
 def test_no_undeclared_inline_store_touching_branch():
