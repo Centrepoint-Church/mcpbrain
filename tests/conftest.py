@@ -81,6 +81,15 @@ def protocol_session(tmp_path):
                     await session.initialize()
                     yield session, str(stderr_path)
 
+    # The MCPBRAIN_HOME the child will read, hung off the factory rather than
+    # added to the yielded tuple: every existing caller unpacks exactly
+    # `(session, stderr_path)`, and widening that would touch five modules to
+    # serve the two tests that need the path. Needed by
+    # test_tool_exec_routing.py, which must place a ControlServer's
+    # control_port/control_token (and a config.json) in the SAME home the
+    # subprocess resolves -- and by any test pinning the tool_exec_in_daemon
+    # flag, since a fresh home has no config.json and so takes the default.
+    _open.home = home
     return _open
 
 

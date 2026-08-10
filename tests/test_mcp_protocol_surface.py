@@ -81,7 +81,32 @@ def test_every_tool_round_trips_over_stdio(protocol_session):
                 f"tools failed over the protocol: {failures}\n"
                 f"server stderr:\n{Path(stderr_path).read_text()}"
             )
-    asyncio.run(_body())
+
+    # Store-touching tools now EXECUTE IN THE DAEMON (config.tool_exec_in_daemon
+    # defaults ON -- it is a kill switch, not an opt-in), so the sweep needs a
+    # daemon listening on the same MCPBRAIN_HOME or those tools correctly degrade
+    # to isError. A real Daemon behind the real ControlServer keeps this test at
+    # the shipped default AND covers the routed path end-to-end; the flag-off
+    # local path, the daemon-down isError and the routing decision itself are
+    # covered in tests/test_tool_exec_routing.py. Daemon.__init__ starts no
+    # threads and does no I/O, so this is cheap.
+    from mcpbrain.control_api import ControlServer
+    from mcpbrain.daemon import Daemon, SingleWriterLock
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain.store import Store
+
+    home = protocol_session.home
+    daemon = Daemon(
+        Store(home / "brain.sqlite3", dim=embedder_dim("bge-small"), read_only=False),
+        None,  # no embedder: only /api/tool is exercised, and search degrades to []
+        services={}, lock=SingleWriterLock(home / "daemon.lock"),
+    )
+    srv = ControlServer(daemon, home=str(home))
+    srv.start()
+    try:
+        asyncio.run(_body())
+    finally:
+        srv.stop()
 
 
 def test_unknown_tool_reports_unknown_tool(protocol_session):

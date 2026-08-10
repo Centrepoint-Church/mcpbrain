@@ -586,6 +586,27 @@ def retrieval_expand_enabled(home) -> bool:
     return bool(fleet_flag(home, "retrieval_expand", False))
 
 
+def tool_exec_in_daemon(home) -> bool:
+    """Whether Store-touching MCP tools execute in the DAEMON rather than in the
+    MCP server process.
+
+    Default **ON**, deliberately: ``schema_grounding`` and ``write_time_dedup``
+    have both sat OFF since they shipped because nothing ever exercised them, so
+    this is a KILL SWITCH (set ``"tool_exec_in_daemon": false`` locally, or
+    ``{"flags": {"tool_exec_in_daemon": false}}`` in the fleet's org-config.json)
+    rather than an opt-in. The consequence is that the latency gate on the routed
+    path is a hard pre-release gate -- there is no opt-in soak period.
+
+    Read per tool call, not once at MCP-server startup: a live MCP server runs
+    its start-time code for as long as its client stays connected (see
+    docs/superpowers/specs/2026-08-04-mcp-server-process-lifecycle.md), so a
+    kill switch resolved once at construction would not take effect until every
+    user restarted their client. The cost is one small config.json read per
+    call.
+    """
+    return bool(fleet_flag(home, "tool_exec_in_daemon", True))
+
+
 def expand_params(home) -> dict:
     """Expansion tunables (config 'expand_*'); defaults from the 2026-07-22 spec."""
     c = read_config(home)
