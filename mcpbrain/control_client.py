@@ -9,6 +9,10 @@ MCPBRAIN_HOME and calls the API with stdlib urllib only.
 Every call degrades gracefully: if the daemon is not running (no port file, or
 the connection is refused) the methods raise ``DaemonUnavailable`` rather than a
 raw socket error, so callers can show "daemon not running" instead of crashing.
+A call that reaches the daemon and then times out waiting for it raises the
+``DaemonTimeout`` subclass, so a caller that wants to say something more accurate
+than "not running" can, while one that only cares "did I get an answer?" needs no
+change.
 """
 
 from __future__ import annotations
@@ -23,6 +27,28 @@ from mcpbrain.config import app_dir
 
 class DaemonUnavailable(Exception):
     """The control API could not be reached (daemon not running / no port)."""
+
+
+class DaemonTimeout(DaemonUnavailable):
+    """The daemon WAS reached, but it did not answer within the call's timeout.
+
+    A DaemonUnavailable SUBCLASS on purpose, in both directions:
+
+    * it must stay one, because every existing caller (the tray's status/pause,
+      `is_running`, `recall`, `wizard_url`) acts on exactly one bit -- "did I get
+      an answer?" -- and a no-answer-in-time is a no-answer. Making this a
+      sibling class would silently turn those `except DaemonUnavailable` blocks
+      into uncaught raises in a menu-bar app.
+    * it must be distinguishable, because the ADVICE differs. "The daemon is not
+      running, run `mcpbrain doctor`" is actively wrong here: the daemon is up,
+      answering other requests (the control API is threaded), and this one call
+      is slow or wedged inside its handler. Two routed tools can genuinely block
+      past TOOL_CALL_TIMEOUT_S -- `brain_gardener_apply` shells out to git, which
+      blocks INDEFINITELY on a stale `.git/index.lock` in the records repo, and
+      `brain_meetings_today` makes a live Calendar call -- so this is a real
+      operational state, not a theoretical one, and pointing the user at a daemon
+      restart would send them chasing the wrong thing.
+    """
 
 
 class ToolExecutionError(Exception):
@@ -94,14 +120,14 @@ class ControlClient:
         nothing else.
         """
         base, token = self._endpoint()
+        effective_timeout = self._timeout if timeout is None else timeout
         req = urllib.request.Request(base + path, method=method)
         req.add_header("Authorization", f"Bearer {token}")
         if method == "POST":
             req.add_header("Content-Type", "application/json")
             req.data = json.dumps(body or {}).encode()
         try:
-            with urllib.request.urlopen(
-                    req, timeout=self._timeout if timeout is None else timeout) as resp:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 raw = resp.read()
         # HTTPError FIRST: it subclasses both URLError and OSError, so the
         # broader handler below would otherwise swallow it and its body.
@@ -131,6 +157,24 @@ class ControlClient:
                 raise DaemonUnavailable(f"{exc}: unexpected response body")
             return parsed
         except (urllib.error.URLError, OSError) as exc:
+            # A timeout is NOT "could not reach the daemon", and it lands here by
+            # accident of the type hierarchy: socket.timeout IS TimeoutError IS
+            # OSError since 3.10, so the line below would report a daemon that is
+            # up and merely slow (or wedged inside one handler) as an absent one.
+            # See DaemonTimeout for why that misdiagnosis matters.
+            #
+            # Two shapes, because urllib only wraps SOME of them: a timeout
+            # waiting for the response or reading the body propagates bare, while
+            # one raised while urllib is still sending gets wrapped
+            # (`URLError(reason=TimeoutError(...))`) by AbstractHTTPHandler.
+            # Both are classified the same way, deliberately: this client only
+            # ever calls 127.0.0.1, where a dead daemon refuses the connection
+            # instantly (ECONNREFUSED) rather than timing out -- so a timeout at
+            # any phase means something IS listening and just isn't answering.
+            if isinstance(exc, TimeoutError) or isinstance(
+                    getattr(exc, "reason", None), TimeoutError):
+                raise DaemonTimeout(
+                    f"no response from {path} within {effective_timeout:g}s") from exc
             raise DaemonUnavailable(str(exc)) from exc
         return json.loads(raw) if raw else {}
 
@@ -157,11 +201,14 @@ class ControlClient:
         """Execute a Store-touching MCP tool IN the daemon and return its result.
 
         The thin-adapter path: the MCP server holds the protocol, the daemon
-        holds the Store. Two failure modes, kept apart on purpose --
+        holds the Store. Three failure modes, kept apart on purpose --
         DaemonUnavailable (not running, unreachable, or rejected before a handler
         ran: auth, routing, body cap -- which the MCP server turns into a readable
-        isError result) and ToolExecutionError (a handler ran and failed, or the
-        executor refused a tool/arguments it does not recognise).
+        isError result), DaemonTimeout (reached, then no answer within
+        TOOL_CALL_TIMEOUT_S: a running daemon with one slow or stuck handler, so
+        it needs different advice than an absent one) and ToolExecutionError (a
+        handler ran and failed, or the executor refused a tool/arguments it does
+        not recognise).
 
         Returns the handler's return value verbatim, including None: `"result"`
         is present in every success body, so absence -- not falsiness -- is what
