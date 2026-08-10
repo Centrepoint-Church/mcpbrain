@@ -142,6 +142,11 @@ fix loop. Worth sweeping in the Phase 4 final review or a dedicated cleanup pass
   docstrings were corrected in the final review; the **user-visible string was deliberately left
   alone** because changing it is a behaviour change (and `test_the_stuck_and_absent_diagnoses_
   differ_at_the_mcp_boundary` asserts on it). Fix the wording next time that message is touched.
+- `mcpbrain/drain.py` (~lines 56, 619) and `tests/test_bulk_lock_fairness.py` (~lines 568, 626)
+  repeat the same "stale index.lock blocks forever" claim, entirely outside this plan's touched
+  files. Worth a look on its own: if the corrected understanding above is right, the argument for
+  running records-kind captures *outside* the bulk section rests on a premise that isn't true,
+  which may be worth re-examining independent of anything in this plan.
 - `ControlClient.TOOL_CALL_TIMEOUT_S=120.0` (not the tray's 5s default) already covers
   `brain_graph`/`brain_draft_context`'s measured slow paths for the 9 tools that did route in
   Task 10 — revisit if a future routed tool has a legitimately longer tail.
@@ -157,3 +162,21 @@ fix loop. Worth sweeping in the Phase 4 final review or a dedicated cleanup pass
 - Routed async handlers run on asyncio's *default* executor via `to_thread` on the MCP side and a
   fresh `asyncio.run` per call on the daemon side; the default thread-pool ceiling is a shared
   resource nobody has sized for this traffic.
+
+**Deferred Minors from the re-review of the final-review fix wave (2026-08-10), triaged "not now"
+— residual scope limits of the new mapping-agreement test (`tests/test_tool_exec_routing.py`
+section 8), not defects in it:**
+- The one-sided-drop guard (`test_the_agreement_test_sees_a_one_sided_drop`) is weaker than its
+  docstring implies — its "sabotage" is post-hoc surgery on an already-recorded dict, so the
+  inequality it asserts is close to tautological. The section's real non-vacuity comes from
+  `_FULL_ARGS`' payloads being genuinely value-rich (verified independently by the re-reviewer),
+  not from this specific guard.
+- The comparison only exercises the fully-populated argument point. A divergence in the two
+  sites' `.get()` *default* for an argument that's ABSENT (e.g. one side defaulting a missing
+  `status` to `"open"`, the other to `""`) is invisible here — the same blind spot that motivated
+  the original finding, just not fully closed by the fix (the finding as scoped asked for a
+  fully-populated set, so this is per-spec, not a missed requirement).
+- Factory *construction* arguments (which `store` handle, which `home` string each site wires
+  into a factory) aren't compared — `daemon.py` builds its `home` via `str(app_dir())` while the
+  MCP side passes its own `home` parameter through. A second duplicated-wiring surface, no
+  agreement test covers it, out of scope for the finding as written.
