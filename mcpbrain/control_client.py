@@ -37,6 +37,25 @@ class ToolExecutionError(Exception):
     """
 
 
+# Statuses the control API emits BEFORE (or INSTEAD OF) reaching a tool handler.
+# Every one of them means "this request never ran as a tool call", so they belong
+# to DaemonUnavailable's meaning ("could not talk to the daemon") and not to
+# ToolExecutionError's ("the handler ran and failed"):
+#   401 -- the auth gate rejected the bearer token. Seen for real when a daemon
+#          restart rewrites control_port/control_token non-atomically and a call
+#          lands mid-window with the new port and the stale token.
+#   403 -- the non-loopback guard.
+#   404 -- no such route: version skew, e.g. an MCP server on a newer wheel
+#          calling a still-old daemon that has no /api/tool yet.
+#   413 -- the request body exceeded the control API's 1 MiB cap, so it was
+#          refused unread.
+# Note 400 is deliberately NOT here: /api/tool answers 400 for a Daemon.call_tool
+# ValueError (unknown tool / arguments the two halves disagree about), which is a
+# real, named, actionable refusal of the call -- a ToolExecutionError, so it is
+# reported as itself instead of being disguised as an absent daemon.
+_TRANSPORT_STATUSES = frozenset({401, 403, 404, 413})
+
+
 class ControlClient:
     # Tool calls get their own, far longer timeout than the 5s the tray's
     # status/pause/resume calls use. Measured on the live store, brain_graph is
@@ -67,10 +86,12 @@ class ControlClient:
         "could not talk to the daemon".
 
         `error_body=True` opts INTO reading a 4xx/5xx response's JSON body and
-        returning it, instead of collapsing it into DaemonUnavailable. Only
-        call_tool wants that (see ToolExecutionError); every other method keeps
-        the original behaviour untouched, because the tray's callers act on
-        "reachable or not" and nothing else.
+        returning it, instead of collapsing it into DaemonUnavailable -- except
+        for the _TRANSPORT_STATUSES, which stay DaemonUnavailable because they are
+        raised before any handler runs. Only call_tool wants the body at all (see
+        ToolExecutionError); every other method keeps the original behaviour
+        untouched, because the tray's callers act on "reachable or not" and
+        nothing else.
         """
         base, token = self._endpoint()
         req = urllib.request.Request(base + path, method=method)
@@ -85,15 +106,30 @@ class ControlClient:
         # HTTPError FIRST: it subclasses both URLError and OSError, so the
         # broader handler below would otherwise swallow it and its body.
         except urllib.error.HTTPError as exc:
-            if not error_body:
+            # Transport/auth/routing failures stay DaemonUnavailable even when the
+            # caller asked for the error body: they did not come from a handler,
+            # so presenting them as a tool failure would both misattribute the
+            # fault and (for call_tool) turn a recoverable "daemon unreachable"
+            # isError result into an uncaught raise. Checked BEFORE reading the
+            # body because most of them have none -- the auth gate sends bare
+            # headers, and `exc.read() or b"{}"` would parse that empty body into
+            # a clean `{}` that looks exactly like a handler error with no text.
+            if not error_body or exc.code in _TRANSPORT_STATUSES:
                 raise DaemonUnavailable(str(exc)) from exc
             try:
-                return json.loads(exc.read() or b"{}")
+                parsed = json.loads(exc.read() or b"{}")
             except (ValueError, OSError) as read_exc:
-                # No readable JSON body (a 401 from the auth gate, a truncated
-                # response): the caller has nothing to act on, so this is
-                # indistinguishable from not reaching the daemon at all.
+                # No readable JSON body (a truncated response, an HTML error page
+                # from something that is not our daemon): the caller has nothing
+                # to act on, so this is indistinguishable from not reaching the
+                # daemon at all.
                 raise DaemonUnavailable(str(exc)) from read_exc
+            if not isinstance(parsed, dict):
+                # Valid JSON, but not the {"result"/"error": ...} envelope every
+                # endpoint speaks. Same conclusion: whatever answered is not the
+                # control API mid-tool-call.
+                raise DaemonUnavailable(f"{exc}: unexpected response body")
+            return parsed
         except (urllib.error.URLError, OSError) as exc:
             raise DaemonUnavailable(str(exc)) from exc
         return json.loads(raw) if raw else {}
@@ -122,9 +158,10 @@ class ControlClient:
 
         The thin-adapter path: the MCP server holds the protocol, the daemon
         holds the Store. Two failure modes, kept apart on purpose --
-        DaemonUnavailable (not running / unreachable, which the MCP server turns
-        into a readable isError result) and ToolExecutionError (reached, but the
-        call was refused or the handler raised).
+        DaemonUnavailable (not running, unreachable, or rejected before a handler
+        ran: auth, routing, body cap -- which the MCP server turns into a readable
+        isError result) and ToolExecutionError (a handler ran and failed, or the
+        executor refused a tool/arguments it does not recognise).
 
         Returns the handler's return value verbatim, including None: `"result"`
         is present in every success body, so absence -- not falsiness -- is what
