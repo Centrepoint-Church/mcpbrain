@@ -490,6 +490,31 @@ def _validate_tool_arguments(name: str, arguments: dict) -> None:
         raise ValueError(f"invalid arguments for {name}: {field}: {exc.message}") from exc
 
 
+class _DaemonUnreachable:
+    """A routed tool's "the daemon is not running" outcome, carried as a VALUE.
+
+    Not an exception, and not an early return, because `on_call_tool` holds a
+    deliberate invariant: exactly four `return`s and exactly one `except
+    ValueError`, wrapping only `_validate_tool_arguments`. A fifth return or a
+    second `except` around the dispatch chain is how a real handler bug gets
+    dressed up as a tidy isError result. So the routing helper hands this back
+    like any other handler value and the single trailing `return` recognises it,
+    turning it into the readable isError result the model can act on -- the same
+    treatment a validation failure gets, for the same reason (a raised exception
+    would put a ~20-line traceback in the fleet's MCP log with code=0).
+
+    Only ever produced for DaemonUnavailable. A daemon-side handler fault raises
+    ToolExecutionError and propagates exactly as a local handler's exception
+    would, so routing does not change what a genuine bug looks like -- and the
+    daemon has already logged that traceback on its own side.
+    """
+
+    __slots__ = ("message",)
+
+    def __init__(self, message: str):
+        self.message = message
+
+
 def build_server(store, draft_store, client, home: str):
     """Construct the MCP Server with every handler registered, no transport started.
 
@@ -631,6 +656,53 @@ def build_server(store, draft_store, client, home: str):
             for name, s in registry().items()
         ])
 
+    async def run_tool(name: str, arguments: dict, local):
+        """Execute `name` in the daemon when routing is on, else run `local`.
+
+        The routing decision lives HERE, in the dispatch layer, and not in
+        `mcpbrain/tools.py`: that module is deliberately `mcp`-free and is
+        imported by the daemon as-is, so it must stay a pure registry of handlers
+        with no notion of "am I the local or the routed side". This function is
+        already the one place that knows both which tool was called and what flag
+        state applies.
+
+        `local` is a zero-argument callable producing the in-process result. It
+        may return a coroutine (every routed tool except brain_read is an `async
+        def`) and is awaited if so. On the routed path it is never CALLED, so the
+        flag-on path touches no Store handle -- which is what lets Task 10 stop
+        constructing one at all.
+
+        The flag is read per call rather than once at startup on purpose: a live
+        MCP server keeps running its start-time code for as long as its client
+        stays connected, so a kill switch latched at construction would not take
+        effect until every user restarted their client.
+
+        Never raises for an absent daemon -- it returns _DaemonUnreachable; see
+        that class for why the error is a value and not a fifth `return`.
+        """
+        import asyncio
+        import inspect
+
+        if config.tool_exec_in_daemon(home):
+            from mcpbrain.control_client import DaemonUnavailable
+            try:
+                # to_thread, not a bare call: client.call_tool is a blocking
+                # urllib request with a 120s ceiling, and running it on the event
+                # loop would stall this session's progress notifications and
+                # every other in-flight request for its whole duration.
+                return await asyncio.to_thread(client.call_tool, name, arguments)
+            except DaemonUnavailable as exc:
+                _log.warning("tool %s: daemon unreachable (%s)", name, exc)
+                return _DaemonUnreachable(
+                    f"{name} runs in the mcpbrain daemon, which is not reachable "
+                    f"({exc}). Check the daemon is running (`mcpbrain doctor`). "
+                    "The capture tools keep working without it."
+                )
+        result = local()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     async def on_call_tool(ctx, params) -> types.CallToolResult:
         import json
         name, arguments = params.name, (params.arguments or {})
@@ -671,7 +743,11 @@ def build_server(store, draft_store, client, home: str):
         # a handler, so it stays its own explicit return rather than flowing
         # through the `json.dumps(out)` at the bottom.
         if name == "brain_read":
-            out = store.get_chunk(arguments["doc_id"])
+            # First tool routed through the daemon (Phase 4). The lambda is the
+            # kill-switch path only: with the flag on, run_tool never calls it and
+            # this branch touches no Store.
+            out = await run_tool(name, arguments,
+                                 lambda: store.get_chunk(arguments["doc_id"]))
         elif name == "brain_context":
             out = await context(
                 entity=arguments.get("entity", ""),
@@ -855,11 +931,22 @@ def build_server(store, draft_store, client, home: str):
         # and only when `out` is actually the dict-shaped envelope that schema
         # describes — a declared schema the tool then violates (e.g. by
         # returning a list) would be worse than no schema at all.
+        #
+        # _DaemonUnreachable is the routed path's "the daemon is not running"
+        # value (see the class). It is reported here rather than by a return of
+        # its own so on_call_tool keeps its four-return invariant, and its text is
+        # the plain message -- not json.dumps'd -- matching the validation
+        # failure above, which is the other isError this function produces.
         result_kwargs = {}
-        if spec(name).output_schema is not None and isinstance(out, dict):
-            result_kwargs["structured_content"] = out
+        if isinstance(out, _DaemonUnreachable):
+            text = out.message
+            result_kwargs["isError"] = True
+        else:
+            text = json.dumps(out)
+            if spec(name).output_schema is not None and isinstance(out, dict):
+                result_kwargs["structured_content"] = out
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=json.dumps(out))],
+            content=[types.TextContent(type="text", text=text)],
             **result_kwargs,
         )
 

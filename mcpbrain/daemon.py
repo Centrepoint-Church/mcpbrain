@@ -34,6 +34,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 
+import asyncio
 import json
 import logging
 import os
@@ -766,6 +767,9 @@ class Daemon:
                  clock=time.monotonic,
                  enrich_mode: str = "off"):
         self._store = store
+        # Tool handlers for the routed-execution path (/api/tool), built on first
+        # use by _routed_tool_handlers(). See call_tool().
+        self._tool_handlers: dict | None = None
         # Lazy embedder: hold the instance (may be None) in a backing field and
         # build on first use via _embedder_factory. Keeps the control server /
         # wizard reachable even before the model is downloaded.
@@ -1327,6 +1331,80 @@ class Daemon:
             "records_dir": config.records_dir(str(app_dir())),
             "project_instructions": config.render_project_instructions(cfg),
         }
+
+    def _routed_tool_handlers(self) -> dict:
+        """name -> callable(arguments) for every MCP tool executed in this process.
+
+        The daemon's half of the thin adapter. The MCP server keeps the protocol
+        (transport, tools/list, argument validation, result envelopes) and routes
+        the Store-touching tools here, so this process is the only one holding a
+        Store handle -- which removes the multiple-writable-handle class by
+        construction rather than by measurement.
+
+        Each entry takes the raw `arguments` dict and returns the handler's
+        result, or a coroutine call_tool awaits. Keeping the argument->kwargs
+        mapping here (rather than passing kwargs from the MCP side) means the
+        wire payload stays exactly the client's validated `arguments` object,
+        with no second serialisation contract to keep in step.
+
+        Built lazily and cached. A concurrent double-build is harmless -- these
+        are pure closure/factory constructions over the same store -- so this
+        needs no lock, unlike the embedder's genuinely expensive lazy build.
+        """
+        if self._tool_handlers is None:
+            # brain_read is the one routed tool with no make_brain_* factory: the
+            # MCP server dispatches it inline as a bare store.get_chunk (see the
+            # declare(...) comment in mcpbrain/tools.py), so its handler is that
+            # same call. Reads self._store per call rather than capturing it, so
+            # the table can never hold a stale handle.
+            self._tool_handlers = {
+                "brain_read": lambda a: self._store.get_chunk(a["doc_id"]),
+            }
+        return self._tool_handlers
+
+    def call_tool(self, name: str, arguments: dict):
+        """Execute a routed MCP tool here and return its result (for /api/tool).
+
+        Raises ValueError -- surfaced as a 400, not a 500 -- for a tool this
+        daemon does not route or for arguments that fail the tool's declared
+        inputSchema. Both mean the MCP server and the daemon disagree about the
+        advertised surface, which is a bug in us and should be loud; a handler
+        that genuinely raises propagates untouched so its traceback survives.
+
+        The schema check is a DEFENSIVE second line: the MCP server validates at
+        the protocol boundary (that is where a failure has to become an isError
+        result the model can read), and this one exists so a mismatch fails here
+        instead of arriving as a KeyError from deep inside a handler. Its message
+        is deliberately terser -- it goes to the daemon log, not to the model.
+        """
+        import jsonschema
+
+        # Importing mcpbrain.tools is what POPULATES the registry read below (and,
+        # from Task 10 on, supplies the make_brain_* factories the handler table
+        # binds). That module is deliberately mcp-free and AST-guarded, so the
+        # daemon pays 143 modules / ~11ms for it rather than the ~601 / ~0.26s the
+        # protocol stack would cost -- which is the whole reason the tools live
+        # there and not in mcp_server.py.
+        from mcpbrain import tools as _tools  # noqa: F401 -- populates the registry
+        from mcpbrain.tool_registry import spec
+
+        handlers = self._routed_tool_handlers()
+        if name not in handlers:
+            raise ValueError(f"tool not routed to the daemon: {name}")
+        try:
+            jsonschema.validate(arguments, spec(name).input_schema)
+        except jsonschema.ValidationError as exc:
+            raise ValueError(f"invalid arguments for {name}: {exc.message}") from exc
+
+        result = handlers[name](arguments)
+        # Every routed tool except brain_read is an `async def` handler, and the
+        # control API's handler threads have no running event loop -- so a
+        # coroutine result is driven to completion here. A fresh loop per call is
+        # the right shape for these handlers: they hold no loop-affine state and
+        # await nothing but their own store work.
+        if asyncio.iscoroutine(result):
+            result = asyncio.run(result)
+        return result
 
     def search(self, query: str, limit: int = 5, *, expand: bool = False) -> list[dict]:
         """Semantic recall for the UserPromptSubmit hook (via /api/recall).
