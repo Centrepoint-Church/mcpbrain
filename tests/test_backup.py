@@ -2080,3 +2080,37 @@ def test_free_space_preflight_sizes_from_live_pages_not_file_size(tmp_path, monk
 
     monkeypatch.setattr(backup_mod.shutil, "disk_usage", lambda p: _Usage)
     backup_mod._require_free_space(tmp_path, tmp_path / "out.enc", store.path)
+
+
+def test_live_bytes_does_not_create_file_for_missing_store(tmp_path):
+    """_live_bytes must not call sqlite3.connect on a path that doesn't exist,
+    because sqlite3.connect auto-creates an empty file immediately -- and then
+    the PRAGMAs succeed against that empty file (page_count=0, freelist=0),
+    returning 0, which is wrong and unsafe. It must check path existence first,
+    so missing paths raise FileNotFoundError (via stat()) rather than silently
+    returning 0 or creating a stray file."""
+    import mcpbrain.backup as backup_mod
+
+    missing_path = tmp_path / "nonexistent.sqlite3"
+    assert not missing_path.exists(), "sanity: path should not exist yet"
+
+    # Call _live_bytes on a missing path and expect FileNotFoundError
+    try:
+        result = backup_mod._live_bytes(str(missing_path))
+        # If we get here without raising, the result must not be 0 (which would
+        # make _require_free_space trivially pass). This would mean _open_db
+        # succeeded and returned live pages, which shouldn't happen for a
+        # nonexistent path.
+        assert result > 0, (
+            f"_live_bytes returned {result} for a missing store; must raise "
+            f"FileNotFoundError or return a safe non-zero value")
+    except FileNotFoundError:
+        # This is the expected safe behavior: stat() raises FileNotFoundError
+        # for a path that doesn't exist. This is louder and safer than
+        # silently returning 0.
+        pass
+    finally:
+        # Must not create a stray file as a side effect
+        assert not missing_path.exists(), (
+            f"_live_bytes created a stray file at {missing_path}; "
+            "sqlite3.connect must not auto-create on a missing path")
