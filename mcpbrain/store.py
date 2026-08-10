@@ -156,6 +156,23 @@ def _base_cal_event_id(value: str) -> str:
     return _CAL_INSTANCE_SUFFIX.sub("", value)
 
 
+# Drive chunk doc_ids are `gdrive-<file_id>-<idx>`. A Drive file_id uses the
+# base64url alphabet and can contain '-', and can end in digits, so ONLY a
+# trailing '-<digits>' may be stripped — the greedy `.+` leaves exactly the
+# last such group. Splitting on the first or every hyphen would merge the
+# payloads of distinct files.
+_DRIVE_DOC_ID = re.compile(r"^gdrive-(.+)-\d+$")
+
+
+def _file_key_from_doc_id(doc_id: str) -> str | None:
+    """The Drive file_id a chunk doc_id belongs to, or None if it is not a
+    Drive chunk doc_id. `enrich_payloads` is keyed on the bare file_id — what
+    ingest_cache.publish_file already holds and chunks.metadata.$.file_id
+    stores."""
+    m = _DRIVE_DOC_ID.match(doc_id or "")
+    return m.group(1) if m else None
+
+
 _BEGIN_RETRIES = 3
 _BEGIN_BASE_SLEEP_S = 0.05
 
@@ -962,12 +979,37 @@ class Store:
                 updated_at TEXT DEFAULT '')""")
 
             # --- A4, Task 1: enrich_payloads (cache enrichment payloads) ----
-            # Carries the extraction so importers skip re-enrich on shared-drive artifacts.
+            # Carries the extraction so importers skip re-enrich on shared-drive
+            # artifacts. Keyed on the Drive FILE, one row per file: drain used
+            # to write the whole-unit payload once per chunk doc_id while
+            # ingest_cache.publish_file reads exactly one per file, which on the
+            # live store was 50,099 rows for 8,183 files -- 13.5GB of a 15.65GB
+            # store, and the reason the plaintext backup copy stopped fitting on
+            # disk.
             db.execute("""CREATE TABLE IF NOT EXISTS enrich_payloads(
-                doc_id        TEXT PRIMARY KEY,
+                file_id       TEXT PRIMARY KEY,
                 payload       TEXT NOT NULL,
                 logic_version INTEGER DEFAULT 0,
                 at            TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            # A store written before the re-key is keyed per chunk doc_id. Move
+            # it aside -- metadata-only, so init() stays instant -- and let the
+            # enrich_payload_migration cadence drain it in the background.
+            # Collapsing here would free 41,916 rows' overflow pages on the
+            # startup path, minutes of I/O.
+            #
+            # Driven from init() on whatever store it finds, NOT a one-shot
+            # behind a version marker: a backup artifact captured before this
+            # change carries the old schema, and restoring it into a post-fix
+            # build has to migrate it too.
+            _ep_cols = {row["name"] for row in
+                        db.execute("PRAGMA table_info(enrich_payloads)").fetchall()}
+            if "doc_id" in _ep_cols:
+                db.execute("ALTER TABLE enrich_payloads RENAME TO enrich_payloads_legacy")
+                db.execute("""CREATE TABLE enrich_payloads(
+                    file_id       TEXT PRIMARY KEY,
+                    payload       TEXT NOT NULL,
+                    logic_version INTEGER DEFAULT 0,
+                    at            TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 

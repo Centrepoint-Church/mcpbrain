@@ -1364,3 +1364,78 @@ def test_fts_match_query_require_all_false_joins_with_or(tmp_path):
 
     assert _fts_match_query("alpha beta") == '"alpha" "beta"'
     assert _fts_match_query("alpha beta", require_all=False) == '"alpha" OR "beta"'
+
+
+# --- enrich_payloads schema migration (Task 3) --------------------------
+
+def test_init_creates_the_file_keyed_enrich_payloads_table(tmp_path):
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    with store._connect() as db:
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(enrich_payloads)")}
+    assert "file_id" in cols and "doc_id" not in cols
+
+
+def test_init_sets_a_legacy_doc_keyed_table_aside(tmp_path):
+    """A store written before this change is keyed per chunk doc_id. init()
+    must move it aside instantly (metadata-only) rather than collapse it —
+    freeing 41,916 rows' overflow pages is minutes of I/O and init() blocks
+    daemon startup."""
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:            # recreate the OLD shape
+        db.execute("DROP TABLE enrich_payloads")
+        db.execute("CREATE TABLE enrich_payloads(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.executemany("INSERT INTO enrich_payloads(doc_id,payload,logic_version) "
+                       "VALUES(?,?,?)",
+                       [(f"gdrive-FILE1-{i}", '{"x":1}', 3) for i in range(5)])
+
+    Store(path, dim=4).init()
+
+    with store._connect() as db:
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(enrich_payloads)")}
+        assert "file_id" in cols and "doc_id" not in cols
+        assert db.execute("SELECT count(*) FROM enrich_payloads").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT count(*) FROM enrich_payloads_legacy").fetchone()[0] == 5
+
+
+def test_init_is_idempotent_over_the_legacy_rename(tmp_path):
+    """Restoring a pre-fix artifact into a post-fix build must migrate it, and
+    running init() again must not clobber a legacy table still draining."""
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:
+        db.execute("DROP TABLE enrich_payloads")
+        db.execute("CREATE TABLE enrich_payloads(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO enrich_payloads(doc_id,payload) VALUES('gdrive-A-0','{}')")
+
+    Store(path, dim=4).init()
+    Store(path, dim=4).init()          # second run must be a no-op
+
+    with store._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM enrich_payloads_legacy").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("doc_id,expected", [
+    ("gdrive-1AbC-0", "1AbC"),
+    ("gdrive-1AbC-12", "1AbC"),
+    ("gdrive-a-b-c-7", "a-b-c"),          # file_id containing hyphens
+    ("gdrive-file-2024-3", "file-2024"),  # file_id ending in digits
+    ("gdrive-noindex", None),
+    ("cal-event-1", None),
+    ("", None),
+])
+def test_file_key_from_doc_id(doc_id, expected):
+    """Drive file ids are base64url and can contain '-', so only a trailing
+    '-<digits>' may be stripped. Splitting on the first or every hyphen would
+    merge distinct files."""
+    from mcpbrain.store import _file_key_from_doc_id
+    assert _file_key_from_doc_id(doc_id) == expected
