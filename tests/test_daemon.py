@@ -1736,3 +1736,14 @@ def test_backup_under_bulk_lock_resweeps_orphan_snapshots_every_cycle(tmp_path, 
         "orphaned snapshot temp dir should be re-swept every "
         "_backup_under_bulk_lock call, not just once at startup"
     )
+
+
+def test_enrich_payload_migration_is_registered_as_a_cadence_pass():
+    from mcpbrain.daemon import _CADENCE_PASSES
+    names = {p.name for p in _CADENCE_PASSES}
+    assert "enrich_payload_migration" in names
+    p = next(p for p in _CADENCE_PASSES if p.name == "enrich_payload_migration")
+    # Draining our own cache table needs no Google identity, and it must not
+    # run against the store while a backfill holds it.
+    assert p.needs_configured is False
+    assert p.needs_bulk_lock is True
