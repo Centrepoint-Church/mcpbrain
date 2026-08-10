@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Colocate each tool's metadata with its implementation, then move Store-touching tool execution into the daemon so the MCP server becomes a thin protocol adapter — making stale MCP server code stop mattering and removing the multiple-writable-`Store`-handle class by construction.
+**Goal:** Colocate each tool's metadata with its implementation, then move Store-touching tool execution into the daemon so the MCP server becomes a thin protocol adapter — making stale MCP server code stop mattering and removing the multiple-writable-`Store`-handle class by construction. **This is only the write-side half of the WAL-contention picture** — Task 7's live-load probe found a second, worse cause (a single held read transaction blocks `wal_checkpoint(TRUNCATE)` absolutely, and ordinary recall reads on this store already outlive the 5s busy_timeout). This phase relocates that read-side cause into the daemon; it does not eliminate it, and it does not fix backups — see Task 12.
 
 **Architecture:** Two phases with a dependency. **(1)** A `@tool(...)` decorator on each of the 24 `make_brain_*` factories declares description / input schema / annotations / output schema beside the handler, replacing four parallel name-keyed mappings and creating a single registry both processes can read. **(2)** The 10 Store-touching tools execute in the daemon behind a new `POST /api/tool` endpoint, gated by a `fleet_flag` defaulting **ON** with the local kill-switch as the fallback path. The six filesystem-only capture tools stay in the MCP server because they work with the daemon down today. Latency is a hard pre-release gate.
 
@@ -24,6 +24,18 @@
 **This directly answers Task 9 Step 3's open question** ("decide where the handler functions live so the daemon can reach them without importing the MCP surface") — see that task for the resolution.
 
 Anywhere below this line still says `mcpbrain/mcp_server.py:220-1150` for factory locations, or a bare `grep ... mcpbrain/mcp_server.py` for `make_brain_`, that is now **`mcpbrain/tools.py`** — fixed inline below where it mattered, but if you find another stale reference, trust `tools.py`, not the old text.
+
+## Status as of 2026-08-10 — Phases 1-3 (Tasks 1-8) are DONE and RELEASED as 0.7.114
+
+**A fresh session must not re-run Tasks 1-8.** Everything below Phase 1 above is also complete: Phase 2 (Tasks 4-5: per-process version records + the `doctor` drift check, `2a491c2`/`7f8543a`) and Phase 3 (Tasks 6-8: the Store-access seam pinned, the live latency baseline, the WAL probe under load, and the Finding 2 measurement — `0c27e85`/`07f43ba`/`870ecf9`, one fix round `8438ad3`). All of it — plus one unplanned fix found during release pause-checking (an hourly `mcp_heartbeat` sweep cadence, `0030e68`) — shipped as **0.7.114**, live-verified against the real published wheel and real Claude Desktop.
+
+**Three measured facts from Phase 3 that Phase 4's tasks were corrected to use — read these before Task 9:**
+
+1. **The latency gate must be per-tool, not aggregate** (already reflected in Task 11 below). Baseline: `brain_graph` **6.3s median / 8.3s p95**, `brain_actions` **3.1s / 4.4s** — 2-3 orders of magnitude slower than the other 9 Store-touching tools (1.8-31ms). These are the numbers Task 11 Step 2 compares against.
+2. **Finding 3 (WAL contention) is CONFIRMED under load, not "still unexplained."** Two distinct causes: (W) concurrent MCP writers, and (R) a single held read transaction — the latter blocks `wal_checkpoint(TRUNCATE)` absolutely, and it is reachable by *ordinary recall*, since `brain_graph`/`brain_actions` read transactions (fact 1, above) already outlive the 5000ms `busy_timeout`. **Phase 4 kills cause (W) but not cause (R), and does not fix backups** — Task 12 below was corrected to test for exactly this split, not to re-derive whether contention exists. The actual backup fix (distinguishing "frames remained" from "truncate failed," and/or a longer checkpoint timeout under the bulk lock) is a named follow-up, out of this plan's scope.
+3. **Finding 2 is answered the opposite way the spec originally guessed.** Of the two MCP servers Claude Desktop spawns per reconnect, only **one** ever completes `initialize` — the other is spawned, pays the full ~77MB import cost, and is abandoned. Client behaviour (`LocalMcpServerManager`'s bulk sweep doesn't notice a server was already launched), nothing to change on our side. Worth **re-measuring this table after Task 10**: a shim holding no `Store` makes the abandoned spawn cheap instead of 77MB, and that delta is the clearest single number for what the thin adapter buys.
+
+Real backup failures were correctly attributed during Phase 3's fix round: **3 of 98 (3%)** are WAL-related, **57%** are disk-space, **39%** network/transport. The WAL-contention verdict is real; its priority relative to other causes was initially overstated by quoting an unrelated aggregate figure, then corrected.
 
 ## Global Constraints
 
@@ -900,17 +912,25 @@ If a tool regresses: **it does not move.** Revert that tool to local execution a
 
 ---
 
-### Task 12: Re-probe Finding 3 after the move
+### Task 12: Re-probe Finding 3 after the move — confirm the split, not "is it fixed"
 
 **Files:** none (measurement)
 
-- [ ] **Step 1: Re-run Task 7's probe**
+**Finding 3 is already closed, with evidence, from Phase 3** (`bin/probe_wal_contention.py`'s six-arm live-load run, recorded in `docs/superpowers/specs/2026-08-04-mcp-server-process-lifecycle.md` and corrected by `8438ad3` after the first fix round). It is CONFIRMED, not "still unexplained" — this task is not re-opening that question. Two causes were found:
+- **(W) Concurrent MCP writes.** The `mcp_writes` arm produced `busy=1` with `log_frames=4907` — the busy handler exhausted for its full 5000ms.
+- **(R) A single held read transaction.** The `pinned_reader` arm returned `busy=1` on 6 of 6 attempts with `checkpointed_frames: 0` every time — this is the more dangerous cause, because Task 6 measured `brain_graph` at 6.3s median / 8.3s p95 and `brain_actions` at 3.1s / 4.4s on this store, and ordinary recall reads **already outlive** the 5000ms `busy_timeout` `_open_db` sets.
 
-With the flag on and the MCP server holding no Store handle, re-run `bin/probe_wal_contention.py`. Expected: the writable-handle contention class is **gone by construction**. Confirm rather than assume, and record it against Task 7's before-numbers.
+**This task's job is to confirm the split held after the move, not to re-derive whether contention exists at all:**
 
-- [ ] **Step 2: Close Finding 3 in the spec**
+- [ ] **Step 1: Re-run Task 7's probe with the flag on**
 
-Append the before/after to the lifecycle spec and commit that doc change. **The success criterion for this plan is that Finding 3 ends fixed or explicitly closed with evidence** — "still unexplained" is a failure, because live backups were failing and the cause is currently unattributed.
+Run `bin/probe_wal_contention.py`'s `mcp_writes` and `pinned_reader` arms against the post-move daemon. Expected, precisely:
+- **(W) should be gone** — the MCP server holds no writable `Store` handle, so nothing there can produce the `mcp_writes` result any more. Confirm rather than assume.
+- **(R) is expected to PERSIST, unchanged.** Phase 4 *relocates* the recall reads into the daemon process; it does not remove them, shorten them, or give them any WAL-checkpoint accommodation. If `pinned_reader`'s result has changed at all, that is a surprise worth investigating (did something *else* about the move accidentally help or hurt?) — do not assume "still busy=1" needs no comment just because it was expected.
+
+- [ ] **Step 2: Record the confirmed split in the spec, and do NOT claim this phase fixed backups**
+
+Append the post-move numbers to the lifecycle spec, next to Task 7/8's existing measurements. State plainly: cause (W) is closed by this phase; cause (R) is not, and moved (not eliminated) into the daemon, where it is still uncovered by `_bulk_lock`. **The backup fix remains a separate, specific change to `backup.snapshot()`** — distinguishing "frames remained in the WAL" from "the WAL could not be truncated" (`checkpointed_frames == log_frames` in the observed live failures means the data was safe; only the WAL reset failed), and/or checkpointing under a longer `busy_timeout` while holding the bulk lock. That is not in this plan's scope — record it as a named follow-up, do not attempt it here.
 
 ---
 
