@@ -43,11 +43,16 @@ class DaemonTimeout(DaemonUnavailable):
       running, run `mcpbrain doctor`" is actively wrong here: the daemon is up,
       answering other requests (the control API is threaded), and this one call
       is slow or wedged inside its handler. Two routed tools can genuinely block
-      past TOOL_CALL_TIMEOUT_S -- `brain_gardener_apply` shells out to git, which
-      blocks INDEFINITELY on a stale `.git/index.lock` in the records repo, and
-      `brain_meetings_today` makes a live Calendar call -- so this is a real
-      operational state, not a theoretical one, and pointing the user at a daemon
-      restart would send them chasing the wrong thing.
+      past TOOL_CALL_TIMEOUT_S: `brain_gardener_apply` shells out to git with no
+      subprocess timeout, and `brain_meetings_today` makes a live Calendar call.
+      Note what git actually hangs ON -- records_write._git runs only `add` and
+      `commit` (no network, no push), so a stale `.git/index.lock` makes git FAIL
+      FAST with CalledProcessError, which brain_gardener_apply already converts
+      into `{"applied": false, "error": "git busy (retry next run)"}`. The genuine
+      (low-probability) hangs are an interactive gpg-signing pinentry prompt and a
+      slow/blocking repo hook. Either way this is a real operational state, not a
+      theoretical one, and pointing the user at a daemon restart would send them
+      chasing the wrong thing.
     """
 
 

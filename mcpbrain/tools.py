@@ -51,9 +51,12 @@ _log = logging.getLogger("mcpbrain.tools")
 # open_world_hint is False for 25 of the 26: each of those touches only the local
 # store, local files, or the loopback control API. The one exception is
 # brain_meetings_today, which calls dashboard.calendar_today(home) ->
-# auth.build_google_services(...) + a live Calendar events().list(...),
-# in-process and synchronously as part of the tool call -- a real trust-boundary
-# crossing, not something the daemon does on its behalf. It spells its
+# auth.build_google_services(...) + a live Calendar events().list(...)
+# synchronously as part of the tool call -- a real trust-boundary crossing. The
+# annotation describes the CALL, not which process makes it: Phase 4 routes this
+# tool to the daemon (tool_exec_in_daemon, default ON), so the Calendar request
+# now leaves from there rather than from the MCP server, but it is still one
+# outbound network call made on the caller's behalf while it waits. It spells its
 # annotations out at its declaration rather than using a shorthand.
 
 

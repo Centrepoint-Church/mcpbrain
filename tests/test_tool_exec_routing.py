@@ -283,9 +283,14 @@ def test_a_stuck_handler_is_a_timeout_not_an_absent_daemon(tmp_path, monkeypatch
     `socket.timeout` IS `TimeoutError` IS `OSError`, so the read timeout lands in
     the same handler as ECONNREFUSED unless it is classified first -- and Task 10
     routed two tools that can genuinely block past TOOL_CALL_TIMEOUT_S:
-    brain_gardener_apply shells out to git with NO timeout (indefinite on a stale
-    records-repo `.git/index.lock`, as drain.py's own comment documents) and
-    brain_meetings_today makes a live Calendar call.
+    brain_gardener_apply shells out to git with NO subprocess timeout, and
+    brain_meetings_today makes a live Calendar call. On the git side the hang is
+    NOT a stale `.git/index.lock`: records_write._git runs only add/commit (no
+    network, no push), so the lock makes git fail fast with CalledProcessError and
+    the handler already turns that into "git busy (retry next run)". The genuine,
+    low-probability hangs are an interactive gpg-signing pinentry prompt and a
+    blocking repo hook -- unbounded either way, which is what this classification
+    has to survive.
 
     The blocked handler thread here IS the production shape: ThreadingHTTPServer
     means one wedged call does not wedge the control API, which is exactly why
@@ -299,8 +304,8 @@ def test_a_stuck_handler_is_a_timeout_not_an_absent_daemon(tmp_path, monkeypatch
 
     class _Stuck:
         def call_tool(self, name, arguments):
-            released.wait(30)   # like git on a stale index.lock; bounded so a
-            return {"applied": True}   # failing test cannot hang the suite
+            released.wait(30)   # like git waiting on a pinentry prompt; bounded
+            return {"applied": True}   # so a failing test cannot hang the suite
 
     monkeypatch.setattr(ControlClient, "TOOL_CALL_TIMEOUT_S", 0.5)
     srv = ControlServer(_Stuck(), home=str(tmp_path))
@@ -899,9 +904,14 @@ def test_the_stuck_and_absent_diagnoses_differ_at_the_mcp_boundary(tmp_path, mon
     Both are isError results, so a caller can only act on the text. If a stuck
     call said "not reachable, check the daemon is running (`mcpbrain doctor`)" the
     user would restart a daemon that doctor reports healthy, while the real cause
-    -- a git child blocked on a stale `.git/index.lock`, or a hung Calendar call
-    -- sat there untouched. Driven through the real dispatch layer so the
-    classification is proven where it is consumed, not just where it is raised.
+    -- a git child waiting on a gpg pinentry prompt or a blocking repo hook, or a
+    hung Calendar call -- sat there untouched. (A stale `.git/index.lock` is NOT
+    one of those causes: git fails fast on it and the handler already reports "git
+    busy (retry next run)". The shipped message still names it; that inaccuracy is
+    logged as a follow-up rather than fixed here, because changing the text is a
+    user-visible change and this round was scoped to comment accuracy.) Driven
+    through the real dispatch layer so the classification is proven where it is
+    consumed, not just where it is raised.
     """
     import threading
 
@@ -951,3 +961,217 @@ def test_the_stuck_and_absent_diagnoses_differ_at_the_mcp_boundary(tmp_path, mon
     assert "mcpbrain doctor" not in stuck_text, stuck_text
     # The absent case is unchanged: still the doctor advice it has always given.
     assert "not reachable" in absent_text and "mcpbrain doctor" in absent_text, absent_text
+
+
+# --- 8. the two mappings must agree ARGUMENT BY ARGUMENT, not just in result --
+
+# Section 6 compares RESULTS, which only catches a dropped argument when the
+# handler's output visibly depends on it. Three arguments fail that test: none of
+# them is exercised by either side above, and dropping one from just ONE of the
+# two mapping sites degrades the tool to a wrong-but-plausible answer with
+# nothing failing --
+#   * brain_context's `community_id`: without it, mode="communities" returns the
+#     WHOLE community list instead of one cluster's members. A behaviour test for
+#     this would be VACUOUS on a test store (no communities are detected, so
+#     community_members(1) and list_communities() are both [] either way), which
+#     is exactly why this test compares the FORWARDED ARGUMENTS instead.
+#   * brain_finding_resolve's `note`: free text into the change log, absent from
+#     the tool's return value entirely.
+#   * brain_draft_save's `parent_draft_id`: the supersede link on the stored row.
+#
+# So: stub out every handler, drive both mapping sites, and compare what each one
+# actually passed. No store seeding, no handler logic -- the wiring alone.
+
+# Every argument each routed tool's inputSchema declares, all present at once.
+# Deliberately NOT derived from the schema at runtime: a table written by hand is
+# what forces a NEW argument to be classified here (and _covers_every_declared_
+# argument below fails until it is).
+_FULL_ARGS = {
+    "brain_read": {"doc_id": "d-1"},
+    "brain_context": {"entity": "Sam Taylor", "mode": "communities",
+                      "community_id": 7},
+    "brain_actions": {"owner": "Sam Taylor", "status": "done"},
+    "brain_proactive": {"finding_type": "memory_promotion", "severity": "info"},
+    "brain_finding_resolve": {"finding_id": 3, "outcome": "promoted",
+                              "note": "wrote the memory file"},
+    "brain_gardener_apply": {"lane": "context", "filename": "identity.md",
+                             "content": "new body", "asserts_person_role": True,
+                             "attribution_source": "signature",
+                             "attribution_quote": "verbatim",
+                             "attribution_doc_id": "d-1"},
+    "brain_draft_save": {"email_id": "m1", "thread_id": "t1", "intent": "reply",
+                         "final_draft": "Happy to help.", "parent_draft_id": 4},
+    "brain_meetings_today": {},
+    "brain_meeting_pack_get": {"event_id": "ev-1"},
+    "brain_meeting_pack_upsert": {"event_id": "ev-2", "event_title": "Elders",
+                                  "event_date": "2026-08-11", "pack_text": "# e",
+                                  "attendees": ["Sam Taylor"],
+                                  "context_hash": "hash-2"},
+}
+
+# routed tool -> the mcpbrain.tools factory whose product both mapping sites call.
+# brain_read is absent on purpose: it has no factory (both sides call
+# store.get_chunk directly), so the stub Store below records it instead.
+_TOOL_FACTORIES = {
+    "brain_context": "make_brain_context",
+    "brain_actions": "make_brain_actions",
+    "brain_proactive": "make_brain_proactive",
+    "brain_finding_resolve": "make_brain_finding_resolve",
+    "brain_gardener_apply": "make_brain_gardener_apply",
+    "brain_draft_save": "make_brain_draft_save",
+    "brain_meetings_today": "make_brain_meetings_today",
+    "brain_meeting_pack_get": "make_brain_meeting_pack_get",
+    "brain_meeting_pack_upsert": "make_brain_meeting_pack_upsert",
+}
+
+
+class _Recorder:
+    """Stub handlers that record (args, kwargs) per tool and run no logic.
+
+    Positional args are recorded alongside keyword ones because the two mapping
+    sites currently agree on call STYLE as well as content (brain_actions,
+    brain_proactive and brain_meeting_pack_get are passed positionally on both
+    sides). Comparing both halves means a one-sided switch from positional to
+    keyword -- harmless today, but the kind of edit that hides a reorder -- shows
+    up here too.
+    """
+
+    def __init__(self):
+        self.calls: dict[str, tuple] = {}
+
+    def factory(self, tool_name: str):
+        def _make(*_a, **_kw):
+            # async: every routed tool except brain_read is an `async def`
+            # handler, so this matches what both call sites await/drive.
+            async def _handler(*args, **kwargs):
+                self.calls[tool_name] = (args, kwargs)
+                return {"recorded": tool_name}
+            return _handler
+        return _make
+
+    def store(self):
+        recorder = self
+
+        class _Store:
+            # brain_read's "handler" on both sides. Synchronous, like the real
+            # store.get_chunk it stands in for.
+            def get_chunk(self, *args, **kwargs):
+                recorder.calls["brain_read"] = (args, kwargs)
+                return {"recorded": "brain_read"}
+
+        return _Store()
+
+
+def _patch_factories(monkeypatch, module, recorder):
+    """Point `module`'s make_brain_* names at recording stubs.
+
+    Two modules need patching separately and that is the point: mcp_server binds
+    the factories at IMPORT time (`from mcpbrain.tools import make_brain_...`),
+    while Daemon._routed_tool_handlers imports them at CALL time -- so each side
+    is stubbed where it actually looks the name up, and neither patch can
+    accidentally satisfy the other.
+    """
+    for tool_name, factory in _TOOL_FACTORIES.items():
+        monkeypatch.setattr(module, factory, recorder.factory(tool_name))
+
+
+def _kwargs_the_daemon_forwards(tmp_path, monkeypatch):
+    from mcpbrain import tools as _tools
+    from mcpbrain.daemon import Daemon, SingleWriterLock
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    recorder = _Recorder()
+    _patch_factories(monkeypatch, _tools, recorder)
+    daemon = Daemon(recorder.store(), None, services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+    for name in sorted(ROUTED_TOOLS):
+        # Through call_tool, not the raw table: its jsonschema re-validation also
+        # proves _FULL_ARGS is a legal payload for every tool, so this cannot
+        # drift into asserting agreement about arguments no client could send.
+        daemon.call_tool(name, _FULL_ARGS[name])
+    return recorder.calls
+
+
+def _kwargs_the_mcp_server_forwards(tmp_path, monkeypatch):
+    from mcpbrain import config, mcp_server
+    from mcpbrain.control_client import ControlClient
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    # Flag OFF: this is the kill-switch path, the half of the duplication that
+    # lives in on_call_tool. With the flag on, run_tool would forward to a daemon
+    # and never call these stubs at all.
+    config.write_config(str(tmp_path), {"tool_exec_in_daemon": False})
+    recorder = _Recorder()
+    _patch_factories(monkeypatch, mcp_server, recorder)
+    store = recorder.store()
+    server = mcp_server.build_server(store, store, ControlClient(home=tmp_path),
+                                     str(tmp_path))
+    call = _dispatch(server)
+
+    async def _body():
+        for name in sorted(ROUTED_TOOLS):
+            result = await call(name, _FULL_ARGS[name])
+            assert not result.is_error, (name, [c.text for c in result.content])
+
+    asyncio.run(_body())
+    return recorder.calls
+
+
+def test_the_two_argument_mappings_forward_identical_kwargs(tmp_path, monkeypatch):
+    """The companion to section 6: identical FORWARDED ARGUMENTS, per tool.
+
+    Fails loudly the moment either mapping site drops, renames or reorders an
+    argument the other keeps -- including the three (community_id, note,
+    parent_draft_id) whose loss no result comparison can see.
+    """
+    daemon_calls = _kwargs_the_daemon_forwards(tmp_path, monkeypatch)
+    mcp_calls = _kwargs_the_mcp_server_forwards(tmp_path, monkeypatch)
+
+    assert set(daemon_calls) == set(ROUTED_TOOLS), (
+        f"the daemon path did not reach every routed handler: {sorted(daemon_calls)}")
+    assert set(mcp_calls) == set(ROUTED_TOOLS), (
+        f"the local path did not reach every routed handler: {sorted(mcp_calls)}")
+    for name in sorted(ROUTED_TOOLS):
+        assert daemon_calls[name] == mcp_calls[name], (
+            f"{name}: the two argument->kwargs mappings disagree\n"
+            f"  daemon={daemon_calls[name]}\n  mcp   ={mcp_calls[name]}")
+
+
+def test_the_agreement_table_covers_every_declared_argument(tmp_path, monkeypatch):
+    """_FULL_ARGS must be FULL, or the test above proves agreement about nothing.
+
+    An argument absent from _FULL_ARGS is one both mappings could drop in
+    lockstep-invisible silence -- which is precisely how community_id, note and
+    parent_draft_id came to be untested in the first place.
+    """
+    from mcpbrain import tools as _tools  # noqa: F401 -- populates the registry
+    from mcpbrain.tool_registry import spec
+
+    for name in sorted(ROUTED_TOOLS):
+        declared = set(spec(name).input_schema.get("properties", {}))
+        assert declared == set(_FULL_ARGS[name]), (
+            f"{name}: _FULL_ARGS is out of step with the inputSchema "
+            f"(missing={sorted(declared - set(_FULL_ARGS[name]))}, "
+            f"stale={sorted(set(_FULL_ARGS[name]) - declared)})")
+
+
+def test_the_agreement_test_sees_a_one_sided_drop(tmp_path, monkeypatch):
+    """Non-vacuity guard: the comparison must FAIL for a real one-sided drop.
+
+    Without this, a refactor that made both `_kwargs_*` helpers record nothing
+    (or record the same empty thing) would leave the test above passing while
+    checking nothing at all -- the exact failure mode it exists to prevent.
+    Simulated by re-running the daemon side with community_id stripped from the
+    payload, which is what a mapping that forgot to forward it produces.
+    """
+    daemon_calls = _kwargs_the_daemon_forwards(tmp_path, monkeypatch)
+    mcp_calls = _kwargs_the_mcp_server_forwards(tmp_path, monkeypatch)
+    assert daemon_calls["brain_context"] == mcp_calls["brain_context"]
+
+    # One argument gone on one side only -> the tuples must no longer compare
+    # equal. (Tuple-of-dicts, so this reaches into the kwargs half.)
+    _args, kwargs = daemon_calls["brain_context"]
+    assert "community_id" in kwargs, kwargs
+    dropped = (_args, {k: v for k, v in kwargs.items() if k != "community_id"})
+    assert dropped != mcp_calls["brain_context"], (
+        "dropping community_id on one side changed nothing the comparison sees")

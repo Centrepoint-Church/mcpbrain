@@ -215,8 +215,13 @@ class Store:
     def __init__(self, path: Path, dim: int, read_only: bool = False):
         self.path = Path(path)
         self.dim = dim
-        self.read_only = read_only  # daemon is sole writer for index/graph/ingest tables;
-        # the MCP server also opens a writable handle for draft_records (serialised via WAL)
+        self.read_only = read_only  # the daemon is the sole writer, full stop.
+        # The MCP server still CONSTRUCTS a writable handle, but as of Phase 4
+        # (tool_exec_in_daemon, default ON) nothing calls it: draft_save /
+        # meeting_pack_upsert / finding_resolve route to the daemon, and
+        # draft_context was rewired onto the read-only handle. That handle is
+        # reached only on the local kill-switch path (flag off), so in the shipped
+        # configuration no second writable connection exists to serialise against.
 
     @contextmanager
     def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
