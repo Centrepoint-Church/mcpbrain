@@ -33,6 +33,7 @@ import errno
 import logging
 import os
 import shutil
+import sqlite3
 import struct
 import tempfile
 import time
@@ -165,6 +166,12 @@ def snapshot(store_path, out_path) -> Path:
         raise
     finally:
         db.close()
+
+    try:
+        _verify_artifact(out_path)
+    except BaseException:
+        _clear_artifact(out_path)
+        raise
     return out_path
 
 
@@ -172,6 +179,66 @@ def _clear_artifact(out_path: Path) -> None:
     """Remove an artifact path and any sidecars left beside it."""
     for p in (out_path, Path(f"{out_path}-wal"), Path(f"{out_path}-shm")):
         p.unlink(missing_ok=True)
+
+
+_VERIFY_SAMPLE = 20
+
+
+def _verify_artifact(out_path) -> None:
+    """Check that the rebuilt artifact's vector index still resolves.
+
+    Deliberately narrow. It probes the ARTIFACT ALONE and asserts an internal
+    invariant — every sampled embedded chunk's rowid resolves to a vector of
+    uniform, non-zero length. It does NOT compare against the source: the
+    daemon writes throughout a multi-minute rebuild, so any source-vs-artifact
+    count or KNN comparison would be legitimately unequal and flaky. The
+    stronger source-equality check belongs in the test suite and the live gate,
+    where the store is quiescent.
+
+    It is also NOT an integrity_check: that re-reads the whole artifact and is
+    not the best detector of the hazard this mechanism actually introduces,
+    which is a vec0 shadow table not surviving the rebuild.
+
+    Silent no-op when the store has no embedded chunks or no vec0 table — the
+    probe has nothing to say, and bin/repair.py snapshots stores that may
+    already be broken. A probe that raised there would block the very safety
+    copy it exists to protect.
+    """
+    db = _open_db(out_path, read_only=False)
+    try:
+        try:
+            rowids = [r[0] for r in db.execute(
+                "SELECT rowid FROM chunks WHERE embedded=1 "
+                "ORDER BY rowid LIMIT ?", (_VERIFY_SAMPLE,))]
+        except sqlite3.DatabaseError:
+            return                      # no chunks table: nothing to verify
+        if not rowids:
+            return
+
+        lengths = set()
+        for rid in rowids:
+            try:
+                row = db.execute(
+                    "SELECT embedding FROM vec_chunks WHERE rowid=?", (rid,)).fetchone()
+            except sqlite3.DatabaseError as exc:
+                raise RuntimeError(
+                    f"snapshot artifact {out_path}: vector lookup failed for "
+                    f"chunk rowid {rid} ({exc}); the rebuild did not preserve "
+                    "the vec0 index") from exc
+            if row is None or not row[0]:
+                raise RuntimeError(
+                    f"snapshot artifact {out_path}: chunk rowid {rid} is marked "
+                    "embedded but its vector does not resolve; the rebuild did "
+                    "not preserve the vec0 index")
+            lengths.add(len(bytes(row[0])))
+
+        if len(lengths) != 1:
+            raise RuntimeError(
+                f"snapshot artifact {out_path}: sampled vectors have differing "
+                f"lengths {sorted(lengths)}; the rebuild did not preserve the "
+                "vec0 index")
+    finally:
+        db.close()
 
 
 def generate_escrow_key() -> bytes:
