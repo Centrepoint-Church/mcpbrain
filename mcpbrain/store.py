@@ -1480,19 +1480,30 @@ class Store:
         if not doc_ids:
             return 0
         with self._connect(write=True) as db:
-            # Clean up enrich_payloads for the requested doc_ids UNCONDITIONALLY,
-            # even if no chunk rows exist (e.g. payload orphaned after chunk deletion).
-            db.executemany("DELETE FROM enrich_payloads WHERE doc_id=?",
-                           [(d,) for d in doc_ids])
             qs = ",".join("?" * len(doc_ids))
             rowids = [r["rowid"] for r in db.execute(
                 f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
-            if not rowids:
-                return 0
-            ph = ",".join("?" * len(rowids))
-            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
-            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
-            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            # Which Drive files these doc_ids belong to, resolved BEFORE the
+            # delete so the payload cleanup below can ask whether anything is
+            # left. Derived from the doc_id rather than metadata so an orphaned
+            # payload (no chunk row at all) is still cleaned up.
+            file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
+            if rowids:
+                ph = ",".join("?" * len(rowids))
+                db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
+                db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
+                db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            # A file's cached payload dies only with its LAST chunk. Before the
+            # re-key each chunk had its own row and the file's others survived a
+            # partial delete, so dropping it on any delete would be a behaviour
+            # change — and ingest_cache's shrink path deletes stale chunks of a
+            # file that is still very much present.
+            for fid in file_ids:
+                remaining = db.execute(
+                    "SELECT 1 FROM chunks WHERE json_extract(metadata,'$.file_id')=? "
+                    "LIMIT 1", (fid,)).fetchone()
+                if remaining is None:
+                    db.execute("DELETE FROM enrich_payloads WHERE file_id=?", (fid,))
             return len(rowids)
 
     def invalidate_local_relations_for_docs(self, doc_ids, *,
@@ -2727,18 +2738,20 @@ class Store:
                 "(thread_id, signature, triggered_at) VALUES(?,?,?)",
                 (thread_id, signature, triggered_at))
 
-    def set_enrich_payload(self, doc_id: str, payload: str, logic_version: int) -> None:
-        """Persist the validated extraction (JSON string) a drive doc produced, so
-        its shared-drive cache artifact can carry it and importers skip re-enrich."""
+    def set_enrich_payload(self, file_id: str, payload: str, logic_version: int) -> None:
+        """Persist the validated extraction (JSON string) a Drive FILE produced,
+        so its shared-drive cache artifact can carry it and importers skip
+        re-enrich. One row per file: every chunk of a Drive doc shares the one
+        unit extraction, and publish_file reads exactly one."""
         with self._connect(write=True) as db:
             db.execute("INSERT OR REPLACE INTO enrich_payloads"
-                       "(doc_id, payload, logic_version) VALUES(?,?,?)",
-                       (doc_id, payload, int(logic_version)))
+                       "(file_id, payload, logic_version) VALUES(?,?,?)",
+                       (file_id, payload, int(logic_version)))
 
-    def get_enrich_payload(self, doc_id: str) -> dict | None:
+    def get_enrich_payload(self, file_id: str) -> dict | None:
         with self._connect() as db:
             r = db.execute("SELECT payload, logic_version FROM enrich_payloads "
-                           "WHERE doc_id=?", (doc_id,)).fetchone()
+                           "WHERE file_id=?", (file_id,)).fetchone()
         return {"payload": r["payload"], "logic_version": r["logic_version"]} if r else None
 
     def get_unified_action(self, action_id: int) -> dict | None:

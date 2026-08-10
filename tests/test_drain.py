@@ -353,8 +353,31 @@ def test_drain_persists_enrich_payload_for_drive_docs_only(store, home):
     summary = drain.drain(store, home=home, apply=app)
 
     assert summary["applied"] == 1
-    assert store.get_enrich_payload("gdrive-F1-0") is not None
+    assert store.get_enrich_payload("F1") is not None       # the FILE key
+    assert store.get_enrich_payload("gdrive-F1-0") is None  # not the chunk key
     assert store.get_enrich_payload("gmail-m1-body") is None
+
+
+def test_drain_writes_one_payload_per_drive_file_not_per_chunk(store, home):
+    """drain looped every gdrive- doc_id writing the same whole-unit payload
+    while ingest_cache.publish_file reads exactly one per file: 50,099 rows for
+    8,183 files on the live store, 13.5GB of a 15.65GB store."""
+    thread_id = "t-multi"
+    for i in range(4):
+        _seed_chunk(store, f"gdrive-F9-{i}", thread_id, message_id="msg-drive")
+    env = _envelope(thread_id, messages=[
+        {"message_id": "msg-drive", "sender": "Joel <joel@example.org>",
+         "date": "2026-04-18", "labels": "INBOX", "subject": "Subject"},
+    ])
+    _write_inbox(home, "batch.json", _batch("batch-multi", [env]))
+
+    summary = drain.drain(store, home=home, apply=RecordingApply())
+
+    assert summary["applied"] == 1
+    with store._connect() as db:
+        rows = [r["file_id"] for r in
+                db.execute("SELECT file_id FROM enrich_payloads").fetchall()]
+    assert rows == ["F9"], f"expected one row for the file, got {rows}"
 
 
 def test_drain_apply_failure_isolated_no_mark(store, home):
