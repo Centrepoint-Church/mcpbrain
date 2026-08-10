@@ -1477,3 +1477,82 @@ def test_delete_chunks_drops_the_payload_when_the_last_chunk_goes(tmp_path):
     store.delete_chunks(["gdrive-FILE1-0", "gdrive-FILE1-1"])
 
     assert store.get_enrich_payload("FILE1") is None
+
+
+# --- migrate_enrich_payloads_batch drains the legacy doc_id-keyed table (Task 5) -
+
+def test_migrate_enrich_payloads_batch_collapses_to_one_row_per_file(tmp_path):
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:
+        db.execute("DROP TABLE enrich_payloads")
+        db.execute("CREATE TABLE enrich_payloads(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.executemany(
+            "INSERT INTO enrich_payloads(doc_id,payload,logic_version) VALUES(?,?,?)",
+            [(f"gdrive-F{f}-{i}", '{"n":%d}' % f, 2) for f in range(3) for i in range(4)])
+    store = Store(path, dim=4)
+    store.init()
+
+    res = store.migrate_enrich_payloads_batch(limit=2)
+    assert res["migrated"] == 2 and res["done"] is False
+
+    while not store.migrate_enrich_payloads_batch(limit=2)["done"]:
+        pass
+
+    with store._connect() as db:
+        rows = db.execute("SELECT file_id, payload FROM enrich_payloads "
+                          "ORDER BY file_id").fetchall()
+        assert [r["file_id"] for r in rows] == ["F0", "F1", "F2"]
+        assert db.execute("SELECT count(*) FROM sqlite_schema WHERE name="
+                          "'enrich_payloads_legacy'").fetchone()[0] == 0
+
+
+def test_migrate_enrich_payloads_batch_is_a_noop_without_a_legacy_table(tmp_path):
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    assert store.migrate_enrich_payloads_batch() == {
+        "migrated": 0, "deleted": 0, "done": True}
+
+
+def test_migrate_enrich_payloads_batch_never_overwrites_a_fresh_row(tmp_path):
+    """A payload written since the rename is current; a legacy row for the same
+    file is stale and must not clobber it."""
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:
+        db.execute("CREATE TABLE enrich_payloads_legacy(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO enrich_payloads_legacy(doc_id,payload) "
+                   "VALUES('gdrive-F1-0','\"stale\"')")
+    store.set_enrich_payload("F1", '"fresh"', 5)
+
+    while not store.migrate_enrich_payloads_batch()["done"]:
+        pass
+
+    assert store.get_enrich_payload("F1")["payload"] == '"fresh"'
+
+
+def test_migrate_enrich_payloads_batch_discards_unrecognised_keys(tmp_path):
+    """The table has only ever been written by drain's gdrive- filter, so a key
+    that is not a Drive chunk doc_id means an assumption broke. It is dropped,
+    never guessed at -- the payload is a regenerable cache."""
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:
+        db.execute("CREATE TABLE enrich_payloads_legacy(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO enrich_payloads_legacy(doc_id,payload) "
+                   "VALUES('weird-key','{}')")
+
+    while not store.migrate_enrich_payloads_batch()["done"]:
+        pass
+
+    with store._connect() as db:
+        assert db.execute("SELECT count(*) FROM enrich_payloads").fetchone()[0] == 0

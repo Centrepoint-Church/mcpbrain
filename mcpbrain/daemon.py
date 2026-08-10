@@ -285,6 +285,13 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     CadencePass("action_hygiene", "_action_hygiene_interval_s",
                 "_last_action_hygiene", "_run_action_hygiene",
                 needs_configured=False),
+    # One-time-ish: drain the legacy doc_id-keyed enrich_payloads table left
+    # aside by store.init(). Batched because the live table is 13.5GB and
+    # deleting a row frees its overflow chain. needs_configured=False: draining
+    # our own cache table needs no Google identity.
+    CadencePass("enrich_payload_migration", "_enrich_payload_migration_interval_s",
+                "_last_enrich_payload_migration", "_run_enrich_payload_migration",
+                needs_configured=False, needs_bulk_lock=True),
     # Prune dead-pid mcp_heartbeat/<pid>.json files. Before this, the only thing
     # that pruned them was doctor.py's version_drift_line, and run_doctor has no
     # caller anywhere else -- so a dead MCP server's heartbeat file only got
@@ -910,6 +917,12 @@ class Daemon:
         # in the cadences config to disable.
         self._action_hygiene_interval_s: float | None = None
         self._last_action_hygiene = None
+        # Drain the legacy doc_id-keyed enrich_payloads table store.init()
+        # renames aside. Hourly and hardcoded (not config-driven): this is a
+        # one-time-ish drain, not a tunable maintenance policy, and it
+        # self-terminates once the legacy table is gone.
+        self._enrich_payload_migration_interval_s = 3600.0
+        self._last_enrich_payload_migration = None
         # Prune dead-pid mcp_heartbeat/<pid>.json files (hourly). Default 3600s
         # via _CADENCE_DEFAULTS; set mcp_heartbeat_sweep_interval_s: 0 in the
         # cadences config to disable.
@@ -2857,6 +2870,28 @@ class Daemon:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
+
+    def _run_enrich_payload_migration(self) -> None:
+        """Drain one batch of the legacy doc_id-keyed enrich_payloads table.
+
+        Self-terminating: once store.init() has renamed the old table aside and
+        this has emptied and dropped it, every subsequent call is a cheap
+        no-op returning done=True -- but _is_due still gates it hourly rather
+        than every maintenance tick, matching every other needs_bulk_lock=True
+        pass (decay_pass, salience_score, consolidation, stale_reextract) and
+        the invariant test_maintenance_scheduler.py pins: the outer dispatch
+        pre-check in _run_periodic_passes only skips contending for
+        _bulk_lock on a not-due pass, it is not the authoritative gate.
+        """
+        if not self._is_due("_enrich_payload_migration_interval_s", "_last_enrich_payload_migration"):
+            return
+        now = self._clock()
+        res = self._store.migrate_enrich_payloads_batch()
+        self._last_enrich_payload_migration = now
+        if res["migrated"] or res["deleted"]:
+            log.info("enrich_payload_migration: migrated %d file(s), "
+                     "deleted %d legacy row(s), done=%s",
+                     res["migrated"], res["deleted"], res["done"])
 
     def _run_mcp_heartbeat_sweep(self) -> dict | None:
         """Hourly prune of dead-pid mcp_heartbeat/<pid>.json files.
