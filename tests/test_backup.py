@@ -1915,3 +1915,111 @@ def test_prune_keep_zero_is_noop():
     svc = FakeService(FakeFilesPrune(files))
     assert prune_snapshots(svc, "drive-X", "sam", keep=0) == 0
     assert svc._files.deleted == []
+
+
+# --- Task 2: the artifact carries an intact vector index -----------------------
+
+
+def test_snapshot_preserves_the_vector_index_across_the_rebuild(tmp_path):
+    """VACUUM may renumber rowids of tables without an INTEGER PRIMARY KEY, and
+    vec_chunks_vector_chunks00 is declared `rowid PRIMARY KEY` untyped. If it
+    renumbered while vec_chunks_chunks.chunk_id (INTEGER PRIMARY KEY
+    AUTOINCREMENT) did not, KNN would silently return the wrong chunks.
+
+    NULL-INSTRUMENT GUARD: gaps must exist in that table before the snapshot.
+    With contiguous rowids a renumbering VACUUM is the identity map and this
+    test could not go red — the first design probe passed for exactly that
+    reason and proved nothing.
+    """
+    import struct
+
+    from mcpbrain.store import _open_db
+
+    dim = 8
+    store = Store(tmp_path / "live.sqlite3", dim=dim)
+    store.init()
+
+    def vec(i):
+        return [((i * 7919 + j * 104729) % 1000) / 1000.0 for j in range(dim)]
+
+    def ser(v):
+        return struct.pack(f"{len(v)}f", *v)
+
+    db = _open_db(store.path, read_only=False)
+    db.execute("BEGIN")
+    for i in range(6000):          # > 5 vec0 chunks at the 1024 default
+        db.execute("INSERT INTO chunks(rowid,doc_id,text,content_hash,metadata,embedded) "
+                   "VALUES(?,?,?,?,'{}',1)", (i + 1, f"doc-{i:05d}", f"text {i}", f"h{i}"))
+        db.execute("INSERT INTO vec_chunks(rowid,embedding) VALUES(?,?)", (i + 1, ser(vec(i))))
+    db.execute("COMMIT")
+    db.execute("BEGIN")            # free whole vector chunks -> rowid gaps
+    db.execute("DELETE FROM vec_chunks WHERE rowid BETWEEN 1100 AND 4200")
+    db.execute("DELETE FROM chunks WHERE rowid BETWEEN 1100 AND 4200")
+    db.execute("COMMIT")
+
+    cnt, lo, hi = db.execute(
+        "SELECT count(*), min(rowid), max(rowid) FROM vec_chunks_vector_chunks00").fetchone()
+    assert (hi - lo + 1) - cnt > 0, (
+        "NULL INSTRUMENT: no rowid gaps, a renumbering VACUUM would be the "
+        "identity map and this test could not fail")
+
+    def knn(path, q, k=10):
+        d = _open_db(path, read_only=False)
+        try:
+            return [(r["doc_id"], round(r["distance"], 6)) for r in d.execute(
+                "SELECT c.doc_id, v.distance FROM vec_chunks v "
+                "JOIN chunks c ON c.rowid = v.rowid "
+                "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance", (ser(q), k))]
+        finally:
+            d.close()
+
+    queries = [vec(i * 137 + 3) for i in range(4)]
+    before = [knn(store.path, q) for q in queries]
+    fts_before = db.execute(
+        "SELECT count(*) FROM fts_chunks WHERE fts_chunks MATCH 'text'").fetchone()[0]
+    db.close()
+
+    out = snapshot(store.path, tmp_path / "snap.sqlite3")
+
+    assert [knn(out, q) for q in queries] == before, "KNN differs after the rebuild"
+    d = _open_db(out, read_only=False)
+    try:
+        assert d.execute("SELECT count(*) FROM fts_chunks "
+                         "WHERE fts_chunks MATCH 'text'").fetchone()[0] == fts_before
+    finally:
+        d.close()
+
+
+def test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve(tmp_path, monkeypatch):
+    """The runtime guard: snapshot() must not hand back an artifact whose
+    vector index does not resolve. Simulated by corrupting the artifact between
+    the copy and the check."""
+    import pytest
+
+    import mcpbrain.backup as backup_mod
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+    with store._connect(write=True) as db:
+        rid = db.execute("SELECT rowid FROM chunks WHERE doc_id='d1'").fetchone()["rowid"]
+    store.write_embedding(rid, [0.1, 0.2, 0.3, 0.4])
+
+    real_verify = backup_mod._verify_artifact
+
+    def corrupt_then_verify(out_path):
+        d = _open_db(out_path, read_only=False)
+        try:
+            d.execute("DELETE FROM vec_chunks")   # chunks still claim embedded=1
+            d.commit()
+        finally:
+            d.close()
+        return real_verify(out_path)
+
+    monkeypatch.setattr(backup_mod, "_verify_artifact", corrupt_then_verify)
+
+    out = tmp_path / "snap.sqlite3"
+    with pytest.raises(RuntimeError, match="vector"):
+        snapshot(store.path, out)
+    assert not out.exists(), "a failed artifact must not be left behind"
