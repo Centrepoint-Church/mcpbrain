@@ -27,11 +27,11 @@ from mcpbrain.store import Store                     # noqa: E402
 
 def _backup_db(db_path: Path) -> Path:
     # WAL-safe backup: the store runs journal_mode=WAL, so committed writes can
-    # live in the -wal sidecar. A bare shutil.copy2 of the main .sqlite3 file can
-    # silently MISS the latest committed transactions. backup.snapshot() runs
-    # PRAGMA wal_checkpoint(TRUNCATE) first (folding WAL frames into the main
-    # file), then copies — so the .bak is a complete, restorable snapshot. This
-    # is the reversibility guarantee for the destructive migration.
+    # live in the -wal sidecar and a bare shutil.copy2 of the main .sqlite3 file
+    # can silently MISS them. backup.snapshot() uses VACUUM INTO, which reads
+    # through the WAL under one consistent read transaction — so the .bak is a
+    # complete, restorable snapshot even while the daemon is writing. This is
+    # the reversibility guarantee for the destructive migration.
     db_path = Path(db_path)
     backup = db_path.with_suffix(db_path.suffix + f".bak-{int(time.time())}")
     return snapshot(db_path, backup)

@@ -1,13 +1,16 @@
-"""Tests for mcpbrain.backup — store snapshot with mandatory WAL checkpoint.
+"""Tests for mcpbrain.backup — store snapshot via VACUUM INTO.
 
-The store runs journal_mode=WAL. Committed writes can still live in the -wal
-sidecar, so a bare copy of the main .sqlite3 file can MISS the latest writes.
-snapshot() must run PRAGMA wal_checkpoint(TRUNCATE) to fold those frames into
-the main DB file BEFORE copying. The latest-writes roundtrip test below is the
-behavioural proof: a freshly-committed row must survive the snapshot.
+The store runs journal_mode=WAL. Committed writes can live in the -wal sidecar,
+so a bare copy of the main .sqlite3 file can MISS the latest writes. snapshot()
+uses VACUUM INTO, which reads through the WAL under one consistent read
+transaction: it needs no exclusive checkpoint (which a single held reader
+blocks absolutely) and cannot be torn by a concurrent autocheckpoint. The
+latest-writes roundtrip test below is the behavioural proof: a freshly
+committed row must survive the snapshot.
 """
 
 import sqlite3
+from pathlib import Path
 
 import sqlite_vec
 
@@ -114,63 +117,86 @@ def test_snapshot_accepts_str_paths(tmp_path):
     assert loaded.get_chunk("d1") is not None
 
 
-def test_checkpoint_runs_before_copy(tmp_path, monkeypatch):
-    """Behavioural-adjacent guard: assert wal_checkpoint(TRUNCATE) is executed
-    and that it runs BEFORE shutil.copy2. Ordering matters — checkpoint after
-    copy would not fold the WAL into the copied file."""
+def test_snapshot_succeeds_while_a_read_transaction_is_held(tmp_path):
+    """Cause (R) from Finding 3: one open read transaction on an older snapshot
+    blocks wal_checkpoint(TRUNCATE) absolutely — busy=1 on 6/6 live attempts,
+    checkpointed_frames=0 every time. snapshot() must not depend on that
+    checkpoint at all.
+
+    NULL-INSTRUMENT GUARD: the WAL must be non-empty when the snapshot runs.
+    With an empty WAL, TRUNCATE returns busy=0 regardless of concurrency, so
+    this test could not go red — the exact failure that made the 2026-08-04
+    idle measurement worthless.
+    """
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "before", "h1", {})
+
+    reader = _open_db(store.path, read_only=False)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM chunks").fetchone()  # pins the snapshot
+    try:
+        for i in range(50):
+            store.upsert_chunk(f"d-{i}", f"body {i}", f"h-{i}", {})
+
+        wal = Path(f"{store.path}-wal")
+        assert wal.exists() and wal.stat().st_size > 0, (
+            "NULL INSTRUMENT: the WAL is empty, so TRUNCATE would have returned "
+            "busy=0 regardless and this test proves nothing")
+
+        out = snapshot(store.path, tmp_path / "snap.sqlite3")
+    finally:
+        reader.rollback()
+        reader.close()
+
+    loaded = Store(out, dim=4)
+    assert loaded.get_chunk("d1") is not None
+    assert loaded.get_chunk("d-49") is not None
+
+
+def test_snapshot_never_runs_an_exclusive_checkpoint(tmp_path, monkeypatch):
+    """The inverse of the old test_checkpoint_runs_before_copy, which pinned
+    the defect in place. wal_checkpoint(TRUNCATE) is what cause (R) blocks, so
+    the backup path must not issue one at all."""
     import mcpbrain.backup as backup_mod
 
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d1", "hello", "h1", {})
 
-    events = []
-
+    seen = []
     real_open_db = backup_mod._open_db
 
     def spy_open_db(*args, **kwargs):
-        # sqlite3.Connection is immutable, so wrap the instance's execute via a
-        # thin proxy that records wal_checkpoint calls and delegates everything
-        # else to the real connection.
         conn = real_open_db(*args, **kwargs)
-        real_execute = conn.execute
 
-        def recording_execute(sql, *a, **k):
-            if "wal_checkpoint" in sql.lower():
-                events.append("checkpoint")
-            return real_execute(sql, *a, **k)
-
-        # Bind onto a lightweight proxy so we don't mutate the immutable type.
         class _Proxy:
             def __getattr__(self, name):
                 return getattr(conn, name)
 
             def execute(self, sql, *a, **k):
-                return recording_execute(sql, *a, **k)
+                seen.append(sql)
+                return conn.execute(sql, *a, **k)
 
         return _Proxy()
 
-    real_copy2 = backup_mod.shutil.copy2
-
-    def spy_copy2(*args, **kwargs):
-        events.append("copy")
-        return real_copy2(*args, **kwargs)
-
     monkeypatch.setattr(backup_mod, "_open_db", spy_open_db)
-    monkeypatch.setattr(backup_mod.shutil, "copy2", spy_copy2)
-
     snapshot(store.path, tmp_path / "snap.sqlite3")
 
-    assert "checkpoint" in events, "wal_checkpoint(TRUNCATE) was never executed"
-    assert "copy" in events, "shutil.copy2 was never called"
-    assert events.index("checkpoint") < events.index("copy"), (
-        "checkpoint must run BEFORE the file copy"
-    )
+    assert not any("wal_checkpoint" in s.lower() for s in seen), (
+        f"snapshot() issued a checkpoint: {seen}")
+    assert any("vacuum into" in s.lower() for s in seen), (
+        f"snapshot() did not use VACUUM INTO: {seen}")
 
 
-def test_snapshot_raises_on_busy_checkpoint_no_partial_file(tmp_path, monkeypatch):
-    """A busy checkpoint (busy != 0) must abort with RuntimeError and write NO
-    file — a degraded snapshot must never look successful to 5.2/5.3 callers."""
+def test_snapshot_leaves_no_partial_artifact_when_the_copy_fails(tmp_path, monkeypatch):
+    """The old busy-abort contract, preserved under the new mechanism: a
+    failure must leave nothing that looks like a successful artifact to
+    make_encrypted_snapshot."""
+    import sqlite3
+
     import pytest
 
     import mcpbrain.backup as backup_mod
@@ -179,6 +205,7 @@ def test_snapshot_raises_on_busy_checkpoint_no_partial_file(tmp_path, monkeypatc
     store.init()
     store.upsert_chunk("d1", "hello", "h1", {})
 
+    out = tmp_path / "snap.sqlite3"
     real_open_db = backup_mod._open_db
 
     def spy_open_db(*args, **kwargs):
@@ -189,25 +216,117 @@ def test_snapshot_raises_on_busy_checkpoint_no_partial_file(tmp_path, monkeypatc
                 return getattr(conn, name)
 
             def execute(self, sql, *a, **k):
-                if "wal_checkpoint" in sql.lower():
-                    # Force a busy result so the checkpoint reports it could not
-                    # fully fold the WAL. (busy, log, checkpointed).
-                    class _Cur:
-                        def fetchone(self_inner):
-                            return (1, -1, -1)
-
-                    return _Cur()
+                if "vacuum into" in sql.lower():
+                    out.write_bytes(b"partial")   # a half-written artifact
+                    raise sqlite3.OperationalError("disk I/O error")
                 return conn.execute(sql, *a, **k)
 
         return _Proxy()
 
     monkeypatch.setattr(backup_mod, "_open_db", spy_open_db)
 
-    out = tmp_path / "snap.sqlite3"
-    with pytest.raises(RuntimeError, match="busy=1"):
+    with pytest.raises(sqlite3.OperationalError):
         snapshot(store.path, out)
 
-    assert not out.exists(), "no partial artifact may be written on a busy checkpoint"
+    assert not out.exists(), "a partial artifact was left behind"
+
+
+def test_snapshot_clears_a_pre_existing_destination_and_its_sidecars(tmp_path):
+    """VACUUM INTO refuses to overwrite, and a stale -wal beside a previous
+    artifact would be applied over the fresh one on first open."""
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+
+    out = tmp_path / "snap.sqlite3"
+    out.write_bytes(b"stale artifact")
+    Path(f"{out}-wal").write_bytes(b"stale wal")
+    Path(f"{out}-shm").write_bytes(b"stale shm")
+
+    snapshot(store.path, out)
+
+    assert Store(out, dim=4).get_chunk("d1") is not None
+    assert not Path(f"{out}-wal").exists()
+    assert not Path(f"{out}-shm").exists()
+
+
+def test_snapshot_artifact_opens_and_ends_in_wal_mode(tmp_path):
+    """VACUUM INTO writes a fresh DB whose header says rollback-journal, where
+    copy2 preserved WAL. init() converts it on open; this pins that the restore
+    path is unaffected."""
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+
+    out = snapshot(store.path, tmp_path / "snap.sqlite3")
+
+    db = _open_db(out, read_only=False)
+    try:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        db.close()
+
+    restored = Store(out, dim=4)
+    restored.init()
+    db = _open_db(out, read_only=False)
+    try:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        db.close()
+    assert restored.get_chunk("d1") is not None
+
+
+def test_snapshot_is_consistent_under_a_concurrent_writer(tmp_path):
+    """The torn-copy half. The old implementation checkpointed and then copied
+    the DB file for minutes, during which any connection's wal_autocheckpoint
+    could write pages into that file mid-copy. VACUUM INTO builds from one
+    consistent read transaction and cannot be torn.
+
+    The artifact is a point-in-time snapshot, so rows committed DURING it may
+    or may not appear — what must hold is that everything committed BEFORE the
+    call is present and the result is a valid database.
+    """
+    import threading
+
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    for i in range(200):
+        store.upsert_chunk(f"pre-{i}", f"before {i}", f"hp{i}", {})
+
+    stop = threading.Event()
+    written = []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            store.upsert_chunk(f"dur-{i}", f"during {i}", f"hd{i}", {})
+            written.append(i)
+            i += 1
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        while len(written) < 20:          # ensure the writer is genuinely live
+            pass
+        out = snapshot(store.path, tmp_path / "snap.sqlite3")
+    finally:
+        stop.set()
+        t.join(timeout=10)
+
+    assert written, "NULL INSTRUMENT: the writer never committed anything"
+
+    db = _open_db(out, read_only=False)
+    try:
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        missing = [i for i in range(200) if db.execute(
+            "SELECT 1 FROM chunks WHERE doc_id=?", (f"pre-{i}",)).fetchone() is None]
+    finally:
+        db.close()
+    assert not missing, f"pre-snapshot rows missing from the artifact: {missing[:5]}"
 
 
 # --- Task 5.2: encryption with an admin-escrow key ----------------------------

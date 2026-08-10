@@ -1,11 +1,11 @@
 """Store snapshot (Phase 5, Task 5.1).
 
 Produces a single-file snapshot of the derived store. The store runs with
-journal_mode=WAL, so committed writes can still live in the `-wal` sidecar.
-A bare copy of the main `.sqlite3` file alone can MISS those latest writes.
-snapshot() therefore runs PRAGMA wal_checkpoint(TRUNCATE) FIRST to fold the
-committed WAL frames into the main database file, THEN copies the (now
-complete) main file to the output path.
+journal_mode=WAL, so committed writes can live in the `-wal` sidecar and a bare
+copy of the main `.sqlite3` file alone can MISS them. snapshot() therefore uses
+VACUUM INTO, which reads through the WAL under one consistent read transaction
+and needs no exclusive checkpoint — see snapshot()'s own docstring for why the
+previous checkpoint-then-copy approach was both blockable and tearable.
 
 Encryption (Task 5.2) wraps the snapshot with an admin-escrow Fernet key so the
 derived store — which holds chunk text, i.e. the user's actual mail/doc bodies —
@@ -122,48 +122,56 @@ class UnsupportedArchive(ValueError):
 def snapshot(store_path, out_path) -> Path:
     """Produce a single-file snapshot of the derived store at store_path.
 
-    Runs PRAGMA wal_checkpoint(TRUNCATE) to fold committed WAL frames into the
-    main DB file (WAL implication — a bare file copy can miss the latest
-    writes), then copies the checkpointed DB file to out_path. Returns out_path.
+    Uses VACUUM INTO, which builds the output from one consistent read
+    transaction. That choice is load-bearing in three ways:
 
-    Raises RuntimeError on a busy checkpoint (busy != 0) BEFORE copying anything,
-    so a returned path always reflects a complete, checkpointed artifact rather
-    than a degraded one. Under the single-writer invariant (daemon is the sole
-    writer) a busy checkpoint is abnormal.
+    1. It needs no exclusive checkpoint. PRAGMA wal_checkpoint(TRUNCATE) blocks
+       until there is no writer AND every reader is on the newest snapshot, so
+       a single held read transaction blocks it absolutely — measured busy=1 on
+       6 of 6 attempts with checkpointed_frames=0, against brain_graph reads
+       that run 6.3s median on the live store and outlive the 5000ms
+       busy_timeout. Removing the need for the checkpoint removes that class.
+    2. It cannot be torn. The previous implementation checkpointed and then
+       shutil.copy2'd the main DB file, during which any connection's
+       wal_autocheckpoint could write pages into that file mid-copy. _bulk_lock
+       does not cover the daemon's control-API threads, which is where routed
+       tool writes execute. A busy=0 result never made the following copy safe.
+    3. It excludes free pages, which is what keeps the artifact small once
+       per-file enrich_payloads keying frees ~11.3GB onto the freelist.
 
-    Accepts str or Path for both arguments. Creates out_path's parent dir if
-    needed. A clean TRUNCATE checkpoint empties the `-wal` sidecar, so the copied
-    main file alone is complete — only the main file is copied.
+    Raises before writing anything if the destination cannot be cleared, and
+    unlinks a partial destination if the copy fails, so a returned path always
+    reflects a complete artifact. Accepts str or Path for both arguments.
     """
     store_path = Path(store_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write-mode connection: wal_checkpoint(TRUNCATE) needs the write lock.
-    # Loading sqlite-vec is precautionary so opening a DB containing vec0 virtual
-    # tables can't fail schema validation on connect.
+    # VACUUM INTO refuses outright if the output exists ("output file already
+    # exists"), so clearing is required, not defensive. The sidecars matter
+    # too: a stale -wal left beside a previous artifact would be applied over
+    # the fresh one the first time it is opened.
+    _clear_artifact(out_path)
+
+    # Write-mode connection. mode=ro would be a better fit for a read-only
+    # operation, but a read-only connection cannot create the -shm file when
+    # nothing else has the DB open — which is exactly how bin/repair.py and
+    # bin/consolidate.py run, with the daemon stopped.
     db = _open_db(store_path, read_only=False)
     try:
-        # MUST run BEFORE the copy. TRUNCATE flushes all committed WAL frames
-        # into the main DB file and resets the WAL to zero length.
-        row = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        # Result is (busy, log, checkpointed). busy != 0 means a reader/writer
-        # blocked the checkpoint and frames may remain in the WAL. Raise rather
-        # than copy a degraded artifact — a returned path must be complete.
-        busy = row[0] if row is not None else 0
+        db.execute("VACUUM INTO ?", (str(out_path),))
+    except BaseException:
+        _clear_artifact(out_path)
+        raise
     finally:
         db.close()
-
-    if busy != 0:
-        raise RuntimeError(
-            f"wal_checkpoint(TRUNCATE) busy={busy}; snapshot aborted to avoid "
-            "an incomplete artifact"
-        )
-
-    # After a clean TRUNCATE checkpoint the main file is complete; copy it as the
-    # single snapshot artifact. copy2 preserves metadata (mtime).
-    shutil.copy2(store_path, out_path)
     return out_path
+
+
+def _clear_artifact(out_path: Path) -> None:
+    """Remove an artifact path and any sidecars left beside it."""
+    for p in (out_path, Path(f"{out_path}-wal"), Path(f"{out_path}-shm")):
+        p.unlink(missing_ok=True)
 
 
 def generate_escrow_key() -> bytes:
