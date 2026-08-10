@@ -515,6 +515,74 @@ class _DaemonUnreachable:
         self.message = message
 
 
+class _LazyStore:
+    """A Store handle that is CONSTRUCTED on first use, not at process start.
+
+    Deliberately NOT a performance optimisation, and it must not be read as one:
+    `Store.__init__` is pure field assignment and `Store._connect` opens and
+    closes a connection per operation, so deferring the construction saves no
+    I/O whatsoever. What it buys is an auditable property. Phase 4's claim is
+    that the daemon holds the only writable handle on the store, and with
+    `tool_exec_in_daemon` on this makes that claim STRUCTURAL rather than
+    behavioural: no writable Store object exists in this process at all, so no
+    code path in it can open a write connection -- which is a far easier thing to
+    verify (and to keep true) than "a writable Store exists but nothing ever
+    calls a write method on it".
+
+    Two things still need a local handle, and both are per-CALL needs:
+
+    * `brain_graph` and `brain_draft_context` never route -- see the DELIBERATE
+      EXCEPTION notes in on_call_tool. Both are read-only, so the only handle
+      they can resolve is the read-only one; the writable handle is left with no
+      caller outside the kill switch.
+    * the `tool_exec_in_daemon=False` kill switch, where every handler runs
+      in-process and so needs whichever handle it was wired with.
+
+    Attribute access is proxied because the `make_brain_*` factories in
+    `mcpbrain.tools` take a store OBJECT and only touch it inside the handler
+    body -- so they need no change on their side, and build_server's whole
+    registration pass performs no Store access at all, which is what makes "no
+    Store constructed" a test rather than a claim.
+
+    Not thread-safe, deliberately: a stdio MCP server runs one asyncio loop, and
+    the worst a doubled build could cost is a second inert object.
+    """
+
+    __slots__ = ("_open", "_store")
+
+    def __init__(self, open_store):
+        self._open = open_store
+        self._store = None
+
+    def __getattr__(self, name):
+        # Reached only for names NOT found normally -- i.e. every Store member.
+        # `_open`/`_store` are real slots assigned above, so they resolve through
+        # the slot descriptors and cannot recurse back into here.
+        if self._store is None:
+            self._store = self._open()
+        return getattr(self._store, name)
+
+
+def store_handles():
+    """(read-only handle, writable handle) for the MCP server -- both LAZY.
+
+    Split out of main() so the "does the flag being on stop us opening the
+    store?" question is answerable without spawning a subprocess or starting a
+    transport: a test can point `mcpbrain.store.Store` at a counting stub, call
+    this, drive on_call_tool, and read the count. Inside main() it is one line.
+    """
+    from mcpbrain.embed import embedder_dim
+    from mcpbrain import store as _store_mod
+
+    path, dim = config.store_path(), embedder_dim("bge-small")
+    # `_store_mod.Store` is looked up at CALL time, not bound now, so a test that
+    # patches the attribute on the module sees its stub used.
+    return (
+        _LazyStore(lambda: _store_mod.Store(path, dim=dim, read_only=True)),
+        _LazyStore(lambda: _store_mod.Store(path, dim=dim, read_only=False)),
+    )
+
+
 def build_server(store, draft_store, client, home: str):
     """Construct the MCP Server with every handler registered, no transport started.
 
@@ -540,13 +608,18 @@ def build_server(store, draft_store, client, home: str):
     note = make_brain_note()
     memory_write = make_brain_memory_write()
     gardener_apply = make_brain_gardener_apply(store)
-    # Draft tools write to draft_records, so they need a writable store handle.
-    # the read-only store cannot INSERT; this writable handle is scoped to draft_records
-    # writes by the MCP server (serialised via WAL + busy_timeout).
-    draft_context_fn = make_brain_draft_context(draft_store, home)
+    # brain_draft_context is wired with the READ-ONLY handle, not draft_store:
+    # draft.draft_context only reads (email_context lookup, voice rules off disk,
+    # thread samples, then an out-of-process critique) and it is one of the two
+    # tools that never route -- so pointing it at the writable handle would keep a
+    # writable connection alive in this process for a purely read-only tool,
+    # which is precisely the condition Phase 4 removes. draft_save DOES write
+    # (INSERT into draft_records), and it routes, so its writable handle is now
+    # reached only on the kill-switch path.
+    draft_context_fn = make_brain_draft_context(store, home)
     draft_save_fn = make_brain_draft_save(draft_store, home)
     # Autonomous-loop tools (host-native). Reads use the RO store; pack upsert
-    # needs the writable handle (same one the draft tools use).
+    # needs the writable handle (same one draft_save uses).
     enrich_units = make_brain_enrich_units(home)
     enrich_pull = make_brain_enrich_pull(home)
     enrich_push = make_brain_enrich_push(home)
@@ -749,11 +822,11 @@ def build_server(store, draft_store, client, home: str):
             out = await run_tool(name, arguments,
                                  lambda: store.get_chunk(arguments["doc_id"]))
         elif name == "brain_context":
-            out = await context(
+            out = await run_tool(name, arguments, lambda: context(
                 entity=arguments.get("entity", ""),
                 mode=arguments.get("mode", "profile"),
                 community_id=arguments.get("community_id"),
-            )
+            ))
         elif name == "brain_actions":
             # null-coalesce: explicit None/empty defaults to the configured owner
             owner = arguments.get("owner") or _default_owner()
@@ -762,8 +835,30 @@ def build_server(store, draft_store, client, home: str):
                     content=[types.TextContent(type="text", text='[{"error": "Install not configured: set owner_name in config.json"}]')]
                 )
             status = arguments.get("status") or "open"
-            out = await actions(owner, status)
+            # The RESOLVED owner/status are folded back into the forwarded
+            # arguments (both are plain schema-valid strings, so the daemon's
+            # defensive re-validation still passes). Forwarding the raw arguments
+            # instead would leave brain_actions to resolve an empty owner from
+            # config on the DAEMON's side, i.e. the "Install not configured"
+            # guard above and the owner actually queried would come from two
+            # config reads in two processes -- one authority is worth the copy.
+            out = await run_tool(name, {**arguments, "owner": owner, "status": status},
+                                 lambda: actions(owner, status))
         elif name == "brain_graph":
+            # DELIBERATE EXCEPTION (1 of 2): brain_graph does NOT route to the
+            # daemon, and must not be "tidied" into run_tool. `_on_hop` below
+            # closes over `ctx.session.send_progress_notification`, a method on
+            # the live MCP ServerSession that exists only inside this request's
+            # own event loop. /api/tool is a single blocking round trip with no
+            # channel back mid-call, so a routed brain_graph could emit no
+            # per-hop progress at all -- and tests/test_mcp_progress.py pins the
+            # exact per-hop count and content end-to-end over a real session.
+            # `store` here is the read-only _LazyStore, so this branch is also
+            # what decides whether this process constructs a Store at all.
+            # Preserving progress under routing needs fine-grained per-hop daemon
+            # calls; specced as a follow-up in
+            # docs/superpowers/specs/2026-08-10-tool-registry-thin-adapter-followups.md
+            # ("Fine-grained daemon routing for brain_graph and brain_draft_context").
             report = _progress_reporter(ctx)
             hops = arguments.get("hops", 1)
             # The BFS below caps at GRAPH_MAX_HOPS regardless of a larger
@@ -780,13 +875,14 @@ def build_server(store, draft_store, client, home: str):
                               include_invalidated=arguments.get("include_invalidated", False),
                               on_hop=_on_hop)
         elif name == "brain_proactive":
-            out = await proactive(arguments.get("finding_type", ""), arguments.get("severity", ""))
+            out = await run_tool(name, arguments, lambda: proactive(
+                arguments.get("finding_type", ""), arguments.get("severity", "")))
         elif name == "brain_finding_resolve":
-            out = await finding_resolve(
+            out = await run_tool(name, arguments, lambda: finding_resolve(
                 finding_id=arguments.get("finding_id", 0),
                 outcome=arguments.get("outcome", ""),
                 note=arguments.get("note", ""),
-            )
+            ))
         elif name == "brain_ingest":
             out = await ingest(
                 title=arguments.get("title", ""),
@@ -829,7 +925,14 @@ def build_server(store, draft_store, client, home: str):
                 memory_type=arguments.get("memory_type", "project"),
             )
         elif name == "brain_gardener_apply":
-            out = await gardener_apply(
+            # Routed like the rest despite doing a SYNCHRONOUS git commit: that
+            # moves the blocking call off this event loop and onto a daemon
+            # handler thread, and lands it in the process that is already the
+            # records repo's usual writer -- so the "git busy (retry next run)"
+            # branch in the handler now contends with itself rather than across
+            # processes. It is still a long blocking call added to a contended
+            # process; its latency is called out for Task 11 specifically.
+            out = await run_tool(name, arguments, lambda: gardener_apply(
                 lane=arguments.get("lane", ""),
                 filename=arguments.get("filename", ""),
                 content=arguments.get("content", ""),
@@ -837,8 +940,17 @@ def build_server(store, draft_store, client, home: str):
                 attribution_source=arguments.get("attribution_source", ""),
                 attribution_quote=arguments.get("attribution_quote", ""),
                 attribution_doc_id=arguments.get("attribution_doc_id", ""),
-            )
+            ))
         elif name == "brain_draft_context":
+            # DELIBERATE EXCEPTION (2 of 2): brain_draft_context does NOT route,
+            # for the same reason as brain_graph above -- `_on_stage` sends
+            # progress through the live ServerSession, and for THIS tool the
+            # notification is the whole point: the "critique" stage announces
+            # itself immediately before a blocking subprocess that can take ~30s,
+            # so the send has to reach the client BEFORE the block, which a single
+            # blocking /api/tool round trip cannot do. Pinned end-to-end by
+            # tests/test_mcp_progress.py. Read-only, so it resolves the read-only
+            # handle; see the follow-up spec referenced on brain_graph.
             report = _progress_reporter(ctx)
             # 1-based step matching each stage draft_context actually moves
             # through; "critique" only fires when draft_critic is enabled, so
@@ -864,13 +976,13 @@ def build_server(store, draft_store, client, home: str):
                 on_stage=_on_stage,
             )
         elif name == "brain_draft_save":
-            out = await draft_save_fn(
+            out = await run_tool(name, arguments, lambda: draft_save_fn(
                 email_id=arguments.get("email_id", ""),
                 thread_id=arguments.get("thread_id", ""),
                 intent=arguments.get("intent", ""),
                 final_draft=arguments.get("final_draft", ""),
                 parent_draft_id=arguments.get("parent_draft_id"),
-            )
+            ))
         elif name == "brain_routine":
             rname = (arguments or {}).get("name", "")
             instructions = _routine_instructions(rname)
@@ -897,18 +1009,19 @@ def build_server(store, draft_store, client, home: str):
         elif name == "brain_enrich_pending":
             out = await enrich_pending()
         elif name == "brain_meetings_today":
-            out = await meetings_today()
+            out = await run_tool(name, arguments, meetings_today)
         elif name == "brain_meeting_pack_get":
-            out = await meeting_pack_get(arguments.get("event_id", ""))
+            out = await run_tool(name, arguments,
+                                 lambda: meeting_pack_get(arguments.get("event_id", "")))
         elif name == "brain_meeting_pack_upsert":
-            out = await meeting_pack_upsert(
+            out = await run_tool(name, arguments, lambda: meeting_pack_upsert(
                 event_id=arguments.get("event_id", ""),
                 event_title=arguments.get("event_title", ""),
                 event_date=arguments.get("event_date", ""),
                 pack_text=arguments.get("pack_text", ""),
                 attendees=arguments.get("attendees") or [],
                 context_hash=arguments.get("context_hash", ""),
-            )
+            ))
         elif name == "brain_search":
             out = await search(arguments["query"], arguments.get("limit", 10))
         else:
@@ -977,12 +1090,13 @@ def main() -> None:  # stdio entry point, exercised manually + in P3 integration
 
     from mcpbrain import config
     from mcpbrain.control_client import ControlClient
-    from mcpbrain.embed import embedder_dim
-    from mcpbrain.store import Store
 
-    _store_path, _store_dim = config.store_path(), embedder_dim("bge-small")
-    store = Store(_store_path, dim=_store_dim, read_only=True)   # read path: index/graph/email
-    draft_store = Store(_store_path, dim=_store_dim, read_only=False)  # draft_records writes
+    # Both handles are LAZY (see _LazyStore / store_handles). With
+    # tool_exec_in_daemon on, the writable one is never constructed at all and
+    # the read-only one only if brain_graph or brain_draft_context is actually
+    # called -- so no writable Store exists in this process to open a write
+    # connection with, which is the thin adapter's whole point.
+    store, draft_store = store_handles()
     home = str(config.app_dir())
     write_heartbeat(home)
     write_version_record(home)

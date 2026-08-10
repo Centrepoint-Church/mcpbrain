@@ -1350,15 +1350,104 @@ class Daemon:
         Built lazily and cached. A concurrent double-build is harmless -- these
         are pure closure/factory constructions over the same store -- so this
         needs no lock, unlike the embedder's genuinely expensive lazy build.
+
+        NOT every Store-touching tool is here. `brain_graph` and
+        `brain_draft_context` are a documented exception and stay in the MCP
+        server: both report progress through `ctx.session.send_progress_notification`
+        on the live MCP ServerSession, and /api/tool is one blocking round trip
+        with no channel back mid-call, so routing them would silently drop
+        per-hop/per-stage progress (pinned by tests/test_mcp_progress.py). See
+        docs/superpowers/specs/2026-08-10-tool-registry-thin-adapter-followups.md
+        for the fine-grained routing that would fix that. The six filesystem-only
+        capture tools are absent for a different reason: they deliberately keep
+        working with the daemon down.
         """
         if self._tool_handlers is None:
+            # Imported HERE (not at module scope) for the same reason call_tool
+            # imports it: mcpbrain.tools is mcp-free precisely so this process can
+            # read the tool layer without paying the protocol stack's import.
+            from mcpbrain.tools import (
+                make_brain_actions,
+                make_brain_context,
+                make_brain_draft_save,
+                make_brain_finding_resolve,
+                make_brain_gardener_apply,
+                make_brain_meeting_pack_get,
+                make_brain_meeting_pack_upsert,
+                make_brain_meetings_today,
+                make_brain_proactive,
+            )
+
+            # self._store is assigned once in __init__ and never rebound, so
+            # binding it into the factories below cannot go stale -- and this is
+            # the daemon's single writable handle, the one Phase 4 makes the only
+            # one in existence.
+            store, home = self._store, str(app_dir())
+            context = make_brain_context(store)
+            actions = make_brain_actions(store)
+            proactive = make_brain_proactive(store)
+            finding_resolve = make_brain_finding_resolve(store)
+            gardener_apply = make_brain_gardener_apply(store)
+            draft_save = make_brain_draft_save(store, home)
+            meetings_today = make_brain_meetings_today(store, home)
+            meeting_pack_get = make_brain_meeting_pack_get(store)
+            meeting_pack_upsert = make_brain_meeting_pack_upsert(store)
+
+            # The argument->kwargs mapping mirrors on_call_tool's dispatch for
+            # each tool, and each `.get(...)` default is the SAME default the MCP
+            # side uses -- the two must agree, which is what
+            # test_tool_exec_routing's local-vs-routed agreement tests pin.
             # brain_read is the one routed tool with no make_brain_* factory: the
             # MCP server dispatches it inline as a bare store.get_chunk (see the
             # declare(...) comment in mcpbrain/tools.py), so its handler is that
-            # same call. Reads self._store per call rather than capturing it, so
-            # the table can never hold a stale handle.
+            # same call.
             self._tool_handlers = {
-                "brain_read": lambda a: self._store.get_chunk(a["doc_id"]),
+                "brain_read": lambda a: store.get_chunk(a["doc_id"]),
+                "brain_context": lambda a: context(
+                    entity=a.get("entity", ""),
+                    mode=a.get("mode", "profile"),
+                    community_id=a.get("community_id"),
+                ),
+                # The MCP side resolves an empty owner to the configured install
+                # owner before forwarding, so `owner` normally arrives filled in;
+                # brain_actions' own empty-owner fallback still applies for a
+                # direct /api/tool caller.
+                "brain_actions": lambda a: actions(a.get("owner", ""),
+                                                   a.get("status") or "open"),
+                "brain_proactive": lambda a: proactive(a.get("finding_type", ""),
+                                                        a.get("severity", "")),
+                "brain_finding_resolve": lambda a: finding_resolve(
+                    finding_id=a.get("finding_id", 0),
+                    outcome=a.get("outcome", ""),
+                    note=a.get("note", ""),
+                ),
+                "brain_gardener_apply": lambda a: gardener_apply(
+                    lane=a.get("lane", ""),
+                    filename=a.get("filename", ""),
+                    content=a.get("content", ""),
+                    asserts_person_role=bool(a.get("asserts_person_role", False)),
+                    attribution_source=a.get("attribution_source", ""),
+                    attribution_quote=a.get("attribution_quote", ""),
+                    attribution_doc_id=a.get("attribution_doc_id", ""),
+                ),
+                "brain_draft_save": lambda a: draft_save(
+                    email_id=a.get("email_id", ""),
+                    thread_id=a.get("thread_id", ""),
+                    intent=a.get("intent", ""),
+                    final_draft=a.get("final_draft", ""),
+                    parent_draft_id=a.get("parent_draft_id"),
+                ),
+                "brain_meetings_today": lambda a: meetings_today(),
+                "brain_meeting_pack_get": lambda a: meeting_pack_get(
+                    a.get("event_id", "")),
+                "brain_meeting_pack_upsert": lambda a: meeting_pack_upsert(
+                    event_id=a.get("event_id", ""),
+                    event_title=a.get("event_title", ""),
+                    event_date=a.get("event_date", ""),
+                    pack_text=a.get("pack_text", ""),
+                    attendees=a.get("attendees") or [],
+                    context_hash=a.get("context_hash", ""),
+                ),
             }
         return self._tool_handlers
 
@@ -1379,9 +1468,12 @@ class Daemon:
         """
         import jsonschema
 
-        # Importing mcpbrain.tools is what POPULATES the registry read below (and,
-        # from Task 10 on, supplies the make_brain_* factories the handler table
-        # binds). That module is deliberately mcp-free and AST-guarded, so the
+        # Importing mcpbrain.tools is what POPULATES the registry `spec()` reads
+        # below. _routed_tool_handlers() imports it too (for the make_brain_*
+        # factories), but this one is still load-bearing: a caller that pre-seeds
+        # `_tool_handlers` (test_tool_exec_routing does) short-circuits that build
+        # entirely, and `spec(name)` would then raise KeyError against an empty
+        # registry. That module is deliberately mcp-free and AST-guarded, so the
         # daemon pays 143 modules / ~11ms for it rather than the ~601 / ~0.26s the
         # protocol stack would cost -- which is the whole reason the tools live
         # there and not in mcp_server.py.
