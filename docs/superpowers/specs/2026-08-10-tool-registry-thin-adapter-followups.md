@@ -150,6 +150,16 @@ fix loop. Worth sweeping in the Phase 4 final review or a dedicated cleanup pass
 - `ControlClient.TOOL_CALL_TIMEOUT_S=120.0` (not the tray's 5s default) already covers
   `brain_graph`/`brain_draft_context`'s measured slow paths for the 9 tools that did route in
   Task 10 — revisit if a future routed tool has a legitimately longer tail.
+- **Task 11's latency gate was measured against an effectively idle daemon, not a loaded one** —
+  the final whole-branch review flagged this: the 0.7.105 incident this whole plan traces back to
+  was specifically about drain pinning the process and starving control-API threads under GIL/DB
+  contention, and Task 11's window happened to be largely quiet (its own cadence work only
+  surfaced at shutdown). Josh's explicit decision (2026-08-10, before release): do NOT re-measure
+  under load — accept the existing mitigations (`TOOL_CALL_TIMEOUT_S=120` bounds a bad case to
+  "slow" not "broken"; 0.7.105's expression indexes already removed the specific full-scan cause;
+  `BULK_LOCK_YIELD_S` bounds starvation) and the `tool_exec_in_daemon` kill switch as the field
+  response if `brain_context`/`brain_actions` recall latency regresses under real drain load
+  post-release. If that happens, this is the first thing to check.
 
 **Deferred Minors from the Phase 4 final whole-branch review (2026-08-10), triaged "not now":**
 - Routed reads now execute on the daemon's *writable* handle, so a read-only tool no longer has
