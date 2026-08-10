@@ -160,8 +160,10 @@ def _base_cal_event_id(value: str) -> str:
 # base64url alphabet and can contain '-', and can end in digits, so ONLY a
 # trailing '-<digits>' may be stripped — the greedy `.+` leaves exactly the
 # last such group. Splitting on the first or every hyphen would merge the
-# payloads of distinct files.
-_DRIVE_DOC_ID = re.compile(r"^gdrive-(.+)-\d+$")
+# payloads of distinct files. The second group captures that trailing index so
+# callers that need chunk order (e.g. migrate_enrich_payloads_batch's keeper
+# selection) can compare it as an int instead of as a string.
+_DRIVE_DOC_ID = re.compile(r"^gdrive-(.+)-(\d+)$")
 
 
 def _file_key_from_doc_id(doc_id: str) -> str | None:
@@ -171,6 +173,15 @@ def _file_key_from_doc_id(doc_id: str) -> str | None:
     stores."""
     m = _DRIVE_DOC_ID.match(doc_id or "")
     return m.group(1) if m else None
+
+
+def _chunk_index_from_doc_id(doc_id: str) -> int | None:
+    """The trailing chunk index of a Drive chunk doc_id, as an int, or None if
+    it is not a Drive chunk doc_id. Unpadded, so it must be compared as an int
+    -- never as the raw doc_id string, which does not sort numerically (e.g.
+    "gdrive-F-9" > "gdrive-F-89" lexicographically, even though 9 < 89)."""
+    m = _DRIVE_DOC_ID.match(doc_id or "")
+    return int(m.group(2)) if m else None
 
 
 _BEGIN_RETRIES = 3
@@ -2773,6 +2784,14 @@ class Store:
         (the file grew between enrichments) the highest chunk index is the
         newer. Worst case is one cache miss and one re-enrichment -- the table
         is a regenerable cache, not user data.
+
+        The chunk index is compared as a PARSED INT
+        (`_chunk_index_from_doc_id`), never as the raw doc_id string: indices
+        are unpadded, so string order disagrees with numeric order past 9
+        chunks (e.g. "gdrive-F-9" > "gdrive-F-89" lexicographically, even
+        though 9 < 89) -- a real case on this codebase's own 2,303-chunk PDF.
+        Parsing the trailing digits costs nothing beyond string manipulation;
+        it still never touches the `payload` column.
         """
         with self._connect(write=True) as db:
             if db.execute("SELECT count(*) FROM sqlite_schema WHERE type='table' "
@@ -2788,13 +2807,17 @@ class Store:
                 return {"migrated": 0, "deleted": 0, "done": True}
 
             keeper: dict[str, str] = {}
+            keeper_idx: dict[str, int] = {}
             unkeyed: list[str] = []
             for d in doc_ids:
                 fid = _file_key_from_doc_id(d)
                 if fid is None:
                     unkeyed.append(d)
-                elif fid not in keeper or d > keeper[fid]:
+                    continue
+                idx = _chunk_index_from_doc_id(d)
+                if fid not in keeper or idx > keeper_idx[fid]:
                     keeper[fid] = d
+                    keeper_idx[fid] = idx
 
             batch = sorted(keeper.items())[:limit]
             migrated = 0

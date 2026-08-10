@@ -1556,3 +1556,26 @@ def test_migrate_enrich_payloads_batch_discards_unrecognised_keys(tmp_path):
 
     with store._connect() as db:
         assert db.execute("SELECT count(*) FROM enrich_payloads").fetchone()[0] == 0
+
+
+def test_migrate_enrich_payloads_batch_keeper_is_numeric_not_lexicographic(tmp_path):
+    """Chunk indices are unpadded, so string order disagrees with numeric order
+    once a file has 10+ chunks: "gdrive-F-9" > "gdrive-F-89" lexicographically,
+    even though 9 < 89. The keeper must be picked by parsed int, not by
+    comparing doc_id strings -- otherwise a file with many chunks silently
+    keeps a stale, lower-index row instead of the true latest one."""
+    path = tmp_path / "s.sqlite3"
+    store = Store(path, dim=4)
+    store.init()
+    with store._connect(write=True) as db:
+        db.execute("CREATE TABLE enrich_payloads_legacy(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.executemany(
+            "INSERT INTO enrich_payloads_legacy(doc_id,payload) VALUES(?,?)",
+            [("gdrive-F-9", '"newer"'), ("gdrive-F-89", '"newest"')])
+
+    while not store.migrate_enrich_payloads_batch()["done"]:
+        pass
+
+    assert store.get_enrich_payload("F")["payload"] == '"newest"'
