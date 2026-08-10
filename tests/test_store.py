@@ -1439,3 +1439,41 @@ def test_file_key_from_doc_id(doc_id, expected):
     merge distinct files."""
     from mcpbrain.store import _file_key_from_doc_id
     assert _file_key_from_doc_id(doc_id) == expected
+
+
+# --- enrich_payloads accessors + delete semantics use the file key (Task 4) -
+
+def test_enrich_payload_roundtrips_on_the_file_key(tmp_path):
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    store.set_enrich_payload("FILE1", '{"entities":[]}', 3)
+    got = store.get_enrich_payload("FILE1")
+    assert got == {"payload": '{"entities":[]}', "logic_version": 3}
+    assert store.get_enrich_payload("NOPE") is None
+
+
+def test_delete_chunks_keeps_the_payload_while_any_chunk_of_the_file_remains(tmp_path):
+    """A Drive file that SHRANK still has chunks and must keep its cached
+    payload. Deleting it here would be a behaviour change: before the re-key,
+    the file's other per-chunk rows survived and publish_file found one."""
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    for i in range(3):
+        store.upsert_chunk(f"gdrive-FILE1-{i}", f"t{i}", f"h{i}", {"file_id": "FILE1"})
+    store.set_enrich_payload("FILE1", "{}", 1)
+
+    store.delete_chunks(["gdrive-FILE1-2"])
+
+    assert store.get_enrich_payload("FILE1") is not None
+
+
+def test_delete_chunks_drops_the_payload_when_the_last_chunk_goes(tmp_path):
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    for i in range(2):
+        store.upsert_chunk(f"gdrive-FILE1-{i}", f"t{i}", f"h{i}", {"file_id": "FILE1"})
+    store.set_enrich_payload("FILE1", "{}", 1)
+
+    store.delete_chunks(["gdrive-FILE1-0", "gdrive-FILE1-1"])
+
+    assert store.get_enrich_payload("FILE1") is None

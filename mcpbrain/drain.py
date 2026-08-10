@@ -42,7 +42,7 @@ from mcpbrain import config, orgs, review_apply
 from mcpbrain.contract import (
     normalise_org, sanitize_batch, validate_batch_wrapper, validate_extraction,
 )
-from mcpbrain.store import ENRICH_LOGIC_VERSION
+from mcpbrain.store import ENRICH_LOGIC_VERSION, _file_key_from_doc_id
 
 log = logging.getLogger(__name__)
 
@@ -525,15 +525,19 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                 summary["relations"] += (res or {}).get("relations", 0)
                 store.mark_enriched(doc_ids)
                 summary["marked"] += len(doc_ids)
-                # A#4: persist the validated extraction for shared-drive docs so its
-                # cache artifact can carry it (importers then skip Haiku). Drive-only:
-                # email payloads never enter a shared cache. `extraction` here has
-                # already passed sanitize_batch + validate_extraction + grounding.
-                _drive_docs = [d for d in doc_ids if d.startswith("gdrive-")]
-                if _drive_docs:
+                # A#4: persist the validated extraction for shared-drive docs so
+                # its cache artifact can carry it (importers then skip Haiku).
+                # ONE row per file, not per chunk: every chunk of a Drive doc
+                # shares this unit's extraction and ingest_cache.publish_file
+                # reads exactly one. Writing per doc_id duplicated the whole
+                # payload 6.1x on the live store. Drive-only: email payloads
+                # never enter a shared cache. `extraction` here has already
+                # passed sanitize_batch + validate_extraction + grounding.
+                _file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
+                if _file_ids:
                     _payload = json.dumps(extraction, sort_keys=True)
-                    for _d in _drive_docs:
-                        store.set_enrich_payload(_d, _payload, ENRICH_LOGIC_VERSION)
+                    for _f in _file_ids:
+                        store.set_enrich_payload(_f, _payload, ENRICH_LOGIC_VERSION)
 
             try:
                 _merge_result = review_apply.apply_duplicate_verdicts(
