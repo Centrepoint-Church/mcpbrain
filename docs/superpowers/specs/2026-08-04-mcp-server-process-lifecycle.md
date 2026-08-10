@@ -357,7 +357,53 @@ complete artifact), and/or checkpoint with a longer busy_timeout under the bulk 
 
 Related and separately recorded: `CLAUDE.md` notes daemon cadence passes have appeared
 stalled since 2026-07-23 (`_run_periodic_passes` early-returns wholesale when
-`_backfill_active` is set), which would also suppress the backup cadence.
+`_backfill_active` is set), which would also suppress the backup cadence. **This note is
+itself stale** — `CLAUDE.md` records the stall as resolved and verified live on 2026-08-04; it
+is left here only because it sits directly under the Finding-3 correction above and reads as a
+live alternative explanation if skimmed on its own. Not swept in the same pass as the heading
+fix (deliberately deferred; tracked in `docs/superpowers/specs/2026-08-10-tool-registry-thin-adapter-followups.md`).
+
+### RE-PROBED AFTER THE MOVE, 2026-08-10 (Task 12) — the split held exactly as predicted
+
+Phase 4 (Tasks 9-10) routed `brain_meeting_pack_upsert`/`brain_draft_save` (the `mcp_writes`
+load above) and `brain_graph`'s Store access is unchanged (kept local, a documented exception —
+see the followups doc) through the daemon behind `POST /api/tool`, default ON. This section's
+job was to confirm the predicted split — (W) gone, (R) persists — not to re-derive whether
+contention exists at all; that question was already closed above.
+
+Re-ran `bin/probe_wal_contention.py --arms mcp_writes pinned_reader` against a daemon running
+this work's code, on the same live 11.92 GB store, daemon and Desktop servers otherwise idle
+during the window:
+
+| arm | busy per attempt | log_frames | verdict |
+|---|---|---|---|
+| `mcp_writes` (624 `brain_meeting_pack_upsert` + 200 `brain_draft_save` calls, routed) | 0 ×6 | 0 ×6 | **(W) CONFIRMED GONE** |
+| `pinned_reader` (1 held read txn + routed writes) | **1 ×6** | 1480 → 2053, growing | **(R) CONFIRMED UNCHANGED** |
+
+**(W) is gone, as predicted, and for the reason predicted.** The MCP server no longer holds a
+writable `draft_store` handle for either tool — both routed calls execute inside the daemon's
+own single-writer discipline instead, so there is no second process left that can hold an open
+write lock across a checkpoint attempt. `log_frames=0` on every attempt (not just `busy=0`)
+confirms this isn't the null-instrument failure mode the idle baseline hit: 824 real write
+calls completed successfully (confirmed via `calls_completed: [624, 200]`), so the WAL genuinely
+had nothing outstanding at each checkpoint instant rather than never having been exercised.
+
+**(R) persists, unchanged, exactly as predicted.** Same signature as the pre-move measurement:
+busy=1 on 6 of 6 attempts, `checkpointed_frames: 0` every time (the passive part still makes
+zero progress), WAL growing monotonically under the pinned snapshot (1480 → 2053 frames here,
+comparable in shape to 1474 → 2456 before the move). The read-only pinned connection was never
+inside the MCP server or the daemon's own control path in either measurement — it stands in
+for what `brain_graph`/`brain_actions`' own multi-second read transactions do naturally, so
+this result does not change now that those tools' reads execute inside the daemon process
+instead of the MCP server: the read transaction still outlives the 5000 ms `busy_timeout`
+wherever it runs.
+
+**Confirms the load-bearing correction from Task 7/8, does not supersede it, and still does
+NOT fix backups.** Cause (W) is closed. Cause (R) is not — it has moved *into* the daemon
+process along with the recall reads that cause it, still uncovered by `_bulk_lock`. The actual
+backup fix (distinguish "frames remained" from "truncate failed"; and/or checkpoint under a
+longer `busy_timeout` while holding the bulk lock) remains out of this plan's scope, named as a
+follow-up in `docs/superpowers/specs/2026-08-10-tool-registry-thin-adapter-followups.md`.
 
 ---
 
