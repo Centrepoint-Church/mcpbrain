@@ -48,6 +48,35 @@ def test_apply_refuses_without_enough_free_disk(tmp_path, monkeypatch):
     assert "disk" in why.lower()
 
 
+def test_preflight_sizes_from_live_pages_not_file_size(tmp_path, monkeypatch):
+    """Same hazard as backup._require_free_space: a cache-table dedup can free
+    pages onto SQLite's freelist without shrinking the file on disk. This
+    preflight guards the same snapshot() call and must size from live pages
+    (backup._live_bytes), not db_path.stat().st_size, or it keeps refusing a
+    backup that now actually fits."""
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    for i in range(4000):
+        store.upsert_chunk(f"d-{i}", "x" * 2000, f"h{i}", {})
+    store.delete_chunks([f"d-{i}" for i in range(3600)])   # big freelist, no VACUUM
+
+    file_bytes = (tmp_path / "brain.sqlite3").stat().st_size
+    live_bytes = repair._live_bytes(tmp_path / "brain.sqlite3")
+    assert live_bytes < file_bytes * 0.7, (
+        f"NULL INSTRUMENT: freelist too small to tell the two apart "
+        f"(live={live_bytes} file={file_bytes})")
+
+    # Enough free disk for 2x the LIVE size, but not for 2x the raw FILE size --
+    # the old file-size-based estimate would refuse this; the fixed one must not.
+    monkeypatch.setattr(repair, "_free_bytes", lambda path: int(live_bytes * 2.5))
+    ok, why = repair.preflight(tmp_path / "brain.sqlite3")
+
+    assert ok is True, why
+
+
 def test_purge_reports_what_it_would_do_without_doing_it(tmp_path):
     from mcpbrain.store import Store
 
