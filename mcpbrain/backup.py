@@ -206,12 +206,15 @@ def _verify_artifact(out_path) -> None:
     """
     db = _open_db(out_path, read_only=False)
     try:
-        try:
-            rowids = [r[0] for r in db.execute(
-                "SELECT rowid FROM chunks WHERE embedded=1 "
-                "ORDER BY rowid LIMIT ?", (_VERIFY_SAMPLE,))]
-        except sqlite3.DatabaseError:
+        has_chunks_table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        if not has_chunks_table:
             return                      # no chunks table: nothing to verify
+
+        rowids = [r[0] for r in db.execute(
+            "SELECT rowid FROM chunks WHERE embedded=1 "
+            "ORDER BY rowid LIMIT ?", (_VERIFY_SAMPLE,))]
         if not rowids:
             return
 
