@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcpbrain import config                     # noqa: E402
-from mcpbrain.backup import snapshot            # noqa: E402
+from mcpbrain.backup import _live_bytes, snapshot  # noqa: E402
 from mcpbrain.chunking import CHUNKER_VERSION   # noqa: E402
 from mcpbrain.store import Store                # noqa: E402
 
@@ -50,10 +50,15 @@ def preflight(db_path: Path, *, db_bytes: int | None = None) -> tuple[bool, str]
     """Refuse to --apply unless a backup can safely fit.
 
     Twice the database size: one for the backup, one for headroom (SQLite needs
-    room for its WAL and for the snapshot's own temporary files).
+    room for its WAL and for the snapshot's own temporary files). Sized from
+    LIVE pages (backup._live_bytes), not the file's raw stat().st_size: a
+    cache-table dedup can free pages onto SQLite's freelist without shrinking
+    the file on disk, and _backup()'s own VACUUM INTO snapshot only ever costs
+    the live-page total -- sizing from the raw file would keep refusing
+    backups that now actually fit.
     """
     if db_bytes is None:
-        db_bytes = db_path.stat().st_size if db_path.exists() else 0
+        db_bytes = _live_bytes(db_path) if db_path.exists() else 0
     need = db_bytes * 2
     free = _free_bytes(db_path.parent)
     if free < need:
