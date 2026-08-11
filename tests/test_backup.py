@@ -2057,6 +2057,68 @@ def test_verify_artifact_no_ops_when_the_store_has_no_vec0_table_at_all(tmp_path
     assert out.exists()
 
 
+def test_verify_artifact_no_ops_when_the_chunks_table_does_not_exist(tmp_path):
+    """A store with no chunks table at all (e.g. bin/repair.py snapshotting an
+    already-broken store, per the function's own docstring) has nothing to
+    verify and must no-op, not raise -- this is the legitimate "table absent"
+    case the sqlite_master check is meant to catch.
+    """
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+
+    db = _open_db(store.path, read_only=False)
+    try:
+        db.execute("DROP TABLE chunks")
+        db.commit()
+    finally:
+        db.close()
+
+    _verify_artifact(store.path)   # must not raise
+
+
+def test_verify_artifact_raises_on_genuine_chunks_corruption(tmp_path, monkeypatch):
+    """The chunks-table check must only swallow "table doesn't exist" -- a
+    genuinely corrupt table (e.g. sqlite3.DatabaseError("database disk image is
+    malformed")) must propagate, not be silently treated as "nothing to
+    verify". Before the fix, the broad `except sqlite3.DatabaseError: return`
+    around the chunks query would have swallowed this too, letting a corrupt
+    rebuild silently pass verification.
+    """
+    import sqlite3
+
+    import pytest
+
+    import mcpbrain.backup as backup_mod
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d1", "hello", "h1", {})
+
+    real_open_db = backup_mod._open_db
+
+    def spy_open_db(*args, **kwargs):
+        conn = real_open_db(*args, **kwargs)
+
+        class _Proxy:
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+            def execute(self, sql, *a, **k):
+                if "FROM chunks WHERE embedded" in sql:
+                    raise sqlite3.DatabaseError("database disk image is malformed")
+                return conn.execute(sql, *a, **k)
+
+        return _Proxy()
+
+    monkeypatch.setattr(backup_mod, "_open_db", spy_open_db)
+
+    with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+        backup_mod._verify_artifact(store.path)
+
+
 def test_free_space_preflight_sizes_from_live_pages_not_file_size(tmp_path, monkeypatch):
     """After the enrich_payloads re-key the store file stays large while most
     of it is freelist. VACUUM INTO's output tracks LIVE pages, so an estimate
