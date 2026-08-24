@@ -21,6 +21,17 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     PASSAGE-ONLY (embed.contextual_prefix), never applied to the query side. `home`
     selects which config to read (defaults to the app dir).
 
+    `embed_skip_tabular`, if enabled via config, partitions each batch before
+    embedding: chunks whose `metadata.content_subtype == "table"` are pulled out
+    and never sent to `embedder.embed_passages` -- they're written via
+    `store.write_embedding(rowid, None)` instead, which still indexes them into
+    FTS and stamps embedded=1, just without a dense vector (raw table markdown
+    embeds poorly; keyword search on table content does not). Non-table chunks
+    in the same batch are embedded exactly as before. When the flag is off (the
+    default), no partitioning happens and every chunk -- table-subtype included
+    -- goes through the normal embed path, unchanged from before this flag
+    existed.
+
     Bounded: `max_items` caps how many chunks one call fetches, and `budget`
     stops the loop between batches once the cycle's wall-clock slice is spent.
     Remaining chunks keep embedded=0 and are picked up next cycle — the work is
