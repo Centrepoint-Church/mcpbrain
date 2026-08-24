@@ -5,7 +5,12 @@
 **Origin:** `mcpbrain doctor` flagged two warnings on the author's live install —
 backup upload failing (4d stale) and a chunk-window notice (5,181 chunks over the
 2,000-char embedder window). Root-cause investigation surfaced four independent
-defects, not one. This spec covers all four.
+defects, not one. A follow-up question ("is multi-chunk item ingestion — doc
+edits, thread growth — handled well?") led to re-verifying five older findings
+(B4-B8 from `2026-07-27-ingestion-defects-findings.md`) against current code —
+all five turned out to already be fixed — and surfaced one genuinely new gap
+in how short threads get prior-message context. This spec covers all five
+(four original + the new one).
 
 ## Context
 
@@ -252,6 +257,92 @@ then land 2a's version bump on top.
 Gmail-sourced stale chunk fixture, asserting it gets re-queued through
 `backfill_gmail` the same way a Drive fixture goes through `backfill_drive`
 today.
+
+---
+
+## 5. Short threads get no prior-message context
+
+### What's already fine (verified against current code, not assumed)
+
+Re-checking B4-B8 from the 2026-07-27 findings doc against current code found
+all five already fixed:
+
+- **B4** (thread expansion scrambled paragraph order) — `retrieval_expand._by_date`
+  now sorts by `(date, message_id, chunk_index)`, not date alone.
+- **B5** (stale chunks orphaned on doc shrink) — `drive.py::upsert_file_chunks`
+  diffs the current extraction's doc_ids against `store.doc_ids_for_file` and
+  deletes orphans via `store.delete_chunks` (clears `vec_chunks`+`fts_chunks`
+  too), with a guard that skips the delete entirely on a partial/failed
+  extraction so a transient error can't be mistaken for a shrink.
+- **B6** (`chunk_text` emitting empty/oversize chunks) — the zero-length-chunk
+  path is guarded (`if current: chunks.append(current)` before splitting an
+  oversized paragraph) and the final return filters empties.
+- **B7** (silent `except Exception: return ""` in extractors) — every
+  extraction exception now logs (`log.debug`/`log.warning`) with the actual
+  error, and `PartialTables` distinguishes a partial failure from "no
+  content" so B5's orphan-sweep doesn't misfire on it.
+- **B8** (partial document presented as whole to the model) — `_join_with_gaps`
+  explicitly inserts a gap marker for a missing chunk_index and a truncated-tail
+  marker when `chunk_total` is known, so a partially-enriched or cold-excluded
+  thread is never silently presented as complete.
+
+No action needed on any of the above — noted here so this spec is the single
+place that confirms it, rather than leaving five findings looking "open" in
+an old doc that current code has already resolved.
+
+### The new gap: prior-message context is empty for threads under 5 messages
+
+**Files:** `mcpbrain/prepare.py` (`_thread_block`), `mcpbrain/store.py`
+(new method), `mcpbrain/synthesise_threads.py` (`build_synthesis_requests`,
+refactor only).
+
+`thread_context.contextual_summary` — the field `prepare._thread_block` reads
+into `prior_thread_context` for a growing thread's next enrichment pass — is
+populated **only** by the periodic cross-message synthesis pass
+(`synthesise_threads.py::drain_synthesis`). `graph_write.apply()` deliberately
+never writes it (its own comment: "left unset here for the deeper synthesis
+pass to fill"). Synthesis itself only considers threads with `email_count >=
+min_emails` (default 5, in `build_synthesis_requests`/`threads_needing_summary`).
+So a thread with fewer than 5 messages — the common case — gets a genuinely
+empty `prior_thread_context` on every subsequent message, even though every
+prior message's own one-line `summary` is already durably stored per-message
+in `email_context` (via `upsert_email_context`, written on every `apply()`
+regardless of thread length) and is fully queryable today via
+`store.thread_messages(thread_id)` — the exact same data
+`build_synthesis_requests` already reads to build its digest for the ≥5 case.
+
+This is a pure read-side gap: no writer needs to change, no new accumulation
+or overwrite-ordering logic is needed (there is no overwrite bug — `apply()`
+simply never touches `contextual_summary` at all), and nothing about the
+existing synthesis pass's behavior or the `thread_context` table's semantics
+needs to change.
+
+**Fix:** add `store.thread_summary_digest(thread_id, max_chars=1500) -> str`:
+reads `email_context` rows for the thread ordered by `date_iso`, joins each
+as `f"- {date_iso}{content_type_tag}: {summary}"` (identical line format to
+`build_synthesis_requests`'s existing inline loop), and caps the joined
+result to `max_chars`, dropping the **oldest** lines first when it doesn't
+fit (the most recent messages are the most relevant prior context for
+whatever's about to be enriched next). In `prepare._thread_block`, when
+`store.thread_context(thread_id)` returns an empty `contextual_summary`
+(true for any thread not yet synthesized — short or simply not-yet-due),
+fall back to `store.thread_summary_digest(thread_id)` instead of `""`. Once
+a thread crosses the synthesis threshold and gets a real narrative, that
+takes over exactly as today — this fallback only fills the gap before that
+point, for the threads that never reach it, and does not compete with or
+get overwritten by anything.
+
+**DRY refactor (optional, no behavior change):** `build_synthesis_requests`'s
+existing inline per-message-summary-join loop becomes redundant with the new
+method — have it call `store.thread_summary_digest(thread_id, max_chars=None)`
+instead, so the line-format logic lives in exactly one place.
+
+**Testing:** unit test `thread_summary_digest` against a fixture thread with
+several `email_context` rows, asserting line format, ascending-date order,
+and that exceeding `max_chars` drops the oldest lines, not the newest. Unit
+test `_thread_block`'s fallback: `thread_context` empty → digest used;
+`thread_context` non-empty (post-synthesis) → digest never called, existing
+value used unchanged.
 
 ---
 
