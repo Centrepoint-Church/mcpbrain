@@ -83,6 +83,37 @@ def test_an_interior_blank_column_is_kept():
     assert tabular.normalise_rows(rows) == rows
 
 
+def test_normalise_rows_ignores_a_single_outlier_wide_row():
+    # 700 normal rows (4 real columns) plus one title-banner row with a
+    # single stray non-empty cell at column 19999 -- the exact reproducing
+    # case from the live investigation (a Fixed Assets Register spreadsheet).
+    header = ["Item", "Cost", "Date", "Location"]
+    normal_rows = [["Chair", "50", "2024-01-01", "Hall A"] for _ in range(700)]
+    outlier = [""] * 19999 + ["FIXED ASSETS REGISTER as at 31 December 2022"]
+    rows = [header] + normal_rows + [outlier]
+
+    out = tabular.normalise_rows(rows)
+
+    # The outlier row is trimmed to the real width, not the other way around.
+    assert all(len(r) <= 4 for r in out), (
+        f"expected every row trimmed to width<=4, got a row of length "
+        f"{max(len(r) for r in out)}")
+
+
+def test_normalise_rows_keeps_a_genuinely_sparse_real_column():
+    # A "notes" column only 5 of 50 rows populate is still real -- it must
+    # NOT be dropped just because it's a minority.
+    header = ["Item", "Cost", "Notes"]
+    rows_without_notes = [["Chair", "50", ""] for _ in range(45)]
+    rows_with_notes = [["Desk", "200", "damaged"] for _ in range(5)]
+    rows = [header] + rows_without_notes + rows_with_notes
+
+    out = tabular.normalise_rows(rows)
+
+    assert all(len(r) == 3 for r in out), (
+        "the Notes column (5/50 rows, above the support floor of 2) must survive")
+
+
 def test_no_content_free_chunk_is_ever_emitted():
     from mcpbrain.chunking import has_content
 

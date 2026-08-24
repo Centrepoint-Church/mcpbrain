@@ -78,18 +78,46 @@ def is_tabular(mime: str) -> bool:
 
 
 def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
-    """Drop entirely-empty rows and trim trailing all-empty columns.
+    """Drop entirely-empty rows and trim trailing columns with no real support.
 
-    Only TRAILING columns: an interior blank column can be meaningful (a spacer
-    between a budget's actuals and its variance), and dropping it would misalign
-    the header against its values.
+    Only TRAILING columns: an interior blank column can be meaningful (a
+    spacer between a budget's actuals and its variance), and dropping it
+    would misalign the header against its values.
+
+    A column counts as real only if at least max(2, len(kept)//100) distinct
+    rows have non-empty content there -- NOT simply "the max index any row
+    reaches". A single anomalous row (a title banner, a stray far-right
+    formatted-but-blank cell -- both routine in real Excel files, since
+    Excel's "used range" is inflated by formatting alone) can never clear a
+    support floor of 2 on its own, so it can no longer single-handedly
+    dictate the whole table's width the way a bare max did. A genuinely
+    sparse-but-real column (used by a legitimate minority of rows) still
+    clears the floor and survives -- a median would have dropped it if used
+    by fewer than half the rows, which is why this isn't a median.
     """
     kept = [r for r in rows if any((c or "").strip() for c in r)]
-    width = 0
+    if not kept:
+        return []
+    max_len = max(len(r) for r in kept)
+    support = [0] * max_len
     for r in kept:
         for i, c in enumerate(r):
             if (c or "").strip():
-                width = max(width, i + 1)
+                support[i] += 1
+    floor = max(2, len(kept) // 100)
+    width = 0
+    for i in range(max_len - 1, -1, -1):
+        if support[i] >= floor:
+            width = i + 1
+            break
+    if width == 0:
+        # No column clears the floor (e.g. a genuinely tiny 1-2 row table) --
+        # fall back to the simple max so a small legitimate table isn't
+        # wrongly trimmed to zero width.
+        for r in kept:
+            for i, c in enumerate(r):
+                if (c or "").strip():
+                    width = max(width, i + 1)
     return [r[:width] for r in kept]
 
 
