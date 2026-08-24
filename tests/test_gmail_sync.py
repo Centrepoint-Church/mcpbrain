@@ -620,7 +620,7 @@ def test_reingest_messages_rechunks_a_stale_thread(tmp_path):
 
     summary = reingest_messages(svc, store, ["t1"])
 
-    assert summary == {"messages": 1, "missing": 0, "failed": 0}
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
     chunk = store.get_chunk("gmail-m1-body-0")
     assert chunk is not None
     assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
@@ -646,7 +646,7 @@ def test_reingest_messages_stamps_version_on_a_missing_message(tmp_path):
 
     summary = reingest_messages(svc, store, ["t1"])
 
-    assert summary == {"messages": 0, "missing": 1, "failed": 0}
+    assert summary == {"messages": 0, "missing": 1, "empty": 0, "failed": 0}
     chunk = store.get_chunk("gmail-m1-body-0")
     assert chunk is not None
     assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
@@ -677,8 +677,85 @@ def test_reingest_messages_one_bad_message_does_not_end_the_run(tmp_path):
 
     summary = reingest_messages(svc, store, ["t1", "t2"])
 
-    assert summary == {"messages": 1, "missing": 0, "failed": 1}
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 1}
     # t1's chunk is untouched -- a transient/non-404 failure must not stamp
     # the convergence guard, or a retryable error would wrongly converge.
     assert store.get_chunk("gmail-m1-body-0")["metadata"]["chunker_version"] == 1
     assert store.get_chunk("gmail-m2-body-0")["metadata"]["chunker_version"] == CHUNKER_VERSION
+
+
+def test_reingest_messages_post_fetch_failure_is_isolated(tmp_path, monkeypatch):
+    """An exception AFTER a successful fetch (in normalise/upsert/patch) must
+    also be caught -- not just a fetch failure. Simulates a write-path error
+    (e.g. a SQLite write failure) on one message; it must be counted `failed`
+    and must not abort processing of the next thread_id in the same batch."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "old content", "h1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    store.upsert_chunk("gmail-m2-body-0", "old content 2", "h2",
+                       {"source_type": "gmail", "thread_id": "t2",
+                        "message_id": "m2", "chunker_version": 1})
+
+    msg_m1 = plain_msg("m1", "Re: test", "a@b.com", "new content 1")
+    msg_m1["threadId"] = "t1"
+    msg_m2 = plain_msg("m2", "Re: test 2", "a@b.com", "new content 2")
+    msg_m2["threadId"] = "t2"
+    svc = FakeService(messages={"m1": msg_m1, "m2": msg_m2})
+
+    real_upsert = store.upsert_chunk
+
+    def _boom(doc_id, text, content_hash, metadata):
+        if doc_id == "gmail-m1-body-0":
+            raise RuntimeError("simulated sqlite write failure")
+        return real_upsert(doc_id, text, content_hash, metadata)
+
+    monkeypatch.setattr(store, "upsert_chunk", _boom)
+
+    summary = reingest_messages(svc, store, ["t1", "t2"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 1}
+    # t1's chunk is untouched by the failed write -- still the pre-existing
+    # row, not stamped, since the failure is retryable, not a convergent one.
+    t1_chunk = store.get_chunk("gmail-m1-body-0")
+    assert t1_chunk["text"] == "old content"
+    assert t1_chunk["metadata"]["chunker_version"] == 1
+    # t2 is still re-chunked despite t1's write-path failure.
+    t2_chunk = store.get_chunk("gmail-m2-body-0")
+    assert t2_chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
+    assert "new content 2" in t2_chunk["text"]
+
+
+def test_reingest_messages_stamps_version_on_empty_normalise_result(tmp_path):
+    """A message that fetches successfully but normalises to zero chunks
+    (here, a body too short to survive extract_body_with_signature's >10-char
+    threshold) still gets its existing chunks stamped to the current
+    chunker_version -- otherwise store.stale_chunker_ids re-selects this
+    message on every future repair run forever, the identical non-convergence
+    bug class the missing-message guard exists to prevent."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "old content", "h1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    msg_m1 = plain_msg("m1", "Re: test", "a@b.com", "hi")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 0, "missing": 0, "empty": 1, "failed": 0}
+    chunk = store.get_chunk("gmail-m1-body-0")
+    assert chunk is not None
+    assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
+    assert chunk["metadata"]["reextract_empty"] is True
+    # Stamping touches metadata only -- the existing content is left alone.
+    assert chunk["text"] == "old content"
