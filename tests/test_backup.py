@@ -1115,12 +1115,14 @@ class FakeFiles:
         self.file_id = file_id
         self.list_calls = []
         self.create_calls = []
+        # num_retries passed to each list(...).execute(), in call order.
+        self.list_retries = []
         # num_retries passed to each create(...).execute(), in call order.
         self.execute_retries = []
 
     def list(self, **kw):
         self.list_calls.append(kw)
-        return _FakeList(self.list_calls, self.list_response)
+        return _FakeList(self.list_calls, self.list_response, executes=self.list_retries)
 
     def create(self, **kw):
         self.create_calls.append(kw)
@@ -1879,13 +1881,14 @@ class FakeFilesPrune:
     def __init__(self, snapshot_files):
         self._snaps = snapshot_files
         self.deleted = []
+        self.list_retries = []
         self.delete_retries = []
 
     def list(self, **kw):
         q = kw.get("q", "")
         if self.FOLDER_MIME in q:
-            return _FakeList([], {"files": [{"id": "folder-1"}]})
-        return _FakeList([], {"files": list(self._snaps)})
+            return _FakeList([], {"files": [{"id": "folder-1"}]}, executes=self.list_retries)
+        return _FakeList([], {"files": list(self._snaps)}, executes=self.list_retries)
 
     def delete(self, *, fileId, supportsAllDrives=False):
         return _FakeDelete(self.deleted, fileId, self.delete_retries)
@@ -1932,6 +1935,8 @@ def test_upload_snapshot_folder_lookup_and_create_pass_num_retries(tmp_path):
 
     upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
 
+    # Folder lookup list uses _NUM_RETRIES.
+    assert files.list_retries == [_NUM_RETRIES]
     # Folder create uses _NUM_RETRIES; media file upload uses _MEDIA_NUM_RETRIES.
     assert files.execute_retries == [_NUM_RETRIES, _MEDIA_NUM_RETRIES]
 
@@ -1945,6 +1950,9 @@ def test_prune_snapshots_list_and_delete_pass_num_retries():
 
     prune_snapshots(svc, "drive-X", "sam", keep=3)
 
+    # Folder lookup list and file list both use _NUM_RETRIES.
+    assert fake_files.list_retries == [_NUM_RETRIES, _NUM_RETRIES]
+    # Delete calls also use _NUM_RETRIES.
     assert fake_files.delete_retries == [_NUM_RETRIES, _NUM_RETRIES]
 
 

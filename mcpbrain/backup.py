@@ -1008,8 +1008,11 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
     deleted = 0
     for f in files[keep:]:
         try:
-            service.files().delete(fileId=f["id"], supportsAllDrives=True) \
+            (
+                service.files()
+                .delete(fileId=f["id"], supportsAllDrives=True)
                 .execute(num_retries=_NUM_RETRIES)
+            )
             deleted += 1
         except Exception as exc:  # noqa: BLE001 — pruning must never break a backup
             log.warning("prune_snapshots: could not delete %s (%s): %s",
