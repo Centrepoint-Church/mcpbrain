@@ -783,3 +783,62 @@ def test_reingest_stale_dispatches_gmail_threads_through_reingest_messages(tmp_p
 
     assert rc == 0
     assert called.get("thread_ids") == ["t1"]
+
+
+def test_reingest_stale_dispatches_calendar_through_backfill_calendar_window(tmp_path, monkeypatch):
+    import bin.repair as repair
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("cal-e1-0", "old", "h1",
+                       {"source_type": "calendar", "event_id": "e1", "chunker_version": 1})
+
+    called = {}
+
+    def _fake_backfill_calendar_window(service, store, *, time_min, time_max):
+        called["window"] = (time_min, time_max)
+        return 0   # simulates the event being OUTSIDE the window: 0 refreshed
+
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"calendar_service": "fake-calendar-service"})
+    monkeypatch.setattr("mcpbrain.sync.calendar.backfill_calendar_window",
+                        _fake_backfill_calendar_window)
+
+    rc = repair.phase_reingest_stale(store, True, limit=500, workers=1)
+
+    assert rc == 0
+    assert "window" in called
+
+
+def test_reingest_stale_stamps_a_calendar_event_the_window_backfill_missed(tmp_path, monkeypatch):
+    """A calendar event outside the +/-730-day window is never reached by the
+    window backfill, so it must be stamped to the current version anyway --
+    otherwise stale_chunker_ids re-selects it, and this same non-convergent
+    dispatch, on every future run forever."""
+    import bin.repair as repair
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.store import Store
+
+    store = Store(tmp_path / "brain.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("cal-e1-0", "old", "h1",
+                       {"source_type": "calendar", "event_id": "e1", "chunker_version": 1})
+
+    monkeypatch.setattr("mcpbrain.auth.build_google_services",
+                        lambda: {"calendar_service": "fake-calendar-service"})
+    # The window backfill runs but never touches this event (e.g. it's more
+    # than 2 years out) -- content_hash is unchanged either way, so a real
+    # backfill_calendar_window wouldn't have stamped it either.
+    monkeypatch.setattr("mcpbrain.sync.calendar.backfill_calendar_window",
+                        lambda *a, **kw: 0)
+
+    rc = repair.phase_reingest_stale(store, True, limit=500, workers=1)
+
+    assert rc == 0
+    import json
+    with store._connect() as db:
+        meta = json.loads(db.execute(
+            "SELECT metadata FROM chunks WHERE doc_id='cal-e1-0'").fetchone()["metadata"])
+    assert meta["chunker_version"] == CHUNKER_VERSION
+    assert meta.get("reextract_out_of_window") is True

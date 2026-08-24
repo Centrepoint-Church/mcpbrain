@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcpbrain import config                     # noqa: E402
 from mcpbrain.backup import _live_bytes, snapshot  # noqa: E402
-from mcpbrain.chunking import CHUNKER_VERSION   # noqa: E402
+from mcpbrain.chunking import CHUNKER_VERSION, PRIOR_CHUNKER_VERSION   # noqa: E402
 from mcpbrain.store import Store                # noqa: E402
 
 # Shared --limit default. Meaningful for reingest-stale/backfill-attachments
@@ -74,16 +74,23 @@ def _backup(db_path: Path) -> Path:
     # committed transactions. backup.snapshot() uses VACUUM INTO, which is
     # consistent by construction and cannot be blocked by a held reader.
     dest = db_path.with_suffix(db_path.suffix + f".bak-{int(time.time())}")
-    return snapshot(db_path, dest)
+    # db_path's parent IS home (brain.sqlite3 lives directly under it) --
+    # passed through so _verify_artifact can check embed_skip_tabular instead
+    # of falling back to its unconditional table-chunk exclusion.
+    return snapshot(db_path, dest, home=str(db_path.parent))
 
 
 def phase_status(store, apply: bool) -> int:
     empty = store.count_content_free()
     total = store.chunk_count()
-    stale = len(store.stale_chunker_ids(CHUNKER_VERSION, limit=100_000))
+    stale = len(store.stale_chunker_ids(table_version=CHUNKER_VERSION,
+                                        other_version=PRIOR_CHUNKER_VERSION,
+                                        limit=100_000))
     print(f"content-free chunks       : {empty} of {total} "
           f"({100 * empty / total:.1f}%)" if total else f"content-free: {empty}")
-    print(f"Drive files to re-chunk   : {stale} (chunker_version < {CHUNKER_VERSION})")
+    print(f"Items to re-chunk         : {stale} "
+          f"(table chunker_version < {CHUNKER_VERSION}, "
+          f"other content < {PRIOR_CHUNKER_VERSION})")
     return 0
 
 
@@ -142,7 +149,9 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
     and calendar are new dispatch targets with no such history, so they're
     only invoked when there's actually something of that type to do.
     """
-    items = store.stale_chunker_ids(CHUNKER_VERSION, limit=limit)
+    items = store.stale_chunker_ids(table_version=CHUNKER_VERSION,
+                                    other_version=PRIOR_CHUNKER_VERSION,
+                                    limit=limit)
     by_type: dict[str, list] = {}
     for item in items:
         by_type.setdefault(item["source_type"], []).append(item["id"])
@@ -200,6 +209,15 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
             print("[reingest-stale] no gmail_service (token lacks the Gmail "
                   "scope); re-authenticate with `mcpbrain setup`", file=sys.stderr)
         else:
+            # reingest_messages has no max_workers/service_factory -- it's
+            # deliberately sequential (see its own docstring for why splitting
+            # its combined fetch+write error handling isn't a safe side
+            # effect of adding threading). Said explicitly here so --workers
+            # appearing to do nothing for this phase isn't a silent surprise.
+            if workers > 1:
+                print(f"[reingest-stale] gmail: --workers {workers} does not "
+                      "apply to this phase (sequential by design); running "
+                      "single-threaded")
             summary = reingest_messages(gmail, store, by_type["gmail"])
             print(f"[reingest-stale] gmail: {summary}")
 
@@ -224,6 +242,41 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
             n = backfill_calendar_window(calendar_svc, store, time_min=time_min,
                                          time_max=time_max)
             print(f"[reingest-stale] calendar: refreshed window, {n} events")
+
+            # Convergence guard: an event more than 2 years old/out is never
+            # reached by the window backfill above, so it would otherwise be
+            # re-selected by store.stale_chunker_ids on every future run
+            # forever -- the same non-convergence gdrive/gmail guard against
+            # via their own missing/empty stamping, just reached a different
+            # way here (a window miss, not a fetch failure). Stamp its
+            # existing chunks to the current version so the selector stops;
+            # this event's chunks were never actually re-rendered, only
+            # exempted from being re-selected -- if it's ever within the
+            # window on a LATER run (the window is relative to "now"), the
+            # normal sync_calendar delta path or a future backfill still
+            # picks up real content changes independently of this stamp.
+            still_stale = {
+                item["id"] for item in store.stale_chunker_ids(
+                    table_version=CHUNKER_VERSION,
+                    other_version=PRIOR_CHUNKER_VERSION, limit=100_000)
+                if item["source_type"] == "calendar"
+                and item["id"] in by_type["calendar"]
+            }
+            if still_stale:
+                with store._connect() as db:
+                    stale_doc_ids = [
+                        r["doc_id"] for r in db.execute(
+                            "SELECT doc_id FROM chunks WHERE "
+                            f"json_extract(metadata,'$.event_id') IN "
+                            f"({','.join('?' for _ in still_stale)})",
+                            tuple(still_stale))]
+                for doc_id in stale_doc_ids:
+                    store.patch_chunk_metadata(
+                        doc_id, chunker_version=CHUNKER_VERSION,
+                        reextract_out_of_window=True)
+                print(f"[reingest-stale] calendar: {len(still_stale)} event(s) "
+                      f"outside the +/-730-day window, stamped so they don't "
+                      f"loop forever (not actually re-rendered)")
 
     return 0
 

@@ -1697,7 +1697,22 @@ class Store:
                 db.execute(f"UPDATE chunks SET enriched=0 WHERE doc_id IN ({qs})", ids)
         return len(ids)
 
-    def stale_chunker_ids(self, version: int, limit: int) -> list[dict]:
+    # Maps each source_type to the metadata field that identifies its owning
+    # file/thread/event -- kept as one named, documented constant (rather
+    # than an inline literal) so the mapping's correctness is visible in one
+    # place. It relies on these writers stamping exactly these field names:
+    # sync/drive.py's base_meta (file_id), sync/gmail.py's normalise_gmail /
+    # attachments.normalise_attachment (thread_id), and
+    # sync/calendar.py's normalise_calendar (event_id). A future rename in
+    # any of those three writers must be mirrored here, or that source type's
+    # stale chunks silently stop being selected (a false-green "0 stale"
+    # result, not an error) -- there's no automated guard against that drift.
+    _STALE_ID_FIELDS = (
+        ("gdrive", "file_id"), ("gmail", "thread_id"), ("calendar", "event_id"),
+    )
+
+    def stale_chunker_ids(self, *, table_version: int, other_version: int,
+                          limit: int) -> list[dict]:
         """File/thread/event ids with at least one chunk written by an older
         chunker, across every source type.
 
@@ -1716,24 +1731,40 @@ class Store:
         anything else, so it stays stale forever without this. Generalized
         to cover gmail/calendar too.
 
+        TWO version floors, not one, because chunker_version is a single
+        monotonic number shared by every content type, but a version bump
+        can affect only ONE of them (CHUNKER_VERSION 2->3 changed table
+        rendering only -- chunk_text, which renders every non-table chunk,
+        is untouched). A single `< CHUNKER_VERSION` floor would mark every
+        historical chunk of every type stale, including prose already at
+        version 2 that would just re-chunk byte-identically -- a full-mailbox
+        re-fetch for zero benefit. `table_version` (pass chunking.CHUNKER_VERSION)
+        applies only to content_subtype=='table' chunks; `other_version`
+        (pass chunking.PRIOR_CHUNKER_VERSION) applies to everything else, so
+        only content that ACTUALLY needs re-chunking under the current
+        release is swept.
+
         Ordered by MIN(rowid) within each source type, Drive rows first then
         Gmail then Calendar (not interleaved) -- see bin/repair.py's
         phase_reingest_stale for why sequential-by-source is enough.
         """
         out: list[dict] = []
         with self._connect() as db:
-            for source_type, id_field in (
-                ("gdrive", "file_id"), ("gmail", "thread_id"),
-                ("calendar", "event_id"),
-            ):
+            for source_type, id_field in self._STALE_ID_FIELDS:
                 rows = db.execute(
                     f"SELECT json_extract(metadata,'$.{id_field}') AS oid, "
                     f"MIN(rowid) AS r FROM chunks "
                     f"WHERE json_extract(metadata,'$.source_type')=? "
                     f"  AND json_extract(metadata,'$.{id_field}') IS NOT NULL "
-                    f"  AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ? "
+                    f"  AND ("
+                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')='table' "
+                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"    OR "
+                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')<>'table' "
+                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"  ) "
                     f"GROUP BY oid ORDER BY r LIMIT ?",
-                    (source_type, version, limit - len(out)),
+                    (source_type, table_version, other_version, limit - len(out)),
                 ).fetchall()
                 out.extend({"source_type": source_type, "id": r["oid"]} for r in rows)
                 if len(out) >= limit:

@@ -419,6 +419,19 @@ def reingest_messages(service, store, thread_ids: list, *,
     """Re-fetch and re-chunk specific Gmail threads by id, under the current
     chunker version.
 
+    **Deliberately sequential, unlike its Drive twin `reingest_files`.** That
+    function cleanly separates a pure fetch step (`_reingest_one`, returning a
+    tagged outcome) from an unwrapped write step (`_apply`), so the fetch half
+    can run on worker threads. Here, one message's fetch, normalise, AND
+    write (upsert_chunk / patch_chunk_metadata) share a single try/except (see
+    the "Any OTHER failure" paragraph below) so a write-time error is retried
+    like a fetch-time one -- splitting that boundary to add worker threads
+    would mean re-deriving which failures are retryable vs. permanent, which
+    is exactly the class of change worth doing deliberately, not as a side
+    effect of adding `max_workers`. `bin/repair.py reingest-stale --workers N`
+    therefore only parallelizes the Drive phase; the Gmail phase always runs
+    single-threaded, regardless of `--workers` (see phase_reingest_stale).
+
     The mechanism the repair needs and the sync layer lacks: `sync_gmail` only
     ever touches NEW messages via the History API, so a message chunked by an
     older chunker (e.g. before a `chunk_text` change) is never revisited by
@@ -598,7 +611,18 @@ def reingest_messages(service, store, thread_ids: list, *,
 # conflates "genuinely no extractable content" with "the extractor raised"
 # (normalise_attachment returns [] for both). Either one present means the
 # shorter output is not evidence of a shrink, so nothing is deleted.
-_ATT_PARTIAL_SKIPS = ("attachment_fetch_failed", "attachment_empty")
+#
+# attachment_unsupported is included too, even though today it's genuinely
+# deterministic (an unsupported mime type stays unsupported between when a
+# chunk was written and a later repair run) -- that's only true as long as
+# the supported-mime-type set never SHRINKS. If a future release ever drops
+# support for a type, this outcome would otherwise be treated as ordinary
+# and the orphan sweep would delete previously-good chunks for it. Treating
+# it as ambiguous like the other two costs a rare missed cleanup; treating
+# it as safe costs real chunks if that assumption ever breaks -- the cheaper
+# mistake to make by default.
+_ATT_PARTIAL_SKIPS = ("attachment_fetch_failed", "attachment_empty",
+                      "attachment_unsupported")
 
 
 def _sweep_attachment_orphans(store, mid: str, own_doc_ids: list, chunks: list,

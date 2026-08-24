@@ -171,6 +171,15 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
     chars anyway. That's why this is a write-time cap, not a prompt fix: an
     LLM instruction is evidence, not a guarantee, and every other bound in
     this codebase is defensive at the write layer for exactly that reason.
+
+    doc_id shape is NOT uniform: a single-chunk note keeps the bare
+    `note-consolidated-<hash>` id (no migration needed for the existing,
+    common case), but a multi-chunk note gets numeric-suffixed ids
+    (`-0`, `-1`, ...) -- including chunk 0, which would have no suffix as a
+    lone chunk. No current caller matches/parses the bare pattern (checked),
+    so this is inert today, but a future one that does would silently stop
+    matching multi-chunk notes. If you're adding such a caller, match on the
+    `note-consolidated-<hash>` PREFIX, not the bare id.
     """
     if not summary:
         return None

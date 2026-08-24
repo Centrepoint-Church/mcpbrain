@@ -30,6 +30,18 @@ import unicodedata
 # Bump it whenever chunk boundaries or chunk admission change.
 CHUNKER_VERSION = 3
 
+# The version floor below which EVERY content type is considered stale --
+# these chunks predate the 2026-07-28 headroom fix (1 -> 2) and have needed
+# re-chunking since before this release, regardless of source or subtype.
+# CHUNKER_VERSION (3) only ADDITIONALLY invalidates table-subtype content (the
+# phantom-column rendering fix, which changed nothing about prose chunking).
+# store.stale_chunker_ids uses both floors so a chunker_version bump doesn't
+# accidentally mark every historical prose chunk in the corpus stale too --
+# chunk_text (which renders every non-table chunk) is unchanged by the 2->3
+# bump, so re-fetching prose already at version 2 would burn real API quota
+# for a byte-identical re-chunk and zero benefit.
+PRIOR_CHUNKER_VERSION = 2
+
 
 # Leading honorifics stripped from a name so "Ps Joel" / "Pastor Joel Chelliah"
 # canonicalise to the bare name. Matched case-insensitively with any trailing
