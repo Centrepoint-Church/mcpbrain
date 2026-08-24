@@ -64,6 +64,14 @@ import mcpbrain.profile_audit    # noqa: F401 — registers BLOCK_DRAINERS["prof
 
 log = logging.getLogger(__name__)
 
+# see mcpbrain.backup._NUM_RETRIES for the full rationale — googleapiclient's
+# own num_retries already retries this error class (SSL errors, socket
+# timeouts, ConnectionError/OSError) with randomized exponential backoff, so
+# every plain Google API call in this module passes it. A local constant
+# rather than importing backup's keeps the established per-module convention
+# (sync/gmail.py, sync/drive.py, fleet.py all define their own).
+_NUM_RETRIES = 5
+
 
 def _configure_logging(root=None):
     """Configure logging format/level and, on Windows, a rotating log file.
@@ -1623,7 +1631,8 @@ class Daemon:
         if gmail is None:
             return ""
         try:
-            profile = gmail.users().getProfile(userId="me").execute()
+            profile = gmail.users().getProfile(
+                userId="me").execute(num_retries=_NUM_RETRIES)
             email = (profile.get("emailAddress") or "").strip()
         except Exception as exc:  # noqa: BLE001 — must not break status polls
             log.debug("status: getProfile failed: %s", exc)

@@ -77,10 +77,12 @@ def plain_msg(mid: str, subject: str, sender: str, body: str) -> dict:
 
 
 class _Req:
-    def __init__(self, result):
+    def __init__(self, result, executes=None):
         self._r = result
+        self.executes = executes if executes is not None else []
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         return self._r
 
 
@@ -1771,3 +1773,38 @@ def test_enrich_payload_migration_is_registered_as_a_cadence_pass():
     # run against the store while a backfill holds it.
     assert p.needs_configured is False
     assert p.needs_bulk_lock is True
+
+
+def test_resolve_google_account_get_profile_passes_num_retries(tmp_path):
+    """The last-resort getProfile in _resolve_google_account had no retry.
+
+    It is the only network call on the /api/status path, so an Errno-49-class
+    blip left `google_account` empty and re-issued the same uncached call on
+    every subsequent poll. Same rationale as mcpbrain.backup._NUM_RETRIES.
+    """
+    from mcpbrain import daemon as daemon_mod
+
+    calls: list = []
+
+    class _Profile:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return {"emailAddress": "sam@example.com"}
+
+    class _ProfileUsers:
+        def getProfile(self, userId):
+            return _Profile()
+
+    class _ProfileGmail:
+        def users(self):
+            return _ProfileUsers()
+
+    store = _make_store(tmp_path)
+    daemon = Daemon(store, FakeEmbedder(),
+                    services={"gmail_service": _ProfileGmail()},
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+
+    email = daemon._resolve_google_account(tmp_path / "no-such-token.json")
+
+    assert email == "sam@example.com"
+    assert calls == [daemon_mod._NUM_RETRIES]
