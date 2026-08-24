@@ -39,48 +39,58 @@ def plain_msg(mid: str, subject: str, sender: str, body: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class _Req:
-    def __init__(self, result):
+    """One pending request. `executes` is a shared list every fake in the
+    service appends its `num_retries` to, so a test can assert the retry
+    parameter reached every call site (see FakeService.execute_retries)."""
+
+    def __init__(self, result, executes=None):
         self._r = result
+        self._executes = executes if executes is not None else []
 
     def execute(self, num_retries=0):
+        self._executes.append(num_retries)
         return self._r
 
 
 class _History:
-    def __init__(self, pages, raise_on_list=None):
+    def __init__(self, pages, raise_on_list=None, executes=None):
         # pages is a list of page dicts; pageToken "1","2",... indexes self._pages
         self._pages = pages
         self._raise = raise_on_list  # if set, raise this on list()
+        self._executes = executes
 
     def list(self, **kw):
         if self._raise is not None:
             raise self._raise
         token = kw.get("pageToken")
         idx = 0 if token is None else int(token)
-        return _Req(self._pages[idx])
+        return _Req(self._pages[idx], self._executes)
 
 
 class _Messages:
-    def __init__(self, by_id):
+    def __init__(self, by_id, executes=None):
         self._by_id = by_id
         self.get_call_count = {}  # mid -> count
+        self._executes = executes
 
     def get(self, userId, id, format):
         self.get_call_count[id] = self.get_call_count.get(id, 0) + 1
         result = self._by_id[id]
         if isinstance(result, Exception):
             raise result
-        return _Req(result)
+        return _Req(result, self._executes)
 
 
 class _Users:
-    def __init__(self, profile_hid, history, messages):
+    def __init__(self, profile_hid, history, messages, executes=None):
         self._p = profile_hid
         self._h = history
         self._m = messages
+        self._executes = executes
 
     def getProfile(self, userId):
-        return _Req({"historyId": self._p, "emailAddress": "test@example.com"})
+        return _Req({"historyId": self._p, "emailAddress": "test@example.com"},
+                    self._executes)
 
     def history(self):
         return self._h
@@ -91,8 +101,15 @@ class _Users:
 
 class FakeService:
     def __init__(self, profile_hid="1000", pages=None, messages=None, raise_on_list=None):
-        msgs = _Messages(messages or {})
-        self._users = _Users(profile_hid, _History(pages or [], raise_on_list=raise_on_list), msgs)
+        # Shared across every sub-fake: `execute_retries` ends up holding one
+        # entry per .execute() call, in call order.
+        self.execute_retries: list = []
+        msgs = _Messages(messages or {}, self.execute_retries)
+        self._users = _Users(
+            profile_hid,
+            _History(pages or [], raise_on_list=raise_on_list,
+                     executes=self.execute_retries),
+            msgs, executes=self.execute_retries)
         self._messages = msgs  # expose for call-count assertions
 
     def users(self):
@@ -281,6 +298,67 @@ def test_non_404_httperror_propagates(tmp_path):
 
     # Cursor must be unchanged
     assert store.get_cursor("gmail") == "1000"
+
+
+# ---------------------------------------------------------------------------
+# Retry coverage for the ORDINARY delta-sync path
+#
+# _fetch_one / backfill_gmail's messages.list already passed num_retries; the
+# four calls sync_gmail itself makes (bootstrap getProfile, history.list
+# pagination, the 404/410-recovery getProfile, and the in-loop messages.get)
+# did not, so the delta sync -- the path that runs every cycle -- had no
+# retry at all against the Errno-49-class transient failures the rest of this
+# branch hardened everywhere else.
+# ---------------------------------------------------------------------------
+
+def test_bootstrap_get_profile_passes_num_retries(tmp_path):
+    from mcpbrain.sync.gmail import _NUM_RETRIES
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+
+    svc = FakeService(profile_hid="1000")
+    sync_gmail(svc, store)
+
+    assert svc.execute_retries == [_NUM_RETRIES]
+
+
+def test_delta_history_list_and_messages_get_pass_num_retries(tmp_path):
+    from mcpbrain.sync.gmail import _NUM_RETRIES
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    msg_m1 = plain_msg("m1", "Budget update", "alice@example.com",
+                       "The quarterly budget review is scheduled for next week.")
+    pages = [_make_page(["m1"], history_id="1005")]
+    svc = FakeService(profile_hid="1000", pages=pages, messages={"m1": msg_m1})
+
+    assert sync_gmail(svc, store) == 1
+
+    # One history.list + one messages.get, both retried.
+    assert svc.execute_retries == [_NUM_RETRIES, _NUM_RETRIES]
+
+
+def test_expired_historyid_recovery_get_profile_passes_num_retries(tmp_path):
+    """The 404/410 re-bootstrap getProfile is the one call that runs when the
+    mailbox's history window has already been lost -- a transient failure here
+    leaves the cursor stale for another whole cycle."""
+    from mcpbrain.sync.gmail import _NUM_RETRIES
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.set_cursor("gmail", "1000")
+
+    error = HttpError(httplib2.Response({"status": 410}), b"Sync token expired")
+    svc = FakeService(profile_hid="5000", raise_on_list=error)
+
+    assert sync_gmail(svc, store) == 0
+
+    # history.list raised before .execute(), so the only recorded call is the
+    # recovery getProfile.
+    assert svc.execute_retries == [_NUM_RETRIES]
 
 
 # ---------------------------------------------------------------------------
