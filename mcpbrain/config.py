@@ -109,6 +109,24 @@ def salience_gate_enabled(home) -> bool:
     return bool(read_config(home).get("salience_gate", True))
 
 
+def embed_skip_tabular_enabled(home) -> bool:
+    """Whether content_subtype=='table' chunks skip the dense-vector embedder.
+
+    When True, index_pending never calls embed_passages for table chunks --
+    they still get full FTS indexing (write_embedding(rowid, None) writes
+    the FTS row regardless), only the dense vector is skipped. Raw
+    markdown/table embeddings underperform schema-enriched row sentences for
+    retrieval (RAG-chunking research, 2026-08), and this corpus's own
+    salience gate already treats tabular content as low-signal for
+    graph-extraction -- this extends that same judgment to dense embedding.
+
+    Default: FALSE. Ships off until validated on the live gold-eval harness
+    that recall@10/MRR are unaffected -- same rollout discipline as
+    salience_gate and recall_excludes_cold before it.
+    """
+    return bool(read_config(home).get("embed_skip_tabular", False))
+
+
 def enrich_org_default_enabled(home) -> bool:
     """Whether graph_write.apply() falls back to the sender-domain-derived
     org_hint when the model's own extraction.get("org") is empty or the

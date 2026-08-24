@@ -1579,3 +1579,27 @@ def test_migrate_enrich_payloads_batch_keeper_is_numeric_not_lexicographic(tmp_p
         pass
 
     assert store.get_enrich_payload("F")["payload"] == '"newest"'
+
+
+def test_write_embedding_with_none_vector_writes_fts_but_not_vec_chunks(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("d1", "some table text", "h1", {})
+    with s._connect() as db:
+        rowid = db.execute(
+            "SELECT rowid FROM chunks WHERE doc_id='d1'").fetchone()["rowid"]
+
+    s.write_embedding(rowid, None)
+
+    with s._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid=?", (rowid,)
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM fts_chunks WHERE rowid=?", (rowid,)
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT embedded FROM chunks WHERE rowid=?", (rowid,)
+        ).fetchone()["embedded"] == 1
