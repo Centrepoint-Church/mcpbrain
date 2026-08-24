@@ -12,6 +12,12 @@ import unicodedata
 #   chunks; tabular sources are chunked by header-repeating row group instead of
 #   character-split; content-free text is never written as a chunk.
 #
+# 2 -> 3: the tabular renderer redesign (schema-enriched row sentences,
+#   replacing the fixed-width markdown grid) and normalise_rows' minimum-
+#   row-support fix both change what a "correctly chunked" table looks like --
+#   every existing chunk below this version gets re-fetched and re-rendered by
+#   bin/repair.py's generalized reingest-stale sweep.
+#
 # Bumping this is what makes a chunking change VISIBLE, in two ways:
 #   * `WHERE COALESCE(chunker_version, 0) < CHUNKER_VERSION` is the
 #     level-triggered selector bin/repair.py walks; and
@@ -22,7 +28,7 @@ import unicodedata
 #     alone would otherwise change nothing about the cache (config.fleet_pin's
 #     default only applies when the key is absent). See that function.
 # Bump it whenever chunk boundaries or chunk admission change.
-CHUNKER_VERSION = 2
+CHUNKER_VERSION = 3
 
 
 # Leading honorifics stripped from a name so "Ps Joel" / "Pastor Joel Chelliah"
