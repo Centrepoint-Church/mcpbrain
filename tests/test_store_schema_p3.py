@@ -796,11 +796,12 @@ def test_stale_chunker_ids_covers_gdrive_gmail_and_calendar(tmp_path):
                    {"source_type": "gmail", "thread_id": "t1", "chunker_version": 1})
     s.upsert_chunk("cal-e1-0", "old calendar content", "h3",
                    {"source_type": "calendar", "event_id": "e1", "chunker_version": 1})
-    # A chunk already at the current version must NOT be selected.
+    # A chunk already at the prior version must NOT be selected (unaffected
+    # non-table content -- the other_version floor, not the table_version one).
     s.upsert_chunk("gdrive-f2-0", "current", "h4",
                    {"source_type": "gdrive", "file_id": "f2", "chunker_version": 2})
 
-    out = s.stale_chunker_ids(version=2, limit=100)
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
 
     assert {"source_type": "gdrive", "id": "f1"} in out
     assert {"source_type": "gmail", "id": "t1"} in out
@@ -810,6 +811,45 @@ def test_stale_chunker_ids_covers_gdrive_gmail_and_calendar(tmp_path):
     types_in_order = [item["source_type"] for item in out]
     assert types_in_order == sorted(
         types_in_order, key=lambda t: {"gdrive": 0, "gmail": 1, "calendar": 2}[t])
+
+
+def test_stale_chunker_ids_does_not_sweep_unaffected_prose_at_the_prior_version(tmp_path):
+    """A table chunk at the OLD version is stale under the tabular-fix floor;
+    a prose chunk at that SAME old version is not -- chunk_text (which
+    renders every non-table chunk) didn't change between versions 2 and 3, so
+    re-fetching it would burn real API quota for a byte-identical re-chunk."""
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-table1-0", "old table render", "h1",
+                   {"source_type": "gdrive", "file_id": "table1",
+                    "content_subtype": "table", "chunker_version": 2})
+    s.upsert_chunk("gmail-prose1-body-0", "old prose", "h2",
+                   {"source_type": "gmail", "thread_id": "prose1",
+                    "content_subtype": "prose", "chunker_version": 2})
+
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+
+    assert {"source_type": "gdrive", "id": "table1"} in out
+    assert not any(item["id"] == "prose1" for item in out)
+
+
+def test_stale_chunker_ids_still_sweeps_prose_below_the_prior_version(tmp_path):
+    """The original legacy backlog (pre-2026-07-28 headroom-fix chunks, any
+    type) must still be caught -- only chunks already at other_version are
+    exempted from the table_version floor."""
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gmail-legacy1-body-0", "legacy prose", "h1",
+                   {"source_type": "gmail", "thread_id": "legacy1",
+                    "content_subtype": "prose", "chunker_version": 1})
+
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+
+    assert {"source_type": "gmail", "id": "legacy1"} in out
 
 
 def test_thread_summary_digest_joins_messages_oldest_first(tmp_path):

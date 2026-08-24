@@ -1000,6 +1000,45 @@ def test_reingest_messages_orphan_sweep_skipped_after_an_attachment_failure(
         "chunker_version"] == CHUNKER_VERSION
 
 
+def test_reingest_messages_orphan_sweep_skipped_after_an_unsupported_attachment(
+        tmp_path, monkeypatch):
+    """attachment_unsupported is deterministic TODAY (an unsupported mime type
+    stays unsupported), but that's only true as long as the supported set
+    never shrinks. Treated as ambiguous like fetch_failed/empty so a future
+    mime-support removal can't silently read as a shrink and delete
+    previously-good chunks."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    store.upsert_chunk("gmail-m1-body-0", "old body", "hb",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    store.upsert_chunk("gmail-m1-att-0-0", "good rows", "ha0",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    fetch, _seen = _att_fake(
+        [], skips={("attachment_unsupported", "application/zip"): 1})
+    monkeypatch.setattr(attachments, "fetch_and_normalise", fetch)
+
+    msg_m1 = plain_msg("m1", "Invoice", "a@b.com", "See the attached sheet.")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
+    assert store.get_chunk("gmail-m1-att-0-0") is not None, \
+        "an unsupported-attachment skip must never be read as a shrink"
+    assert store.get_chunk("gmail-m1-body-0")["metadata"][
+        "chunker_version"] == CHUNKER_VERSION
+
+
 def test_reingest_messages_orphan_sweep_skipped_when_attachments_are_off(
         tmp_path, monkeypatch):
     """With gmail_attachments off, att_chunks is empty for EVERY message --

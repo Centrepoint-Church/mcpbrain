@@ -1218,7 +1218,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
     store.upsert_chunk("gdrive-empty1-0", "Sheet: Sheet1\nSheet: Sheet2", "h1",
                        {"source_type": "gdrive", "file_id": "empty1",
                         "chunk_index": 0})
-    assert [d["id"] for d in store.stale_chunker_ids(CHUNKER_VERSION, limit=10)] == ["empty1"]
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["empty1"]
 
     class _Service:
         def files(self):
@@ -1241,7 +1241,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
     summary = drive.reingest_files(_Service(), store, ["empty1"])
 
     assert summary["empty"] == 1, f"expected an 'empty' outcome, got {summary}"
-    assert store.stale_chunker_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "the file is still selected, so reingest-stale will re-fetch it forever"
     )
     meta = store.get_chunk("gdrive-empty1-0")["metadata"]
@@ -1289,7 +1289,7 @@ def test_a_transient_failure_does_NOT_stop_the_file_being_selected(tmp_path, mon
 
     assert summary["failed"] == 1
     assert summary["empty"] == 0
-    assert [d["id"] for d in store.stale_chunker_ids(CHUNKER_VERSION, limit=10)] == ["flaky"], (
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["flaky"], (
         "a transient failure must remain retryable"
     )
 
@@ -1506,7 +1506,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
     # Pre-existing chunk from the old chunker: same text, same hash, no version.
     store.upsert_chunk("gdrive-f1-0", body, content_hash(body),
                        {"source_type": "gdrive", "file_id": "f1", "chunk_index": 0})
-    assert [d["id"] for d in store.stale_chunker_ids(CHUNKER_VERSION, limit=10)] == ["f1"]
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["f1"]
 
     class _Service:
         def files(self):
@@ -1525,7 +1525,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
     summary = drive.reingest_files(_Service(), store, ["f1"])
 
     assert summary["files"] == 1
-    assert store.stale_chunker_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "an unchanged-text file never left the stale set — reingest-stale would "
         "re-fetch it forever"
     )
@@ -1614,7 +1614,7 @@ def test_a_file_gone_from_drive_also_stops_being_selected(tmp_path, monkeypatch)
     summary = drive.reingest_files(_Service(), store, ["gone"])
 
     assert summary["missing"] == 1
-    assert store.stale_chunker_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "the 404'd file is still selected, so every run re-fetches it forever"
     )
     chunk = store.get_chunk("gdrive-gone-0")

@@ -2047,14 +2047,14 @@ def test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve(tmp_path, mon
 
     real_verify = backup_mod._verify_artifact
 
-    def corrupt_then_verify(out_path):
+    def corrupt_then_verify(out_path, *, home=None):
         d = _open_db(out_path, read_only=False)
         try:
             d.execute("DELETE FROM vec_chunks")   # chunks still claim embedded=1
             d.commit()
         finally:
             d.close()
-        return real_verify(out_path)
+        return real_verify(out_path, home=home)
 
     monkeypatch.setattr(backup_mod, "_verify_artifact", corrupt_then_verify)
 
@@ -2177,6 +2177,59 @@ def test_verify_artifact_still_raises_for_a_non_table_chunk_missing_its_vector(t
 
     with pytest.raises(RuntimeError, match="vector"):
         _verify_artifact(store.path)
+
+
+def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_table_chunk(tmp_path):
+    """Without a `home` to check embed_skip_tabular against, the exclusion
+    must stay unconditional (the two tests above, run with no `home`, prove
+    that path still works). WITH `home` and the flag OFF, a table chunk
+    already re-rendered to CHUNKER_VERSION should have gotten a real vector
+    from index_pending same as any other chunk -- missing one there is
+    genuine corruption, not the designed state, and must still raise."""
+    import json
+
+    import pytest
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table", "chunker_version": CHUNKER_VERSION})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)   # missing, but should be real
+
+    with pytest.raises(RuntimeError, match="vector"):
+        _verify_artifact(store.path, home=str(home))
+
+
+def test_verify_artifact_with_home_and_flag_off_still_spares_a_pre_rerender_table_chunk(tmp_path):
+    """Same flag-off home, but the table chunk is still below CHUNKER_VERSION
+    -- i.e. it could legitimately be sitting in the transient post-cleanup
+    window (bin/cleanup_tabular_vectors.py deleted its vector, the version-
+    bump sweep hasn't re-rendered it yet). Must not raise."""
+    import json
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table", "chunker_version": CHUNKER_VERSION - 1})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)
+
+    _verify_artifact(store.path, home=str(home))   # must not raise
 
 
 def test_verify_artifact_raises_on_genuine_chunks_corruption(tmp_path, monkeypatch):
