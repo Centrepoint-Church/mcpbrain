@@ -2122,6 +2122,19 @@ class Daemon:
         every ATTEMPT, success or failure, so a failing backup retries once per
         interval rather than on every cycle, and is advanced AGAIN on success so
         the interval is spacing from completion rather than from start.
+
+        Layer-2 safety net: on a failure, once write_backup_state reports
+        consecutive_failures >= 2 (i.e. this is the SECOND failure in a row,
+        not the first), self._backup.drive_service is rebuilt from scratch
+        via _build_drive_service() and swapped in under _config_lock. This is
+        deliberately a higher bar than the per-call num_retries added across
+        the codebase in Tasks 1-5: that layer already retries a single flaky
+        call, so a failure that survives it and repeats is more likely a
+        persistently broken client/session (e.g. a stale OAuth token) than a
+        one-off transient blip — exactly the case a per-call retry can't fix
+        but a fresh service object can. The rebuild is itself best-effort: a
+        failure to rebuild is logged and swallowed, never raised, and never
+        blocks returning the original backup error.
         """
         if self._backfill_active.is_set():
             return None  # single-writer: yield to the backfill
@@ -2168,7 +2181,9 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
             log.warning("periodic backup failed: %s", exc, exc_info=True)
             bstate = write_backup_state(home, ok=False, error=str(exc))
-            failures = bstate.get("consecutive_failures") or 0
+            # write_backup_state always sets this to prev_failures + 1 (>= 1)
+            # on the failure branch, so it's never missing/0/None here.
+            failures = bstate["consecutive_failures"]
             if failures >= 2:
                 log.warning(
                     "periodic backup: %d consecutive failures, rebuilding "
@@ -4018,6 +4033,15 @@ def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
     compared across restarts, where a monotonic epoch is meaningless (same
     reasoning as ``_recent_watchdog_exits``). Best-effort — a write failure must
     never fail an otherwise-good backup.
+
+    Returns:
+        The ``state`` dict just written (``last_attempt``, ``last_success``,
+        ``consecutive_failures``, ``last_error``) — even when the write to
+        disk itself failed (best-effort covers persistence, not the return).
+        This lets a caller such as ``maybe_backup`` read e.g.
+        ``consecutive_failures`` off the return value directly, without a
+        second read of ``backup_state.json`` through another module's
+        private helper.
     """
     path = Path(home) / "backup_state.json"
     try:
