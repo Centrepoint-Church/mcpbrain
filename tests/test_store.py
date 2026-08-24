@@ -81,9 +81,9 @@ def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
     paths every call is a full `SCAN chunks` (~1.4s on the ~108k-chunk live
     store), so a drain cycle spends ~24 min scanning and starves recall. init()
     must create expression indexes matching exactly the _meta_extract() paths
-    the query uses (jsonb_extract or json_extract, whichever the running
-    SQLite supports — see store._meta_extract), so the planner can turn the
-    SCAN into an index SEARCH."""
+    the query uses (json_extract, unconditionally and on every SQLite version —
+    see store._meta_extract for why it must never be version-dependent), so the
+    planner can turn the SCAN into an index SEARCH."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
     with s._connect() as db:
         idx_sql = {
