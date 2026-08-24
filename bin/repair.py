@@ -4,9 +4,10 @@ Phases (each independently runnable, each idempotent):
 
   purge-empty     delete chunks carrying no alphanumeric character
                   (68,193 of 196,396 live chunks; 34.7%)
-  reingest-stale  re-fetch and re-chunk Drive files whose chunks predate
-                  chunking.CHUNKER_VERSION (455 clipped spreadsheets +
-                  9,351 legacy files)
+  reingest-stale  re-fetch and re-chunk Drive files/Gmail threads/Calendar
+                  events whose chunks predate chunking.CHUNKER_VERSION (455
+                  clipped spreadsheets + 9,351 legacy Drive files, plus any
+                  stale Gmail/Calendar items)
   status          report remaining work; changes nothing
 
 DRY RUN IS THE DEFAULT. Pass --apply to write. --apply takes a full WAL-safe
@@ -128,46 +129,102 @@ def phase_purge_empty(store, apply: bool) -> int:
 
 
 def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) -> int:
-    ids = store.stale_chunker_file_ids(CHUNKER_VERSION, limit=limit)
-    print(f"[reingest-stale] {len(ids)} Drive file(s) selected (limit {limit})")
+    """Re-fetch and re-chunk items whose chunks predate CHUNKER_VERSION,
+    dispatching per source type.
+
+    store.stale_chunker_ids (Task 7) returns {"source_type", "id"} across
+    gdrive/gmail/calendar; this groups by type and hands each group to that
+    type's own re-ingest primitive. The gdrive branch is deliberately
+    UNCONDITIONAL (always calls reingest_files when --apply, even with an
+    empty id list) -- that's the exact call shape that existed before this
+    generalization, and several pre-existing tests exercise it against an
+    empty store to check --workers wiring / skip-report aggregation. Gmail
+    and calendar are new dispatch targets with no such history, so they're
+    only invoked when there's actually something of that type to do.
+    """
+    items = store.stale_chunker_ids(CHUNKER_VERSION, limit=limit)
+    by_type: dict[str, list] = {}
+    for item in items:
+        by_type.setdefault(item["source_type"], []).append(item["id"])
+    counts = {k: len(v) for k, v in by_type.items()}
+    print(f"[reingest-stale] {len(items)} item(s) selected (limit {limit}): {counts}")
     if not apply:
         print("[reingest-stale] dry run — nothing fetched; pass --apply to write")
         return 0
+
     from mcpbrain.auth import build_google_services
-    from mcpbrain.sync.drive import flush_skip_report, reingest_files
     services = build_google_services()
+
+    # --- gdrive: unchanged from the pre-generalization Drive-only call. ---
+    from mcpbrain.sync.drive import flush_skip_report, reingest_files
     drive = services.get("drive_service")
     if drive is None:
         # build_google_services omits a service whose scope the token lacks,
-        # rather than failing the whole build — so this is a missing scope, not
-        # a crash, and it must be said plainly.
+        # rather than failing the whole build — so this is a missing scope,
+        # not a crash, and it must be said plainly.
         print("[reingest-stale] no drive_service (token lacks the Drive scope); "
               "re-authenticate with `mcpbrain setup`", file=sys.stderr)
-        return 0
-    # workers>1 parallelizes the network-bound fetch across a thread pool (see
-    # reingest_files' docstring); each worker builds its OWN service via this
-    # factory rather than sharing `drive`, because googleapiclient's Resource
-    # wraps a stateful httplib2.Http that is not safe to use from multiple
-    # threads at once.
-    service_factory = (
-        (lambda: build_google_services().get("drive_service"))
-        if workers > 1 else None)
-    # Tally skipped files instead of writing one change_log row each, then flush
-    # once — the same `report=` pattern every other bulk Drive path uses
-    # (sync_drive, backfill_drive, sync_shared_drive all do this). Without it
-    # fetch_content's _note_skip takes its immediate-write branch, which would
-    # (a) issue store writes from WORKER THREADS, the one hole in
-    # reingest_files' otherwise careful "only _apply writes, on the main thread"
-    # design, and (b) evict the 500-row change_log — which doubles as the
-    # user-facing change digest — with one `ingest_skip` row per unreadable file
-    # across a 9,400-file run. Counts may undercount slightly under
-    # --workers > 1 (the tally is a plain dict incremented from several threads);
-    # they are diagnostics, and the aggregate row is what matters.
-    report: dict = {}
-    summary = reingest_files(drive, store, ids, max_workers=workers,
-                             service_factory=service_factory, report=report)
-    flush_skip_report(store, report, source="repair:reingest")
-    print(f"[reingest-stale] {summary}")
+    else:
+        # workers>1 parallelizes the network-bound fetch across a thread pool
+        # (see reingest_files' docstring); each worker builds its OWN service
+        # via this factory rather than sharing `drive`, because
+        # googleapiclient's Resource wraps a stateful httplib2.Http that is
+        # not safe to use from multiple threads at once.
+        service_factory = (
+            (lambda: build_google_services().get("drive_service"))
+            if workers > 1 else None)
+        # Tally skipped files instead of writing one change_log row each, then
+        # flush once — the same `report=` pattern every other bulk Drive path
+        # uses (sync_drive, backfill_drive, sync_shared_drive all do this).
+        # Without it fetch_content's _note_skip takes its immediate-write
+        # branch, which would (a) issue store writes from WORKER THREADS, the
+        # one hole in reingest_files' otherwise careful "only _apply writes,
+        # on the main thread" design, and (b) evict the 500-row change_log —
+        # which doubles as the user-facing change digest — with one
+        # `ingest_skip` row per unreadable file across a 9,400-file run.
+        # Counts may undercount slightly under --workers > 1 (the tally is a
+        # plain dict incremented from several threads); they are
+        # diagnostics, and the aggregate row is what matters.
+        report: dict = {}
+        summary = reingest_files(drive, store, by_type.get("gdrive", []),
+                                 max_workers=workers,
+                                 service_factory=service_factory, report=report)
+        flush_skip_report(store, report, source="repair:reingest")
+        print(f"[reingest-stale] drive: {summary}")
+
+    # --- gmail: new dispatch target (Task 8's reingest_messages). ---
+    if by_type.get("gmail"):
+        from mcpbrain.sync.gmail import reingest_messages
+        gmail = services.get("gmail_service")
+        if gmail is None:
+            print("[reingest-stale] no gmail_service (token lacks the Gmail "
+                  "scope); re-authenticate with `mcpbrain setup`", file=sys.stderr)
+        else:
+            summary = reingest_messages(gmail, store, by_type["gmail"])
+            print(f"[reingest-stale] gmail: {summary}")
+
+    # --- calendar: volume is tiny (4 in the original investigation), so this
+    # reuses the existing window-backfill primitive rather than building a
+    # bespoke single-event-refetch one. A per-event narrow window would need
+    # each event's own start time, which isn't cheaply available from just the
+    # event id here, so this re-runs the window backfill over a wide-enough
+    # span (+/- 2 years) to catch them regardless of when they fall.
+    if by_type.get("calendar"):
+        from mcpbrain.sync.calendar import backfill_calendar_window
+        calendar_svc = services.get("calendar_service")
+        if calendar_svc is None:
+            print("[reingest-stale] no calendar_service (token lacks the "
+                  "Calendar scope); re-authenticate with `mcpbrain setup`",
+                  file=sys.stderr)
+        else:
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc)
+            time_min = (now - timedelta(days=730)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            time_max = (now + timedelta(days=730)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            n = backfill_calendar_window(calendar_svc, store, time_min=time_min,
+                                         time_max=time_max)
+            print(f"[reingest-stale] calendar: refreshed window, {n} events")
+
     return 0
 
 
