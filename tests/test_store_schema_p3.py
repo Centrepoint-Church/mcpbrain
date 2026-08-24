@@ -783,3 +783,30 @@ def test_note_chunks_exclude_distilled_keep_with_bad_timestamp_fails_safe(tmp_pa
                         keep_review_days=30, limit=500)}
 
     assert ids == set()
+
+
+def test_stale_chunker_ids_covers_gdrive_gmail_and_calendar(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-f1-0", "old drive content", "h1",
+                   {"source_type": "gdrive", "file_id": "f1", "chunker_version": 1})
+    s.upsert_chunk("gmail-m1-body-0", "old gmail content", "h2",
+                   {"source_type": "gmail", "thread_id": "t1", "chunker_version": 1})
+    s.upsert_chunk("cal-e1-0", "old calendar content", "h3",
+                   {"source_type": "calendar", "event_id": "e1", "chunker_version": 1})
+    # A chunk already at the current version must NOT be selected.
+    s.upsert_chunk("gdrive-f2-0", "current", "h4",
+                   {"source_type": "gdrive", "file_id": "f2", "chunker_version": 2})
+
+    out = s.stale_chunker_ids(version=2, limit=100)
+
+    assert {"source_type": "gdrive", "id": "f1"} in out
+    assert {"source_type": "gmail", "id": "t1"} in out
+    assert {"source_type": "calendar", "id": "e1"} in out
+    assert not any(item["id"] == "f2" for item in out)
+    # Drive entries sort before Gmail before Calendar.
+    types_in_order = [item["source_type"] for item in out]
+    assert types_in_order == sorted(
+        types_in_order, key=lambda t: {"gdrive": 0, "gmail": 1, "calendar": 2}[t])

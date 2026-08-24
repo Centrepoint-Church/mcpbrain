@@ -79,7 +79,7 @@ def _backup(db_path: Path) -> Path:
 def phase_status(store, apply: bool) -> int:
     empty = store.count_content_free()
     total = store.chunk_count()
-    stale = len(store.stale_chunker_file_ids(CHUNKER_VERSION, limit=100_000))
+    stale = len(store.stale_chunker_ids(CHUNKER_VERSION, limit=100_000))
     print(f"content-free chunks       : {empty} of {total} "
           f"({100 * empty / total:.1f}%)" if total else f"content-free: {empty}")
     print(f"Drive files to re-chunk   : {stale} (chunker_version < {CHUNKER_VERSION})")
