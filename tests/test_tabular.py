@@ -98,6 +98,9 @@ def test_normalise_rows_ignores_a_single_outlier_wide_row():
     assert all(len(r) <= 4 for r in out), (
         f"expected every row trimmed to width<=4, got a row of length "
         f"{max(len(r) for r in out)}")
+    # After trimming, the outlier row becomes all-empty and must be dropped.
+    assert all(any(c.strip() for c in r) for r in out), (
+        "every row must have at least one non-empty cell")
 
 
 def test_normalise_rows_keeps_a_genuinely_sparse_real_column():
