@@ -52,6 +52,8 @@ from mcpbrain.sync.tabular import Table
 
 log = logging.getLogger(__name__)
 
+_NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
+
 
 # ---------------------------------------------------------------------------
 # MIME routing tables
@@ -155,15 +157,15 @@ def _fetch_text(service, file_meta: dict) -> str | None:
         # fine by fileId alone.
         raw = service.files().export(
             fileId=file_meta["id"], mimeType=_EXPORT[mime]
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
     elif mime in _DOWNLOAD_TEXT:
         raw = service.files().get_media(
             fileId=file_meta["id"], supportsAllDrives=True
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
     elif mime in _DOWNLOAD_BINARY:
         raw = service.files().get_media(
             fileId=file_meta["id"], supportsAllDrives=True
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
         return _DOWNLOAD_BINARY[mime](data)
     else:
@@ -258,7 +260,8 @@ def fetch_content(service, file_meta: dict, *, store=None,
         "application/vnd.ms-excel": extract_tables_from_xls,   # legacy .xls
     }
     if mime in binary_tables:
-        raw = service.files().get_media(fileId=fid, supportsAllDrives=True).execute()
+        raw = service.files().get_media(
+            fileId=fid, supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
         data = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
         tables = binary_tables[mime](data, char_budget=budget)
         if not tables:
@@ -369,8 +372,9 @@ def folder_path(service, file_meta: dict, cache: dict) -> str:
         seen.add(fid)
         if fid not in cache:
             try:
-                info = service.files().get(fileId=fid, fields="id,name,parents",
-                                           supportsAllDrives=True).execute()
+                info = service.files().get(
+                    fileId=fid, fields="id,name,parents",
+                    supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
                 cache[fid] = (info.get("name", ""), info.get("parents") or [])
             except Exception as exc:  # noqa: BLE001 — provenance is best-effort
                 log.debug("folder_path: lookup failed for %s: %s", fid, exc)
@@ -442,7 +446,7 @@ def list_shared_drives(service) -> list[dict]:
         resp = service.drives().list(
             pageSize=100, fields="nextPageToken,drives(id,name)",
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         out.extend(resp.get("drives", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -678,7 +682,8 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
 
     # Bootstrap: no prior cursor
     if cursor is None:
-        tok = service.changes().getStartPageToken().execute()["startPageToken"]
+        tok = service.changes().getStartPageToken().execute(
+            num_retries=_NUM_RETRIES)["startPageToken"]
         store.set_cursor(source, str(tok))
         return 0
 
@@ -716,7 +721,7 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
             spaces="drive",
             includeRemoved=True,
             fields=_CHANGES_FIELDS,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
 
         for ch in resp.get("changes", []):
             if ch.get("removed"):
@@ -862,7 +867,8 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     cursor = store.get_cursor(source)
     if cursor is None:
         tok = service.changes().getStartPageToken(
-            driveId=drive_id, supportsAllDrives=True).execute()["startPageToken"]
+            driveId=drive_id, supportsAllDrives=True).execute(
+            num_retries=_NUM_RETRIES)["startPageToken"]
         store.set_cursor(source, str(tok))
         return {"processed": 0, "miss": [], "live_file_ids": set()}
 
@@ -905,7 +911,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
             supportsAllDrives=True,
             includeRemoved=True,
             fields=_CHANGES_FIELDS,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         for ch in resp.get("changes", []):
             if ch.get("removed"):
                 fid = ch.get("fileId")
@@ -1152,7 +1158,7 @@ def backfill_drive(service, store, modified_after: str,
         params = {"q": q, "fields": fields, "pageSize": 100, "spaces": "drive"}
         if page_token:
             params["pageToken"] = page_token
-        resp = service.files().list(**params).execute()
+        resp = service.files().list(**params).execute(num_retries=_NUM_RETRIES)
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 flush_skip_report(store, skip_report)
@@ -1210,7 +1216,7 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
         }
         if page_token:
             params["pageToken"] = page_token
-        resp = service.files().list(**params).execute()
+        resp = service.files().list(**params).execute(num_retries=_NUM_RETRIES)
         for f in resp.get("files", []):
             if max_files is not None and processed >= max_files:
                 flush_skip_report(store, skip_report, source=f"drive:{drive_id}")
@@ -1264,7 +1270,8 @@ def _reingest_one(service, store, fid, fields, folder_cache, report):
         # of moving on to the next file.
         try:
             fmeta = service.files().get(
-                fileId=fid, fields=fields, supportsAllDrives=True).execute()
+                fileId=fid, fields=fields,
+                supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
         except HttpError as exc:
             resp = getattr(exc, "resp", None)
             if resp is not None and resp.status == 404:

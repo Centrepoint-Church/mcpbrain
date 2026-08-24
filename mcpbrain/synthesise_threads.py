@@ -26,15 +26,10 @@ def build_synthesis_requests(store, *, min_emails: int = 5, limit: int = 50) -> 
     threads = store.threads_needing_summary(min_emails)[:limit]
     requests = []
     for t in threads:
-        msgs = store.thread_messages(t["thread_id"])
-        parts = []
-        for m in msgs:
-            if m.get("summary"):
-                ctype = f" [{m['content_type']}]" if m.get("content_type") else ""
-                parts.append(f"- {m.get('date_iso', '?')}{ctype}: {m['summary']}")
-        if not parts:
+        email_summaries = store.thread_summary_digest(t["thread_id"], max_chars=None)
+        if not email_summaries:
             continue  # skip threads with no per-message summaries
-        email_summaries = "\n".join(parts)
+        msgs = store.thread_messages(t["thread_id"])
         first_date = msgs[0].get("date_iso", "?") if msgs else "?"
         last_date = msgs[-1].get("date_iso", "?") if msgs else "?"
         requests.append({

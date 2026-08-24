@@ -89,3 +89,31 @@ def test_index_pending_prefix_gmail_contains_sender(tmp_path):
 
     passage = emb.captured_texts[0]
     assert "alice@example.org" in passage
+
+
+def test_index_pending_skips_embedder_for_table_chunks(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text('{"embed_skip_tabular": true}')
+
+    store = Store(tmp_path / "test.db", dim=4)
+    store.init()
+    store.upsert_chunk("gdrive-t-0", "table row text", "h1",
+                       {"content_subtype": "table"})
+    store.upsert_chunk("gmail-p-0", "prose text", "h2", {"content_subtype": "prose"})
+
+    class _FakeEmbedder:
+        def __init__(self):
+            self.calls = []
+        def embed_passages(self, texts):
+            self.calls.append(list(texts))
+            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    embedder = _FakeEmbedder()
+    index_pending(store, embedder, home=str(home))
+
+    # Only the prose chunk's text ever reached the embedder.
+    all_texts = [t for call in embedder.calls for t in call]
+    assert "prose text" in " ".join(all_texts) or any(
+        "prose text" in t for t in all_texts)
+    assert not any("table row text" in t for t in all_texts)

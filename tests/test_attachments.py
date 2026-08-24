@@ -119,7 +119,8 @@ def test_a_spreadsheet_attachment_uses_the_row_group_chunker(monkeypatch):
     chunks = attachments.normalise_attachment(raw, part, b"fake")
     rowtext = next(c.text for c in chunks if c.metadata.get("table_role") == "rows")
 
-    assert "| Item | Amount |" in rowtext
+    assert "Item: Rent; Amount: 500" in rowtext
+    assert "Item: Power; Amount: 120" in rowtext
 
 
 def test_an_emailed_legacy_xls_is_ingested_like_a_drive_one():
@@ -141,7 +142,8 @@ def test_an_emailed_legacy_xls_is_ingested_like_a_drive_one():
 
     assert chunks, ".xls attachment produced no chunks"
     rowtext = next(c.text for c in chunks if c.metadata.get("table_role") == "rows")
-    assert "|" in rowtext, "an .xls attachment must use the row-group chunker"
+    assert "Item: Rent; Amount: 500" in rowtext, (
+        "an .xls attachment must use the row-group chunker")
     assert chunks[0].metadata["extraction_method"] == "spreadsheet"
 
 
@@ -319,8 +321,8 @@ def test_a_tsv_attachment_is_parsed_on_tabs(monkeypatch):
     chunks = attachments.normalise_attachment(raw, part, tsv.encode())
     rowtext = next(c.text for c in chunks if c.metadata.get("table_role") == "rows")
 
-    assert "| Account | Description | Amount |" in rowtext
-    assert "| 4521 | Venue hire | 1450.00 |" in rowtext
+    assert "Account: 4521; Description: Venue hire; Amount: 1450.00" in rowtext
+    assert "Account: 6100; Description: Catering; Amount: 320.50" in rowtext
 
 
 def test_a_calendar_invite_is_skipped_silently():

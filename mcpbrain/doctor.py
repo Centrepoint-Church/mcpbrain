@@ -383,11 +383,13 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # files whose chunks predate the current chunker. Surfaced here so "is the
     # repair done?" is answerable without running the CLI.
     try:
-        from mcpbrain.chunking import CHUNKER_VERSION
+        from mcpbrain.chunking import CHUNKER_VERSION, PRIOR_CHUNKER_VERSION
         empty = store.count_content_free()
-        stale = len(store.stale_chunker_file_ids(CHUNKER_VERSION, limit=100_000))
+        stale = len(store.stale_chunker_ids(table_version=CHUNKER_VERSION,
+                                            other_version=PRIOR_CHUNKER_VERSION,
+                                            limit=100_000))
         lines.append(f"{'✅' if not empty else '⚠️'} content-free chunks: {empty}")
-        lines.append(f"{'✅' if not stale else '⚠️'} Drive files awaiting re-chunk: {stale}")
+        lines.append(f"{'✅' if not stale else '⚠️'} Items awaiting re-chunk: {stale}")
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Repair state':<16} skipped ({exc})")
 
