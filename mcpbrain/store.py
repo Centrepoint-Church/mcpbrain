@@ -66,6 +66,28 @@ def fts5_supports_contentless() -> bool:
     return parts >= (3, 43)
 
 
+def jsonb_supported() -> bool:
+    """JSONB (binary JSON) lands in SQLite 3.45. Same guard rationale as
+    fts5_supports_contentless(): the version comes from whichever Python the
+    wheel installed under and MUST be checked at runtime, never assumed.
+    """
+    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
+    return parts >= (3, 45)
+
+
+def _meta_extract(path: str) -> str:
+    """SQL fragment reading `path` out of chunks.metadata.
+
+    Single source of truth so an expression INDEX and the QUERY that should
+    use it can never drift apart — a mismatch silently produces a full table
+    scan, which is exactly the 0.7.105 failure mode. Every read site in this
+    module that extracts a value from chunks.metadata MUST build its SQL
+    through this function rather than hand-writing json_extract/jsonb_extract.
+    """
+    fn = "jsonb_extract" if jsonb_supported() else "json_extract"
+    return f"{fn}(metadata,'{path}')"
+
+
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -368,30 +390,35 @@ class Store:
             # call is a full `SCAN chunks` — ~1.4s on the ~108k-chunk live store, so
             # a backlogged drain cycle spends ~24 min scanning and starves the
             # control-API recall threads (GIL + DB), timing out brain_search/actions.
-            # The expressions must match doc_ids_for_messages' json_extract() paths
-            # byte-for-byte or the planner won't use the index.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_msgid "
-                       "ON chunks(json_extract(metadata,'$.message_id'))")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fileid "
-                       "ON chunks(json_extract(metadata,'$.file_id'))")
-            # I6: thread_enrich._chunk_key groups a split calendar event's chunks
-            # by event_id, so doc_ids_for_messages resolves that id too — same
-            # arm shape as file_id, so it needs the same expression index.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_eventid "
-                       "ON chunks(json_extract(metadata,'$.event_id'))")
-            # thread_chunks (recall small-to-big expansion via retrieval_expand,
-            # plus the stale-action / stale-reextract passes) filters chunks by
-            # metadata.thread_id — a full SCAN (~4.3s on the live store) without
-            # this index; a single-equality predicate, so the index alone fixes it.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_threadid "
-                       "ON chunks(json_extract(metadata,'$.thread_id'))")
+            # The expressions must match doc_ids_for_messages' _meta_extract()
+            # paths byte-for-byte or the planner won't use the index — both the
+            # index DDL and every query read site build their SQL through the
+            # single _meta_extract() source of truth, so they cannot drift apart.
+            for _idx_name, _idx_path in (
+                ("idx_chunks_msgid", "$.message_id"),
+                ("idx_chunks_fileid", "$.file_id"),
+                # I6: thread_enrich._chunk_key groups a split calendar event's
+                # chunks by event_id, so doc_ids_for_messages resolves that id
+                # too — same arm shape as file_id, so it needs the same
+                # expression index.
+                ("idx_chunks_eventid", "$.event_id"),
+                # thread_chunks (recall small-to-big expansion via
+                # retrieval_expand, plus the stale-action / stale-reextract
+                # passes) filters chunks by metadata.thread_id — a full SCAN
+                # (~4.3s on the live store) without this index; a
+                # single-equality predicate, so the index alone fixes it.
+                ("idx_chunks_threadid", "$.thread_id"),
+            ):
+                db.execute(f"CREATE INDEX IF NOT EXISTS {_idx_name} "
+                           f"ON chunks({_meta_extract(_idx_path)})")
             # inbound_chunks_since (the waiting-on sweep, every cycle) range-filters
             # on COALESCE(date,date_iso); index the SAME expression so the range
             # plans as a SEARCH (~2.9s SCAN -> ~tens of ms). Expression must match
             # inbound_chunks_since's date_expr byte-for-byte.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_inbound_date ON chunks("
-                       "COALESCE(json_extract(metadata,'$.date'),"
-                       "json_extract(metadata,'$.date_iso')))")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_inbound_date ON chunks("
+                f"COALESCE({_meta_extract('$.date')},"
+                f"{_meta_extract('$.date_iso')}))")
             db.execute(f"""CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
                 USING vec0(embedding float[{self.dim}])""")
             if fts5_supports_contentless():
@@ -1196,7 +1223,7 @@ class Store:
         clause = " OR ".join("text LIKE ?" for _ in terms)
         params = [f"%{t}%" for t in terms]
         sql = ("SELECT 1 FROM chunks "
-               "WHERE json_extract(metadata,'$.source_type')='gmail' "
+               f"WHERE {_meta_extract('$.source_type')}='gmail' "
                f"AND ({clause}) LIMIT 1")
         try:
             with self._connect() as db:
@@ -1409,8 +1436,8 @@ class Store:
         with self._connect(write=True) as db:
             cur = db.execute(
                 "SELECT rowid FROM chunks "
-                "WHERE json_extract(metadata,'$.source_type')='calendar' "
-                "  AND json_extract(metadata,'$.start') > ?",
+                f"WHERE {_meta_extract('$.source_type')}='calendar' "
+                f"  AND {_meta_extract('$.start')} > ?",
                 (iso_cutoff,),
             )
             rowids = [r["rowid"] for r in cur.fetchall()]
@@ -1426,7 +1453,7 @@ class Store:
         """Chunk doc_ids whose metadata drive_id matches (see DRIVE_ID_META_KEY)."""
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.drive_id')=?",
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.drive_id')}=?",
                 (drive_id,)).fetchall()]
 
     def doc_ids_for_file(self, file_id: str) -> list[str]:
@@ -1442,7 +1469,7 @@ class Store:
         """
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.file_id')=?",
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=?",
                 (file_id,)).fetchall()]
 
     def doc_root_content_hashes(self, roots: list[str]) -> dict[str, frozenset[str]]:
@@ -1504,9 +1531,9 @@ class Store:
                 file_ids = [r[len("gdrive-"):] for r in gdrive_roots]
                 qs = ",".join("?" * len(file_ids))
                 rows = db.execute(
-                    "SELECT json_extract(metadata,'$.file_id') AS fid, "
+                    f"SELECT {_meta_extract('$.file_id')} AS fid, "
                     f"content_hash AS h FROM chunks "
-                    f"WHERE json_extract(metadata,'$.file_id') IN ({qs})",
+                    f"WHERE {_meta_extract('$.file_id')} IN ({qs})",
                     file_ids).fetchall()
                 for row in rows:
                     result[f"gdrive-{row['fid']}"].add(row["h"])
@@ -1553,7 +1580,7 @@ class Store:
             # file that is still very much present.
             for fid in file_ids:
                 remaining = db.execute(
-                    "SELECT 1 FROM chunks WHERE json_extract(metadata,'$.file_id')=? "
+                    f"SELECT 1 FROM chunks WHERE {_meta_extract('$.file_id')}=? "
                     "LIMIT 1", (fid,)).fetchone()
                 if remaining is None:
                     db.execute("DELETE FROM enrich_payloads WHERE file_id=?", (fid,))
@@ -1761,11 +1788,11 @@ class Store:
         """
         with self._connect() as db:
             rows = db.execute(
-                "SELECT json_extract(metadata,'$.file_id') AS fid, MIN(rowid) AS r "
+                f"SELECT {_meta_extract('$.file_id')} AS fid, MIN(rowid) AS r "
                 "FROM chunks "
-                "WHERE json_extract(metadata,'$.source_type')='gdrive' "
-                "  AND json_extract(metadata,'$.file_id') IS NOT NULL "
-                "  AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ? "
+                f"WHERE {_meta_extract('$.source_type')}='gdrive' "
+                f"  AND {_meta_extract('$.file_id')} IS NOT NULL "
+                f"  AND COALESCE({_meta_extract('$.chunker_version')},0) < ? "
                 "GROUP BY fid ORDER BY r LIMIT ?",
                 (int(version), int(limit)),
             ).fetchall()
@@ -2040,7 +2067,7 @@ class Store:
         (verified 0 mismatches over 200 live file_ids, incl. base64url ids with
         LIKE metacharacters)."""
         return ("SELECT doc_id,text,content_hash,metadata FROM chunks "
-                "WHERE json_extract(metadata,'$.file_id')=?")
+                f"WHERE {_meta_extract('$.file_id')}=?")
 
     def chunks_for_file(self, file_id: str) -> list[dict]:
         """All gdrive-<file_id>-<i> chunks as {doc_id,text,content_hash,metadata,idx},
@@ -3017,12 +3044,10 @@ class Store:
         of one message shares its date; that was B4.
         """
         with self._connect() as db:
-            # json_extract over metadata is a full table scan; acceptable at
-            # current corpus size. Add a generated-column index on thread_id if
-            # thread queries grow slow.
+            # Index-backed by idx_chunks_threadid (see init()).
             cur = db.execute(
                 "SELECT doc_id, text, metadata FROM chunks "
-                "WHERE json_extract(metadata, '$.thread_id') = ?",
+                f"WHERE {_meta_extract('$.thread_id')} = ?",
                 (thread_id,),
             )
             return [
@@ -3040,7 +3065,7 @@ class Store:
         with self._connect() as db:
             r = db.execute(
                 "SELECT 1 FROM chunks "
-                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=0 "
+                f"WHERE {_meta_extract('$.thread_id')}=? AND enriched=0 "
                 "LIMIT 1",
                 (thread_id,)).fetchone()
             return r is not None
@@ -3052,7 +3077,7 @@ class Store:
         with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE chunks SET enriched=0 "
-                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=1",
+                f"WHERE {_meta_extract('$.thread_id')}=? AND enriched=1",
                 (thread_id,))
             return cur.rowcount
 
@@ -3063,7 +3088,7 @@ class Store:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT doc_id, content_hash FROM chunks "
-                "WHERE json_extract(metadata,'$.thread_id')=? ORDER BY doc_id",
+                f"WHERE {_meta_extract('$.thread_id')}=? ORDER BY doc_id",
                 (thread_id,)).fetchall()
         h = hashlib.sha256()
         for r in rows:
@@ -3138,16 +3163,16 @@ class Store:
         ph = ",".join("?" * n)
         return (
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.message_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.message_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.file_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.file_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.event_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.event_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.message_id') IS NULL "
+            f"WHERE {_meta_extract('$.message_id')} IS NULL "
             f"  AND doc_id IN ({ph}) "
             f"ORDER BY rowid")
 
@@ -3692,8 +3717,7 @@ class Store:
         so a future move to `>=` (re-scanning the boundary day) would be safe. At
         larger corpus sizes, add a generated-column index on the extracted date.
         """
-        date_expr = ("COALESCE(json_extract(metadata, '$.date'), "
-                     "json_extract(metadata, '$.date_iso'))")
+        date_expr = f"COALESCE({_meta_extract('$.date')}, {_meta_extract('$.date_iso')})"
         with self._connect() as db:
             if cursor:
                 rows = db.execute(
