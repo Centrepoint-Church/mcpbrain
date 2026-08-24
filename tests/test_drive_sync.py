@@ -17,7 +17,7 @@ class _Req:
         self._r = result
         self._e = raise_exc
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._e:
             raise self._e
         return self._r
@@ -782,7 +782,7 @@ def test_folder_path_is_resolved_and_cached():
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"folder-1": {"id": "folder-1", "name": "Budgets",
                                  "parents": ["folder-0"]},
                     "folder-0": {"id": "folder-0", "name": "Finance",
@@ -1030,7 +1030,7 @@ def test_fetch_content_marks_a_partial_table_extraction(monkeypatch):
     xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     class _Media:
-        def execute(self):
+        def execute(self, num_retries=0):
             return b"fake"
 
     class _Files:
@@ -1060,7 +1060,7 @@ def test_fetch_content_does_not_mark_a_complete_extraction(monkeypatch):
     xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     class _Media:
-        def execute(self):
+        def execute(self, num_retries=0):
             return b"fake"
 
     class _Files:
@@ -1177,7 +1177,7 @@ def test_reingest_files_replaces_a_files_chunks_from_a_fresh_fetch(tmp_path, mon
         def get_media(self, fileId, supportsAllDrives=None):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
                     "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
 
@@ -1218,7 +1218,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
     store.upsert_chunk("gdrive-empty1-0", "Sheet: Sheet1\nSheet: Sheet2", "h1",
                        {"source_type": "gdrive", "file_id": "empty1",
                         "chunk_index": 0})
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["empty1"]
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["empty1"]
 
     class _Service:
         def files(self):
@@ -1230,7 +1230,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
         def get_media(self, fileId=None, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "empty1", "name": "Guest Coffee Vouchers.xlsx",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1241,7 +1241,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
     summary = drive.reingest_files(_Service(), store, ["empty1"])
 
     assert summary["empty"] == 1, f"expected an 'empty' outcome, got {summary}"
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "the file is still selected, so reingest-stale will re-fetch it forever"
     )
     meta = store.get_chunk("gdrive-empty1-0")["metadata"]
@@ -1276,7 +1276,7 @@ def test_a_transient_failure_does_NOT_stop_the_file_being_selected(tmp_path, mon
         def get(self, fileId=None, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "flaky", "name": "F.txt", "mimeType": "text/plain",
                     "parents": []}
 
@@ -1289,7 +1289,7 @@ def test_a_transient_failure_does_NOT_stop_the_file_being_selected(tmp_path, mon
 
     assert summary["failed"] == 1
     assert summary["empty"] == 0
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["flaky"], (
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["flaky"], (
         "a transient failure must remain retryable"
     )
 
@@ -1318,7 +1318,7 @@ def test_reingest_files_skips_a_file_that_no_longer_exists(tmp_path):
         def get(self, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             raise HttpError(_Resp(), b"not found")
 
     summary = drive.reingest_files(_Service(), store, ["gone"])
@@ -1354,7 +1354,7 @@ def test_reingest_files_isolates_a_non_404_httperror_from_metadata_fetch(tmp_pat
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             if self._fid == "throttled":
                 raise HttpError(_Resp(), b"rate limited")
             return {"id": self._fid, "name": f"{self._fid}.txt",
@@ -1385,7 +1385,7 @@ def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monke
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1428,7 +1428,7 @@ def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1468,7 +1468,7 @@ def test_reingest_files_with_workers_isolates_a_per_file_failure(tmp_path, monke
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1492,7 +1492,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
     unchanged content_hash and writes NOTHING — metadata included — so a legacy
     Drive file whose prose re-chunks identically (the common case: spec 2 changed
     empty/oversize emission and tabular routing, not prose boundaries) would
-    never acquire `chunker_version`. stale_chunker_file_ids selects on exactly
+    never acquire `chunker_version`. stale_chunker_ids selects on exactly
     that field and orders by MIN(rowid), so `reingest-stale --apply --limit N`
     would re-fetch the same oldest N files forever, burning Drive quota with zero
     progress while reporting success."""
@@ -1506,7 +1506,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
     # Pre-existing chunk from the old chunker: same text, same hash, no version.
     store.upsert_chunk("gdrive-f1-0", body, content_hash(body),
                        {"source_type": "gdrive", "file_id": "f1", "chunk_index": 0})
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == ["f1"]
+    assert [d["id"] for d in store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10)] == ["f1"]
 
     class _Service:
         def files(self):
@@ -1516,7 +1516,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
                     "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
 
@@ -1525,7 +1525,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
     summary = drive.reingest_files(_Service(), store, ["f1"])
 
     assert summary["files"] == 1
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "an unchanged-text file never left the stale set — reingest-stale would "
         "re-fetch it forever"
     )
@@ -1553,7 +1553,7 @@ def test_reingest_keeps_the_drive_id_stamp_for_a_shared_drive_file(tmp_path, mon
             self._fid, self._fields = fileId, fields
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             assert "driveId" in (self._fields or ""), (
                 "driveId must be requested or the fetched metadata can never "
                 f"carry it: {self._fields}"
@@ -1608,13 +1608,13 @@ def test_a_file_gone_from_drive_also_stops_being_selected(tmp_path, monkeypatch)
         def get(self, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             raise HttpError(_Resp(), b"not found")
 
     summary = drive.reingest_files(_Service(), store, ["gone"])
 
     assert summary["missing"] == 1
-    assert store.stale_chunker_file_ids(CHUNKER_VERSION, limit=10) == [], (
+    assert store.stale_chunker_ids(table_version=CHUNKER_VERSION, other_version=CHUNKER_VERSION, limit=10) == [], (
         "the 404'd file is still selected, so every run re-fetches it forever"
     )
     chunk = store.get_chunk("gdrive-gone-0")

@@ -163,27 +163,66 @@ def _build_prompt(cluster: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def _write_note(store, cluster: list[dict], summary: str) -> str | None:
-    """Write a consolidated semantic note chunk. Returns the new doc_id or None."""
+    """Write a consolidated semantic note, bounded like every other
+    multi-chunk source. Returns the FIRST doc_id written, or None.
+
+    The consolidation prompt already asks for "a concise durable semantic
+    note (3-6 sentences)" -- and 1,151 existing notes still averaged 18K
+    chars anyway. That's why this is a write-time cap, not a prompt fix: an
+    LLM instruction is evidence, not a guarantee, and every other bound in
+    this codebase is defensive at the write layer for exactly that reason.
+
+    doc_id shape is NOT uniform: a single-chunk note keeps the bare
+    `note-consolidated-<hash>` id (no migration needed for the existing,
+    common case), but a multi-chunk note gets numeric-suffixed ids
+    (`-0`, `-1`, ...) -- including chunk 0, which would have no suffix as a
+    lone chunk. No current caller matches/parses the bare pattern (checked),
+    so this is inert today, but a future one that does would silently stop
+    matching multi-chunk notes. If you're adding such a caller, match on the
+    `note-consolidated-<hash>` PREFIX, not the bare id.
+    """
     if not summary:
         return None
 
+    from mcpbrain.chunking import chunk_text
+
     source_ids = [c.get("doc_id", "") for c in cluster]
     ts = _now_iso()
-    content_hash = hashlib.sha256(summary.encode()).hexdigest()[:16]
-    doc_id = f"note-consolidated-{content_hash}"
+    content_hash_full = hashlib.sha256(summary.encode()).hexdigest()[:16]
+    base_doc_id = f"note-consolidated-{content_hash_full}"
 
-    text = summary
-    metadata = {
-        "observation_type": "consolidated",
-        "source_doc_ids": source_ids,
-        "captured_at": ts,
-        "title": "Consolidated note",
-    }
+    pieces = chunk_text(summary)
+    if len(pieces) <= 1:
+        doc_id = base_doc_id
+        metadata = {
+            "observation_type": "consolidated",
+            "source_doc_ids": source_ids,
+            "captured_at": ts,
+            "title": "Consolidated note",
+        }
+        store.upsert_chunk(doc_id, summary, content_hash_full, metadata)
+        store.set_chunk_type(doc_id, "semantic")
+        store.set_chunk_tier(doc_id, "hot")
+        return doc_id
 
-    store.upsert_chunk(doc_id, text, content_hash, metadata)
-    store.set_chunk_type(doc_id, "semantic")
-    store.set_chunk_tier(doc_id, "hot")
-    return doc_id
+    first_doc_id = None
+    for i, piece in enumerate(pieces):
+        doc_id = f"{base_doc_id}-{i}"
+        if first_doc_id is None:
+            first_doc_id = doc_id
+        metadata = {
+            "observation_type": "consolidated",
+            "source_doc_ids": source_ids,
+            "captured_at": ts,
+            "title": "Consolidated note",
+            "chunk_index": i,
+            "chunk_total": len(pieces),
+        }
+        piece_hash = hashlib.sha256(piece.encode()).hexdigest()[:16]
+        store.upsert_chunk(doc_id, piece, piece_hash, metadata)
+        store.set_chunk_type(doc_id, "semantic")
+        store.set_chunk_tier(doc_id, "hot")
+    return first_doc_id
 
 
 def _make_slug(summary: str) -> str:

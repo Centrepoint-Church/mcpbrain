@@ -25,16 +25,85 @@ def _table(header=None, rows=None, *, sheet="GL Detail", truncated=False, total=
                          truncated=truncated)
 
 
-def test_every_row_group_chunk_repeats_the_header():
-    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=120)
+def test_row_sentences_use_schema_enriched_format():
+    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=1800)
     rows = [(t, m) for t, m in chunks if m["table_role"] == "rows"]
 
-    assert len(rows) >= 2, "max_chars=120 should force more than one row group"
-    for text, _meta in rows:
-        assert "| Date | Account | Description | Amount |" in text, (
-            "a row-group chunk without its header is the B2 defect: orphaned "
-            f"numbers with no column names. Got:\n{text}"
-        )
+    assert rows, "expected at least one row-group chunk"
+    text, _meta = rows[0]
+    assert "Date: 2024-03-01" in text
+    assert "Account: 4521" in text
+    assert "Description: Office supplies" in text
+    assert "Amount: 42.00" in text
+    # No markdown grid artifacts survive.
+    assert "| Date | Account" not in text
+    assert "---" not in text
+
+
+def test_a_row_group_chunk_has_no_stray_blank_lines():
+    """Regression guard for the _emit/_rendered_size empty-line-join fix: since
+    header_line/sep_line are always "" in the schema-enriched design, joining
+    them verbatim (instead of filtering falsy lines out) would leave two
+    blank lines between the title and the first row. A "simplification" back
+    to a plain "\\n".join([...]) must be caught here."""
+    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "\n\n" not in text, f"stray blank line in row-group chunk:\n{text!r}"
+
+
+def test_a_pipe_in_a_cell_value_is_not_escaped():
+    """Row sentences aren't `|`-delimited any more, so a cell that legitimately
+    contains a pipe character must render literally -- the old markdown-grid
+    escaping (`|` -> `\\|`) would inject a spurious backslash into the
+    sentence for no benefit."""
+    header = ["Item", "Notes"]
+    rows = [["Chair", "A | B"]]
+    table = tabular.Table(sheet="S", header=header, rows=rows, rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "Notes: A | B" in text
+    assert "\\|" not in text, "a literal pipe must not be backslash-escaped"
+
+
+def test_empty_cells_are_never_rendered():
+    header = ["Item", "Cost", "Notes"]
+    rows = [["Chair", "50", ""]]  # Notes is empty for this row
+    table = tabular.Table(sheet="S", header=header, rows=rows, rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "Notes" not in text, "an empty cell must not render at all"
+
+
+def test_phantom_wide_row_stays_under_chunk_chars_regardless():
+    # Belt-and-suspenders: even without Task 10's normalise_rows fix, one
+    # anomalous row with thousands of non-empty phantom cells must not blow
+    # the chunk budget, because the field-count safety valve bounds it.
+    header = ["Item"] + [f"col{i}" for i in range(5000)]
+    phantom_row = ["Chairs"] + [f"v{i}" for i in range(5000)]  # all non-empty
+    table = tabular.Table(sheet="S", header=header, rows=[phantom_row], rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    for text, meta in chunks:
+        if meta["table_role"] == "rows":
+            assert len(text) <= 1800 + 200, (
+                f"row-group chunk of {len(text)} chars exceeds budget even "
+                "with the field-count safety valve")
+
+
+def test_row_with_too_many_fields_gets_elided():
+    header = ["Item"] + [f"col{i}" for i in range(60)]
+    row = ["Chairs"] + [f"v{i}" for i in range(60)]
+    table = tabular.Table(sheet="S", header=header, rows=[row], rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=100_000)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "more fields" in text
 
 
 def test_each_row_group_names_its_sheet_and_row_range():
@@ -81,6 +150,56 @@ def test_an_interior_blank_column_is_kept():
     rows = [["Name", "", "Amount"], ["Rent", "", "500"]]
 
     assert tabular.normalise_rows(rows) == rows
+
+
+def test_normalise_rows_ignores_a_single_outlier_wide_row():
+    # 700 normal rows (4 real columns) plus one title-banner row with a
+    # single stray non-empty cell at column 19999 -- the exact reproducing
+    # case from the live investigation (a Fixed Assets Register spreadsheet).
+    header = ["Item", "Cost", "Date", "Location"]
+    normal_rows = [["Chair", "50", "2024-01-01", "Hall A"] for _ in range(700)]
+    outlier = [""] * 19999 + ["FIXED ASSETS REGISTER as at 31 December 2022"]
+    rows = [header] + normal_rows + [outlier]
+
+    out = tabular.normalise_rows(rows)
+
+    # The outlier row is trimmed to the real width, not the other way around.
+    assert all(len(r) <= 4 for r in out), (
+        f"expected every row trimmed to width<=4, got a row of length "
+        f"{max(len(r) for r in out)}")
+    # After trimming, the outlier row becomes all-empty and must be dropped.
+    assert all(any(c.strip() for c in r) for r in out), (
+        "every row must have at least one non-empty cell")
+
+
+def test_normalise_rows_keeps_a_genuinely_sparse_real_column():
+    # A "notes" column only 5 of 50 rows populate is still real -- it must
+    # NOT be dropped just because it's a minority.
+    header = ["Item", "Cost", "Notes"]
+    rows_without_notes = [["Chair", "50", ""] for _ in range(45)]
+    rows_with_notes = [["Desk", "200", "damaged"] for _ in range(5)]
+    rows = [header] + rows_without_notes + rows_with_notes
+
+    out = tabular.normalise_rows(rows)
+
+    assert all(len(r) == 3 for r in out), (
+        "the Notes column (5/50 rows, above the support floor of 2) must survive")
+
+
+def test_normalise_rows_keeps_a_sparse_real_column_on_a_large_table():
+    """A proportional floor (len(kept)//100) would require 7 rows' support on
+    a 700-row table -- a real column used by only e.g. 3 rows would be wrongly
+    treated as phantom. The flat floor of 2 doesn't scale with table size, so
+    it survives regardless of how large the table is."""
+    header = ["Item", "Cost", "Notes"]
+    rows_without_notes = [["Chair", "50", ""] for _ in range(697)]
+    rows_with_notes = [["Desk", "200", "damaged"] for _ in range(3)]
+    rows = [header] + rows_without_notes + rows_with_notes
+
+    out = tabular.normalise_rows(rows)
+
+    assert all(len(r) == 3 for r in out), (
+        "the Notes column (3/700 rows, still above the flat floor of 2) must survive")
 
 
 def test_no_content_free_chunk_is_ever_emitted():

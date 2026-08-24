@@ -25,6 +25,10 @@ from mcpbrain.ingest_cache import CACHE_DIR                    # noqa: E402
 
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# see mcpbrain.backup._NUM_RETRIES for the full rationale. Every call here is
+# a plain metadata list/delete, so all of them retry.
+_NUM_RETRIES = 5
+
 
 def _drive_service(home):
     from mcpbrain import auth
@@ -57,7 +61,8 @@ def _find_cache_folders(service, drive_id):
                f"and mimeType = '{_FOLDER_MIME}'"),
             corpora="drive", driveId=drive_id,
             includeItemsFromAllDrives=True, supportsAllDrives=True,
-            fields="nextPageToken, files(id)", pageSize=100, pageToken=token).execute()
+            fields="nextPageToken, files(id)", pageSize=100,
+            pageToken=token).execute(num_retries=_NUM_RETRIES)
         ids.extend(f["id"] for f in resp.get("files", []))
         token = resp.get("nextPageToken")
         if not token:
@@ -71,7 +76,8 @@ def _count_children(service, folder_id):
         resp = service.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
             includeItemsFromAllDrives=True, supportsAllDrives=True,
-            fields="nextPageToken, files(id)", pageSize=1000, pageToken=token).execute()
+            fields="nextPageToken, files(id)", pageSize=1000,
+            pageToken=token).execute(num_retries=_NUM_RETRIES)
         n += len(resp.get("files", []))
         token = resp.get("nextPageToken")
         if not token:
@@ -113,7 +119,9 @@ def delete_legacy(service, entries):
         drive_deleted = 0
         for fid in e["folder_ids"]:
             try:
-                service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+                service.files().delete(
+                    fileId=fid,
+                    supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
             except Exception as exc:  # noqa: BLE001 — isolate one folder's failure
                 print(f"  ! {e['drive_name']} ({e['drive_id']}): delete failed: {exc}")
                 continue

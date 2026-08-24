@@ -1697,37 +1697,79 @@ class Store:
                 db.execute(f"UPDATE chunks SET enriched=0 WHERE doc_id IN ({qs})", ids)
         return len(ids)
 
-    def stale_chunker_file_ids(self, version: int, limit: int) -> list[str]:
-        """Drive `file_id`s with at least one chunk written by an older chunker.
+    # Maps each source_type to the metadata field that identifies its owning
+    # file/thread/event -- kept as one named, documented constant (rather
+    # than an inline literal) so the mapping's correctness is visible in one
+    # place. It relies on these writers stamping exactly these field names:
+    # sync/drive.py's base_meta (file_id), sync/gmail.py's normalise_gmail /
+    # attachments.normalise_attachment (thread_id), and
+    # sync/calendar.py's normalise_calendar (event_id). A future rename in
+    # any of those three writers must be mirrored here, or that source type's
+    # stale chunks silently stop being selected (a false-green "0 stale"
+    # result, not an error) -- there's no automated guard against that drift.
+    _STALE_ID_FIELDS = (
+        ("gdrive", "file_id"), ("gmail", "thread_id"), ("calendar", "event_id"),
+    )
+
+    def stale_chunker_ids(self, *, table_version: int, other_version: int,
+                          limit: int) -> list[dict]:
+        """File/thread/event ids with at least one chunk written by an older
+        chunker, across every source type.
 
         The level-triggered selector for bin/repair.py's re-ingest phase: no
         queue, no cursor, no new state. Re-running walks forward because a
-        repaired file stops matching, and an interrupted run simply resumes —
-        the same property that made reflow_outdated_chunks the right shape for
-        change-driven re-extraction.
+        repaired item stops matching, and an interrupted run simply resumes.
 
-        Distinct file_ids (not doc_ids) because re-ingest operates per FILE: one
-        Drive fetch replaces all of that file's chunks at once.
+        Distinct ids (not doc_ids) because re-ingest operates per FILE/
+        THREAD/EVENT: one fetch replaces all of that owner's chunks at once.
 
-        Drive-only. Gmail is 2% of the corpus and its chunking defects are ~75
-        rows the purge deletes outright, so re-fetching a mailbox to re-chunk
-        them is not a trade worth making; Gmail chunks pick up the new version as
-        they naturally re-sync.
+        Originally Drive-only, on the theory that "Gmail chunks pick up the
+        new version as they naturally re-sync." That assumption doesn't
+        hold: a Gmail message is immutable once received, and ordinary sync
+        only ever touches NEW/changed messages via the history API -- an
+        already-ingested message's chunker_version never gets revisited by
+        anything else, so it stays stale forever without this. Generalized
+        to cover gmail/calendar too.
 
-        Ordered by MIN(rowid) so the oldest, least-recently-touched files repair
-        first and progress is monotonic across runs.
+        TWO version floors, not one, because chunker_version is a single
+        monotonic number shared by every content type, but a version bump
+        can affect only ONE of them (CHUNKER_VERSION 2->3 changed table
+        rendering only -- chunk_text, which renders every non-table chunk,
+        is untouched). A single `< CHUNKER_VERSION` floor would mark every
+        historical chunk of every type stale, including prose already at
+        version 2 that would just re-chunk byte-identically -- a full-mailbox
+        re-fetch for zero benefit. `table_version` (pass chunking.CHUNKER_VERSION)
+        applies only to content_subtype=='table' chunks; `other_version`
+        (pass chunking.PRIOR_CHUNKER_VERSION) applies to everything else, so
+        only content that ACTUALLY needs re-chunking under the current
+        release is swept.
+
+        Ordered by MIN(rowid) within each source type, Drive rows first then
+        Gmail then Calendar (not interleaved) -- see bin/repair.py's
+        phase_reingest_stale for why sequential-by-source is enough.
         """
+        out: list[dict] = []
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT json_extract(metadata,'$.file_id') AS fid, MIN(rowid) AS r "
-                "FROM chunks "
-                "WHERE json_extract(metadata,'$.source_type')='gdrive' "
-                "  AND json_extract(metadata,'$.file_id') IS NOT NULL "
-                "  AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ? "
-                "GROUP BY fid ORDER BY r LIMIT ?",
-                (int(version), int(limit)),
-            ).fetchall()
-        return [r["fid"] for r in rows]
+            for source_type, id_field in self._STALE_ID_FIELDS:
+                rows = db.execute(
+                    f"SELECT json_extract(metadata,'$.{id_field}') AS oid, "
+                    f"MIN(rowid) AS r FROM chunks "
+                    f"WHERE json_extract(metadata,'$.source_type')=? "
+                    f"  AND json_extract(metadata,'$.{id_field}') IS NOT NULL "
+                    f"  AND ("
+                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')='table' "
+                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"    OR "
+                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')<>'table' "
+                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"  ) "
+                    f"GROUP BY oid ORDER BY r LIMIT ?",
+                    (source_type, table_version, other_version, limit - len(out)),
+                ).fetchall()
+                out.extend({"source_type": source_type, "id": r["oid"]} for r in rows)
+                if len(out) >= limit:
+                    break
+        return out
 
     @staticmethod
     def _content_free(text: str | None) -> bool:
@@ -1879,11 +1921,32 @@ class Store:
                 n += 1
             return n
 
-    def write_embedding(self, rowid: int, vector: list[float], *, home=None) -> None:
+    def write_embedding(self, rowid: int, vector: list[float] | None, *, home=None) -> None:
+        """Write a chunk's embedding and FTS row, stamping embedded=1.
+
+        vector=None means "skip the dense vector, still write FTS and stamp
+        embedded=1" -- used for content_subtype=='table' chunks when
+        embed_skip_tabular is on. Every RETRIEVAL path that gates on
+        embedded=1 handles that state correctly on its own: a join against
+        vec_chunks simply returns nothing for that rowid, which is exactly
+        the desired "never surfaces via dense search" behavior, while
+        unembedded_chunks() correctly stops re-fetching it.
+
+        The one place it is NOT self-evidently safe is a consistency CHECK
+        rather than a query: `backup._verify_artifact` samples the
+        lowest-rowid embedded=1 chunks and RAISES if one does not resolve to
+        a vector. It therefore excludes content_subtype='table' from its
+        sample -- keep that exclusion in step with this method (and with
+        bin/cleanup_tabular_vectors.py, which produces the same state on
+        already-embedded rows), or a periodic backup and bin/repair.py's
+        pre-apply safety snapshot both start failing on a deliberately
+        vector-less chunk.
+        """
         with self._connect(write=True) as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
-            db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
-                       (rowid, sqlite_vec.serialize_float32(vector)))
+            if vector is not None:
+                db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
+                           (rowid, sqlite_vec.serialize_float32(vector)))
             row = db.execute("SELECT text, metadata FROM chunks WHERE rowid=?",
                              (rowid,)).fetchone()
             fts_text, applied = self._fts_text(row["text"], json.loads(row["metadata"]),
@@ -3389,6 +3452,48 @@ class Store:
                     (thread_id,),
                 ).fetchall()
             ]
+
+    def thread_summary_digest(self, thread_id: str, max_chars: int | None = 1500) -> str:
+        """Join a thread's per-message summaries into one digest, oldest
+        message first, dropping the OLDEST lines first if it doesn't fit.
+
+        thread_context.contextual_summary is only ever populated by the
+        periodic cross-message synthesis pass (threads with email_count>=5).
+        A thread under that threshold gets a genuinely empty
+        prior_thread_context otherwise, even though every message's own
+        one-line summary is already sitting right here in email_context.
+        This is the fallback prepare._thread_block reaches for when
+        thread_context is empty -- the most recent messages are the most
+        relevant prior context for whatever's about to be enriched next, so
+        recency wins when trimming to budget, not chronological completeness.
+
+        max_chars=None means no cap (used by build_synthesis_requests, which
+        already caps the THREAD count via min_emails/limit rather than the
+        digest's own length).
+
+        Line format matches build_synthesis_requests' prior inline join loop
+        exactly (this method is now the shared, canonical source of it):
+        "- {date_iso}{ ' [content_type]' if content_type else ''}: {summary}"
+        """
+        if not thread_id:
+            return ""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT date_iso, content_type, summary FROM email_context "
+                "WHERE thread_id=? AND summary != '' ORDER BY date_iso",
+                (thread_id,),
+            ).fetchall()
+        lines = []
+        for r in rows:
+            ctype = f" [{r['content_type']}]" if r["content_type"] else ""
+            lines.append(f"- {r['date_iso'] or '?'}{ctype}: {r['summary']}")
+        if max_chars is None:
+            return "\n".join(lines)
+        # Drop OLDEST lines first (lines is already oldest-to-newest) until
+        # the joined result fits.
+        while lines and len("\n".join(lines)) > max_chars:
+            lines.pop(0)
+        return "\n".join(lines)
 
     # --- Phase 3, Task 0.5C: proactive_findings reader/writer methods -------
 

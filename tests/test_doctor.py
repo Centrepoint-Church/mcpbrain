@@ -403,7 +403,8 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
                        {"source_type": "gdrive", "file_id": "f1"})
 
     assert store.count_content_free() == 1
-    assert store.stale_chunker_file_ids(2, limit=10) == ["f1"]
+    assert [d["id"] for d in
+           store.stale_chunker_ids(table_version=3, other_version=2, limit=10)] == ["f1"]
 
     # Asserting the store methods is not enough: the lines are only useful if
     # run_doctor actually prints them, and its own `except Exception` turns any
@@ -412,5 +413,5 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
     code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
                                   conns=_conns(), repairs={})
     assert "⚠️ content-free chunks: 1" in msg, msg
-    assert "⚠️ Drive files awaiting re-chunk: 1" in msg, msg
+    assert "⚠️ Items awaiting re-chunk: 1" in msg, msg
     assert "Repair state" not in msg, f"the repair-state block was skipped: {msg}"

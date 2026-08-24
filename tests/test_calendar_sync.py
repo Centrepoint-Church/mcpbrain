@@ -16,7 +16,7 @@ class _Req:
         self._r = result
         self._raise = raise_410
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._raise:
             raise HttpError(httplib2.Response({"status": 410}), b"Sync token expired")
         return self._r
@@ -495,3 +495,84 @@ def test_a_split_events_chunks_are_all_evicted_when_the_horizon_shrinks(tmp_path
 
     for c in chunks:
         assert store.get_chunk(c.doc_id) is None, f"{c.doc_id} survived the sweep"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: _list_events should pass num_retries to .execute()
+# ---------------------------------------------------------------------------
+
+def test_list_events_calls_pass_num_retries():
+    from mcpbrain.sync import calendar
+
+    calls = []
+
+    class _FakeExec:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return {"items": [], "nextSyncToken": None}
+
+    class _FakeEvents:
+        def list(self, **kw):
+            return _FakeExec()
+
+    class _FakeService:
+        def events(self):
+            return _FakeEvents()
+
+    calendar._list_events(_FakeService(), "primary", None,
+                          "2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z")
+
+    assert calls == [calendar._NUM_RETRIES]
+
+
+# ---------------------------------------------------------------------------
+# Final-review C1: backfill_calendar_window must refresh metadata even when
+# the re-render is byte-identical
+# ---------------------------------------------------------------------------
+
+def test_backfill_calendar_window_stamps_version_on_a_byte_identical_rechunk(tmp_path):
+    """This function is the calendar arm of `bin/repair.py reingest-stale`.
+
+    CHUNKER_VERSION 2->3 changed sync/tabular.py only, so a re-fetched event
+    renders BYTE-IDENTICALLY -- the normal case, not a corner one.
+    store.upsert_chunk short-circuits on an unchanged content_hash and writes
+    nothing at all (metadata included), so without the patch_chunk_metadata
+    fallback the chunk never acquires the new chunker_version,
+    store.stale_chunker_ids re-selects the same event on every run, and the
+    sweep burns Calendar quota forever while reporting success.
+    """
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.calendar import backfill_calendar_window
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+
+    ev = _event("e1", "Standup")
+    # Seed EXACTLY what the re-fetch will render, only on the old version.
+    expected = normalise_calendar(ev)
+    assert expected, "fixture must produce at least one chunk"
+    for ch in expected:
+        store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash,
+                           {**ch.metadata, "chunker_version": 1})
+
+    class _WinExec:
+        def execute(self, num_retries=0):
+            return {"items": [ev]}
+
+    class _WinEvents:
+        def list(self, **kw):
+            return _WinExec()
+
+    class _WinService:
+        def events(self):
+            return _WinEvents()
+
+    n = backfill_calendar_window(_WinService(), store,
+                                 time_min="2026-01-01T00:00:00Z",
+                                 time_max="2026-12-31T00:00:00Z")
+
+    assert n == 1
+    for ch in expected:
+        got = store.get_chunk(ch.doc_id)
+        assert got["metadata"]["chunker_version"] == CHUNKER_VERSION, ch.doc_id
+        assert got["text"] == ch.text          # unchanged, as expected

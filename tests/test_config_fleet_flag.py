@@ -32,6 +32,26 @@ def test_retrieval_expand_enabled_delegates_to_fleet_flag(tmp_path):
     _write(tmp_path, {"org_config": {"flags": {"retrieval_expand": True}}})
     assert config.retrieval_expand_enabled(str(tmp_path)) is True
 
+def test_embed_skip_tabular_enabled_delegates_to_fleet_flag(tmp_path):
+    # Ships OFF pending gold-harness validation, so the ON flip must be an
+    # org-config.json edit, not another release.
+    _write(tmp_path, {"org_config": {"flags": {"embed_skip_tabular": True}}})
+    assert config.embed_skip_tabular_enabled(str(tmp_path)) is True
+
+def test_embed_skip_tabular_local_false_is_the_kill_switch(tmp_path):
+    # Even after a fleet-wide enable, one install can shut the flag off for
+    # itself -- the same emergency escape every fleet flag has.
+    _write(tmp_path, {"embed_skip_tabular": False,
+                      "org_config": {"flags": {"embed_skip_tabular": True}}})
+    assert config.embed_skip_tabular_enabled(str(tmp_path)) is False
+
+def test_embed_skip_tabular_top_level_local_true_still_works(tmp_path):
+    # The pre-existing per-machine opt-in (a plain top-level config.json key)
+    # must keep working -- that's how the flag gets validated locally before
+    # any fleet-wide enable.
+    _write(tmp_path, {"embed_skip_tabular": True})
+    assert config.embed_skip_tabular_enabled(str(tmp_path)) is True
+
 def test_flags_is_allowlisted():
     assert "flags" in fleet._ALLOWLIST
 
