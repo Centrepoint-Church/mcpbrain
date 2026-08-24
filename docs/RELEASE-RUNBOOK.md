@@ -354,11 +354,19 @@ metadata, contentless FTS5, FK constraints, the trigram index) reaches a
 this tool. There is no silent migration path and there should never be one.**
 
 Run this when: the live store is due for its (infrequent, one-off-per-schema-
-generation) physical rebuild — not on a schedule. Budget disk: ~2.4x the
-store's current size free on the store's volume (measured on the 2.62 GB live
-store: 3.48 GB verified encrypted snapshot + 2.62 GB transient snapshot-verify
-cleartext + 1.49 GB rebuilt file ≈ 7.6 GB peak, most of it released once the
-snapshot verifies).
+generation) physical rebuild — not on a schedule. **Budget disk generously: on
+the 2.62 GB live store, following the procedure below as written needs ~11 GB
+free, not merely ~2.4x the store size.** The tool's snapshot step (Gate 2,
+inside `_verified_snapshot`) runs on **every** non-`--swap`/non-`--rollback`
+invocation — including the report-only run in step 2 below — writes a
+**timestamped** artifact (`<store>.snapshot-<epoch>.enc`), and never deletes
+it. Doing step 2 and then step 3 as written therefore leaves **two** 3.48 GB
+snapshots on disk simultaneously (6.96 GB), plus the still-present old store
+(2.62 GB) plus the in-progress rebuild (up to 1.49 GB) ≈ 11 GB peak — not the
+~7.6 GB a naive "one snapshot" accounting suggests. Delete the older
+`<store>.snapshot-*.enc` (and its `<store>.rebuild-key`, if you don't need it
+retained) once you've moved past the step that produced it and confirmed the
+next step's own snapshot succeeded.
 
 ### Procedure
 
@@ -372,8 +380,11 @@ snapshot verifies).
    (unmanaged tables carried verbatim, dead columns to be dropped with their
    non-null counts), and takes a **verified encrypted snapshot** first (Gate 2:
    the snapshot is decrypted to a temp file and integrity-checked before the
-   tool proceeds at all — an unverified snapshot is not a rollback). Read the
-   report. This step alone is safe to run any time; it changes nothing.
+   tool proceeds at all — an unverified snapshot is not a rollback). **This
+   step does not touch the live store's own data or schema, but it is not a
+   no-op**: it writes a multi-GB encrypted snapshot artifact next to the store
+   (and an escrow-key file, if none is configured yet) every time it runs —
+   see the disk-budget note above. Read the report.
 3. **Rebuild, out of place.** `uv run python bin/optimise_store.py --yes` —
    produces `<store>.new` next to the live file. The live file is **never**
    touched by this step. Gates 5/6 (integrity_check + foreign_key_check, and a
@@ -396,15 +407,20 @@ snapshot verifies).
    floor). Contentless FTS5 and JSONB metadata are ranking-neutral by
    construction — same tokens indexed, same BM25 ranking — so if the numbers
    differ from the live store's own current gold run, explain why before
-   proceeding (see the Task 9 report for a worked example: a small upward move
-   was traced to the rebuild's unconditional full FTS re-derivation
-   incidentally fixing ~4% of chunks whose stored contextual-prefix text had
-   gone stale relative to a later, unversioned change to `contextual_prefix()`
-   — a pre-existing gap in `FTS_CONTEXT_VERSION` tracking, not something this
-   rebuild introduced). Also spot-check the injection path
-   (`daemon.search`/`prompt_recall`) directly — the `--gold` harness calls
-   `hybrid_search` and does not exercise the `recall_max_distance` off-topic
-   gate.
+   proceeding. A small **upward** move is possible here: the rebuild's
+   `_rederive_fts` unconditionally regenerates every row's FTS text from that
+   row's *current* metadata, which corrects any chunk whose indexed text had
+   drifted stale relative to its metadata — a real, pre-existing gap
+   (`Store.patch_chunk_metadata` updates `chunks.metadata` but never
+   refreshes the `fts_chunks` mirror or resets `fts_context_version`, so a
+   metadata-only write — e.g. a Drive re-sync backfilling `folder_path` onto
+   an already-indexed chunk — can leave the FTS index silently behind
+   metadata forever). See the Task 9 report for the worked example (traced to
+   a specific ~4.3% of chunks and one gold case, confirmed by direct
+   before/after `fts_chunks` text comparison, not inferred from score deltas
+   alone). Also spot-check the injection path (`daemon.search`/`prompt_recall`)
+   directly — the `--gold` harness calls `hybrid_search` and does not
+   exercise the `recall_max_distance` off-topic gate.
 5. **Promote.** `uv run python bin/optimise_store.py --swap --yes` — checkpoints
    `<store>.new`'s WAL, re-verifies integrity, then swaps it over the live file.
    **The old store is retained, never deleted**, at
@@ -417,7 +433,13 @@ snapshot verifies).
    then delete `<store>.pre-rebuild-<timestamp>` (and its escrow-key sidecar,
    `<store>.rebuild-key`, if one was generated). Deleting it immediately after
    swap removes your only same-machine fallback before the new store has had a
-   full cadence cycle to prove itself.
+   full cadence cycle to prove itself. **Also clean up the encrypted snapshot
+   artifact(s)** from steps 2/3 (`<store>.snapshot-<epoch>.enc`, plus any
+   `<store>.rebuild-key` not already accounted for above) — the tool never
+   deletes these itself, they are 3.48 GB each on the live store, and a
+   report-only run followed by a real `--yes` run leaves **two** of them on
+   disk. Confirm you no longer need a given snapshot (i.e. you're past the
+   step it protected) before removing it.
 
 ### Emergency recovery: `--rollback --yes`
 
