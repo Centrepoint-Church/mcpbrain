@@ -594,3 +594,91 @@ def test_backfill_gmail_without_q_extra_is_unchanged(tmp_path):
     backfill_gmail(_Svc(), store, after="2026/01/01", before="2026/02/01")
 
     assert seen["q"] == "after:2026/01/01 before:2026/02/01"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: reingest_messages -- re-chunk stale threads under the current
+# chunker version, mirroring sync/drive.py's reingest_files.
+# ---------------------------------------------------------------------------
+
+def test_reingest_messages_rechunks_a_stale_thread(tmp_path):
+    """A thread with a chunk stamped chunker_version=1 gets re-fetched and
+    re-chunked; the new chunk carries the current CHUNKER_VERSION and the
+    freshly-fetched text."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "old short content", "h1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    msg_m1 = plain_msg("m1", "Re: test", "a@b.com", "new content")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "failed": 0}
+    chunk = store.get_chunk("gmail-m1-body-0")
+    assert chunk is not None
+    assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
+    assert "new content" in chunk["text"]
+
+
+def test_reingest_messages_stamps_version_on_a_missing_message(tmp_path):
+    """A 404'd message's existing chunks get stamped to the current
+    chunker_version anyway -- the convergence guard that stops
+    store.stale_chunker_ids from re-selecting the same dead thread forever
+    (mirrors reingest_files' missing/empty stamping)."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "old content", "h1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    error = HttpError(httplib2.Response({"status": 404}), b"not found")
+    svc = FakeService(messages={"m1": error})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 0, "missing": 1, "failed": 0}
+    chunk = store.get_chunk("gmail-m1-body-0")
+    assert chunk is not None
+    assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION
+    assert chunk["metadata"]["reextract_missing"] is True
+    # Stamping touches metadata only -- the existing content is left alone.
+    assert chunk["text"] == "old content"
+
+
+def test_reingest_messages_one_bad_message_does_not_end_the_run(tmp_path):
+    """A non-404 failure on one thread is isolated (counted as `failed`) and
+    does not prevent the next thread's message from being re-chunked."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "old content", "h1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    store.upsert_chunk("gmail-m2-body-0", "old content 2", "h2",
+                       {"source_type": "gmail", "thread_id": "t2",
+                        "message_id": "m2", "chunker_version": 1})
+
+    error = HttpError(httplib2.Response({"status": 500}), b"boom")
+    msg_m2 = plain_msg("m2", "Re: test 2", "a@b.com", "fresh content")
+    msg_m2["threadId"] = "t2"
+    svc = FakeService(messages={"m1": error, "m2": msg_m2})
+
+    summary = reingest_messages(svc, store, ["t1", "t2"])
+
+    assert summary == {"messages": 1, "missing": 0, "failed": 1}
+    # t1's chunk is untouched -- a transient/non-404 failure must not stamp
+    # the convergence guard, or a retryable error would wrongly converge.
+    assert store.get_chunk("gmail-m1-body-0")["metadata"]["chunker_version"] == 1
+    assert store.get_chunk("gmail-m2-body-0")["metadata"]["chunker_version"] == CHUNKER_VERSION
