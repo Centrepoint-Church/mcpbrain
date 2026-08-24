@@ -129,6 +129,18 @@ def _open_db(path, read_only: bool = False, *,
     # and the WAL grows without bound; this makes SQLite truncate it back after
     # a checkpoint instead. Chosen well above normal transaction size.
     db.execute("PRAGMA journal_size_limit=67108864")  # 64 MiB
+    # Tuned for a multi-GB, read-heavy derived store. Defaults left this at a
+    # 2 MB page cache on a 2.6 GB database.
+    db.execute("PRAGMA cache_size=-65536")    # 64 MiB
+    db.execute("PRAGMA mmap_size=268435456")  # 256 MiB
+    db.execute("PRAGMA temp_store=2")         # MEMORY: FTS5/ORDER BY temp b-trees
+    db.execute("PRAGMA threads=4")            # parallel sort
+    db.execute("PRAGMA analysis_limit=400")   # bounds PRAGMA optimize (Task 3)
+    if not read_only:
+        # NORMAL is corruption-safe under WAL and this store is DERIVED —
+        # fully re-ingestable from Google. FULL fsyncs every commit for a
+        # durability guarantee we do not need.
+        db.execute("PRAGMA synchronous=1")
     db.enable_load_extension(True)
     sqlite_vec.load(db)  # vec0 tables need the extension even on a read-only conn
     db.enable_load_extension(False)
