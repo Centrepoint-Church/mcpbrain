@@ -2085,17 +2085,34 @@ class Store:
         Returns True if the chunk exists and was updated, False if not found.
         Leaves content_hash and embedded untouched so an expiry flag (or any other
         metadata patch) does not re-queue embedding.
+
+        If the patch changes what embed.contextual_prefix() would render for this
+        chunk (e.g. Drive stamping folder_path onto a content-unchanged file),
+        fts_context_version is reset to 0 so reindex_fts_batch's `< FTS_CONTEXT_VERSION`
+        selector picks the row back up -- otherwise an already-migrated row's FTS
+        mirror silently drifts from its own metadata forever, since nothing else
+        ever re-derives it. Patches that don't touch a prefix-relevant field (e.g.
+        bin/repair.py's chunker_version/reextract_*) leave the version untouched,
+        so they don't needlessly re-queue every repaired chunk for re-indexing.
         """
+        from mcpbrain.embed import contextual_prefix
         with self._connect(write=True) as db:
             row = db.execute(
                 "SELECT metadata FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
             if row is None:
                 return False
             meta = json.loads(row["metadata"])
+            prefix_before = contextual_prefix(meta)
             meta.update(patch)
-            db.execute(
-                "UPDATE chunks SET metadata=? WHERE doc_id=?",
-                (json.dumps(meta), doc_id))
+            prefix_after = contextual_prefix(meta)
+            if prefix_after != prefix_before:
+                db.execute(
+                    "UPDATE chunks SET metadata=?, fts_context_version=0 WHERE doc_id=?",
+                    (json.dumps(meta), doc_id))
+            else:
+                db.execute(
+                    "UPDATE chunks SET metadata=? WHERE doc_id=?",
+                    (json.dumps(meta), doc_id))
             return True
 
     def note_chunks(self, *, observation_type: str | None = None,
