@@ -118,7 +118,7 @@ def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
             for i, c in enumerate(r):
                 if (c or "").strip():
                     width = max(width, i + 1)
-    return [r[:width] for r in kept]
+    return [r[:width] for r in kept if any((c or "").strip() for c in r[:width])]
 
 
 def delimiter_for_mime(mime: str) -> str:
