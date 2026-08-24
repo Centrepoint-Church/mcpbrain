@@ -13,6 +13,21 @@ def _store(tmp_path):
     return s
 
 
+def _cite(store, doc_id):
+    """A relation citing `doc_id` as its provenance.
+
+    entity_relations.entity_a/entity_b are real foreign keys into entities (and
+    foreign_keys is ON), so the cited relation needs its two endpoints to exist
+    -- a citation from nowhere is not a state the store can hold.
+    """
+    with store._connect(write=True) as db:
+        db.execute("INSERT OR IGNORE INTO entities(id,name,type) VALUES('e1','E One','person')")
+        db.execute("INSERT OR IGNORE INTO entities(id,name,type) VALUES('e2','E Two','person')")
+        db.execute("INSERT INTO entity_relations"
+                   "(entity_a,relation,entity_b,source_doc_id,valid_from) "
+                   "VALUES('e1','mentioned_with','e2',?,'2026-01-01')", (doc_id,))
+
+
 def test_content_free_selection_finds_pipes_and_spares_real_content(tmp_path):
     store = _store(tmp_path)
     store.upsert_chunk("d-pipes", "|  |  |  |\n|  |  |  |", "h1", {})
@@ -60,10 +75,7 @@ def test_purge_refuses_a_doc_id_the_graph_cites(tmp_path):
     not silently orphan the graph."""
     store = _store(tmp_path)
     store.upsert_chunk("d-cited", "|  |  |", "h1", {})
-    with store._connect(write=True) as db:
-        db.execute("INSERT INTO entity_relations"
-                   "(entity_a,relation,entity_b,source_doc_id,valid_from) "
-                   "VALUES('e1','mentioned_with','e2','d-cited','2026-01-01')")
+    _cite(store, "d-cited")
 
     import pytest
     with pytest.raises(ValueError, match="cited"):
@@ -77,10 +89,7 @@ def test_purge_is_all_or_nothing(tmp_path):
     store = _store(tmp_path)
     store.upsert_chunk("d-ok", "|  |", "h1", {})
     store.upsert_chunk("d-cited", "|  |", "h2", {})
-    with store._connect(write=True) as db:
-        db.execute("INSERT INTO entity_relations"
-                   "(entity_a,relation,entity_b,source_doc_id,valid_from) "
-                   "VALUES('e1','mentioned_with','e2','d-cited','2026-01-01')")
+    _cite(store, "d-cited")
 
     import pytest
     with pytest.raises(ValueError):

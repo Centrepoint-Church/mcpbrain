@@ -157,6 +157,15 @@ def test_drive_backfill_lands_doc_chunks_across_pages(e2e_store, fake_google):
 def test_calendar_backfill_creates_attendee_graph(e2e_store, fake_google, e2e_home):
     # Owner is sam@acme.org (e2e_home). The event has Sam (self), Joel (real
     # attendee), and a room resource. Only Joel should become a person entity.
+    #
+    # The owner's own node is seeded here the way the EMAIL path mints it: from
+    # the display name, so its id ('sam-a') is NOT slugify(owner_full_name)
+    # ('sam-admin'). The attendee pass must attach its `attended` edge to THAT
+    # node (resolved by email) and must never mint 'sam-admin' — writing from
+    # the unresolved slug is what left 7 dangling relations on the live store.
+    with e2e_store._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr) "
+                   "VALUES('sam-a','Sam Admin','person','sam@acme.org')")
     n = backfill_calendar_window(
         fake_google, e2e_store,
         time_min="2026-06-01T00:00:00Z", time_max="2026-06-30T00:00:00Z")
@@ -164,9 +173,14 @@ def test_calendar_backfill_creates_attendee_graph(e2e_store, fake_google, e2e_ho
 
     ents = e2e_store.list_entities()
     names = {e["name"] for e in ents}
+    ids = {e["id"] for e in ents}
     assert "Joel Chelliah" in names, "a non-owner attendee must become a person entity"
-    assert "Sam Admin" not in names, "the owner must be excluded"
+    assert "sam-admin" not in ids, "the attendee pass must never mint the owner's own node"
+    assert sum(1 for e in ents if e["name"] == "Sam Admin") == 1, "no second owner node"
     assert "Hall B" not in names, "room resources must be excluded"
 
     rels = e2e_store.list_relations()
-    assert any("attended" in str(r) for r in rels), "an 'attended' relation must be written"
+    attended = [r for r in rels if r["relation"] == "attended"]
+    assert attended, "an 'attended' relation must be written"
+    assert {r["entity_a"] for r in attended} == {"sam-a"}, \
+        "the edge must attach to the owner node that actually exists"

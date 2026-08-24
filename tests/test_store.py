@@ -288,6 +288,9 @@ def test_get_entity_returns_none_when_absent(tmp_path):
 
 def test_add_relation_dedups(tmp_path):
     s = _store(tmp_path)
+    # entity_relations endpoints are enforced foreign keys into entities.
+    for eid in ("taryn-hamilton", "joel-chelliah"):
+        s.upsert_entity(eid, eid.replace("-", " ").title(), "person", "Acme", "2026-05-12")
     first = s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", source_doc_id="d1")
     second = s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", source_doc_id="d2")
     assert first is True   # new triple inserted
@@ -1082,6 +1085,7 @@ def test_meeting_series_for_old_matches_via_calendar_evidence(store):
     store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
     store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "cal-evt123")
     store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
@@ -1097,6 +1101,7 @@ def test_meeting_series_for_old_matches_via_calendar_evidence_recurring_instance
     store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup",
                             "cal-evt123_20260512T090000Z")
     store.link_email_entity("cal-evt123_20260512T090000Z", "meeting-acme-standup", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
@@ -1113,6 +1118,7 @@ def test_meeting_series_for_old_calendar_evidence_ambiguous_returns_none(store):
     store.append_occurrence("meeting-acme-sync", "2026-05-12", "sync", "cal-evt123")
     store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
     store.link_email_entity("cal-evt123", "meeting-acme-sync", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") is None

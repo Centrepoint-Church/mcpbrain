@@ -20,6 +20,20 @@ _OWNER = OwnerIdentity(
 )
 
 
+def _seed_owner_node(s, *, entity_id="josh-kemp", email="josh.k@centrepoint.church"):
+    """Put an owner node in the graph, the way the EMAIL path does.
+
+    The attendee pass never mints one (see resolve_owner_entity_id), so a store
+    that has only ever seen calendar events has no owner node and therefore no
+    `attended` edge to hang on it. Every test that asserts on those edges has to
+    seed it — which is also the realistic state: a real store has 1000s of the
+    owner's own emails long before the calendar sync runs.
+    """
+    with s._connect(write=True) as db:
+        db.execute("INSERT OR IGNORE INTO entities(id,name,type,email_addr) "
+                   "VALUES(?,'Josh Kemp','person',?)", (entity_id, email))
+
+
 def _event(eid, attendees, start="2026-06-01T09:00:00Z"):
     return {
         "id": eid,
@@ -33,6 +47,7 @@ def _event(eid, attendees, start="2026-06-01T09:00:00Z"):
 
 def test_two_external_attendees_create_entities_and_attended_relations(tmp_path):
     s = _store(tmp_path)
+    _seed_owner_node(s)
     ev = _event("evt1", [
         {"displayName": "Sam Chen", "email": "sam@partner.org"},
         {"displayName": "Dana Lee", "email": "dana@other.org"},
@@ -88,18 +103,52 @@ def test_attendee_with_no_email_uses_display_name(tmp_path):
 
 def test_resync_same_event_is_idempotent(tmp_path):
     s = _store(tmp_path)
+    _seed_owner_node(s)
     ev = _event("evt5", [{"displayName": "Sam Chen", "email": "sam@partner.org"}])
     _apply_attendees_to_graph(s, ev, _OWNER)
     _apply_attendees_to_graph(s, ev, _OWNER)  # re-sync
 
     with s._connect() as db:
+        # Excludes the seeded owner node: what must not double is the ATTENDEE.
         ent_count = db.execute(
-            "SELECT COUNT(*) c FROM entities WHERE type='person'").fetchone()["c"]
+            "SELECT COUNT(*) c FROM entities WHERE type='person' AND id!='josh-kemp'"
+        ).fetchone()["c"]
         rel_count = db.execute(
             "SELECT COUNT(*) c FROM entity_relations "
             "WHERE relation='attended' AND invalidated_at IS NULL").fetchone()["c"]
     assert ent_count == 1
     assert rel_count == 1
+
+
+def test_attendee_pass_never_mints_the_owner_node(tmp_path):
+    """A store with no owner node gets the attendee entity and NO edge.
+
+    Regression test for 7 dangling entity_relations rows on the live store: the
+    pass wrote `attended` from owner.entity_id, a recogniser slug with no row
+    ('joshua-kemp'), while the graph's real owner node was 'josh-kemp'. Minting
+    the missing node instead would have created a second owner beside it.
+    """
+    s = _store(tmp_path)
+    ev = _event("evt6", [{"displayName": "Sam Chen", "email": "sam@partner.org"}])
+    assert _apply_attendees_to_graph(s, ev, _OWNER) == 1
+    assert s.find_entity("Sam Chen") is not None
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM entities WHERE id='josh-kemp'"
+                          ).fetchone()["c"] == 0
+        assert db.execute("SELECT COUNT(*) c FROM entity_relations").fetchone()["c"] == 0
+
+
+def test_attended_edge_attaches_to_the_owners_real_node_id(tmp_path):
+    """The owner node's id comes from the email path (display name), so it need
+    not equal owner.entity_id — resolution is by email address."""
+    s = _store(tmp_path)
+    _seed_owner_node(s, entity_id="j-kemp-from-email")
+    ev = _event("evt7", [{"displayName": "Sam Chen", "email": "sam@partner.org"}])
+    _apply_attendees_to_graph(s, ev, _OWNER)
+    with s._connect() as db:
+        rows = db.execute("SELECT entity_a, entity_b FROM entity_relations "
+                          "WHERE relation='attended'").fetchall()
+    assert [r["entity_a"] for r in rows] == ["j-kemp-from-email"]
 
 
 def test_sync_calendar_applies_attendees_to_graph(tmp_path, monkeypatch):
@@ -109,6 +158,7 @@ def test_sync_calendar_applies_attendees_to_graph(tmp_path, monkeypatch):
     monkeypatch.setattr(calmod, "owner_identity_from_config", lambda: _OWNER)
 
     s = _store(tmp_path)
+    _seed_owner_node(s)
     ev = _sync_event("evtX", "Project sync", attendees=[
         {"displayName": "Sam Chen", "email": "sam@partner.org"},
     ])
