@@ -65,7 +65,7 @@ wrong and MUST be right:
 - **SQLite optimisation (2026-08-24 plan, Tasks 1-9): store rebuild is BUILT and
   GATED, not yet run against the live store.** `bin/optimise_store.py`'s
   `rebuild()`/`main()` performs a full out-of-place rewrite of `brain.sqlite3`
-  (page_size 4096→8192, contentless FTS5, JSONB metadata, STRICT tables + FK
+  (page_size 4096→8192, contentless FTS5, STRICT tables + FK
   constraints, a trigram index scaffold) behind an attended CLI (`--yes` gate,
   verified encrypted snapshot before anything is written, `--swap` that
   retains the old file, and a sidecar-aware `--rollback --yes`) — see
@@ -121,7 +121,36 @@ wrong and MUST be right:
   0, whenever it touches a metadata field `_fts_text`/`contextual_prefix`
   reads — otherwise the exact same drift resumes on the very next Drive sync
   after any future rebuild. Bumping `FTS_CONTEXT_VERSION` once would only
-  clear today's backlog, not stop it recurring. **Not
+  clear today's backlog, not stop it recurring.
+  **Metadata is JSON TEXT, NOT JSONB — Task 6 delivered the
+  `store._meta_extract()` single-source-of-truth pattern, not a storage-format
+  change, and the earlier "JSONB metadata" framing overstated it.** What is real
+  and valuable: every expression INDEX in `init()` and every one of the ~24 query
+  read sites that pull a value out of `chunks.metadata` now build their SQL
+  through one function, so an index's expression and its query's expression
+  cannot independently drift — which is exactly the 0.7.105 full-`SCAN chunks`
+  failure mode. That function emits **`json_extract` unconditionally**, never
+  `jsonb_extract` and never version-dependent: `CREATE INDEX IF NOT EXISTS` keys
+  on the index NAME, so an existing store's five expression indexes
+  (`idx_chunks_msgid`/`fileid`/`threadid`/`eventid`/`inbound_date`) are NOT
+  rebuilt when the fragment changes, and SQLite does not match a `jsonb_extract`
+  query against a `json_extract` index. The branch briefly did emit
+  `jsonb_extract` behind a 3.45 guard; measured on the real live store that
+  killed all five indexes on daemon restart (message_id 0.0ms→233.8ms, thread_id
+  0.0ms→215.9ms — full scans), i.e. it would have reinstated the 0.7.105 outage
+  fleet-wide, silently and with correct-but-slow results, the moment the wheel
+  shipped. Fixed before merge, and pinned by
+  `tests/test_metadata_jsonb.py::test_reinit_on_existing_store_*` (the missing
+  test class: re-`init()` an ALREADY-init'd store and assert the plan is still
+  `SEARCH … USING INDEX`; every prior index test built a FRESH store, where DDL
+  and query text necessarily agree). Cost of staying on `json_extract`: 15.6ms
+  vs 14.9ms over a 50k-row scan — noise. True JSONB *storage* was investigated
+  and is **structurally foreclosed** by Task 7: `metadata` is declared `TEXT`
+  inside a **STRICT** `chunks` table, so a `jsonb()` blob write is rejected
+  outright, and `bin/optimise_store.py`'s `_copy_all` copies `metadata`
+  verbatim. Enabling it would need that column loosened to `ANY`/`BLOB` plus a
+  dedicated rebuild — a separate follow-up, not this plan. `jsonb_supported()`
+  remains defined as an unused version-guard utility. **Not
   yet run against any user's actual live store** — that is a separate,
   explicit, attended operation per machine, to be scheduled deliberately.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
