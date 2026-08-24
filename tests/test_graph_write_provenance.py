@@ -296,6 +296,10 @@ def test_upsert_relation_backfills_missing_provenance_only(tmp_path):
     source_doc_id/valid_from onto the EXISTING row only when currently empty —
     and must never overwrite a real value already present."""
     s = _store(tmp_path)
+    # entity_relations.entity_a/entity_b are enforced foreign keys, so the
+    # endpoints these relations are written between have to exist.
+    for eid in ("person:a", "org:x", "person:b", "org:y"):
+        _seed_entity(s, eid, entity_type="org" if eid.startswith("org") else "person")
 
     # Case 1: first write has no source_doc_id; second write supplies one ->
     # backfilled onto the existing row.

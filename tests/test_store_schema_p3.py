@@ -24,6 +24,16 @@ def _store(tmp_path):
     return s
 
 
+def _seed_entities(s, *entity_ids):
+    """entity_communities.entity_id is an enforced foreign key into entities, so
+    a membership row needs its entity to exist — the community pass only ever
+    partitions entities already in the graph."""
+    with s._connect(write=True) as db:
+        for eid in entity_ids:
+            db.execute("INSERT OR IGNORE INTO entities(id,name,type) VALUES(?,?,'person')",
+                       (eid, eid.title()))
+
+
 def _cols(s, table):
     with s._connect() as db:
         return {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -64,6 +74,7 @@ def test_community_tables_exist(tmp_path):
 def test_community_tables_pks(tmp_path):
     """entity_communities PK is (entity_id, level); community_summaries PK is (community_id, level)."""
     s = _store(tmp_path)
+    _seed_entities(s, "e1")
     with s._connect() as db:
         # Duplicate PK must fail.
         db.execute(
@@ -234,6 +245,7 @@ def test_actions_waiting_on_backfilled_on_old_store(tmp_path):
 
 def test_store_replace_communities(tmp_path):
     s = _store(tmp_path)
+    _seed_entities(s, "alice", "bob", "carol")
     partition = {"alice": 1, "bob": 1, "carol": 2}
     summaries = {
         1: {"member_count": 2, "key_entities": "alice,bob", "title": "Core team",
@@ -260,6 +272,7 @@ def test_store_replace_communities(tmp_path):
 def test_store_replace_communities_is_atomic_replace(tmp_path):
     """Second replace_communities completely replaces the first, no stale rows."""
     s = _store(tmp_path)
+    _seed_entities(s, "alice", "bob", "carol")
     partition1 = {"alice": 1, "bob": 1}
     summaries1 = {1: {"member_count": 2, "key_entities": "alice,bob",
                       "title": "T1", "summary": "", "updated": ""}}
@@ -283,6 +296,7 @@ def test_store_replace_communities_is_atomic_replace(tmp_path):
 
 def test_store_communities_for_member(tmp_path):
     s = _store(tmp_path)
+    _seed_entities(s, "alice", "bob", "carol")
     partition = {"alice": 1, "bob": 1, "carol": 2}
     summaries = {
         1: {"member_count": 2, "key_entities": "alice,bob", "title": "T1",
@@ -316,6 +330,7 @@ def test_store_community_members(tmp_path):
 
 def test_store_list_communities(tmp_path):
     s = _store(tmp_path)
+    _seed_entities(s, "alice", "bob")
     partition = {"alice": 1, "bob": 2}
     summaries = {
         1: {"member_count": 1, "key_entities": "alice", "title": "C1",

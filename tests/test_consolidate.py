@@ -90,6 +90,7 @@ def test_reset_meeting_sources_recovers_calendar_evidence(store):
     store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
     store.upsert_chunk("cal-evt123", "t", "h", {"event_id": "evt123"})
     store.mark_enriched(["cal-evt123"])
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-acme-standup", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     out = consolidate.reset_meeting_sources(store)
@@ -103,6 +104,7 @@ def test_reset_meeting_sources_recovers_calendar_evidence_recurring_instance(sto
     store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
     store.upsert_chunk("cal-evt123_20260512T090000Z", "t", "h", {"event_id": "evt123"})
     store.mark_enriched(["cal-evt123_20260512T090000Z"])
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-acme-standup", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     out = consolidate.reset_meeting_sources(store)
