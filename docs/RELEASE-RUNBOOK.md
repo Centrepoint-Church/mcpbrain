@@ -348,10 +348,25 @@ this gate passes.**
 NEVER wired into a daemon cadence, a cron, or any automatic trigger — same
 posture as `bin/consolidate.py` (§ its own module docstring: "Attended,
 backup-gated consolidation migrations (curator-run)"). `init()` uses `CREATE
-TABLE IF NOT EXISTS`, so a schema change (page size, STRICT tables, JSONB
-metadata, contentless FTS5, FK constraints, the trigram index) reaches a
+TABLE IF NOT EXISTS`, so a schema change (page size, STRICT tables,
+contentless FTS5, FK constraints, the trigram index) reaches a
 **new** install for free but an **existing** store only picks it up by running
 this tool. There is no silent migration path and there should never be one.**
+
+**The same `IF NOT EXISTS` property also applies to `init()`'s five expression
+indexes on `chunks.metadata`, and there it is a TRAP:** `CREATE INDEX IF NOT
+EXISTS` keys on the index NAME, not its expression, so changing the SQL an index
+is built over does **not** rebuild an existing store's copy — the persisted index
+keeps the old expression while queries move to the new one, SQLite stops matching
+them, and every affected query silently degrades to a full `SCAN chunks` (the
+0.7.105 outage). That is why `store._meta_extract()` emits `json_extract`
+unconditionally and must never become version-dependent; see its docstring and
+`tests/test_metadata_jsonb.py::test_reinit_on_existing_store_*`. **If a metadata
+index expression ever legitimately has to change, the index must be renamed (or
+explicitly dropped) — never edited in place.** Relatedly: metadata is stored as
+JSON **TEXT**, not JSONB. Task 7's STRICT `chunks` table declares `metadata TEXT`,
+so a JSONB blob cannot be written to it at all; true JSONB storage would need
+that column loosened to `ANY`/`BLOB` plus a dedicated rebuild.
 
 Run this when: the live store is due for its (infrequent, one-off-per-schema-
 generation) physical rebuild — not on a schedule. **Budget disk generously: on
@@ -414,7 +429,7 @@ next step's own snapshot succeeded.
    MCPBRAIN_HOME=/tmp/gold-check uv run python tests/eval/run_eval.py --gold --k 10
    ```
    Expected: recall@10 **≥ 0.750**, MRR **≥ 0.514** (the plan's non-negotiable
-   floor). Contentless FTS5 and JSONB metadata are ranking-neutral by
+   floor). Contentless FTS5 is ranking-neutral by
    construction — same tokens indexed, same BM25 ranking — so if the numbers
    differ from the live store's own current gold run, explain why before
    proceeding. A small **upward** move is possible here: the rebuild's
@@ -473,16 +488,44 @@ happens to be sitting next to the file on next open, no error, `integrity_check`
 still reports `ok`, and the restored content and page size both come from the
 wrong store.
 
-**Operator warning — untested by the tool today:** `--rollback --from` takes
-the path to a retained store and does **no validation that it is a main
-database file rather than a sidecar**. Passing a path ending `-wal` or `-shm`
-is not rejected — the tool does not currently check for this — and could
-silently install an empty or partial store while still reporting success
-(a `-wal`/`-shm` file alone, opened as if it were the main file, is not a
-valid standalone SQLite database). **Always pass `--from` a bare
-`<store>.pre-rebuild-<timestamp>` path with no `-wal`/`-shm` suffix**, or omit
-`--from` entirely and let the tool pick the newest one itself — that path is
-computed by `_find_retained`, which already filters sidecars out.
+**`--from` is validated in code, not left to operator care.** `_refuse_as_store`
+rejects a candidate before anything is promoted if it (a) has a `-wal`/`-shm`
+suffix, (b) opens as fewer than 16 pages (a fresh store is already 114, the live
+one ~640k — so this catches a 0-byte or truncated file), or (c) has no `chunks`
+table. This matters because `PRAGMA integrity_check` **cannot** catch any of
+them: a 0-byte sidecar opens as a perfectly valid, structurally sound, *empty*
+SQLite database, so every downstream gate passes and the tool would report
+`restored store: integrity_check=['ok']` having installed an empty brain over a
+real one. The retained generations (`.pre-rebuild-*`, `.rolled-back-*`, and both
+of their sidecars) all share the store name as a prefix, so that was one
+tab-completion away on the highest-stakes command here. Still prefer omitting
+`--from` and letting `_find_retained` pick the newest retained main file.
+
+### Cross-machine restore: SQLite version is a one-way door
+
+**A rebuilt (or freshly `init()`'d) store requires the SAME OR NEWER SQLite
+version on any machine it is later opened on for writes.** Restoring one onto a
+machine with an OLDER SQLite will fail. The binding constraint is contentless
+FTS5: `init()` creates `fts_chunks`/`fts_chunks_trigram` with
+`contentless_delete=1` when SQLite is ≥ 3.43 (`store.fts5_supports_contentless`),
+and an older FTS5 module does not recognise that option — it rejects the table
+rather than degrading. STRICT tables (≥ 3.37) are a second, lower floor.
+Practical consequences:
+
+- A store rebuilt on a modern machine is **not** portable backwards. Note down
+  the SQLite version it was built under (`uv run python -c "import sqlite3;
+  print(sqlite3.sqlite_version)"`) alongside the backup.
+- Restoring a backup onto a **new or reinstalled** machine: check that machine's
+  SQLite version *before* restoring, not after. `uv tool install --python 3.12`
+  (the pin § 1 already requires) is what keeps the fleet's interpreters —
+  and therefore their bundled SQLite — consistent enough for this not to bite.
+- The daemon does **not** currently detect this and refuse cleanly; an
+  incompatible open surfaces as a raw `sqlite3.OperationalError`. Stamping a
+  minimum-SQLite marker into the store's `meta` table with a startup check was
+  considered and deliberately deferred — it touches daemon startup and
+  `doctor.py`, so it is a separate change, not part of the rebuild work.
+- Metadata storage is *not* a factor here: it is JSON TEXT read with
+  `json_extract`, which every supported SQLite has.
 
 ## Environment note — repos live outside iCloud
 
