@@ -24,6 +24,7 @@ from mcpbrain.graph_write import (
 )
 from mcpbrain.sync.normalise import Chunk
 
+_NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
 
 # ---------------------------------------------------------------------------
 # Normalisation
@@ -269,7 +270,7 @@ def _list_events(service, calendar_id: str, sync_token: str | None,
         if page_token:
             params["pageToken"] = page_token
 
-        resp = service.events().list(**params).execute()
+        resp = service.events().list(**params).execute(num_retries=_NUM_RETRIES)
         items.extend(resp.get("items", []))
         next_sync = resp.get("nextSyncToken", next_sync)
         page_token = resp.get("nextPageToken")
@@ -310,7 +311,7 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
         }
         if page_token:
             params["pageToken"] = page_token
-        resp = service.events().list(**params).execute()
+        resp = service.events().list(**params).execute(num_retries=_NUM_RETRIES)
         items.extend(resp.get("items", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
