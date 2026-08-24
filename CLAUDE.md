@@ -62,6 +62,45 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
+- **SQLite optimisation (2026-08-24 plan, Tasks 1-9): store rebuild is BUILT and
+  GATED, not yet run against the live store.** `bin/optimise_store.py`'s
+  `rebuild()`/`main()` performs a full out-of-place rewrite of `brain.sqlite3`
+  (page_size 4096→8192, contentless FTS5, JSONB metadata, STRICT tables + FK
+  constraints, a trigram index scaffold) behind an attended CLI (`--yes` gate,
+  verified encrypted snapshot before anything is written, `--swap` that
+  retains the old file, and a sidecar-aware `--rollback --yes`) — see
+  `docs/RELEASE-RUNBOOK.md` § 7 for the full procedure. **This is attended and
+  NEVER automatic**, same posture as `bin/consolidate.py`: nothing in the
+  daemon's cadences calls it. Gated on a real copy of the live store (2.62 GB,
+  170,705 chunks) rebuilt to 1.495 GB (57.1% of original), `has_stat1`
+  false→true, `integrity_check`/`foreign_key_check` clean, row-count
+  reconciliation clean. The four 0.7.105 benchmark latencies, warmed:
+  `doc_ids_for_messages` ~690ms→~50-100ms, `thread_chunks` ~234ms→~1ms,
+  `chunks_for_file` ~228ms→~0.8ms, `inbound_chunks_since` ~376ms→~135ms — the
+  live store currently has **no** `sqlite_stat1` at all (`has_stat1: false`),
+  so these expression-index queries are on a slow, stats-free plan today;
+  the rebuild's mandatory `ANALYZE` is what fixes that, independent of the
+  schema changes themselves. **Gold gate: recall@10 0.750 / MRR 0.514 is the
+  plan's non-negotiable floor; both the pre-rebuild copy (0.800/0.591) and the
+  rebuilt copy (0.850/0.599) clear it, and the small pre→post movement is
+  EXPLAINED, not a construction defect:** traced to 7,343/170,705 chunks
+  (4.3%) whose stored FTS contextual-prefix text had gone stale relative to
+  `contextual_prefix()` (a later, un-versioned addition of a `folder_path`
+  clause was never accompanied by an `FTS_CONTEXT_VERSION` bump, so
+  `reindex_fts_batch`'s `fts_context_version < FTS_CONTEXT_VERSION` selection
+  can never pick already-migrated `version=1` rows back up). The rebuild's
+  `_rederive_fts` unconditionally regenerates FTS text for every row from
+  current metadata, incidentally correcting all 7,343 in one pass; per-document
+  FTS text and BM25 candidate identity were verified byte-identical for every
+  row actually compared, and vector search / the `recall_max_distance`
+  injection gate were spot-checked identical pre/post on real queries. The
+  `FTS_CONTEXT_VERSION` versioning gap itself is a pre-existing bug, unrelated
+  to Tasks 1-8, and is **not fixed here** — flagged for a follow-up (bump the
+  version or hash the prefix template) rather than fixed in this docs-only
+  task. Full evidence and commands:
+  `.superpowers/sdd/2026-08-24-sqlite-optimisation/task-9-report.md`. **Not
+  yet run against any user's actual live store** — that is a separate,
+  explicit, attended operation per machine, to be scheduled deliberately.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
   **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
