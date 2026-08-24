@@ -115,3 +115,7 @@ def test_write_config_without_fchmod(tmp_path, monkeypatch):
     config.write_config(str(tmp_path), {"owner_full_name": "Nakia Busby"})
     got = config.read_config(str(tmp_path))
     assert got["owner_full_name"] == "Nakia Busby"
+
+
+def test_embed_skip_tabular_defaults_off(tmp_path):
+    assert config.embed_skip_tabular_enabled(str(tmp_path)) is False

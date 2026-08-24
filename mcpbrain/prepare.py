@@ -556,8 +556,12 @@ def _thread_block(store, batch) -> dict:
     """Reassemble one thread into the pending-thread shape: ordered messages with
     body text, plus prior context and open actions.
 
-    prior_thread_context is '' until Phase 3 populates it; degrade to empty
-    rather than fail. open_actions is [] when the thread has no open actions.
+    prior_thread_context prefers store.thread_context (the periodic cross-message
+    synthesis pass, threads with email_count>=5); when that's empty (not yet
+    synthesized, or the thread is too short to ever qualify) it falls back to
+    store.thread_summary_digest, a join of each message's own already-durable
+    one-line summary. Degrades to '' if both are unavailable, rather than fail.
+    open_actions is [] when the thread has no open actions.
 
     org_hint is a deterministic org guess derived from the lead message's
     (earliest by date, same tie-break as graph_write.apply()) sender email
@@ -572,6 +576,15 @@ def _thread_block(store, batch) -> dict:
         prior = store.thread_context(batch.thread_id) or ""
     except AttributeError:  # Phase 1 seam: method absent until Phase 1 lands; real errors must surface.
         prior = ""
+    if not prior:
+        # thread_context is only ever populated by the periodic cross-message
+        # synthesis pass (threads with email_count>=5); a shorter thread falls
+        # back to a digest of each message's own already-durable one-line
+        # summary rather than shipping genuinely empty prior context.
+        try:
+            prior = store.thread_summary_digest(batch.thread_id) or ""
+        except AttributeError:  # Defensive: guard retained for fake stores in tests that omit it.
+            prior = ""
     try:
         actions = store.unified_actions(thread_id=batch.thread_id, status="open") or []
     except AttributeError:  # Defensive: unified_actions exists post-Phase-1; guard retained for fake stores in tests that omit it.

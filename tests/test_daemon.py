@@ -77,10 +77,12 @@ def plain_msg(mid: str, subject: str, sender: str, body: str) -> dict:
 
 
 class _Req:
-    def __init__(self, result):
+    def __init__(self, result, executes=None):
         self._r = result
+        self.executes = executes if executes is not None else []
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         return self._r
 
 
@@ -1175,6 +1177,30 @@ def test_maybe_backup_records_success_and_clears_the_failure_run(tmp_path, monke
     assert state["last_success"] is not None
 
 
+def test_maybe_backup_rebuilds_drive_service_after_two_consecutive_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    store = _store_with_chunk(tmp_path)
+    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
+
+    rebuilt = {"count": 0}
+
+    def _fake_build():
+        rebuilt["count"] += 1
+        return object()
+
+    monkeypatch.setattr("mcpbrain.daemon._build_drive_service", _fake_build)
+
+    daemon.maybe_backup()  # 1st failure: consecutive_failures becomes 1, no rebuild
+    assert rebuilt["count"] == 0
+
+    daemon.maybe_backup()  # 2nd failure: consecutive_failures becomes 2, rebuild fires
+    assert rebuilt["count"] == 1
+    assert daemon._backup.drive_service is not cfg.drive_service
+
+
 def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
     # Isolate the home so the bundle reflects this test's data, not the dev box.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -1747,3 +1773,38 @@ def test_enrich_payload_migration_is_registered_as_a_cadence_pass():
     # run against the store while a backfill holds it.
     assert p.needs_configured is False
     assert p.needs_bulk_lock is True
+
+
+def test_resolve_google_account_get_profile_passes_num_retries(tmp_path):
+    """The last-resort getProfile in _resolve_google_account had no retry.
+
+    It is the only network call on the /api/status path, so an Errno-49-class
+    blip left `google_account` empty and re-issued the same uncached call on
+    every subsequent poll. Same rationale as mcpbrain.backup._NUM_RETRIES.
+    """
+    from mcpbrain import daemon as daemon_mod
+
+    calls: list = []
+
+    class _Profile:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return {"emailAddress": "sam@example.com"}
+
+    class _ProfileUsers:
+        def getProfile(self, userId):
+            return _Profile()
+
+    class _ProfileGmail:
+        def users(self):
+            return _ProfileUsers()
+
+    store = _make_store(tmp_path)
+    daemon = Daemon(store, FakeEmbedder(),
+                    services={"gmail_service": _ProfileGmail()},
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+
+    email = daemon._resolve_google_account(tmp_path / "no-such-token.json")
+
+    assert email == "sam@example.com"
+    assert calls == [daemon_mod._NUM_RETRIES]
