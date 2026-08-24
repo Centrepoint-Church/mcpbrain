@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 _PERTH = timezone(timedelta(hours=8))  # AWST — fixed UTC+8, no DST
 _CAP = 20
+_NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
 
 
 def _today_perth() -> str:
@@ -218,7 +219,7 @@ def calendar_today(home) -> list[dict]:
                 orderBy="startTime",
                 maxResults=_CAP,
             )
-            .execute()
+            .execute(num_retries=_NUM_RETRIES)
         )
 
         events = []
