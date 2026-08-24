@@ -53,6 +53,17 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 ENRICH_LOGIC_VERSION = 1
 
 
+def fts5_supports_contentless() -> bool:
+    """True when SQLite is new enough for contentless FTS5 WITH deletes.
+
+    contentless_delete=1 lands in 3.43. Without it a contentless table cannot
+    service DELETE, which mcpbrain does on every retention and GC sweep — so
+    below the floor we keep the content-storing form. The version comes from
+    whichever Python the wheel installed under, and the Windows path pins its
+    own x64 interpreter, so this MUST be checked and never assumed.
+    """
+    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
+    return parts >= (3, 43)
 
 
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
@@ -383,8 +394,17 @@ class Store:
                        "json_extract(metadata,'$.date_iso')))")
             db.execute(f"""CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
                 USING vec0(embedding float[{self.dim}])""")
-            db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks
-                USING fts5(text)""")
+            if fts5_supports_contentless():
+                # content='' drops FTS5's own duplicate copy of the indexed
+                # text -- 0.78 GB of the 2.62 GB live store. External content
+                # (content='chunks') is NOT usable: _fts_text indexes the
+                # contextual prefix + body while chunks.text stays raw, so the
+                # content table could not reproduce the indexed string.
+                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+                           "USING fts5(text, content='', contentless_delete=1)")
+            else:
+                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+                           "USING fts5(text)")
             db.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
             db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dim',?)", (str(self.dim),))
             db.execute("""CREATE TABLE IF NOT EXISTS sync_cursors(
