@@ -57,14 +57,21 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
     done = 0
     if pending:
         use_prefix = config.contextual_retrieval_enabled(_home)
+        skip_tabular = config.embed_skip_tabular_enabled(_home)
         for i in range(0, len(pending), batch_size):
             if budget is not None and budget.expired():
                 log.info("index_pending: budget spent after %d chunks", done)
                 break
             batch = pending[i:i + batch_size]
+            if skip_tabular:
+                table_batch = [c for c in batch
+                              if c["metadata"].get("content_subtype") == "table"]
+                normal_batch = [c for c in batch if c not in table_batch]
+            else:
+                table_batch, normal_batch = [], batch
             texts = [
                 (contextual_prefix(c["metadata"]) + c["text"]) if use_prefix else c["text"]
-                for c in batch
+                for c in normal_batch
             ]
             oversize = sum(1 for t in texts if len(t) > EMBED_WINDOW_CHARS)
             if oversize:
@@ -78,10 +85,13 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
                 log.warning("index: %d of %d passages exceed the %d-char embedder "
                             "window; their tails will not be searchable",
                             oversize, len(texts), EMBED_WINDOW_CHARS)
-            vectors = embedder.embed_passages(texts)
+            vectors = embedder.embed_passages(texts) if normal_batch else []
             with bulk_section():
-                for c, v in zip(batch, vectors):
+                for c, v in zip(normal_batch, vectors):
                     store.write_embedding(c["rowid"], v, home=_home)
+                    done += 1
+                for c in table_batch:
+                    store.write_embedding(c["rowid"], None, home=_home)
                     done += 1
     # `pending` was fetched with limit=max_items, so embedding exactly that many
     # means the fetch — not the pending set and not the budget — is what stopped
