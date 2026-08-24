@@ -1,7 +1,12 @@
+from pathlib import Path
+import subprocess
+import sys
+
+_BIN = Path(__file__).resolve().parents[1] / "bin" / "cleanup_tabular_vectors.py"
+
+
 def test_dry_run_reports_without_deleting(tmp_path, capsys):
     from mcpbrain.store import Store
-    import subprocess
-    import sys
 
     db_path = tmp_path / "brain.sqlite3"
     store = Store(db_path, dim=4)
@@ -13,7 +18,7 @@ def test_dry_run_reports_without_deleting(tmp_path, capsys):
     store.write_embedding(rowid, [0.1, 0.2, 0.3, 0.4])
 
     out = subprocess.run(
-        [sys.executable, "bin/cleanup_tabular_vectors.py", "--home", str(tmp_path)],
+        [sys.executable, str(_BIN), "--home", str(tmp_path)],
         capture_output=True, text=True)
 
     assert out.returncode == 0, out.stderr
@@ -26,8 +31,6 @@ def test_dry_run_reports_without_deleting(tmp_path, capsys):
 
 def test_apply_deletes_matching_vec_chunks_rows(tmp_path):
     from mcpbrain.store import Store
-    import subprocess
-    import sys
 
     db_path = tmp_path / "brain.sqlite3"
     store = Store(db_path, dim=4)
@@ -42,7 +45,7 @@ def test_apply_deletes_matching_vec_chunks_rows(tmp_path):
         store.write_embedding(rowid, [0.1, 0.2, 0.3, 0.4])
 
     subprocess.run(
-        [sys.executable, "bin/cleanup_tabular_vectors.py", "--home", str(tmp_path),
+        [sys.executable, str(_BIN), "--home", str(tmp_path),
          "--apply"],
         capture_output=True, text=True, check=True)
 
