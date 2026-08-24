@@ -44,6 +44,21 @@ def test_no_toplevel_bin_dir():
     assert not (_PLUGIN / "bin").exists(), \
         "plugin/bin/ must not exist — it fails claude.ai marketplace validation"
 
+def test_no_mcpb_extension_dir():
+    # The Desktop Extension (.mcpb) was REMOVED, deliberately. It registered a
+    # server under the same name "mcpbrain" as the connector `mcpbrain setup`
+    # writes into claude_desktop_config.json, WON that collision, and then
+    # failed to launch: mcpb's `server.type: "uv"` drops the `--from mcpbrain
+    # mcpbrain` argv, so Desktop ran a bare `uv mcp-server` ->
+    # "unrecognized subcommand". Net effect was to shadow a working connector
+    # with a broken one (observed live 2026-08-24). The manifest was also
+    # unresolvable regardless: it lacked `--index`, and mcpbrain is not on PyPI.
+    # Do not reintroduce this directory -- `mcpbrain setup` is the only
+    # supported way the connector is registered.
+    assert not (_PLUGIN / "mcpb").exists(), \
+        "plugin/mcpb/ must not exist -- the .mcpb extension shadows the working connector"
+
+
 def test_hooks_json_declares_both_events():
     d = json.loads((_PLUGIN / "hooks" / "hooks.json").read_text())
     assert {"SessionStart", "SessionEnd"} <= set(d["hooks"].keys())

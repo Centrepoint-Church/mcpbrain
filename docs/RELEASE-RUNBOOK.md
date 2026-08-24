@@ -15,7 +15,7 @@ whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goe
   shipped `update.py` `DEFAULT_INDEX_URL` pulls from, so a published bump
   auto-updates installed daemons within ~a day.
 - **`Centrepoint-Church/mcpbrain-plugin`** — public plugin assets (skills, hooks,
-  commands, `.claude-plugin/{plugin,marketplace}.json`, `mcpb/`). Distributed to staff
+  commands, `.claude-plugin/{plugin,marketplace}.json`). Distributed to staff
   through the org **plugin marketplace**. Note: the plugin's `.mcp.json` bundles
   **no** MCP server — the `mcpbrain` connector is registered by `mcpbrain setup`
   at user scope (see `docs/ARCHITECTURE.md` for why). The plugin ships **no
@@ -61,13 +61,12 @@ machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
 
 From the source repo (`~/GitHub/mcpbrain`), on `main`, with a clean tree:
 
-### 1a. Bump the version in all FIVE sources of truth (keep them equal)
+### 1a. Bump the version in all FOUR sources of truth (keep them equal)
 
 - `pyproject.toml` → `[project] version`
 - `mcpbrain/__init__.py` → `__version__`
 - `plugin/.claude-plugin/plugin.json` → `version`
 - `plugin/.claude-plugin/marketplace.json` → `plugins[0].version`
-- `plugin/mcpb/manifest.json` → `version`
 
 ```bash
 uv run pytest tests/test_version.py tests/test_plugin_manifest.py -q   # version semver + manifest sane
@@ -100,32 +99,29 @@ cd ~/GitHub/mcpbrain-dist && git add -A \
 `update.py` picks the highest PEP 440 version, so multiple wheels are *functionally*
 fine — but keep the index to the current wheel for clarity.
 
-### 1b.1 Publish install.ps1 and .mcpb to dist repo
+### 1b.1 Publish install.ps1 to dist repo
 
-The Windows installer script and `.mcpb` plugin package must also be published:
+The Windows installer script must also be published:
 
-**⚠️ The pack output is named after the DIRECTORY, not the package.** `mcpb pack plugin/mcpb`
-writes `./mcpb.mcpb` in the repo root — *not* `mcpbrain-<version>.mcpb`, even though the archive's
-own manifest says `mcpbrain` / `<version>`. Rename on copy, as below, or you will copy a file that
-does not exist. (`mcpb.mcpb` in the repo root is a throwaway build artifact — delete it after.)
+> **The `.mcpb` Desktop Extension was REMOVED (2026-08-24) and must not be reintroduced.**
+> It registered a server under the same name (`mcpbrain`) as the connector `mcpbrain setup`
+> writes into `claude_desktop_config.json`, won that collision, and then failed to launch —
+> mcpb's `server.type: "uv"` drops the `--from mcpbrain mcpbrain` argv, so Desktop ran a bare
+> `uv mcp-server` → `unrecognized subcommand`. It shadowed a working connector with a broken
+> one. `mcpbrain setup` is the only supported way the connector is registered; the plugin
+> deliberately bundles no server (`plugin/.mcp.json`, guarded by
+> `tests/test_plugin_manifest.py`).
 
 ```bash
 cp plugin/scripts/install.ps1 ~/GitHub/mcpbrain-dist/
-npx --yes @anthropic-ai/mcpb pack plugin/mcpb     # -> ./mcpb.mcpb
-cp mcpb.mcpb ~/GitHub/mcpbrain-dist/mcpbrain-<version>.mcpb
-cp ~/GitHub/mcpbrain-dist/mcpbrain-<version>.mcpb ~/GitHub/mcpbrain-dist/mcpbrain.mcpb
-rm -f mcpb.mcpb                                    # don't leave it in the source tree
-# Confirm the archive really carries the new version before publishing:
-python -c "import zipfile,json;print(json.loads(zipfile.ZipFile('$HOME/GitHub/mcpbrain-dist/mcpbrain.mcpb').read('manifest.json'))['version'])"
 cd ~/GitHub/mcpbrain-dist
-git add install.ps1 mcpbrain-<version>.mcpb mcpbrain.mcpb \
-  && git commit -m "release: mcpbrain <version> (install.ps1 + .mcpb)" && git push origin main
+git add install.ps1 \
+  && git commit -m "release: mcpbrain <version> (install.ps1)" && git push origin main
 ```
 
 `install.ps1` is often byte-identical between releases; `git add` then simply stages nothing for
 it, which is fine.
 
-Both the versioned and unversioned `.mcpb` are now served at `https://centrepoint-church.github.io/mcpbrain-dist/`. The unversioned URL `mcpbrain.mcpb` ensures install instructions remain stable across releases.
 
 ### 1c. Sync the plugin assets to `mcpbrain-plugin`
 
@@ -153,7 +149,6 @@ in a `.DS_Store`, `git rm --cached` it before pushing.
 ```bash
 curl -fsS https://centrepoint-church.github.io/mcpbrain-dist/simple/mcpbrain/ \
   | grep -o 'mcpbrain-[0-9.]*-py3-none-any.whl' | sort -u    # expect the new version only
-curl -fsSI https://centrepoint-church.github.io/mcpbrain-dist/mcpbrain.mcpb | head -1   # 200
 curl -fsSI https://centrepoint-church.github.io/mcpbrain-dist/install.ps1   | head -1   # 200
 ```
 
@@ -269,7 +264,7 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
 
 ## 5. Windows QA (MANDATORY pre-ship gate) — Hardware & installer validation
 
-**Do not ship the Windows path without passing this gate.** Test the `install.ps1` script and `.mcpb` plugin on real hardware before wider Windows rollout. Do this once per release cycle with a **non-author** `@centrepoint.church` account.
+**Do not ship the Windows path without passing this gate.** Test the `install.ps1` script on real hardware before wider Windows rollout. Do this once per release cycle with a **non-author** `@centrepoint.church` account.
 
 **Architecture note:** Windows uses **x64 Python under emulation on ARM64** machines. Native ARM64 wheels are not available for sqlite-vec, cryptography, pymupdf, and leidenalg, so the installer probes the machine, detects ARM64, and provisions the x64 Python runtime + VC++ runtime. The daemon runs with emulation overhead but no translation via Rosetta. Confirm `mcpbrain doctor` reports the correct architecture (`ARM64` vs. `X64`).
 
@@ -293,12 +288,6 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
   - `install.ps1` detects the block and falls through to Startup-shortcut mechanism
   - Daemon runs at next user logon (check Task Manager → Startup tab or registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`)
 
-- [ ] **`.mcpb` plugin installation (cross-platform)**
-  - Download `mcpbrain-<version>.mcpb` from `https://centrepoint-church.github.io/mcpbrain-dist/`
-  - Install in Claude Desktop (drag-drop or install dialog)
-  - Windows: `brain_search` works and returns results with `score` field
-  - macOS: repeat the test (`.mcpb` must work on both platforms)
-
 **Record results below. Do not roll out Windows until all items pass.**
 
 | Test | Result |
@@ -310,8 +299,6 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
 | x64 embedder load | |
 | x64 wizard ready | |
 | Policy-blocked fallback | |
-| .mcpb installs on Windows | |
-| .mcpb installs on macOS | |
 | brain_search Windows | |
 | brain_search macOS | |
 

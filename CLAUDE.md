@@ -25,12 +25,20 @@ running `uv tool install` only affects *this* machine.
 `docs/DISTRIBUTION.md` is the *why*. Follow the runbook. The things that are easy to get
 wrong and MUST be right:
 
-- **Version lives in FIVE files, keep them equal:** `pyproject.toml`, `mcpbrain/__init__.py`,
-  `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`,
-  `plugin/mcpb/manifest.json`. The plugin manifests are the marketplace's version and the
-  `.mcpb` manifest is the Desktop Extension's version — all **easy to forget**; bumping only
-  `__init__.py`/`pyproject.toml` ships a wrong plugin/extension version. (`uv.lock`'s
+- **Version lives in FOUR files, keep them equal:** `pyproject.toml`, `mcpbrain/__init__.py`,
+  `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`. The plugin
+  manifests are the marketplace's version — **easy to forget**; bumping only
+  `__init__.py`/`pyproject.toml` ships a wrong plugin version. (`uv.lock`'s
   mcpbrain entry is also kept in step but isn't a marketplace source-of-truth.)
+- **There is no `.mcpb` Desktop Extension — it was REMOVED 2026-08-24, do not reintroduce it.**
+  It registered a server under the same name (`mcpbrain`) as the connector `mcpbrain setup`
+  writes into `claude_desktop_config.json`, **won** that collision, then failed to launch:
+  mcpb's `server.type: "uv"` drops the `--from mcpbrain mcpbrain` argv, so Desktop ran a bare
+  `uv mcp-server` → `unrecognized subcommand`, taking the brain tools down on a machine where
+  they had been working. Its manifest was unresolvable anyway (no `--index`, and mcpbrain is
+  not on PyPI). `mcpbrain setup` is the ONLY supported connector registration; the plugin
+  deliberately bundles no server. Guarded by `tests/test_plugin_manifest.py`
+  (`test_no_mcpb_extension_dir`, `test_mcp_json_bundles_no_server`).
 - Release = push `mcpbrain` source → `python bin/release.py --dist ../mcpbrain-dist` then
   commit+push `mcpbrain-dist` (mind the stale-wheel gotcha in the runbook) → sync `plugin/`
   into `mcpbrain-plugin` via `git archive HEAD:plugin` + push. All three repos end at the
@@ -313,7 +321,7 @@ wrong and MUST be right:
   x64-on-ARM64 as **"emulated — expected"**; the tray gains the Startup-shortcut fallback; the
   `mcpbrain.maintenance` import is optional (no wheel-install warning). Gates green at release
   (full suite passed, ruff clean). **HARDWARE QA GATE STILL OPEN (runbook §5):** 0.7.97 is published
-  (safe — existing installs auto-update only the daemon wheel; `install.ps1`/`.mcpb` are opt-in,
+  (safe — existing installs auto-update only the daemon wheel; `install.ps1` is opt-in,
   used only when someone runs a Windows install), but the reworked installer is **not yet validated
   on a real ARM64/x64 Windows box — do NOT onboard Windows users until that QA passes.** (The two
   deferred review Minors that were noted here are now **fixed in 0.7.98**, above.) Earlier:
@@ -321,8 +329,8 @@ wrong and MUST be right:
   Windows preflight-installer releases** — 0.7.96 also removed the plugin's top-level `bin/` (shims
   + `monitors/`) that **fails claude.ai marketplace validation** (a `test_no_toplevel_bin_dir` guard
   prevents regressions; that removal STANDS). The lazy embedder, wizard-owned model download,
-  `[daemon]` optional dep + `update.py` reinstalling `mcpbrain[daemon]`, and the `.mcpb` bridge from
-  that line all **remain**; only the native-ARM64 install strategy was replaced. Earlier:
+  `[daemon]` optional dep + `update.py` reinstalling `mcpbrain[daemon]` from
+  that line **remain** (the `.mcpb` bridge does NOT — removed 2026-08-24, see above); only the native-ARM64 install strategy was replaced. Earlier:
   **0.7.90 was the org-baseline ACTIVATION release**: it fixes `fleet.merge_org_config` to fall back to
   `org_defaults.FLEET_FOLDER_ID` when `fleet.folder_id` is unset (the common case) — the
   prerequisite for the fleet-wide `org_pin` to reach installs at all (it previously early-returned
