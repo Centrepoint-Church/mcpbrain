@@ -604,6 +604,120 @@ def test_rollback_requires_yes_and_reports_nothing_to_restore(tmp_path):
                  "--swap", "--rollback", "--yes"]) == 2   # opposite operations
 
 
+# --- what --from is allowed to promote over the live store (final-review I3) --
+
+def _swapped_with_a_retained_generation(tmp_path, name="brain.sqlite3"):
+    """Rebuild + swap, so <src>.pre-rebuild-* exists beside the live store.
+
+    This is the real starting state for --rollback, and the state in which the
+    sidecar hazard exists: several retained paths now share a common prefix.
+    """
+    src = tmp_path / name
+    _seed(src)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--swap", "--yes"]) == 0
+    kept = _main_files(tmp_path, f"{name}.pre-rebuild-*")
+    assert len(kept) == 1, kept
+    return src, kept[0]
+
+
+def _store_fingerprint(p: Path) -> tuple:
+    """Enough of a store's identity to prove it was NOT replaced."""
+    db = sqlite3.connect(p)
+    try:
+        return (db.execute("PRAGMA page_size").fetchone()[0],
+                db.execute("PRAGMA page_count").fetchone()[0],
+                db.execute("SELECT count(*) FROM chunks").fetchone()[0],
+                {r[0] for r in db.execute("SELECT name FROM entities")})
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_rollback_refuses_a_sidecar_passed_via_from(tmp_path, suffix, capsys):
+    """A 0-byte -wal/-shm opens as a VALID, EMPTY database.
+
+    So integrity_check answers `ok`, every downstream gate passes, and the tool
+    would report "restored store: integrity_check=['ok']" having installed an
+    empty brain over the real one. The retained generations all share the store
+    name as a prefix, so this is one tab-completion away for the operator
+    running the highest-stakes command in the runbook. It must refuse in CODE,
+    like check_migrations and embedded_without_vectors do -- not in prose.
+    """
+    src, kept = _swapped_with_a_retained_generation(tmp_path)
+    sidecar = Path(f"{kept}{suffix}")
+    sidecar.write_bytes(b"")            # exactly the hazard: 0 bytes
+    assert sidecar.exists()
+    before = _store_fingerprint(src)
+
+    rc = main(["--src", str(src), "--home", str(tmp_path),
+               "--rollback", "--yes", "--from", str(sidecar)])
+
+    assert rc != 0, "a sidecar was accepted as a store"
+    out = capsys.readouterr().out
+    assert "REFUSING to roll back" in out, out
+    assert "sidecar" in out, out
+    # The live store is untouched, and nothing was moved aside.
+    assert _store_fingerprint(src) == before
+    assert _main_files(tmp_path, "brain.sqlite3.rolled-back-*") == []
+    assert kept.exists(), "the retained generation was disturbed"
+
+
+def test_rollback_refuses_an_empty_file_passed_via_from(tmp_path, capsys):
+    """The same hazard without a sidecar name: a 0-byte file is a valid,
+    zero-table SQLite database that integrity_check calls `ok`."""
+    src, kept = _swapped_with_a_retained_generation(tmp_path)
+    empty = tmp_path / "brain.sqlite3.pre-rebuild-0000000000"
+    empty.write_bytes(b"")
+    before = _store_fingerprint(src)
+
+    rc = main(["--src", str(src), "--home", str(tmp_path),
+               "--rollback", "--yes", "--from", str(empty)])
+
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "REFUSING to roll back" in out, out
+    assert "page(s)" in out, out
+    assert _store_fingerprint(src) == before
+    assert _main_files(tmp_path, "brain.sqlite3.rolled-back-*") == []
+
+
+def test_rollback_refuses_a_sqlite_file_that_is_not_a_store(tmp_path, capsys):
+    """Big enough to pass the page floor, but no `chunks` table -- e.g. some
+    other SQLite file that happens to sit beside the store."""
+    src, kept = _swapped_with_a_retained_generation(tmp_path)
+    other = tmp_path / "not-a-store.sqlite3"
+    db = sqlite3.connect(other)
+    db.execute("CREATE TABLE junk(a TEXT)")
+    db.executemany("INSERT INTO junk VALUES(?)", [("x" * 500,)] * 500)
+    db.commit(); db.close()
+    before = _store_fingerprint(src)
+
+    rc = main(["--src", str(src), "--home", str(tmp_path),
+               "--rollback", "--yes", "--from", str(other)])
+
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "REFUSING to roll back" in out, out
+    assert "chunks" in out, out
+    assert _store_fingerprint(src) == before
+
+
+def test_rollback_still_accepts_the_real_retained_store(tmp_path):
+    """The guard must not break the operation it guards: the same --from path
+    that the tool itself prints has to keep working."""
+    src, kept = _swapped_with_a_retained_generation(tmp_path)
+    assert sqlite3.connect(src).execute("PRAGMA page_size").fetchone()[0] == 8192
+
+    rc = main(["--src", str(src), "--home", str(tmp_path),
+               "--rollback", "--yes", "--from", str(kept)])
+
+    assert rc == 0
+    # The pre-rebuild store really came back (4096, not the rebuild's 8192).
+    assert sqlite3.connect(src).execute("PRAGMA page_size").fetchone()[0] == 4096
+
+
 # --- pre-migration sources (I2) --------------------------------------------
 
 def _unmigrate_actions(src):

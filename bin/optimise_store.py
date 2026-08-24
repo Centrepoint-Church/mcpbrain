@@ -1,9 +1,9 @@
 """Attended, backup-gated store rebuild. NEVER run automatically.
 
 Six of the target optimisations each require rewriting the whole file
-(page_size, STRICT, JSONB, contentless FTS5, the partial + trigram indexes,
-and FK constraints), so they are applied together in ONE out-of-place pass
-instead of six sequential rewrites of a 2.6 GB file.
+(page_size, STRICT, contentless FTS5, the partial + trigram indexes, FK
+constraints, and dropping the dead columns), so they are applied together in
+ONE out-of-place pass instead of six sequential rewrites of a 2.6 GB file.
 
 Usage (attended — this is a CLI a human runs, following bin/consolidate.py):
 
@@ -16,12 +16,20 @@ Nothing here is wired into a daemon cadence, a cron, or any automatic
 trigger, and no invocation ever overwrites the live store: `--swap` moves the
 old file aside under a timestamped name and never deletes it.
 
-FREE SPACE: budget ~2.4x the store. Measured on the 2.62 GB live store, peak
-concurrent usage is 3.48 GB (the encrypted snapshot -- Fernet base64 costs 4/3
-over the plaintext) + 2.62 GB (the snapshot's transient cleartext, both during
-the snapshot and again while verifying it) + 1.49 GB (the rebuild) = 7.6 GB.
-make_encrypted_snapshot refuses up front rather than filling the disk part-way,
-so a short check fails cleanly at gate 2.
+FREE SPACE, for ONE invocation: ~2.4x the store. On the 2.62 GB live store,
+peak concurrent usage is 3.48 GB (the encrypted snapshot -- Fernet base64 costs
+4/3 over the plaintext) + 2.62 GB (the snapshot's transient cleartext, both
+during the snapshot and again while verifying it) + 1.49 GB (the rebuild)
+= 7.6 GB. make_encrypted_snapshot refuses up front rather than filling the disk
+part-way, so a short check fails cleanly at gate 2.
+
+But running the DOCUMENTED PROCEDURE -- which is what an operator actually does
+-- peaks HIGHER than any single invocation, because gate 2 fires on every
+non-`--swap`/non-`--rollback` run (the report-only step included), writes a
+TIMESTAMPED artifact, and never deletes it: two retained snapshots overlap.
+Budget ~12-13 GB and see `docs/RELEASE-RUNBOOK.md` section 7 for the full
+per-step arithmetic; do not size the disk from the single-invocation figure
+above.
 """
 import argparse
 import json
@@ -786,10 +794,68 @@ def _swap(src: Path, dst: Path) -> int:
     return 0
 
 
+def _is_sidecar(p: Path) -> bool:
+    """True for one of SQLite's own `-wal`/`-shm` sidecar names.
+
+    ONE predicate, used both when `_find_retained` picks a candidate itself and
+    when the operator names one with `--from`. Two independent checks would
+    drift, and the automatic path having a filter the explicit path lacks is
+    precisely the gap that let a sidecar through `--from`.
+    """
+    return p.name.endswith(_SIDECARS)
+
+
+# A real store has a full schema and, on the live machine, ~640k pages. A fresh
+# init() is already 114. So this rejects the degenerate cases -- a 0-byte file,
+# which SQLite opens as a perfectly valid EMPTY database, and any stub -- while
+# staying an order of magnitude below the smallest legitimate store.
+_MIN_STORE_PAGES = 16
+
+
+def _refuse_as_store(p: Path) -> str | None:
+    """Why `p` must not be promoted over the live store, or None if it may be.
+
+    `--rollback --from` promotes an arbitrary operator-supplied path over the
+    live store, and the three retained generations (`.pre-rebuild-*`,
+    `.rolled-back-*`, and their `-wal`/`-shm`) share a common prefix -- so one
+    tab-completion too many lands on a 0-byte sidecar. SQLite opens that as a
+    valid, empty, zero-table database and `integrity_check` answers `ok`, so
+    every gate downstream passes and the tool reports success having installed
+    an EMPTY BRAIN over a real one. This is the one operation a stressed human
+    runs against the live store after something has already gone wrong, so it
+    refuses in code like every other gate here rather than warning in prose.
+    """
+    if _is_sidecar(p):
+        return (f"{p.name} is a SQLite {p.name[-4:]} sidecar, not a store. A "
+                "0-byte sidecar opens as a valid EMPTY database, so promoting "
+                "one would install an empty brain over the real store. Pass "
+                "the main .pre-rebuild-* file (no -wal/-shm suffix).")
+    try:
+        db = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return f"{p.name} will not open as SQLite: {exc}"
+    try:
+        pages = db.execute("PRAGMA page_count").fetchone()[0]
+        tables = {r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    except sqlite3.DatabaseError as exc:
+        return f"{p.name} will not read as SQLite: {exc}"
+    finally:
+        db.close()
+    if pages < _MIN_STORE_PAGES:
+        return (f"{p.name} holds {pages} page(s) -- a store has at least "
+                f"{_MIN_STORE_PAGES} (a fresh one, 114). This is an empty or "
+                "truncated file, not a store.")
+    if "chunks" not in tables:
+        return (f"{p.name} has no `chunks` table ({len(tables)} table(s) "
+                "present), so it is not an mcpbrain store.")
+    return None
+
+
 def _find_retained(src: Path) -> Path | None:
     """Newest <src>.pre-rebuild-* (the main file, never a sidecar)."""
     kept = [p for p in src.parent.glob(f"{src.name}.pre-rebuild-*")
-            if not p.name.endswith(_SIDECARS)]
+            if not _is_sidecar(p)]
     return max(kept, key=lambda p: p.name) if kept else None
 
 
@@ -809,6 +875,10 @@ def _rollback(src: Path, frm: Path | None) -> int:
     deleted -- nothing here destroys a store), which is what clears the foreign
     WAL, and then the retained file is restored WITH the sidecars that are
     genuinely its own.
+
+    The candidate -- whether found automatically or named with `--from` -- must
+    pass `_refuse_as_store` first; see there for why integrity_check alone is
+    not a sufficient gate on what gets promoted over the live store.
     """
     kept = frm or _find_retained(src)
     if kept is None:
@@ -817,6 +887,11 @@ def _rollback(src: Path, frm: Path | None) -> int:
         return 2
     if not kept.exists():
         print(f"[optimise] no such retained store: {kept}")
+        return 2
+    # BEFORE integrity_check, because integrity_check cannot tell the difference:
+    # a 0-byte sidecar is a structurally perfect empty database.
+    if refusal := _refuse_as_store(kept):
+        print(f"[optimise] REFUSING to roll back: {refusal}")
         return 2
     # check_fk=False: a pre-rebuild store has dangling references BY
     # DEFINITION (256 on the live store) -- removing them is what the rebuild
