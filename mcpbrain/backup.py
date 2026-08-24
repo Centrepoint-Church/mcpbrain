@@ -743,6 +743,16 @@ def _default_media(path):
 # `next_chunk` by hand so each attempt re-seeks.
 _MEDIA_NUM_RETRIES = 0
 
+# Every OTHER Drive call in this module is a plain metadata list/create/delete
+# or an in-memory-body upload — none has _MEDIA_NUM_RETRIES' "can't re-seek a
+# stream" problem, so all of them retry. googleapiclient's own num_retries
+# param already does randomized exponential backoff on exactly this error
+# class (SSL errors, socket timeouts, ConnectionError, OSError generally —
+# confirmed against googleapiclient.http._retry_request), so no new retry
+# logic is written here, just the parameter every other call in this codebase
+# that already retries (sync/gmail.py, sync/attachments.py) also passes.
+_NUM_RETRIES = 5
+
 
 def upload_snapshot(
     service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None
@@ -784,7 +794,7 @@ def upload_snapshot(
             supportsAllDrives=True,
             fields="files(id, name)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     files = resp.get("files", [])
 
@@ -804,7 +814,7 @@ def upload_snapshot(
                 supportsAllDrives=True,
                 fields="id",
             )
-            .execute()["id"]
+            .execute(num_retries=_NUM_RETRIES)["id"]
         )
 
     # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
@@ -921,7 +931,7 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
             supportsAllDrives=True,
             fields="files(id, name)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     folders = folder_resp.get("files", [])
     if not folders:
@@ -940,7 +950,7 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
             supportsAllDrives=True,
             fields="files(id, name, createdTime, modifiedTime)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     files = files_resp.get("files", [])
     if not files:
@@ -977,7 +987,7 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         .list(q=folder_q, corpora="drive", driveId=shared_drive_id,
               includeItemsFromAllDrives=True, supportsAllDrives=True,
               fields="files(id)")
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
         .get("files", [])
     )
     if not folders:
@@ -989,7 +999,7 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         .list(q=f"'{folder_id}' in parents and trashed = false", corpora="drive",
               driveId=shared_drive_id, includeItemsFromAllDrives=True,
               supportsAllDrives=True, fields="files(id, name, createdTime, modifiedTime)")
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
         .get("files", [])
     )
     files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
@@ -998,7 +1008,8 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
     deleted = 0
     for f in files[keep:]:
         try:
-            service.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+            service.files().delete(fileId=f["id"], supportsAllDrives=True) \
+                .execute(num_retries=_NUM_RETRIES)
             deleted += 1
         except Exception as exc:  # noqa: BLE001 — pruning must never break a backup
             log.warning("prune_snapshots: could not delete %s (%s): %s",
@@ -1028,7 +1039,7 @@ def _list_in_drives(service, q: str, *, fields="files(id, name, createdTime, mod
     return service.files().list(
         q=q, spaces="drive", corpora="allDrives",
         includeItemsFromAllDrives=True, supportsAllDrives=True, fields=fields,
-    ).execute().get("files", [])
+    ).execute(num_retries=_NUM_RETRIES).get("files", [])
 
 
 def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
@@ -1042,7 +1053,7 @@ def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
         return found[0]["id"]
     return service.files().create(
         body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_folder_id]},
-        supportsAllDrives=True, fields="id").execute()["id"]
+        supportsAllDrives=True, fields="id").execute(num_retries=_NUM_RETRIES)["id"]
 
 
 def upload_to_folder(service, file_path, parent_folder_id: str, *,
