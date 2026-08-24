@@ -424,10 +424,37 @@ def reingest_messages(service, store, thread_ids: list, *,
     older chunker (e.g. before a `chunk_text` change) is never revisited by
     ordinary delta sync -- see `store.stale_chunker_ids`, which this feeds.
 
-    Unlike Drive, a Gmail message's content never shrinks after the fact --
-    it's immutable once received -- so there's no B5-style orphan sweep here,
-    just re-chunking: per message, fetch -> normalise_gmail -> upsert_chunk,
-    which replaces its chunks' text/metadata (and CHUNKER_VERSION) in place.
+    Per message: fetch -> normalise_gmail (+ normalise_attachment, via
+    `_fetch_one`'s own attachment fetch) -> upsert_chunk, which replaces the
+    chunks' text/metadata (and CHUNKER_VERSION) in place.
+
+    **Attachments are re-fetched too**, gated on the same
+    `config.gmail_attachments` flag `sync_gmail`/`backfill_gmail` read. They
+    are not incidental here: `gmail-<mid>-att-<idx>-<i>` chunks are produced
+    by `sync/attachments.normalise_attachment`, which routes spreadsheets
+    through `sync/tabular.render_chunks` -- so an emailed workbook's chunks
+    are exactly the ones the tabular-rendering fix (and the CHUNKER_VERSION
+    bump behind it) exists to repair. A body-only re-ingest would refresh the
+    body chunks, leave every attachment chunk on the old version, and the
+    thread would therefore be re-selected by `store.stale_chunker_ids`
+    forever -- the same non-convergence this function's missing/empty stamping
+    guards against, on a different axis.
+
+    Attachment chunks are ALSO the one shape here that can SHRINK: the whole
+    point of the tabular fix is that a phantom-column-inflated sheet collapses
+    to fewer, correctly-rendered chunks, which would leave the surplus tail
+    doc_ids behind as searchable garbage (B5). So attachment doc_ids get a
+    Drive-style orphan sweep (`store.delete_chunks`, which clears the
+    vec_chunks/fts_chunks mirrors too), scoped to `-att-` doc_ids only -- a
+    message BODY cannot shrink (immutable once received), so body doc_ids need
+    no sweep and are deliberately never touched by it. The sweep is skipped
+    entirely when this message's attachment tally recorded a fetch failure or
+    an empty extraction, mirroring `drive.upsert_file_chunks`' `partial` guard:
+    `attachments.fetch_and_normalise` is best-effort per attachment (a 404 or a
+    failed extraction silently yields fewer chunks), and deleting on THAT would
+    destroy previously-good chunks over a transient error. It is also skipped
+    when attachment fetching is off in config -- with the flag off `att_chunks`
+    is empty for every message, which is not evidence that anything shrank.
 
     Isolation is per THREAD, but within a thread each of its already-chunked
     messages is re-fetched individually (a doc_id's second `-`-separated
@@ -441,10 +468,16 @@ def reingest_messages(service, store, thread_ids: list, *,
     reingest_files measured live before that guard existed: ~46 repeat
     fetches of the same 10 files in 41 minutes):
       * `missing` -- the message 404s (deleted/inaccessible).
-      * `empty` -- the message fetches fine but normalises to zero chunks
-        (e.g. no body, or a future `has_content`/`chunk_text` tightening).
-        Reachable even though a message's raw bytes never shrink, because
-        this whole function only runs after CHUNKER_VERSION itself changed.
+      * `empty` -- the message fetches fine but normalises to zero chunks,
+        body AND attachments (e.g. no body, or a future
+        `has_content`/`chunk_text` tightening). Reachable even though a
+        message's raw bytes never shrink, because this whole function only
+        runs after CHUNKER_VERSION itself changed. The half-empty case (body
+        normalises to nothing, attachments still produce chunks) is counted as
+        a normal re-ingest, but its orphaned body doc_ids are stamped the same
+        way -- see the inline comment; without that, folding attachments into
+        the emptiness check would have LOST the convergence guard for exactly
+        that shape.
     Any OTHER failure -- a transient 5xx, a network error, or an exception
     from the write path itself (patch_chunk_metadata/normalise_gmail/
     upsert_chunk) -- is retryable, so the WHOLE per-message operation is
@@ -455,10 +488,13 @@ def reingest_messages(service, store, thread_ids: list, *,
     counted as `failed` and left untouched -- stamping a merely-transient
     failure would wrongly converge it out of the selector too.
 
-    `report` is passed through to `_fetch_one` as `att_report` for interface
-    parity with the fetch primitive; attachment fetching itself is always off
-    here (`fetch_attachments=False`) since attachments are handled by the
-    normal sync/backfill paths, not this rechunk-only repair.
+    Attachment skips are TALLIED, never written per attachment, for the same
+    reason `backfill_gmail` tallies them: `change_log` is pruned to 500 rows
+    and doubles as the user-facing digest, so one row per skipped image/.zip
+    across a repair sweep would evict the whole audit trail. When the caller
+    supplies `report`, the tally is merged into it and the caller flushes
+    (matching how `bin/repair.py` flushes Drive's); otherwise this flushes its
+    own one-row-per-kind summary before returning.
 
     Returns {"messages": n_reingested, "missing": n, "empty": n, "failed": n}.
     `messages` counts only messages that actually wrote fresh chunks; `empty`
@@ -466,6 +502,10 @@ def reingest_messages(service, store, thread_ids: list, *,
     written for those.
     """
     summary = {"messages": 0, "missing": 0, "empty": 0, "failed": 0}
+    # Read once, not per message -- config.read_config is an uncached
+    # exists()+read_text()+json.loads() (see sync_gmail for the same hoist).
+    fetch_attachments = config.gmail_attachments(str(config.app_dir()))
+    att_skips: dict = {}
     for thread_id in thread_ids:
         doc_ids = [c["doc_id"] for c in store.thread_chunks(thread_id)]
         message_ids = {
@@ -473,9 +513,16 @@ def reingest_messages(service, store, thread_ids: list, *,
         } or {thread_id}
         for mid in message_ids:
             own_doc_ids = [d for d in doc_ids if d.split("-")[1] == mid]
+            # This message's OWN tally, so the orphan sweep can tell a
+            # best-effort attachment failure apart from a genuine shrink;
+            # merged into the run-wide tally below either way.
+            msg_att_skips: dict = {}
             try:
-                raw, _att = _fetch_one(service, mid, fetch_attachments=False,
-                                       att_report=report)
+                raw, att_chunks = _fetch_one(
+                    service, mid, fetch_attachments=fetch_attachments,
+                    att_report=msg_att_skips)
+                for key, count in msg_att_skips.items():
+                    att_skips[key] = att_skips.get(key, 0) + count
                 if raw is None:
                     # 404 -- stamp the existing chunks so the selector stops
                     # re-picking this dead message. Exact id-segment match,
@@ -488,7 +535,8 @@ def reingest_messages(service, store, thread_ids: list, *,
                     summary["missing"] += 1
                     continue
                 skips: dict = {}
-                chunks = normalise_gmail(raw, report=skips)
+                body_chunks = list(normalise_gmail(raw, report=skips))
+                chunks = body_chunks + list(att_chunks)
                 if not chunks:
                     # Fetched fine, nothing survived normalisation. Stamp
                     # anyway -- mirrors Drive's "empty" outcome -- or this
@@ -500,10 +548,82 @@ def reingest_messages(service, store, thread_ids: list, *,
                             reextract_empty=True)
                     summary["empty"] += 1
                     continue
+                if not body_chunks:
+                    # The BODY normalised to nothing while attachments still
+                    # produced chunks -- the `empty` outcome above, narrowed
+                    # to one half of the message. Its body doc_ids are not in
+                    # `written`, so without this they keep the old
+                    # chunker_version and re-select the thread forever.
+                    # Body normalisation is deterministic on the fetched raw
+                    # (no best-effort partiality, unlike attachments), so
+                    # converging it here is safe.
+                    for doc_id in own_doc_ids:
+                        if doc_id.startswith(f"gmail-{mid}-body-"):
+                            store.patch_chunk_metadata(
+                                doc_id, chunker_version=CHUNKER_VERSION,
+                                reextract_empty=True)
                 for c in chunks:
-                    store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+                    # store.upsert_chunk writes NOTHING -- text, embedding AND
+                    # metadata -- when the content_hash is unchanged, so
+                    # without this fallback a byte-identical re-chunk never
+                    # acquires the current chunker_version and
+                    # store.stale_chunker_ids re-selects the thread on every
+                    # run forever (burning Gmail quota, reporting success).
+                    # That is the NORMAL case here, not a corner one: the
+                    # CHUNKER_VERSION 2->3 bump changed sync/tabular.py only,
+                    # so a plain-prose body re-chunks identically. Same
+                    # pattern, same reason, as drive.upsert_file_chunks.
+                    if not store.upsert_chunk(c.doc_id, c.text, c.content_hash,
+                                              c.metadata):
+                        store.patch_chunk_metadata(c.doc_id, **c.metadata)
+                _sweep_attachment_orphans(
+                    store, mid, own_doc_ids, chunks,
+                    fetch_attachments=fetch_attachments,
+                    att_skips=msg_att_skips)
                 summary["messages"] += 1
             except Exception as exc:  # noqa: BLE001 -- one bad message must not end the run
                 log.warning("reingest_messages: %s failed: %s", mid, exc)
                 summary["failed"] += 1
+    if report is not None:
+        for key, count in att_skips.items():
+            report[key] = report.get(key, 0) + count
+    elif att_skips:
+        attachments.flush_skip_report(store, att_skips,
+                                      source="repair:reingest")
     return summary
+
+
+# Best-effort attachment outcomes that make "fewer chunks than before"
+# ambiguous: fetch_failed is a transient 404/5xx, and attachment_empty
+# conflates "genuinely no extractable content" with "the extractor raised"
+# (normalise_attachment returns [] for both). Either one present means the
+# shorter output is not evidence of a shrink, so nothing is deleted.
+_ATT_PARTIAL_SKIPS = ("attachment_fetch_failed", "attachment_empty")
+
+
+def _sweep_attachment_orphans(store, mid: str, own_doc_ids: list, chunks: list,
+                              *, fetch_attachments: bool,
+                              att_skips: dict) -> int:
+    """Delete this message's leftover `-att-` chunks that the re-render no
+    longer produces. Returns the number deleted (0 when skipped).
+
+    Split out of reingest_messages because the three conditions that must
+    hold before deleting anything are the whole substance of the operation --
+    see reingest_messages' docstring for why each one is load-bearing.
+    """
+    if not fetch_attachments:
+        return 0
+    if any(kind in _ATT_PARTIAL_SKIPS for kind, _mime in att_skips):
+        log.info("reingest_messages: %s had best-effort attachment skips; "
+                 "skipping the orphan sweep so good chunks are not deleted", mid)
+        return 0
+    prefix = f"gmail-{mid}-att-"
+    written = {c.doc_id for c in chunks}
+    orphans = [d for d in own_doc_ids
+               if d.startswith(prefix) and d not in written]
+    if not orphans:
+        return 0
+    log.info("reingest_messages: %s re-rendered to fewer attachment chunks; "
+             "deleting %d orphan(s)", mid, len(orphans))
+    store.delete_chunks(orphans)
+    return len(orphans)
