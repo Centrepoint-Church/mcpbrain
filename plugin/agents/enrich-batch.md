@@ -102,6 +102,13 @@ Field notes:
   `notification`.
 - `summary`: one plain sentence. `contextual_summary` is optional; leave it as
   an empty string when there is nothing situational to add.
+- **Malformed or sparse content.** You must still emit exactly one extraction
+  for a thread even when its content is empty, corrupted, a broken form or
+  session artifact, or otherwise has no substantive information. In that
+  case keep the extraction minimal: `content_type: "fyi"`, a one-sentence
+  `summary` noting the content was malformed/sparse, and leave `entities`,
+  `topics`, and `actions` empty. Do not invent entities, topics, or actions to
+  fill out a thin extraction.
 - `entities`, `topics`, `actions`, `relations`: lists. Empty lists are fine.
 - **Meetings/events.** For a `meeting` entity, also set `series_name` — the
   recurring series identity with the specific-occasion parts removed (drop
