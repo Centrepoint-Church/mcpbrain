@@ -83,21 +83,45 @@ wrong and MUST be right:
   schema changes themselves. **Gold gate: recall@10 0.750 / MRR 0.514 is the
   plan's non-negotiable floor; both the pre-rebuild copy (0.800/0.591) and the
   rebuilt copy (0.850/0.599) clear it, and the small pre→post movement is
-  EXPLAINED, not a construction defect:** traced to 7,343/170,705 chunks
-  (4.3%) whose stored FTS contextual-prefix text had gone stale relative to
-  `contextual_prefix()` (a later, un-versioned addition of a `folder_path`
-  clause was never accompanied by an `FTS_CONTEXT_VERSION` bump, so
-  `reindex_fts_batch`'s `fts_context_version < FTS_CONTEXT_VERSION` selection
-  can never pick already-migrated `version=1` rows back up). The rebuild's
-  `_rederive_fts` unconditionally regenerates FTS text for every row from
-  current metadata, incidentally correcting all 7,343 in one pass; per-document
-  FTS text and BM25 candidate identity were verified byte-identical for every
-  row actually compared, and vector search / the `recall_max_distance`
-  injection gate were spot-checked identical pre/post on real queries. The
-  `FTS_CONTEXT_VERSION` versioning gap itself is a pre-existing bug, unrelated
-  to Tasks 1-8, and is **not fixed here** — flagged for a follow-up (bump the
-  version or hash the prefix template) rather than fixed in this docs-only
-  task. Full evidence and commands:
+  EXPLAINED, not a construction defect — but the mechanism is DATA drift from
+  a metadata-only writer, not a code-versioning gap.** `contextual_prefix()`'s
+  `folder_path` clause has existed since the initial commit (317ea4d,
+  2026-06-02); `FTS_CONTEXT_VERSION` was introduced seven weeks later
+  (731a620, 2026-07-22, Phase C), so the clause cannot be what escaped that
+  version. `folder_path` metadata itself only started being STAMPED onto
+  Drive chunks on 2026-07-28 (`b7bf024`, "C5"). The real gap:
+  `Store.patch_chunk_metadata` (`mcpbrain/store.py`) writes
+  `UPDATE chunks SET metadata=?` and returns — it never touches the
+  `fts_chunks` mirror and never resets `fts_context_version`.
+  `mcpbrain/sync/drive.py`'s re-sync path calls exactly this
+  (`store.patch_chunk_metadata(c.doc_id, **c.metadata)`) whenever a Drive
+  file's content is unchanged but its metadata should refresh — so a chunk
+  that already carried `fts_context_version=1` (from before `folder_path`
+  existed) silently acquires `folder_path` in `chunks.metadata` on its next
+  Drive sync, while its `fts_chunks` row keeps the old, folder-less text
+  forever: the version was never invalidated, so
+  `reindex_fts_batch`'s `fts_context_version < FTS_CONTEXT_VERSION` check can
+  never re-catch it. 7,343/170,705 chunks (4.3%) carry this drift today. The
+  rebuild's `_rederive_fts` unconditionally regenerates FTS text for every row
+  from current metadata, incidentally correcting all 7,343 in one pass.
+  Confirmed directly on the ONE gold case that flipped
+  (`gdrive_3_capes_budget_jan_to_sept`): its cross-acceptable P&L chunk
+  (`gdrive-1IfsM_VJGu81hOY_8DeEvJ6_-g0ib8FZ0-0`) is one of the 7,343 — its
+  stored FTS text lacked "in My Drive/…/2024 - Capes Church/Board
+  Meetings/2026 Capes Community Board Meetings/2026.07.02 Capes Board Pack",
+  a folder path that itself contains "Capes"/"Community"/"Board" — exactly
+  the query's own terms. Re-deriving it directly boosted this document's
+  keyword-search rank into the gold set's top 10 (a specific, direct token
+  match, not a diffuse corpus-wide BM25 stat shift). Vector search and the
+  `recall_max_distance` injection gate were spot-checked identical pre/post
+  on real queries (unaffected — vectors are copied byte-exact). **Follow-up,
+  not fixed here (out of this docs-only task's scope):**
+  `patch_chunk_metadata` (and any other metadata-only writer) needs to
+  refresh the `fts_chunks` mirror, or at least reset `fts_context_version` to
+  0, whenever it touches a metadata field `_fts_text`/`contextual_prefix`
+  reads — otherwise the exact same drift resumes on the very next Drive sync
+  after any future rebuild. Bumping `FTS_CONTEXT_VERSION` once would only
+  clear today's backlog, not stop it recurring. Full evidence and commands:
   `.superpowers/sdd/2026-08-24-sqlite-optimisation/task-9-report.md`. **Not
   yet run against any user's actual live store** — that is a separate,
   explicit, attended operation per machine, to be scheduled deliberately.
