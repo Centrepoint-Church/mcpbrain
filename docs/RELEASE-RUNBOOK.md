@@ -342,6 +342,115 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 add a regression assertion. **Record results here. Do not roll out to Windows until
 this gate passes.**
 
+## 7. Store maintenance: `bin/optimise_store.py` (attended SQLite rebuild)
+
+**This is an ATTENDED, backup-gated migration a human runs at the terminal. It is
+NEVER wired into a daemon cadence, a cron, or any automatic trigger — same
+posture as `bin/consolidate.py` (§ its own module docstring: "Attended,
+backup-gated consolidation migrations (curator-run)"). `init()` uses `CREATE
+TABLE IF NOT EXISTS`, so a schema change (page size, STRICT tables, JSONB
+metadata, contentless FTS5, FK constraints, the trigram index) reaches a
+**new** install for free but an **existing** store only picks it up by running
+this tool. There is no silent migration path and there should never be one.**
+
+Run this when: the live store is due for its (infrequent, one-off-per-schema-
+generation) physical rebuild — not on a schedule. Budget disk: ~2.4x the
+store's current size free on the store's volume (measured on the 2.62 GB live
+store: 3.48 GB verified encrypted snapshot + 2.62 GB transient snapshot-verify
+cleartext + 1.49 GB rebuilt file ≈ 7.6 GB peak, most of it released once the
+snapshot verifies).
+
+### Procedure
+
+1. **Stop the daemon.** `launchctl bootout gui/$UID/com.mcpbrain` (macOS) /
+   the Windows scheduled-task equivalent. The tool's own Gate 1 refuses to run
+   against the live store while the daemon holds `daemon.lock`, but stopping it
+   first avoids a confusing refusal message and is the point at which "attended"
+   starts — nothing below should run with the daemon up.
+2. **Report only, no `--yes`.** `uv run python bin/optimise_store.py` — prints
+   orphan-row counts (rows whose FK parent is missing), the schema preflight
+   (unmanaged tables carried verbatim, dead columns to be dropped with their
+   non-null counts), and takes a **verified encrypted snapshot** first (Gate 2:
+   the snapshot is decrypted to a temp file and integrity-checked before the
+   tool proceeds at all — an unverified snapshot is not a rollback). Read the
+   report. This step alone is safe to run any time; it changes nothing.
+3. **Rebuild, out of place.** `uv run python bin/optimise_store.py --yes` —
+   produces `<store>.new` next to the live file. The live file is **never**
+   touched by this step. Gates 5/6 (integrity_check + foreign_key_check, and a
+   row-count reconciliation against the orphan report) must both report `ok`
+   before the tool will say it is safe to promote; if either fails, `<store>.new`
+   is retained for inspection and the live store is untouched — do not proceed
+   to `--swap`.
+4. **Verify independently before swapping.** Beyond the tool's own gates, spot
+   check on `<store>.new` with `bin/measure_store.py --latency` (expect
+   `has_stat1: true` now that the rebuild ran `ANALYZE`, and the four 0.7.105
+   benchmark latencies at least as good as the live store's), and run the gold
+   harness against a **copy** of `<store>.new` renamed to `brain.sqlite3` under
+   a scratch `MCPBRAIN_HOME` (never against the live `MCPBRAIN_HOME` — that
+   would silently exercise the live store, not the rebuild):
+   ```bash
+   cp <store>.new /tmp/gold-check/brain.sqlite3
+   MCPBRAIN_HOME=/tmp/gold-check uv run python tests/eval/run_eval.py --gold --k 10
+   ```
+   Expected: recall@10 **≥ 0.750**, MRR **≥ 0.514** (the plan's non-negotiable
+   floor). Contentless FTS5 and JSONB metadata are ranking-neutral by
+   construction — same tokens indexed, same BM25 ranking — so if the numbers
+   differ from the live store's own current gold run, explain why before
+   proceeding (see the Task 9 report for a worked example: a small upward move
+   was traced to the rebuild's unconditional full FTS re-derivation
+   incidentally fixing ~4% of chunks whose stored contextual-prefix text had
+   gone stale relative to a later, unversioned change to `contextual_prefix()`
+   — a pre-existing gap in `FTS_CONTEXT_VERSION` tracking, not something this
+   rebuild introduced). Also spot-check the injection path
+   (`daemon.search`/`prompt_recall`) directly — the `--gold` harness calls
+   `hybrid_search` and does not exercise the `recall_max_distance` off-topic
+   gate.
+5. **Promote.** `uv run python bin/optimise_store.py --swap --yes` — checkpoints
+   `<store>.new`'s WAL, re-verifies integrity, then swaps it over the live file.
+   **The old store is retained, never deleted**, at
+   `<store>.pre-rebuild-<timestamp>` (sidecars moved with it, so nothing is left
+   for a later re-open to silently replay into the wrong file).
+6. **Restart the daemon** and confirm it opens the promoted store normally
+   (`mcpbrain doctor`, a live `brain_search` call).
+7. **Keep the retained pre-rebuild file until the next successful scheduled
+   backup run** confirms the new store is being backed up correctly — only
+   then delete `<store>.pre-rebuild-<timestamp>` (and its escrow-key sidecar,
+   `<store>.rebuild-key`, if one was generated). Deleting it immediately after
+   swap removes your only same-machine fallback before the new store has had a
+   full cadence cycle to prove itself.
+
+### Emergency recovery: `--rollback --yes`
+
+If something is wrong post-swap and you need to go back **now**, on the same
+machine, prefer this over restoring the encrypted snapshot by hand — it is
+faster and, critically, it is **sidecar-aware** in a way a bare `mv` is not:
+
+```bash
+uv run python bin/optimise_store.py --src <store> --rollback --yes
+```
+
+This moves the *current* store aside (with its own `-wal`/`-shm`, so no
+foreign WAL is left behind to be replayed into the restored file), restores
+the newest `<store>.pre-rebuild-*` (or the one named by `--from`) together
+with **its own** sidecars, checkpoints it, and re-verifies integrity before
+declaring success. The tool's own docstring explains why the sidecar handling
+matters: a bare `mv <kept> <store>` used to be the documented rollback and it
+**silently corrupted the restored store** — SQLite replays whatever `-wal`
+happens to be sitting next to the file on next open, no error, `integrity_check`
+still reports `ok`, and the restored content and page size both come from the
+wrong store.
+
+**Operator warning — untested by the tool today:** `--rollback --from` takes
+the path to a retained store and does **no validation that it is a main
+database file rather than a sidecar**. Passing a path ending `-wal` or `-shm`
+is not rejected — the tool does not currently check for this — and could
+silently install an empty or partial store while still reporting success
+(a `-wal`/`-shm` file alone, opened as if it were the main file, is not a
+valid standalone SQLite database). **Always pass `--from` a bare
+`<store>.pre-rebuild-<timestamp>` path with no `-wal`/`-shm` suffix**, or omit
+`--from` entirely and let the tool pick the newest one itself — that path is
+computed by `_find_retained`, which already filters sidecars out.
+
 ## Environment note — repos live outside iCloud
 
 All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`
