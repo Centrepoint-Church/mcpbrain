@@ -9,8 +9,13 @@ defects, not one. A follow-up question ("is multi-chunk item ingestion — doc
 edits, thread growth — handled well?") led to re-verifying five older findings
 (B4-B8 from `2026-07-27-ingestion-defects-findings.md`) against current code —
 all five turned out to already be fixed — and surfaced one genuinely new gap
-in how short threads get prior-message context. This spec covers all five
-(four original + the new one).
+in how short threads get prior-message context (section 5). A final "is this
+actually the best/most complete fix, not a v1" pass then found two of the
+four original sections were narrower than they should be: the backup retry
+gap turned out to affect ~40 call sites codebase-wide, not 2, and the
+tabular-rendering fix needed a root-cause change in `normalise_rows` itself
+(section 2a-0), not just a more robust renderer downstream of it. This spec
+covers all five items at that depth.
 
 ## Context
 
@@ -57,9 +62,12 @@ global width is fragile by construction.
 
 **Decisions locked in with the user:**
 1. Backup — retry + rebuild-on-persistent-failure (not retry-only, not a
-   cooldown circuit breaker).
+   cooldown circuit breaker). Later widened, also confirmed with the user:
+   the retry layer applies codebase-wide (~40 call sites), not just backup's.
 2. Tabular — redesign rendering to schema-enriched row sentences, AND stop
    embedding table-subtype content into the dense vector index (keep FTS).
+   Later deepened: also fix the width computation at its root in
+   `normalise_rows`, not only in the renderer that consumes it.
 3. Consolidated notes — route through `chunk_text()`, bounded like every
    other multi-chunk source.
 4. Repair tooling — generalize `reingest-stale` to cover every source type,
@@ -67,48 +75,98 @@ global width is fragile by construction.
 
 ---
 
-## 1. Backup: bounded retry + rebuild-on-persistent-failure
+## 1. Retry gap: not just backup — 40 call sites codebase-wide
 
-**Files:** `mcpbrain/backup.py` (`upload_snapshot`, folder lookup/create
-calls), `mcpbrain/daemon.py` (`maybe_backup`, `_build_drive_service`).
+**Revised scope (confirmed with user):** the original report was backup-only.
+Auditing every `.execute()` call in the codebase found `num_retries` passed
+at only 4 of ~44 sites — `sync/gmail.py` and `sync/attachments.py` already
+have their own local `_NUM_RETRIES = 5` (correctly applied), and
+`backup.py`'s resumable media upload has a deliberate, well-commented
+`_MEDIA_NUM_RETRIES = 0` (a retried chunk can't re-seek a non-seekable
+stream — do not touch this one). Every other call — `backup.py`'s *other*
+~10 calls (including `prune_snapshots`, which runs right after every upload
+and was equally exposed to the exact bug that was reported, but which the
+original narrower fix would have missed entirely), all of `fleet.py`, all of
+`dashboard.py`, `auth.py`'s `userinfo().get()`, and `sync/drive.py`'s main
+sync path — has no retry at all, so every one of them is equally exposed to
+the same `Errno 49`-class transient failure, not just backup's.
 
-**Design:**
-- Add a small retry helper (module-level in `backup.py`, not a new
-  dependency) that wraps the two `service.files().list()/.create()` calls in
-  `upload_snapshot`'s folder-resolution step (lines ~773-798) with up to 3
-  attempts, exponential backoff (1s / 2s / 4s), retrying only on
-  `OSError`/socket-level errors (`Errno 49`, `Errno 32` broken pipe, etc.) —
-  not on 4xx auth/permission errors, which retrying can't fix.
-- **Do NOT touch the chunked media upload's `num_retries=0`** — that's a
-  deliberate, documented constraint (a retried chunk can't re-seek a
-  non-seekable stream). This retry applies only to the plain idempotent
-  metadata calls that precede it.
-- `daemon.maybe_backup` already tracks `consecutive_failures` via
-  `write_backup_state`. Add: after a backup attempt fails AND
-  `consecutive_failures >= 2` (two full-interval misses, matching the
-  existing "single failure is routine" philosophy already documented at
-  `probes.py:168`), rebuild `drive_service` via `_build_drive_service()` and
-  swap it into `self._backup.drive_service` under `_config_lock` before
-  returning. The next scheduled attempt gets a fresh client without needing
-  a manual daemon restart.
-- `BackupConfig` needs `drive_service` to be assignable post-construction (it
-  currently is — a plain dataclass field) — no schema change needed, just the
-  rebuild-and-reassign call site in `maybe_backup`'s except branch.
+**Files:** `mcpbrain/backup.py`, `mcpbrain/fleet.py`, `mcpbrain/dashboard.py`,
+`mcpbrain/auth.py`, `mcpbrain/sync/drive.py`, `mcpbrain/sync/calendar.py`,
+`mcpbrain/daemon.py` (`maybe_backup`, `_build_drive_service`).
 
-**Testing:** unit test the retry helper against injected `OSError` sequences
-(succeeds on 2nd/3rd attempt, gives up after 3, does not retry a
-non-transient exception). Unit test `maybe_backup`'s rebuild trigger: fake
-`drive_service` raising twice, assert `_build_drive_service` (monkeypatched)
-gets called and the daemon's `_backup.drive_service` identity changes.
+**Design — two independent layers:**
+
+1. **Per-call retry, everywhere, via the existing idiom.** `googleapiclient`'s
+   own `.execute(num_retries=N)` already implements randomized exponential
+   backoff and already retries exactly this error class (SSL errors, socket
+   timeouts, `ConnectionError`, and `OSError` generally — confirmed against
+   the library source, `_retry_request` in `googleapiclient/http.py`). No new
+   retry logic needs to be written. The fix is mechanical: add a local
+   `_NUM_RETRIES = 5` constant to every module above that's missing one
+   (matching the exact value and pattern already established in `gmail.py`
+   and `attachments.py` — a new shared cross-module constant would be less
+   idiomatic than extending the convention that's already there), and pass
+   `num_retries=_NUM_RETRIES` on every non-resumable `.execute()` call in
+   that module. `backup.py` gets both constants side by side —
+   `_MEDIA_NUM_RETRIES = 0` (unchanged, still commented as deliberate) and a
+   new `_NUM_RETRIES = 5` for every other call including `prune_snapshots`'s.
+2. **Rebuild-on-persistent-failure, backup only.** `daemon.maybe_backup`
+   already tracks `consecutive_failures` via `write_backup_state`. Add: after
+   a backup attempt fails AND `consecutive_failures >= 2` (two full-interval
+   misses, matching the existing "single failure is routine" philosophy
+   already documented at `probes.py:168`), rebuild `drive_service` via
+   `_build_drive_service()` and swap it into `self._backup.drive_service`
+   under `_config_lock` before returning. This is a second, smaller safety
+   net for the case where the client/session itself is persistently broken
+   in a way layer-1's per-call retry can't paper over (e.g. a stale/invalid
+   token) — with layer 1 in place codebase-wide, this should fire far less
+   often than the 4 outages that motivated it originally, but it closes the
+   "only a full daemon restart fixes it" gap for whatever's left.
+   `BackupConfig.drive_service` is already a plain, reassignable dataclass
+   field — no schema change needed.
+
+**Testing:** for each touched module, a unit test asserting its `.execute()`
+calls pass `num_retries=_NUM_RETRIES` (grep-style assertion against the call,
+or a fake `http` that records `num_retries` on the request object). Unit
+test `maybe_backup`'s rebuild trigger: fake `drive_service` raising twice,
+assert `_build_drive_service` (monkeypatched) gets called and the daemon's
+`_backup.drive_service` identity changes.
 
 ---
 
 ## 2. Tabular rendering: schema-enriched rows + skip dense embedding
 
 **Files:** `mcpbrain/sync/tabular.py` (`render_chunks`, `_fit_row`, `_md_row`,
-`normalise_rows` stays as-is — the *global* width computation is what's being
-removed, not the trim itself), `mcpbrain/index.py` (`index_pending`),
-`mcpbrain/store.py` (`write_embedding`, `unembedded_chunks`).
+`normalise_rows`), `mcpbrain/index.py` (`index_pending`), `mcpbrain/store.py`
+(`write_embedding`, `unembedded_chunks`).
+
+### 2a-0. Root-cause fix in `normalise_rows` (defense in depth, not just the renderer)
+
+The renderer redesign below (2a) makes the *output* immune to a phantom-width
+`Table`, but `normalise_rows()` itself is still where the phantom width gets
+created, and it feeds more than just the renderer — `_summary_text` (the
+per-table "summary" chunk emitted first) loops `for i, name in
+enumerate(t.header): for r in t.rows: ...`, an O(width × rows) cost that
+scales with the SAME inflated width (a genuinely wide phantom-column sheet
+would make this loop slow, independent of the chunk-size bug). Fixing this
+one level down closes both problems at the source and benefits every current
+and future consumer of `Table`, not just `render_chunks`.
+
+Current logic trims trailing columns using the MAX non-empty column index
+across every row — exactly what one anomalous row (the reproducing case: a
+title banner with a single stray non-empty cell far to the right) defeats.
+The fix is **not** switching to a median (a legitimately-sparse-but-real
+trailing column used by a genuine minority of rows — e.g. a "notes" column
+only some invoice rows populate — could get silently dropped if fewer than
+half the rows use it). Instead, require **minimum multi-row support**: a
+column only counts as real if at least `max(2, len(kept) // 100)` distinct
+rows have non-empty content there (tune the exact fraction during
+implementation against real fixture data). One outlier row can never clear a
+support threshold of 2 on its own, while a column used by even a modest
+minority of rows still counts as real. Falls back to today's behavior (no
+column clears the threshold — e.g. a genuinely tiny 1-2 row table) so a small
+legitimate table isn't wrongly trimmed to zero width.
 
 ### 2a. Rendering redesign
 
@@ -201,10 +259,14 @@ chunks where `content_subtype == "table" AND length(text) > 2000`
 being returned by dense search right away, ahead of the version-bump sweep
 re-rendering their `text` from scratch.
 
-**Testing:** unit tests for the new renderer against the exact reproducing
-case (a table with a header at column 0 and one anomalous row with a
-non-empty value far to the right) asserting output stays under `CHUNK_CHARS`
-regardless. Unit test the field-count safety valve. Unit test
+**Testing:** unit test `normalise_rows` against the exact reproducing case
+(a title-banner row with one stray non-empty far-right cell among hundreds
+of normal-width rows) asserting the outlier no longer inflates width, PLUS a
+case with a legitimately-sparse real column (used by a minority but more
+than the support floor of rows) asserting it's preserved, not dropped. Unit
+tests for the new renderer against the same reproducing case, asserting
+output stays under `CHUNK_CHARS` regardless (belt-and-suspenders even after
+2a-0's fix). Unit test the field-count safety valve. Unit test
 `write_embedding(rowid, None)` writes `fts_chunks` and stamps `embedded=1`
 without touching `vec_chunks`. Unit test `index_pending`'s batch
 partitioning (table chunks never reach `embed_passages`).
@@ -225,6 +287,16 @@ at `drive.py:346`). Single-chunk case (the common one) keeps today's bare
 `note-consolidated-<hash>` doc_id unchanged — no migration needed for
 existing single-chunk notes.
 
+**Why this has to be a write-time cap, not just a prompt fix:** the
+consolidation prompt (`consolidation.py:_PROMPT_TEMPLATE`) already asks for
+"a concise durable semantic note (3-6 sentences)" — and 1,151 notes still
+average 18K chars anyway. The prompt instruction is evidence, not a
+guarantee; an LLM asked for 3-6 sentences over a large/diverse source
+cluster can still produce far more (e.g. trying to cite every source
+individually). This is exactly why the fix has to be defensive at the write
+layer regardless of prompt wording — consistent with every other bound in
+this codebase (never trust upstream generation to self-limit).
+
 **Testing:** unit test `_write_note` with a summary long enough to require
 2+ chunks — assert multiple doc_ids written, each under budget, and that a
 short summary still produces exactly the current single-doc_id shape
@@ -234,29 +306,63 @@ short summary still produces exactly the current single-doc_id shape
 
 ## 4. Generalize the re-chunk repair sweep across source types
 
-**Files:** `bin/repair.py` (currently Drive-only `reingest-stale`).
+**Files:** `bin/repair.py` (`phase_reingest_stale`), `mcpbrain/store.py`
+(`stale_chunker_file_ids` → generalized), `mcpbrain/sync/gmail.py` (new
+`reingest_messages`, mirroring the existing `reingest_files` shape),
+`mcpbrain/sync/calendar.py` (reuse `backfill_calendar_window`, no new
+function needed).
 
-Replace the Drive-specific stale query with a generic one keyed only on
-`chunker_version < CHUNKER_VERSION` (already the correct predicate — just
-not applied outside `doc_id LIKE 'gdrive-%'` today), dispatching the re-fetch
-by doc_id prefix: `gdrive-*` → `backfill_drive` (existing behavior,
-unchanged), `gmail-*` → `backfill_gmail` for the owning thread, `cal-*` →
-`backfill_calendar_window` for the owning event's window. `note-*` chunks are
-out of scope for this sweep (they're regenerated by consolidation, not
-re-fetched from a source) — section 3's fix is what bounds them going
-forward.
+**Store layer:** `store.stale_chunker_file_ids(CHUNKER_VERSION, limit)` is
+Drive-specific by name and by query (`doc_id LIKE 'gdrive-%'` implied by its
+existing use). Generalize to `store.stale_chunker_ids(CHUNKER_VERSION,
+limit) -> list[dict]`, returning `{"source_type": "gdrive"|"gmail"|
+"calendar", "id": <file_id|thread_id|event_id>}` per stale item, grouped by
+owning file/thread/event (not per-chunk) exactly as the Drive version
+already does. Process sequentially by source type (Drive, then Gmail, then
+Calendar) rather than interleaving — the tool is already designed to be
+re-run repeatedly and safely (no cursor to disturb, per `reingest_files`'s
+own docstring), so successive runs naturally make cross-source progress
+without needing round-robin scheduling; that's added complexity this
+one-time-ish sweep doesn't need.
 
-This must ship *before or alongside* section 2a's `CHUNKER_VERSION` bump —
-otherwise bumping the version marks every chunk stale with no sweep able to
-act on the non-Drive ones yet, which is harmless (they just wait) but
-pointless to sequence that way. Implementation order: land section 4 first
-(pure generalization, no behavior change until a version bump happens),
-then land 2a's version bump on top.
+**Dispatch, mirroring the existing Drive path exactly:**
+- `gdrive` → `reingest_files` (unchanged, existing behavior).
+- `gmail` → new `sync/gmail.py::reingest_messages(service, store,
+  message_ids, ...)`, built the same shape as `reingest_files`: per message,
+  `_fetch_one` (already exists, already thread-safe, already retries via its
+  own `_NUM_RETRIES`) → re-chunk → `upsert_email_context`/chunk write. Unlike
+  Drive, an email's content never shrinks after the fact (immutable once
+  sent), so there's no B5-style orphan-sweep needed here — this is purely
+  "re-chunk under the current chunker version," simpler than the Drive case.
+  **Must still replicate `reingest_files`'s convergence guard**: a 404'd
+  message (deleted/inaccessible) gets its existing chunks stamped with the
+  current `chunker_version` anyway, exactly like Drive's `missing`/`empty`
+  outcomes — without this, a permanently-inaccessible message gets
+  re-selected and re-fetched on every single run forever (this is a measured,
+  not hypothetical, failure mode: Drive's own reingest hit exactly this,
+  ~46 repeat fetches of the same 10 files in 41 minutes, before the stamp-on
+  non-convergent-outcome guard was added).
+- `calendar` → reuse `backfill_calendar_window` scoped to a narrow window
+  bracketing the stale event's own start time, rather than building a new
+  targeted single-event-refetch primitive. Calendar's stale-chunk volume is
+  tiny (4, in the original investigation) — not worth a bespoke function for.
+- `note-*` chunks stay out of scope for this sweep (regenerated by
+  consolidation, not re-fetched from a source) — section 3 is what bounds
+  them going forward.
+
+**Sequencing constraint (unchanged from the original draft):** this must
+ship *before or alongside* section 2a's `CHUNKER_VERSION` bump — bumping the
+version with no generalized sweep in place would mark every non-Drive chunk
+stale with nothing able to act on it, which is harmless (they just wait) but
+pointless to sequence that way. Land section 4 first (pure generalization,
+no behavior change until a version bump happens), then land 2a's version
+bump on top.
 
 **Testing:** extend `bin/repair.py`'s existing test coverage with a
-Gmail-sourced stale chunk fixture, asserting it gets re-queued through
-`backfill_gmail` the same way a Drive fixture goes through `backfill_drive`
-today.
+Gmail-sourced stale-message fixture, asserting it gets re-queued through the
+new `reingest_messages` the same way a Drive fixture goes through
+`reingest_files` today, plus a Calendar fixture asserting the narrow-window
+`backfill_calendar_window` call.
 
 ---
 
