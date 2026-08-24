@@ -783,3 +783,28 @@ def test_main_reports_a_rebuild_failure_without_a_traceback(tmp_path, capsys):
     assert "REBUILD FAILED" in out and "NOT NULL constraint failed" in out
     assert "UNTOUCHED" in out
     assert "Traceback" not in out
+
+
+# --- Task 10: prove the rollback path actually restores --------------------
+
+def test_snapshot_taken_before_rebuild_restores_the_original(tmp_path):
+    """Tests the raw `backup` primitive that BOTH main()'s GATE 2 snapshot and
+    `--rollback --yes` depend on. Untested rollback is not rollback."""
+    from mcpbrain import backup
+    src = tmp_path / "src.sqlite3"
+    s = Store(str(src), dim=4); s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO chunks(doc_id,text,embedded) VALUES('d1','keep me',0)")
+
+    key = backup.generate_escrow_key()
+    enc = tmp_path / "snap.enc"
+    backup.make_encrypted_snapshot(src, enc, key)
+
+    src.unlink()                      # simulate a failed rebuild + lost original
+    restored = tmp_path / "restored.sqlite3"
+    backup.restore(enc, restored, key)
+
+    import sqlite3
+    db = sqlite3.connect(restored)
+    assert db.execute("SELECT text FROM chunks WHERE doc_id='d1'").fetchone()[0] == "keep me"
+    db.close()
