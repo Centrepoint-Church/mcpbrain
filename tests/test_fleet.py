@@ -76,7 +76,7 @@ class _Exec:
     def __init__(self, value):
         self._value = value
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._value
 
 
@@ -457,3 +457,27 @@ def test_write_report_empty_folder_prints_no_beacons(tmp_path, monkeypatch, caps
     fleet.write_report(str(tmp_path), _DriveMulti(store))
     assert "No beacons found" in capsys.readouterr().out
     assert "created" not in store and "updated" not in store  # nothing uploaded
+
+
+def test_list_all_passes_num_retries():
+    """_list_all passes num_retries to every .execute() call in the pagination loop."""
+    from mcpbrain import fleet
+
+    calls = []
+
+    class _FakeExec:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return {"files": []}
+
+    class _FakeFilesResource:
+        def list(self, **kw):
+            return _FakeExec()
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFilesResource()
+
+    fleet._list_all(_FakeDriveService(), q="x", fields="x")
+
+    assert calls == [fleet._NUM_RETRIES]
