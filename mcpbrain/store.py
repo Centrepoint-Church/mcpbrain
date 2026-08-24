@@ -1145,12 +1145,36 @@ class Store:
             # created earlier would fail on a fresh store.
             db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unembedded "
                        "ON chunks(rowid) WHERE embedded=0")
-            # unenriched_chunks() also filters enrich_state != 'cold' and orders
-            # by rowid DESC, so the key is (enrich_state, rowid): a reverse walk
-            # of the index serves the order without a temp b-tree.
+            # unenriched_chunks(): the key is rowid ALONE, deliberately. That
+            # removes the full scan on `enriched=0`, and because rowid is the
+            # only key column a reverse walk also satisfies the query's
+            # ORDER BY rowid DESC — measured plan: 'SCAN chunks USING INDEX
+            # idx_chunks_unenriched', no temp b-tree.
+            #
+            # A (enrich_state, rowid) key was measured strictly WORSE: the
+            # leading column destroys that ordering (the plan gains USE TEMP
+            # B-TREE FOR ORDER BY) and buys nothing on the predicate side,
+            # because the query filters COALESCE(enrich_state,'') != 'cold',
+            # not the bare column — an expression no plain-column index can
+            # seek. That and the doc_id NOT LIKE are filtered per row either
+            # way.
             db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unenriched "
-                       "ON chunks(enrich_state, rowid) WHERE enriched=0")
-            # reindex_fts_batch's embedded=1 AND fts_context_version < N.
+                       "ON chunks(rowid) WHERE enriched=0")
+            # reindex_fts_batch's `embedded=1 AND fts_context_version < N`.
+            #
+            # That query MUST filter the bare column, not COALESCE(...,0): a
+            # plain-column index cannot serve a COALESCE-wrapped predicate, so
+            # the COALESCE form plans as SCAN chunks and this index would be
+            # pure write-time cost on one of the hottest tables in the store.
+            # Same index/query-drift class as the 0.7.105 json_extract bug that
+            # _meta_extract() exists to prevent. The COALESCE was removed as
+            # dead defensive code: the column is INTEGER DEFAULT 0, SQLite
+            # returns that default for rows predating the ALTER, all three
+            # writers stamp an int, and the live store reads 170,695/170,695
+            # rows as typeof()='integer' with zero NULLs. If a NULL ever
+            # becomes reachable, make this an expression index on
+            # COALESCE(fts_context_version,0) and put the COALESCE back — index
+            # and query must move together.
             db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fts_stale "
                        "ON chunks(fts_context_version) WHERE embedded=1")
 
@@ -2065,11 +2089,19 @@ class Store:
         was actually applied (see _fts_text), this only ever migrates genuinely
         stale rows — either legacy pre-Phase-C rows, or rows written while the
         contextual_retrieval flag was OFF that need to catch up once it flips ON.
+
+        The predicate reads the BARE column, not COALESCE(fts_context_version,0):
+        SQLite cannot serve a COALESCE-wrapped predicate from the plain-column
+        partial index idx_chunks_fts_stale, so the COALESCE form scanned the
+        whole chunks table while paying that index's write cost anyway. The
+        COALESCE was dead defensively: the column is INTEGER DEFAULT 0 (SQLite
+        returns that default for rows predating the ALTER), all three writers
+        stamp an int, and the live store has zero NULLs in 170,695 rows.
         """
         with self._connect(write=True) as db:
             rows = db.execute(
                 "SELECT rowid, text, metadata FROM chunks "
-                "WHERE embedded=1 AND COALESCE(fts_context_version,0) < ? LIMIT ?",
+                "WHERE embedded=1 AND fts_context_version < ? LIMIT ?",
                 (self.FTS_CONTEXT_VERSION, cap)).fetchall()
             n = 0
             for r in rows:
