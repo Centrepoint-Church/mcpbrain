@@ -40,6 +40,8 @@ DEFAULT_READ_TIMEOUT_S = 60
 
 logger = logging.getLogger(__name__)
 
+_NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -239,7 +241,8 @@ def fetch_google_name(creds: Credentials) -> str:
     error (e.g. the token wasn't granted the userinfo.profile scope). Best-effort:
     used only to prefill the wizard's name field, so it must never raise."""
     try:
-        info = build_service("oauth2", "v2", creds).userinfo().get().execute()
+        info = build_service("oauth2", "v2", creds).userinfo().get() \
+            .execute(num_retries=_NUM_RETRIES)
         return (info.get("name") or "").strip()
     except Exception:  # noqa: BLE001 — prefill nicety; degrade silently
         return ""
