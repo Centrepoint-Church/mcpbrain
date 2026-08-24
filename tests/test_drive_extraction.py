@@ -290,3 +290,27 @@ def test_a_content_free_document_produces_no_chunks():
     fmeta = {"id": "f1", "name": "Empty.txt", "mimeType": "text/plain"}
 
     assert normalise_drive(fmeta, "|  |  |  |\n\n|  |  |  |") == []
+
+
+def test_fetch_text_get_media_passes_num_retries():
+    from mcpbrain.sync import drive
+
+    calls = []
+
+    class _FakeExec:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return b"file contents"  # get_media returns raw bytes, decoded below
+
+    class _FakeFiles:
+        def get_media(self, **kw):
+            return _FakeExec()
+
+    class _FakeService:
+        def files(self):
+            return _FakeFiles()
+
+    result = drive._fetch_text(_FakeService(), {"id": "f1", "mimeType": "text/plain"})
+
+    assert result == "file contents"  # _fetch_text decodes bytes -> str
+    assert calls == [drive._NUM_RETRIES]

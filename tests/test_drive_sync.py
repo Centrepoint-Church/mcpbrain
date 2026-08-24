@@ -17,7 +17,7 @@ class _Req:
         self._r = result
         self._e = raise_exc
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._e:
             raise self._e
         return self._r
@@ -782,7 +782,7 @@ def test_folder_path_is_resolved_and_cached():
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"folder-1": {"id": "folder-1", "name": "Budgets",
                                  "parents": ["folder-0"]},
                     "folder-0": {"id": "folder-0", "name": "Finance",
@@ -1030,7 +1030,7 @@ def test_fetch_content_marks_a_partial_table_extraction(monkeypatch):
     xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     class _Media:
-        def execute(self):
+        def execute(self, num_retries=0):
             return b"fake"
 
     class _Files:
@@ -1060,7 +1060,7 @@ def test_fetch_content_does_not_mark_a_complete_extraction(monkeypatch):
     xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     class _Media:
-        def execute(self):
+        def execute(self, num_retries=0):
             return b"fake"
 
     class _Files:
@@ -1177,7 +1177,7 @@ def test_reingest_files_replaces_a_files_chunks_from_a_fresh_fetch(tmp_path, mon
         def get_media(self, fileId, supportsAllDrives=None):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
                     "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
 
@@ -1230,7 +1230,7 @@ def test_a_file_that_genuinely_extracts_to_nothing_stops_being_selected(tmp_path
         def get_media(self, fileId=None, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "empty1", "name": "Guest Coffee Vouchers.xlsx",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1276,7 +1276,7 @@ def test_a_transient_failure_does_NOT_stop_the_file_being_selected(tmp_path, mon
         def get(self, fileId=None, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "flaky", "name": "F.txt", "mimeType": "text/plain",
                     "parents": []}
 
@@ -1318,7 +1318,7 @@ def test_reingest_files_skips_a_file_that_no_longer_exists(tmp_path):
         def get(self, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             raise HttpError(_Resp(), b"not found")
 
     summary = drive.reingest_files(_Service(), store, ["gone"])
@@ -1354,7 +1354,7 @@ def test_reingest_files_isolates_a_non_404_httperror_from_metadata_fetch(tmp_pat
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             if self._fid == "throttled":
                 raise HttpError(_Resp(), b"rate limited")
             return {"id": self._fid, "name": f"{self._fid}.txt",
@@ -1385,7 +1385,7 @@ def test_reingest_files_is_bounded_and_reports_per_file_failures(tmp_path, monke
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1428,7 +1428,7 @@ def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1468,7 +1468,7 @@ def test_reingest_files_with_workers_isolates_a_per_file_failure(tmp_path, monke
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": self._fid, "name": f"{self._fid}.txt",
                     "mimeType": "text/plain", "parents": []}
 
@@ -1516,7 +1516,7 @@ def test_reingest_refreshes_metadata_when_the_text_is_byte_identical(tmp_path, m
             self._fid = fileId
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             return {"id": "f1", "name": "Notes.txt", "mimeType": "text/plain",
                     "modifiedTime": "2026-07-01T00:00:00Z", "parents": []}
 
@@ -1553,7 +1553,7 @@ def test_reingest_keeps_the_drive_id_stamp_for_a_shared_drive_file(tmp_path, mon
             self._fid, self._fields = fileId, fields
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             assert "driveId" in (self._fields or ""), (
                 "driveId must be requested or the fetched metadata can never "
                 f"carry it: {self._fields}"
@@ -1608,7 +1608,7 @@ def test_a_file_gone_from_drive_also_stops_being_selected(tmp_path, monkeypatch)
         def get(self, **kw):
             return self
 
-        def execute(self):
+        def execute(self, num_retries=0):
             raise HttpError(_Resp(), b"not found")
 
     summary = drive.reingest_files(_Service(), store, ["gone"])
