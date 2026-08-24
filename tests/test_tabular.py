@@ -25,16 +25,57 @@ def _table(header=None, rows=None, *, sheet="GL Detail", truncated=False, total=
                          truncated=truncated)
 
 
-def test_every_row_group_chunk_repeats_the_header():
-    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=120)
+def test_row_sentences_use_schema_enriched_format():
+    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=1800)
     rows = [(t, m) for t, m in chunks if m["table_role"] == "rows"]
 
-    assert len(rows) >= 2, "max_chars=120 should force more than one row group"
-    for text, _meta in rows:
-        assert "| Date | Account | Description | Amount |" in text, (
-            "a row-group chunk without its header is the B2 defect: orphaned "
-            f"numbers with no column names. Got:\n{text}"
-        )
+    assert rows, "expected at least one row-group chunk"
+    text, _meta = rows[0]
+    assert "Date: 2024-03-01" in text
+    assert "Account: 4521" in text
+    assert "Description: Office supplies" in text
+    assert "Amount: 42.00" in text
+    # No markdown grid artifacts survive.
+    assert "| Date | Account" not in text
+    assert "---" not in text
+
+
+def test_empty_cells_are_never_rendered():
+    header = ["Item", "Cost", "Notes"]
+    rows = [["Chair", "50", ""]]  # Notes is empty for this row
+    table = tabular.Table(sheet="S", header=header, rows=rows, rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "Notes" not in text, "an empty cell must not render at all"
+
+
+def test_phantom_wide_row_stays_under_chunk_chars_regardless():
+    # Belt-and-suspenders: even without Task 10's normalise_rows fix, one
+    # anomalous row with thousands of non-empty phantom cells must not blow
+    # the chunk budget, because the field-count safety valve bounds it.
+    header = ["Item"] + [f"col{i}" for i in range(5000)]
+    phantom_row = ["Chairs"] + [f"v{i}" for i in range(5000)]  # all non-empty
+    table = tabular.Table(sheet="S", header=header, rows=[phantom_row], rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    for text, meta in chunks:
+        if meta["table_role"] == "rows":
+            assert len(text) <= 1800 + 200, (
+                f"row-group chunk of {len(text)} chars exceeds budget even "
+                "with the field-count safety valve")
+
+
+def test_row_with_too_many_fields_gets_elided():
+    header = ["Item"] + [f"col{i}" for i in range(60)]
+    row = ["Chairs"] + [f"v{i}" for i in range(60)]
+    table = tabular.Table(sheet="S", header=header, rows=[row], rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=100_000)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "more fields" in text
 
 
 def test_each_row_group_names_its_sheet_and_row_range():
