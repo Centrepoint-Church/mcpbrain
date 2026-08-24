@@ -123,8 +123,14 @@ def embed_skip_tabular_enabled(home) -> bool:
     Default: FALSE. Ships off until validated on the live gold-eval harness
     that recall@10/MRR are unaffected -- same rollout discipline as
     salience_gate and recall_excludes_cold before it.
+
+    Resolved through `fleet_flag`, not a bare read_config: the whole point of
+    shipping OFF is that it gets flipped ON once the gold harness clears it,
+    and going through the org overlay means that flip is an org-config.json
+    edit ({"flags": {"embed_skip_tabular": true}}) rather than another
+    release -- with the same local-False kill-switch every fleet flag has.
     """
-    return bool(read_config(home).get("embed_skip_tabular", False))
+    return bool(fleet_flag(home, "embed_skip_tabular", False))
 
 
 def enrich_org_default_enabled(home) -> bool:
