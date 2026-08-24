@@ -56,7 +56,14 @@ NOISE_SENDERS = [
     # marketing senders; neither appears in real org/ministry mail.
     "updates@",       # Ubiquiti mailchimp newsletter (updates@ui.com)
     "microsoftstore",  # Microsoft Store retail blast (Microsoftstore@microsoftstore.microsoft.com)
+    "toolsonair.com",  # ToolsOnAir vendor blast (license/trade-show marketing, no relationship mail)
+    "medium.com",      # Medium digest/newsletter platform, no genuine 1:1 correspondence
     # Deliberately NOT added: support@, info@, hello@ — too broad, hit real mail.
+    # Deliberately NOT added: peakconsultancy.com.au — the sender (John Hardy)
+    # has genuine correspondence history (meeting invites, assistance
+    # requests); a domain-level block would also suppress future real mail
+    # from him. His occasional pure-marketing blasts slip through uncaught,
+    # same accepted tradeoff as Fivetran below.
 ]
 
 NOISE_SUBJECT_PATTERNS = [
@@ -93,6 +100,11 @@ _BULK_BODY_MARKERS = (
     "list-unsubscribe",
     "view in browser",
     "view this email in your browser",
+    # Internal tool debug/eval output (mcpbrain addition) — not bulk mail, but
+    # the same "never appears in genuine correspondence" property holds, and
+    # this content has leaked into the graph as bogus business "fyi" notes.
+    "ops-brain eval harness",
+    "evals passed",
 )
 
 _SUBJECT_LEADING_DECORATION = re.compile(r"^[^\w\[]+")

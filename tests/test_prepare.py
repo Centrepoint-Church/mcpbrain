@@ -220,6 +220,49 @@ def test_guard_shop_today_cta_is_noise():
     assert prepare._is_noise("a@b.com", "Shop today — limited stock") is True
 
 
+# --- 2.1d pre-enrichment filter additions ----------------------------------
+
+def test_thread_is_noise_toolsonair_vendor_blast():
+    # Real leaked email: ToolsOnAir product/license marketing, no relationship.
+    assert prepare.thread_is_noise([
+        _msg("m1", "ToolsOnAir <helpdesk@toolsonair.com>", "2026-06-01",
+             "Discover what's new in ToolsOnAir Capture 2026.1",
+             "Thank you for downloading and testing Just In Mac Lite."),
+    ]) is True
+
+
+def test_thread_is_noise_medium_digest():
+    # Real leaked email: Medium digest. Caught by the medium.com sender token
+    # even for an address that doesn't contain "noreply".
+    assert prepare.thread_is_noise([
+        _msg("m1", "Medium Daily Digest <digest@medium.com>", "2026-06-01",
+             "Today's highlights", "Stories for Josh K"),
+    ]) is True
+
+
+def test_thread_is_noise_ops_brain_eval_harness_body_marker():
+    # Real leaked content: internal eval-harness output landed in the graph as
+    # a business "fyi" note. Caught via a body marker, not sender/subject,
+    # since the sender/subject here look unremarkable.
+    assert prepare.thread_is_noise([
+        _msg("m1", "josh.k@centrepoint.church", "2026-06-01", "Test run",
+             "ops-brain eval harness: 34/67 evals passed. FAIL ..."),
+    ]) is True
+
+
+def test_guard_peak_consultancy_real_correspondence_not_noise():
+    # Deliberately NOT added to NOISE_SENDERS: John Hardy at Peak Consultancy
+    # has genuine correspondence history (meeting invites, assistance
+    # requests), so a sender/domain-level block would also suppress future
+    # real mail from him. Only his occasional pure-marketing blasts slip
+    # through uncaught — an accepted tradeoff, same as Fivetran above.
+    assert prepare.thread_is_noise([
+        _msg("m1", "John Hardy <john@peakconsultancy.com.au>", "2026-06-01",
+             "Zoom meeting invitation",
+             "Let's meet to discuss the email sequences you need help with."),
+    ]) is False
+
+
 # --- 2.2 noise threads skipped + marked enriched ---------------------------
 
 def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
