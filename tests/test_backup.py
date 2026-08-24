@@ -1091,11 +1091,13 @@ class _FakeCreate:
 
 
 class _FakeList:
-    def __init__(self, calls, canned):
+    def __init__(self, calls, canned, executes=None):
         self.calls = calls
         self.canned = canned
+        self.executes = executes if executes is not None else []
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         return self.canned
 
 
@@ -1700,7 +1702,7 @@ class _FLReq:
     def __init__(self, result):
         self._r = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._r
 
 
@@ -1858,11 +1860,13 @@ def test_download_snapshot_writes_bytes_via_injected_factory(tmp_path):
 # --- snapshot retention (prune) ---------------------------------------------
 
 class _FakeDelete:
-    def __init__(self, deleted, file_id):
+    def __init__(self, deleted, file_id, executes=None):
         self.deleted = deleted
         self.file_id = file_id
+        self.executes = executes if executes is not None else []
 
     def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         self.deleted.append(self.file_id)
         return {}
 
@@ -1875,6 +1879,7 @@ class FakeFilesPrune:
     def __init__(self, snapshot_files):
         self._snaps = snapshot_files
         self.deleted = []
+        self.delete_retries = []
 
     def list(self, **kw):
         q = kw.get("q", "")
@@ -1883,7 +1888,7 @@ class FakeFilesPrune:
         return _FakeList([], {"files": list(self._snaps)})
 
     def delete(self, *, fileId, supportsAllDrives=False):
-        return _FakeDelete(self.deleted, fileId)
+        return _FakeDelete(self.deleted, fileId, self.delete_retries)
 
 
 def _snap(i, day):
@@ -1915,6 +1920,32 @@ def test_prune_keep_zero_is_noop():
     svc = FakeService(FakeFilesPrune(files))
     assert prune_snapshots(svc, "drive-X", "sam", keep=0) == 0
     assert svc._files.deleted == []
+
+
+def test_upload_snapshot_folder_lookup_and_create_pass_num_retries(tmp_path):
+    from mcpbrain.backup import upload_snapshot, _NUM_RETRIES, _MEDIA_NUM_RETRIES
+
+    src = tmp_path / "snap.enc"
+    src.write_bytes(b"ciphertext")
+    files = FakeFiles(list_response={"files": []})
+    service = FakeService(files)
+
+    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
+
+    # Folder create uses _NUM_RETRIES; media file upload uses _MEDIA_NUM_RETRIES.
+    assert files.execute_retries == [_NUM_RETRIES, _MEDIA_NUM_RETRIES]
+
+
+def test_prune_snapshots_list_and_delete_pass_num_retries():
+    from mcpbrain.backup import prune_snapshots, _NUM_RETRIES
+
+    files = [_snap(i, i) for i in range(1, 6)]
+    fake_files = FakeFilesPrune(files)
+    svc = FakeService(fake_files)
+
+    prune_snapshots(svc, "drive-X", "sam", keep=3)
+
+    assert fake_files.delete_retries == [_NUM_RETRIES, _NUM_RETRIES]
 
 
 # --- Task 2: the artifact carries an intact vector index -----------------------
