@@ -837,3 +837,245 @@ def test_reingest_messages_stamps_version_on_empty_normalise_result(tmp_path):
     assert chunk["metadata"]["reextract_empty"] is True
     # Stamping touches metadata only -- the existing content is left alone.
     assert chunk["text"] == "old content"
+
+
+# ---------------------------------------------------------------------------
+# Final-review C1/I1: the unchanged-content_hash guard, and attachments
+# ---------------------------------------------------------------------------
+
+def _att_fake(chunks, *, skips=None):
+    """A fake attachments.fetch_and_normalise matching the real signature
+    _fetch_one calls it with (report=..., no store)."""
+    seen: list = []
+
+    def _fetch(service, raw, *, store=None, report=None):
+        seen.append(raw["id"])
+        if skips and report is not None:
+            for key, count in skips.items():
+                report[key] = report.get(key, 0) + count
+        return list(chunks)
+
+    return _fetch, seen
+
+
+def test_reingest_messages_stamps_version_on_a_byte_identical_rechunk(tmp_path):
+    """The NORMAL case for a Gmail sweep, not a corner one.
+
+    CHUNKER_VERSION 2->3 changed sync/tabular.py only -- `chunk_text` (which
+    chunks every Gmail body) is untouched -- so a re-fetched prose message
+    re-chunks BYTE-IDENTICALLY. store.upsert_chunk short-circuits on an
+    unchanged content_hash and writes nothing at all, metadata included, so
+    without the patch_chunk_metadata fallback the chunk never acquires the new
+    chunker_version, store.stale_chunker_ids re-selects the thread forever,
+    and `bin/repair.py reingest-stale` burns Gmail quota on the same threads
+    every run while reporting success.
+    """
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync.gmail import reingest_messages
+    from mcpbrain.sync.normalise import normalise_gmail
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+
+    msg_m1 = plain_msg("m1", "Re: test", "a@b.com",
+                       "This body is stored exactly as it re-chunks.")
+    msg_m1["threadId"] = "t1"
+    # Seed EXACTLY what the re-fetch will produce, only on the old version.
+    expected = normalise_gmail(msg_m1)
+    assert expected, "fixture must produce at least one body chunk"
+    for c in expected:
+        store.upsert_chunk(c.doc_id, c.text, c.content_hash,
+                           {**c.metadata, "chunker_version": 1})
+
+    svc = FakeService(messages={"m1": msg_m1})
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
+    for c in expected:
+        chunk = store.get_chunk(c.doc_id)
+        assert chunk["metadata"]["chunker_version"] == CHUNKER_VERSION, c.doc_id
+        assert chunk["text"] == c.text          # unchanged, as expected
+
+
+def test_reingest_messages_reingests_attachment_chunks_and_sweeps_orphans(
+        tmp_path, monkeypatch):
+    """Attachment chunks are the ones the tabular fix exists to repair.
+
+    They are produced by sync/attachments.normalise_attachment (which routes
+    spreadsheets through sync/tabular.render_chunks), so a body-only re-ingest
+    would leave every emailed workbook on the old chunker_version and the
+    thread would be re-selected forever. They are also the one shape that can
+    SHRINK -- a phantom-column-inflated sheet collapses to fewer chunks -- so
+    the surplus tail doc_ids must be deleted, not left behind as searchable
+    garbage (B5).
+    """
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.gmail import reingest_messages
+    from mcpbrain.sync.normalise import Chunk
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    store.upsert_chunk("gmail-m1-body-0", "old body", "hb",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    # Two attachment chunks today; the re-render produces only the first.
+    store.upsert_chunk("gmail-m1-att-0-0", "Item: chair; Cost: 12", "ha0",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "content_subtype": "table",
+                        "chunker_version": 1})
+    store.upsert_chunk("gmail-m1-att-0-1", "phantom-column overflow", "ha1",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "content_subtype": "table",
+                        "chunker_version": 1})
+
+    # Byte-identical to what is stored, so this ALSO exercises the C1 guard on
+    # the attachment write path.
+    fresh_att = Chunk(doc_id="gmail-m1-att-0-0", text="Item: chair; Cost: 12",
+                      content_hash="ha0",
+                      metadata={"source_type": "gmail", "thread_id": "t1",
+                                "message_id": "m1", "content_subtype": "table",
+                                "chunker_version": CHUNKER_VERSION})
+    fetch, seen = _att_fake([fresh_att])
+    monkeypatch.setattr(attachments, "fetch_and_normalise", fetch)
+
+    msg_m1 = plain_msg("m1", "Invoice", "a@b.com", "See the attached sheet.")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
+    assert seen == ["m1"], "reingest_messages never reached the attachment path"
+    # The surviving attachment chunk acquired the current version even though
+    # its text was byte-identical (the C1 guard on the attachment write).
+    assert store.get_chunk("gmail-m1-att-0-0")["metadata"][
+        "chunker_version"] == CHUNKER_VERSION
+    # The orphaned tail chunk is gone.
+    assert store.get_chunk("gmail-m1-att-0-1") is None
+    # The body was re-chunked normally and is NOT swept.
+    assert store.get_chunk("gmail-m1-body-0")["metadata"][
+        "chunker_version"] == CHUNKER_VERSION
+
+
+def test_reingest_messages_orphan_sweep_skipped_after_an_attachment_failure(
+        tmp_path, monkeypatch):
+    """attachments.fetch_and_normalise is best-effort per attachment: a 404 or
+    a failed extraction silently yields FEWER chunks. Deleting on that would
+    destroy previously-good chunks over a transient error -- the same hazard
+    drive.upsert_file_chunks' `partial` guard exists for."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    store.upsert_chunk("gmail-m1-body-0", "old body", "hb",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    store.upsert_chunk("gmail-m1-att-0-0", "good rows", "ha0",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    fetch, _seen = _att_fake(
+        [], skips={("attachment_fetch_failed", "application/pdf"): 1})
+    monkeypatch.setattr(attachments, "fetch_and_normalise", fetch)
+
+    msg_m1 = plain_msg("m1", "Invoice", "a@b.com", "See the attached sheet.")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
+    assert store.get_chunk("gmail-m1-att-0-0") is not None, \
+        "a transient attachment failure must never be read as a shrink"
+    # Its version is deliberately NOT stamped either -- nothing re-rendered it.
+    assert store.get_chunk("gmail-m1-att-0-0")["metadata"]["chunker_version"] == 1
+    assert store.get_chunk("gmail-m1-body-0")["metadata"][
+        "chunker_version"] == CHUNKER_VERSION
+
+
+def test_reingest_messages_orphan_sweep_skipped_when_attachments_are_off(
+        tmp_path, monkeypatch):
+    """With gmail_attachments off, att_chunks is empty for EVERY message --
+    which is not evidence that anything shrank. Previously-ingested attachment
+    chunks must survive untouched."""
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.gmail import reingest_messages
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"gmail_attachments": false}')
+
+    store.upsert_chunk("gmail-m1-body-0", "old body", "hb",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+    store.upsert_chunk("gmail-m1-att-0-0", "good rows", "ha0",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    called: list = []
+    monkeypatch.setattr(attachments, "fetch_and_normalise",
+                        lambda *a, **kw: called.append(1) or [])
+
+    msg_m1 = plain_msg("m1", "Invoice", "a@b.com", "See the attached sheet.")
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    reingest_messages(svc, store, ["t1"])
+
+    assert called == [], "the flag is off; the attachment path must not run"
+    assert store.get_chunk("gmail-m1-att-0-0") is not None
+
+
+def test_reingest_messages_converges_a_body_that_normalises_to_nothing(
+        tmp_path, monkeypatch):
+    """Half-empty message: the body normalises to zero chunks (here, a body
+    below extract_body_with_signature's >10-char threshold) but an attachment
+    still produces one.
+
+    Folding att_chunks into the emptiness check means the whole-message
+    `empty` outcome no longer fires, so the surviving BODY doc_ids would keep
+    their old chunker_version and store.stale_chunker_ids would re-select this
+    thread forever -- the same non-convergence, narrowed to one half of the
+    message."""
+    from mcpbrain.chunking import CHUNKER_VERSION
+    from mcpbrain.sync import attachments
+    from mcpbrain.sync.gmail import reingest_messages
+    from mcpbrain.sync.normalise import Chunk
+
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    store.upsert_chunk("gmail-m1-body-0", "old body", "hb",
+                       {"source_type": "gmail", "thread_id": "t1",
+                        "message_id": "m1", "chunker_version": 1})
+
+    fresh_att = Chunk(doc_id="gmail-m1-att-0-0", text="Item: chair; Cost: 12",
+                      content_hash="ha0",
+                      metadata={"source_type": "gmail", "thread_id": "t1",
+                                "message_id": "m1",
+                                "chunker_version": CHUNKER_VERSION})
+    fetch, _seen = _att_fake([fresh_att])
+    monkeypatch.setattr(attachments, "fetch_and_normalise", fetch)
+
+    msg_m1 = plain_msg("m1", "Invoice", "a@b.com", "hi")   # body too short
+    msg_m1["threadId"] = "t1"
+    svc = FakeService(messages={"m1": msg_m1})
+
+    summary = reingest_messages(svc, store, ["t1"])
+
+    assert summary == {"messages": 1, "missing": 0, "empty": 0, "failed": 0}
+    assert store.get_chunk("gmail-m1-att-0-0") is not None
+    body = store.get_chunk("gmail-m1-body-0")
+    assert body["metadata"]["chunker_version"] == CHUNKER_VERSION
+    assert body["metadata"]["reextract_empty"] is True
+    # Metadata only -- the existing body text is left alone.
+    assert body["text"] == "old body"
