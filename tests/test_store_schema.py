@@ -14,6 +14,16 @@ def _store(tmp_path):
     return s
 
 
+def _people(s, *entity_ids):
+    """Seed bare person rows. entity_relations.entity_a/entity_b are enforced
+    foreign keys into entities, so a relation between two names needs the two
+    rows to exist first — the real writers upsert the entity before relating it."""
+    with s._connect(write=True) as db:
+        for eid in entity_ids:
+            db.execute("INSERT OR IGNORE INTO entities(id,name,type) VALUES(?,?,'person')",
+                       (eid, eid.title()))
+
+
 def _cols(s, table):
     with s._connect() as db:
         return {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -103,6 +113,11 @@ def test_store_email_context_writer(tmp_path):
 
 def test_store_link_email_entity(tmp_path):
     s = _store(tmp_path)
+    # email_entities.entity_id is an enforced foreign key into entities: the
+    # real caller (graph_write.apply) upserts the entity before linking it.
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) "
+                   "VALUES('joel-chelliah','Joel Chelliah','person')")
     s.link_email_entity("m-1", "joel-chelliah", role="sender")
     s.link_email_entity("m-1", "joel-chelliah", role="mentioned")  # no-op re-link
     with s._connect() as db:
@@ -444,6 +459,7 @@ def test_store_unified_actions_by_owner_status(tmp_path):
 
 def test_store_relations_at_time(tmp_path):
     s = _store(tmp_path)
+    _people(s, "taryn", "joel")
     s.add_relation("taryn", "reports_to", "joel", "doc-1")
     with s._connect() as db:
         db.execute(
@@ -468,6 +484,7 @@ def test_store_relations_at_time(tmp_path):
 
 def test_store_relations_include_invalidated(tmp_path):
     s = _store(tmp_path)
+    _people(s, "taryn", "joel")
     s.add_relation("taryn", "reports_to", "joel", "doc-1")
     with s._connect() as db:
         db.execute(
@@ -486,6 +503,7 @@ def test_store_relations_legacy_rows_still_returned(tmp_path):
     """add_relation leaves invalidated_at NULL, so legacy-written relations
     still surface by default (keeps existing brain_context/graph behaviour)."""
     s = _store(tmp_path)
+    _people(s, "taryn", "joel")
     s.add_relation("taryn", "reports_to", "joel", "doc-1")
     rels = s.relations_for("taryn")
     assert any(r["relation"] == "reports_to" for r in rels)

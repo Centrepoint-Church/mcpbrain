@@ -128,6 +128,10 @@ def test_purge_apply_halts_cleanly_on_a_graph_cited_chunk(tmp_path):
     store.upsert_chunk("d-cited", "|  |  |", "h1", {})
     store.upsert_chunk("d-uncited", "|  |  |", "h2", {})
     with store._connect(write=True) as db:
+        # entity_a/entity_b are enforced foreign keys into entities, so the
+        # citing relation needs real endpoints.
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e1','E One','person')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e2','E Two','person')")
         db.execute("INSERT INTO entity_relations"
                    "(entity_a,relation,entity_b,source_doc_id,valid_from) "
                    "VALUES('e1','mentioned_with','e2','d-cited','2026-01-01')")

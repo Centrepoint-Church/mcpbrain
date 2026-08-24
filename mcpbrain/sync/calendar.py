@@ -19,6 +19,7 @@ from mcpbrain.graph_write import (
     _meeting_series_id,
     is_junk_entity,
     owner_identity_from_config,
+    resolve_owner_entity_id,
     upsert_entity,
     upsert_relation,
 )
@@ -115,6 +116,10 @@ def _apply_attendees_to_graph(store, event: dict, owner) -> int:
     - Idempotent on re-sync: upsert_entity dedups by email/name; upsert_relation
       bumps the existing `attended` row (accumulating relation) rather than
       duplicating it.
+    - The relation is written only when this graph HAS an owner node
+      (resolve_owner_entity_id): the attendee pass never mints one, and an edge
+      from an id with no row is a dangling edge the graph explorer silently
+      drops. The attendee entity is written either way.
 
     Returns the number of attendees written (entities upserted).
     """
@@ -130,6 +135,13 @@ def _apply_attendees_to_graph(store, event: dict, owner) -> int:
 
     valid_from = _attendee_valid_from(event)
     event_id = event.get("id", "")
+    # The `attended` edges start AT the owner, so they need the owner's real
+    # node id — NOT owner.entity_id, which is a recogniser slug that need not
+    # exist (it did not on the live store: 7 dangling 'joshua-kemp' rows beside
+    # the real 'josh-kemp' owner node). '' means this graph has no owner node
+    # yet; the attendee entities are still written, the edge is skipped rather
+    # than dangled.
+    owner_eid = resolve_owner_entity_id(store, owner, owner_email)
     written = 0
     for a in attendees:
         email_addr = (a.get("email") or "").strip().lower()
@@ -150,14 +162,15 @@ def _apply_attendees_to_graph(store, event: dict, owner) -> int:
 
         entity_id = upsert_entity(
             store, name=name, entity_type="person", email_addr=email_addr)
-        if not entity_id or entity_id == owner.entity_id:
+        if not entity_id or entity_id in (owner.entity_id, owner_eid):
             continue
 
-        upsert_relation(
-            store, owner.entity_id, "attended", entity_id,
-            valid_from=valid_from,
-            evidence=f"cal-{event_id}" if event_id else "",
-            source_doc_id=f"cal-{event_id}" if event_id else None)
+        if owner_eid:
+            upsert_relation(
+                store, owner_eid, "attended", entity_id,
+                valid_from=valid_from,
+                evidence=f"cal-{event_id}" if event_id else "",
+                source_doc_id=f"cal-{event_id}" if event_id else None)
         written += 1
     return written
 

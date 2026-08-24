@@ -1,0 +1,117 @@
+"""FK enforcement, STRICT tables, trigram index and the new partial indexes.
+
+The brief's tests construct `Store(str(p))`; the real signature is
+`Store(path, dim)` (dim has no default — a store's vector width is not
+guessable), so every test here passes dim=4 like the rest of the suite does.
+"""
+import sqlite3
+
+import pytest
+
+from mcpbrain.store import Store, strict_supported
+
+
+def test_foreign_keys_are_enforced(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with pytest.raises(sqlite3.IntegrityError):
+        with s._connect(write=True) as db:
+            db.execute("INSERT INTO email_entities(message_id, entity_id) "
+                       "VALUES('m1','NO_SUCH_ENTITY')")
+
+
+def test_strict_tables_reject_wrong_types(tmp_path):
+    if not strict_supported():
+        pytest.skip("SQLite < 3.37")
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with pytest.raises(sqlite3.IntegrityError):
+        with s._connect(write=True) as db:
+            db.execute("INSERT INTO chunks(doc_id, text, embedded) "
+                       "VALUES('d1','t','not-an-integer')")
+
+
+def test_email_mentions_like_is_index_backed(tmp_path):
+    """CLAUDE.md records this LIKE as unindexable; a trigram index fixes that."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with s._connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM fts_chunks_trigram "
+            "WHERE fts_chunks_trigram MATCH 'byford'").fetchall()
+    assert plan
+
+
+# --- supporting coverage for the same change -------------------------------
+
+def test_strict_supported_matches_runtime_version():
+    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
+    assert strict_supported() == (parts >= (3, 37))
+
+
+def test_no_strict_table_declares_a_non_strict_type(tmp_path):
+    """STRICT permits only INT/INTEGER/REAL/TEXT/BLOB/ANY.
+
+    entity_observations.created_at was DATETIME, which SQLite accepts happily
+    on a loose table and rejects outright on a STRICT one, so this pins the
+    whole schema rather than that one column.
+    """
+    if not strict_supported():
+        pytest.skip("SQLite < 3.37")
+    p = tmp_path / "b.sqlite3"
+    Store(str(p), dim=4).init()
+    db = sqlite3.connect(p)
+    try:
+        rows = db.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' "
+            "AND sql LIKE '%STRICT%'").fetchall()
+        assert rows, "no STRICT tables were created"
+        allowed = {"INT", "INTEGER", "REAL", "TEXT", "BLOB", "ANY"}
+        for name, _sql in rows:
+            for col in db.execute(f'PRAGMA table_info("{name}")').fetchall():
+                assert (col[2] or "").upper() in allowed, (name, col[1], col[2])
+    finally:
+        db.close()
+
+
+def test_entity_delete_cascades_to_children(tmp_path):
+    """merge_entities repoints relations/observations/email links before it
+    deletes the loser, but nothing repoints entity_communities — CASCADE is
+    what keeps that delete from failing (and from leaving a dangling row)."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e1','A','person')")
+        db.execute("INSERT INTO email_entities(message_id,entity_id) VALUES('m1','e1')")
+        db.execute("INSERT INTO entity_communities(entity_id,community_id,level) "
+                   "VALUES('e1',1,0)")
+        db.execute("INSERT INTO entity_observations(entity_id,attribute,value) "
+                   "VALUES('e1','role','boss')")
+        db.execute("DELETE FROM entities WHERE id='e1'")
+    with s._connect() as db:
+        for table in ("email_entities", "entity_communities", "entity_observations"):
+            assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
+
+
+def test_unenriched_scan_uses_the_partial_index(tmp_path):
+    """The enrichment backlog scan was a full SCAN of chunks."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        # Enough rows (and few enough matches) that the planner's own stats
+        # prefer the partial index — same reasoning as test_metadata_jsonb's
+        # index test.
+        for i in range(200):
+            db.execute("INSERT INTO chunks(doc_id, text, metadata, enriched) "
+                       "VALUES(?,'t','{}',1)", (f"d{i}",))
+        db.execute("INSERT INTO chunks(doc_id, text, metadata, enriched) "
+                   "VALUES('u1','t','{}',0)")
+    with s._connect() as db:
+        plan = [tuple(r) for r in db.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM chunks WHERE enriched=0").fetchall()]
+    assert any("idx_chunks_unenriched" in str(cell) for r in plan for cell in r), plan
