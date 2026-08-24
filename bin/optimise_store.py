@@ -51,14 +51,35 @@ _REFS = [
     # test, not in a foreign_key_check after the rebuild.
     ("entity_observations", "invalidated_by_observation_id",
      "entity_observations", "id"),
+    # entity_relations' bitemporal sibling of the above, and the one that
+    # actually MATTERS: it is written and read for real (graph_write
+    # ._invalidate_relation / _supersede, maintenance.graph_cleanup), and it is
+    # added by ALTER TABLE with NO `REFERENCES` clause -- so
+    # `PRAGMA foreign_key_check` is structurally blind to it and gate 5 can
+    # never catch a dangling one. The rebuild drops 8 orphan entity_relations
+    # rows on the live store; any surviving row pointing at one of those 8
+    # would be left dangling with nothing to detect it.
+    ("entity_relations", "invalidated_by_relation_id",
+     "entity_relations", "id"),
 ]
 
 # Dangling NULLABLE references are repaired by NULLing the pointer, not by
-# dropping the row: that is exactly what the column's declared
-# ON DELETE SET NULL means, and dropping an observation because whatever
-# invalidated it went away would lose good data (and cascade further).
-_NULLIFY = [("entity_observations", "invalidated_by_observation_id",
-             "entity_observations", "id")]
+# dropping the row: that is exactly what entity_observations' declared
+# ON DELETE SET NULL means, and dropping a row because whatever invalidated it
+# went away would lose good data (and cascade further). Same repair for
+# entity_relations, whose column declares no FK at all: a NULL there reads as
+# "invalidated, invalidator unknown", which is true and harmless, whereas a
+# pointer to a row that no longer exists is neither.
+#
+# This runs on the DESTINATION, after the referential filter -- which is the
+# only place it can work. A pointer into a row that exists in the source but
+# is DROPPED as an orphan is not an orphan in the source, so report_orphans
+# cannot see it; only the post-copy state can.
+_NULLIFY = [
+    ("entity_observations", "invalidated_by_observation_id",
+     "entity_observations", "id"),
+    ("entity_relations", "invalidated_by_relation_id", "entity_relations", "id"),
+]
 
 
 def report_orphans(path) -> dict[str, int]:
@@ -125,6 +146,82 @@ def _store_dim(src) -> int:
     return int(row[0])
 
 
+class UnmigratedStore(RuntimeError):
+    """The source still carries a pre-migration table shape.
+
+    `init()` performs two RENAME migrations (store.py: graph_actions /
+    graph_decisions -> *_legacy behind the meta.actions_migrated flag;
+    enrich_payloads -> enrich_payloads_legacy when it is still doc_id-keyed).
+    A store that has not run them yet is a valid input to init() -- that is
+    the whole point of those branches -- but it is NOT a valid input to a
+    rebuild, and both cases fail in ways that pass every gate:
+
+    * graph_actions: the fresh destination's own init() drains its (empty)
+      graph_actions and renames it, so the destination has
+      graph_actions_legacy and no graph_actions. The carry rule then sees the
+      source's graph_actions as an unmanaged table and recreates it, while the
+      copied `meta` (which has no actions_migrated row) wipes the destination's
+      flag. All seven gates pass, and then the FIRST init() on the rebuilt
+      store tries the rename again and dies:
+      `OperationalError: there is already another table or index with this
+      name: graph_actions_legacy` -- an unopenable store.
+    * enrich_payloads: the source's table is doc_id-keyed, the destination's is
+      file_id-keyed, so the column intersection drops doc_id and every INSERT
+      hits `NOT NULL constraint failed: enrich_payloads.file_id` -- an
+      IntegrityError mid-rebuild leaving a stuck partial .new file.
+
+    Making the rebuild rename-aware would mean re-implementing both
+    migrations inside it (and the enrich_payloads one is a re-KEY that needs
+    Store.migrate_enrich_payloads_batch, a background cadence, not an inline
+    step). Refusing with an actionable message is the honest answer: let the
+    daemon finish migrating, then rebuild.
+    """
+
+
+def check_migrations(src) -> list[str]:
+    """Reasons the source is not rebuildable yet. Empty list == good to go."""
+    db = sqlite3.connect(f"file:{Path(src)}?mode=ro", uri=True)
+    try:
+        tables = {r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        reasons = []
+        for legacy in ("graph_actions", "graph_decisions"):
+            if legacy in tables:
+                reasons.append(
+                    f"{legacy} still exists (pre-Task-1.7 shape). Start the "
+                    "daemon once: init() drains it into `actions` and renames "
+                    f"it to {legacy}_legacy, then rebuild.")
+        if "enrich_payloads" in tables:
+            cols = {r[1] for r in db.execute("PRAGMA table_info(enrich_payloads)")}
+            if "doc_id" in cols:
+                reasons.append(
+                    "enrich_payloads is still doc_id-keyed. Start the daemon "
+                    "and let the enrich_payload_migration cadence drain "
+                    "enrich_payloads_legacy, then rebuild.")
+        return reasons
+    finally:
+        db.close()
+
+
+def embedded_without_vectors(src) -> int:
+    """Chunks flagged embedded=1 whose vector does not resolve.
+
+    Pre-checked because `backup.snapshot` -> `_verify_artifact` REFUSES such a
+    store outright (it samples the first embedded chunks and raises), so gate 2
+    cannot take a snapshot of it and the rebuild cannot start. That is also why
+    the daemon's own backups are already failing on such a store, so this is
+    worth fixing regardless of the rebuild.
+    """
+    from mcpbrain.store import _open_db
+    db = _open_db(src, read_only=True)
+    try:
+        return db.execute(
+            "SELECT count(*) FROM chunks WHERE embedded=1 AND rowid NOT IN "
+            "(SELECT rowid FROM vec_chunks)").fetchone()[0]
+    finally:
+        db.close()
+
+
 def _load_meta(raw) -> dict:
     """chunks.metadata -> dict, tolerantly.
 
@@ -163,6 +260,10 @@ def rebuild(src, dst, *, page_size: int = 8192,
     src, dst = Path(src), Path(dst)
     if dst.exists():
         raise FileExistsError(dst)
+    # Checked here as well as in the CLI's report, so a direct caller cannot
+    # produce the unopenable store described on UnmigratedStore.
+    if reasons := check_migrations(src):
+        raise UnmigratedStore("; ".join(reasons))
 
     dim = _store_dim(src)
 
@@ -587,11 +688,77 @@ def _schema_preflight(src: Path, dim: int) -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+# A SQLite file is THREE paths, not one. `-wal` holds committed pages not yet
+# checkpointed into the main file, and it is replayed on the next open with no
+# error and no signal. So every move of a store must move (or deliberately
+# retire) its sidecars with it: a `-wal` left beside a DIFFERENT main file is
+# silently applied to it. That is not a theoretical hazard -- a WAL carries its
+# own page size, so replaying the wrong one can rewrite the file's content AND
+# flip its page_size while `PRAGMA integrity_check` still answers `ok`.
+_SIDECARS = ("-wal", "-shm")
+
+
+def _move_sidecars(frm, to) -> list[str]:
+    moved = []
+    for side in _SIDECARS:
+        s = Path(f"{frm}{side}")
+        if s.exists():
+            os.replace(s, f"{to}{side}")
+            moved.append(side)
+    return moved
+
+
+def _drop_sidecars(base) -> list[str]:
+    """Remove a store's sidecars. ONLY safe after a clean TRUNCATE checkpoint,
+    which is what proves the WAL holds nothing the main file does not."""
+    gone = []
+    for side in _SIDECARS:
+        p = Path(f"{base}{side}")
+        if p.exists():
+            p.unlink()
+            gone.append(side)
+    return gone
+
+
+def _checkpoint(path) -> tuple[bool, str]:
+    """Fold committed WAL pages into the main file and truncate the WAL.
+
+    Run on the rebuild immediately before it is promoted. Without it, anything
+    that opened `<store>.new` write-capable between the rebuild and the swap
+    leaves committed pages in `<store>.new-wal`, and `os.replace(dst, src)`
+    moves only the main file -- silently dropping them. Checkpointing first
+    makes the main file self-contained, so the swap cannot lose data even if
+    relocating the sidecar afterwards fails. Best-effort: a failure here is not
+    a reason to refuse, because the sidecar relocation below still preserves
+    the pages.
+
+    Returns (complete, detail). `complete` is True only when SQLite reports
+    busy=0, i.e. every frame was applied -- the one condition under which the
+    sidecars may then be deleted.
+    """
+    from mcpbrain.store import _open_db
+    try:
+        db = _open_db(path)
+    except sqlite3.Error as exc:
+        return False, f"could not open to checkpoint: {exc}"
+    try:
+        row = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        busy = row[0] if row else 1
+        return not busy, f"wal_checkpoint(TRUNCATE)={tuple(row) if row else ()}"
+    except sqlite3.Error as exc:
+        return False, f"checkpoint failed: {exc}"
+    finally:
+        db.close()
+
+
 def _swap(src: Path, dst: Path) -> int:
-    """Promote dst over src, RETAINING src under a timestamped name."""
+    """Promote dst over src, RETAINING src (and its sidecars) alongside."""
     if not dst.exists():
         print(f"[optimise] nothing to swap: {dst} does not exist")
         return 2
+    # Checkpoint BEFORE verifying, so integrity_check reads the content the
+    # promoted file will actually have, not a pre-WAL view of it.
+    print(f"[optimise] {dst.name}: {_checkpoint(dst)[1]}")
     ok, detail = _integrity(dst)
     print(f"[optimise] re-verify {dst.name}: {detail}")
     if not ok:
@@ -601,18 +768,95 @@ def _swap(src: Path, dst: Path) -> int:
     if kept.exists():
         print(f"[optimise] REFUSING to swap: {kept} already exists")
         return 1
-    # The sidecars belong to the OLD file. Left beside the promoted rebuild
-    # they would be replayed into it on first open and corrupt it.
-    for side in ("-wal", "-shm"):
-        if Path(f"{src}{side}").exists():
-            os.replace(f"{src}{side}", f"{kept}{side}")
+    # The old store's sidecars travel WITH it, so nothing of its is left beside
+    # the promoted rebuild -- and so a later --rollback has them to restore.
+    _move_sidecars(src, kept)
     os.replace(src, kept)
     os.replace(dst, src)
+    # Belt and braces for the checkpoint above: if it could not truncate, the
+    # rebuild's own committed pages are still in dst's WAL, and they must follow
+    # the main file to its new name or they are dropped.
+    _move_sidecars(dst, src)
     print(f"[optimise] swapped. OLD STORE RETAINED at {kept}\n"
-          f"[optimise] roll back with: mv {kept} {src}\n"
-          f"[optimise] delete it only after the gold gate passes:\n"
+          f"[optimise] roll back with (NOT a bare mv -- see below):\n"
+          f"[optimise]   uv run python bin/optimise_store.py "
+          f"--src {src} --rollback --yes\n"
+          f"[optimise] delete the retained file only after the gold gate passes:\n"
           f"[optimise]   uv run python tests/eval/run_eval.py --gold --k 10")
     return 0
+
+
+def _find_retained(src: Path) -> Path | None:
+    """Newest <src>.pre-rebuild-* (the main file, never a sidecar)."""
+    kept = [p for p in src.parent.glob(f"{src.name}.pre-rebuild-*")
+            if not p.name.endswith(_SIDECARS)]
+    return max(kept, key=lambda p: p.name) if kept else None
+
+
+def _rollback(src: Path, frm: Path | None) -> int:
+    """Restore a retained pre-rebuild store, sidecars and all.
+
+    This exists because `mv <kept> <src>` -- the instruction this tool used to
+    print -- SILENTLY CORRUPTS the restored store. By the time anyone wants to
+    roll back, the daemon has been running against the promoted rebuild, so
+    `<src>-wal` on disk belongs to the NEW store. Moving only the main file
+    back leaves that foreign WAL in place and SQLite replays it into the old
+    file on the next open: no error, `integrity_check` still `ok`, the old
+    content gone and the page size flipped to the new store's. The safety net
+    for the highest-stakes step in the plan cannot be a command that does that.
+
+    So: the current store is moved aside WITH its sidecars (retained, not
+    deleted -- nothing here destroys a store), which is what clears the foreign
+    WAL, and then the retained file is restored WITH the sidecars that are
+    genuinely its own.
+    """
+    kept = frm or _find_retained(src)
+    if kept is None:
+        print(f"[optimise] nothing to roll back to: no {src.name}"
+              ".pre-rebuild-* beside the store")
+        return 2
+    if not kept.exists():
+        print(f"[optimise] no such retained store: {kept}")
+        return 2
+    # check_fk=False: a pre-rebuild store has dangling references BY
+    # DEFINITION (256 on the live store) -- removing them is what the rebuild
+    # was for. Structural soundness is what matters for a restore.
+    ok, detail = _integrity(kept, check_fk=False)
+    print(f"[optimise] verify {kept.name}: {detail}")
+    if not ok:
+        print("[optimise] REFUSING to roll back: the retained store does not "
+              "verify")
+        return 1
+    aside = Path(f"{src}.rolled-back-{int(time.time())}")
+    if aside.exists():
+        print(f"[optimise] REFUSING to roll back: {aside} already exists")
+        return 1
+    if src.exists():
+        # Its WAL is the one that must not survive beside the restored file.
+        moved = _move_sidecars(src, aside)
+        os.replace(src, aside)
+        print(f"[optimise] current store moved aside to {aside}"
+              f"{' (+' + ','.join(moved) + ')' if moved else ''}")
+    os.replace(kept, src)
+    restored = _move_sidecars(kept, src)
+    # Fold the restored store's OWN WAL into its main file and, once that is
+    # complete, leave a single self-contained file behind. Not tidiness: it
+    # means the post-rollback state is unambiguous. Otherwise a `-wal` beside
+    # the store could be either the restored store's own or a leftover of the
+    # one just rolled back from, and nothing on disk distinguishes them.
+    complete, detail = _checkpoint(src)
+    ok, integrity = _integrity(src, check_fk=False)
+    # AFTER the verification, not before: opening the file re-creates an (empty)
+    # -shm/-wal pair, so dropping first would leave them behind again. Gated on
+    # a complete checkpoint AND a clean read -- the two things that prove the
+    # main file holds everything, so there is nothing in a sidecar to lose.
+    dropped = _drop_sidecars(src) if complete and ok else []
+    print(f"[optimise] rolled back {kept.name} -> {src.name}"
+          f"{' (+' + ','.join(restored) + ')' if restored else ''}\n"
+          f"[optimise] {detail}"
+          f"{'; sidecars folded in and removed' if dropped else ''}\n"
+          f"[optimise] restored store: {integrity}")
+    return 0 if ok else 1
 
 
 def _print_report(r: dict) -> None:
@@ -700,6 +944,11 @@ def main(argv=None) -> int:
                     help="proceed past the orphan/schema report")
     ap.add_argument("--swap", action="store_true",
                     help="promote <src>.new over <src>, retaining the old file")
+    ap.add_argument("--rollback", action="store_true",
+                    help="restore the retained pre-rebuild store, sidecars and "
+                         "all -- NEVER do this with a bare mv")
+    ap.add_argument("--from", dest="frm", default=None,
+                    help="--rollback: which retained store (default: newest)")
     ap.add_argument("--populate-trigram", action="store_true",
                     help="fill fts_chunks_trigram (only once it has a writer)")
     ns = ap.parse_args(argv)
@@ -708,7 +957,11 @@ def main(argv=None) -> int:
     home = Path(ns.home) if ns.home else Path(config.app_dir())
     src = Path(ns.src) if ns.src else Path(config.store_path())
     dst = Path(ns.dst) if ns.dst else Path(f"{src}.new")
-    if not src.exists():
+    if ns.swap and ns.rollback:
+        print("[optimise] --swap and --rollback are opposite operations; "
+              "pick one")
+        return 2
+    if not src.exists() and not ns.rollback:
         print(f"[optimise] no such store: {src}")
         return 2
 
@@ -721,15 +974,39 @@ def main(argv=None) -> int:
         print(f"[optimise] exclusive on {src}"
               f"{'' if is_live else ' (not the live store)'}")
 
-        if ns.swap:
+        if ns.swap or ns.rollback:
+            what = "--swap" if ns.swap else "--rollback"
             if not ns.yes:
-                print("[optimise] --swap replaces the live store. Re-run with "
-                      "--swap --yes.")
+                print(f"[optimise] {what} replaces the live store. Re-run with "
+                      f"{what} --yes.")
                 return 2
-            return _swap(src, dst)
+            if ns.swap:
+                return _swap(src, dst)
+            return _rollback(src, Path(ns.frm) if ns.frm else None)
 
         # GATE 2 -- a VERIFIED encrypted snapshot, before anything is written.
-        snap, key_path = _verified_snapshot(src, home)
+        # Pre-checked, because backup._verify_artifact REFUSES a store whose
+        # embedded chunks have no vector: without this the snapshot raises a
+        # bare traceback and the operator is left guessing, in the middle of a
+        # deliberately careful attended operation.
+        if missing := embedded_without_vectors(src):
+            print(f"[optimise] REFUSING: {missing} chunks are flagged "
+                  "embedded=1 but have no vector, and NO snapshot of this "
+                  "store can be taken (backup._verify_artifact rejects it) -- "
+                  "so the daemon's own backups are already failing too. Fix "
+                  "first, then rebuild:\n"
+                  f"[optimise]   sqlite3 {src} \"UPDATE chunks SET embedded=0 "
+                  "WHERE embedded=1 AND rowid NOT IN (SELECT rowid FROM "
+                  "vec_chunks)\"\n"
+                  "[optimise]   uv run python bin/repair.py embed-pending --apply")
+            return 2
+        try:
+            snap, key_path = _verified_snapshot(src, home)
+        except Exception as exc:  # noqa: BLE001 -- attended CLI: no tracebacks
+            print(f"[optimise] REFUSING: could not take a VERIFIED snapshot, "
+                  f"so there is no rollback and the rebuild must not start: "
+                  f"{type(exc).__name__}: {exc}")
+            return 1
         print(f"[optimise] verified snapshot: {snap} ({snap.stat().st_size / 1e9:.3f} GB)")
         if key_path:
             print(f"[optimise] escrow key written to {key_path} -- KEEP IT, the "
@@ -745,6 +1022,15 @@ def main(argv=None) -> int:
               f"verbatim): {pre['unmanaged_tables']}")
         print(f"[optimise] columns the new schema does not define (DROPPED, "
               f"non-null counts): {pre['dropped_columns']}")
+        # Not a consent matter -- a pre-migration source cannot be rebuilt at
+        # all (see UnmigratedStore), so --yes does not unlock it.
+        if reasons := check_migrations(src):
+            print("[optimise] REFUSING: the source has not finished init()'s "
+                  "rename migrations, and rebuilding it would produce a store "
+                  "that passes every gate and then cannot be opened:")
+            for reason in reasons:
+                print(f"[optimise]   - {reason}")
+            return 2
         if not ns.yes:
             print("[optimise] report only. Re-run with --yes to rebuild.")
             return 0
@@ -754,8 +1040,15 @@ def main(argv=None) -> int:
             print(f"[optimise] REFUSING: {dst} already exists; move it aside")
             return 2
         t0 = time.time()
-        r = rebuild(src, dst, page_size=ns.page_size,
-                    populate_trigram=ns.populate_trigram)
+        try:
+            r = rebuild(src, dst, page_size=ns.page_size,
+                        populate_trigram=ns.populate_trigram)
+        except Exception as exc:  # noqa: BLE001 -- attended CLI: no tracebacks
+            print(f"[optimise] REBUILD FAILED: {type(exc).__name__}: {exc}")
+            print(f"[optimise] the live store is UNTOUCHED and {snap} is your "
+                  "verified rollback. A partial "
+                  f"{dst.name} may remain -- delete it before retrying.")
+            return 1
         print(f"[optimise] rebuilt {dst} in {time.time() - t0:.0f}s")
         _print_report(r)
 
