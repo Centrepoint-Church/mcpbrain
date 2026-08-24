@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from googleapiclient.errors import HttpError
 
 from mcpbrain import config
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.sync import attachments, ingest_report
 from mcpbrain.sync.normalise import normalise_gmail
 
@@ -406,3 +407,71 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
             pool.shutdown(wait=True)
     _flush_skips()
     return processed
+
+
+def reingest_messages(service, store, thread_ids: list, *,
+                      report: dict | None = None) -> dict:
+    """Re-fetch and re-chunk specific Gmail threads by id, under the current
+    chunker version.
+
+    The mechanism the repair needs and the sync layer lacks: `sync_gmail` only
+    ever touches NEW messages via the History API, so a message chunked by an
+    older chunker (e.g. before a `chunk_text` change) is never revisited by
+    ordinary delta sync -- see `store.stale_chunker_ids`, which this feeds.
+
+    Unlike Drive, a Gmail message's content never shrinks after the fact --
+    it's immutable once received -- so there's no B5-style orphan sweep here,
+    just re-chunking: per message, fetch -> normalise_gmail -> upsert_chunk,
+    which replaces its chunks' text/metadata (and CHUNKER_VERSION) in place.
+
+    Isolation is per THREAD, but within a thread each of its already-chunked
+    messages is re-fetched individually (a doc_id's second `-`-separated
+    segment is the message id, `gmail-<mid>-body-<i>` / `gmail-<mid>-att-...`
+    both parse the same way). A message that 404s (deleted/inaccessible) is
+    NOT left alone the way "nothing acted on it" would suggest: its existing
+    chunks are stamped to the current chunker_version anyway, exactly like
+    sync/drive.py's reingest_files stamps a missing/empty Drive file's chunks
+    -- otherwise store.stale_chunker_ids keeps re-selecting the same dead
+    thread on every single repair run forever (the non-convergence Drive's
+    reingest_files measured live before that guard existed: ~46 repeat
+    fetches of the same 10 files in 41 minutes). Any OTHER failure (a
+    transient 5xx, a network error) is retryable, so it is counted as
+    `failed` and left untouched -- stamping a merely-transient failure would
+    wrongly converge it out of the selector too.
+
+    `report` is passed through to `_fetch_one` as `att_report` for interface
+    parity with the fetch primitive; attachment fetching itself is always off
+    here (`fetch_attachments=False`) since attachments are handled by the
+    normal sync/backfill paths, not this rechunk-only repair.
+
+    Returns {"messages": n_reingested, "missing": n, "failed": n}.
+    """
+    summary = {"messages": 0, "missing": 0, "failed": 0}
+    for thread_id in thread_ids:
+        doc_ids = [c["doc_id"] for c in store.thread_chunks(thread_id)]
+        message_ids = {
+            d.split("-")[1] for d in doc_ids if d.startswith("gmail-")
+        } or {thread_id}
+        for mid in message_ids:
+            try:
+                raw, _att = _fetch_one(service, mid, fetch_attachments=False,
+                                       att_report=report)
+            except Exception as exc:  # noqa: BLE001 -- one bad message must not end the run
+                log.warning("reingest_messages: %s failed: %s", mid, exc)
+                summary["failed"] += 1
+                continue
+            if raw is None:
+                # 404 -- stamp the existing chunks so the selector stops
+                # re-picking this dead message. Exact id-segment match, not a
+                # substring check -- "m1" must not match a doc_id for "m10".
+                for doc_id in [d for d in doc_ids if d.split("-")[1] == mid]:
+                    store.patch_chunk_metadata(
+                        doc_id, chunker_version=CHUNKER_VERSION,
+                        reextract_missing=True)
+                summary["missing"] += 1
+                continue
+            skips: dict = {}
+            for c in normalise_gmail(raw, report=skips):
+                store.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+            summary["messages"] += 1
+    return summary
