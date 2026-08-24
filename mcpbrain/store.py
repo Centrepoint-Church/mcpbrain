@@ -3395,6 +3395,48 @@ class Store:
                 ).fetchall()
             ]
 
+    def thread_summary_digest(self, thread_id: str, max_chars: int | None = 1500) -> str:
+        """Join a thread's per-message summaries into one digest, oldest
+        message first, dropping the OLDEST lines first if it doesn't fit.
+
+        thread_context.contextual_summary is only ever populated by the
+        periodic cross-message synthesis pass (threads with email_count>=5).
+        A thread under that threshold gets a genuinely empty
+        prior_thread_context otherwise, even though every message's own
+        one-line summary is already sitting right here in email_context.
+        This is the fallback prepare._thread_block reaches for when
+        thread_context is empty -- the most recent messages are the most
+        relevant prior context for whatever's about to be enriched next, so
+        recency wins when trimming to budget, not chronological completeness.
+
+        max_chars=None means no cap (used by build_synthesis_requests, which
+        already caps the THREAD count via min_emails/limit rather than the
+        digest's own length).
+
+        Line format matches build_synthesis_requests' prior inline join loop
+        exactly (this method is now the shared, canonical source of it):
+        "- {date_iso}{ ' [content_type]' if content_type else ''}: {summary}"
+        """
+        if not thread_id:
+            return ""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT date_iso, content_type, summary FROM email_context "
+                "WHERE thread_id=? AND summary != '' ORDER BY date_iso",
+                (thread_id,),
+            ).fetchall()
+        lines = []
+        for r in rows:
+            ctype = f" [{r['content_type']}]" if r["content_type"] else ""
+            lines.append(f"- {r['date_iso'] or '?'}{ctype}: {r['summary']}")
+        if max_chars is None:
+            return "\n".join(lines)
+        # Drop OLDEST lines first (lines is already oldest-to-newest) until
+        # the joined result fits.
+        while lines and len("\n".join(lines)) > max_chars:
+            lines.pop(0)
+        return "\n".join(lines)
+
     # --- Phase 3, Task 0.5C: proactive_findings reader/writer methods -------
 
     def record_finding(
