@@ -72,12 +72,22 @@ def _sample_file_id(store) -> str:
 
 
 def latency(store) -> dict:
-    """Time the 0.7.105 benchmark methods through the real Store API."""
+    """Time the 0.7.105 benchmark methods through the real Store API.
+
+    Resolve sample IDs BEFORE starting timers so that only the target Store
+    method call is inside the timed window. This avoids measuring the cost of
+    sample-id lookup together with the actual method being benchmarked.
+    """
+    # Resolve all sample IDs before starting timers
+    msg_ids = _sample_msg_ids(store)
+    thread_id = _sample_thread_id(store)
+    file_id = _sample_file_id(store)
+
     out = {}
     probes = {
-        "doc_ids_for_messages": lambda: store.doc_ids_for_messages(_sample_msg_ids(store)),
-        "thread_chunks": lambda: store.thread_chunks(_sample_thread_id(store)),
-        "chunks_for_file": lambda: store.chunks_for_file(_sample_file_id(store)),
+        "doc_ids_for_messages": lambda: store.doc_ids_for_messages(msg_ids),
+        "thread_chunks": lambda: store.thread_chunks(thread_id),
+        "chunks_for_file": lambda: store.chunks_for_file(file_id),
         "inbound_chunks_since": lambda: store.inbound_chunks_since("2026-01-01"),
     }
     for name, fn in probes.items():
