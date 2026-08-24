@@ -44,6 +44,65 @@ def test_patch_unknown_doc_returns_false(tmp_path):
     assert _store(tmp_path).patch_chunk_metadata("nope", expired=True) is False
 
 
+def test_patch_resets_fts_version_when_the_contextual_prefix_changes(tmp_path):
+    """A metadata-only re-sync (e.g. Drive stamping folder_path onto a
+    content-unchanged file) changes what embed.contextual_prefix() renders for
+    this chunk, but patch_chunk_metadata never touched fts_context_version --
+    so reindex_fts_batch's `fts_context_version < FTS_CONTEXT_VERSION` selector
+    could never re-catch an already-migrated row, and its FTS text silently
+    drifted from its own metadata forever."""
+    s = _store(tmp_path)
+    meta = {"source_type": "gdrive", "file_id": "f1", "file_name": "Budget.pdf"}
+    s.upsert_chunk("gdrive-f1-0", "some budget prose", "h1", meta)
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1 WHERE doc_id='gdrive-f1-0'")
+    s.reindex_fts_batch()  # stamps fts_context_version = FTS_CONTEXT_VERSION
+    with s._connect() as db:
+        before = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert before == s.FTS_CONTEXT_VERSION
+
+    # folder_path feeds contextual_prefix() for gdrive sources -- this patch
+    # changes what the FTS mirror SHOULD contain.
+    assert s.patch_chunk_metadata("gdrive-f1-0", folder_path="Church/Budgets") is True
+
+    with s._connect() as db:
+        after = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert after == 0, "prefix-affecting metadata patch must re-arm reindex_fts_batch"
+
+    s.reindex_fts_batch()
+    with s._connect() as db:
+        fts_text = db.execute(
+            "SELECT text FROM fts_chunks WHERE rowid="
+            "(SELECT rowid FROM chunks WHERE doc_id='gdrive-f1-0')"
+        ).fetchone()["text"]
+    assert "Church/Budgets" in fts_text
+
+
+def test_patch_leaves_fts_version_alone_when_the_prefix_is_unaffected(tmp_path):
+    """chunker_version/reextract_* patches (bin/repair.py's usage) don't touch
+    any field embed.contextual_prefix() reads -- these must NOT re-arm
+    reindex_fts_batch, or every repaired chunk gets needlessly re-indexed."""
+    s = _store(tmp_path)
+    meta = {"source_type": "gdrive", "file_id": "f1", "file_name": "Budget.pdf"}
+    s.upsert_chunk("gdrive-f1-0", "some budget prose", "h1", meta)
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1 WHERE doc_id='gdrive-f1-0'")
+    s.reindex_fts_batch()
+
+    assert s.patch_chunk_metadata("gdrive-f1-0", chunker_version=3,
+                                  reextract_missing=True) is True
+
+    with s._connect() as db:
+        after = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert after == s.FTS_CONTEXT_VERSION
+
+
 def test_note_chunks_filters_type_and_expiry(tmp_path):
     s = _store(tmp_path)
     _add_note(s, "note-mem", otype="memory")
