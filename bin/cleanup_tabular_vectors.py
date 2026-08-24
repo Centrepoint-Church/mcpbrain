@@ -34,6 +34,7 @@ def main(argv=None) -> int:
 
     from pathlib import Path
     from mcpbrain import config
+    from mcpbrain.chunking import CHUNKER_VERSION
     from mcpbrain.store import Store
 
     home = args.home or str(config.app_dir())
@@ -43,8 +44,15 @@ def main(argv=None) -> int:
         rows = db.execute(
             "SELECT rowid, doc_id FROM chunks "
             "WHERE json_extract(metadata,'$.content_subtype')='table' "
-            "  AND length(text) > 2000"
-        ).fetchall()
+            "  AND length(text) > 2000 "
+            # A chunk already at CHUNKER_VERSION has already been through the
+            # new renderer -- if it's still over 2000 chars, that's a
+            # legitimately dense row group, not garbage from the old
+            # phantom-column bug. Deleting its vector would be permanent:
+            # `embedded` stays 1, so the version-gated stale_chunker_ids
+            # selector never re-queues it for embedding again.
+            "  AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?"
+        , (CHUNKER_VERSION,)).fetchall()
 
     print(f"[cleanup-tabular-vectors] {len(rows)} oversize table chunk(s) found")
     if not args.apply:

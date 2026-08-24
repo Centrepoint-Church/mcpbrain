@@ -186,6 +186,22 @@ def test_normalise_rows_keeps_a_genuinely_sparse_real_column():
         "the Notes column (5/50 rows, above the support floor of 2) must survive")
 
 
+def test_normalise_rows_keeps_a_sparse_real_column_on_a_large_table():
+    """A proportional floor (len(kept)//100) would require 7 rows' support on
+    a 700-row table -- a real column used by only e.g. 3 rows would be wrongly
+    treated as phantom. The flat floor of 2 doesn't scale with table size, so
+    it survives regardless of how large the table is."""
+    header = ["Item", "Cost", "Notes"]
+    rows_without_notes = [["Chair", "50", ""] for _ in range(697)]
+    rows_with_notes = [["Desk", "200", "damaged"] for _ in range(3)]
+    rows = [header] + rows_without_notes + rows_with_notes
+
+    out = tabular.normalise_rows(rows)
+
+    assert all(len(r) == 3 for r in out), (
+        "the Notes column (3/700 rows, still above the flat floor of 2) must survive")
+
+
 def test_no_content_free_chunk_is_ever_emitted():
     from mcpbrain.chunking import has_content
 

@@ -155,7 +155,8 @@ def test_stale_chunker_ids_selects_only_out_of_date_drive_files(tmp_path):
                        {"source_type": "gdrive", "file_id": "new",
                         "chunker_version": 2})
 
-    got = [d["id"] for d in store.stale_chunker_ids(2, limit=10)]
+    got = [d["id"] for d in
+          store.stale_chunker_ids(table_version=2, other_version=2, limit=10)]
 
     assert sorted(got) == ["mid", "old"]
 
@@ -174,7 +175,7 @@ def test_stale_chunker_ids_respects_its_limit_across_source_types(tmp_path):
     store.upsert_chunk("gmail-m1-body-0", "mail text", "hm",
                        {"source_type": "gmail", "thread_id": "t1"})
 
-    got = store.stale_chunker_ids(2, limit=3)
+    got = store.stale_chunker_ids(table_version=2, other_version=2, limit=3)
 
     assert len(got) == 3
     # The limit is hit within the gdrive batch (5 candidates, limit 3) before

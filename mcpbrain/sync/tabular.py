@@ -79,6 +79,20 @@ def is_tabular(mime: str) -> bool:
     return mime in TABLE_MIMES
 
 
+# A column counts as real if at least this many DISTINCT rows have non-empty
+# content there. Flat, not proportional to table size: a single anomalous
+# row (a title banner, a stray far-right formatted-but-blank cell -- both
+# routine in real Excel files, since Excel's "used range" is inflated by
+# formatting alone) can never clear 2 on its own, which is all defeating the
+# original bug requires. A proportional floor (e.g. len(kept)//100) sounds
+# more "statistically sound" but is actively wrong here: on a real 700+ row
+# ledger it climbs well past 2, and a genuinely rare-but-real column (used by
+# a few dozen rows, not the single outlier this exists to catch) gets treated
+# as phantom too. 2 is the minimum that still defeats the bug, at any table
+# size.
+_MIN_COLUMN_SUPPORT = 2
+
+
 def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
     """Drop entirely-empty rows and trim trailing columns with no real support.
 
@@ -86,16 +100,22 @@ def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
     spacer between a budget's actuals and its variance), and dropping it
     would misalign the header against its values.
 
-    A column counts as real only if at least max(2, len(kept)//100) distinct
+    A column counts as real only if at least _MIN_COLUMN_SUPPORT distinct
     rows have non-empty content there -- NOT simply "the max index any row
-    reaches". A single anomalous row (a title banner, a stray far-right
-    formatted-but-blank cell -- both routine in real Excel files, since
-    Excel's "used range" is inflated by formatting alone) can never clear a
-    support floor of 2 on its own, so it can no longer single-handedly
-    dictate the whole table's width the way a bare max did. A genuinely
-    sparse-but-real column (used by a legitimate minority of rows) still
-    clears the floor and survives -- a median would have dropped it if used
-    by fewer than half the rows, which is why this isn't a median.
+    reaches". A single anomalous row can never clear that floor on its own,
+    so it can no longer single-handedly dictate the whole table's width the
+    way a bare max did. A genuinely sparse-but-real column (used by a
+    legitimate minority of rows, any table size) still clears the floor and
+    survives -- a median would have dropped it if used by fewer than half
+    the rows, which is why this isn't a median.
+
+    A row that HAD real content, but only in a column that didn't clear the
+    floor, becomes empty after trimming and is dropped along with the
+    genuinely-empty rows below -- the same fate as the reproducing case (a
+    title-banner row whose entire content was one phantom far-right cell).
+    This is the accepted cost of frequency-based phantom-detection: a
+    single-row column is structurally indistinguishable from a phantom one
+    by frequency alone, which is exactly why the floor exists.
     """
     kept = [r for r in rows if any((c or "").strip() for c in r)]
     if not kept:
@@ -106,7 +126,7 @@ def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
         for i, c in enumerate(r):
             if (c or "").strip():
                 support[i] += 1
-    floor = max(2, len(kept) // 100)
+    floor = _MIN_COLUMN_SUPPORT
     width = 0
     for i in range(max_len - 1, -1, -1):
         if support[i] >= floor:
