@@ -296,6 +296,26 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
     (defaulting to `contextlib.nullcontext`) still brackets each event's
     writes so even this bounded window doesn't hold `_bulk_lock` for its
     whole duration.
+
+    A chunk whose text is byte-identical to what is already stored still has
+    its METADATA refreshed, exactly as `drive.upsert_file_chunks` does.
+    `store.upsert_chunk` short-circuits on an unchanged content_hash and
+    writes nothing at all — text, embedding AND metadata — so without this a
+    re-ingest would never acquire the current `chunker_version`. That matters
+    specifically because this function is ALSO the calendar arm of
+    `bin/repair.py reingest-stale`, whose selector `store.stale_chunker_ids`
+    picks items on exactly that field and orders by MIN(rowid): a stale event
+    that re-renders identically would be re-selected and re-fetched on every
+    run forever, burning Calendar quota with zero progress while reporting
+    success. And identical re-rendering is the NORMAL case for calendar, not a
+    corner one — the CHUNKER_VERSION 2->3 bump changed sync/tabular.py only,
+    not `chunk_text`, so nothing about a calendar event's rendering changed.
+    `patch_chunk_metadata` merges without touching content_hash or `embedded`,
+    so nothing is spuriously re-queued for embedding.
+
+    The delta path (`sync_calendar`) deliberately does NOT need this: it only
+    ever sees events Google reports as changed, so it is not what a
+    version-bump sweep re-drives and has no non-convergent selector behind it.
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -325,7 +345,9 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
         with bulk_section():
             chunks = normalise_calendar(ev)
             for ch in chunks:
-                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+                if not store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash,
+                                          ch.metadata):
+                    store.patch_chunk_metadata(ch.doc_id, **ch.metadata)
             if chunks:
                 count += 1
                 _apply_attendees_to_graph(store, ev, owner)
