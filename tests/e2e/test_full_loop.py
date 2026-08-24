@@ -76,7 +76,8 @@ def _hand_extraction(thread):
         "relations": [{"source_name": "Joel Chelliah", "type": "works_at",
                        "target_name": "Acme Corp"}],
         "messages": [{"message_id": m["message_id"], "sender": m.get("sender", ""),
-                      "date": m["date"], "subject": m.get("subject", "")}
+                      "date": m["date"], "subject": m.get("subject", ""),
+                      "labels": m.get("labels", "")}
                      for m in msgs],
         "resolved_action_ids": [],
     }
