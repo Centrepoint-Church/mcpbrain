@@ -203,6 +203,21 @@ def _verify_artifact(out_path) -> None:
     probe has nothing to say, and bin/repair.py snapshots stores that may
     already be broken. A probe that raised there would block the very safety
     copy it exists to protect.
+
+    The sample EXCLUDES content_subtype='table' chunks, because for those
+    "embedded=1 with no vector" is the designed state, not corruption: with
+    `embed_skip_tabular` on, index_pending calls
+    `store.write_embedding(rowid, None)` for them (FTS row written, embedded=1
+    stamped, no vec_chunks insert), and `bin/cleanup_tabular_vectors.py`
+    deletes existing oversize table vectors outright while deliberately
+    leaving embedded=1 so nothing re-queues them. Sampling the lowest rowids
+    with no such filter would eventually hit one of those and raise — turning
+    the periodic backup AND `bin/repair.py --apply`'s pre-apply safety
+    snapshot into hard failures, i.e. re-creating exactly the "backup upload
+    failing" outage this spec set out to fix, and blocking the sweep that
+    repairs the tabular chunks in the first place. Table chunks are the only
+    deliberately vector-less shape in the codebase; every other embedded=1
+    row still MUST resolve, so genuine vec0 loss is still detected.
     """
     db = _open_db(out_path, read_only=False)
     try:
@@ -214,6 +229,8 @@ def _verify_artifact(out_path) -> None:
 
         rowids = [r[0] for r in db.execute(
             "SELECT rowid FROM chunks WHERE embedded=1 "
+            "  AND COALESCE(json_extract(metadata,'$.content_subtype'),'') "
+            "      <> 'table' "
             "ORDER BY rowid LIMIT ?", (_VERIFY_SAMPLE,))]
         if not rowids:
             return

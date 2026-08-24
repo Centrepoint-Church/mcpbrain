@@ -2118,6 +2118,67 @@ def test_verify_artifact_no_ops_when_the_chunks_table_does_not_exist(tmp_path):
     _verify_artifact(store.path)   # must not raise
 
 
+def test_verify_artifact_ignores_deliberately_vector_less_table_chunks(tmp_path):
+    """embedded=1 with no vec_chunks row is the DESIGNED state for table
+    chunks -- write_embedding(rowid, None) under embed_skip_tabular, and
+    bin/cleanup_tabular_vectors.py deleting existing oversize table vectors
+    while leaving embedded=1 so nothing re-queues them.
+
+    Verification samples the LOWEST rowids, so a table chunk at the front of
+    the store would have made every periodic backup AND bin/repair.py
+    --apply's pre-apply safety snapshot raise -- re-creating the very
+    "backup upload failing" outage this work exists to fix, and blocking the
+    sweep that repairs those chunks.
+    """
+    from mcpbrain.backup import _verify_artifact
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    # Lowest rowid FIRST, so the table chunk is unavoidably in the sample.
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table"})
+    store.upsert_chunk("d-prose", "hello there", "h2", {})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)          # no vector, by design
+    store.write_embedding(by_doc["d-prose"], [0.1, 0.2, 0.3, 0.4])
+
+    _verify_artifact(store.path)   # must not raise
+
+    out = snapshot(store.path, tmp_path / "snap.sqlite3")
+    assert out.exists()
+
+
+def test_verify_artifact_still_raises_for_a_non_table_chunk_missing_its_vector(tmp_path):
+    """The table-subtype exclusion must not weaken the probe it lives in: a
+    PROSE chunk marked embedded=1 whose vector does not resolve is genuine
+    vec0 loss and must still raise, even when a legitimately vector-less
+    table chunk sits alongside it."""
+    import pytest
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table"})
+    store.upsert_chunk("d-prose", "hello there", "h2", {})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)
+    store.write_embedding(by_doc["d-prose"], [0.1, 0.2, 0.3, 0.4])
+
+    # Lose only the prose chunk's vector — the hazard the probe exists for.
+    db = _open_db(store.path, read_only=False)
+    try:
+        db.execute("DELETE FROM vec_chunks WHERE rowid=?", (by_doc["d-prose"],))
+        db.commit()
+    finally:
+        db.close()
+
+    with pytest.raises(RuntimeError, match="vector"):
+        _verify_artifact(store.path)
+
+
 def test_verify_artifact_raises_on_genuine_chunks_corruption(tmp_path, monkeypatch):
     """The chunks-table check must only swallow "table doesn't exist" -- a
     genuinely corrupt table (e.g. sqlite3.DatabaseError("database disk image is
