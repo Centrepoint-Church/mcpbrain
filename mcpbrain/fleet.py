@@ -22,6 +22,14 @@ _PROBE_LABELS = {
 }
 _GLYPH = {"ok": "✅", "needs_action": "⚠️", "not_started": "❌"}
 
+# See mcpbrain.backup._NUM_RETRIES for the full rationale: googleapiclient's
+# own num_retries already retries this error class with backoff, so every
+# non-resumable Drive call here gets it. _upload_text's calls use
+# MediaInMemoryUpload (a fixed in-memory buffer, not a resumable stream), so
+# they have no "can't re-seek" problem either -- everything in this module
+# is safe to retry.
+_NUM_RETRIES = 5
+
 
 def _parse_reported_at(value: str):
     """Parse an ISO timestamp (with or without trailing Z) to aware UTC, or None."""
@@ -131,7 +139,7 @@ def _list_all(drive_service, *, q: str, fields: str) -> list[dict]:
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         out.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -164,12 +172,12 @@ def _upload_text(drive_service, folder_id: str, name: str, text: str, mimetype: 
     if existing:
         drive_service.files().update(
             fileId=existing, media_body=media, supportsAllDrives=True,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
     else:
         meta = {"name": name, "parents": [folder_id]}
         drive_service.files().create(
             body=meta, media_body=media, fields="id", supportsAllDrives=True,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
 
 
 def _read_daemon_heartbeat(home) -> str | None:
@@ -253,7 +261,7 @@ def read_org_config(folder_id: str, drive_service) -> dict | None:
     if not file_id:
         return {}
     try:
-        raw = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
+        raw = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         data = json.loads(raw)
@@ -353,7 +361,7 @@ def write_report(home, drive_service) -> None:
     for f in files:
         try:
             raw = drive_service.files().get_media(
-                fileId=f["id"], supportsAllDrives=True).execute()
+                fileId=f["id"], supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
             parsed = json.loads(raw)
