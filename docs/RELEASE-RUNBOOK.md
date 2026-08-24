@@ -355,15 +355,25 @@ this tool. There is no silent migration path and there should never be one.**
 
 Run this when: the live store is due for its (infrequent, one-off-per-schema-
 generation) physical rebuild — not on a schedule. **Budget disk generously: on
-the 2.62 GB live store, following the procedure below as written needs ~11 GB
-free, not merely ~2.4x the store size.** The tool's snapshot step (Gate 2,
-inside `_verified_snapshot`) runs on **every** non-`--swap`/non-`--rollback`
-invocation — including the report-only run in step 2 below — writes a
-**timestamped** artifact (`<store>.snapshot-<epoch>.enc`), and never deletes
-it. Doing step 2 and then step 3 as written therefore leaves **two** 3.48 GB
-snapshots on disk simultaneously (6.96 GB), plus the still-present old store
-(2.62 GB) plus the in-progress rebuild (up to 1.49 GB) ≈ 11 GB peak — not the
-~7.6 GB a naive "one snapshot" accounting suggests. Delete the older
+the 2.62 GB live store, following the procedure below as written needs
+~12-13 GB free, not merely ~2.4x the store size.** The tool's snapshot step
+(Gate 2, inside `_verified_snapshot`) runs on **every**
+non-`--swap`/non-`--rollback` invocation — including the report-only run in
+step 2 below — writes a **timestamped** artifact
+(`<store>.snapshot-<epoch>.enc`, 3.48 GB — Fernet base64 costs 4/3 over the
+2.62 GB plaintext), and never deletes it. Each call to `_verified_snapshot`
+also materialises a **transient 2.62 GB cleartext copy twice**: once inside
+`backup.make_encrypted_snapshot` (a full plaintext snapshot, encrypted
+in place) and again when `_verified_snapshot` decrypts its own output back
+to a temp file to integrity-check it before trusting it as a rollback —
+both removed immediately after, but present on disk while that call runs.
+Doing step 2 and then step 3 as written therefore peaks (at step 3's own
+Gate 2, just before its transient cleartext is cleaned up, and *before* the
+rebuild file has even started writing) at: **two** 3.48 GB encrypted
+snapshots left over from steps 2 and 3 (6.96 GB) + **one** 2.62 GB transient
+snapshot-verify cleartext (step 3's own, still live at that instant) + the
+still-present 2.62 GB old/live store ≈ **12.2 GB** — before the up-to-1.49 GB
+rebuild file even starts growing. Delete the older
 `<store>.snapshot-*.enc` (and its `<store>.rebuild-key`, if you don't need it
 retained) once you've moved past the step that produced it and confirmed the
 next step's own snapshot succeeded.
@@ -415,10 +425,11 @@ next step's own snapshot succeeded.
    refreshes the `fts_chunks` mirror or resets `fts_context_version`, so a
    metadata-only write — e.g. a Drive re-sync backfilling `folder_path` onto
    an already-indexed chunk — can leave the FTS index silently behind
-   metadata forever). See the Task 9 report for the worked example (traced to
-   a specific ~4.3% of chunks and one gold case, confirmed by direct
-   before/after `fts_chunks` text comparison, not inferred from score deltas
-   alone). Also spot-check the injection path (`daemon.search`/`prompt_recall`)
+   metadata forever — see the "SQLite optimisation" entry under this repo's
+   root `CLAUDE.md` § "Shipping caveats" for the full worked example,
+   including the specific commit SHAs and the one gold-set chunk this was
+   confirmed against directly, not just inferred from score deltas). Also
+   spot-check the injection path (`daemon.search`/`prompt_recall`)
    directly — the `--gold` harness calls `hybrid_search` and does not
    exercise the `recall_max_distance` off-topic gate.
 5. **Promote.** `uv run python bin/optimise_store.py --swap --yes` — checkpoints
