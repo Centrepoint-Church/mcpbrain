@@ -77,6 +77,58 @@ def test_no_strict_table_declares_a_non_strict_type(tmp_path):
         db.close()
 
 
+def test_invalidated_by_relation_id_is_a_real_foreign_key(tmp_path):
+    """entity_observations.invalidated_by_observation_id already declared
+    REFERENCES entity_observations(id) ON DELETE SET NULL from the start, but
+    its sibling entity_relations.invalidated_by_relation_id (added by an older
+    ALTER TABLE, before foreign_keys=ON existed) never got the matching
+    REFERENCES clause -- so foreign_key_check could never see it, and 416
+    dangling pointers accumulated silently on the live store (merge_entities/
+    decay_relations delete relations without repointing back-pointers to
+    them). This closes that asymmetry for new installs and rebuilt stores.
+    """
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with pytest.raises(sqlite3.IntegrityError):
+        with s._connect(write=True) as db:
+            db.execute(
+                "INSERT INTO entities(id,name,type) VALUES('e1','A','person')")
+            db.execute(
+                "INSERT INTO entities(id,name,type) VALUES('e2','B','person')")
+            db.execute(
+                "INSERT INTO entity_relations(entity_a,relation,entity_b,"
+                "invalidated_by_relation_id) VALUES('e1','knows','e2',999999)")
+
+
+def test_deleting_the_invalidating_relation_nulls_the_back_pointer(tmp_path):
+    """ON DELETE SET NULL, not the default NO ACTION or a CASCADE: deleting the
+    relation that superseded another must not delete the superseded row too,
+    and must not abort the delete either -- it just clears the now-dangling
+    pointer, same policy as the entity_observations sibling column."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e1','A','person')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e2','B','person')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES('e1','knows','e2')")
+        newer_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,"
+                   "invalidated_by_relation_id) VALUES('e1','knew','e2',?)",
+                   (newer_id,))
+        old_id = db.execute("SELECT id FROM entity_relations WHERE relation='knew'"
+                            ).fetchone()[0]
+        db.execute("DELETE FROM entity_relations WHERE id=?", (newer_id,))
+    with s._connect() as db:
+        row = db.execute(
+            "SELECT invalidated_by_relation_id, id FROM entity_relations "
+            "WHERE id=?", (old_id,)).fetchone()
+        assert row is not None, "the superseded row itself must survive"
+        assert row["invalidated_by_relation_id"] is None
+
+
 def test_entity_delete_cascades_to_children(tmp_path):
     """merge_entities repoints relations/observations/email links before it
     deletes the loser, but nothing repoints entity_communities — CASCADE is
