@@ -43,7 +43,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
@@ -2167,7 +2167,26 @@ class Daemon:
                             keep=cfg.retain)
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
             log.warning("periodic backup failed: %s", exc, exc_info=True)
-            write_backup_state(home, ok=False, error=str(exc))
+            bstate = write_backup_state(home, ok=False, error=str(exc))
+            failures = bstate.get("consecutive_failures") or 0
+            if failures >= 2:
+                log.warning(
+                    "periodic backup: %d consecutive failures, rebuilding "
+                    "drive_service", failures)
+                try:
+                    fresh = _build_drive_service()
+                    with self._config_lock:
+                        if self._backup is not None:
+                            # Build a new BackupConfig rather than mutating
+                            # the caller-supplied one in place: the caller
+                            # (or a test) may still hold a reference to the
+                            # original object and shouldn't see it change
+                            # out from under them.
+                            self._backup = replace(
+                                self._backup, drive_service=fresh)
+                except Exception as rebuild_exc:  # noqa: BLE001 — best-effort
+                    log.warning("periodic backup: drive_service rebuild "
+                               "failed: %s", rebuild_exc)
             return {"backed_up": False, "error": str(exc)}
 
         # Re-stamp on SUCCESS as well, so the interval is measured from
@@ -3982,7 +4001,7 @@ def last_backup_attempt_epoch(home) -> float | None:
         return None
 
 
-def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
+def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
     """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
 
     The encrypted artifact is written locally BEFORE the upload, so
@@ -4020,6 +4039,7 @@ def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
         path.write_text(json.dumps(state))
     except OSError as exc:
         log.warning("backup state write failed (continuing): %s", exc)
+    return state
 
 
 def write_daemon_heartbeat(home) -> None:
