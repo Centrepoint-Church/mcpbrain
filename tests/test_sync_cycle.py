@@ -23,7 +23,7 @@ class _DriveReq:
         self._r = result
         self._e = raise_exc
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._e:
             raise self._e
         return self._r
