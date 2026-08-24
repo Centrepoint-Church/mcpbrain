@@ -403,7 +403,7 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
                        {"source_type": "gdrive", "file_id": "f1"})
 
     assert store.count_content_free() == 1
-    assert store.stale_chunker_file_ids(2, limit=10) == ["f1"]
+    assert [d["id"] for d in store.stale_chunker_ids(2, limit=10)] == ["f1"]
 
     # Asserting the store methods is not enough: the lines are only useful if
     # run_doctor actually prints them, and its own `except Exception` turns any

@@ -385,7 +385,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     try:
         from mcpbrain.chunking import CHUNKER_VERSION
         empty = store.count_content_free()
-        stale = len(store.stale_chunker_file_ids(CHUNKER_VERSION, limit=100_000))
+        stale = len(store.stale_chunker_ids(CHUNKER_VERSION, limit=100_000))
         lines.append(f"{'✅' if not empty else '⚠️'} content-free chunks: {empty}")
         lines.append(f"{'✅' if not stale else '⚠️'} Drive files awaiting re-chunk: {stale}")
     except Exception as exc:  # noqa: BLE001 — never fatal

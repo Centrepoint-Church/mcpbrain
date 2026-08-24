@@ -138,7 +138,7 @@ def test_the_chunker_version_is_ahead_of_the_pre_spec_2_chunker():
     assert CHUNKER_VERSION >= 2
 
 
-def test_stale_chunker_file_ids_selects_only_out_of_date_drive_files(tmp_path):
+def test_stale_chunker_ids_selects_only_out_of_date_drive_files(tmp_path):
     """The level-triggered selector. No queue, no cursor: re-running walks
     forward because each repaired file stops matching. Same shape as
     reflow_outdated_chunks, which is the established pattern here."""
@@ -155,13 +155,15 @@ def test_stale_chunker_file_ids_selects_only_out_of_date_drive_files(tmp_path):
                        {"source_type": "gdrive", "file_id": "new",
                         "chunker_version": 2})
 
-    assert sorted(store.stale_chunker_file_ids(2, limit=10)) == ["mid", "old"]
+    got = [d["id"] for d in store.stale_chunker_ids(2, limit=10)]
+
+    assert sorted(got) == ["mid", "old"]
 
 
-def test_stale_chunker_file_ids_respects_its_limit_and_is_gmail_free(tmp_path):
-    """Drive-only by design (decision 4): Gmail is 2% of the store and its
-    chunking defects are 75 rows the purge removes directly, so re-fetching a
-    mailbox is not a trade worth making."""
+def test_stale_chunker_ids_respects_its_limit_across_source_types(tmp_path):
+    """Gmail is no longer excluded (that assumption didn't hold -- see
+    stale_chunker_ids' docstring) -- this now tests that `limit` is respected
+    as a TOTAL across source types, not that Gmail is filtered out."""
     from mcpbrain.store import Store
 
     store = Store(tmp_path / "b.sqlite3", dim=4)
@@ -170,9 +172,11 @@ def test_stale_chunker_file_ids_respects_its_limit_and_is_gmail_free(tmp_path):
         store.upsert_chunk(f"gdrive-f{i}-0", f"text {i}", f"h{i}",
                            {"source_type": "gdrive", "file_id": f"f{i}"})
     store.upsert_chunk("gmail-m1-body-0", "mail text", "hm",
-                       {"source_type": "gmail", "message_id": "m1"})
+                       {"source_type": "gmail", "thread_id": "t1"})
 
-    got = store.stale_chunker_file_ids(2, limit=3)
+    got = store.stale_chunker_ids(2, limit=3)
 
     assert len(got) == 3
-    assert all(g.startswith("f") for g in got), f"non-Drive id leaked in: {got}"
+    # The limit is hit within the gdrive batch (5 candidates, limit 3) before
+    # gmail's single candidate is even considered -- sequential by source type.
+    assert all(d["source_type"] == "gdrive" for d in got)
