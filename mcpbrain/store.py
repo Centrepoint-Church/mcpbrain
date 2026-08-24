@@ -326,6 +326,16 @@ class Store:
                 with db:
                     yield db
         finally:
+            # PRAGMA optimize is the documented way to keep planner statistics
+            # current; analysis_limit (set in _open_db) bounds its cost so it
+            # cannot stall a close. It WRITES, so never on a read-only handle.
+            if not self.read_only:
+                try:
+                    db.execute("PRAGMA optimize")
+                except sqlite3.Error:
+                    # Best-effort: a stats refresh must never fail a caller's
+                    # otherwise-successful transaction.
+                    pass
             db.close()
 
     def init(self) -> None:
