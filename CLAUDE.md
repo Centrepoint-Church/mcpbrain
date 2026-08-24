@@ -121,8 +121,7 @@ wrong and MUST be right:
   0, whenever it touches a metadata field `_fts_text`/`contextual_prefix`
   reads — otherwise the exact same drift resumes on the very next Drive sync
   after any future rebuild. Bumping `FTS_CONTEXT_VERSION` once would only
-  clear today's backlog, not stop it recurring. Full evidence and commands:
-  `.superpowers/sdd/2026-08-24-sqlite-optimisation/task-9-report.md`. **Not
+  clear today's backlog, not stop it recurring. **Not
   yet run against any user's actual live store** — that is a separate,
   explicit, attended operation per machine, to be scheduled deliberately.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
