@@ -16,7 +16,7 @@ class _Req:
         self._r = result
         self._raise = raise_410
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._raise:
             raise HttpError(httplib2.Response({"status": 410}), b"Sync token expired")
         return self._r
@@ -495,3 +495,31 @@ def test_a_split_events_chunks_are_all_evicted_when_the_horizon_shrinks(tmp_path
 
     for c in chunks:
         assert store.get_chunk(c.doc_id) is None, f"{c.doc_id} survived the sweep"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: _list_events should pass num_retries to .execute()
+# ---------------------------------------------------------------------------
+
+def test_list_events_calls_pass_num_retries():
+    from mcpbrain.sync import calendar
+
+    calls = []
+
+    class _FakeExec:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return {"items": [], "nextSyncToken": None}
+
+    class _FakeEvents:
+        def list(self, **kw):
+            return _FakeExec()
+
+    class _FakeService:
+        def events(self):
+            return _FakeEvents()
+
+    calendar._list_events(_FakeService(), "primary", None,
+                          "2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z")
+
+    assert calls == [calendar._NUM_RETRIES]
