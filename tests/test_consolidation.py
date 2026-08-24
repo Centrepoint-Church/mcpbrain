@@ -163,6 +163,47 @@ def test_consolidate_marks_sources_hot(store, home_consolidation, monkeypatch):
         assert r["memory_tier"] == "hot", f"Expected hot, got {r['memory_tier']}"
 
 
+def test_write_note_short_summary_keeps_single_doc_id(store):
+    from mcpbrain.consolidation import _write_note
+
+    cluster = [{"doc_id": "src-1"}]
+    doc_id = _write_note(store, cluster, "A short note.")
+
+    assert doc_id == f"note-consolidated-{__import__('hashlib').sha256(b'A short note.').hexdigest()[:16]}"
+    with store._connect() as db:
+        rows = db.execute("SELECT doc_id FROM chunks WHERE doc_id LIKE ?",
+                          (f"{doc_id}%",)).fetchall()
+    assert [r["doc_id"] for r in rows] == [doc_id]
+
+
+def test_write_note_long_summary_splits_into_multiple_chunks(store):
+    from mcpbrain.consolidation import _write_note
+
+    cluster = [{"doc_id": "src-1"}]
+    long_summary = "This is a sentence about the project. " * 200  # well over 2000 chars
+
+    doc_id = _write_note(store, cluster, long_summary)
+
+    # doc_id is only the FIRST piece's id (e.g. "...-0"); strip the trailing
+    # "-<index>" to get the shared base and match every sibling chunk. (A
+    # plain f"{doc_id}%" wildcard only matches "-0" itself, since indices
+    # aren't zero-padded and "-1" doesn't start with "-0".)
+    base_doc_id, _, _ = doc_id.rpartition("-")
+    with store._connect() as db:
+        rows = db.execute(
+            "SELECT doc_id, length(text) as len, metadata FROM chunks "
+            "WHERE doc_id LIKE ? ORDER BY doc_id",
+            (f"{base_doc_id}-%",)).fetchall()
+
+    assert len(rows) > 1, "a long summary must split into multiple chunks"
+    for r in rows:
+        assert r["len"] <= 2000
+    import json
+    metas = [json.loads(r["metadata"]) for r in rows]
+    assert [m["chunk_index"] for m in metas] == list(range(len(rows)))
+    assert all(m["chunk_total"] == len(rows) for m in metas)
+
+
 def test_consolidate_skips_when_claude_returns_empty(store, home_consolidation, monkeypatch):
     """If claude returns empty string, no note is written (no crash)."""
     from mcpbrain import consolidation
