@@ -1890,11 +1890,22 @@ class Store:
                 n += 1
             return n
 
-    def write_embedding(self, rowid: int, vector: list[float], *, home=None) -> None:
+    def write_embedding(self, rowid: int, vector: list[float] | None, *, home=None) -> None:
+        """Write a chunk's embedding and FTS row, stamping embedded=1.
+
+        vector=None means "skip the dense vector, still write FTS and stamp
+        embedded=1" -- used for content_subtype=='table' chunks when
+        embed_skip_tabular is on. embedded=1 with no vec_chunks row is safe
+        everywhere else that gates on embedded=1 for vector search: a join
+        against vec_chunks simply returns nothing for that rowid, which is
+        exactly the desired "never surfaces via dense search" behavior,
+        while unembedded_chunks() correctly stops re-fetching it.
+        """
         with self._connect(write=True) as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
-            db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
-                       (rowid, sqlite_vec.serialize_float32(vector)))
+            if vector is not None:
+                db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
+                           (rowid, sqlite_vec.serialize_float32(vector)))
             row = db.execute("SELECT text, metadata FROM chunks WHERE rowid=?",
                              (rowid,)).fetchone()
             fts_text, applied = self._fts_text(row["text"], json.loads(row["metadata"]),
