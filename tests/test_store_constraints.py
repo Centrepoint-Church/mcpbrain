@@ -97,21 +97,76 @@ def test_entity_delete_cascades_to_children(tmp_path):
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
 
 
-def test_unenriched_scan_uses_the_partial_index(tmp_path):
-    """The enrichment backlog scan was a full SCAN of chunks."""
-    p = tmp_path / "b.sqlite3"
-    s = Store(str(p), dim=4)
-    s.init()
+def _seed_chunks(s, n=200):
+    """Enough rows (and few enough matches) that the planner's own stats prefer
+    a partial index — same reasoning as test_metadata_jsonb's index test."""
     with s._connect(write=True) as db:
-        # Enough rows (and few enough matches) that the planner's own stats
-        # prefer the partial index — same reasoning as test_metadata_jsonb's
-        # index test.
-        for i in range(200):
-            db.execute("INSERT INTO chunks(doc_id, text, metadata, enriched) "
-                       "VALUES(?,'t','{}',1)", (f"d{i}",))
-        db.execute("INSERT INTO chunks(doc_id, text, metadata, enriched) "
-                   "VALUES('u1','t','{}',0)")
+        for i in range(n):
+            db.execute("INSERT INTO chunks(doc_id, text, metadata, embedded, enriched, "
+                       "fts_context_version) VALUES(?,'t','{}',1,1,?)",
+                       (f"d{i}", Store.FTS_CONTEXT_VERSION))
+        db.execute("INSERT INTO chunks(doc_id, text, metadata, embedded, enriched, "
+                   "fts_context_version) VALUES('u1','t','{}',0,0,0)")
     with s._connect() as db:
-        plan = [tuple(r) for r in db.execute(
-            "EXPLAIN QUERY PLAN SELECT rowid FROM chunks WHERE enriched=0").fetchall()]
-    assert any("idx_chunks_unenriched" in str(cell) for r in plan for cell in r), plan
+        db.execute("ANALYZE")
+
+
+def _plan(s, sql, params=()):
+    with s._connect() as db:
+        return " | ".join(
+            str(cell) for row in db.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+            for cell in tuple(row))
+
+
+def test_unenriched_scan_uses_the_partial_index(tmp_path):
+    """The enrichment backlog scan was a full SCAN of chunks.
+
+    Asserts the plan shape, not just the index NAME: the index must also carry
+    the ORDER BY rowid DESC, which it only does while rowid is its ONLY key
+    column. A (enrich_state, rowid) key still names the index in the plan but
+    adds USE TEMP B-TREE FOR ORDER BY — so a name-only assertion would pass
+    with the worse shape.
+    """
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    _seed_chunks(s)
+    # The real query, verbatim from unenriched_chunks().
+    plan = _plan(s, "SELECT rowid,doc_id,text,metadata FROM chunks "
+                    "WHERE enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
+                    "AND doc_id NOT LIKE 'enriched-%' ORDER BY rowid DESC LIMIT ?", (50,))
+    assert "idx_chunks_unenriched" in plan, plan
+    assert "TEMP B-TREE" not in plan.upper(), plan
+
+
+def test_unembedded_scan_uses_the_partial_index(tmp_path):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    _seed_chunks(s)
+    plan = _plan(s, "SELECT rowid,doc_id,text,metadata FROM chunks WHERE embedded=0 LIMIT ?",
+                 (50,))
+    assert "idx_chunks_unembedded" in plan, plan
+
+
+def test_fts_reindex_selection_is_index_backed(tmp_path):
+    """reindex_fts_batch's predicate must match idx_chunks_fts_stale's key.
+
+    A COALESCE(fts_context_version,0) wrapper cannot be served by a
+    plain-column index: it planned as a full SCAN while still paying the
+    index's write cost on one of the hottest tables in the store. Same
+    index/query-drift class as the 0.7.105 json_extract bug _meta_extract()
+    exists to prevent.
+    """
+    s = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    s.init()
+    _seed_chunks(s)
+    plan = _plan(s, "SELECT rowid, text, metadata FROM chunks "
+                    "WHERE embedded=1 AND fts_context_version < ? LIMIT ?",
+                 (Store.FTS_CONTEXT_VERSION + 1, 5000))
+    assert "idx_chunks_fts_stale" in plan, plan
+    assert "SEARCH" in plan, plan
+    # And that IS the predicate the store runs (the docstring explains the
+    # COALESCE it must not use, so match the SQL fragment, not the whole source).
+    import inspect
+    assert "WHERE embedded=1 AND fts_context_version < ? LIMIT ?" in \
+        inspect.getsource(Store.reindex_fts_batch), \
+        "reindex_fts_batch's predicate must stay seekable by idx_chunks_fts_stale"
