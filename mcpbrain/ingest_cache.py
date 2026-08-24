@@ -29,7 +29,7 @@ from mcpbrain.org_contracts import (
     CacheArtifact, CacheChunk, DRIVE_ID_META_KEY,
     artifact_filename, pipeline_fingerprint,
 )
-from mcpbrain.store import ENRICH_LOGIC_VERSION
+from mcpbrain.store import ENRICH_LOGIC_VERSION, _meta_extract
 
 log = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
             # '-'-delimited prefix of another's and a range/prefix match can't
             # tell them apart. Equality on the metadata field can.
             existing = [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.file_id')=?",
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=?",
                 (art.file_id,)).fetchall()]
             stale = [d for d in existing if d not in written]
             if stale:
