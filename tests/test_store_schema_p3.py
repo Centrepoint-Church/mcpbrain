@@ -810,3 +810,40 @@ def test_stale_chunker_ids_covers_gdrive_gmail_and_calendar(tmp_path):
     types_in_order = [item["source_type"] for item in out]
     assert types_in_order == sorted(
         types_in_order, key=lambda t: {"gdrive": 0, "gmail": 1, "calendar": 2}[t])
+
+
+def test_thread_summary_digest_joins_messages_oldest_first(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_email_context("m1", thread_id="t1", date_iso="2026-06-01",
+                           content_type="request", summary="Joel asked about Hall B.")
+    s.upsert_email_context("m2", thread_id="t1", date_iso="2026-06-02",
+                           content_type="update", summary="Sam confirmed availability.")
+
+    digest = s.thread_summary_digest("t1")
+
+    lines = digest.split("\n")
+    assert lines[0].startswith("- 2026-06-01")
+    assert "Joel asked about Hall B." in lines[0]
+    assert lines[1].startswith("- 2026-06-02")
+    assert "Sam confirmed availability." in lines[1]
+
+
+def test_thread_summary_digest_drops_oldest_lines_when_over_budget(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    for i in range(20):
+        s.upsert_email_context(f"m{i}", thread_id="t1", date_iso=f"2026-06-{i+1:02d}",
+                               content_type="update",
+                               summary="A reasonably long summary line " * 5)
+
+    digest = s.thread_summary_digest("t1", max_chars=500)
+
+    assert len(digest) <= 500
+    # The MOST RECENT message must survive; an early one must have been dropped.
+    assert "2026-06-20" in digest
+    assert "2026-06-01" not in digest
