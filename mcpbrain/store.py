@@ -610,7 +610,19 @@ class Store:
                 ("valid_from", "TEXT"),
                 ("valid_to", "TEXT"),
                 ("invalidated_at", "TEXT"),
-                ("invalidated_by_relation_id", "INTEGER"),
+                # SET NULL, not the default NO ACTION or a CASCADE, matching
+                # the entity_observations sibling: deleting the relation that
+                # superseded another must not delete the superseded row (and
+                # must not abort the delete either) -- it just clears the
+                # dangling pointer. ALTER TABLE ADD COLUMN can carry a
+                # REFERENCES clause as long as the default is NULL, so this
+                # takes effect on any store where the column doesn't exist
+                # yet (new installs, rebuilt stores) -- existing stores
+                # already have this column from before foreign_keys=ON
+                # existed, and ALTER cannot retrofit a constraint onto an
+                # existing column, so those only pick this up via a rebuild.
+                ("invalidated_by_relation_id",
+                 "INTEGER REFERENCES entity_relations(id) ON DELETE SET NULL"),
                 ("superseded_reason", "TEXT"),
                 ("confidence", "REAL DEFAULT 1.0"),
                 ("evidence", "TEXT"),
