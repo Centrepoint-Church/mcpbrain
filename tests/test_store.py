@@ -1,7 +1,7 @@
 import pytest
 
 from mcpbrain.graph_write import upsert_relation
-from mcpbrain.store import Store
+from mcpbrain.store import Store, _meta_extract
 
 
 @pytest.fixture
@@ -80,8 +80,10 @@ def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
     metadata.message_id and metadata.file_id. Without an index on those JSON
     paths every call is a full `SCAN chunks` (~1.4s on the ~108k-chunk live
     store), so a drain cycle spends ~24 min scanning and starves recall. init()
-    must create expression indexes matching exactly the json_extract() paths the
-    query uses, so the planner can turn the SCAN into an index SEARCH."""
+    must create expression indexes matching exactly the _meta_extract() paths
+    the query uses (jsonb_extract or json_extract, whichever the running
+    SQLite supports — see store._meta_extract), so the planner can turn the
+    SCAN into an index SEARCH."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
     with s._connect() as db:
         idx_sql = {
@@ -90,11 +92,11 @@ def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
                 "SELECT name, sql FROM sqlite_master "
                 "WHERE type='index' AND tbl_name='chunks'").fetchall()
         }
-    # An index whose expression matches the query's json_extract() path exactly.
-    assert any("json_extract(metadata,'$.message_id')" in s.replace(" ", "")
+    # An index whose expression matches the query's _meta_extract() path exactly.
+    assert any(_meta_extract("$.message_id").replace(" ", "") in s.replace(" ", "")
                for s in idx_sql.values()), \
         f"no index on metadata.message_id; have {list(idx_sql)}"
-    assert any("json_extract(metadata,'$.file_id')" in s.replace(" ", "")
+    assert any(_meta_extract("$.file_id").replace(" ", "") in s.replace(" ", "")
                for s in idx_sql.values()), \
         f"no index on metadata.file_id; have {list(idx_sql)}"
 
@@ -187,10 +189,10 @@ def test_init_indexes_thread_and_date_lookup_paths(tmp_path):
             (row["sql"] or "").replace(" ", "")
             for row in db.execute("SELECT sql FROM sqlite_master "
                 "WHERE type='index' AND tbl_name='chunks'").fetchall())
-    assert "json_extract(metadata,'$.thread_id')" in have, \
+    assert _meta_extract("$.thread_id").replace(" ", "") in have, \
         f"no index on metadata.thread_id: {have}"
-    assert ("json_extract(metadata,'$.date')" in have
-            and "json_extract(metadata,'$.date_iso')" in have), \
+    assert (_meta_extract("$.date").replace(" ", "") in have
+            and _meta_extract("$.date_iso").replace(" ", "") in have), \
         f"no index on the inbound date expression: {have}"
 
 
