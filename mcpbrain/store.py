@@ -70,6 +70,13 @@ def jsonb_supported() -> bool:
     """JSONB (binary JSON) lands in SQLite 3.45. Same guard rationale as
     fts5_supports_contentless(): the version comes from whichever Python the
     wheel installed under and MUST be checked at runtime, never assumed.
+
+    Currently CONSULTED BY NOTHING, deliberately. _meta_extract() used to gate
+    on it and that was a bug: a version-dependent SQL fragment cannot be used
+    where it has to match a PERSISTED schema object (see _meta_extract). Before
+    wiring this into anything, check the feature is not one that gets baked into
+    an existing store's schema — JSONB *storage* additionally cannot work at all
+    while chunks.metadata is declared TEXT in a STRICT table.
     """
     parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
     return parts >= (3, 45)
@@ -102,10 +109,26 @@ def _meta_extract(path: str) -> str:
     use it can never drift apart — a mismatch silently produces a full table
     scan, which is exactly the 0.7.105 failure mode. Every read site in this
     module that extracts a value from chunks.metadata MUST build its SQL
-    through this function rather than hand-writing json_extract/jsonb_extract.
+    through this function rather than hand-writing json_extract.
+
+    Deliberately `json_extract` UNCONDITIONALLY — never `jsonb_extract`, and
+    never version-dependent. `CREATE INDEX IF NOT EXISTS` in init() keys on the
+    index NAME, not its expression, so an already-built index is NOT replaced
+    when this fragment changes. Every real installed store already has these
+    five expression indexes built on `json_extract`; SQLite does not consider
+    `jsonb_extract(...)` the same expression for index matching, so emitting
+    `jsonb_extract` here silently kills those indexes and reinstates the
+    0.7.105 full-`SCAN chunks` outage on the whole fleet the moment a daemon
+    restarts. Measured cost of staying on json_extract over TEXT-stored JSON:
+    15.6ms vs 14.9ms on a 50k-row scan — noise. Version-dependent SQL text is
+    only ever safe where it does not have to match a persisted schema object.
+
+    Assumes SCALAR json paths (message_id, file_id, thread_id, event_id, date,
+    …) — true of all current call sites. An object/array-valued path would
+    behave differently between json_extract and jsonb_extract, so this
+    assumption matters to anyone reconsidering JSONB later.
     """
-    fn = "jsonb_extract" if jsonb_supported() else "json_extract"
-    return f"{fn}(metadata,'{path}')"
+    return f"json_extract(metadata,'{path}')"
 
 
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
@@ -429,6 +452,16 @@ class Store:
             # paths byte-for-byte or the planner won't use the index — both the
             # index DDL and every query read site build their SQL through the
             # single _meta_extract() source of truth, so they cannot drift apart.
+            #
+            # `IF NOT EXISTS` KEYS ON THE INDEX NAME, NOT THE EXPRESSION. So this
+            # loop does NOT rebuild an index that already exists with a DIFFERENT
+            # expression — on every already-installed store it is a silent no-op.
+            # If one of these expressions ever has to change, the index must be
+            # RENAMED (or explicitly DROPped first), never edited in place:
+            # otherwise the persisted index keeps the old expression, the queries
+            # move to the new one, they stop matching, and every one of these
+            # lookups degrades to the full `SCAN chunks` described above with no
+            # error and correct results. See _meta_extract's docstring.
             for _idx_name, _idx_path in (
                 ("idx_chunks_msgid", "$.message_id"),
                 ("idx_chunks_fileid", "$.file_id"),
