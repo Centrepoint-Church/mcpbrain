@@ -40,6 +40,34 @@ def test_row_sentences_use_schema_enriched_format():
     assert "---" not in text
 
 
+def test_a_row_group_chunk_has_no_stray_blank_lines():
+    """Regression guard for the _emit/_rendered_size empty-line-join fix: since
+    header_line/sep_line are always "" in the schema-enriched design, joining
+    them verbatim (instead of filtering falsy lines out) would leave two
+    blank lines between the title and the first row. A "simplification" back
+    to a plain "\\n".join([...]) must be caught here."""
+    chunks = tabular.render_chunks([_table()], file_name="Ledger.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "\n\n" not in text, f"stray blank line in row-group chunk:\n{text!r}"
+
+
+def test_a_pipe_in_a_cell_value_is_not_escaped():
+    """Row sentences aren't `|`-delimited any more, so a cell that legitimately
+    contains a pipe character must render literally -- the old markdown-grid
+    escaping (`|` -> `\\|`) would inject a spurious backslash into the
+    sentence for no benefit."""
+    header = ["Item", "Notes"]
+    rows = [["Chair", "A | B"]]
+    table = tabular.Table(sheet="S", header=header, rows=rows, rows_total=1)
+
+    chunks = tabular.render_chunks([table], file_name="f.xlsx", max_chars=1800)
+    text = [t for t, m in chunks if m["table_role"] == "rows"][0]
+
+    assert "Notes: A | B" in text
+    assert "\\|" not in text, "a literal pipe must not be backslash-escaped"
+
+
 def test_empty_cells_are_never_rendered():
     header = ["Item", "Cost", "Notes"]
     rows = [["Chair", "50", ""]]  # Notes is empty for this row

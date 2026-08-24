@@ -164,7 +164,17 @@ def tables_from_csv(text: str, *, sheet: str = "Sheet1",
 
 
 def _cell(value: str, max_cell_chars: int = _MAX_CELL_CHARS) -> str:
-    out = (value or "").replace("|", "\\|").replace("\n", " ").strip()
+    """Normalise one cell's value for rendering into a row sentence.
+
+    No pipe-escaping: that was a markdown-grid artifact (cells used to sit
+    inside `| ... |` columns, where a literal `|` would misalign the grid).
+    Row sentences aren't `|`-delimited, so escaping here only injected a
+    spurious backslash into any cell that legitimately contained a pipe
+    character -- noise reaching the embedder for no benefit. `_cell`'s only
+    caller is `_row_sentence`; `_summary_text` builds its lines directly and
+    never calls this.
+    """
+    out = (value or "").replace("\n", " ").strip()
     return out[:max_cell_chars] + "…" if len(out) > max_cell_chars else out
 
 
