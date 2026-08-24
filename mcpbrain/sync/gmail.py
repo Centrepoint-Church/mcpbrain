@@ -108,7 +108,8 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
 
     # First run — bootstrap
     if cursor is None:
-        hid = service.users().getProfile(userId="me").execute()["historyId"]
+        hid = service.users().getProfile(
+            userId="me").execute(num_retries=_NUM_RETRIES)["historyId"]
         store.set_cursor(source, str(hid))
         return 0
 
@@ -139,7 +140,8 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
             if page_token is not None:
                 kwargs["pageToken"] = page_token
 
-            response = service.users().history().list(**kwargs).execute()
+            response = service.users().history().list(
+                **kwargs).execute(num_retries=_NUM_RETRIES)
 
             # Track the most recent historyId seen; fall back to current if absent
             latest_history_id = response.get("historyId", latest_history_id)
@@ -156,7 +158,8 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     except HttpError as e:
         if getattr(e, "resp", None) is not None and e.resp.status in (404, 410):
             # historyId too old / invalid — reset to current and let a backfill fill the gap
-            hid = service.users().getProfile(userId="me").execute()["historyId"]
+            hid = service.users().getProfile(
+                userId="me").execute(num_retries=_NUM_RETRIES)["historyId"]
             store.set_cursor(source, str(hid))
             store.set_cursor(resume_key, "[]")
             return 0
@@ -197,7 +200,9 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
             fetch_interrupted = True
             break
         try:
-            raw = service.users().messages().get(userId="me", id=mid, format="full").execute()
+            raw = service.users().messages().get(
+                userId="me", id=mid,
+                format="full").execute(num_retries=_NUM_RETRIES)
         except HttpError as e:
             resp = getattr(e, "resp", None)
             if resp is not None and resp.status == 404:
