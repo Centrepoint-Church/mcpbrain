@@ -1,9 +1,11 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from bin.optimise_store import (_copy_all, _populate_trigram, main, rebuild,
-                                report_orphans)
+from bin.optimise_store import (UnmigratedStore, _copy_all, _populate_trigram,
+                                check_migrations, embedded_without_vectors,
+                                main, rebuild, report_orphans)
 from mcpbrain.store import Store
 
 
@@ -414,9 +416,7 @@ def test_main_swap_requires_yes_and_retains_the_old_file(tmp_path):
     assert main(["--src", str(src), "--home", str(tmp_path),
                  "--swap", "--yes"]) == 0
     assert not (tmp_path / "brain.sqlite3.new").exists()
-    # The -wal/-shm sidecars follow the file they belong to, so glob the DB only.
-    kept = [p for p in tmp_path.glob("brain.sqlite3.pre-rebuild-*")
-            if not p.name.endswith(("-wal", "-shm"))]
+    kept = _main_files(tmp_path, "brain.sqlite3.pre-rebuild-*")
     assert len(kept) == 1, kept
     assert sqlite3.connect(kept[0]).execute(
         "SELECT count(*) FROM email_entities").fetchone()[0] == 2  # orphan intact
@@ -425,3 +425,361 @@ def test_main_swap_requires_yes_and_retains_the_old_file(tmp_path):
 def test_main_refuses_a_missing_store(tmp_path):
     assert main(["--src", str(tmp_path / "nope.sqlite3"),
                  "--home", str(tmp_path)]) == 2
+
+
+# --- the -wal hazard: a store is THREE files, not one ----------------------
+
+def _main_files(d, pattern):
+    """Glob, excluding sidecars -- they follow the file they belong to."""
+    return [p for p in d.glob(pattern) if not p.name.endswith(("-wal", "-shm"))]
+
+
+def _crash_left_wal(path, sql):
+    """Commit `sql` and leave a real, non-empty `-wal` on disk afterwards.
+
+    In WAL mode the last connection to close checkpoints and DELETES the -wal,
+    so a stray one only exists after a crash (or after this tool moves one
+    aside). Reproduced faithfully: hold a second connection open while writing
+    so the WAL is live, capture its bytes, then put them back once everything
+    has closed. SQLite replays that file on the next open, silently.
+    """
+    from pathlib import Path as _P
+    keeper = sqlite3.connect(path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("SELECT count(*) FROM chunks").fetchone()   # hold a read
+    w = sqlite3.connect(path)
+    w.execute("PRAGMA journal_mode=WAL")
+    w.execute(sql)
+    w.commit()
+    w.close()
+    wal = _P(f"{path}-wal").read_bytes()
+    keeper.close()
+    assert wal, "no WAL content captured -- the simulation is not testing anything"
+    _P(f"{path}-wal").write_bytes(wal)
+    return wal
+
+
+def test_a_stray_wal_really_does_rewrite_a_store(tmp_path):
+    """The hazard itself, pinned. If SQLite ever stops replaying a foreign WAL
+    this test tells us the sidecar handling below is belt-only."""
+    p = tmp_path / "s.sqlite3"
+    _seed(p)
+    _crash_left_wal(p, "INSERT INTO entities(id,name,type) "
+                       "VALUES('x','LATER','person')")
+    db = sqlite3.connect(p)
+    try:
+        assert db.execute("SELECT count(*) FROM entities "
+                          "WHERE name='LATER'").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_rollback_does_not_replay_the_promoted_stores_wal(tmp_path):
+    """C1. `mv <kept> <src>` -- the instruction this tool used to print -- is
+    silent corruption.
+
+    By rollback time the daemon has run against the PROMOTED store, so
+    `<src>-wal` belongs to the new store. Moving only the main file back leaves
+    it there and SQLite replays it into the old file: no error, integrity_check
+    still `ok`, the old content gone and the page size flipped to the new
+    store's. So `--rollback` moves the current store aside WITH its sidecars
+    and restores the retained store WITH its own.
+    """
+    src = tmp_path / "brain.sqlite3"
+    s = _seed(src)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('old','OLD-ONLY','person')")
+    old_page_size = sqlite3.connect(src).execute("PRAGMA page_size").fetchone()[0]
+    assert old_page_size == 4096, "the old store must differ from the rebuild's 8192"
+
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+    assert main(["--src", str(src), "--home", str(tmp_path), "--swap", "--yes"]) == 0
+    assert sqlite3.connect(src).execute("PRAGMA page_size").fetchone()[0] == 8192
+
+    # The daemon writes to the promoted store and leaves its WAL behind.
+    _crash_left_wal(src, "INSERT INTO entities(id,name,type) "
+                         "VALUES('new','WRITTEN-AFTER-SWAP','person')")
+    assert (tmp_path / "brain.sqlite3-wal").exists()
+
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--rollback", "--yes"]) == 0
+
+    # Read the sidecar state FIRST, before anything opens the database:
+    # opening it checkpoints and deletes a stray -wal, which would hide the
+    # very thing under test.
+    #
+    # And assert the INVARIANT (no foreign sidecar survives beside the restored
+    # file), not the corruption symptom. What SQLite does with a foreign WAL is
+    # not deterministic -- planting one has been observed to (a) be rejected and
+    # the WAL zeroed, (b) raise `database disk image is malformed`, and (c) be
+    # replayed, silently replacing the content and flipping page_size while
+    # integrity_check still says `ok`. Which one you get depends on the frame
+    # checksums. That non-determinism is exactly why the sidecar must not be
+    # there at all, and why asserting on any one outcome would be a flaky test
+    # of the wrong thing.
+    stray = {sc for sc in ("-wal", "-shm")
+             if (tmp_path / f"brain.sqlite3{sc}").exists()}
+    assert stray == set(), f"the promoted store's {stray} was left beside the " \
+                           "restored file, for SQLite to replay into it"
+    # Nothing was destroyed: the rolled-back store is retained WITH its
+    # sidecars, which is where they went.
+    aside = _main_files(tmp_path, "brain.sqlite3.rolled-back-*")
+    assert len(aside) == 1, aside
+    assert Path(f"{aside[0]}-wal").exists(), \
+        "the promoted store's WAL was discarded rather than moved aside with it"
+
+    db = sqlite3.connect(src)
+    try:
+        names = {r[0] for r in db.execute("SELECT name FROM entities")}
+        # And the OLD store is what came back, as its own self.
+        assert db.execute("PRAGMA page_size").fetchone()[0] == old_page_size
+        assert "OLD-ONLY" in names
+        assert "WRITTEN-AFTER-SWAP" not in names
+        assert [r[0] for r in db.execute("PRAGMA integrity_check")] == ["ok"]
+    finally:
+        db.close()
+
+
+def test_swap_preserves_a_committed_write_left_in_the_rebuilds_wal(tmp_path):
+    """I1, the destination-side mirror of C1.
+
+    `<store>.new-wal` was never relocated or checkpointed, so anything that
+    opened the rebuild write-capable between gate 4 and the swap had its
+    committed pages silently dropped by `os.replace(dst, src)`.
+    """
+    src = tmp_path / "brain.sqlite3"
+    dst = tmp_path / "brain.sqlite3.new"
+    _seed(src)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+
+    _crash_left_wal(dst, "INSERT INTO entities(id,name,type) "
+                         "VALUES('w','IN-DST-WAL','person')")
+    assert (tmp_path / "brain.sqlite3.new-wal").exists()
+
+    assert main(["--src", str(src), "--home", str(tmp_path), "--swap", "--yes"]) == 0
+
+    db = sqlite3.connect(src)
+    try:
+        assert db.execute("SELECT count(*) FROM entities "
+                          "WHERE name='IN-DST-WAL'").fetchone()[0] == 1, \
+            "a committed write in the rebuild's WAL was dropped by the swap"
+    finally:
+        db.close()
+    assert not (tmp_path / "brain.sqlite3.new-wal").exists()
+    assert not (tmp_path / "brain.sqlite3.new-shm").exists()
+
+
+def test_swap_moves_the_old_stores_sidecars_with_it(tmp_path):
+    """The forward half: nothing of the OLD store may be left beside the
+    promoted rebuild, and --rollback needs those sidecars to exist."""
+    src = tmp_path / "brain.sqlite3"
+    _seed(src)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+    _crash_left_wal(src, "INSERT INTO entities(id,name,type) "
+                         "VALUES('o','IN-OLD-WAL','person')")
+
+    assert main(["--src", str(src), "--home", str(tmp_path), "--swap", "--yes"]) == 0
+
+    kept = _main_files(tmp_path, "brain.sqlite3.pre-rebuild-*")
+    assert len(kept) == 1, kept
+    assert Path(f"{kept[0]}-wal").exists(), "the old store's WAL was abandoned"
+    # And the rollback that follows brings that content back with the file.
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--rollback", "--yes"]) == 0
+    db = sqlite3.connect(src)
+    try:
+        assert db.execute("SELECT count(*) FROM entities "
+                          "WHERE name='IN-OLD-WAL'").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_rollback_requires_yes_and_reports_nothing_to_restore(tmp_path):
+    src = tmp_path / "brain.sqlite3"
+    _seed(src)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--rollback"]) == 2
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--rollback", "--yes"]) == 2   # nothing retained yet
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--swap", "--rollback", "--yes"]) == 2   # opposite operations
+
+
+# --- pre-migration sources (I2) --------------------------------------------
+
+def _unmigrate_actions(src):
+    """Put the store back into its pre-Task-1.7 shape, which is a valid input
+    to init() and therefore a real store someone could try to rebuild."""
+    db = sqlite3.connect(src)
+    db.execute("ALTER TABLE graph_actions_legacy RENAME TO graph_actions")
+    db.execute("DELETE FROM meta WHERE k='actions_migrated'")
+    db.commit()
+    db.close()
+
+
+def test_rebuild_refuses_a_pre_migration_graph_actions_source(tmp_path):
+    """Rebuilding it passes all seven gates and yields a store that cannot be
+    opened (`already another table or index with this name:
+    graph_actions_legacy`), so it is refused instead."""
+    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
+    _seed(src)
+    _unmigrate_actions(src)
+    assert check_migrations(src)
+    with pytest.raises(UnmigratedStore, match="graph_actions"):
+        rebuild(src, dst)
+    assert not dst.exists()
+
+
+def test_rebuild_refuses_a_doc_id_keyed_enrich_payloads_source(tmp_path):
+    """The destination's table is file_id-keyed, so every copied row hits
+    `NOT NULL constraint failed: enrich_payloads.file_id` mid-rebuild."""
+    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
+    _seed(src)
+    db = sqlite3.connect(src)
+    db.execute("DROP TABLE enrich_payloads")
+    db.execute("CREATE TABLE enrich_payloads(doc_id TEXT PRIMARY KEY, "
+               "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, at TEXT)")
+    db.execute("INSERT INTO enrich_payloads(doc_id,payload) VALUES('d1','{}')")
+    db.commit()
+    db.close()
+    assert check_migrations(src)
+    with pytest.raises(UnmigratedStore, match="enrich_payloads"):
+        rebuild(src, dst)
+
+
+def test_main_refuses_a_pre_migration_source_even_with_yes(tmp_path):
+    """Not a consent matter: --yes does not unlock an unrebuildable store."""
+    src = tmp_path / "brain.sqlite3"
+    _seed(src)
+    _unmigrate_actions(src)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 2
+    assert not (tmp_path / "brain.sqlite3.new").exists()
+
+
+def test_check_migrations_passes_a_normal_store(tmp_path):
+    """The already-migrated case -- Josh's live store, and every fresh one --
+    must stay unaffected."""
+    src = tmp_path / "s.sqlite3"
+    _seed(src)
+    assert check_migrations(src) == []
+
+
+# --- the sibling self-FK nothing could detect (I3) -------------------------
+
+def test_rebuild_nullifies_a_relation_pointer_to_a_dropped_orphan(tmp_path):
+    """entity_relations.invalidated_by_relation_id is added by ALTER TABLE with
+    no REFERENCES clause, so `PRAGMA foreign_key_check` is structurally blind
+    to it -- gate 5 can never catch a dangling one.
+
+    This is the live scenario exactly: the rebuild drops 8 orphan
+    entity_relations rows, and a surviving row pointing at one of those 8 is
+    left dangling. It is not an orphan in the SOURCE (the target row is right
+    there), which is why only a post-copy pass on the destination can see it.
+    """
+    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
+    s = Store(str(src), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e1','A','person')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e2','B','person')")
+    db = sqlite3.connect(src)   # foreign_keys OFF: plant the orphan relation
+    # id=1 is an ORPHAN (entity_a missing) and will be dropped by _KEEP.
+    db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b) "
+               "VALUES(1,'GONE','knows','e2')")
+    # id=2 survives, and points at the row that is about to disappear.
+    db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,"
+               "invalidated_at,invalidated_by_relation_id) "
+               "VALUES(2,'e1','knows','e2','2026-01-01',1)")
+    db.commit()
+    db.close()
+
+    # Not visible as an orphan in the source -- row 1 exists there.
+    assert report_orphans(src)["entity_relations.invalidated_by_relation_id"] == 0
+
+    r = rebuild(src, dst)
+
+    assert r["dropped_rows"]["entity_relations"] == 1
+    assert r["nullified"]["entity_relations.invalidated_by_relation_id"] == 1
+    out = Store(str(dst), dim=4)
+    with out._connect() as db:
+        row = db.execute("SELECT invalidated_at, invalidated_by_relation_id "
+                         "FROM entity_relations WHERE id=2").fetchone()
+        assert row["invalidated_at"] == "2026-01-01"   # still invalidated
+        assert row["invalidated_by_relation_id"] is None   # invalidator unknown
+
+
+def test_report_orphans_covers_the_relation_self_ref(tmp_path):
+    src = tmp_path / "s.sqlite3"
+    s = Store(str(src), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('e1','A','person')")
+    db = sqlite3.connect(src)
+    db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b,"
+               "invalidated_by_relation_id) VALUES(1,'e1','knows','e1',999)")
+    db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b) "
+               "VALUES(2,'e1','likes','e1')")   # NULL pointer, not an orphan
+    db.commit()
+    db.close()
+
+    assert report_orphans(src)["entity_relations.invalidated_by_relation_id"] == 1
+
+
+# --- graceful failure instead of a traceback (I4) ---------------------------
+
+def test_main_refuses_a_store_whose_embedded_chunks_have_no_vector(tmp_path, capsys):
+    """backup._verify_artifact raises on such a store, so gate 2 cannot take a
+    snapshot of it -- which used to surface as a bare traceback in the middle
+    of a deliberately careful attended operation."""
+    src = tmp_path / "brain.sqlite3"
+    s = Store(str(src), dim=4)
+    s.init()
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO chunks(doc_id,text,metadata,embedded) "
+                   "VALUES('d1','hello','{}',1)")   # claims a vector, has none
+    assert embedded_without_vectors(src) == 1
+
+    rc = main(["--src", str(src), "--home", str(tmp_path), "--yes"])
+
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "REFUSING" in out and "embedded=1" in out
+    assert "bin/repair.py embed-pending" in out
+    assert "Traceback" not in out
+    assert not list(tmp_path.glob("*.enc"))
+    assert not (tmp_path / "brain.sqlite3.new").exists()
+
+
+def test_main_reports_a_snapshot_failure_without_a_traceback(tmp_path, capsys):
+    import mcpbrain.backup as backup_mod
+    src = tmp_path / "brain.sqlite3"
+    _seed(src)
+    real = backup_mod.make_encrypted_snapshot
+    backup_mod.make_encrypted_snapshot = lambda *a, **k: (_ for _ in ()).throw(
+        OSError("[Errno 28] No space left on device"))
+    try:
+        rc = main(["--src", str(src), "--home", str(tmp_path), "--yes"])
+    finally:
+        backup_mod.make_encrypted_snapshot = real
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "REFUSING" in out and "No space left on device" in out
+    assert "Traceback" not in out
+    assert not (tmp_path / "brain.sqlite3.new").exists()
+
+
+def test_main_reports_a_rebuild_failure_without_a_traceback(tmp_path, capsys):
+    import bin.optimise_store as mod
+    src = tmp_path / "brain.sqlite3"
+    _seed(src)
+    real = mod.rebuild
+    mod.rebuild = lambda *a, **k: (_ for _ in ()).throw(
+        sqlite3.IntegrityError("NOT NULL constraint failed: x.y"))
+    try:
+        rc = main(["--src", str(src), "--home", str(tmp_path), "--yes"])
+    finally:
+        mod.rebuild = real
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "REBUILD FAILED" in out and "NOT NULL constraint failed" in out
+    assert "UNTOUCHED" in out
+    assert "Traceback" not in out
