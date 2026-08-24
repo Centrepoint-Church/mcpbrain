@@ -10,6 +10,13 @@ that runs at the daemon's normal backfill pace -- this script deletes the
 existing garbage vectors immediately so they stop polluting dense search
 right away, ahead of the full re-fetch.
 
+Only the vec_chunks row goes; `embedded=1` is left alone deliberately, so
+index_pending does not immediately re-embed the same garbage text before the
+re-render lands. That leaves an `embedded=1` chunk with no vector, which
+`backup._verify_artifact` treats as designed rather than corrupt precisely
+because these are content_subtype='table' rows -- see its docstring before
+widening this script's WHERE clause to any other subtype.
+
 Dry-run by default; pass --apply to actually delete. Matches the
 bin/relocate_ingest_cache.py / bin/consolidate.py convention.
 """

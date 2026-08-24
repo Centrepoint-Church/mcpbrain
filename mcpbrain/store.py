@@ -1895,11 +1895,21 @@ class Store:
 
         vector=None means "skip the dense vector, still write FTS and stamp
         embedded=1" -- used for content_subtype=='table' chunks when
-        embed_skip_tabular is on. embedded=1 with no vec_chunks row is safe
-        everywhere else that gates on embedded=1 for vector search: a join
-        against vec_chunks simply returns nothing for that rowid, which is
-        exactly the desired "never surfaces via dense search" behavior,
-        while unembedded_chunks() correctly stops re-fetching it.
+        embed_skip_tabular is on. Every RETRIEVAL path that gates on
+        embedded=1 handles that state correctly on its own: a join against
+        vec_chunks simply returns nothing for that rowid, which is exactly
+        the desired "never surfaces via dense search" behavior, while
+        unembedded_chunks() correctly stops re-fetching it.
+
+        The one place it is NOT self-evidently safe is a consistency CHECK
+        rather than a query: `backup._verify_artifact` samples the
+        lowest-rowid embedded=1 chunks and RAISES if one does not resolve to
+        a vector. It therefore excludes content_subtype='table' from its
+        sample -- keep that exclusion in step with this method (and with
+        bin/cleanup_tabular_vectors.py, which produces the same state on
+        already-embedded rows), or a periodic backup and bin/repair.py's
+        pre-apply safety snapshot both start failing on a deliberately
+        vector-less chunk.
         """
         with self._connect(write=True) as db:
             db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
