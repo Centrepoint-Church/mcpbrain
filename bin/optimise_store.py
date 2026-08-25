@@ -290,7 +290,8 @@ def rebuild(src, dst, *, page_size: int = 8192,
     trigram_rows = _populate_trigram(dst, dim) if populate_trigram else 0
     # Statistics for the planner, once, on the finished file. Through _open_db
     # so the vec0 extension is loaded -- ANALYZE walks sqlite_master.
-    d = _open_db(dst)
+    # bulk=True: a single connection scanning the whole schema (PR #25 finding 5).
+    d = _open_db(dst, bulk=True)
     try:
         d.execute("ANALYZE")
         d.commit()
@@ -335,14 +336,16 @@ def _copy_all(src, dst, *, batch: int = 5000) -> dict:
       the column counts are an upper bound on rows, never an equality.
     """
     from mcpbrain.store import _open_db
-    s_db = _open_db(src, read_only=True)
+    # bulk=True on both sides: this is the actual bulk-copy pass -- every
+    # table, potentially hundreds of thousands of rows (PR #25 finding 5).
+    s_db = _open_db(src, read_only=True, bulk=True)
     # Stamped into dst's own meta table (below, AFTER the generic copy loop --
     # meta is itself a managed table the loop DELETEs-then-refills from src,
     # which would wipe a stamp written any earlier) so _swap can tell whether
     # src kept changing after THIS read of it, no matter how long dst then
     # sits waiting for --swap.
     freshness = _freshness_snapshot(s_db)
-    d_db = _open_db(dst)
+    d_db = _open_db(dst, bulk=True)
     # Parents may land after children (and entity_observations references
     # itself), so enforcement is off for the copy; the CLI's explicit
     # foreign_key_check on the finished file is what actually verifies it.
@@ -524,7 +527,7 @@ def _rederive_fts(dst, dim: int, *, batch: int = 5000) -> int:
     store = Store(str(dst), dim=dim)
     total, last = 0, 0
     while True:
-        with store._connect(write=True) as db:
+        with store._connect(write=True, bulk=True) as db:
             rows = db.execute(
                 "SELECT rowid, text, metadata FROM chunks "
                 "WHERE embedded=1 AND rowid > ? ORDER BY rowid LIMIT ?",
@@ -569,7 +572,7 @@ def _populate_trigram(dst, dim: int, *, batch: int = 5000) -> int:
     store = Store(str(dst), dim=dim)
     total, last = 0, 0
     while True:
-        with store._connect(write=True) as db:
+        with store._connect(write=True, bulk=True) as db:
             rows = db.execute(
                 "SELECT rowid, text FROM chunks WHERE rowid > ? "
                 "ORDER BY rowid LIMIT ?", (last, batch)).fetchall()
