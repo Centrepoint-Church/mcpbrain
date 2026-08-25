@@ -20,7 +20,17 @@
 - Version lives in FOUR files that must stay equal: `pyproject.toml`, `mcpbrain/__init__.py`, `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`. **This plan bumps none of them** — releasing is a separate, explicit act.
 - Every write to a user-owned JSON config must be parse-checked first, merged (never replaced), and written atomically via tempfile + `os.replace`. A file that fails to parse is left byte-identical and reported.
 - Claude runs only edited-and-directly-impacted tests; Josh runs the full suite.
-- Commit after every task. Do not push.
+- **Branch and PR per stage.** Each stage is its own branch off `main` and its own
+  PR: `feat/install-simplification-stage-1`, `-stage-2`, `-stage-3`. Commit after
+  every task; push the branch and open the PR at that stage's ship point, then
+  STOP and wait for review before starting the next stage. Never commit to `main`
+  directly and never merge your own PR.
+- **Line numbers in this plan were captured on 2026-08-25 against commit
+  `10ea7bb`.** `mcpbrain/doctor.py` in particular has changed since (`ce1a4e7`
+  added a dangling-invalidator report line). Treat every `file:line` here as a
+  pointer to a named function or block, not a literal offset — locate the symbol,
+  then edit. If what you find differs materially from what a task describes, stop
+  and say so rather than forcing the edit.
 
 ---
 
@@ -408,7 +418,44 @@ git add README.md docs/DISTRIBUTION.md docs/RELEASE-RUNBOOK.md tests/test_instal
 git commit -m "docs: single-source install instructions; README pointed at a deleted script"
 ```
 
-**STAGE 1 SHIP POINT.** Stop here and confirm with Josh before continuing. Nothing above touches package code.
+### Stage 1 ship point — open the PR
+
+- [ ] **Run the impacted tests once more together**
+
+Run: `pytest tests/test_packaging_extras.py tests/test_plugin_assets.py tests/test_install_docs_single_source.py tests/test_update_index.py -v`
+Expected: PASS.
+
+- [ ] **Push the branch and open the PR**
+
+```bash
+git push -u origin feat/install-simplification-stage-1
+gh pr create --base main --title "install: the install command does the install (stage 1)" --body "$(cat <<'BODY'
+Stage 1 of `docs/superpowers/plans/2026-08-25-install-simplification.md`.
+Documentation and packaging only — no package code changes.
+
+- `/mcpbrain:install` now creates the four Local scheduled tasks itself instead
+  of printing a table for the user to retype into the Routines UI. That step was
+  ~10 of the install's ~20 manual actions and the one place a Cloud task could be
+  created by mistake, which fails silently forever. The manual procedure is
+  retained in `plugin/INSTALL.md` as a fallback for org-policy-disabled Routines.
+- `fastembed` moves into base dependencies; `daemon = []` stays declared as an
+  empty alias so the `mcpbrain[daemon]` command lines baked into deployed
+  `update.py` installs keep resolving without a uv warning.
+- Install instructions single-sourced to `plugin/commands/install.md`, guarded by
+  a test. `README.md` was telling users to clone a repo named `mcp-ops-brain` and
+  run `./install/setup.sh` — neither exists.
+
+No version bump, no release. Spec:
+`docs/superpowers/specs/2026-08-25-install-simplification-design.md`
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_01PLBavmPAaoeRC1JBKhefu4
+BODY
+)"
+```
+
+- [ ] **STOP.** Report the PR URL and wait for review. Do not start Stage 2.
 
 ---
 
@@ -1461,7 +1508,52 @@ git add mcpbrain/doctor.py tests/test_doctor_connector.py
 git commit -m "feat(doctor): report and repair the MCP connector on every surface"
 ```
 
-**STAGE 2 SHIP POINT.** Stop and confirm with Josh. The MSIX path is derived from bug reports, not from a machine we control — it stays behind the open Windows hardware QA gate.
+### Stage 2 ship point — open the PR
+
+- [ ] **Run the impacted tests together**
+
+Run: `pytest tests/test_connector_paths.py tests/test_connector_write.py tests/test_connector_register.py tests/test_setup_path_echo.py tests/test_setup_bin_path.py tests/test_desktop_relaunch_order.py tests/test_doctor_connector.py tests/test_control_api_post.py -v && ruff check mcpbrain/`
+Expected: PASS, ruff clean.
+
+- [ ] **Push the branch and open the PR**
+
+Branch `feat/install-simplification-stage-2`, based on `main` after Stage 1 merges.
+
+```bash
+git push -u origin feat/install-simplification-stage-2
+gh pr create --base main --title "install: one connector path, correct on both surfaces (stage 2)" --body "$(cat <<'BODY'
+Stage 2 of `docs/superpowers/plans/2026-08-25-install-simplification.md`.
+
+New `mcpbrain/connector.py` replaces the three call sites that wrote one config
+file between them:
+
+- **Fixes a live Windows bug.** MSIX installs virtualise `%APPDATA%\Claude\` to
+  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\`.
+  `setup.py` wrote only the former, so on an MSIX box the connector write landed
+  in a file nothing reads — silently. See anthropics/claude-code#26073, #29100.
+- Registers both surfaces (chat config + `~/.claude.json` user scope) rather than
+  leaving one to chance. Writes are merge-preserving and atomic, and a config
+  that will not parse is left byte-identical and reported.
+- `/api/connect-desktop` now writes **while Claude Desktop is down**
+  (quit → write → launch). Desktop rewrites its config on quit, so the previous
+  write-then-quit ordering put the entry inside the window where it is lost.
+- `setup` records uv's shim path rather than `resolve()`-ing into uv's internal
+  tool venv, and its five-line "quit and re-run `mcpbrain connect`" block is gone
+  — it contradicted both the install command and the wizard.
+- `doctor` reports and repairs the connector per config file. Nothing checked
+  this before, which is why the MSIX bug needed a hardware gate to surface.
+
+**The Windows hardware QA gate stays OPEN.** The MSIX path is derived from bug
+reports, not verified on hardware; this does not close that gate.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_01PLBavmPAaoeRC1JBKhefu4
+BODY
+)"
+```
+
+- [ ] **STOP.** Report the PR URL and wait for review. Do not start Stage 3.
 
 ---
 
@@ -2150,7 +2242,49 @@ git add mcpbrain/daemon.py mcpbrain/setup.py plugin/INSTALL.md tests/test_ocr_fi
 git commit -m "fix(setup): install OCR on a daemon cadence, not in front of a waiting user"
 ```
 
-**STAGE 3 SHIP POINT.** Ask Josh to run the full suite (`pytest tests/`) and `ruff check .` before any release decision.
+### Stage 3 ship point — open the PR
+
+- [ ] **Run the impacted tests together**
+
+Run: `pytest tests/test_windows_installer_shape.py tests/test_release_publishes_installer.py tests/test_fleet_defaults.py tests/test_wizard_assets.py tests/test_ocr_first_run.py tests/test_ocr_install.py -v && ruff check mcpbrain/ bin/`
+Expected: PASS, ruff clean.
+
+- [ ] **Push the branch and open the PR**
+
+Branch `feat/install-simplification-stage-3`, based on `main` after Stage 2 merges.
+
+```bash
+git push -u origin feat/install-simplification-stage-3
+gh pr create --base main --title "install: installer cleanup, wizard framing, OCR off the critical path (stage 3)" --body "$(cat <<'BODY'
+Stage 3 of `docs/superpowers/plans/2026-08-25-install-simplification.md`.
+
+- `install.ps1` loses its plan layer: `Invoke-InstallPlan` reached `default { }`
+  for both `persistence-*` actions, so they were computed and discarded, and
+  `Test-Scheduler` duplicated `agents._scheduler_available()` while creating and
+  deleting a real scheduled task — every install probed the scheduler twice. The
+  ARM64 uv-link fallback is real and stays.
+- `bin/release.py` publishes `install.ps1` to the dist repo. It was hand-copied
+  per runbook §1b.1 with nothing guarding it, so a fixed installer could sit
+  unpublished for releases at a time.
+- Wizard cut to three numbered steps (it advertised seven; four were prose and a
+  status panel). Every control is retained. Two defects fixed: `saveFleet()` was
+  defined twice byte-identically, and `config_profile()` never returned a `fleet`
+  key — so the wizard's fleet prefill was dead code and its hardcoded org ids
+  were the only source, silently duplicating `org_defaults`.
+- OCR install moves from `mcpbrain setup` (a multi-minute `brew install` running
+  immediately before the wizard opens, with the user watching a blank screen) to
+  a once-ever daemon cadence. It moves rather than goes: `doctor --repair` is
+  manual, and without an automatic caller every install has OCR silently off.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_01PLBavmPAaoeRC1JBKhefu4
+BODY
+)"
+```
+
+- [ ] **STOP.** Report the PR URL. Ask Josh to run the full suite (`pytest tests/`)
+      and `ruff check .` before any release decision.
 
 ---
 
