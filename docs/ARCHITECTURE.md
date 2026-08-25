@@ -27,14 +27,15 @@ scheduling live in `agents.py`; `setup.py` wires it all up.
 ## How Claude connects to the brain (the connector)
 
 Staff work in **Claude Desktop**, which reads its MCP servers from
-`claude_desktop_config.json` — **not** from Claude Code's `~/.claude.json`, and
-**not** from the plugin's `.mcp.json`. So the connector is **written by
-`mcpbrain setup`** into the Desktop config:
+`claude_desktop_config.json` — **not** from the plugin's `.mcp.json`. Some staff
+also use Claude Code directly, which reads its own `~/.claude.json` (user
+scope). So `mcpbrain setup` registers the connector into **both** surfaces —
+the Desktop config and `~/.claude.json` — rather than picking one:
 
 | OS | Claude Desktop MCP config |
 |---|---|
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` (or, on MSIX installs, the app actually reads `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` instead — mcpbrain writes to whichever of the two actually exist, both if both do) |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
 Setup merges this entry in (preserving any other servers, idempotent):

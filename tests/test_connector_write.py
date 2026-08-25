@@ -72,6 +72,20 @@ def test_non_dict_top_level_is_refused(tmp_path):
     assert cfg.read_text() == "[1, 2, 3]"
 
 
+def test_non_dict_mcp_servers_value_is_refused(tmp_path):
+    # A non-dict value AT the mcpServers key (e.g. a stray list) parses fine as
+    # an object at the top level, but overwriting it wholesale would discard
+    # whatever it actually is. Refuse rather than replace, same as a non-dict
+    # top level.
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"mcpServers": [1, 2]}))
+    ok, detail = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
+    assert ok is False
+    assert "mcpServers" in detail
+    assert cfg.read_text() == json.dumps({"mcpServers": [1, 2]})
+
+
 def test_write_is_atomic_no_partial_file(tmp_path, monkeypatch):
     # If os.replace fails, the original must survive intact.
     cfg = tmp_path / "c.json"

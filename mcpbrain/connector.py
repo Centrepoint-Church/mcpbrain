@@ -118,6 +118,19 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
 
     ``create=False`` skips a file that does not exist, which is how a machine with
     only one of the two surfaces avoids gaining an empty config for the other.
+
+    Accepted tradeoff — read-modify-write, not read-modify-write-with-retry: this
+    function reads ``path``, computes the merged content, and atomically replaces
+    the file, but it does not re-read and retry if the file changed underneath it
+    between those two steps. The atomic replace (tempfile + ``os.replace``)
+    guards against corruption/truncation from an interrupted write, not against a
+    concurrent writer winning a lost-update race in that window. This matters
+    concretely for ``~/.claude.json``: ``/mcpbrain:install`` runs inside a Claude
+    Code session that is itself writing that same file. The window between our
+    read and our replace is milliseconds, so the probability of a genuine
+    collision is low, and a re-read-and-retry loop was deliberately not built for
+    it — that's overengineering for a race this narrow. If it ever proves not
+    narrow enough in practice, add the retry then, with real evidence driving it.
     """
     if not path.exists():
         if not create:
@@ -134,7 +147,9 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
             return False, f"{path} is not a JSON object; left unchanged"
 
     servers = data.get("mcpServers")
-    if not isinstance(servers, dict):
+    if servers is not None and not isinstance(servers, dict):
+        return False, f"{path}'s mcpServers is not a JSON object; left unchanged"
+    if servers is None:
         servers = {}
     if servers.get("mcpbrain") == entry and path.exists():
         return True, f"already registered in {path}"

@@ -1,4 +1,4 @@
 {
-  "_comment": "The mcpbrain MCP server is registered by `mcpbrain setup` into the Claude Desktop config (claude_desktop_config.json) with the absolute install path — Claude Desktop, where the plugin runs, reads its MCP servers from there, not from this plugin manifest. See mcpbrain/setup.py:_register_desktop_mcp.",
+  "_comment": "The mcpbrain MCP server is registered by `mcpbrain setup` with the absolute install path — into BOTH claude_desktop_config.json (the chat app) and ~/.claude.json (Claude Code's own config, user scope), since staff use both surfaces. Neither reads its MCP servers from this plugin manifest. See mcpbrain/connector.py:register_connector.",
   "mcpServers": {}
 }

@@ -70,8 +70,14 @@ def _register_connector(*, dry_run: bool = False) -> None:
     from mcpbrain import connector
     for path, ok, detail in connector.register_connector(
             mcpbrain_bin=_mcpbrain_bin(), dry_run=dry_run):
+        if detail == "dry-run":
+            continue  # register_connector already printed "would register ..."
         if ok:
             print(f"Connected the brain: {detail}")
+        elif detail.startswith("not present:"):
+            # Intentional skip (e.g. ~/.claude.json on a Claude-Desktop-only
+            # machine) — not a failure, just informational.
+            print(f"Skipped: {detail}")
         else:
             print(f"Could not connect the brain here: {detail}", file=sys.stderr)
 
@@ -199,8 +205,13 @@ def _ensure_daemon_running(home: str, *, dry_run: bool = False) -> int:
 def connect_main(argv=None) -> int:
     """``mcpbrain connect``: re-register the brain's MCP connector on every
     Claude surface present, quitting and relaunching Claude Desktop around the
-    write so Desktop's own clobber-on-quit behaviour can't discard it. Unlike
-    ``setup``, this touches nothing else — no daemon, no wizard.
+    write so Desktop's own clobber-on-quit behaviour can't discard it.
+
+    This FORCE-QUITS Claude Desktop (``taskkill /IM Claude.exe /F`` on Windows,
+    ``osascript -e 'quit app "Claude"'`` on macOS). Since Claude Code Desktop
+    *is* Claude Desktop, running this from a terminal inside a Claude Code
+    Desktop session will close that very session. Unlike ``setup``, this
+    touches nothing else — no daemon, no wizard.
     """
     ap = argparse.ArgumentParser(prog="mcpbrain connect")
     ap.add_argument("--dry-run", action="store_true",
@@ -211,6 +222,9 @@ def connect_main(argv=None) -> int:
         # against the user's actual running Claude Desktop.
         _register_connector(dry_run=True)
         return 0
+    print("This will quit and relaunch Claude Desktop (force-quit if needed) "
+          "to register the connector. If you are running this from a terminal "
+          "inside Claude Code Desktop, that session will close.")
     from mcpbrain import desktop
     desktop.relaunch_claude_desktop(on_quit=lambda: _register_connector())
     return 0

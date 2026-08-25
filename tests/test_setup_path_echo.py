@@ -56,6 +56,28 @@ def test_connect_main_writes_only_the_connector(tmp_path, monkeypatch):
         "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
 
 
+def test_register_connector_reports_intentional_skip_as_skipped_not_error(
+        tmp_path, monkeypatch, capsys):
+    # ~/.claude.json doesn't exist (Claude Code has never run here) while
+    # Claude Desktop's config does. The code_config_path skip is intentional
+    # and correct (per merge_server_into's create=False contract), so it must
+    # print "Skipped: ..." to stdout, not "Could not connect ..." to stderr.
+    from mcpbrain import connector
+    desktop_cfg = tmp_path / "claude_desktop_config.json"
+    desktop_cfg.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [desktop_cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
+
+    setup._register_connector(dry_run=False)
+
+    captured = capsys.readouterr()
+    assert "Skipped: not present" in captured.out
+    assert "Connected the brain" in captured.out
+    assert "Could not connect" not in captured.out
+    assert "Could not connect" not in captured.err
+
+
 def test_connect_main_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     from mcpbrain import connector
     desktop_cfg = tmp_path / "claude_desktop_config.json"
