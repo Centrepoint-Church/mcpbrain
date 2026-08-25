@@ -197,18 +197,22 @@ def _ensure_daemon_running(home: str, *, dry_run: bool = False) -> int:
 
 
 def connect_main(argv=None) -> int:
-    """``mcpbrain connect``: (re)write ONLY the Claude Desktop MCP connector.
-
-    Claude Desktop owns ``claude_desktop_config.json`` and overwrites entries
-    added while it is running, so the reliable way to register the connector is
-    to run this with **Claude Desktop quit**, then reopen it. Unlike ``setup``,
-    this touches nothing else — no daemon, no wizard.
+    """``mcpbrain connect``: re-register the brain's MCP connector on every
+    Claude surface present, quitting and relaunching Claude Desktop around the
+    write so Desktop's own clobber-on-quit behaviour can't discard it. Unlike
+    ``setup``, this touches nothing else — no daemon, no wizard.
     """
     ap = argparse.ArgumentParser(prog="mcpbrain connect")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be written without writing")
     args = ap.parse_args(argv)
-    _register_connector(dry_run=args.dry_run)
+    if args.dry_run:
+        # A dry-run must never take a real destructive/disruptive action
+        # against the user's actual running Claude Desktop.
+        _register_connector(dry_run=True)
+        return 0
+    from mcpbrain import desktop
+    desktop.relaunch_claude_desktop(on_quit=lambda: _register_connector())
     return 0
 
 

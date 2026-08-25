@@ -194,12 +194,12 @@ def connector_lines(*, mcpbrain_bin: str) -> list[str]:
             continue
         if not entry:
             lines.append(f"⚠️  {label:<16} not registered in {path} — "
-                         f"run 'mcpbrain doctor --repair'")
+                         f"run 'mcpbrain connect'")
             continue
         command = entry.get("command") or ""
         if not Path(command).exists():
             lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
-                         f"does not exist — run 'mcpbrain doctor --repair'")
+                         f"does not exist — run 'mcpbrain connect'")
             continue
         lines.append(f"✅ {label:<16} registered in {path.name} → {command}")
     return lines

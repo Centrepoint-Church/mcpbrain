@@ -118,14 +118,10 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
     fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".mcpbrain.tmp")
     tmp = Path(tmp_str)
     try:
-        os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
-        os.close(fd)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, path)
     except OSError as exc:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
         tmp.unlink(missing_ok=True)
         return False, f"could not write {path} ({exc})"
     return True, f"registered in {path}"

@@ -38,12 +38,17 @@ def test_setup_dry_run_registers_the_connector(monkeypatch, tmp_path, capsys):
 
 def test_connect_main_writes_only_the_connector(tmp_path, monkeypatch):
     # `mcpbrain connect` registers the connector and nothing else — no daemon,
-    # no wizard, no tray.
-    from mcpbrain import connector
+    # no wizard, no tray. It now quits/relaunches Claude Desktop around the
+    # write (Task 8's fix), so fake that out rather than touching a real app:
+    # the fake proves the on_quit callback (the connector write) actually runs.
+    from mcpbrain import connector, desktop
     desktop_cfg = tmp_path / "claude_desktop_config.json"
     monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
     monkeypatch.setattr(connector, "desktop_config_paths", lambda: [desktop_cfg])
     monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
+    monkeypatch.setattr(desktop, "relaunch_claude_desktop",
+                        lambda on_quit=None: (on_quit() if on_quit else None) or
+                                              {"relaunched": True, "detail": "ok"})
 
     assert setup.connect_main([]) == 0
     data = json.loads(desktop_cfg.read_text())
