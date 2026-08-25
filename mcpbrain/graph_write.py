@@ -1031,13 +1031,19 @@ def apply(store, extraction, *, doc_ids, identity=None,
         identity = config.owner_email(str(config.app_dir()))
     if owner is None:
         owner = owner_identity_from_config()
-    taxonomy = orgs.taxonomy_from_config()
     now = (clock() if clock else datetime.now(timezone.utc))
     today = now.strftime("%Y-%m-%d")
 
     # Resolved once and reused everywhere below instead of recomputing this
     # same expression per flag lookup.
     _home = str(home) if home is not None else str(config.app_dir())
+    # MUST pass _home explicitly: taxonomy_from_config() with no argument
+    # always resolves config.app_dir() regardless of the caller's `home`, so a
+    # bare call here silently ignored a caller-supplied home and read whatever
+    # taxonomy was cached (or the REAL machine's config.json) instead of this
+    # call's own org config -- invisible in production (home always equals
+    # app_dir() there) but broke any test/caller that passes a different home.
+    taxonomy = orgs.taxonomy_from_config(_home)
 
     # Org default: the model's own org signal always wins when present. Only
     # when it's empty or the model's own "unknown" sentinel — and the
