@@ -53,6 +53,66 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 ENRICH_LOGIC_VERSION = 1
 
 
+def fts5_supports_contentless() -> bool:
+    """True when SQLite is new enough for contentless FTS5 WITH deletes.
+
+    contentless_delete=1 lands in 3.43. Without it a contentless table cannot
+    service DELETE, which mcpbrain does on every retention and GC sweep — so
+    below the floor we keep the content-storing form. The version comes from
+    whichever Python the wheel installed under, and the Windows path pins its
+    own x64 interpreter, so this MUST be checked and never assumed.
+    """
+    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
+    return parts >= (3, 43)
+
+
+def strict_supported() -> bool:
+    """STRICT tables land in SQLite 3.37. Same guard rationale as
+    fts5_supports_contentless(): the version comes from whichever Python the
+    wheel installed under and MUST be checked at runtime, never assumed.
+    Below the floor the tables are created without STRICT — i.e. exactly the
+    loose behaviour they have always had.
+    """
+    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
+    return parts >= (3, 37)
+
+
+def _strict_suffix() -> str:
+    """`) STRICT` vs `)` for a CREATE TABLE, resolved at call time.
+
+    Single source of truth so no table can silently drift out of the STRICT
+    set, and so the version guard exists in exactly one place.
+    """
+    return " STRICT" if strict_supported() else ""
+
+
+def _meta_extract(path: str) -> str:
+    """SQL fragment reading `path` out of chunks.metadata.
+
+    Single source of truth so an expression INDEX and the QUERY that should
+    use it can never drift apart — a mismatch silently produces a full table
+    scan, which is exactly the 0.7.105 failure mode. Every read site in this
+    module that extracts a value from chunks.metadata MUST build its SQL
+    through this function rather than hand-writing json_extract.
+
+    Deliberately `json_extract` UNCONDITIONALLY — never `jsonb_extract`, and
+    never version-dependent. `CREATE INDEX IF NOT EXISTS` in init() keys on the
+    index NAME, not its expression, so an already-built index is NOT replaced
+    when this fragment changes. Every real installed store already has these
+    five expression indexes built on `json_extract`; SQLite does not consider
+    `jsonb_extract(...)` the same expression for index matching, so emitting
+    `jsonb_extract` here silently kills those indexes and reinstates the
+    0.7.105 full-`SCAN chunks` outage on the whole fleet the moment a daemon
+    restarts. Measured cost of staying on json_extract over TEXT-stored JSON:
+    15.6ms vs 14.9ms on a 50k-row scan — noise. Version-dependent SQL text is
+    only ever safe where it does not have to match a persisted schema object.
+
+    Assumes SCALAR json paths (message_id, file_id, thread_id, event_id, date,
+    …) — true of all current call sites. An object/array-valued path would
+    behave differently between json_extract and jsonb_extract, so this
+    assumption matters to anyone reconsidering JSONB later.
+    """
+    return f"json_extract(metadata,'{path}')"
 
 
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
@@ -98,9 +158,28 @@ def store_dim_from_path(path) -> int | None:
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
+# cache_size/mmap_size are PER CONNECTION (SQLite's own private page cache,
+# not shared OS-level memory the way an mmap'd file region can be), and the
+# daemon opens roughly one connection per call across ~21 threads (PR #25
+# finding 5) -- e.g. graph_write.upsert_relation opens one per relation. The
+# large tuned values below are sized for a single long-lived, throughput-
+# sensitive connection (a rebuild, a full-store snapshot, a multi-thousand-row
+# reindex batch); multiplied across many short-lived per-call connections they
+# could add on the order of a gigabyte of RSS, and this project gates
+# releases on peak RSS (226 MB verified in 0.7.113). Everyday per-call
+# connections get the smaller default; `bulk=True` opts a connection into the
+# larger values for the specific paths that actually benefit: the rebuild
+# tool (bin/optimise_store.py), Store.reindex_fts_batch, and backup's
+# VACUUM INTO snapshot.
+_DEFAULT_CACHE_KIB = 16384    # 16 MiB
+_DEFAULT_MMAP_BYTES = 67108864     # 64 MiB
+_BULK_CACHE_KIB = 65536       # 64 MiB
+_BULK_MMAP_BYTES = 268435456       # 256 MiB
+
 
 def _open_db(path, read_only: bool = False, *,
-            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+            bulk: bool = False) -> sqlite3.Connection:
     """Open a connection to the derived store with sqlite-vec loaded.
 
     read_only=True uses a mode=ro URI (the MCP server's read path); read_only=False
@@ -115,6 +194,10 @@ def _open_db(path, read_only: bool = False, *,
     RECALL_PATH_BEGIN_RETRIES) does not bound the wait, because even one
     attempt can sit here for the full timeout. Callers on a latency-sensitive
     path pass a smaller value; see RECALL_PATH_BUSY_TIMEOUT_MS.
+
+    bulk: opts into the larger cache_size/mmap_size (see the module-level
+    comment above _DEFAULT_CACHE_KIB) for a single long-lived, throughput-
+    sensitive connection. Leave False for the common per-call case.
     """
     if read_only:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -129,6 +212,31 @@ def _open_db(path, read_only: bool = False, *,
     # and the WAL grows without bound; this makes SQLite truncate it back after
     # a checkpoint instead. Chosen well above normal transaction size.
     db.execute("PRAGMA journal_size_limit=67108864")  # 64 MiB
+    # Tuned for a multi-GB, read-heavy derived store. SQLite's own default
+    # left this at a 2 MB page cache on a 2.6 GB database -- too small. The
+    # much larger `bulk` values are reserved for the few connections that are
+    # actually long-lived and throughput-sensitive (see above); every other
+    # per-call connection gets this smaller default so ~21 concurrent daemon
+    # threads cannot multiply into a gigabyte of RSS between them.
+    cache_kib = _BULK_CACHE_KIB if bulk else _DEFAULT_CACHE_KIB
+    mmap_bytes = _BULK_MMAP_BYTES if bulk else _DEFAULT_MMAP_BYTES
+    db.execute(f"PRAGMA cache_size=-{int(cache_kib)}")
+    db.execute(f"PRAGMA mmap_size={int(mmap_bytes)}")
+    db.execute("PRAGMA temp_store=2")         # MEMORY: FTS5/ORDER BY temp b-trees
+    db.execute("PRAGMA threads=4")            # parallel sort
+    db.execute("PRAGMA analysis_limit=400")   # bounds PRAGMA optimize (Task 3)
+    # Foreign keys are OFF by default in SQLite, per-connection, so every
+    # REFERENCES clause in init() was decoration until this line existed.
+    # Unconditional: FK enforcement has been available since 3.6.19, far below
+    # any version this codebase can run on (unlike STRICT/JSONB/contentless
+    # FTS5, which need runtime guards). Set on read-only connections too —
+    # cheap, and it keeps `PRAGMA foreign_key_check` meaningful there.
+    db.execute("PRAGMA foreign_keys=ON")
+    if not read_only:
+        # NORMAL is corruption-safe under WAL and this store is DERIVED —
+        # fully re-ingestable from Google. FULL fsyncs every commit for a
+        # durability guarantee we do not need.
+        db.execute("PRAGMA synchronous=1")
     db.enable_load_extension(True)
     sqlite_vec.load(db)  # vec0 tables need the extension even on a read-only conn
     db.enable_load_extension(False)
@@ -253,7 +361,8 @@ class Store:
 
     @contextmanager
     def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
-                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS):
+                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+                bulk: bool = False):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
@@ -281,8 +390,15 @@ class Store:
         attempt can block for the full busy_timeout, so a caller that needs a
         hard latency bound (recall) must lower THIS, not just retries; see
         RECALL_PATH_BUSY_TIMEOUT_MS.
+
+        bulk: passed straight through to _open_db (PR #25 finding 5) --
+        opts THIS connection into the larger cache_size/mmap_size for a
+        genuinely long-lived, throughput-sensitive call (e.g.
+        reindex_fts_batch). Leave False for the common per-call case, or
+        many concurrent connections can add up to real RSS growth.
         """
-        db = _open_db(self.path, self.read_only, busy_timeout_ms=busy_timeout_ms)
+        db = _open_db(self.path, self.read_only, busy_timeout_ms=busy_timeout_ms,
+                      bulk=bulk)
         try:
             if write and not self.read_only:
                 # Manual transaction control: take the write lock up front.
@@ -314,6 +430,27 @@ class Store:
                 with db:
                     yield db
         finally:
+            # PRAGMA optimize is the documented way to keep planner statistics
+            # current; analysis_limit (set in _open_db) bounds its cost so it
+            # cannot stall a close. It WRITES, so never on a read-only handle
+            # -- AND never on a write=False connection either, even on a
+            # writable Store: it would acquire the write lock after the
+            # caller's read-only transaction is already done, contending
+            # with a drain's writes at exactly the recall path's latency
+            # budget (RECALL_PATH_BUSY_TIMEOUT_MS/RECALL_PATH_BEGIN_RETRIES
+            # exist to bound that contention, and graph_write.upsert_relation
+            # opens one connection per relation, so a drain would pay this
+            # tens of thousands of times per cycle) -- reintroducing the
+            # 0.7.105 recall-starvation class this pragma was added to help
+            # fix in the first place. Only an actual write transaction
+            # should pay for a stats refresh.
+            if write and not self.read_only:
+                try:
+                    db.execute("PRAGMA optimize")
+                except sqlite3.Error:
+                    # Best-effort: a stats refresh must never fail a caller's
+                    # otherwise-successful transaction.
+                    pass
             db.close()
 
     def init(self) -> None:
@@ -325,51 +462,84 @@ class Store:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")  # concurrent reader (MCP) + one writer (daemon)
         with self._connect(write=True) as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS chunks(
+            # STRICT (SQLite >= 3.37) makes every declared type below a real
+            # constraint instead of an affinity hint. It is a TABLE-CREATION
+            # option: an existing store's tables are untouched by
+            # CREATE TABLE IF NOT EXISTS and stay loose until the one
+            # out-of-place rebuild (bin/optimise_store.py) recreates them
+            # through this same init(). Resolved once per init() so no table
+            # can drift out of the set.
+            _S = _strict_suffix()
+            db.execute(f"""CREATE TABLE IF NOT EXISTS chunks(
                 rowid INTEGER PRIMARY KEY,
                 doc_id TEXT UNIQUE, text TEXT, content_hash TEXT,
                 metadata TEXT, embedded INTEGER DEFAULT 0,
-                enriched INTEGER DEFAULT 0)""")
+                enriched INTEGER DEFAULT 0){_S}""")
             # Expression indexes on the metadata JSON paths that doc_ids_for_messages
             # (called once per extraction by drain) filters on. Without them each
             # call is a full `SCAN chunks` — ~1.4s on the ~108k-chunk live store, so
             # a backlogged drain cycle spends ~24 min scanning and starves the
             # control-API recall threads (GIL + DB), timing out brain_search/actions.
-            # The expressions must match doc_ids_for_messages' json_extract() paths
-            # byte-for-byte or the planner won't use the index.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_msgid "
-                       "ON chunks(json_extract(metadata,'$.message_id'))")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fileid "
-                       "ON chunks(json_extract(metadata,'$.file_id'))")
-            # I6: thread_enrich._chunk_key groups a split calendar event's chunks
-            # by event_id, so doc_ids_for_messages resolves that id too — same
-            # arm shape as file_id, so it needs the same expression index.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_eventid "
-                       "ON chunks(json_extract(metadata,'$.event_id'))")
-            # thread_chunks (recall small-to-big expansion via retrieval_expand,
-            # plus the stale-action / stale-reextract passes) filters chunks by
-            # metadata.thread_id — a full SCAN (~4.3s on the live store) without
-            # this index; a single-equality predicate, so the index alone fixes it.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_threadid "
-                       "ON chunks(json_extract(metadata,'$.thread_id'))")
+            # The expressions must match doc_ids_for_messages' _meta_extract()
+            # paths byte-for-byte or the planner won't use the index — both the
+            # index DDL and every query read site build their SQL through the
+            # single _meta_extract() source of truth, so they cannot drift apart.
+            #
+            # `IF NOT EXISTS` KEYS ON THE INDEX NAME, NOT THE EXPRESSION. So this
+            # loop does NOT rebuild an index that already exists with a DIFFERENT
+            # expression — on every already-installed store it is a silent no-op.
+            # If one of these expressions ever has to change, the index must be
+            # RENAMED (or explicitly DROPped first), never edited in place:
+            # otherwise the persisted index keeps the old expression, the queries
+            # move to the new one, they stop matching, and every one of these
+            # lookups degrades to the full `SCAN chunks` described above with no
+            # error and correct results. See _meta_extract's docstring.
+            for _idx_name, _idx_path in (
+                ("idx_chunks_msgid", "$.message_id"),
+                ("idx_chunks_fileid", "$.file_id"),
+                # I6: thread_enrich._chunk_key groups a split calendar event's
+                # chunks by event_id, so doc_ids_for_messages resolves that id
+                # too — same arm shape as file_id, so it needs the same
+                # expression index.
+                ("idx_chunks_eventid", "$.event_id"),
+                # thread_chunks (recall small-to-big expansion via
+                # retrieval_expand, plus the stale-action / stale-reextract
+                # passes) filters chunks by metadata.thread_id — a full SCAN
+                # (~4.3s on the live store) without this index; a
+                # single-equality predicate, so the index alone fixes it.
+                ("idx_chunks_threadid", "$.thread_id"),
+            ):
+                db.execute(f"CREATE INDEX IF NOT EXISTS {_idx_name} "
+                           f"ON chunks({_meta_extract(_idx_path)})")
             # inbound_chunks_since (the waiting-on sweep, every cycle) range-filters
             # on COALESCE(date,date_iso); index the SAME expression so the range
             # plans as a SEARCH (~2.9s SCAN -> ~tens of ms). Expression must match
             # inbound_chunks_since's date_expr byte-for-byte.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_inbound_date ON chunks("
-                       "COALESCE(json_extract(metadata,'$.date'),"
-                       "json_extract(metadata,'$.date_iso')))")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_inbound_date ON chunks("
+                f"COALESCE({_meta_extract('$.date')},"
+                f"{_meta_extract('$.date_iso')}))")
             db.execute(f"""CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
                 USING vec0(embedding float[{self.dim}])""")
-            db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks
-                USING fts5(text)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
+            if fts5_supports_contentless():
+                # content='' drops FTS5's own duplicate copy of the indexed
+                # text -- 0.78 GB of the 2.62 GB live store. External content
+                # (content='chunks') is NOT usable: _fts_text indexes the
+                # contextual prefix + body while chunks.text stays raw, so the
+                # content table could not reproduce the indexed string.
+                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+                           "USING fts5(text, content='', contentless_delete=1)")
+            else:
+                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+                           "USING fts5(text)")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS meta(
+                k TEXT PRIMARY KEY, v TEXT){_S}""")
             db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dim',?)", (str(self.dim),))
-            db.execute("""CREATE TABLE IF NOT EXISTS sync_cursors(
-                source TEXT PRIMARY KEY, cursor TEXT, updated_at TEXT)""")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS sync_cursors(
+                source TEXT PRIMARY KEY, cursor TEXT, updated_at TEXT){_S}""")
 
             # --- enrichment graph tables (Task 4.2) -----------------------
-            db.execute("""CREATE TABLE IF NOT EXISTS entities(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entities(
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
                 type        TEXT NOT NULL,
@@ -381,7 +551,7 @@ class Store:
                 degree      INTEGER DEFAULT 0,
                 aliases     TEXT DEFAULT '',
                 email_addr  TEXT DEFAULT '',
-                notes       TEXT DEFAULT '')""")
+                notes       TEXT DEFAULT ''){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ent_type ON entities(type)")
             # Migrate base columns on very old stores (pre-v0.7). Check columns
             # before creating idx_ent_org, which references the org column.
@@ -428,13 +598,20 @@ class Store:
                 # most-active profiles every cycle.
                 db.execute("ALTER TABLE entities ADD COLUMN profile_audited_at TEXT DEFAULT ''")
 
-            db.execute("""CREATE TABLE IF NOT EXISTS entity_relations(
+            # entity_a/entity_b now REFERENCE entities(id) for real (see the
+            # foreign_keys=ON pragma in _open_db). ON DELETE CASCADE, not the
+            # default RESTRICT: merge_entities and org_import._remove_org_entity
+            # both delete an entity row, and a relation that references a
+            # deleted node is meaningless — cascading keeps those paths working
+            # AND removes the orphan instead of leaving it (80,577 relation rows
+            # on the live store, 8 of them already orphaned).
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_relations(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_a      TEXT NOT NULL,
+                entity_a      TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 relation      TEXT NOT NULL,
-                entity_b      TEXT NOT NULL,
+                entity_b      TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 source_doc_id TEXT DEFAULT '',
-                UNIQUE(entity_a, relation, entity_b))""")
+                UNIQUE(entity_a, relation, entity_b)){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_a ON entity_relations(entity_a)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_b ON entity_relations(entity_b)")
             # --- entity_relations bitemporal columns (Phase 1, Task 1.6) --
@@ -448,7 +625,19 @@ class Store:
                 ("valid_from", "TEXT"),
                 ("valid_to", "TEXT"),
                 ("invalidated_at", "TEXT"),
-                ("invalidated_by_relation_id", "INTEGER"),
+                # SET NULL, not the default NO ACTION or a CASCADE, matching
+                # the entity_observations sibling: deleting the relation that
+                # superseded another must not delete the superseded row (and
+                # must not abort the delete either) -- it just clears the
+                # dangling pointer. ALTER TABLE ADD COLUMN can carry a
+                # REFERENCES clause as long as the default is NULL, so this
+                # takes effect on any store where the column doesn't exist
+                # yet (new installs, rebuilt stores) -- existing stores
+                # already have this column from before foreign_keys=ON
+                # existed, and ALTER cannot retrofit a constraint onto an
+                # existing column, so those only pick this up via a rebuild.
+                ("invalidated_by_relation_id",
+                 "INTEGER REFERENCES entity_relations(id) ON DELETE SET NULL"),
                 ("superseded_reason", "TEXT"),
                 ("confidence", "REAL DEFAULT 1.0"),
                 ("evidence", "TEXT"),
@@ -483,6 +672,10 @@ class Store:
             # the Task 1.7 migration has renamed them to *_legacy (meta flag set),
             # CREATE TABLE IF NOT EXISTS would otherwise resurrect empty orphan
             # tables on every re-init, so guard on the flag.
+            # Deliberately NOT STRICT: these two are the pre-migration legacy
+            # shape, created here only to be drained into `actions` and renamed
+            # to *_legacy a few statements below. Tightening a table on its way
+            # out would only risk failing the migration copy.
             already_migrated = db.execute(
                 "SELECT 1 FROM meta WHERE k='actions_migrated'").fetchone() is not None
             if not already_migrated:
@@ -506,7 +699,7 @@ class Store:
             # Single forward surface for actions + recorded decisions. The
             # legacy graph_actions/graph_decisions tables are migrated in once
             # (below) and renamed to *_legacy; all new code uses this table.
-            db.execute("""CREATE TABLE IF NOT EXISTS actions(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS actions(
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 text             TEXT NOT NULL,
                 owner            TEXT DEFAULT '',
@@ -527,7 +720,7 @@ class Store:
                 text_fingerprint TEXT DEFAULT '',
                 snoozed_until    TEXT DEFAULT '',
                 created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at       TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                updated_at       TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
             # Back-fill Phase 1 columns on pre-existing actions tables that were
             # created before the full column set was defined. Must run before the
             # index CREATE statements below, because idx_actions_status references
@@ -594,7 +787,7 @@ class Store:
             # signals (reply_needed, reply_reason) on, since mcpbrain has no
             # separate triage surface. doc_context mirrors the same context
             # columns for Drive chunks, keyed by doc_id.
-            db.execute("""CREATE TABLE IF NOT EXISTS email_context(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS email_context(
                 message_id   TEXT PRIMARY KEY,
                 subject      TEXT DEFAULT '',
                 sender       TEXT DEFAULT '',
@@ -611,7 +804,7 @@ class Store:
                 labels       TEXT DEFAULT '',
                 contextual_summary TEXT,
                 reply_needed INTEGER DEFAULT 0,
-                reply_reason TEXT DEFAULT '')""")
+                reply_reason TEXT DEFAULT ''){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ec_org    ON email_context(org)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ec_date   ON email_context(date_iso)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ec_thread ON email_context(thread_id)")
@@ -620,11 +813,15 @@ class Store:
             # doc_db.py:146-153. Keyed (message_id, entity_id); role records how
             # the entity appears (sender / mentioned / about). graph_write.apply
             # writes these via link_email_entity.
-            db.execute("""CREATE TABLE IF NOT EXISTS email_entities(
+            # entity_id CASCADEs: nothing repoints email links away from an
+            # entity that org_import._remove_org_entity deletes, so without the
+            # cascade that delete would now fail (or, pre-FK, leave a dangling
+            # row — 146 of them on the live store).
+            db.execute(f"""CREATE TABLE IF NOT EXISTS email_entities(
                 message_id TEXT NOT NULL,
-                entity_id  TEXT NOT NULL,
+                entity_id  TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 role       TEXT DEFAULT '',
-                PRIMARY KEY (message_id, entity_id))""")
+                PRIMARY KEY (message_id, entity_id)){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ee_entity  ON email_entities(entity_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ee_message ON email_entities(message_id)")
 
@@ -632,9 +829,20 @@ class Store:
             # Bi-temporal role-provenance table ported verbatim from
             # memory_db.py:430-451 (Spec 7 shape: valid_to + REAL confidence +
             # confidence_source + invalidation chain).
-            db.execute("""CREATE TABLE IF NOT EXISTS entity_observations(
+            # entity_id already DECLARED its REFERENCES; foreign_keys was OFF so
+            # it enforced nothing. ON DELETE CASCADE added for the same reason as
+            # the other four child columns — and because plain RESTRICT would
+            # newly BREAK merge_entities/org_import if any observation were left
+            # behind (96 already orphaned on the live store).
+            # created_at was DATETIME: SQLite accepts that on a loose table (it
+            # has NUMERIC affinity) and rejects it outright on a STRICT one.
+            # CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS', a string, and every
+            # live value reads back typeof()='text', so TEXT is what the column
+            # has always actually held.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_observations(
                 id                            INTEGER PRIMARY KEY,
-                entity_id                     TEXT NOT NULL REFERENCES entities(id),
+                entity_id                     TEXT NOT NULL
+                                              REFERENCES entities(id) ON DELETE CASCADE,
                 attribute                     TEXT NOT NULL,
                 value                         TEXT,
                 source                        TEXT,
@@ -643,8 +851,14 @@ class Store:
                 confidence                    REAL DEFAULT 1.0,
                 confidence_source             TEXT DEFAULT 'pipeline_snapshot',
                 invalidated_at                TEXT,
-                invalidated_by_observation_id INTEGER REFERENCES entity_observations(id),
-                created_at                    DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+                -- SET NULL, not the default NO ACTION: an entity's cascade
+                -- deletes its observations one row at a time, so a pointer
+                -- from one of them to another would abort the delete. Nothing
+                -- writes this column today; this keeps it safe if anything does.
+                invalidated_by_observation_id INTEGER
+                                              REFERENCES entity_observations(id)
+                                              ON DELETE SET NULL,
+                created_at                    TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_eo_entity   ON entity_observations(entity_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_eo_valid_to ON entity_observations(valid_to)")
             # Non-unique partial index: multiple sources can share the same
@@ -664,25 +878,25 @@ class Store:
 
             # --- entity merge audit (R4) ----------------------------------
             # IF NOT EXISTS so init() also back-fills the table on existing stores.
-            db.execute("""CREATE TABLE IF NOT EXISTS entity_merge_log(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_merge_log(
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 winner_id   TEXT NOT NULL,
                 loser_id    TEXT NOT NULL,
                 loser_name  TEXT DEFAULT '',
                 method      TEXT NOT NULL,
-                at          TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                at          TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
 
             # -- Org-baseline (Phase 0) Task 2 -----------------------------------
             # Edge outbox: allowlisted, redacted ContributionRecords queued locally
             # per drain; a daily cadence uploads pending rows (uploaded_at == '').
-            db.execute("""CREATE TABLE IF NOT EXISTS org_contrib_outbox(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS org_contrib_outbox(
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 record      TEXT NOT NULL,
                 created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
-                uploaded_at TEXT DEFAULT '')""")
+                uploaded_at TEXT DEFAULT ''){_S}""")
             # Curator staging: contributions ingested from the fleet folder awaiting
             # deterministic merge + adjudication. UNIQUE makes re-ingest idempotent.
-            db.execute("""CREATE TABLE IF NOT EXISTS org_contrib_staging(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS org_contrib_staging(
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 contributor_email TEXT NOT NULL,
                 source_ref        TEXT NOT NULL,
@@ -693,16 +907,16 @@ class Store:
                 source_kind       TEXT DEFAULT '',
                 batch_file        TEXT DEFAULT '',
                 ingested_at       TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(contributor_email, source_ref, claim))""")
+                UNIQUE(contributor_email, source_ref, claim)){_S}""")
             # Consumer re-point log: local entities merged into an org node at import,
             # so a later curator split can restore local flesh (spec B4a rule 4).
-            db.execute("""CREATE TABLE IF NOT EXISTS org_repoint_log(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS org_repoint_log(
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 from_entity_id   TEXT NOT NULL,
                 to_entity_id     TEXT NOT NULL,
                 snapshot_version INTEGER DEFAULT 0,
                 reason           TEXT DEFAULT '',
-                at               TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                at               TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
 
             # --- migration: add chunks.enriched to pre-existing stores --------
             # The real ~/.mcpbrain store predates the enriched column. Idempotent:
@@ -722,19 +936,24 @@ class Store:
             # (entity_id, level) so an entity can appear in different communities
             # at different hierarchy levels. idx_ec_community supports fast
             # lookup of all members in a community.
-            db.execute("""CREATE TABLE IF NOT EXISTS entity_communities (
-                entity_id    TEXT NOT NULL,
+            # CASCADE matters most here: merge_entities repoints relations,
+            # observations and email links onto the winner before deleting the
+            # loser, but NOTHING repoints community membership. Without the
+            # cascade that delete would newly fail; with it, the stale
+            # membership row goes and the next community pass recomputes it.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_communities (
+                entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 community_id INTEGER NOT NULL,
                 level        INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (entity_id, level)
-            )""")
+            ){_S}""")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ec_community "
                 "ON entity_communities(community_id, level)"
             )
             # Community summary table: one row per (community_id, level) with
             # aggregated metadata written by the community-detection pipeline.
-            db.execute("""CREATE TABLE IF NOT EXISTS community_summaries (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS community_summaries (
                 community_id INTEGER NOT NULL,
                 level        INTEGER NOT NULL DEFAULT 0,
                 title        TEXT DEFAULT '',
@@ -743,13 +962,13 @@ class Store:
                 key_entities TEXT DEFAULT '',
                 updated      TEXT DEFAULT '',
                 PRIMARY KEY (community_id, level)
-            )""")
+            ){_S}""")
 
             # --- Phase 3, Task 0.2: thread_context ----------------------------
             # Per-thread context row written by the thread-summariser pipeline.
             # thread_id mirrors Gmail's thread identifier so joins to email_context
             # work without an intermediate key.
-            db.execute("""CREATE TABLE IF NOT EXISTS thread_context (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS thread_context (
                 thread_id           TEXT PRIMARY KEY,
                 subject             TEXT DEFAULT '',
                 org                 TEXT DEFAULT '',
@@ -759,7 +978,7 @@ class Store:
                 last_updated        TEXT DEFAULT '',
                 contextual_summary  TEXT DEFAULT '',
                 contextual_summary_at TEXT DEFAULT ''
-            )""")
+            ){_S}""")
             # Existing DBs: add contextual_summary_at (stamp of when the
             # contextual_summary was written) so a thread re-summarises when it
             # gains messages after being summarised, not just when it has none.
@@ -773,7 +992,7 @@ class Store:
             # replies, stalled threads, etc.). UNIQUE(finding_type, ref_id) so
             # re-detecting the same signal upserts in place rather than
             # accumulating duplicates.
-            db.execute("""CREATE TABLE IF NOT EXISTS proactive_findings (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS proactive_findings (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 finding_type TEXT NOT NULL,
                 ref_id       TEXT NOT NULL DEFAULT '',
@@ -784,7 +1003,7 @@ class Store:
                 detected_at  TEXT DEFAULT '',
                 resolved_at  TEXT,
                 UNIQUE(finding_type, ref_id)
-            )""")
+            ){_S}""")
             _pf_cols = {row["name"] for row in
                         db.execute("PRAGMA table_info(proactive_findings)").fetchall()}
             if "verdict" not in _pf_cols:
@@ -804,24 +1023,24 @@ class Store:
             # Presence of a row here is the entire suppression mechanism: the
             # entities row itself is never mutated or deleted, so suppression is
             # trivially reversible via unsuppress_entity (just delete this row).
-            db.execute("""CREATE TABLE IF NOT EXISTS entity_suppressions (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_suppressions (
                 entity_id     TEXT PRIMARY KEY,
                 reason        TEXT DEFAULT '',
                 suppressed_at TEXT DEFAULT ''
-            )""")
+            ){_S}""")
 
             # --- Session-4, Task 3.2: org-suggestion inbox ----------------------
             # Purely additive/inspectable: an org string the extractor keeps
             # seeing that isn't in the configured taxonomy. Never auto-applied
             # to config.json — a human (or a future dashboard/CLI) reviews these.
-            db.execute("""CREATE TABLE IF NOT EXISTS org_suggestions (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS org_suggestions (
                 raw_org       TEXT PRIMARY KEY,
                 reason        TEXT DEFAULT '',
                 suggested_at  TEXT DEFAULT ''
-            )""")
+            ){_S}""")
 
             # --- Phase 1 capture: change_log -----------------------------------
-            db.execute("""CREATE TABLE IF NOT EXISTS change_log (
+            db.execute(f"""CREATE TABLE IF NOT EXISTS change_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 change_type TEXT NOT NULL,
                 source      TEXT DEFAULT '',
@@ -829,7 +1048,7 @@ class Store:
                 summary     TEXT DEFAULT '',
                 detail      TEXT DEFAULT '',
                 revert_ref  TEXT DEFAULT '',
-                created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                created_at  TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
             # ORDER BY id DESC uses the PK — no secondary index needed.
             cl_cols = {row["name"] for row in db.execute(
                 "PRAGMA table_info(change_log)").fetchall()}
@@ -867,7 +1086,7 @@ class Store:
             )
 
             # --- meeting_packs (Mac capability uplift) -----------------------
-            db.execute("""CREATE TABLE IF NOT EXISTS meeting_packs(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS meeting_packs(
                 event_id       TEXT PRIMARY KEY,
                 event_title    TEXT DEFAULT '',
                 event_date     TEXT DEFAULT '',
@@ -875,7 +1094,7 @@ class Store:
                 attendees      TEXT DEFAULT '[]',
                 built_at       TEXT DEFAULT '',
                 cowork_session TEXT DEFAULT '',
-                context_hash   TEXT DEFAULT '')""")
+                context_hash   TEXT DEFAULT ''){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_mp_date ON meeting_packs(event_date)")
             # context_hash (2026-06-16): a fingerprint of the inputs a pack was
             # built from, so the hourly meeting-packs task rebuilds a pack only
@@ -888,14 +1107,14 @@ class Store:
             # Records that a thread was reset to enriched=0 for a fresh LLM
             # at-bat, keyed by a content signature so the same unchanged thread
             # is never re-triggered (would re-pay the re-extraction token cost).
-            db.execute("""CREATE TABLE IF NOT EXISTS stale_reextract(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS stale_reextract(
                 thread_id    TEXT PRIMARY KEY,
                 signature    TEXT NOT NULL,
                 triggered_at TEXT NOT NULL
-            )""")
+            ){_S}""")
 
             # --- draft_records (Mac capability uplift) ------------------------
-            db.execute("""CREATE TABLE IF NOT EXISTS draft_records(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS draft_records(
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 email_id        TEXT DEFAULT '',
                 thread_id       TEXT DEFAULT '',
@@ -908,19 +1127,19 @@ class Store:
                 model           TEXT DEFAULT '',
                 parent_draft_id INTEGER,
                 refinement      TEXT DEFAULT '',
-                created_at      TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_dr_email  ON draft_records(email_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_dr_thread ON draft_records(thread_id)")
 
             # --- S2 recall-acceptance feedback (Phase 0, 2026-06-22) ----------
             # recall_feedback: raw event log (one row per recall event).
             # chunk_quality:   per-chunk quality float updated by nightly aggregate.
-            db.execute("""CREATE TABLE IF NOT EXISTS recall_feedback(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS recall_feedback(
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_id     TEXT NOT NULL,
                 session_id TEXT DEFAULT '',
                 event_type TEXT NOT NULL,
-                ts         TEXT DEFAULT '')""")
+                ts         TEXT DEFAULT ''){_S}""")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rf_doc_id "
                 "ON recall_feedback(doc_id)")
@@ -928,12 +1147,21 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_rf_ts "
                 "ON recall_feedback(ts)")
 
-            db.execute("""CREATE TABLE IF NOT EXISTS chunk_quality(
+            # exposures/uses are REAL, not INTEGER. They were declared INTEGER,
+            # but feedback.aggregate_feedback has always written TIME-DECAYED
+            # counts -- round(s["exposures"], 2) -- so the live store holds
+            # values like 3.77 exposures / 0.62 uses (9 rows, found by auditing
+            # typeof() against the declared type before turning STRICT on).
+            # Under STRICT that write would raise, and rounding it in the writer
+            # would throw away the decay resolution the algorithm exists for:
+            # a decayed 0.62 uses is not 1 use. The declaration was the thing
+            # that was wrong.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS chunk_quality(
                 doc_id     TEXT PRIMARY KEY,
                 quality    REAL DEFAULT 1.0,
-                exposures  INTEGER DEFAULT 0,
-                uses       INTEGER DEFAULT 0,
-                updated_at TEXT DEFAULT '')""")
+                exposures  REAL DEFAULT 0,
+                uses       REAL DEFAULT 0,
+                updated_at TEXT DEFAULT ''){_S}""")
 
             # --- Q1 salience gate: enrich_state on chunks (Phase 0, 2026-06-22)
             # 'cold' = embedded/searchable but skip graph-extraction.
@@ -961,6 +1189,55 @@ class Store:
             if "fts_context_version" not in ch_cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN fts_context_version INTEGER DEFAULT 0")
 
+            # --- partial indexes for the two work-queue filters ----------------
+            # Both backlog scans were a full `SCAN chunks` (confirmed by EXPLAIN
+            # QUERY PLAN -- count_unembedded's "`embedded` is indexed" docstring
+            # was never true; there was no index on either column). A partial
+            # index holds ONLY the rows matching its WHERE, so on a corpus that
+            # is ~fully embedded and enriched these stay tiny and nearly free to
+            # maintain -- the same trade the existing partial indexes make
+            # (idx_actions_waiting, idx_pf_open, idx_eo_entity_attr,
+            # idx_er_valid_now): index what the query reads, put the selective
+            # constant in the WHERE.
+            #
+            # Placed HERE, after the ALTERs above, because enrich_state and
+            # fts_context_version do not exist in the CREATE TABLE -- an index
+            # created earlier would fail on a fresh store.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unembedded "
+                       "ON chunks(rowid) WHERE embedded=0")
+            # unenriched_chunks(): the key is rowid ALONE, deliberately. That
+            # removes the full scan on `enriched=0`, and because rowid is the
+            # only key column a reverse walk also satisfies the query's
+            # ORDER BY rowid DESC — measured plan: 'SCAN chunks USING INDEX
+            # idx_chunks_unenriched', no temp b-tree.
+            #
+            # A (enrich_state, rowid) key was measured strictly WORSE: the
+            # leading column destroys that ordering (the plan gains USE TEMP
+            # B-TREE FOR ORDER BY) and buys nothing on the predicate side,
+            # because the query filters COALESCE(enrich_state,'') != 'cold',
+            # not the bare column — an expression no plain-column index can
+            # seek. That and the doc_id NOT LIKE are filtered per row either
+            # way.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unenriched "
+                       "ON chunks(rowid) WHERE enriched=0")
+            # reindex_fts_batch's `embedded=1 AND fts_context_version < N`.
+            #
+            # That query MUST filter the bare column, not COALESCE(...,0): a
+            # plain-column index cannot serve a COALESCE-wrapped predicate, so
+            # the COALESCE form plans as SCAN chunks and this index would be
+            # pure write-time cost on one of the hottest tables in the store.
+            # Same index/query-drift class as the 0.7.105 json_extract bug that
+            # _meta_extract() exists to prevent. The COALESCE was removed as
+            # dead defensive code: the column is INTEGER DEFAULT 0, SQLite
+            # returns that default for rows predating the ALTER, all three
+            # writers stamp an int, and the live store reads 170,695/170,695
+            # rows as typeof()='integer' with zero NULLs. If a NULL ever
+            # becomes reachable, make this an expression index on
+            # COALESCE(fts_context_version,0) and put the COALESCE back — index
+            # and query must move together.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fts_stale "
+                       "ON chunks(fts_context_version) WHERE embedded=1")
+
             # --- B5 decay: strength + last_accessed on chunk_quality (Phase 2) -
             cq_cols = {row["name"] for row in
                        db.execute("PRAGMA table_info(chunk_quality)").fetchall()}
@@ -970,7 +1247,7 @@ class Store:
                 db.execute("ALTER TABLE chunk_quality ADD COLUMN last_accessed TEXT DEFAULT ''")
 
             # --- B6 voice suggestions table (Phase 2, 2026-06-23) -------------
-            db.execute("""CREATE TABLE IF NOT EXISTS voice_suggestions(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS voice_suggestions(
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind         TEXT NOT NULL,
                 rule         TEXT NOT NULL,
@@ -979,15 +1256,15 @@ class Store:
                 evidence_ids TEXT DEFAULT '[]',
                 status       TEXT DEFAULT 'pending',
                 created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
-                applied_at   TEXT DEFAULT '')""")
+                applied_at   TEXT DEFAULT ''){_S}""")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_vs_status ON voice_suggestions(status)")
 
             # --- B6 voice state table (Phase 2, 2026-06-23) ------------------
-            db.execute("""CREATE TABLE IF NOT EXISTS voice_analyser_state(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS voice_analyser_state(
                 key        TEXT PRIMARY KEY,
                 value      TEXT DEFAULT '',
-                updated_at TEXT DEFAULT '')""")
+                updated_at TEXT DEFAULT ''){_S}""")
 
             # --- A4, Task 1: enrich_payloads (cache enrichment payloads) ----
             # Carries the extraction so importers skip re-enrich on shared-drive
@@ -997,11 +1274,11 @@ class Store:
             # live store was 50,099 rows for 8,183 files -- 13.5GB of a 15.65GB
             # store, and the reason the plaintext backup copy stopped fitting on
             # disk.
-            db.execute("""CREATE TABLE IF NOT EXISTS enrich_payloads(
+            db.execute(f"""CREATE TABLE IF NOT EXISTS enrich_payloads(
                 file_id       TEXT PRIMARY KEY,
                 payload       TEXT NOT NULL,
                 logic_version INTEGER DEFAULT 0,
-                at            TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                at            TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
             # A store written before the re-key is keyed per chunk doc_id. Move
             # it aside -- metadata-only, so init() stays instant -- and let the
             # enrich_payload_migration cadence drain it in the background.
@@ -1016,11 +1293,14 @@ class Store:
                         db.execute("PRAGMA table_info(enrich_payloads)").fetchall()}
             if "doc_id" in _ep_cols:
                 db.execute("ALTER TABLE enrich_payloads RENAME TO enrich_payloads_legacy")
-                db.execute("""CREATE TABLE enrich_payloads(
+                # Same shape (STRICT included) as the CREATE above -- this branch
+                # recreates the very table that one skipped because the legacy
+                # doc_id-keyed version was still standing.
+                db.execute(f"""CREATE TABLE enrich_payloads(
                     file_id       TEXT PRIMARY KEY,
                     payload       TEXT NOT NULL,
                     logic_version INTEGER DEFAULT 0,
-                    at            TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                    at            TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 
@@ -1060,8 +1340,13 @@ class Store:
             return float(row["quality"]) if row else 1.0
 
     def update_chunk_quality(self, doc_id: str, quality: float,
-                             exposures: int, uses: int) -> None:
-        """Upsert the quality row for one chunk."""
+                             exposures: float, uses: float) -> None:
+        """Upsert the quality row for one chunk.
+
+        exposures/uses are FLOATS: feedback.aggregate_feedback passes
+        time-decayed counts (round(x, 2)), never whole events. The columns were
+        declared INTEGER, which STRICT would have rejected — see the
+        chunk_quality DDL in init()."""
         from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._connect(write=True) as db:
@@ -1154,7 +1439,7 @@ class Store:
         clause = " OR ".join("text LIKE ?" for _ in terms)
         params = [f"%{t}%" for t in terms]
         sql = ("SELECT 1 FROM chunks "
-               "WHERE json_extract(metadata,'$.source_type')='gmail' "
+               f"WHERE {_meta_extract('$.source_type')}='gmail' "
                f"AND ({clause}) LIMIT 1")
         try:
             with self._connect() as db:
@@ -1367,8 +1652,8 @@ class Store:
         with self._connect(write=True) as db:
             cur = db.execute(
                 "SELECT rowid FROM chunks "
-                "WHERE json_extract(metadata,'$.source_type')='calendar' "
-                "  AND json_extract(metadata,'$.start') > ?",
+                f"WHERE {_meta_extract('$.source_type')}='calendar' "
+                f"  AND {_meta_extract('$.start')} > ?",
                 (iso_cutoff,),
             )
             rowids = [r["rowid"] for r in cur.fetchall()]
@@ -1384,7 +1669,7 @@ class Store:
         """Chunk doc_ids whose metadata drive_id matches (see DRIVE_ID_META_KEY)."""
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.drive_id')=?",
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.drive_id')}=?",
                 (drive_id,)).fetchall()]
 
     def doc_ids_for_file(self, file_id: str) -> list[str]:
@@ -1400,7 +1685,7 @@ class Store:
         """
         with self._connect() as db:
             return [r["doc_id"] for r in db.execute(
-                "SELECT doc_id FROM chunks WHERE json_extract(metadata,'$.file_id')=?",
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=?",
                 (file_id,)).fetchall()]
 
     def doc_root_content_hashes(self, roots: list[str]) -> dict[str, frozenset[str]]:
@@ -1462,9 +1747,9 @@ class Store:
                 file_ids = [r[len("gdrive-"):] for r in gdrive_roots]
                 qs = ",".join("?" * len(file_ids))
                 rows = db.execute(
-                    "SELECT json_extract(metadata,'$.file_id') AS fid, "
+                    f"SELECT {_meta_extract('$.file_id')} AS fid, "
                     f"content_hash AS h FROM chunks "
-                    f"WHERE json_extract(metadata,'$.file_id') IN ({qs})",
+                    f"WHERE {_meta_extract('$.file_id')} IN ({qs})",
                     file_ids).fetchall()
                 for row in rows:
                     result[f"gdrive-{row['fid']}"].add(row["h"])
@@ -1511,7 +1796,7 @@ class Store:
             # file that is still very much present.
             for fid in file_ids:
                 remaining = db.execute(
-                    "SELECT 1 FROM chunks WHERE json_extract(metadata,'$.file_id')=? "
+                    f"SELECT 1 FROM chunks WHERE {_meta_extract('$.file_id')}=? "
                     "LIMIT 1", (fid,)).fetchone()
                 if remaining is None:
                     db.execute("DELETE FROM enrich_payloads WHERE file_id=?", (fid,))
@@ -1568,7 +1853,9 @@ class Store:
 
     def count_pending_embeddings(self) -> int:
         """Chunks written but not yet embedded — i.e. not yet searchable by
-        meaning. `embedded` is indexed, so this is cheap."""
+        meaning. Served by the partial index idx_chunks_unembedded, which holds
+        only the embedded=0 rows (this docstring used to claim `embedded` was
+        indexed; until that index existed, it was a full SCAN)."""
         with self._connect() as db:
             return db.execute(
                 "SELECT COUNT(*) FROM chunks WHERE embedded=0").fetchone()[0]
@@ -1751,17 +2038,24 @@ class Store:
         out: list[dict] = []
         with self._connect() as db:
             for source_type, id_field in self._STALE_ID_FIELDS:
+                # Routed through _meta_extract (sqlite-optimisation's single
+                # source of truth for chunks.metadata reads) rather than the
+                # hand-written json_extract this generalization originally
+                # landed with -- id_field is always file_id/thread_id/
+                # event_id, each of which already has an expression index
+                # keyed on _meta_extract's exact fragment.
+                id_expr = _meta_extract(f"$.{id_field}")
                 rows = db.execute(
-                    f"SELECT json_extract(metadata,'$.{id_field}') AS oid, "
+                    f"SELECT {id_expr} AS oid, "
                     f"MIN(rowid) AS r FROM chunks "
-                    f"WHERE json_extract(metadata,'$.source_type')=? "
-                    f"  AND json_extract(metadata,'$.{id_field}') IS NOT NULL "
+                    f"WHERE {_meta_extract('$.source_type')}=? "
+                    f"  AND {id_expr} IS NOT NULL "
                     f"  AND ("
-                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')='table' "
-                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"    (COALESCE({_meta_extract('$.content_subtype')},'')='table' "
+                    f"     AND COALESCE({_meta_extract('$.chunker_version')},0) < ?)"
                     f"    OR "
-                    f"    (COALESCE(json_extract(metadata,'$.content_subtype'),'')<>'table' "
-                    f"     AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+                    f"    (COALESCE({_meta_extract('$.content_subtype')},'')<>'table' "
+                    f"     AND COALESCE({_meta_extract('$.chunker_version')},0) < ?)"
                     f"  ) "
                     f"GROUP BY oid ORDER BY r LIMIT ?",
                     (source_type, table_version, other_version, limit - len(out)),
@@ -1904,11 +2198,22 @@ class Store:
         was actually applied (see _fts_text), this only ever migrates genuinely
         stale rows — either legacy pre-Phase-C rows, or rows written while the
         contextual_retrieval flag was OFF that need to catch up once it flips ON.
+
+        The predicate reads the BARE column, not COALESCE(fts_context_version,0):
+        SQLite cannot serve a COALESCE-wrapped predicate from the plain-column
+        partial index idx_chunks_fts_stale, so the COALESCE form scanned the
+        whole chunks table while paying that index's write cost anyway. The
+        COALESCE was dead defensively: the column is INTEGER DEFAULT 0 (SQLite
+        returns that default for rows predating the ALTER), all three writers
+        stamp an int, and the live store has zero NULLs in 170,695 rows.
         """
-        with self._connect(write=True) as db:
+        # bulk=True: up to `cap` (default 5000) rows re-derived through one
+        # connection -- exactly the throughput-sensitive case the larger
+        # cache_size/mmap_size are for (PR #25 finding 5).
+        with self._connect(write=True, bulk=True) as db:
             rows = db.execute(
                 "SELECT rowid, text, metadata FROM chunks "
-                "WHERE embedded=1 AND COALESCE(fts_context_version,0) < ? LIMIT ?",
+                "WHERE embedded=1 AND fts_context_version < ? LIMIT ?",
                 (self.FTS_CONTEXT_VERSION, cap)).fetchall()
             n = 0
             for r in rows:
@@ -2061,7 +2366,7 @@ class Store:
         (verified 0 mismatches over 200 live file_ids, incl. base64url ids with
         LIKE metacharacters)."""
         return ("SELECT doc_id,text,content_hash,metadata FROM chunks "
-                "WHERE json_extract(metadata,'$.file_id')=?")
+                f"WHERE {_meta_extract('$.file_id')}=?")
 
     def chunks_for_file(self, file_id: str) -> list[dict]:
         """All gdrive-<file_id>-<i> chunks as {doc_id,text,content_hash,metadata,idx},
@@ -3055,12 +3360,10 @@ class Store:
         of one message shares its date; that was B4.
         """
         with self._connect() as db:
-            # json_extract over metadata is a full table scan; acceptable at
-            # current corpus size. Add a generated-column index on thread_id if
-            # thread queries grow slow.
+            # Index-backed by idx_chunks_threadid (see init()).
             cur = db.execute(
                 "SELECT doc_id, text, metadata FROM chunks "
-                "WHERE json_extract(metadata, '$.thread_id') = ?",
+                f"WHERE {_meta_extract('$.thread_id')} = ?",
                 (thread_id,),
             )
             return [
@@ -3078,7 +3381,7 @@ class Store:
         with self._connect() as db:
             r = db.execute(
                 "SELECT 1 FROM chunks "
-                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=0 "
+                f"WHERE {_meta_extract('$.thread_id')}=? AND enriched=0 "
                 "LIMIT 1",
                 (thread_id,)).fetchone()
             return r is not None
@@ -3090,7 +3393,7 @@ class Store:
         with self._connect(write=True) as db:
             cur = db.execute(
                 "UPDATE chunks SET enriched=0 "
-                "WHERE json_extract(metadata,'$.thread_id')=? AND enriched=1",
+                f"WHERE {_meta_extract('$.thread_id')}=? AND enriched=1",
                 (thread_id,))
             return cur.rowcount
 
@@ -3101,7 +3404,7 @@ class Store:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT doc_id, content_hash FROM chunks "
-                "WHERE json_extract(metadata,'$.thread_id')=? ORDER BY doc_id",
+                f"WHERE {_meta_extract('$.thread_id')}=? ORDER BY doc_id",
                 (thread_id,)).fetchall()
         h = hashlib.sha256()
         for r in rows:
@@ -3176,16 +3479,16 @@ class Store:
         ph = ",".join("?" * n)
         return (
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.message_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.message_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.file_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.file_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.event_id') IN ({ph}) "
+            f"WHERE {_meta_extract('$.event_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
-            f"WHERE json_extract(metadata,'$.message_id') IS NULL "
+            f"WHERE {_meta_extract('$.message_id')} IS NULL "
             f"  AND doc_id IN ({ph}) "
             f"ORDER BY rowid")
 
@@ -3772,8 +4075,7 @@ class Store:
         so a future move to `>=` (re-scanning the boundary day) would be safe. At
         larger corpus sizes, add a generated-column index on the extracted date.
         """
-        date_expr = ("COALESCE(json_extract(metadata, '$.date'), "
-                     "json_extract(metadata, '$.date_iso'))")
+        date_expr = f"COALESCE({_meta_extract('$.date')}, {_meta_extract('$.date_iso')})"
         with self._connect() as db:
             if cursor:
                 rows = db.execute(
