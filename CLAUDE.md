@@ -62,8 +62,8 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
-- **SQLite optimisation (2026-08-24 plan, Tasks 1-9): store rebuild is BUILT and
-  GATED, not yet run against the live store.** `bin/optimise_store.py`'s
+- **SQLite optimisation (2026-08-24 plan, Tasks 1-9 + PR #25 review fixes):
+  RUN AND PROMOTED on the author's live store, 2026-08-25.** `bin/optimise_store.py`'s
   `rebuild()`/`main()` performs a full out-of-place rewrite of `brain.sqlite3`
   (page_size 4096→8192, contentless FTS5, STRICT tables + FK
   constraints) behind an attended CLI (`--yes` gate,
@@ -71,20 +71,50 @@ wrong and MUST be right:
   retains the old file, and a sidecar-aware `--rollback --yes`) — see
   `docs/RELEASE-RUNBOOK.md` § 7 for the full procedure. **This is attended and
   NEVER automatic**, same posture as `bin/consolidate.py`: nothing in the
-  daemon's cadences calls it. Gated on a real copy of the live store (2.62 GB,
-  170,705 chunks) rebuilt to 1.495 GB (57.1% of original), `has_stat1`
-  false→true, `integrity_check`/`foreign_key_check` clean, row-count
-  reconciliation clean. The four 0.7.105 benchmark latencies, warmed:
-  `doc_ids_for_messages` ~690ms→~50-100ms, `thread_chunks` ~234ms→~1ms,
-  `chunks_for_file` ~228ms→~0.8ms, `inbound_chunks_since` ~376ms→~135ms — the
-  live store currently has **no** `sqlite_stat1` at all (`has_stat1: false`),
-  so these expression-index queries are on a slow, stats-free plan today;
-  the rebuild's mandatory `ANALYZE` is what fixes that, independent of the
-  schema changes themselves. **Gold gate: recall@10 0.750 / MRR 0.514 is the
-  plan's non-negotiable floor; both the pre-rebuild copy (0.800/0.591) and the
-  rebuilt copy (0.850/0.599) clear it, and the small pre→post movement is
+  daemon's cadences calls it — this run was a manual, attended terminal
+  operation, not a daemon action. **Actually run against the real live store**
+  (daemon stopped first): 2.62 GB (639,769 pages, 170,804 chunks) → 1.496 GB
+  (57.1% of original), `has_stat1` false→true, `integrity_check`/
+  `foreign_key_check` clean, row-count reconciliation clean, daemon restarted
+  and confirmed serving `brain_search` from the promoted store immediately
+  after. Orphan sweep matched the pre-registered baseline exactly: 256 rows
+  dropped (`entity_relations.entity_a` 8, `email_entities.entity_id` 146,
+  `entity_observations.entity_id` 96, `entity_communities.entity_id` 6) plus
+  **416** `entity_relations.invalidated_by_relation_id` dangling pointers
+  nullified (the PR #25 finding 2 fix — this column has no `REFERENCES`
+  clause so `foreign_key_check` never saw these; going forward the new
+  `ON DELETE SET NULL` constraint self-heals this on this now-rebuilt store).
+  Old store retained at `brain.sqlite3.pre-rebuild-1787623472`, per policy,
+  until the next successful scheduled backup cycle confirms the new store
+  backs up correctly.
+  The four 0.7.105 benchmark latencies, warmed (measured through the real
+  `Store` API, comparing the live store against the rebuilt copy — NOT the
+  misleading numbers an earlier note here cited, which were measured against
+  a jsonb-index-drift bug state that was caught and fixed before ever
+  shipping, so it never actually existed in production): `doc_ids_for_messages`
+  ~71ms→~48-50ms, `thread_chunks` ~1.0-1.1ms→~1.1-1.3ms (essentially
+  unchanged — this store's indexes were never actually broken), `chunks_for_file`
+  ~0.8-0.9ms→~0.9ms (unchanged), `inbound_chunks_since` ~144ms→~140-143ms
+  (unchanged). All four at least as good as the live store's, per the
+  runbook's bar — the real win here is size (57.1%) and `has_stat1`/`ANALYZE`
+  finally running, not a dramatic latency swing, since `_meta_extract`'s
+  `json_extract` was never actually broken on this store (the jsonb bug was
+  caught in review, before merge). **A cold first read of any freshly-written/
+  copied file is ~10-15x slower than a warmed one on this hardware (OS page
+  cache, not a query-plan issue) — verified directly on both the live store
+  and the rebuilt copy, same pattern on both; always warm up (2-3 throwaway
+  reads) before trusting a single latency measurement.**
+  **Gold gate: recall@10 ≥ 0.780 / MRR ≥ 0.550 is the
+  plan's non-negotiable floor (raised 2026-08-25 from the original 0.750/0.514,
+  itself stale — see PR #25 review, flag-only, and the plan/spec/runbook
+  correction notes). Measured 2026-08-25: live store 0.800/0.565, rebuilt
+  copy 0.850/0.573 — both clear the floor, and the small pre→post movement is
   EXPLAINED, not a construction defect — but the mechanism is DATA drift from
-  a metadata-only writer, not a code-versioning gap.** `contextual_prefix()`'s
+  a metadata-only writer, not a code-versioning gap.** (Numbers from the
+  original 2026-08-24 investigation — 0.800/0.591 pre-rebuild, 0.850/0.599
+  post — are a separate, earlier measurement against the SAME mechanism on a
+  different snapshot of the live corpus; both runs show the same upward
+  direction and the same explained cause.) `contextual_prefix()`'s
   `folder_path` clause has existed since the initial commit (317ea4d,
   2026-06-02); `FTS_CONTEXT_VERSION` was introduced seven weeks later
   (731a620, 2026-07-22, Phase C), so the clause cannot be what escaped that
@@ -152,9 +182,38 @@ wrong and MUST be right:
   dedicated rebuild — a separate follow-up, not this plan. `jsonb_supported()`
   was deleted (PR #25 finding 7): a dead, unused version-guard utility is a
   trap that invites `_meta_extract` to call it again, exactly the mistake
-  that caused the outage above. **Not
-  yet run against any user's actual live store** — that is a separate,
-  explicit, attended operation per machine, to be scheduled deliberately.
+  that caused the outage above.
+  **PR #25's human review** (Josh, on the merged PR) found 8 further
+  findings post-merge-to-branch, all fixed before merging to `main`: (1)
+  `PRAGMA optimize` was gated on `not self.read_only` alone, firing on every
+  read-only USE of a writable `Store` too (not just genuinely read-only
+  connections) — reintroducing recall-path lock contention; now gated on
+  `write and not self.read_only`. (2) `org_import._has_local_attachments`
+  never checked `email_entities`, so an org entity the user's own mail
+  mentions could be permanently deleted (not demoted) once
+  `ON DELETE CASCADE` was actually enforced — now checked. (3) the rebuild's
+  escrow key was a single shared `<store>.rebuild-key` while snapshots are
+  timestamped and retained, so a second run silently orphaned the first
+  snapshot's key — now one key file per snapshot. (4) `_swap` verified
+  integrity but never freshness, so a stale rebuild left sitting too long
+  could silently discard everything written to `src` since — now stamps and
+  checks a row-count freshness snapshot. (5) `cache_size`/`mmap_size` were
+  tuned unconditionally on every connection (~21 daemon threads × one
+  connection per call), risking ~1 GB of RSS growth — now scoped to
+  `bulk=True` connections only (the rebuild, `reindex_fts_batch`, backup's
+  `VACUUM INTO`). (6) `fts_chunks_trigram` (Task 7) shipped with zero readers
+  and cost +1.089 GB to populate — removed entirely, not left inert;
+  `email_mentions`' `text LIKE` remains genuinely unindexed, same as before
+  this plan. (7) the dead `jsonb_supported()` described above. (8)
+  `resolve_owner_entity_id`'s email-match path didn't filter role addresses
+  (`office@`, `info@`) the way every other identity resolution in
+  `graph_write.py` already did — now filtered. Plus 3 flag-only quality
+  items: the row-drop sanity bound in `_compare_counts` summed
+  `_NULLIFY`-only columns (padding it past what a real over-drop bug could
+  hide behind) — now excludes them; the gold floor recorded in the plan/spec/
+  runbook was stale (see above); the latency table above is the
+  re-measurement that finding asked for. PR #25 merged to `main` 2026-08-25
+  (`ff77176`) before this rebuild ran.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
   **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
