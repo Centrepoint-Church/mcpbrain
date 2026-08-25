@@ -52,6 +52,11 @@ in the UI. They must be **Local** scheduled tasks. Never use `/schedule`: that
 creates a cloud routine, which runs from a fresh clone on Anthropic's servers,
 cannot reach my local mcpbrain daemon, and so silently does nothing forever.
 
+**First, check what already exists.** List my current scheduled tasks. If any of
+these four are already present, update them in place rather than creating a
+second copy — a duplicate hourly enrich coordinator doubles Haiku spend
+indefinitely and nothing surfaces it.
+
 Create each with **Model: Sonnet 4.6**, **Permission mode: Auto** (so it runs
 unattended), and any trusted folder as the working folder:
 
