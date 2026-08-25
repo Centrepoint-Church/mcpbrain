@@ -100,7 +100,6 @@ jobs:
           export MCPBRAIN_BIN="$(command -v mcpbrain)"
           uv run --with mcp python - <<'PY'
           import asyncio
-          import datetime as _dt
           import os
           import sys
 
@@ -117,8 +116,11 @@ jobs:
               }
               params = StdioServerParameters(command=command, args=args, env=env)
               # Generous read timeout: the spawned server loads the bge model on
-              # the first request from a cold start.
-              timeout = _dt.timedelta(seconds=180)
+              # the first request from a cold start. ClientSession wants a plain
+              # float of seconds (mcp 2.x), not a timedelta -- passing a
+              # timedelta breaks anyio.fail_after's `current_time() + delay` with
+              # "unsupported operand type(s) for +: 'float' and 'datetime.timedelta'".
+              timeout = 180.0
               async with stdio_client(params) as (read, write):
                   async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
                       await session.initialize()
@@ -170,7 +172,13 @@ jobs:
         # xdist -- so pytest exited 4 on `unrecognized arguments: -n` (addopts is
         # `-n auto`) without running a single test. Use the same path developers
         # use locally so the two cannot drift again.
-        run: uv sync --group dev
+        #
+        # MUST also carry the `daemon` extra: [dependency-groups].dev has no
+        # fastembed, so a bare `--group dev` leaves every embedder-touching
+        # test failing on ModuleNotFoundError. Same requirement as the smoke
+        # job's `.[daemon]` install above, and the same fix docs/superpowers
+        # plans already give developers hitting this locally.
+        run: uv sync --group dev --extra daemon
 
       - name: Run the offline suite
         run: uv run pytest
