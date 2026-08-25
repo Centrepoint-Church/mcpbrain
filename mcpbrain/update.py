@@ -106,9 +106,13 @@ def update_from_index(index_url: str) -> int:
         # without this on a machine whose default Python is <3.12.)
         "--python", "3.12",
         "--index", f"mcpbrain={index_url}",
-        # Install spec carries the [daemon] extra (pulls in fastembed/onnxruntime):
-        # the daemon needs it to embed. --reinstall-package still takes the bare
-        # package name — extras aren't a separate installed package.
+        # Install spec keeps the [daemon] extra permanently: on a pre-0.7.119
+        # wheel it still pulls fastembed (extra-only there), and on every wheel
+        # after, `daemon = []` is a declared-but-empty alias (fastembed moved to
+        # base deps) that uv resolves silently — so this one command line is
+        # correct against whatever version the index currently serves.
+        # --reinstall-package still takes the bare package name — extras aren't
+        # a separate installed package.
         "mcpbrain[daemon]", "--upgrade", "--reinstall-package", "mcpbrain",
     ])
     if rc != 0:

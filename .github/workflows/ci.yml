@@ -38,10 +38,8 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install mcpbrain as a tool
-        # MUST carry the [daemon] extra: without it fastembed is absent and
-        # `daemon --once` dies on ModuleNotFoundError, which the retry loop
-        # then misreports as "a transient model download".
-        run: uv tool install --from ".[daemon]" mcpbrain
+        # fastembed is now a base dependency (Task 1), so no extra needed.
+        run: uv tool install --from "." mcpbrain
 
       - name: Put uv tool bin on PATH
         # uv installs console scripts into ~/.local/bin. Add it for later steps.
@@ -171,14 +169,9 @@ jobs:
         # [project.optional-dependencies] instead -- a SEPARATE list that has no
         # xdist -- so pytest exited 4 on `unrecognized arguments: -n` (addopts is
         # `-n auto`) without running a single test. Use the same path developers
-        # use locally so the two cannot drift again.
-        #
-        # MUST also carry the `daemon` extra: [dependency-groups].dev has no
-        # fastembed, so a bare `--group dev` leaves every embedder-touching
-        # test failing on ModuleNotFoundError. Same requirement as the smoke
-        # job's `.[daemon]` install above, and the same fix docs/superpowers
-        # plans already give developers hitting this locally.
-        run: uv sync --group dev --extra daemon
+        # use locally so the two cannot drift again. fastembed is now a base
+        # dependency (Task 1), so no extra needed.
+        run: uv sync --group dev
 
       - name: Run the offline suite
         run: uv run pytest

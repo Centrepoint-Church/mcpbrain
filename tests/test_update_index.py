@@ -26,8 +26,11 @@ def test_update_from_index_runs_uv_then_restart(monkeypatch):
     uv_cmd = calls["run"][0]
     assert "uv" in uv_cmd[0] and "tool" in uv_cmd and "install" in uv_cmd
     assert any("mcpbrain=" in c for c in uv_cmd)        # --index mcpbrain=<url>
-    # Install spec must carry the [daemon] extra so the daemon keeps fastembed
-    # (onnxruntime) after an auto-update — plain "mcpbrain" would silently drop it.
+    # Install spec must keep the [daemon] extra: it's the one command line that
+    # resolves correctly against both a pre-0.7.119 wheel (fastembed extra-only)
+    # and every wheel after (fastembed in base deps, daemon = [] an empty alias
+    # uv accepts silently) — dropping it would break auto-update against an
+    # older-but-still-latest wheel with no way to tell which is currently served.
     assert "mcpbrain[daemon]" in uv_cmd and "--upgrade" in uv_cmd
     # --reinstall-package takes the bare package name (extras aren't a separate
     # installed package) — it must stay "mcpbrain", not the extras spec.

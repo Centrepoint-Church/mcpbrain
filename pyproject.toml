@@ -54,6 +54,13 @@ dependencies = [
   # Note: tesseract is an optional external binary for scanned-PDF OCR.
   # It is NOT a pip dependency — install via OS package manager if needed.
   "inflect>=7",            # singular/plural normalization in text_norm.singularize
+  # Embedder. Was the sole member of a `daemon` extra, carved out so the removed
+  # .mcpb MCP bridge could install without native deps. That bridge is gone
+  # (2026-08-24) and `mcpbrain mcp-server` itself fails at startup without the
+  # weights, so there is no consumer for mcpbrain-without-the-embedder. Shipping
+  # it in base deps also removes the shell-quoting-sensitive "mcpbrain[daemon]"
+  # from every install instruction.
+  "fastembed>=0.3",
 ]
 
 [project.scripts]
@@ -61,7 +68,12 @@ mcpbrain = "mcpbrain.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8", "pyyaml>=6"]
-daemon = ["fastembed>=0.3"]
+# Kept, permanently, as an empty no-op alias. Every already-deployed install runs
+# `uv tool install ... "mcpbrain[daemon]" --upgrade` from a command line baked
+# into its own update.py; uv is silent about a DECLARED extra and warns about an
+# undeclared one, so removing this would print a warning on every fleet
+# auto-update forever. Costs one line.
+daemon = []
 
 [build-system]
 requires = ["setuptools>=68"]
