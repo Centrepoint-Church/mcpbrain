@@ -101,8 +101,16 @@ checks the same index daily to self-update.
 The `INSTALL.md` prompt runs uv's per-package "explicit" index mode:
 
 ```bash
-uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" mcpbrain --force
+uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" "mcpbrain[daemon]" --force
 ```
+
+The `[daemon]` extra is deliberate and permanent on every fresh-install command,
+even though `fastembed` is now a base dependency: it is the one spelling that
+resolves correctly against BOTH a pre-0.7.119 wheel (where `fastembed` is
+extra-only) and every wheel after (where `daemon = []` is a declared-but-empty
+alias uv accepts silently). Dropping it would install a brain with no embedder
+against whatever older wheel the index happens to be serving, with no
+auto-update path back — same version both sides, so `_should_update` is False.
 
 The `mcpbrain=<url>` syntax tells uv to use the Pages index **only** for the
 `mcpbrain` package; all dependencies are still resolved from PyPI. The `--python 3.12`
@@ -128,10 +136,9 @@ pin is required (the package needs ≥3.12; uv provisions it when pinned).
    uv tool install --index mcpbrain=<url> "mcpbrain[daemon]" --upgrade --reinstall-package mcpbrain
    ```
 
-   The `[daemon]` extra is required: `fastembed`/`onnxruntime` are daemon-only
-   optional deps (so the MCP bridge can install plain `mcpbrain` without native
-   deps), so the auto-updater must reinstall the extra or the daemon loses its
-   embedder.
+   The `[daemon]` extra is retained as an empty alias so this exact command line —
+   baked into every already-deployed install's `update.py` — keeps resolving
+   without a uv warning. `fastembed` now ships in base dependencies.
 
    followed by an agent restart.  The install/restart therefore never happens
    under the held store-writer lock.

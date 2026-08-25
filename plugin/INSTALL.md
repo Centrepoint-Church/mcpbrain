@@ -26,6 +26,23 @@ marketplace, so it's already there), just run:
 and follow the steps it walks you through (install → wizard → four Local tasks → open at
 login). That's it.
 
+## Manual fallback: creating the recurring tasks by hand
+
+`/mcpbrain:install` creates these four tasks for you. If Routines is disabled for
+your organisation, or your Desktop build predates local scheduled tasks, create
+them by hand: **Code tab → Routines → New routine → Local**, each with **Model:
+Sonnet 4.6** and **Permission mode: Auto**.
+
+| Name | Schedule | Instructions |
+|---|---|---|
+| `brain-enrich-hourly` | Hourly | Call the `brain_routine` tool with name `enrich` and follow the instructions it returns exactly. |
+| `brain-meeting-packs-hourly` | Hourly | Call the `brain_routine` tool with name `meeting-packs` and follow the instructions it returns exactly. |
+| `brain-gardener-weekly` | Weekly | Call the `brain_routine` tool with name `gardener` and follow the instructions it returns exactly. |
+| `brain-reference-gardener-weekly` | Weekly | Call the `brain_routine` tool with name `reference-gardener` and follow the instructions it returns exactly. |
+
+Click **Run now** on each once after creating it, and answer any permission
+prompts, so unattended runs don't stall.
+
 ## Cold start (no plugin yet)
 
 `/mcpbrain:install` only exists once the plugin is installed. On a brand-new machine
