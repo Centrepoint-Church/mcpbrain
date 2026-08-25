@@ -43,7 +43,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
@@ -63,6 +63,14 @@ import mcpbrain.memory_distil    # noqa: F401 — registers BLOCK_DRAINERS["memo
 import mcpbrain.profile_audit    # noqa: F401 — registers BLOCK_DRAINERS["profile_audit"]
 
 log = logging.getLogger(__name__)
+
+# see mcpbrain.backup._NUM_RETRIES for the full rationale — googleapiclient's
+# own num_retries already retries this error class (SSL errors, socket
+# timeouts, ConnectionError/OSError) with randomized exponential backoff, so
+# every plain Google API call in this module passes it. A local constant
+# rather than importing backup's keeps the established per-module convention
+# (sync/gmail.py, sync/drive.py, fleet.py all define their own).
+_NUM_RETRIES = 5
 
 
 def _configure_logging(root=None):
@@ -1623,7 +1631,8 @@ class Daemon:
         if gmail is None:
             return ""
         try:
-            profile = gmail.users().getProfile(userId="me").execute()
+            profile = gmail.users().getProfile(
+                userId="me").execute(num_retries=_NUM_RETRIES)
             email = (profile.get("emailAddress") or "").strip()
         except Exception as exc:  # noqa: BLE001 — must not break status polls
             log.debug("status: getProfile failed: %s", exc)
@@ -2122,6 +2131,19 @@ class Daemon:
         every ATTEMPT, success or failure, so a failing backup retries once per
         interval rather than on every cycle, and is advanced AGAIN on success so
         the interval is spacing from completion rather than from start.
+
+        Layer-2 safety net: on a failure, once write_backup_state reports
+        consecutive_failures >= 2 (i.e. this is the SECOND failure in a row,
+        not the first), self._backup.drive_service is rebuilt from scratch
+        via _build_drive_service() and swapped in under _config_lock. This is
+        deliberately a higher bar than the per-call num_retries added across
+        the codebase in Tasks 1-5: that layer already retries a single flaky
+        call, so a failure that survives it and repeats is more likely a
+        persistently broken client/session (e.g. a stale OAuth token) than a
+        one-off transient blip — exactly the case a per-call retry can't fix
+        but a fresh service object can. The rebuild is itself best-effort: a
+        failure to rebuild is logged and swallowed, never raised, and never
+        blocks returning the original backup error.
         """
         if self._backfill_active.is_set():
             return None  # single-writer: yield to the backfill
@@ -2167,7 +2189,28 @@ class Daemon:
                             keep=cfg.retain)
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
             log.warning("periodic backup failed: %s", exc, exc_info=True)
-            write_backup_state(home, ok=False, error=str(exc))
+            bstate = write_backup_state(home, ok=False, error=str(exc))
+            # write_backup_state always sets this to prev_failures + 1 (>= 1)
+            # on the failure branch, so it's never missing/0/None here.
+            failures = bstate["consecutive_failures"]
+            if failures >= 2:
+                log.warning(
+                    "periodic backup: %d consecutive failures, rebuilding "
+                    "drive_service", failures)
+                try:
+                    fresh = _build_drive_service()
+                    with self._config_lock:
+                        if self._backup is not None:
+                            # Build a new BackupConfig rather than mutating
+                            # the caller-supplied one in place: the caller
+                            # (or a test) may still hold a reference to the
+                            # original object and shouldn't see it change
+                            # out from under them.
+                            self._backup = replace(
+                                self._backup, drive_service=fresh)
+                except Exception as rebuild_exc:  # noqa: BLE001 — best-effort
+                    log.warning("periodic backup: drive_service rebuild "
+                               "failed: %s", rebuild_exc)
             return {"backed_up": False, "error": str(exc)}
 
         # Re-stamp on SUCCESS as well, so the interval is measured from
@@ -3982,7 +4025,7 @@ def last_backup_attempt_epoch(home) -> float | None:
         return None
 
 
-def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
+def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
     """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
 
     The encrypted artifact is written locally BEFORE the upload, so
@@ -3999,6 +4042,15 @@ def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
     compared across restarts, where a monotonic epoch is meaningless (same
     reasoning as ``_recent_watchdog_exits``). Best-effort — a write failure must
     never fail an otherwise-good backup.
+
+    Returns:
+        The ``state`` dict just written (``last_attempt``, ``last_success``,
+        ``consecutive_failures``, ``last_error``) — even when the write to
+        disk itself failed (best-effort covers persistence, not the return).
+        This lets a caller such as ``maybe_backup`` read e.g.
+        ``consecutive_failures`` off the return value directly, without a
+        second read of ``backup_state.json`` through another module's
+        private helper.
     """
     path = Path(home) / "backup_state.json"
     try:
@@ -4020,6 +4072,7 @@ def write_backup_state(home, *, ok: bool, error: str | None = None) -> None:
         path.write_text(json.dumps(state))
     except OSError as exc:
         log.warning("backup state write failed (continuing): %s", exc)
+    return state
 
 
 def write_daemon_heartbeat(home) -> None:

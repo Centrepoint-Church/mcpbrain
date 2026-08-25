@@ -3,6 +3,14 @@ from __future__ import annotations
 
 from mcpbrain import backup, config
 
+# see mcpbrain.backup._NUM_RETRIES for the full rationale. The escrow upload
+# here is a MediaInMemoryUpload (a fixed in-memory byte buffer, not a
+# resumable stream), so it has none of _MEDIA_NUM_RETRIES' "a retried chunk
+# cannot re-seek" problem — a retry just resends the same bytes. This flow
+# runs during `mcpbrain setup`, where a transient Errno-49-class blip on the
+# very first Drive call would otherwise fail backup-enable outright.
+_NUM_RETRIES = 5
+
 
 def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
     """Enable backup for the user.
@@ -77,7 +85,7 @@ def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=_NUM_RETRIES)
         existing.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -85,8 +93,10 @@ def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
     media = MediaInMemoryUpload(key, mimetype="application/octet-stream")
     if existing:
         drive_service.files().update(
-            fileId=existing[0]["id"], media_body=media, supportsAllDrives=True).execute()
+            fileId=existing[0]["id"], media_body=media,
+            supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
     else:
         meta = {"name": name, "parents": [folder_id]}
         drive_service.files().create(
-            body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+            body=meta, media_body=media, fields="id",
+            supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)

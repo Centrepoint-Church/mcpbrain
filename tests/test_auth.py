@@ -37,9 +37,25 @@ def test_fetch_google_name_reads_userinfo(monkeypatch):
     class _UI:
         def userinfo(self): return self
         def get(self): return self
-        def execute(self): return {"name": "Josh Kemp", "email": "josh.k@x.com"}
+        def execute(self, **kwargs): return {"name": "Josh Kemp", "email": "josh.k@x.com"}
     monkeypatch.setattr(auth, "build_service", lambda *a, **k: _UI())
     assert auth.fetch_google_name(object()) == "Josh Kemp"
+
+
+def test_fetch_google_name_passes_num_retries(monkeypatch):
+    from unittest import mock
+
+    fake_service = mock.MagicMock()
+    fake_service.userinfo.return_value.get.return_value.execute.return_value = {
+        "name": "Sam"
+    }
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: fake_service)
+
+    name = auth.fetch_google_name(creds=object())
+
+    assert name == "Sam"
+    fake_service.userinfo.return_value.get.return_value.execute.assert_called_with(
+        num_retries=auth._NUM_RETRIES)
 
 
 # Minimal authorized-user token info that produces a VALID (non-expired) creds
