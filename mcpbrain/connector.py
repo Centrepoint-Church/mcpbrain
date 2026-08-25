@@ -18,8 +18,10 @@ and is atomic; a file that will not parse is left untouched and reported.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # The MSIX package family Claude Desktop ships under. Its LocalCache\Roaming
@@ -63,9 +65,6 @@ def code_config_path() -> Path:
     return (Path(base) if base else Path.home()) / ".claude.json"
 
 
-import json
-
-
 def server_entry(mcpbrain_bin: str, *, typed: bool) -> dict:
     """The stdio server entry to register.
 
@@ -100,7 +99,9 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
     else:
         try:
             data = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
+            return False, f"could not read {path} ({exc}); left unchanged"
+        except ValueError as exc:
             return False, f"could not parse {path} ({exc}); left unchanged"
         if not isinstance(data, dict):
             return False, f"{path} is not a JSON object; left unchanged"
@@ -113,12 +114,18 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
     servers["mcpbrain"] = entry
     data["mcpServers"] = servers
 
-    tmp = path.with_suffix(path.suffix + ".mcpbrain.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".mcpbrain.tmp")
+    tmp = Path(tmp_str)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+        os.close(fd)
         os.replace(tmp, path)
     except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         tmp.unlink(missing_ok=True)
         return False, f"could not write {path} ({exc})"
     return True, f"registered in {path}"

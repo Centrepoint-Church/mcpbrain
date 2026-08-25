@@ -86,3 +86,35 @@ def test_write_is_atomic_no_partial_file(tmp_path, monkeypatch):
     assert ok is False
     assert json.loads(cfg.read_text()) == {"keep": 1}
     assert list(tmp_path.glob("*.tmp")) == []   # temp file cleaned up
+
+
+def test_concurrent_calls_use_unique_tmp_filenames(tmp_path, monkeypatch):
+    # Concurrent calls to merge_server_into targeting the same file must not
+    # collide on a shared tmp filename. Capture the tmp paths used by monkeypatching
+    # tempfile.mkstemp to track which temp files are created.
+    cfg = tmp_path / "c.json"
+
+    used_tmp_paths = []
+
+    original_mkstemp = connector.tempfile.mkstemp
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, path_str = original_mkstemp(*args, **kwargs)
+        used_tmp_paths.append(path_str)
+        return fd, path_str
+
+    monkeypatch.setattr(connector.tempfile, "mkstemp", tracking_mkstemp)
+
+    # Make two back-to-back calls with different entries so both must write
+    # and both call mkstemp
+    entry1 = connector.server_entry("/abs/bin/mcpbrain-v1", typed=False)
+    connector.merge_server_into(cfg, entry1, create=True)
+
+    entry2 = connector.server_entry("/abs/bin/mcpbrain-v2", typed=False)
+    connector.merge_server_into(cfg, entry2, create=True)
+
+    # Verify at least two tmp files were used
+    assert len(used_tmp_paths) >= 2, f"Expected at least 2 tmp calls, got {len(used_tmp_paths)}"
+    # Verify they are different (not reusing a fixed tmp filename)
+    assert used_tmp_paths[0] != used_tmp_paths[1], \
+        f"Tmp filenames must be unique; both calls used {used_tmp_paths[0]}"
