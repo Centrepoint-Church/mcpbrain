@@ -57,8 +57,8 @@ already passes through — both the daemon write path and the MCP read path.
 
 | pragma | value | rationale |
 |---|---|---|
-| `cache_size` | `-65536` (64 MB) | largest single latency win available |
-| `mmap_size` | `268435456` (256 MB) | removes a copy per read on a read-heavy store |
+| `cache_size` | `-16384` (16 MB) default, `-65536` (64 MB) for `bulk=True` | **CORRECTED 2026-08-25 (PR #25 finding 5):** per-connection, and the daemon opens roughly one connection per call across ~21 threads — the 64 MB value applied unconditionally could add ~1 GB of RSS between them (this project gates releases on peak RSS). Reserved for genuinely long-lived, throughput-sensitive connections (the rebuild tool, `reindex_fts_batch`, backup's `VACUUM INTO`) via a new `bulk` parameter; the common per-call case gets 16 MB — bigger than SQLite's own 2 MB default, not the full tuned value |
+| `mmap_size` | `67108864` (64 MB) default, `268435456` (256 MB) for `bulk=True` | same per-connection/`bulk` scoping as `cache_size` above |
 | `temp_store` | `2` (memory) | FTS5 / ORDER BY / vector temp b-trees stop hitting disk |
 | `synchronous` | `1` (NORMAL) | safe against corruption under WAL; the store is **derived** and re-ingestable, so FULL buys nothing and costs every write |
 | `threads` | `4` | parallel sort on large ORDER BY |

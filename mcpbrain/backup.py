@@ -163,7 +163,11 @@ def snapshot(store_path, out_path, *, home=None) -> Path:
     # operation, but a read-only connection cannot create the -shm file when
     # nothing else has the DB open — which is exactly how bin/repair.py and
     # bin/consolidate.py run, with the daemon stopped.
-    db = _open_db(store_path, read_only=False)
+    # bulk=True: VACUUM INTO reads the whole store through one connection --
+    # a genuinely long-lived, throughput-sensitive "backup pass" (PR #25
+    # finding 5), not the many-short-connections case the smaller default
+    # protects.
+    db = _open_db(store_path, read_only=False, bulk=True)
     try:
         db.execute("VACUUM INTO ?", (str(out_path),))
     except BaseException:
