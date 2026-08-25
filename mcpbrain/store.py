@@ -66,28 +66,12 @@ def fts5_supports_contentless() -> bool:
     return parts >= (3, 43)
 
 
-def jsonb_supported() -> bool:
-    """JSONB (binary JSON) lands in SQLite 3.45. Same guard rationale as
-    fts5_supports_contentless(): the version comes from whichever Python the
-    wheel installed under and MUST be checked at runtime, never assumed.
-
-    Currently CONSULTED BY NOTHING, deliberately. _meta_extract() used to gate
-    on it and that was a bug: a version-dependent SQL fragment cannot be used
-    where it has to match a PERSISTED schema object (see _meta_extract). Before
-    wiring this into anything, check the feature is not one that gets baked into
-    an existing store's schema — JSONB *storage* additionally cannot work at all
-    while chunks.metadata is declared TEXT in a STRICT table.
-    """
-    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
-    return parts >= (3, 45)
-
-
 def strict_supported() -> bool:
     """STRICT tables land in SQLite 3.37. Same guard rationale as
-    fts5_supports_contentless()/jsonb_supported(): the version comes from
-    whichever Python the wheel installed under and MUST be checked at runtime,
-    never assumed. Below the floor the tables are created without STRICT —
-    i.e. exactly the loose behaviour they have always had.
+    fts5_supports_contentless(): the version comes from whichever Python the
+    wheel installed under and MUST be checked at runtime, never assumed.
+    Below the floor the tables are created without STRICT — i.e. exactly the
+    loose behaviour they have always had.
     """
     parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
     return parts >= (3, 37)

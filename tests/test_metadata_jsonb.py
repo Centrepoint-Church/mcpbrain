@@ -1,6 +1,6 @@
 import sqlite3
 
-from mcpbrain.store import Store, _meta_extract, jsonb_supported
+from mcpbrain.store import Store, _meta_extract
 
 # The five expression indexes init() builds over chunks.metadata, and the
 # _meta_extract path each one keys on. Kept here so the re-init drift test
@@ -169,11 +169,3 @@ def test_inbound_date_range_uses_the_index_after_reinit(tmp_path):
     plan = _plan(s, f"SELECT doc_id FROM chunks WHERE {expr} > '2020-01-01'")
     assert "idx_chunks_inbound_date" in plan, plan
     assert "SCAN chunks" not in plan, plan
-
-
-def test_jsonb_supported_matches_runtime_version():
-    """Retained utility (same version-guard family as fts5_supports_contentless);
-    deliberately NOT consulted by _meta_extract — see that function's docstring.
-    """
-    parts = tuple(int(x) for x in sqlite3.sqlite_version.split(".")[:2])
-    assert jsonb_supported() == (parts >= (3, 45))
