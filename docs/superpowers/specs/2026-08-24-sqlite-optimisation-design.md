@@ -204,8 +204,17 @@ Run after Part A, and again after Part B. Both must pass.
 
 1. **Row counts preserved** for every table except deliberate orphan removals, which must
    match the reported sweep counts exactly.
-2. **Gold harness: recall@10 ≥ 0.750, MRR ≥ 0.514.** B1 and B2 should be ranking-neutral by
+2. **Gold harness: recall@10 ≥ 0.780, MRR ≥ 0.550.** B1 and B2 should be ranking-neutral by
    construction, so any movement here means something is wrong — investigate, do not accept.
+   **CORRECTED 2026-08-25 (PR #25 review, flag-only):** the original 0.750/0.514 figures
+   recorded here were stale relative to the corpus by the time this plan actually ran — every
+   pre-rebuild measurement taken during this work landed at recall@10=0.800 and MRR in the
+   0.565–0.591 range, so a future regression that dropped MRR to, say, 0.52 would have passed
+   this gate while still being a real loss. Raised with margin below the consistently-observed
+   baseline (not raised to match it exactly, since the exact MRR figure has genuine run-to-run
+   variance — see CLAUDE.md's SQLite optimisation entry for the actual measured numbers each
+   time this gate was run). Re-measure and reconsider this floor again if it starts tripping on
+   ordinary noise.
 3. **Latency, before/after, on the real store** for the 0.7.105 benchmark methods:
    `doc_ids_for_messages`, `thread_chunks`, `chunks_for_file`, `inbound_chunks_since`.
    Measured through the real store methods, not hand-written SQL.
