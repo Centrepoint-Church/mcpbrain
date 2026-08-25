@@ -1053,6 +1053,40 @@ def _compare_counts(src: Path, dst: Path, r: dict) -> bool:
     return ok
 
 
+def _nullify_dangling(src: Path, *, yes: bool) -> int:
+    """Null back-pointers whose target row is gone, in place. No rebuild.
+
+    Separate from the rebuild because it is a one-time sweep for residue that
+    predates FK enforcement: the constraint reaches an existing store only via
+    a rebuild, and `foreign_key_check` is structurally blind to any of these
+    columns that does not declare a REFERENCES clause. Reports first, and
+    requires --yes to write, because a NON-ZERO count on an already-rebuilt
+    store means something wrote with foreign_keys OFF -- that is a bug signal
+    worth reading before it is swept away.
+    """
+    from mcpbrain.store import Store
+
+    if not src.exists():
+        print(f"[optimise] no store at {src}")
+        return 2
+    store = Store(str(src), _store_dim(src), read_only=True)
+    with store._connect() as db:
+        counts = store._dangling_invalidator_counts(db)
+    total = sum(counts.values())
+    if not total:
+        print("[optimise] no dangling invalidator pointers -- nothing to do")
+        return 0
+    print(f"[optimise] dangling invalidator pointers in {src}:")
+    for k, v in sorted(counts.items()):
+        print(f"    {k:<50} {v:>8,}")
+    if not yes:
+        print("[optimise] report only. Re-run with --yes to null them.")
+        return 0
+    done = Store(str(src), _store_dim(src)).nullify_dangling_invalidators()
+    print(f"[optimise] nulled {sum(done.values()):,} pointer(s): {done}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--src", default=None, help="store to rebuild (default: live)")
@@ -1068,12 +1102,17 @@ def main(argv=None) -> int:
                          "all -- NEVER do this with a bare mv")
     ap.add_argument("--from", dest="frm", default=None,
                     help="--rollback: which retained store (default: newest)")
+    ap.add_argument("--nullify-dangling", action="store_true",
+                    help="null bi-temporal back-pointers whose target row is "
+                         "gone (in place, no rebuild); reports counts and exits")
     ns = ap.parse_args(argv)
 
     from mcpbrain import config
     home = Path(ns.home) if ns.home else Path(config.app_dir())
     src = Path(ns.src) if ns.src else Path(config.store_path())
     dst = Path(ns.dst) if ns.dst else Path(f"{src}.new")
+    if ns.nullify_dangling:
+        return _nullify_dangling(src, yes=ns.yes)
     if ns.swap and ns.rollback:
         print("[optimise] --swap and --rollback are opposite operations; "
               "pick one")
