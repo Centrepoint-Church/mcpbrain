@@ -452,10 +452,13 @@ def test_connect_desktop_endpoint(tmp_path, monkeypatch):
 
     monkeypatch.setattr(connector, "register_connector",
                         lambda **kw: fake_register() or [])
-    monkeypatch.setattr(
-        desktop, "relaunch_claude_desktop",
-        lambda: {"relaunched": True, "detail": "Claude Desktop is restarting"},
-    )
+
+    def fake_relaunch(on_quit=None):
+        if on_quit is not None:
+            on_quit()
+        return {"relaunched": True, "detail": "Claude Desktop is restarting"}
+
+    monkeypatch.setattr(desktop, "relaunch_claude_desktop", fake_relaunch)
 
     d = FakeDaemon()
     srv = ControlServer(d, home=str(tmp_path))

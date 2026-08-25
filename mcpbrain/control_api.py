@@ -331,8 +331,11 @@ class ControlServer:
                 d.ensure_model(); return h_json(h, 202, {"started": True})
             if h.path == "/api/connect-desktop":
                 from mcpbrain import connector, desktop, setup as _setup
-                connector.register_connector(mcpbrain_bin=_setup._mcpbrain_bin())
-                return h_json(h, 200, desktop.relaunch_claude_desktop())
+                # Write the connector while Claude Desktop is DOWN: it rewrites
+                # its own config on quit, so an entry written first is discarded.
+                mcpbrain_bin = _setup._mcpbrain_bin()
+                return h_json(h, 200, desktop.relaunch_claude_desktop(
+                    on_quit=lambda: connector.register_connector(mcpbrain_bin=mcpbrain_bin)))
             if h.path == "/api/recall":
                 # Semantic recall for the UserPromptSubmit hook. Loopback +
                 # bearer-token gated like every other handler here. Empty query
