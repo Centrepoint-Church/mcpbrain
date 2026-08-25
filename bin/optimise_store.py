@@ -1,9 +1,9 @@
 """Attended, backup-gated store rebuild. NEVER run automatically.
 
 Six of the target optimisations each require rewriting the whole file
-(page_size, STRICT, contentless FTS5, the partial + trigram indexes, FK
-constraints, and dropping the dead columns), so they are applied together in
-ONE out-of-place pass instead of six sequential rewrites of a 2.6 GB file.
+(page_size, STRICT, contentless FTS5, the partial indexes, FK constraints,
+and dropping the dead columns), so they are applied together in ONE
+out-of-place pass instead of six sequential rewrites of a 2.6 GB file.
 
 Usage (attended — this is a CLI a human runs, following bin/consolidate.py):
 
@@ -248,8 +248,7 @@ def _load_meta(raw) -> dict:
     return val if isinstance(val, dict) else {}
 
 
-def rebuild(src, dst, *, page_size: int = 8192,
-            populate_trigram: bool = False) -> dict:
+def rebuild(src, dst, *, page_size: int = 8192) -> dict:
     """Rebuild `src` into a fresh `dst` in ONE pass.
 
     page_size MUST be set before any table exists, so it comes first, and it is
@@ -287,7 +286,6 @@ def rebuild(src, dst, *, page_size: int = 8192,
     dropped = report_orphans(src)
     copy = _copy_all(src, dst)
     fts_rows = _rederive_fts(dst, dim)
-    trigram_rows = _populate_trigram(dst, dim) if populate_trigram else 0
     # Statistics for the planner, once, on the finished file. Through _open_db
     # so the vec0 extension is loaded -- ANALYZE walks sqlite_master.
     # bulk=True: a single connection scanning the whole schema (PR #25 finding 5).
@@ -304,7 +302,7 @@ def rebuild(src, dst, *, page_size: int = 8192,
             "nullified": copy["nullified"],
             "requeued_embeddings": copy["requeued_embeddings"],
             "vectors": copy["vectors"],
-            "fts_rows": fts_rows, "trigram_rows": trigram_rows,
+            "fts_rows": fts_rows,
             "dim": dim,
             "src_bytes": src.stat().st_size, "dst_bytes": dst.stat().st_size}
 
@@ -542,45 +540,6 @@ def _rederive_fts(dst, dim: int, *, batch: int = 5000) -> int:
                 db.execute("UPDATE chunks SET fts_context_version=? WHERE rowid=?",
                            (Store.FTS_CONTEXT_VERSION if applied else 0,
                             r["rowid"]))
-            last = rows[-1]["rowid"]
-            total += len(rows)
-
-
-def _populate_trigram(dst, dim: int, *, batch: int = 5000) -> int:
-    """Fill fts_chunks_trigram from raw chunks.text. OPT-IN, default off.
-
-    Task 7 created this table to make store.email_mentions' `text LIKE`
-    index-backed, but shipped neither a writer nor a reader: email_mentions
-    still scans `chunks.text` directly, and none of write_embedding /
-    _write_cached_chunk_row / the retention+GC deletes touch the trigram table.
-    Populating it by default would therefore be worse than leaving it empty --
-    it would be correct for exactly as long as the rebuild takes, then drift
-    (missing every new chunk, retaining every deleted one) while LOOKING ready,
-    and a trigram index over the whole corpus is not free (measured on the live
-    corpus: see the task report). Wiring the writers and pointing
-    email_mentions at it is a store.py change, not a rebuild change.
-
-    So the mechanism lives here, tested, behind --populate-trigram, for
-    whoever lands that change; the default rebuild reports the table as
-    deliberately empty rather than silently leaving it so.
-
-    Indexes RAW chunks.text, not the contextual text fts_chunks gets:
-    email_mentions matches against the body a user actually wrote, and a
-    synthesised prefix would produce phantom hits.
-    """
-    from mcpbrain.store import Store
-    store = Store(str(dst), dim=dim)
-    total, last = 0, 0
-    while True:
-        with store._connect(write=True, bulk=True) as db:
-            rows = db.execute(
-                "SELECT rowid, text FROM chunks WHERE rowid > ? "
-                "ORDER BY rowid LIMIT ?", (last, batch)).fetchall()
-            if not rows:
-                return total
-            db.executemany(
-                "INSERT INTO fts_chunks_trigram(rowid, text) VALUES(?,?)",
-                [(r["rowid"], r["text"] or "") for r in rows])
             last = rows[-1]["rowid"]
             total += len(rows)
 
@@ -1020,11 +979,7 @@ def _print_report(r: dict) -> None:
           f"{r['dst_bytes']:,} B  "
           f"({100 * r['dst_bytes'] / max(r['src_bytes'], 1):.1f}% of original)")
     print(f"[optimise] vectors copied: {r['vectors']}  "
-          f"fts rows: {r['fts_rows']}  trigram rows: {r['trigram_rows']}")
-    if not r["trigram_rows"]:
-        print("[optimise] fts_chunks_trigram is DELIBERATELY EMPTY -- it has no "
-              "writer and no reader yet (see _populate_trigram); "
-              "--populate-trigram fills it once one lands.")
+          f"fts rows: {r['fts_rows']}")
     for label, key in (("dropped orphan rows", "dropped_rows"),
                        ("dropped dead columns (non-null values)", "dropped_columns"),
                        ("carried over verbatim (unmanaged tables)", "carried"),
@@ -1105,8 +1060,6 @@ def main(argv=None) -> int:
                          "all -- NEVER do this with a bare mv")
     ap.add_argument("--from", dest="frm", default=None,
                     help="--rollback: which retained store (default: newest)")
-    ap.add_argument("--populate-trigram", action="store_true",
-                    help="fill fts_chunks_trigram (only once it has a writer)")
     ns = ap.parse_args(argv)
 
     from mcpbrain import config
@@ -1197,8 +1150,7 @@ def main(argv=None) -> int:
             return 2
         t0 = time.time()
         try:
-            r = rebuild(src, dst, page_size=ns.page_size,
-                        populate_trigram=ns.populate_trigram)
+            r = rebuild(src, dst, page_size=ns.page_size)
         except Exception as exc:  # noqa: BLE001 -- attended CLI: no tracebacks
             print(f"[optimise] REBUILD FAILED: {type(exc).__name__}: {exc}")
             print(f"[optimise] the live store is UNTOUCHED and {snap} is your "

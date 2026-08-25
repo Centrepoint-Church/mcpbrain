@@ -700,6 +700,22 @@ git commit -m "perf(store): JSONB metadata via a single _meta_extract source of 
 
 ### Task 7: FK constraints, STRICT tables, trigram index in `init()`
 
+**REVERTED 2026-08-25** (PR #25 finding 6, spec/plan defect): this task's
+trigram index shipped with zero readers (`email_mentions` still scans
+`chunks.text` directly) and populating it on the live store measured
++1.089 GB — erasing most of this whole plan's 57% storage saving. The plan
+asked for the index without a task to wire a reader and without pricing the
+populate cost. Rather than defer it (which is what actually shipped first,
+behind an opt-in `--populate-trigram` flag on `bin/optimise_store.py`), it
+was removed entirely: the `fts_chunks_trigram` schema, `_populate_trigram`,
+`--populate-trigram`, and their tests are all gone. `email_mentions`'s
+`text LIKE` remains genuinely unindexable, same as CLAUDE.md recorded
+before this task — a future reader would likely want different tokenizer
+settings anyway, so this is left as a clean slate for whoever actually
+wires up a reader, rather than half-built infrastructure nothing uses. The
+FK constraints and STRICT tables parts of this task stand; only the
+trigram index was reverted. Kept below for its historical record.
+
 **Files:**
 - Modify: `mcpbrain/store.py` — `init()` table DDL, `_open_db` (`foreign_keys=ON`)
 - Test: `tests/test_store_constraints.py`

@@ -1,4 +1,4 @@
-"""FK enforcement, STRICT tables, trigram index and the new partial indexes.
+"""FK enforcement, STRICT tables, and the new partial indexes.
 
 The brief's tests construct `Store(str(p))`; the real signature is
 `Store(path, dim)` (dim has no default — a store's vector width is not
@@ -31,18 +31,6 @@ def test_strict_tables_reject_wrong_types(tmp_path):
         with s._connect(write=True) as db:
             db.execute("INSERT INTO chunks(doc_id, text, embedded) "
                        "VALUES('d1','t','not-an-integer')")
-
-
-def test_email_mentions_like_is_index_backed(tmp_path):
-    """CLAUDE.md records this LIKE as unindexable; a trigram index fixes that."""
-    p = tmp_path / "b.sqlite3"
-    s = Store(str(p), dim=4)
-    s.init()
-    with s._connect() as db:
-        plan = db.execute(
-            "EXPLAIN QUERY PLAN SELECT rowid FROM fts_chunks_trigram "
-            "WHERE fts_chunks_trigram MATCH 'byford'").fetchall()
-    assert plan
 
 
 # --- supporting coverage for the same change -------------------------------

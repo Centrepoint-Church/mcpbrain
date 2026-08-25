@@ -349,7 +349,7 @@ NEVER wired into a daemon cadence, a cron, or any automatic trigger — same
 posture as `bin/consolidate.py` (§ its own module docstring: "Attended,
 backup-gated consolidation migrations (curator-run)"). `init()` uses `CREATE
 TABLE IF NOT EXISTS`, so a schema change (page size, STRICT tables,
-contentless FTS5, FK constraints, the trigram index) reaches a
+contentless FTS5, FK constraints) reaches a
 **new** install for free but an **existing** store only picks it up by running
 this tool. There is no silent migration path and there should never be one.**
 
@@ -509,10 +509,10 @@ tab-completion away on the highest-stakes command here. Still prefer omitting
 **A rebuilt (or freshly `init()`'d) store requires the SAME OR NEWER SQLite
 version on any machine it is later opened on for writes.** Restoring one onto a
 machine with an OLDER SQLite will fail. The binding constraint is contentless
-FTS5: `init()` creates `fts_chunks`/`fts_chunks_trigram` with
-`contentless_delete=1` when SQLite is ≥ 3.43 (`store.fts5_supports_contentless`),
-and an older FTS5 module does not recognise that option — it rejects the table
-rather than degrading. STRICT tables (≥ 3.37) are a second, lower floor.
+FTS5: `init()` creates `fts_chunks` with `contentless_delete=1` when SQLite is
+≥ 3.43 (`store.fts5_supports_contentless`), and an older FTS5 module does not
+recognise that option — it rejects the table rather than degrading. STRICT
+tables (≥ 3.37) are a second, lower floor.
 Practical consequences:
 
 - A store rebuilt on a modern machine is **not** portable backwards. Note down

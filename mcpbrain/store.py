@@ -548,23 +548,6 @@ class Store:
             else:
                 db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
                            "USING fts5(text)")
-            # unicode61 cannot index a LIKE; trigram can. This is the fix for
-            # the email_mentions `text LIKE` that CLAUDE.md records as
-            # unindexable. content='' keeps it index-only (no second copy of
-            # the text); rowid is the chunks rowid, exactly like fts_chunks, so
-            # a MATCH here joins straight back to chunks. Same contentless_delete
-            # branch as fts_chunks above, for the same reason: a contentless
-            # table below 3.43 cannot service a DELETE, and every retention/GC
-            # sweep in this store deletes.
-            if fts5_supports_contentless():
-                db.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks_trigram "
-                    "USING fts5(text, content='', contentless_delete=1, "
-                    "tokenize='trigram')")
-            else:
-                db.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks_trigram "
-                    "USING fts5(text, tokenize='trigram')")
             db.execute(f"""CREATE TABLE IF NOT EXISTS meta(
                 k TEXT PRIMARY KEY, v TEXT){_S}""")
             db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('dim',?)", (str(self.dim),))
