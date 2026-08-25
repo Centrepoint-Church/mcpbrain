@@ -66,7 +66,7 @@ wrong and MUST be right:
   GATED, not yet run against the live store.** `bin/optimise_store.py`'s
   `rebuild()`/`main()` performs a full out-of-place rewrite of `brain.sqlite3`
   (page_size 4096→8192, contentless FTS5, STRICT tables + FK
-  constraints, a trigram index scaffold) behind an attended CLI (`--yes` gate,
+  constraints) behind an attended CLI (`--yes` gate,
   verified encrypted snapshot before anything is written, `--swap` that
   retains the old file, and a sidecar-aware `--rollback --yes`) — see
   `docs/RELEASE-RUNBOOK.md` § 7 for the full procedure. **This is attended and
