@@ -188,18 +188,31 @@ def connector_lines(*, mcpbrain_bin: str) -> list[str]:
             continue
         try:
             data = _json.loads(path.read_text())
-            entry = (data.get("mcpServers") or {}).get("mcpbrain")
         except (OSError, ValueError) as exc:
             lines.append(f"⚠️  {label:<16} could not read {path} ({exc})")
             continue
+        # data/mcpServers/entry can each independently be the wrong JSON shape
+        # (a hand-edited config, or one written by something else entirely) —
+        # never let .get()/.get() on a non-dict raise out of this function.
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        entry = servers.get("mcpbrain") if isinstance(servers, dict) else None
         if not entry:
             lines.append(f"⚠️  {label:<16} not registered in {path} — "
+                         f"run 'mcpbrain connect'")
+            continue
+        if not isinstance(entry, dict):
+            lines.append(f"⚠️  {label:<16} malformed connector entry in {path} — "
                          f"run 'mcpbrain connect'")
             continue
         command = entry.get("command") or ""
         if not Path(command).exists():
             lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
                          f"does not exist — run 'mcpbrain connect'")
+            continue
+        if command != mcpbrain_bin:
+            lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
+                         f"differs from the current install ({mcpbrain_bin}) — "
+                         f"run 'mcpbrain connect'")
             continue
         lines.append(f"✅ {label:<16} registered in {path.name} → {command}")
     return lines
@@ -386,7 +399,24 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             lines.append(f"✅ {'Watchdog':<16} no stall restarts")
 
     lines.append(arch_line())
-    lines.extend(connector_lines(mcpbrain_bin=mcpbrain_bin))
+
+    # Connector registration: not probe-driven through _DISPOSITIONS (same as
+    # embedder/baseline above), so it gets its own explicit repair dispatch.
+    # A "⚠️" line means an actionable problem (missing/malformed/stale entry);
+    # "➖"/"✅" need no repair. Re-check after repairing so the report reflects
+    # the POST-repair state, mirroring the embedder block's `healed` idiom.
+    conn_lines = connector_lines(mcpbrain_bin=mcpbrain_bin)
+    if any(line.startswith("⚠️") for line in conn_lines):
+        connector_repair = repairs.get("connector")
+        if connector_repair is not None:
+            try:
+                connector_repair()
+            except Exception:  # noqa: BLE001 — a diagnostic must not break doctor
+                pass
+            conn_lines = connector_lines(mcpbrain_bin=mcpbrain_bin)
+            if any(line.startswith("⚠️") for line in conn_lines):
+                need_action += 1
+    lines.extend(conn_lines)
 
     drift_line = version_drift_line(home)
     if drift_line is not None:

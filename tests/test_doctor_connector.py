@@ -55,3 +55,98 @@ def test_repair_registers_the_connector(tmp_path, monkeypatch):
     assert "connector" in repairs
     repairs["connector"]()
     assert json.loads(cfg.read_text())["mcpServers"]["mcpbrain"]["command"] == "/abs/bin/mcpbrain"
+
+
+def test_mcpservers_non_dict_does_not_crash_and_reports_not_registered(tmp_path, monkeypatch):
+    """Bug 2: a malformed-but-valid-JSON config (mcpServers is a list) must not
+    raise AttributeError out of connector_lines."""
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": [1, 2]}))
+    lines = _lines(monkeypatch, cfg, tmp_path / "absent.json")
+    assert any("⚠️" in line and "not registered" in line for line in lines)
+
+
+def test_entry_non_dict_does_not_crash_and_reports_malformed(tmp_path, monkeypatch):
+    """Bug 2: mcpServers.mcpbrain being a bare string (hand-edited) must not
+    raise AttributeError out of connector_lines, and must be distinguishable
+    from the plain 'not registered' case."""
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {"mcpbrain": "not-a-dict"}}))
+    lines = _lines(monkeypatch, cfg, tmp_path / "absent.json")
+    assert any("⚠️" in line and "malformed" in line for line in lines)
+    assert not any("not registered" in line for line in lines)
+
+
+def test_reports_stale_binary_path_when_command_differs_from_current_install(tmp_path, monkeypatch):
+    """Bug 3: a command that exists on disk but is not the CURRENT mcpbrain_bin
+    (e.g. an old uv-tool-venv resolved path that still exists after Task 7
+    switched to the stable shim path) must not report ✅."""
+    old_binary = tmp_path / "old-mcpbrain"
+    old_binary.write_text("#!/bin/sh\n")
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {
+        "mcpbrain": {"command": str(old_binary), "args": ["mcp-server"]}}}))
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / "absent.json")
+
+    lines = doctor.connector_lines(mcpbrain_bin=str(tmp_path / "new-mcpbrain"))
+    assert any("⚠️" in line and "differs from the current install" in line for line in lines)
+    assert not any(line.startswith("✅") and "Connector" in line for line in lines)
+
+
+def test_run_doctor_dispatches_connector_repair(tmp_path, monkeypatch):
+    """Bug 1: run_doctor must actually CALL the injected connector repair when
+    a connector problem is present, not just report it -- the pre-fix bug was
+    that '_repair_connector' was registered but never dispatched anywhere."""
+    from mcpbrain import doctor as doctor_mod
+
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / "absent.json")
+
+    new_bin_path = tmp_path / "new-mcpbrain"
+    new_bin_path.write_text("#!/bin/sh\n")
+    new_bin = str(new_bin_path)
+    calls = {"n": 0}
+
+    def fake_repair():
+        calls["n"] += 1
+        data = json.loads(cfg.read_text())
+        data.setdefault("mcpServers", {})["mcpbrain"] = {
+            "command": new_bin, "args": ["mcp-server"]}
+        cfg.write_text(json.dumps(data))
+
+    conns = {k: {"state": "ok", "detail": "Connected", "last_verified": None}
+             for k in ("google", "claude", "backup", "records", "enrichment")}
+    repairs = {"daemon": lambda: None, "agent": lambda: None,
+               "records": lambda: None, "connector": fake_repair}
+
+    code, msg = doctor_mod.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                      conns=conns, repairs=repairs,
+                                      mcpbrain_bin=new_bin)
+    assert calls["n"] == 1, "the connector repair closure was never dispatched"
+    assert "✅ Connector" in msg
+
+
+def test_run_doctor_connector_repair_still_broken_counts_as_need_action(tmp_path, monkeypatch):
+    """Bug 1 continued: if the repair is attempted and the post-repair state
+    still shows a warning, that must count toward need_action / exit code."""
+    from mcpbrain import doctor as doctor_mod
+
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / "absent.json")
+
+    conns = {k: {"state": "ok", "detail": "Connected", "last_verified": None}
+             for k in ("google", "claude", "backup", "records", "enrichment")}
+    repairs = {"daemon": lambda: None, "agent": lambda: None,
+               "records": lambda: None, "connector": lambda: None}  # no-op repair
+
+    code, msg = doctor_mod.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                      conns=conns, repairs=repairs,
+                                      mcpbrain_bin="/abs/bin/mcpbrain")
+    assert "⚠️" in msg
+    assert "Connector" in msg
+    assert code == 1
