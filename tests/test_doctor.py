@@ -130,7 +130,7 @@ def test_scheduled_tasks_inferred_from_enrichment():
     code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: f)
     assert "Scheduled tasks" in msg
-    assert "/mcpbrain-fix" in msg
+    assert "/mcpbrain:install" in msg
     assert all(r.calls == 0 for r in repairs.values())
     # enrichment is guided (1 need_action) + scheduled-tasks is NOT double-counted
     # so code == 1 (one issue: enrichment itself)
@@ -261,7 +261,7 @@ def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_pa
 
     repairs = doctor._default_repairs(str(tmp_path), "darwin", "/usr/local/bin/mcpbrain")
     assert set(repairs) == {"daemon", "agent", "records", "embedder", "baseline",
-                            "ocr"}
+                            "ocr", "connector"}
 
     # Invoking each closure must dispatch to the real function with valid kwargs
     # (a TypeError here is exactly the production-only failure we're guarding).

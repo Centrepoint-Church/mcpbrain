@@ -17,13 +17,14 @@ launchd/git/agent side effects in tests.
 Scheduled-task health is INFERRED from probe_enrichment: the daemon cannot read
 the Cowork app DB, so doctor cannot verify the four scheduled tasks directly.
 It states this honestly. Recreating tasks is therefore always a guided step
-(/mcpbrain-fix), never auto.
+(/mcpbrain:install), never auto.
 """
 from __future__ import annotations
 
 import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mcpbrain.mcp_server import live_version_records
 
@@ -41,7 +42,7 @@ _DISPOSITIONS: dict[str, dict] = {
     "google":     {"kind": "guided", "label": "Google",
                    "guided": "Run: mcpbrain auth"},
     "enrichment": {"kind": "guided", "label": "Enrichment",
-                   "guided": "Open Claude or run /mcpbrain-fix in Cowork"},
+                   "guided": "Open Claude or run /mcpbrain:install in Claude Code"},
     "backup":     {"kind": "guided", "label": "Backup",
                    "guided": "Re-run a backup from the mcpbrain wizard"},
 }
@@ -128,9 +129,16 @@ def _default_repairs(home: str, platform: str, mcpbrain_bin: str) -> dict:
         ok, msg = ocr.install_tesseract(platform)
         return {"status": "ok" if ok else "skipped", "reason": msg}
 
+    def _repair_connector():
+        # Re-register with every Claude surface present. Idempotent, and the
+        # merge writer refuses to touch a config it cannot parse.
+        from mcpbrain import connector
+        connector.register_connector(mcpbrain_bin=mcpbrain_bin)
+
     return {"daemon": _repair_daemon, "agent": _repair_agent,
             "records": _repair_records, "embedder": _repair_embedder,
-            "baseline": _repair_baseline, "ocr": _repair_ocr}
+            "baseline": _repair_baseline, "ocr": _repair_ocr,
+            "connector": _repair_connector}
 
 
 def _is_problem(key: str, state: str) -> bool:
@@ -157,6 +165,44 @@ def _live_daemon_status(home) -> dict | None:
         return ControlClient(str(home), timeout=5).status()
     except Exception:  # noqa: BLE001 — diagnostics must never fail on a probe
         return None
+
+
+def connector_lines(*, mcpbrain_bin: str) -> list[str]:
+    """One report line per Claude config file on this machine.
+
+    The failure this exists for is silent: on Windows MSIX installs the app reads
+    a virtualised config path, so a write to the documented %APPDATA% location
+    succeeds and is then ignored. Nothing surfaced that until a hardware QA gate
+    did. A config file that simply is not present is informational (➖), not a
+    fault — a machine may legitimately have only one of the two surfaces.
+    """
+    import json as _json
+    from mcpbrain import connector
+
+    lines: list[str] = []
+    targets = list(connector.desktop_config_paths()) + [connector.code_config_path()]
+    for path in targets:
+        label = "Connector"
+        if not path.exists():
+            lines.append(f"➖ {label:<16} {path.name} not present ({path.parent})")
+            continue
+        try:
+            data = _json.loads(path.read_text())
+            entry = (data.get("mcpServers") or {}).get("mcpbrain")
+        except (OSError, ValueError) as exc:
+            lines.append(f"⚠️  {label:<16} could not read {path} ({exc})")
+            continue
+        if not entry:
+            lines.append(f"⚠️  {label:<16} not registered in {path} — "
+                         f"run 'mcpbrain doctor --repair'")
+            continue
+        command = entry.get("command") or ""
+        if not Path(command).exists():
+            lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
+                         f"does not exist — run 'mcpbrain doctor --repair'")
+            continue
+        lines.append(f"✅ {label:<16} registered in {path.name} → {command}")
+    return lines
 
 
 def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
@@ -340,6 +386,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             lines.append(f"✅ {'Watchdog':<16} no stall restarts")
 
     lines.append(arch_line())
+    lines.extend(connector_lines(mcpbrain_bin=mcpbrain_bin))
 
     drift_line = version_drift_line(home)
     if drift_line is not None:
@@ -362,7 +409,6 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
 
     # Chunks that exceed the embedder window (512 tokens ≈ 2,000 chars). Their
     # tails are silently truncated at embed time and become unsearchable.
-    from pathlib import Path
     from mcpbrain.store import Store
     # "brain.sqlite3" — the same filename config.store_path() builds under
     # app_dir(); spelled relative to the injected `home` because run_doctor is
@@ -415,8 +461,8 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         lines.append("✅ Scheduled tasks  enrichment fresh ⇒ enrich task firing")
     else:
         lines.append("⚠️  Scheduled tasks  not directly checkable → "
-                     "run /mcpbrain-fix in Cowork to recreate the enrich/gardener/"
-                     "meeting-packs/reference-gardener tasks")
+                     "run /mcpbrain:install in Claude Code to recreate the "
+                     "enrich/meeting-packs/gardener/reference-gardener tasks")
         if not enr_already_counted:
             need_action += 1
 
