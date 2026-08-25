@@ -1,6 +1,6 @@
 """Calendar attendees -> person graph (pure structured-data writes, no LLM)."""
 
-from mcpbrain.graph_write import OwnerIdentity
+from mcpbrain.graph_write import OwnerIdentity, resolve_owner_entity_id
 from mcpbrain.store import Store
 from mcpbrain.sync.calendar import _apply_attendees_to_graph
 
@@ -136,6 +136,39 @@ def test_attendee_pass_never_mints_the_owner_node(tmp_path):
         assert db.execute("SELECT COUNT(*) c FROM entities WHERE id='josh-kemp'"
                           ).fetchone()["c"] == 0
         assert db.execute("SELECT COUNT(*) c FROM entity_relations").fetchone()["c"] == 0
+
+
+def test_resolve_owner_entity_id_never_matches_a_role_address(tmp_path):
+    """PR #25 finding 8: if the configured/passed owner email is a shared
+    mailbox (office@, info@), matching an entity on it would attribute the
+    owner's whole meeting history to whatever entity happens to be
+    registered under that shared address -- the exact hazard the docstring
+    already refuses a name/alias fallback for. is_role_address() must gate
+    the email-match path the same way it already gates every other identity
+    resolution in this module."""
+    s = _store(tmp_path)
+    # A shared inbox entity -- NOT the real owner -- happens to be
+    # registered under the role address.
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type,email_addr) "
+                   "VALUES('shared-inbox','Office','person',"
+                   "'office@centrepoint.church')")
+    owner = OwnerIdentity(name="Josh", entity_id="joshua-kemp", aliases=frozenset())
+
+    result = resolve_owner_entity_id(s, owner, "office@centrepoint.church")
+
+    assert result == ""   # never binds to the shared-inbox entity
+
+
+def test_resolve_owner_entity_id_still_matches_a_genuine_personal_address(tmp_path):
+    """The role-address guard must not break the ordinary, real case."""
+    s = _store(tmp_path)
+    _seed_owner_node(s, entity_id="josh-kemp", email="josh.k@centrepoint.church")
+    owner = OwnerIdentity(name="Josh", entity_id="joshua-kemp", aliases=frozenset())
+
+    result = resolve_owner_entity_id(s, owner, "josh.k@centrepoint.church")
+
+    assert result == "josh-kemp"
 
 
 def test_attended_edge_attaches_to_the_owners_real_node_id(tmp_path):
