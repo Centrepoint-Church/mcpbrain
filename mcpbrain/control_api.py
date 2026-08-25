@@ -330,8 +330,8 @@ class ControlServer:
             if h.path == "/api/model/ensure":
                 d.ensure_model(); return h_json(h, 202, {"started": True})
             if h.path == "/api/connect-desktop":
-                from mcpbrain import setup as _setup, desktop
-                _setup._register_desktop_mcp()   # (re)write the connector Desktop may have clobbered
+                from mcpbrain import connector, desktop, setup as _setup
+                connector.register_connector(mcpbrain_bin=_setup._mcpbrain_bin())
                 return h_json(h, 200, desktop.relaunch_claude_desktop())
             if h.path == "/api/recall":
                 # Semantic recall for the UserPromptSubmit hook. Loopback +

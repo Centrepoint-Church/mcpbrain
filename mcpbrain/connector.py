@@ -129,3 +129,33 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
         tmp.unlink(missing_ok=True)
         return False, f"could not write {path} ({exc})"
     return True, f"registered in {path}"
+
+
+def register_connector(*, mcpbrain_bin: str, dry_run: bool = False
+                       ) -> list[tuple[Path, bool, str]]:
+    """Register the brain with every Claude surface present on this machine.
+
+    Returns one (path, wrote, detail) per file attempted, so a caller can report
+    honestly rather than claiming success. One unwritable file never stops the
+    others: a machine with a corrupt chat config still gets a working Code-tab
+    registration, and vice versa.
+
+    The chat config is CREATED when absent (a first-ever install has none yet);
+    ~/.claude.json is not, because its absence means Claude Code has never run
+    here and a config we fabricated is one the real client may later disagree
+    with.
+    """
+    targets: list[tuple[Path, dict, bool]] = [
+        (p, server_entry(mcpbrain_bin, typed=False), True) for p in desktop_config_paths()
+    ]
+    targets.append((code_config_path(), server_entry(mcpbrain_bin, typed=True), False))
+
+    results: list[tuple[Path, bool, str]] = []
+    for path, entry, create in targets:
+        if dry_run:
+            print(f"would register mcpbrain in {path}: {json.dumps(entry)}")
+            results.append((path, True, "dry-run"))
+            continue
+        ok, detail = merge_server_into(path, entry, create=create)
+        results.append((path, ok, detail))
+    return results

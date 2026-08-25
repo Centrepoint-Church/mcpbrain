@@ -11,7 +11,6 @@ browser.
 """
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -52,58 +51,21 @@ def _mcpbrain_bin() -> str:
     return found
 
 
-def _desktop_config_path() -> Path:
-    """Path to the Claude **Desktop** MCP config for this OS.
+def _register_connector(*, dry_run: bool = False) -> None:
+    """Register the brain with every Claude surface, reporting each outcome.
 
-    Claude Desktop — where the plugin runs and staff do their work — reads its
-    MCP servers from this file, *not* from Claude Code's ``~/.claude.json``.
+    Deliberately terse. This used to print a five-line block instructing the user
+    to quit Claude Desktop and re-run `mcpbrain connect` — advice that contradicted
+    both the install command and the wizard's final step, and which is obsolete now
+    that the wizard's Connect button writes inside the quit/relaunch window.
     """
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(base) / "Claude" / "claude_desktop_config.json"
-    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
-
-
-def _register_desktop_mcp(*, dry_run: bool = False) -> None:
-    """Connect the brain to **Claude Desktop** by writing its MCP config.
-
-    The brain is served through its stdio MCP server, ``mcpbrain mcp-server``.
-    Setup writes the entry directly into ``claude_desktop_config.json`` using the
-    *absolute* path to the installed binary — which only setup knows. A plain
-    JSON edit with an absolute command is fully cross-platform (no shell/PATH/
-    extension problem), and targets Claude Desktop rather than Claude Code. The
-    plugin's own ``.mcp.json`` deliberately bundles no server. Best-effort: a
-    write failure must never block onboarding.
-
-    Merges into any existing config, preserving other servers; idempotent.
-    """
-    cfg = _desktop_config_path()
-    entry = {"command": _mcpbrain_bin(), "args": ["mcp-server"]}
-    if dry_run:
-        print(f"would connect mcpbrain to Claude Desktop at {cfg}: {json.dumps(entry)}")
-        return
-    try:
-        data = json.loads(cfg.read_text()) if cfg.exists() else {}
-        if not isinstance(data, dict):
-            data = {}
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            servers = {}
-            data["mcpServers"] = servers
-        servers["mcpbrain"] = entry
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"Wrote the mcpbrain MCP server to Claude Desktop's config:\n  {cfg}\n"
-              "IMPORTANT: fully QUIT and REOPEN Claude Desktop to load the brain_* tools.\n"
-              "Claude Desktop owns this file and overwrites edits made while it's running,\n"
-              "so for a reliable result: quit Claude Desktop, run `mcpbrain connect` in a\n"
-              "terminal, then reopen Claude Desktop.")
-    except OSError as exc:
-        print(f"Could not write the Claude Desktop MCP config ({exc}). Add this to "
-              f"{cfg} under \"mcpServers\":\n  \"mcpbrain\": {json.dumps(entry)}",
-              file=sys.stderr)
+    from mcpbrain import connector
+    for path, ok, detail in connector.register_connector(
+            mcpbrain_bin=_mcpbrain_bin(), dry_run=dry_run):
+        if ok:
+            print(f"Connected the brain: {detail}")
+        else:
+            print(f"Could not connect the brain here: {detail}", file=sys.stderr)
 
 
 def _install_tray_best_effort(home: str) -> None:
@@ -238,7 +200,7 @@ def connect_main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be written without writing")
     args = ap.parse_args(argv)
-    _register_desktop_mcp(dry_run=args.dry_run)
+    _register_connector(dry_run=args.dry_run)
     return 0
 
 
@@ -260,7 +222,7 @@ def main(argv=None) -> int:
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
 
-    _register_desktop_mcp(dry_run=args.dry_run)
+    _register_connector(dry_run=args.dry_run)
 
     if args.dry_run:
         print(f"would open {url}")
@@ -280,8 +242,8 @@ def main(argv=None) -> int:
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
     print("Finish setup in the wizard (Google sign-in, your details), then click "
-          "'Connect & restart Claude Desktop' as the LAST step — that loads the brain_* "
-          "tools. Backup and recovery happen automatically.")
+          "'Connect & restart Claude Desktop' as the LAST step — that reloads Claude "
+          "so the brain_* tools appear. Backup and recovery happen automatically.")
     webbrowser.open(url)
     return 0
 
