@@ -61,3 +61,64 @@ def code_config_path() -> Path:
     """Claude Code's config file, honouring ``CLAUDE_CONFIG_DIR`` when set."""
     base = os.environ.get("CLAUDE_CONFIG_DIR")
     return (Path(base) if base else Path.home()) / ".claude.json"
+
+
+import json
+
+
+def server_entry(mcpbrain_bin: str, *, typed: bool) -> dict:
+    """The stdio server entry to register.
+
+    ``typed`` selects the shape the target file already uses: Claude Code writes
+    ``type``/``env`` into ~/.claude.json, while claude_desktop_config.json has
+    carried the bare command/args form since mcpbrain first wrote it. Matching
+    each file's existing convention keeps diffs minimal and avoids asking either
+    reader to accept a shape it does not already produce itself.
+    """
+    if typed:
+        return {"type": "stdio", "command": mcpbrain_bin, "args": ["mcp-server"], "env": {}}
+    return {"command": mcpbrain_bin, "args": ["mcp-server"]}
+
+
+def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, str]:
+    """Merge ``entry`` in as ``mcpServers.mcpbrain``. Returns (wrote, detail).
+
+    Never destructive. The file is parsed first and left byte-identical if it does
+    not parse, or if its top level is not an object — both are states where a
+    wholesale write would discard something we cannot interpret, and both have
+    been observed in the wild. The write itself is tempfile + os.replace so an
+    interrupted run cannot truncate a config, and the temp file is removed if the
+    replace fails.
+
+    ``create=False`` skips a file that does not exist, which is how a machine with
+    only one of the two surfaces avoids gaining an empty config for the other.
+    """
+    if not path.exists():
+        if not create:
+            return False, f"not present: {path}"
+        data: dict = {}
+    else:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            return False, f"could not parse {path} ({exc}); left unchanged"
+        if not isinstance(data, dict):
+            return False, f"{path} is not a JSON object; left unchanged"
+
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    if servers.get("mcpbrain") == entry and path.exists():
+        return True, f"already registered in {path}"
+    servers["mcpbrain"] = entry
+    data["mcpServers"] = servers
+
+    tmp = path.with_suffix(path.suffix + ".mcpbrain.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return False, f"could not write {path} ({exc})"
+    return True, f"registered in {path}"

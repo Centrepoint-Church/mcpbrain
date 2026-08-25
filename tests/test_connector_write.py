@@ -1,0 +1,88 @@
+"""The connector write must merge, never replace, and must be atomic.
+
+~/.claude.json carries the user's whole project history; claude_desktop_config.json
+carries their Cowork preferences alongside mcpServers. Both have been destroyed in
+the wild by tools that rewrote them wholesale.
+"""
+import json
+
+from mcpbrain import connector
+
+
+def test_server_entry_shapes():
+    plain = connector.server_entry("/abs/bin/mcpbrain", typed=False)
+    assert plain == {"command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
+    typed = connector.server_entry("/abs/bin/mcpbrain", typed=True)
+    assert typed == {"type": "stdio", "command": "/abs/bin/mcpbrain",
+                     "args": ["mcp-server"], "env": {}}
+
+
+def test_merge_preserves_every_other_key(tmp_path):
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({
+        "mcpServers": {"other": {"command": "x"}},
+        "preferences": {"menuBarEnabled": True},
+        "coworkUserFilesPath": "/Users/x/Claude",
+    }))
+    ok, _ = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
+    assert ok
+    data = json.loads(cfg.read_text())
+    assert data["preferences"] == {"menuBarEnabled": True}
+    assert data["coworkUserFilesPath"] == "/Users/x/Claude"
+    assert data["mcpServers"]["other"] == {"command": "x"}
+    assert data["mcpServers"]["mcpbrain"]["command"] == "/abs/bin/mcpbrain"
+
+
+def test_merge_is_idempotent(tmp_path):
+    cfg = tmp_path / "c.json"
+    entry = connector.server_entry("/abs/bin/mcpbrain", typed=False)
+    connector.merge_server_into(cfg, entry, create=True)
+    first = cfg.read_text()
+    connector.merge_server_into(cfg, entry, create=True)
+    assert cfg.read_text() == first
+
+
+def test_unparseable_file_is_left_byte_identical(tmp_path):
+    cfg = tmp_path / "c.json"
+    cfg.write_text("{ this is not json")
+    ok, detail = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
+    assert ok is False
+    assert "parse" in detail.lower()
+    assert cfg.read_text() == "{ this is not json"
+
+
+def test_missing_file_is_skipped_when_create_is_false(tmp_path):
+    cfg = tmp_path / "nope.json"
+    ok, detail = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=False)
+    assert ok is False and "not present" in detail.lower()
+    assert not cfg.exists()
+
+
+def test_non_dict_top_level_is_refused(tmp_path):
+    # A JSON array parses fine but is not a config; overwriting it would destroy
+    # whatever it is. Refuse rather than replace.
+    cfg = tmp_path / "c.json"
+    cfg.write_text("[1, 2, 3]")
+    ok, _ = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
+    assert ok is False
+    assert cfg.read_text() == "[1, 2, 3]"
+
+
+def test_write_is_atomic_no_partial_file(tmp_path, monkeypatch):
+    # If os.replace fails, the original must survive intact.
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"keep": 1}))
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(connector.os, "replace", boom)
+    ok, _ = connector.merge_server_into(
+        cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
+    assert ok is False
+    assert json.loads(cfg.read_text()) == {"keep": 1}
+    assert list(tmp_path.glob("*.tmp")) == []   # temp file cleaned up
