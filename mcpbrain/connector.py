@@ -24,38 +24,65 @@ import sys
 import tempfile
 from pathlib import Path
 
-# The MSIX package family Claude Desktop ships under. Its LocalCache\Roaming
-# subtree is what the containerised app actually sees as %APPDATA%.
-_MSIX_RELATIVE = Path("Packages") / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+# The MSIX package family Claude Desktop ships under. Its directory exists on
+# any MSIX install regardless of whether a config file was ever written there
+# (see _windows_desktop_paths). LocalCache\Roaming is what the containerised
+# app actually sees as %APPDATA%.
+_MSIX_PACKAGE = Path("Packages") / "Claude_pzs8sxrjxfjjc"
+_MSIX_RELATIVE = _MSIX_PACKAGE / "LocalCache" / "Roaming" / "Claude"
 
 _CONFIG_NAME = "claude_desktop_config.json"
 
-# Capture the native Path type at module import time, before monkeypatching
-_NATIVE_PATH_TYPE = type(Path("."))  # Will be PosixPath on Unix, WindowsPath on Windows
+
+def _windows_desktop_paths(appdata: str, localappdata: str, *,
+                            exists=os.path.exists) -> list[Path]:
+    """Pure Windows path-selection logic, injectable for testing.
+
+    Keys MSIX detection on the PACKAGE DIRECTORY
+    (%LOCALAPPDATA%\\Packages\\Claude_pzs8sxrjxfjjc\\), not on the config file's
+    existence: Claude Desktop never creates claude_desktop_config.json itself —
+    it appears only once someone manually edits it via Settings > Developer >
+    Edit Config — so on a fresh MSIX machine with no config written yet
+    (exactly what a new user has when `mcpbrain setup` runs), checking the file
+    finds nothing and silently falls back to the non-MSIX path the
+    containerised app never reads. The package directory, by contrast, exists
+    on any MSIX install regardless of whether a config was ever written.
+
+    Also writes to the plain %APPDATA%\\Claude\\ path when ITS config file
+    already exists, even on an MSIX machine: a box can carry both an MSIX and
+    a separately-installed non-MSIX Claude Desktop, the two are not reliably
+    distinguishable from here, and writing the same entry twice is idempotent
+    and cheap.
+    """
+    msix_root = Path(localappdata) / _MSIX_PACKAGE
+    msix_path = Path(localappdata) / _MSIX_RELATIVE / _CONFIG_NAME
+    plain_path = Path(appdata) / "Claude" / _CONFIG_NAME
+    if exists(str(msix_root)):
+        paths = [msix_path]
+        if exists(str(plain_path)):
+            paths.append(plain_path)
+        return paths
+    return [plain_path]
 
 
 def desktop_config_paths() -> list[Path]:
     """Every chat-surface config file this machine could be reading, best first.
 
-    Windows returns the MSIX-virtualised path ahead of ``%APPDATA%`` when it
-    exists, and returns BOTH when both exist: a machine can carry an MSIX install
-    and a non-MSIX one, the two are not reliably distinguishable from here, and
-    writing the same entry twice is idempotent and cheap. When neither exists we
-    return the ``%APPDATA%`` path so a first-time write has a destination.
+    Windows returns the MSIX-virtualised path ahead of ``%APPDATA%`` whenever
+    the MSIX package directory is present (regardless of whether a config file
+    has ever been written there — see ``_windows_desktop_paths``), and returns
+    BOTH when the plain ``%APPDATA%`` config also exists: a machine can carry
+    an MSIX install and a non-MSIX one, the two are not reliably
+    distinguishable from here, and writing the same entry twice is idempotent
+    and cheap. When no MSIX package directory is present we return the
+    ``%APPDATA%`` path so a first-time write has a destination.
     """
     if sys.platform == "darwin":
         return [Path.home() / "Library" / "Application Support" / "Claude" / _CONFIG_NAME]
     if os.name == "nt":
         appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         localappdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        # Build paths as strings to avoid Path type issues when os.name is monkeypatched
-        # Derive MSIX path from _MSIX_RELATIVE to keep a single source of truth
-        msix_relative_str = "/".join(_MSIX_RELATIVE.parts)
-        msix_str = f"{localappdata}/{msix_relative_str}/{_CONFIG_NAME}"
-        plain_str = f"{appdata}/Claude/{_CONFIG_NAME}"
-        # Check existence and convert to native path type
-        found = [_NATIVE_PATH_TYPE(p_str) for p_str in (msix_str, plain_str) if os.path.exists(p_str)]
-        return found or [_NATIVE_PATH_TYPE(plain_str)]
+        return _windows_desktop_paths(appdata, localappdata)
     return [Path.home() / ".config" / "Claude" / _CONFIG_NAME]
 
 
