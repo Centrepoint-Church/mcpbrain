@@ -69,14 +69,28 @@ def _parse_snapshot(gz: bytes):
 
 
 def _has_local_attachments(db, entity_id) -> bool:
-    """True if any origin='local' relation or any observation hangs off entity_id."""
+    """True if any origin='local' relation, any observation, or any email
+    link hangs off entity_id.
+
+    email_entities was missing here (PR #25 finding 2): an origin='org'
+    person the user's own mail also mentions has no local relation and no
+    observation, so this returned False and _remove_org_entity ran --
+    permanently destroying those email links once foreign_keys=ON made
+    email_entities.entity_id ON DELETE CASCADE actually enforced. Before
+    that, the same rows were merely orphaned and could revive on a later
+    re-import; enabling FKs surfaced this latent gap in the "import never
+    orphans the user's own knowledge" property (spec B4), it didn't create it.
+    """
     r = db.execute(
         "SELECT 1 FROM entity_relations WHERE (entity_a=? OR entity_b=?) AND origin='local' LIMIT 1",
         (entity_id, entity_id)).fetchone()
     if r:
         return True
+    if db.execute(
+        "SELECT 1 FROM entity_observations WHERE entity_id=? LIMIT 1", (entity_id,)).fetchone():
+        return True
     return db.execute(
-        "SELECT 1 FROM entity_observations WHERE entity_id=? LIMIT 1", (entity_id,)).fetchone() is not None
+        "SELECT 1 FROM email_entities WHERE entity_id=? LIMIT 1", (entity_id,)).fetchone() is not None
 
 
 def _is_org_entity(db, entity_id) -> bool:
