@@ -1,7 +1,23 @@
 # Install simplification — the install command should do the install
 
-**Status:** design. Scope approved 2026-08-25 (all three stages, with the three
-corrections in "What the first pass got wrong" folded in).
+**Status:** design — **planned and ready to execute.** Scope approved 2026-08-25
+(all three stages, with the three corrections in "What the first pass got wrong"
+folded in).
+
+**Implementation plan:** `docs/superpowers/plans/2026-08-25-install-simplification.md`
+(13 tasks, three ship points). **Delivery: one branch and one PR per stage** —
+`feat/install-simplification-stage-1`, `-stage-2`, `-stage-3` — each merged before
+the next begins. No stage bumps a version or runs `bin/release.py`; releasing is a
+separate, explicit act.
+
+**One deliberate widening of this spec, agreed at planning time:** Stage 1 also
+repairs `README.md:33-39` ("Updating"), which describes `mcpbrain update` as a
+fast-forward git pull when `update.py` reinstalls from the wheel index. Same class
+of defect as the Install section this spec already names, two sentences long, and
+splitting it across PRs would ship a half-fixed page.
+
+**All `file:line` references below were re-verified against commit `ba07840`
+(main, 0.7.118) on 2026-08-25.**
 
 **Thesis.** The install *mechanism* is sound — uv tool install, a login agent, a
 stdio MCP connector, a browser wizard. What is overcomplicated is everything
@@ -139,7 +155,7 @@ instruction drops the extra and the shell quoting it required.
 
 Rationale for the merge: the extra is one package; `mcp-server` itself dies
 without the embedder weights (`doctor.py:277-281`); and the carve-out's stated
-justification in `DISTRIBUTION.md:130` is the `.mcpb` bridge removed 2026-08-24.
+justification in `DISTRIBUTION.md:131` is the `.mcpb` bridge removed 2026-08-24.
 Meanwhile `pystray`, `pillow`, `pyobjc`, `igraph` and `leidenalg` all ship in base
 deps on the reasoning that "the daemon and its tray are one system". The split is
 inconsistent and, per Josh's own local-reinstall experience, an active footgun.
@@ -148,9 +164,9 @@ inconsistent and, per Josh's own local-reinstall experience, an active footgun.
 
 `plugin/commands/install.md` becomes the single source of install instructions.
 
-- `README.md:11-17` is **wrong today** — it says clone a repo named
+- `README.md:9-19` is **wrong today** — it says clone a repo named
   `mcp-ops-brain` and run `./install/setup.sh`. Verified: `install/` does not
-  exist in this repo, and `DISTRIBUTION.md:97` states those scripts were removed.
+  exist in this repo, and `DISTRIBUTION.md:98` states those scripts were removed.
   Replaced with a link.
 - `DISTRIBUTION.md:104` omits `[daemon]`; after the merge above the line is
   simply correct, and gains a link rather than a duplicated command.
@@ -197,7 +213,7 @@ mode to replace a JSON merge we already perform correctly elsewhere.
 `control_api.py:332-334` currently does write → quit → launch. Claude Desktop
 rewrites its config on quit, so the write is inside the window where it can be
 lost. Reorder to **quit → wait for exit → write → launch**, which is the ordering
-`setup.py:100-103`'s own warning text already identifies as the reliable one.
+`setup.py:99-102`'s own warning text already identifies as the reliable one.
 
 `desktop.relaunch_claude_desktop()` gains an exit-wait (poll for the process to
 disappear, bounded — ~10s, then proceed regardless) and is split so the caller
@@ -213,7 +229,7 @@ point is the shim itself, `~/.local/bin/mcpbrain`. Prefer the shim; keep
 
 ### 2d. Messaging
 
-`setup.py:98-110`'s five-line IMPORTANT block is deleted. It contradicts both
+`setup.py:98-102`'s five-line IMPORTANT block is deleted. It contradicts both
 `install.md` step 3 and wizard step 4, and after 2b the flow it recommends is no
 longer the better one. `setup` keeps writing the connector (see correction 1) but
 says one line about it and defers to the wizard's final step.
@@ -227,6 +243,14 @@ A connector check: for each config file this machine actually has, is the
 `mcpbrain` entry present, and does its `command` path exist on disk? Repairable
 via `--repair`, reusing `register_connector()`. This is what would have caught
 the MSIX bug before a hardware gate did.
+
+**Found while planning:** `doctor.py` sends users to **`/mcpbrain-fix in Cowork`**
+in three separate places (`:20` module docstring, `:44` a `_DISPOSITIONS` guided
+message, `:418` the scheduled-tasks report line). That command does not exist —
+`plugin/commands/` contains only `install.md`. All three are corrected to
+`/mcpbrain:install`, which after Stage 1 is also the thing that actually recreates
+the tasks. Fixing only the visible report line would leave doctor still routing
+people to a dead command from its other two.
 
 ---
 
@@ -307,7 +331,7 @@ Stage 1 is mostly prose and packaging; Stages 2–3 are code and get TDD'd.
 | `~/.claude.json` | entry lands under top-level `mcpServers`; `projects` is untouched; `CLAUDE_CONFIG_DIR` honoured |
 | Ordering | `/api/connect-desktop` calls quit, then write, then launch — asserted on call order, not just outcome |
 | Binary path | shim preferred over the resolved venv path; `resolve()` fallback when `which` is empty |
-| Doctor | connector check reports missing entry, stale command path, and repairs both |
+| Doctor | connector check reports missing entry, stale command path, and repairs both; `grep -n "mcpbrain-fix" mcpbrain/doctor.py` returns nothing |
 | `install.ps1` | Pester suite shrinks to uv / vcredist / install actions; no `persistence-*` assertions remain |
 | Release | dist copy of `install.ps1` matches source |
 | Wizard | fleet IDs render from `/api/config`; model download auto-fires once on Google connect and is idempotent |
