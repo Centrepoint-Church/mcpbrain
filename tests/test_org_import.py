@@ -136,6 +136,31 @@ def test_removal_demotes_when_local_data_attached(tmp_path):
     assert beta is not None and beta["origin"] == "local"   # demoted, not deleted
 
 
+def test_removal_demotes_when_only_an_email_link_is_attached(tmp_path):
+    """_has_local_attachments checked local relations and observations but
+    never email_entities -- so an org entity the user's OWN mail also
+    mentions was wrongly REMOVED (not demoted) when absent from a later
+    snapshot. Before foreign_keys=ON this only orphaned the email_entities
+    row (revivable on a later re-import); with ON DELETE CASCADE (this PR's
+    Task 7) it is now permanently destroyed -- exactly the "import never
+    orphans the user's own knowledge" property spec B4 promises."""
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    s = _store(tmp_path)
+    _publish(fs, [_ent("beta", "Beta", "org")], [], version=1)
+    org_import.import_snapshot(s, fs)
+    with s._connect() as db:                        # the user's own mail mentions beta
+        db.execute(
+            "INSERT INTO email_entities(message_id, entity_id) VALUES('m1','beta')")
+    _publish(fs, [_ent("acme", "Acme", "org")], [], version=2)   # beta absent
+    org_import.import_snapshot(s, fs)
+    beta = s.get_entity("beta")
+    assert beta is not None and beta["origin"] == "local"   # demoted, not deleted
+    with s._connect() as db:
+        assert db.execute(
+            "SELECT 1 FROM email_entities WHERE entity_id='beta'").fetchone()
+
+
 def test_tombstone_never_touches_colliding_local_entity(tmp_path):
     """A tombstoned id can currently belong to an unrelated origin='local' row
     (entity ids are deterministic name-slugs, so local/org collisions are the
