@@ -41,14 +41,22 @@ def _platform() -> str:
 
 
 def _mcpbrain_bin() -> str:
-    found = shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
-    # Resolve to an absolute path: agent registration (launchd/schtasks) and the
-    # MCP registration below both run later under a minimal login PATH, so a bare
-    # name like "mcpbrain" would not resolve.
-    p = Path(found)
-    if p.exists():
-        return str(p.resolve())
-    return found
+    """Absolute path to the installed mcpbrain launcher.
+
+    Agent registration (launchd/schtasks) and connector registration both run
+    later under a minimal login PATH, so a bare name would not resolve — this
+    must be absolute.
+
+    Prefer the path `which` reports (uv's shim, ~/.local/bin/mcpbrain) WITHOUT
+    resolving it. Resolving follows the symlink into uv's tool venv, which is an
+    internal layout detail rather than a supported entry point. Only fall back to
+    resolving argv[0] when there is no shim on PATH at all.
+    """
+    found = shutil.which("mcpbrain")
+    if found:
+        return str(Path(found).absolute())
+    fallback = Path(sys.argv[0] or "mcpbrain")
+    return str(fallback.resolve()) if fallback.exists() else "mcpbrain"
 
 
 def _register_connector(*, dry_run: bool = False) -> None:
