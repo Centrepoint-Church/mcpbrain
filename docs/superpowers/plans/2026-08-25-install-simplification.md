@@ -261,18 +261,36 @@ Click **Run now** on each once after creating it, and answer any permission
 prompts, so unattended runs don't stall.
 ```
 
-- [ ] **Step 5: Drop the `[daemon]` extra from the install command**
+- [ ] **Step 5: Keep the `[daemon]` extra in the install command — CORRECTED 2026-08-25**
 
-In `plugin/commands/install.md:13`, change the macOS install line to:
+**This step originally instructed dropping the `[daemon]` extra from
+`plugin/commands/install.md:13`. That was wrong and was caught in PR #28
+review before merge — do not drop it, in this task or in any later stage.**
 
-```bash
-uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force
-```
+The published wheel at the time this plan is executed may still be `0.7.118`,
+whose `fastembed` is extra-only (`Requires-Dist: fastembed>=0.3; extra ==
+"daemon"` — verified against the live index). Stage 1 deliberately bumps no
+version and ships no release, so dropping the extra from the install command
+would make a fresh `/mcpbrain:install` install a brain with no embedder the
+moment `plugin/` is next mirrored into `mcpbrain-plugin` — `mcp-server` fails
+at startup and recall returns empty. It cannot self-heal: `update.py`'s
+`_should_update` compares installed vs latest and both read the same version
+until a new wheel is actually published, so the daily auto-update is a no-op.
+And because the install command carries `--force`, re-running
+`/mcpbrain:install` as a repair (which `README.md` now presents as the entry
+point) destroys a working install rather than fixing it.
+
+**Leave `plugin/commands/install.md:13` as `"mcpbrain[daemon]"`, permanently** —
+the same reasoning Task 1 already applies to the extra's *declaration* applies
+to every caller of it: the extra resolves correctly against both the old wheel
+(pulls fastembed) and every wheel after (empty alias, fastembed already in base
+deps), so keeping it removes the release-ordering hazard entirely rather than
+relying on anyone remembering to re-add it once a new version ships.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `pytest tests/test_plugin_assets.py -v`
-Expected: PASS, including the pre-existing `test_install_is_a_command` (it asserts `uv tool install`, `--python 3.12`, `mcpbrain setup`, `brain_routine`, the four routine names, `Local`, `/schedule`, `cloud routine` — all still present).
+Expected: PASS, including the pre-existing `test_install_is_a_command` (it asserts `uv tool install`, `--python 3.12`, `mcpbrain setup`, `brain_routine`, the four routine names, `Local`, `/schedule`, `cloud routine` — all still present), and `tests/test_install_docs_single_source.py::test_canonical_install_command_keeps_the_daemon_alias`.
 
 - [ ] **Step 7: Commit**
 

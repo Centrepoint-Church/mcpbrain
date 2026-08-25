@@ -36,5 +36,11 @@ def test_readme_describes_update_as_a_wheel_reinstall():
     assert "fast-forward" not in text, "update.py reinstalls from the wheel index, not git"
 
 
-def test_canonical_install_command_has_no_daemon_extra():
-    assert "mcpbrain[daemon]" not in _CANONICAL.read_text()
+def test_canonical_install_command_keeps_the_daemon_alias():
+    # Deliberate: the extra must STAY in the install command. It resolves against
+    # both the pre-0.7.119 wheels (where fastembed is extra-only) and every wheel
+    # after (where `daemon = []` is an empty alias and fastembed is a base dep).
+    # Dropping it breaks every fresh install until a new wheel is published, with
+    # no auto-update path back — `update.py`'s `_should_update` compares installed
+    # vs latest and both are the same version until a release lands.
+    assert '"mcpbrain[daemon]"' in _CANONICAL.read_text()
