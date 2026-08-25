@@ -471,6 +471,43 @@ def test_main_swap_requires_yes_and_retains_the_old_file(tmp_path):
         "SELECT count(*) FROM email_entities").fetchone()[0] == 2  # orphan intact
 
 
+def test_swap_refuses_a_rebuild_that_has_gone_stale(tmp_path):
+    """PR #25 finding 4: `_swap` verified integrity but never freshness.
+    Rebuild -> interrupted -> daemon restarts and ingests for days ->
+    `--swap --yes`: Gate 1 (daemon stopped) passes at swap time, integrity
+    passes, and every row written to src since the rebuild silently
+    disappears while the tool reports success. A rebuild must refuse to
+    promote once src has moved since it was read."""
+    src = _cli_store(tmp_path)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+    assert (tmp_path / "brain.sqlite3.new").exists()
+
+    # Simulate "the daemon restarted and ingested more data" -- src changes
+    # AFTER the rebuild already read it.
+    db = sqlite3.connect(src)
+    db.execute("INSERT INTO chunks(doc_id,text,metadata,embedded) "
+               "VALUES('d2','new content since rebuild','{}',0)")
+    db.commit()
+    db.close()
+
+    rc = main(["--src", str(src), "--home", str(tmp_path), "--swap", "--yes"])
+
+    assert rc == 1
+    assert (tmp_path / "brain.sqlite3.new").exists()   # not swapped away
+    assert sqlite3.connect(src).execute(
+        "SELECT count(*) FROM chunks").fetchone()[0] == 2   # d1 AND d2 survive
+
+
+def test_swap_allows_a_rebuild_whose_source_has_not_moved(tmp_path):
+    """The freshness check must not false-positive on the ordinary case:
+    stop daemon, rebuild, swap, with nothing touching src in between."""
+    src = _cli_store(tmp_path)
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
+    assert main(["--src", str(src), "--home", str(tmp_path),
+                 "--swap", "--yes"]) == 0
+    assert not (tmp_path / "brain.sqlite3.new").exists()
+
+
 def test_main_refuses_a_missing_store(tmp_path):
     assert main(["--src", str(tmp_path / "nope.sqlite3"),
                  "--home", str(tmp_path)]) == 2
@@ -620,12 +657,20 @@ def test_swap_preserves_a_committed_write_left_in_the_rebuilds_wal(tmp_path):
 
 def test_swap_moves_the_old_stores_sidecars_with_it(tmp_path):
     """The forward half: nothing of the OLD store may be left beside the
-    promoted rebuild, and --rollback needs those sidecars to exist."""
+    promoted rebuild, and --rollback needs those sidecars to exist.
+
+    The crash-left WAL is written BEFORE the rebuild (not after): a
+    read-only open transparently reads through a live WAL, so the rebuild's
+    own freshness stamp already reflects this row -- and the WAL itself
+    stays un-truncated (a read-only connection cannot checkpoint), so it is
+    still there, live, for the swap to carry over. Writing it AFTER the
+    rebuild would (correctly, per PR #25 finding 4) make _swap refuse: src
+    would have moved since the rebuild read it."""
     src = tmp_path / "brain.sqlite3"
     _seed(src)
-    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
     _crash_left_wal(src, "INSERT INTO entities(id,name,type) "
                          "VALUES('o','IN-OLD-WAL','person')")
+    assert main(["--src", str(src), "--home", str(tmp_path), "--yes"]) == 0
 
     assert main(["--src", str(src), "--home", str(tmp_path), "--swap", "--yes"]) == 0
 
