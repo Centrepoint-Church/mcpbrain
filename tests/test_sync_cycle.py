@@ -23,7 +23,7 @@ class _DriveReq:
         self._r = result
         self._e = raise_exc
 
-    def execute(self):
+    def execute(self, num_retries=0):
         if self._e:
             raise self._e
         return self._r
@@ -117,7 +117,7 @@ class _Req:
     def __init__(self, result):
         self._r = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._r
 
 

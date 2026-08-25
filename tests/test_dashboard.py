@@ -429,6 +429,16 @@ class TestCalendarTodayWithEvents:
             result = dashboard.calendar_today(str(tmp_path))
         assert result[0]["title"] == "(no title)"
 
+    def test_events_list_execute_passes_num_retries(self, tmp_path):
+        svc = self._make_service([])
+
+        with mock.patch("mcpbrain.auth.build_google_services",
+                        return_value={"calendar_service": svc}):
+            dashboard.calendar_today(str(tmp_path))
+
+        svc.events.return_value.list.return_value.execute.assert_called_with(
+            num_retries=dashboard._NUM_RETRIES)
+
 
 # ---------------------------------------------------------------------------
 # clickup_today

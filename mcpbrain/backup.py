@@ -120,8 +120,13 @@ class UnsupportedArchive(ValueError):
     """
 
 
-def snapshot(store_path, out_path) -> Path:
+def snapshot(store_path, out_path, *, home=None) -> Path:
     """Produce a single-file snapshot of the derived store at store_path.
+
+    `home`, if given, is forwarded to `_verify_artifact` so it can check
+    `embed_skip_tabular` instead of falling back to its conservative,
+    can't-check-the-flag exclusion. Optional and defaults to None so every
+    existing caller that doesn't have a home handy keeps working unchanged.
 
     Uses VACUUM INTO, which builds the output from one consistent read
     transaction. That choice is load-bearing in three ways:
@@ -168,7 +173,7 @@ def snapshot(store_path, out_path) -> Path:
         db.close()
 
     try:
-        _verify_artifact(out_path)
+        _verify_artifact(out_path, home=home)
     except BaseException:
         _clear_artifact(out_path)
         raise
@@ -184,7 +189,7 @@ def _clear_artifact(out_path: Path) -> None:
 _VERIFY_SAMPLE = 20
 
 
-def _verify_artifact(out_path) -> None:
+def _verify_artifact(out_path, *, home=None) -> None:
     """Check that the rebuilt artifact's vector index still resolves.
 
     Deliberately narrow. It probes the ARTIFACT ALONE and asserts an internal
@@ -203,7 +208,43 @@ def _verify_artifact(out_path) -> None:
     probe has nothing to say, and bin/repair.py snapshots stores that may
     already be broken. A probe that raised there would block the very safety
     copy it exists to protect.
+
+    Table chunks are the only deliberately vector-less shape in the
+    codebase: with `embed_skip_tabular` on, index_pending calls
+    `store.write_embedding(rowid, None)` for them (FTS row written,
+    embedded=1 stamped, no vec_chunks insert), and
+    `bin/cleanup_tabular_vectors.py` deletes existing oversize table vectors
+    outright while deliberately leaving embedded=1 so nothing re-queues
+    them. Sampling the lowest rowids with no exclusion would eventually hit
+    one of those and raise — re-creating the "backup upload failing" outage
+    this spec set out to fix, and blocking the sweep that repairs the
+    tabular chunks in the first place.
+
+    Excluding ALL table chunks unconditionally would be safe but overbroad:
+    reading `embed_skip_tabular` from `home` (when given) narrows the
+    exclusion to only the chunks that could plausibly be in a legitimate
+    vector-less state --
+      * every table chunk, if the flag is ON (the ongoing designed state), or
+      * only chunks still below CHUNKER_VERSION, if the flag is OFF (the
+        transient post-cleanup window before the version-bump sweep
+        re-renders and re-embeds them for real).
+    A table chunk already AT CHUNKER_VERSION with the flag OFF should have
+    gotten a real vector from index_pending same as any other chunk, so a
+    missing one there is genuine corruption and is not excluded.
+
+    `home=None` (the default, used by every caller that doesn't have one
+    handy, e.g. bin/repair.py's pre-apply safety snapshot when it can't
+    cheaply derive one) falls back to the fully unconditional exclusion —
+    the conservative, always-safe choice when the flag can't be checked.
     """
+    exclude_current_version_tables = True
+    current_version = None
+    if home is not None:
+        from mcpbrain import config
+        from mcpbrain.chunking import CHUNKER_VERSION
+        exclude_current_version_tables = config.embed_skip_tabular_enabled(home)
+        current_version = CHUNKER_VERSION
+
     db = _open_db(out_path, read_only=False)
     try:
         has_chunks_table = db.execute(
@@ -212,9 +253,22 @@ def _verify_artifact(out_path) -> None:
         if not has_chunks_table:
             return                      # no chunks table: nothing to verify
 
+        if exclude_current_version_tables:
+            table_exclusion = (
+                "COALESCE(json_extract(metadata,'$.content_subtype'),'')='table'"
+            )
+            params: tuple = (_VERIFY_SAMPLE,)
+        else:
+            table_exclusion = (
+                "(COALESCE(json_extract(metadata,'$.content_subtype'),'')='table' "
+                " AND COALESCE(json_extract(metadata,'$.chunker_version'),0) < ?)"
+            )
+            params = (current_version, _VERIFY_SAMPLE)
+
         rowids = [r[0] for r in db.execute(
-            "SELECT rowid FROM chunks WHERE embedded=1 "
-            "ORDER BY rowid LIMIT ?", (_VERIFY_SAMPLE,))]
+            f"SELECT rowid FROM chunks WHERE embedded=1 "
+            f"  AND NOT ({table_exclusion}) "
+            f"ORDER BY rowid LIMIT ?", params)]
         if not rowids:
             return
 
@@ -588,6 +642,11 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
     (~15GB on the live store) and is the mechanism behind the 2026-08-03 ENOSPC
     storm; the tar now streams straight into the encryptor. A pre-flight
     free-space check refuses outright rather than filling the disk part-way.
+
+    `config_path` doubles as the source of `home` for `_verify_artifact`'s
+    `embed_skip_tabular` check (its parent directory) -- daemon.maybe_backup
+    already passes `config_path=str(Path(home)/"config.json")`, so no new
+    parameter is needed to thread it through.
     """
     import tarfile
 
@@ -596,6 +655,7 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     records_dir = Path(records_dir) if records_dir else None
     config_path = Path(config_path) if config_path else None
+    home = str(config_path.parent) if config_path else None
     bundle = bool((records_dir and records_dir.exists())
                   or (config_path and config_path.exists()))
 
@@ -605,11 +665,11 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
         _require_free_space(work, out_path, store_path)
         if not bundle:
             plain = work / "store.sqlite3"
-            snapshot(store_path, plain)
+            snapshot(store_path, plain, home=home)
             encrypt_file(plain, out_path, key)
         else:
             store_snap = work / "brain.sqlite3"
-            snapshot(store_path, store_snap)
+            snapshot(store_path, store_snap, home=home)
             # "w|gz" is tarfile's STREAMING mode — it never seeks, so it can
             # write into a forward-only encrypting sink. The plaintext bundle
             # is therefore never materialised.
@@ -743,6 +803,16 @@ def _default_media(path):
 # `next_chunk` by hand so each attempt re-seeks.
 _MEDIA_NUM_RETRIES = 0
 
+# Every OTHER Drive call in this module is a plain metadata list/create/delete
+# or an in-memory-body upload — none has _MEDIA_NUM_RETRIES' "can't re-seek a
+# stream" problem, so all of them retry. googleapiclient's own num_retries
+# param already does randomized exponential backoff on exactly this error
+# class (SSL errors, socket timeouts, ConnectionError, OSError generally —
+# confirmed against googleapiclient.http._retry_request), so no new retry
+# logic is written here, just the parameter every other call in this codebase
+# that already retries (sync/gmail.py, sync/attachments.py) also passes.
+_NUM_RETRIES = 5
+
 
 def upload_snapshot(
     service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None
@@ -784,7 +854,7 @@ def upload_snapshot(
             supportsAllDrives=True,
             fields="files(id, name)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     files = resp.get("files", [])
 
@@ -804,7 +874,7 @@ def upload_snapshot(
                 supportsAllDrives=True,
                 fields="id",
             )
-            .execute()["id"]
+            .execute(num_retries=_NUM_RETRIES)["id"]
         )
 
     # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
@@ -921,7 +991,7 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
             supportsAllDrives=True,
             fields="files(id, name)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     folders = folder_resp.get("files", [])
     if not folders:
@@ -940,7 +1010,7 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
             supportsAllDrives=True,
             fields="files(id, name, createdTime, modifiedTime)",
         )
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
     )
     files = files_resp.get("files", [])
     if not files:
@@ -977,7 +1047,7 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         .list(q=folder_q, corpora="drive", driveId=shared_drive_id,
               includeItemsFromAllDrives=True, supportsAllDrives=True,
               fields="files(id)")
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
         .get("files", [])
     )
     if not folders:
@@ -989,7 +1059,7 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         .list(q=f"'{folder_id}' in parents and trashed = false", corpora="drive",
               driveId=shared_drive_id, includeItemsFromAllDrives=True,
               supportsAllDrives=True, fields="files(id, name, createdTime, modifiedTime)")
-        .execute()
+        .execute(num_retries=_NUM_RETRIES)
         .get("files", [])
     )
     files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
@@ -998,7 +1068,11 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
     deleted = 0
     for f in files[keep:]:
         try:
-            service.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+            (
+                service.files()
+                .delete(fileId=f["id"], supportsAllDrives=True)
+                .execute(num_retries=_NUM_RETRIES)
+            )
             deleted += 1
         except Exception as exc:  # noqa: BLE001 — pruning must never break a backup
             log.warning("prune_snapshots: could not delete %s (%s): %s",
@@ -1028,7 +1102,7 @@ def _list_in_drives(service, q: str, *, fields="files(id, name, createdTime, mod
     return service.files().list(
         q=q, spaces="drive", corpora="allDrives",
         includeItemsFromAllDrives=True, supportsAllDrives=True, fields=fields,
-    ).execute().get("files", [])
+    ).execute(num_retries=_NUM_RETRIES).get("files", [])
 
 
 def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
@@ -1042,7 +1116,7 @@ def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
         return found[0]["id"]
     return service.files().create(
         body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_folder_id]},
-        supportsAllDrives=True, fields="id").execute()["id"]
+        supportsAllDrives=True, fields="id").execute(num_retries=_NUM_RETRIES)["id"]
 
 
 def upload_to_folder(service, file_path, parent_folder_id: str, *,

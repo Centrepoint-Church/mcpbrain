@@ -41,6 +41,9 @@ class FakeStore:
     def thread_context(self, thread_id):
         return self._contexts.get(thread_id, "")
 
+    def thread_summary_digest(self, thread_id, max_chars=1500):
+        return ""
+
     def unified_actions(self, thread_id=None, status="open"):
         return self._actions.get(thread_id, [])
 
@@ -572,6 +575,50 @@ def test_prepare_messages_ordered_by_date(monkeypatch):
 
     msgs = prepare._thread_block(store, batch)["messages"]
     assert [m["message_id"] for m in msgs] == ["m1", "m2"]
+
+
+def test_thread_block_falls_back_to_digest_when_thread_context_empty(monkeypatch):
+    calls = {"digest": 0}
+
+    class _Store(FakeStore):
+        def thread_context(self, thread_id):
+            return ""  # not yet synthesized
+        def thread_summary_digest(self, thread_id, max_chars=1500):
+            calls["digest"] += 1
+            return "- 2026-06-01: Joel asked about Hall B."
+
+    store = _Store()
+    batch = FakeBatch("t1", ["d1"], [
+        _msg("m1", "joel@example.org", "2026-06-01", "Hall B", "text"),
+    ])
+    _stub_reassemble(monkeypatch)
+
+    block = prepare._thread_block(store, batch)
+
+    assert calls["digest"] == 1
+    assert block["prior_thread_context"] == "- 2026-06-01: Joel asked about Hall B."
+
+
+def test_thread_block_prefers_real_synthesis_over_digest(monkeypatch):
+    calls = {"digest": 0}
+
+    class _Store(FakeStore):
+        def thread_context(self, thread_id):
+            return "A real synthesized narrative."
+        def thread_summary_digest(self, thread_id, max_chars=1500):
+            calls["digest"] += 1
+            return "should never be used"
+
+    store = _Store()
+    batch = FakeBatch("t1", ["d1"], [
+        _msg("m1", "joel@example.org", "2026-06-01", "Hall B", "text"),
+    ])
+    _stub_reassemble(monkeypatch)
+
+    block = prepare._thread_block(store, batch)
+
+    assert calls["digest"] == 0
+    assert block["prior_thread_context"] == "A real synthesized narrative."
 
 
 # --- 2.4 context + cap + long-thread guard ---------------------------------

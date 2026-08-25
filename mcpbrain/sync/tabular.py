@@ -10,8 +10,10 @@ This module emits, per sheet:
 
   1. one SUMMARY chunk — file, sheet, dimensions, column names and per-column
      numeric totals, so a broad question has something to match; and
-  2. N ROW-GROUP chunks, each repeating the sheet name, its row range and the
-     header row, so every chunk is independently interpretable.
+  2. N ROW-GROUP chunks, each repeating the sheet name and its row range, with
+     every row rendered as its own schema-enriched "Header: Value; ..."
+     sentence (empty cells never rendered) so every chunk — and every row
+     within it — is independently interpretable without a shared header row.
 
 XLSX, CSV downloads and Google Sheets exports all converge on `Table` before
 they reach the renderer, so there is one chunking implementation rather than
@@ -77,20 +79,68 @@ def is_tabular(mime: str) -> bool:
     return mime in TABLE_MIMES
 
 
-def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
-    """Drop entirely-empty rows and trim trailing all-empty columns.
+# A column counts as real if at least this many DISTINCT rows have non-empty
+# content there. Flat, not proportional to table size: a single anomalous
+# row (a title banner, a stray far-right formatted-but-blank cell -- both
+# routine in real Excel files, since Excel's "used range" is inflated by
+# formatting alone) can never clear 2 on its own, which is all defeating the
+# original bug requires. A proportional floor (e.g. len(kept)//100) sounds
+# more "statistically sound" but is actively wrong here: on a real 700+ row
+# ledger it climbs well past 2, and a genuinely rare-but-real column (used by
+# a few dozen rows, not the single outlier this exists to catch) gets treated
+# as phantom too. 2 is the minimum that still defeats the bug, at any table
+# size.
+_MIN_COLUMN_SUPPORT = 2
 
-    Only TRAILING columns: an interior blank column can be meaningful (a spacer
-    between a budget's actuals and its variance), and dropping it would misalign
-    the header against its values.
+
+def normalise_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Drop entirely-empty rows and trim trailing columns with no real support.
+
+    Only TRAILING columns: an interior blank column can be meaningful (a
+    spacer between a budget's actuals and its variance), and dropping it
+    would misalign the header against its values.
+
+    A column counts as real only if at least _MIN_COLUMN_SUPPORT distinct
+    rows have non-empty content there -- NOT simply "the max index any row
+    reaches". A single anomalous row can never clear that floor on its own,
+    so it can no longer single-handedly dictate the whole table's width the
+    way a bare max did. A genuinely sparse-but-real column (used by a
+    legitimate minority of rows, any table size) still clears the floor and
+    survives -- a median would have dropped it if used by fewer than half
+    the rows, which is why this isn't a median.
+
+    A row that HAD real content, but only in a column that didn't clear the
+    floor, becomes empty after trimming and is dropped along with the
+    genuinely-empty rows below -- the same fate as the reproducing case (a
+    title-banner row whose entire content was one phantom far-right cell).
+    This is the accepted cost of frequency-based phantom-detection: a
+    single-row column is structurally indistinguishable from a phantom one
+    by frequency alone, which is exactly why the floor exists.
     """
     kept = [r for r in rows if any((c or "").strip() for c in r)]
-    width = 0
+    if not kept:
+        return []
+    max_len = max(len(r) for r in kept)
+    support = [0] * max_len
     for r in kept:
         for i, c in enumerate(r):
             if (c or "").strip():
-                width = max(width, i + 1)
-    return [r[:width] for r in kept]
+                support[i] += 1
+    floor = _MIN_COLUMN_SUPPORT
+    width = 0
+    for i in range(max_len - 1, -1, -1):
+        if support[i] >= floor:
+            width = i + 1
+            break
+    if width == 0:
+        # No column clears the floor (e.g. a genuinely tiny 1-2 row table) --
+        # fall back to the simple max so a small legitimate table isn't
+        # wrongly trimmed to zero width.
+        for r in kept:
+            for i, c in enumerate(r):
+                if (c or "").strip():
+                    width = max(width, i + 1)
+    return [r[:width] for r in kept if any((c or "").strip() for c in r[:width])]
 
 
 def delimiter_for_mime(mime: str) -> str:
@@ -134,13 +184,18 @@ def tables_from_csv(text: str, *, sheet: str = "Sheet1",
 
 
 def _cell(value: str, max_cell_chars: int = _MAX_CELL_CHARS) -> str:
-    out = (value or "").replace("|", "\\|").replace("\n", " ").strip()
+    """Normalise one cell's value for rendering into a row sentence.
+
+    No pipe-escaping: that was a markdown-grid artifact (cells used to sit
+    inside `| ... |` columns, where a literal `|` would misalign the grid).
+    Row sentences aren't `|`-delimited, so escaping here only injected a
+    spurious backslash into any cell that legitimately contained a pipe
+    character -- noise reaching the embedder for no benefit. `_cell`'s only
+    caller is `_row_sentence`; `_summary_text` builds its lines directly and
+    never calls this.
+    """
+    out = (value or "").replace("\n", " ").strip()
     return out[:max_cell_chars] + "…" if len(out) > max_cell_chars else out
-
-
-def _md_row(row: list[str], width: int, max_cell_chars: int = _MAX_CELL_CHARS) -> str:
-    cells = [_cell(c, max_cell_chars) for c in row] + [""] * (width - len(row))
-    return "| " + " | ".join(cells[:width]) + " |"
 
 
 # Header words that name an IDENTIFIER, and words that name a QUANTITY. Checked
@@ -231,31 +286,65 @@ def _rendered_size(title: str, header_line: str, sep_line: str,
     on the brief's own max_chars=120 example a "+80" guess was itself larger
     than the whole budget. Measuring the real joined text keeps the packing
     decision honest.
+
+    `header_line`/`sep_line` are "" in the schema-enriched design (there is no
+    shared header/separator line any more) — filtered out here so the size
+    measured here matches exactly what `_emit` joins (it filters the same way),
+    rather than over-counting two blank-line separators that never actually
+    appear in the emitted text.
     """
-    return len("\n".join([title, header_line, sep_line, *rows]))
+    return len("\n".join(line for line in [title, header_line, sep_line, *rows] if line))
 
 
-def _fit_row(t: Table, header_line: str, sep_line: str, row: list[str],
-            width: int, row_start: int, row_end: int, max_chars: int) -> str:
-    """Render one row, shrinking its cells if the row ALONE — together with
-    this group's title/header/separator — would overflow max_chars.
+_MAX_FIELDS_PER_ROW = 40  # generous for a real spreadsheet, tight enough to
+                          # bound a phantom-column sheet even without
+                          # normalise_rows' own fix (defense in depth).
 
-    Without this, a wide table (many columns, each cell elided only down to
-    `_MAX_CELL_CHARS`) can render a single row line longer than the entire
-    chunk budget: 30 long columns at the default 300-char-per-cell cap alone
-    produced a 9,500+ char chunk against a 2,000-char budget, with nothing in
-    the packing loop able to split a single row across chunks. Cell width is
+
+def _row_sentence(header: list[str], row: list[str],
+                  max_cell_chars: int = _MAX_CELL_CHARS) -> str:
+    """Render one row as 'Header: Value; Header: Value; ...' for non-empty
+    cells only -- an empty cell is simply never rendered, which is what
+    makes this immune to phantom trailing columns by construction. No shared
+    width/header_line/sep_line across the sheet: one anomalous row can never
+    inflate another row's output.
+
+    `max_cell_chars` defaults to the module cap but can be shrunk by the
+    caller (see render_chunks) for THIS row alone -- unlike the deleted
+    _fit_row, there is no header_line/sep_line dependency here, so shrinking
+    one row's cells cannot affect any other row's rendering.
+    """
+    pairs = []
+    for i, value in enumerate(row):
+        v = (value or "").strip()
+        if not v:
+            continue
+        h = header[i] if i < len(header) and header[i].strip() else f"col{i}"
+        pairs.append(f"{h}: {_cell(v, max_cell_chars)}")
+    if len(pairs) > _MAX_FIELDS_PER_ROW:
+        extra = len(pairs) - _MAX_FIELDS_PER_ROW
+        pairs = pairs[:_MAX_FIELDS_PER_ROW] + [f"(+{extra} more fields)"]
+    return "; ".join(pairs)
+
+
+def _fit_row_sentence(header: list[str], row: list[str], max_chars: int) -> str:
+    """_row_sentence, shrinking this row's own cell cap if the sentence ALONE
+    would overflow max_chars.
+
+    Belt-and-suspenders alongside the field-count valve in _row_sentence: a
+    table with few enough columns to dodge that valve but long cell content
+    (e.g. 30 columns of pasted paragraphs) could otherwise render a single
+    row line longer than the whole chunk budget, with nothing in the packing
+    loop able to split one row across chunks -- the exact failure mode
+    _fit_row used to guard, minus its header_line/sep_line coupling. Cap is
     halved until the row fits or hits a 5-char floor (never truncated to
-    nothing — a same-if-illegible cell still beats a missing column).
+    nothing -- a barely-legible cell still beats a missing field).
     """
-    title = _title(t, row_start, row_end)
-    fixed = len(title) + 1 + len(header_line) + 1 + len(sep_line) + 1
-    budget = max_chars - fixed
     cap = _MAX_CELL_CHARS
-    line = _md_row(row, width, cap)
-    while len(line) > budget and cap > 5:
+    line = _row_sentence(header, row, cap)
+    while len(line) > max_chars and cap > 5:
         cap = max(5, cap // 2)
-        line = _md_row(row, width, cap)
+        line = _row_sentence(header, row, cap)
     return line
 
 
@@ -263,8 +352,12 @@ def render_chunks(tables: list[Table], *, file_name: str,
                   max_chars: int) -> list[tuple[str, dict]]:
     """Render Tables to (chunk_text, metadata_extras) pairs.
 
-    Every row-group chunk repeats the sheet name, its row range and the header,
-    so it is independently interpretable. Content-free chunks are never emitted.
+    Each row renders as a schema-enriched sentence (see _row_sentence) --
+    matches the RAG-chunking research finding that row-wise "schema-enriched"
+    sentences outperform raw markdown-grid table embeddings for retrieval,
+    and is immune to the phantom-column bug by construction (an empty cell
+    is never rendered, so there's no shared width to compute or get wrong).
+    Content-free chunks are never emitted.
     """
     out: list[tuple[str, dict]] = []
     for t in tables:
@@ -272,33 +365,38 @@ def render_chunks(tables: list[Table], *, file_name: str,
                 "rows_captured": len(t.rows), "truncated": t.truncated}
         out.append((_summary_text(file_name, t), {**base, "table_role": "summary"}))
 
-        width = max([len(t.header)] + [len(r) for r in t.rows]) if t.rows else len(t.header)
-        header_line = _md_row(t.header, width)
-        sep_line = "| " + " | ".join(["---"] * width) + " |"
         group: list[str] = []
         start = 1
         for n, row in enumerate(t.rows, start=1):
-            line = _fit_row(t, header_line, sep_line, row, width, start, n, max_chars)
+            row_budget = max_chars - len(_title(t, start, n)) - 1
+            line = _fit_row_sentence(t.header, row, row_budget)
             candidate = group + [line]
-            if group and _rendered_size(_title(t, start, n), header_line, sep_line,
+            if group and _rendered_size(_title(t, start, n), "", "",
                                         candidate) > max_chars:
-                out.append(_emit(t, header_line, sep_line, group, base,
-                                 start, start + len(group) - 1))
+                out.append(_emit(t, "", "", group, base, start, start + len(group) - 1))
                 start, group = n, []
                 # The group just reset, so re-fit against the new (smaller)
-                # row_start — the row_end digit width rarely changes, but this
-                # keeps the fit exact rather than reusing a stale estimate.
-                line = _fit_row(t, header_line, sep_line, row, width, start, n, max_chars)
+                # row_start -- the row_end digit width rarely changes, but
+                # this keeps the fit exact rather than reusing a stale
+                # estimate.
+                row_budget = max_chars - len(_title(t, start, n)) - 1
+                line = _fit_row_sentence(t.header, row, row_budget)
             group.append(line)
         if group:
-            out.append(_emit(t, header_line, sep_line, group, base,
-                             start, start + len(group) - 1))
+            out.append(_emit(t, "", "", group, base, start, start + len(group) - 1))
     return [(text, meta) for text, meta in out if has_content(text)]
 
 
 def _emit(t: Table, header_line: str, sep_line: str, group: list[str],
           base: dict, row_start: int, row_end: int) -> tuple[str, dict]:
+    """Join title (+ header/sep lines, when non-empty) and the row group.
+
+    `header_line`/`sep_line` are always "" in the schema-enriched design
+    (render_chunks passes them that way) -- filtering falsy lines out of the
+    join, rather than joining "" placeholders verbatim, avoids leaving two
+    stray blank lines between the title and the first row.
+    """
     title = _title(t, row_start, row_end)
-    text = "\n".join([title, header_line, sep_line, *group])
+    text = "\n".join(line for line in [title, header_line, sep_line, *group] if line)
     return text, {**base, "table_role": "rows",
                   "row_start": row_start, "row_end": row_end}

@@ -44,6 +44,65 @@ def test_patch_unknown_doc_returns_false(tmp_path):
     assert _store(tmp_path).patch_chunk_metadata("nope", expired=True) is False
 
 
+def test_patch_resets_fts_version_when_the_contextual_prefix_changes(tmp_path):
+    """A metadata-only re-sync (e.g. Drive stamping folder_path onto a
+    content-unchanged file) changes what embed.contextual_prefix() renders for
+    this chunk, but patch_chunk_metadata never touched fts_context_version --
+    so reindex_fts_batch's `fts_context_version < FTS_CONTEXT_VERSION` selector
+    could never re-catch an already-migrated row, and its FTS text silently
+    drifted from its own metadata forever."""
+    s = _store(tmp_path)
+    meta = {"source_type": "gdrive", "file_id": "f1", "file_name": "Budget.pdf"}
+    s.upsert_chunk("gdrive-f1-0", "some budget prose", "h1", meta)
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1 WHERE doc_id='gdrive-f1-0'")
+    s.reindex_fts_batch()  # stamps fts_context_version = FTS_CONTEXT_VERSION
+    with s._connect() as db:
+        before = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert before == s.FTS_CONTEXT_VERSION
+
+    # folder_path feeds contextual_prefix() for gdrive sources -- this patch
+    # changes what the FTS mirror SHOULD contain.
+    assert s.patch_chunk_metadata("gdrive-f1-0", folder_path="Church/Budgets") is True
+
+    with s._connect() as db:
+        after = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert after == 0, "prefix-affecting metadata patch must re-arm reindex_fts_batch"
+
+    s.reindex_fts_batch()
+    with s._connect() as db:
+        fts_text = db.execute(
+            "SELECT text FROM fts_chunks WHERE rowid="
+            "(SELECT rowid FROM chunks WHERE doc_id='gdrive-f1-0')"
+        ).fetchone()["text"]
+    assert "Church/Budgets" in fts_text
+
+
+def test_patch_leaves_fts_version_alone_when_the_prefix_is_unaffected(tmp_path):
+    """chunker_version/reextract_* patches (bin/repair.py's usage) don't touch
+    any field embed.contextual_prefix() reads -- these must NOT re-arm
+    reindex_fts_batch, or every repaired chunk gets needlessly re-indexed."""
+    s = _store(tmp_path)
+    meta = {"source_type": "gdrive", "file_id": "f1", "file_name": "Budget.pdf"}
+    s.upsert_chunk("gdrive-f1-0", "some budget prose", "h1", meta)
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET embedded=1 WHERE doc_id='gdrive-f1-0'")
+    s.reindex_fts_batch()
+
+    assert s.patch_chunk_metadata("gdrive-f1-0", chunker_version=3,
+                                  reextract_missing=True) is True
+
+    with s._connect() as db:
+        after = db.execute(
+            "SELECT fts_context_version FROM chunks WHERE doc_id='gdrive-f1-0'"
+        ).fetchone()["fts_context_version"]
+    assert after == s.FTS_CONTEXT_VERSION
+
+
 def test_note_chunks_filters_type_and_expiry(tmp_path):
     s = _store(tmp_path)
     _add_note(s, "note-mem", otype="memory")
@@ -138,7 +197,7 @@ def test_the_chunker_version_is_ahead_of_the_pre_spec_2_chunker():
     assert CHUNKER_VERSION >= 2
 
 
-def test_stale_chunker_file_ids_selects_only_out_of_date_drive_files(tmp_path):
+def test_stale_chunker_ids_selects_only_out_of_date_drive_files(tmp_path):
     """The level-triggered selector. No queue, no cursor: re-running walks
     forward because each repaired file stops matching. Same shape as
     reflow_outdated_chunks, which is the established pattern here."""
@@ -155,13 +214,16 @@ def test_stale_chunker_file_ids_selects_only_out_of_date_drive_files(tmp_path):
                        {"source_type": "gdrive", "file_id": "new",
                         "chunker_version": 2})
 
-    assert sorted(store.stale_chunker_file_ids(2, limit=10)) == ["mid", "old"]
+    got = [d["id"] for d in
+          store.stale_chunker_ids(table_version=2, other_version=2, limit=10)]
+
+    assert sorted(got) == ["mid", "old"]
 
 
-def test_stale_chunker_file_ids_respects_its_limit_and_is_gmail_free(tmp_path):
-    """Drive-only by design (decision 4): Gmail is 2% of the store and its
-    chunking defects are 75 rows the purge removes directly, so re-fetching a
-    mailbox is not a trade worth making."""
+def test_stale_chunker_ids_respects_its_limit_across_source_types(tmp_path):
+    """Gmail is no longer excluded (that assumption didn't hold -- see
+    stale_chunker_ids' docstring) -- this now tests that `limit` is respected
+    as a TOTAL across source types, not that Gmail is filtered out."""
     from mcpbrain.store import Store
 
     store = Store(tmp_path / "b.sqlite3", dim=4)
@@ -170,9 +232,11 @@ def test_stale_chunker_file_ids_respects_its_limit_and_is_gmail_free(tmp_path):
         store.upsert_chunk(f"gdrive-f{i}-0", f"text {i}", f"h{i}",
                            {"source_type": "gdrive", "file_id": f"f{i}"})
     store.upsert_chunk("gmail-m1-body-0", "mail text", "hm",
-                       {"source_type": "gmail", "message_id": "m1"})
+                       {"source_type": "gmail", "thread_id": "t1"})
 
-    got = store.stale_chunker_file_ids(2, limit=3)
+    got = store.stale_chunker_ids(table_version=2, other_version=2, limit=3)
 
     assert len(got) == 3
-    assert all(g.startswith("f") for g in got), f"non-Drive id leaked in: {got}"
+    # The limit is hit within the gdrive batch (5 candidates, limit 3) before
+    # gmail's single candidate is even considered -- sequential by source type.
+    assert all(d["source_type"] == "gdrive" for d in got)
