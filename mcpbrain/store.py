@@ -411,8 +411,19 @@ class Store:
         finally:
             # PRAGMA optimize is the documented way to keep planner statistics
             # current; analysis_limit (set in _open_db) bounds its cost so it
-            # cannot stall a close. It WRITES, so never on a read-only handle.
-            if not self.read_only:
+            # cannot stall a close. It WRITES, so never on a read-only handle
+            # -- AND never on a write=False connection either, even on a
+            # writable Store: it would acquire the write lock after the
+            # caller's read-only transaction is already done, contending
+            # with a drain's writes at exactly the recall path's latency
+            # budget (RECALL_PATH_BUSY_TIMEOUT_MS/RECALL_PATH_BEGIN_RETRIES
+            # exist to bound that contention, and graph_write.upsert_relation
+            # opens one connection per relation, so a drain would pay this
+            # tens of thousands of times per cycle) -- reintroducing the
+            # 0.7.105 recall-starvation class this pragma was added to help
+            # fix in the first place. Only an actual write transaction
+            # should pay for a stats refresh.
+            if write and not self.read_only:
                 try:
                     db.execute("PRAGMA optimize")
                 except sqlite3.Error:
