@@ -46,19 +46,36 @@ schtasks /query /tn mcpbrain
 ```
 Check logs at `%APPDATA%\mcpbrain\com.mcpbrain.log` if something seems wrong.
 
-**4. Create four scheduled tasks.** Once I confirm the wizard is done, create these four
-recurring **Local** tasks — do **not** use `/schedule` (that makes a cloud routine that
-can't reach mcpbrain). Pick any trusted folder. Create **each** with **Model: Sonnet 4.6**
-and **Permission mode: Auto** so it runs unattended:
+**4. Create the four recurring tasks.** Once I confirm the wizard is done, **you
+create these four Local scheduled tasks yourself** — do not ask me to build them
+in the UI. They must be **Local** scheduled tasks. Never use `/schedule`: that
+creates a cloud routine, which runs from a fresh clone on Anthropic's servers,
+cannot reach my local mcpbrain daemon, and so silently does nothing forever.
 
-| Task name | Schedule | Model | Permission mode | Instructions (the task's prompt) |
-|---|---|---|---|---|
-| `Brain — enrich (hourly)` | Hourly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `enrich` and follow the instructions it returns exactly. |
-| `Brain — meeting packs (hourly)` | Hourly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `meeting-packs` and follow the instructions it returns exactly. |
-| `Brain — gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `gardener` and follow the instructions it returns exactly. |
-| `Brain — reference gardener (weekly)` | Weekly | Sonnet 4.6 | Auto | Call the `brain_routine` tool with name `reference-gardener` and follow the instructions it returns exactly. |
+**First, check what already exists.** List my current scheduled tasks. If any of
+these four are already present, update them in place rather than creating a
+second copy — a duplicate hourly enrich coordinator doubles Haiku spend
+indefinitely and nothing surfaces it.
 
-After creating each task, click **Run now** once to confirm it works.
+Create each with **Model: Sonnet 4.6**, **Permission mode: Auto** (so it runs
+unattended), and any trusted folder as the working folder:
+
+| Name | Schedule | Instructions (the task's prompt) |
+|---|---|---|
+| `brain-enrich-hourly` | Hourly | Call the `brain_routine` tool with name `enrich` and follow the instructions it returns exactly. |
+| `brain-meeting-packs-hourly` | Hourly | Call the `brain_routine` tool with name `meeting-packs` and follow the instructions it returns exactly. |
+| `brain-gardener-weekly` | Weekly | Call the `brain_routine` tool with name `gardener` and follow the instructions it returns exactly. |
+| `brain-reference-gardener-weekly` | Weekly | Call the `brain_routine` tool with name `reference-gardener` and follow the instructions it returns exactly. |
+
+Then **verify, don't assume**: list my scheduled tasks back and confirm all four
+exist, are **Local**, and are Active. Report what you find.
+
+Finally, click **Run now** on each once while I'm still here, so any permission
+prompts get answered now rather than stalling an unattended 3am run.
+
+If you cannot create scheduled tasks (Routines disabled by org policy, or an
+older Desktop build), say so plainly and point me at the manual table in the
+plugin's `INSTALL.md` — do not silently skip this step.
 
 **5. Run on startup.** Remind me to turn on **Claude → Settings → Desktop App →
 General → "Run on startup"** so Claude launches at login and the Local scheduled

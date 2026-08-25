@@ -8,27 +8,39 @@ Everything stays on your laptop. Nothing is sent anywhere unless you turn on the
 
 ## Install
 
-Three commands:
+mcpbrain installs as a Claude Code plugin. In a Claude Code session, run:
 
-```bash
-git clone <repo-url>
-cd mcp-ops-brain
-./install/setup.sh
+```
+/mcpbrain:install
 ```
 
-On macOS, double-click `install/setup.command` instead of the last line. On Windows, run `install/setup.ps1` in PowerShell.
+and follow it — it installs the daemon, connects it to Claude, opens the sign-in
+wizard, and creates the recurring background tasks for you.
 
-Each installer does the same things:
+On a machine that does not have the plugin yet:
+
+```bash
+claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin
+claude plugin install mcpbrain@centrepoint-church
+```
+
+then run `/mcpbrain:install`. The full walkthrough — the Windows path, what to
+expect at each step, and the manual fallback for the recurring tasks — is in
+[`plugin/INSTALL.md`](plugin/INSTALL.md); the actual install command is written
+once, in [`plugin/commands/install.md`](plugin/commands/install.md), and every
+other doc points at it rather than repeating it.
+
+### What the install does
 
 1. Installs `uv` if it isn't already on the machine.
 2. Installs the `mcpbrain` CLI as a `uv` tool.
-3. Warms the embedding model (the first sync downloads a small ONNX model into your cache).
-4. Registers a login agent so the daemon starts when you log in (launchd on macOS, a systemd user service on Linux, a scheduled task on Windows).
-5. Registers mcpbrain with Claude Desktop and opens a browser wizard to connect your Google account.
+3. Registers a login agent so the daemon starts when you log in (launchd on macOS, a systemd user service on Linux, a scheduled task on Windows).
+4. Registers mcpbrain with Claude Desktop and opens a browser wizard to connect your Google account.
+5. Creates the four recurring `brain_*` background tasks as Local scheduled tasks.
 
 In the wizard you sign in with your own Google account and grant read-only access to Gmail, Drive, and (optionally) Calendar. You don't create a Google Cloud project; mcpbrain ships a shared OAuth client (see the maintainer notes below). Because the app isn't through Google's verification yet, the browser shows "Google hasn't verified this app". Click Advanced, then continue. The token is written to your local data directory and the daemon picks it up.
 
-After the wizard, fully quit and reopen Claude Desktop. The `brain_search`, `brain_read`, `brain_context`, and `brain_graph` tools are then available in any chat.
+The wizard's last step, **"Connect & restart Claude Desktop,"** quits and reopens Claude Desktop for you in one click, after which the `brain_search`, `brain_read`, `brain_context`, and `brain_graph` tools are available in any chat.
 
 ## Updating
 
@@ -36,7 +48,11 @@ After the wizard, fully quit and reopen Claude Desktop. The `brain_search`, `bra
 mcpbrain update
 ```
 
-This pulls the latest commits (fast-forward only, so it aborts cleanly if you have local changes), reinstalls the CLI, and restarts the login agent so the new version takes effect. If the pull can't fast-forward it stops without touching your install and tells you how to resolve it.
+This checks the wheel index for a newer published version and, if there is one,
+reinstalls mcpbrain via uv and restarts the login agent so the new code takes
+effect. Installed daemons also do this on their own about once a day, so running
+it by hand is only for pulling a release early. It never touches your store, your
+config, or your Google token.
 
 ## What runs at login
 

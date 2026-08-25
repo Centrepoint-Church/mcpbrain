@@ -261,18 +261,36 @@ Click **Run now** on each once after creating it, and answer any permission
 prompts, so unattended runs don't stall.
 ```
 
-- [ ] **Step 5: Drop the `[daemon]` extra from the install command**
+- [ ] **Step 5: Keep the `[daemon]` extra in the install command — CORRECTED 2026-08-25**
 
-In `plugin/commands/install.md:13`, change the macOS install line to:
+**This step originally instructed dropping the `[daemon]` extra from
+`plugin/commands/install.md:13`. That was wrong and was caught in PR #28
+review before merge — do not drop it, in this task or in any later stage.**
 
-```bash
-uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" mcpbrain --force
-```
+The published wheel at the time this plan is executed may still be `0.7.118`,
+whose `fastembed` is extra-only (`Requires-Dist: fastembed>=0.3; extra ==
+"daemon"` — verified against the live index). Stage 1 deliberately bumps no
+version and ships no release, so dropping the extra from the install command
+would make a fresh `/mcpbrain:install` install a brain with no embedder the
+moment `plugin/` is next mirrored into `mcpbrain-plugin` — `mcp-server` fails
+at startup and recall returns empty. It cannot self-heal: `update.py`'s
+`_should_update` compares installed vs latest and both read the same version
+until a new wheel is actually published, so the daily auto-update is a no-op.
+And because the install command carries `--force`, re-running
+`/mcpbrain:install` as a repair (which `README.md` now presents as the entry
+point) destroys a working install rather than fixing it.
+
+**Leave `plugin/commands/install.md:13` as `"mcpbrain[daemon]"`, permanently** —
+the same reasoning Task 1 already applies to the extra's *declaration* applies
+to every caller of it: the extra resolves correctly against both the old wheel
+(pulls fastembed) and every wheel after (empty alias, fastembed already in base
+deps), so keeping it removes the release-ordering hazard entirely rather than
+relying on anyone remembering to re-add it once a new version ships.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `pytest tests/test_plugin_assets.py -v`
-Expected: PASS, including the pre-existing `test_install_is_a_command` (it asserts `uv tool install`, `--python 3.12`, `mcpbrain setup`, `brain_routine`, the four routine names, `Local`, `/schedule`, `cloud routine` — all still present).
+Expected: PASS, including the pre-existing `test_install_is_a_command` (it asserts `uv tool install`, `--python 3.12`, `mcpbrain setup`, `brain_routine`, the four routine names, `Local`, `/schedule`, `cloud routine` — all still present), and `tests/test_install_docs_single_source.py::test_canonical_install_command_keeps_the_daemon_alias`.
 
 - [ ] **Step 7: Commit**
 
@@ -401,13 +419,25 @@ it by hand is only for pulling a release early. It never touches your store, you
 config, or your Google token.
 ```
 
-- [ ] **Step 5: Fix DISTRIBUTION.md**
+- [ ] **Step 5: Fix DISTRIBUTION.md — CORRECTED 2026-08-25**
+
+**This step originally specified the fresh-install command WITHOUT the
+`[daemon]` extra. That was wrong for exactly the same reason Task 2 Step 5 was
+wrong, and is the second location of the same mistake — see that step's
+correction block. Keep the extra here too.**
 
 At `docs/DISTRIBUTION.md:104`, replace the command block with:
 
 ```bash
-uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" mcpbrain --force
+uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" "mcpbrain[daemon]" --force
 ```
+
+**Rule for every remaining stage: a complete fresh-install command line
+(`uv tool install … --force`) always carries `"mcpbrain[daemon]"`.** It is the
+only spelling correct against both the pre-0.7.119 wheels and everything after.
+`tests/test_install_docs_single_source.py::test_every_fresh_install_command_keeps_the_alias`
+enforces this across all docs and the PowerShell installer, so a third instance
+cannot appear silently.
 
 and at `:131-135`, delete the sentence explaining that `[daemon]` is required,
 replacing that block's trailing rationale with:
@@ -1657,6 +1687,11 @@ Expected: FAIL on `test_no_inert_persistence_planning`.
 
 Replace the whole file with:
 
+**Keep `"mcpbrain[daemon]"` in every `uv tool install` line below** — same rule as
+Task 2 Step 5 and Task 3 Step 5 (both corrected 2026-08-25). This file's three
+install attempts originally dropped it in this plan; that would have reintroduced
+the no-embedder bug on the Windows path.
+
 ```powershell
 # plugin/scripts/install.ps1
 param([switch]$DotSourceOnly)
@@ -1688,8 +1723,8 @@ function Install-VcRedistX64 {
 function Install-Mcpbrain {
   # uv provisions the x64 CPython (its default on ARM64; pinned here for future-proofing).
   $ok = $false
-  try { uv tool install --python $PY_REQUEST --index $INDEX mcpbrain --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
-  if (-not $ok) { try { uv tool install --python 3.12 --index $INDEX mcpbrain --force; $ok = ($LASTEXITCODE -eq 0) } catch {} }
+  try { uv tool install --python $PY_REQUEST --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
+  if (-not $ok) { try { uv tool install --python 3.12 --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {} }
   if (-not $ok) {
     # uv can fail to finalize the minor-version link on ARM64 even though the x64
     # interpreter is fully extracted. Install the interpreter, resolve its concrete
@@ -1702,7 +1737,7 @@ function Install-Mcpbrain {
       $py = Get-ChildItem "$base\cpython-3.12*x86_64*\python.exe" -ErrorAction SilentlyContinue |
             Select-Object -First 1 -ExpandProperty FullName
     }
-    if ($py) { uv tool install --python "$py" --index $INDEX mcpbrain --force }
+    if ($py) { uv tool install --python "$py" --index $INDEX "mcpbrain[daemon]" --force }
     else { throw "Could not resolve an x64 python.exe for the uv-link fallback" }
   }
 }

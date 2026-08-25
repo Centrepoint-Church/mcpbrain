@@ -76,7 +76,7 @@ monitors, and the `INSTALL.md` prompt. The four recurring skills run as **Local*
 scheduled tasks (Sonnet 4.6 + Auto permission mode) and do their work through the
 `brain_*` MCP tools — so they need no working folder and no filesystem path.
 Backfilling a larger enrichment backlog is not a separate skill — it's just
-re-running the `Brain — enrich (hourly)` task on demand.
+re-running the `brain-enrich-hourly` task on demand.
 
 ## Distribution & update topology
 

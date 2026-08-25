@@ -121,3 +121,37 @@ def test_cowork_setup_skill_removed():
     # Scheduling now happens in the single Claude Code install prompt (creating
     # Local scheduled tasks), so the separate Cowork-setup skill no longer exists.
     assert not (_PLUGIN / "skills" / "mcpbrain-cowork-setup").exists()
+
+
+_TASK_NAMES = ("brain-enrich-hourly", "brain-meeting-packs-hourly",
+               "brain-gardener-weekly", "brain-reference-gardener-weekly")
+
+
+def test_install_command_creates_the_tasks_itself():
+    # Step 4 must instruct the ASSISTANT to create the Local scheduled tasks,
+    # not print a table for the user to retype into the Routines UI. That step
+    # was ~10 of the install's ~20 manual actions and is the one place a Cloud
+    # task can be created by mistake, which fails silently forever.
+    b = _read("commands/install.md")
+    assert "create these four" in b.lower() or "create the four" in b.lower()
+    for name in _TASK_NAMES:
+        assert name in b, f"task {name!r} must be named for creation"
+    # It must verify afterwards rather than assuming success.
+    assert "list my scheduled tasks" in b.lower() and "Run now" in b
+
+
+def test_install_command_still_forbids_cloud_routines():
+    # The Local-not-Cloud rule now binds the assistant instead of the user, but
+    # it must still be stated: a cloud routine runs from a fresh clone on
+    # Anthropic's servers and cannot reach the local daemon.
+    b = _read("commands/install.md")
+    assert "Local" in b and "/schedule" in b and "cloud routine" in b.lower()
+
+
+def test_install_doc_carries_the_manual_task_fallback():
+    # If Routines is disabled by org policy or the Desktop build is too old, the
+    # assistant cannot create tasks. The manual procedure must survive somewhere.
+    b = _read("INSTALL.md")
+    for name in _TASK_NAMES:
+        assert name in b, f"manual fallback must list {name!r}"
+    assert "Auto" in b and "Sonnet" in b
