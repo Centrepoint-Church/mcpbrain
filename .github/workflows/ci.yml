@@ -180,6 +180,35 @@ jobs:
         # plans already give developers hitting this locally.
         run: uv sync --group dev --extra daemon
 
+      - name: DEBUG - sqlite version and stat1 probe
+        run: |
+          uv run python - <<'PY'
+          import sqlite3, tempfile, os
+          print("python sqlite3 module version:", sqlite3.version)
+          print("linked libsqlite3 version:", sqlite3.sqlite_version)
+          d = tempfile.mkdtemp()
+          p = os.path.join(d, "b.sqlite3")
+          import sys
+          sys.path.insert(0, ".")
+          from mcpbrain.store import Store
+          s = Store(p, dim=4)
+          s.init()
+          with s._connect(write=True) as db:
+              db.execute("INSERT INTO chunks(doc_id, text) VALUES('d1','hello world')")
+          db2 = sqlite3.connect(p)
+          print("sqlite_stat1 exists:",
+                db2.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").fetchone())
+          print("indexes on chunks:",
+                db2.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunks'").fetchall())
+          try:
+              cur = db2.execute("PRAGMA optimize")
+              print("manual PRAGMA optimize result:", cur.fetchall())
+          except Exception as exc:
+              print("manual PRAGMA optimize RAISED:", repr(exc))
+          print("sqlite_stat1 exists after manual optimize:",
+                db2.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").fetchone())
+          PY
+
       - name: Run the offline suite
         run: uv run pytest
 
