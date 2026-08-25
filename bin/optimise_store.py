@@ -336,6 +336,12 @@ def _copy_all(src, dst, *, batch: int = 5000) -> dict:
     """
     from mcpbrain.store import _open_db
     s_db = _open_db(src, read_only=True)
+    # Stamped into dst's own meta table (below, AFTER the generic copy loop --
+    # meta is itself a managed table the loop DELETEs-then-refills from src,
+    # which would wipe a stamp written any earlier) so _swap can tell whether
+    # src kept changing after THIS read of it, no matter how long dst then
+    # sits waiting for --swap.
+    freshness = _freshness_snapshot(s_db)
     d_db = _open_db(dst)
     # Parents may land after children (and entity_observations references
     # itself), so enforcement is off for the copy; the CLI's explicit
@@ -419,6 +425,10 @@ def _copy_all(src, dst, *, batch: int = 5000) -> dict:
         # fts_context_version across verbatim would make the re-derive think
         # the work was already done and leave the index EMPTY.
         d_db.execute("UPDATE chunks SET fts_context_version=0")
+        # Written LAST, after the generic loop's own copy of meta (from src)
+        # has already landed -- see the comment where `freshness` is computed.
+        d_db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)",
+                     (_FRESHNESS_META_KEY, json.dumps(freshness)))
         d_db.commit()
     finally:
         s_db.close()
@@ -434,6 +444,19 @@ def _row_count(db, table: str) -> int | None:
         return db.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
     except sqlite3.Error:
         return None  # a shadow table can be uncountable through its own module
+
+
+# Tables a real daemon session actually grows -- chunks (ingest), entities/
+# entity_relations (graph writes), actions (extraction). Any of these moving
+# between the rebuild's read of src and a later --swap means src kept
+# changing after the rebuild was taken -- most concretely: the daemon
+# restarted and ran for a while before someone got around to --swap.
+_FRESHNESS_TABLES = ("chunks", "entities", "entity_relations", "actions")
+_FRESHNESS_META_KEY = "optimise_rebuild_freshness"
+
+
+def _freshness_snapshot(db) -> dict[str, int]:
+    return {t: (_row_count(db, t) or 0) for t in _FRESHNESS_TABLES}
 
 
 def _recreate_from_source_ddl(s_db, d_db, table: str) -> None:
@@ -783,6 +806,42 @@ def _swap(src: Path, dst: Path) -> int:
     if not dst.exists():
         print(f"[optimise] nothing to swap: {dst} does not exist")
         return 2
+    # Freshness, not just integrity: has src moved since the rebuild that
+    # produced dst last read it? A finished rebuild can sit for arbitrarily
+    # long waiting for --swap -- nothing here expires one or re-checks src in
+    # the meantime -- so without this, "rebuild, daemon restarts and ingests
+    # for days, --swap --yes" would silently discard everything written
+    # since, with every OTHER gate (integrity_check, foreign_key_check)
+    # reporting clean.
+    from mcpbrain.store import _open_db
+    d_db = _open_db(dst, read_only=True)
+    try:
+        stamped_row = d_db.execute(
+            "SELECT v FROM meta WHERE k=?", (_FRESHNESS_META_KEY,)).fetchone()
+    finally:
+        d_db.close()
+    if stamped_row:
+        stamped = json.loads(stamped_row[0])
+        s_db = _open_db(src, read_only=True)
+        try:
+            current = _freshness_snapshot(s_db)
+        finally:
+            s_db.close()
+        if current != stamped:
+            moved = {t: {"now": current[t], "at_rebuild": stamped[t]}
+                     for t in _FRESHNESS_TABLES if current[t] != stamped[t]}
+            print(f"[optimise] REFUSING to swap: {src} has changed since the "
+                  f"rebuild was taken -- row counts moved: {moved}. Re-run "
+                  "the rebuild against the current store, or make sure "
+                  "nothing writes to src between the rebuild and --swap "
+                  "(stop the daemon for the whole window, not just at "
+                  "--swap time).")
+            return 1
+    else:
+        print(f"[optimise] {dst.name} carries no freshness stamp (built by "
+              "an older version of this tool) -- cannot verify src has not "
+              "moved since the rebuild. Proceeding, but re-running the "
+              "rebuild is safer.")
     # Checkpoint BEFORE verifying, so integrity_check reads the content the
     # promoted file will actually have, not a pre-WAL view of it.
     print(f"[optimise] {dst.name}: {_checkpoint(dst)[1]}")
