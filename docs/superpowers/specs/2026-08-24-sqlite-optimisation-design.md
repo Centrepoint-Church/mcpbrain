@@ -71,6 +71,14 @@ sprinkled at call sites.
 **Read-only connections must not attempt `optimize`** (it writes). Guard on the existing
 `read_only` flag.
 
+**CORRECTED 2026-08-25** (PR #25 finding 1): `read_only` alone is not the
+right gate — it also fires on every `write=False` USE of a writable `Store`
+(e.g. `daemon.search`'s read path), acquiring the write lock after a
+read-only transaction is already done and contending with a concurrent
+drain at exactly the recall path's latency budget. The correct gate is
+`write and not read_only` — only an actual write transaction should pay
+for a stats refresh.
+
 ---
 
 ## Part B — one rebuild for every schema change

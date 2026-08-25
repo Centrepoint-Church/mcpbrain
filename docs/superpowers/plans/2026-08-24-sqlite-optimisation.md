@@ -227,6 +227,20 @@ git commit -m "perf(store): tune connection pragmas (cache 64MiB, mmap, temp_sto
 - Consumes: `_open_db` from Task 2 (which sets `analysis_limit=400`).
 - Produces: no signature change.
 
+**CORRECTED 2026-08-25** (post-merge human review on PR #25, finding 1): the
+original Step 1/3 below gated `PRAGMA optimize` on `if not self.read_only`
+alone — that fires it on every `write=False` close too, not just after an
+actual write. `PRAGMA optimize` WRITES, so a read-only USE of a writable
+`Store` (e.g. `daemon.search`'s read path, or `graph_write.upsert_relation`,
+which opens one connection per relation) would acquire the write lock
+*after* the caller's read-only transaction had already finished — right
+into contention with a concurrent drain's writes, at exactly the latency
+budget `RECALL_PATH_BUSY_TIMEOUT_MS`/`RECALL_PATH_BEGIN_RETRIES` exist to
+protect. That reintroduces the 0.7.105 recall-starvation class this very
+pragma was meant to help fix. The gate must be `write and not self.read_only`
+— only an actual write transaction pays for the stats refresh. Kept below
+for its historical record; the code and tests now reflect the corrected gate.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -250,6 +264,32 @@ def test_read_only_connection_does_not_attempt_optimize(tmp_path):
     ro = Store(str(p), read_only=True)
     with ro._connect() as db:            # must not raise "attempt to write a readonly database"
         db.execute("SELECT count(*) FROM chunks").fetchone()
+
+
+def test_a_read_only_use_of_a_writable_store_does_not_attempt_optimize(tmp_path, monkeypatch):
+    """CORRECTED per PR #25 finding 1. A write=False use of a WRITABLE Store
+    must not attempt PRAGMA optimize either -- only self.read_only alone is
+    not the right gate."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p))
+    s.init()
+    calls = []
+
+    class _Spy(sqlite3.Connection):
+        def execute(self, sql, *a, **kw):
+            calls.append(sql)
+            return super().execute(sql, *a, **kw)
+
+    real_connect = sqlite3.connect
+
+    def spy_connect(*a, **kw):
+        kw.setdefault("factory", _Spy)
+        return real_connect(*a, **kw)
+
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+    with s._connect() as db:   # write=False (the default) on a WRITABLE Store
+        db.execute("SELECT count(*) FROM chunks")
+    assert "PRAGMA optimize" not in calls
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -265,8 +305,12 @@ Replace the `finally` block of `_connect`:
         finally:
             # PRAGMA optimize is the documented way to keep planner statistics
             # current; analysis_limit (set in _open_db) bounds its cost so it
-            # cannot stall a close. It WRITES, so never on a read-only handle.
-            if not self.read_only:
+            # cannot stall a close. It WRITES, so never on a read-only handle
+            # -- AND never on a write=False connection either, even on a
+            # writable Store: it would contend with a drain's writes at
+            # exactly the recall path's latency budget. Only an actual write
+            # transaction should pay for a stats refresh.
+            if write and not self.read_only:
                 try:
                     db.execute("PRAGMA optimize")
                 except sqlite3.Error:
@@ -279,7 +323,7 @@ Replace the `finally` block of `_connect`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_store_pragmas.py -v`
-Expected: PASS (both)
+Expected: PASS (all three)
 
 - [ ] **Step 5: Re-measure and compare**
 
