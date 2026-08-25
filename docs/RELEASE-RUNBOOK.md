@@ -309,8 +309,7 @@ the live desktop flow has had **zero** real-machine testing. Run once on a clean
 Windows box with a **non-author** `@centrepoint.church` Google account.
 
 - [ ] **1. Install plugin → paste `plugin/INSTALL.md` prompt** on a clean Windows
-  machine. (Note: `INSTALL.md` is currently macOS-worded — the Windows install
-  commands/PATH still need their own pass; see the gaps note below.)
+  machine.
 - [ ] **2. uv + wheel install; PATH correct** — the prompt runs the
   `uv tool install … --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" …`
   step; `mcpbrain --version` resolves in a fresh shell (validates uv shim + PATH).

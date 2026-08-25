@@ -8,17 +8,27 @@ Everything stays on your laptop. Nothing is sent anywhere unless you turn on the
 
 ## Install
 
-Three commands:
+mcpbrain installs as a Claude Code plugin. In a Claude Code session, run:
 
-```bash
-git clone <repo-url>
-cd mcp-ops-brain
-./install/setup.sh
+```
+/mcpbrain:install
 ```
 
-On macOS, double-click `install/setup.command` instead of the last line. On Windows, run `install/setup.ps1` in PowerShell.
+and follow it — it installs the daemon, connects it to Claude, opens the sign-in
+wizard, and creates the recurring background tasks for you.
 
-Each installer does the same things:
+On a machine that does not have the plugin yet:
+
+```bash
+claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin
+claude plugin install mcpbrain@centrepoint-church
+```
+
+then run `/mcpbrain:install`. Full details, including the Windows path and the
+manual fallback for the recurring tasks, are in
+[`plugin/INSTALL.md`](plugin/INSTALL.md) — the single source for install steps.
+
+### What the install does
 
 1. Installs `uv` if it isn't already on the machine.
 2. Installs the `mcpbrain` CLI as a `uv` tool.
@@ -36,7 +46,11 @@ After the wizard, fully quit and reopen Claude Desktop. The `brain_search`, `bra
 mcpbrain update
 ```
 
-This pulls the latest commits (fast-forward only, so it aborts cleanly if you have local changes), reinstalls the CLI, and restarts the login agent so the new version takes effect. If the pull can't fast-forward it stops without touching your install and tells you how to resolve it.
+This checks the wheel index for a newer published version and, if there is one,
+reinstalls mcpbrain via uv and restarts the login agent so the new code takes
+effect. Installed daemons also do this on their own about once a day, so running
+it by hand is only for pulling a release early. It never touches your store, your
+config, or your Google token.
 
 ## What runs at login
 

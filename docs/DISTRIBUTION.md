@@ -128,10 +128,9 @@ pin is required (the package needs ≥3.12; uv provisions it when pinned).
    uv tool install --index mcpbrain=<url> "mcpbrain[daemon]" --upgrade --reinstall-package mcpbrain
    ```
 
-   The `[daemon]` extra is required: `fastembed`/`onnxruntime` are daemon-only
-   optional deps (so the MCP bridge can install plain `mcpbrain` without native
-   deps), so the auto-updater must reinstall the extra or the daemon loses its
-   embedder.
+   The `[daemon]` extra is retained as an empty alias so this exact command line —
+   baked into every already-deployed install's `update.py` — keeps resolving
+   without a uv warning. `fastembed` now ships in base dependencies.
 
    followed by an agent restart.  The install/restart therefore never happens
    under the held store-writer lock.
