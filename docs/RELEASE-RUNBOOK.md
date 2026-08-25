@@ -47,10 +47,12 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    (`claude_desktop_config.json`, with the absolute install path), and opens the
    browser wizard. Backup/recovery is automatic in the wizard — no manual
    `restore`/bootstrap step.
-4. The colleague completes the wizard (Google sign-in + identity + timezone),
-   creates the four **Local** scheduled tasks (Sonnet 4.6 + Auto permission mode)
-   in the same session, and turns on **Claude → Settings → Desktop App → General →
-   "Run on startup"** (so Claude launches at login and the Local tasks fire).
+4. The colleague completes the wizard (Google sign-in + identity + timezone).
+   The assistant then creates the four **Local** scheduled tasks itself (Sonnet
+   4.6 + Auto permission mode) in the same session — the colleague no longer
+   hand-builds them — and reminds the colleague to turn on **Claude → Settings →
+   Desktop App → General → "Run on startup"** (so Claude launches at login and
+   the Local tasks fire).
 
 The `--python 3.12` pin is **required**: without it the install fails on any
 machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).

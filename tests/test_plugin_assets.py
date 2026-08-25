@@ -137,7 +137,7 @@ def test_install_command_creates_the_tasks_itself():
     for name in _TASK_NAMES:
         assert name in b, f"task {name!r} must be named for creation"
     # It must verify afterwards rather than assuming success.
-    assert "list" in b.lower() and "Run now" in b
+    assert "list my scheduled tasks" in b.lower() and "Run now" in b
 
 
 def test_install_command_still_forbids_cloud_routines():

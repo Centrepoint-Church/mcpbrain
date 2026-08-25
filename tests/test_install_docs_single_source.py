@@ -36,6 +36,18 @@ def test_readme_describes_update_as_a_wheel_reinstall():
     assert "fast-forward" not in text, "update.py reinstalls from the wheel index, not git"
 
 
+def test_readme_marketplace_commands_match_install_md():
+    # README's cold-start block duplicates plugin/INSTALL.md's "Cold start" section
+    # rather than linking to it. They agree today; nothing else would notice when
+    # they stop, so pin the exact commands in both places.
+    readme = (_ROOT / "README.md").read_text()
+    install_md = (_ROOT / "plugin" / "INSTALL.md").read_text()
+    for cmd in ("claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin",
+                "claude plugin install mcpbrain@centrepoint-church"):
+        assert cmd in readme, f"README missing {cmd!r}"
+        assert cmd in install_md, f"plugin/INSTALL.md missing {cmd!r}"
+
+
 def test_canonical_install_command_keeps_the_daemon_alias():
     # Deliberate: the extra must STAY in the install command. It resolves against
     # both the pre-0.7.119 wheels (where fastembed is extra-only) and every wheel
