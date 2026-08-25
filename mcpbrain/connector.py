@@ -47,8 +47,9 @@ def desktop_config_paths() -> list[Path]:
         appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         localappdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         # Build paths as strings to avoid Path type issues when os.name is monkeypatched
-        # Use forward slashes which work on all systems
-        msix_str = f"{localappdata}/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/{_CONFIG_NAME}"
+        # Derive MSIX path from _MSIX_RELATIVE to keep a single source of truth
+        msix_relative_str = "/".join(_MSIX_RELATIVE.parts)
+        msix_str = f"{localappdata}/{msix_relative_str}/{_CONFIG_NAME}"
         plain_str = f"{appdata}/Claude/{_CONFIG_NAME}"
         # Check existence and convert to native path type
         found = [_NATIVE_PATH_TYPE(p_str) for p_str in (msix_str, plain_str) if os.path.exists(p_str)]
