@@ -632,20 +632,39 @@ def _verified_snapshot(src: Path, home: Path) -> tuple[Path, Path | None]:
     integrity_check can actually be run against.
 
     If config carries no escrow key one is generated and written next to the
-    artifact at 0600, because an encrypted snapshot whose key is lost is not a
-    rollback either.
+    artifact at 0600 (opened via os.open with the mode set at creation, so
+    there is no world-readable window between create and chmod), because an
+    encrypted snapshot whose key is lost is not a rollback either.
+
+    Named `<artifact>.key` -- ONE PER SNAPSHOT, never a fixed shared path.
+    Snapshots are timestamped and retained across runs (main() never deletes
+    an old one), so a shared `<store>.rebuild-key` meant a second run
+    (e.g. the runbook's own step-2-then-step-3 sequence, or a second
+    report-only invocation) silently generated a fresh random key and
+    overwrote the only copy that could open the FIRST snapshot -- orphaning
+    it while it stayed on disk looking like a valid rollback.
     """
     from mcpbrain import backup, config
     key_path = None
     key = ((config.read_config(str(home)).get("backup") or {})
            .get("escrow_key") or "")
     key = key.encode() if isinstance(key, str) else key
+    out = Path(f"{src}.snapshot-{int(time.time())}.enc")
     if not key:
         key = backup.generate_escrow_key()
-        key_path = Path(f"{src}.rebuild-key")
-        key_path.write_bytes(key)
-        os.chmod(key_path, 0o600)
-    out = Path(f"{src}.snapshot-{int(time.time())}.enc")
+        # Same-second collision on `out` itself (two invocations producing an
+        # identical epoch-seconds name) is an accepted, pre-existing edge
+        # case for the .enc artifact too -- a real snapshot of a multi-GB
+        # store takes measurably longer than a second, so this is not the
+        # bug finding 3 describes. Deliberately O_CREAT|O_TRUNC (not O_EXCL):
+        # an exact-same-name collision here means `out` collided too, so the
+        # last write replaces both consistently, which is correct.
+        key_path = Path(f"{out}.key")
+        fd = os.open(key_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, key)
+        finally:
+            os.close(fd)
     backup.make_encrypted_snapshot(src, out, key)
     work = Path(tempfile.mkdtemp(prefix="mcpbrain-verify-"))
     try:

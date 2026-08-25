@@ -389,9 +389,11 @@ snapshots left over from steps 2 and 3 (6.96 GB) + **one** 2.62 GB transient
 snapshot-verify cleartext (step 3's own, still live at that instant) + the
 still-present 2.62 GB old/live store ≈ **12.2 GB** — before the up-to-1.49 GB
 rebuild file even starts growing. Delete the older
-`<store>.snapshot-*.enc` (and its `<store>.rebuild-key`, if you don't need it
-retained) once you've moved past the step that produced it and confirmed the
-next step's own snapshot succeeded.
+`<store>.snapshot-*.enc` (and its own `<that-snapshot>.key`, if you don't
+need it retained — one key file per snapshot, never a shared name, so
+deleting an older snapshot's key can never affect a newer one) once you've
+moved past the step that produced it and confirmed the next step's own
+snapshot succeeded.
 
 ### Procedure
 
@@ -456,12 +458,13 @@ next step's own snapshot succeeded.
    (`mcpbrain doctor`, a live `brain_search` call).
 7. **Keep the retained pre-rebuild file until the next successful scheduled
    backup run** confirms the new store is being backed up correctly — only
-   then delete `<store>.pre-rebuild-<timestamp>` (and its escrow-key sidecar,
-   `<store>.rebuild-key`, if one was generated). Deleting it immediately after
+   then delete `<store>.pre-rebuild-<timestamp>`. Deleting it immediately after
    swap removes your only same-machine fallback before the new store has had a
    full cadence cycle to prove itself. **Also clean up the encrypted snapshot
-   artifact(s)** from steps 2/3 (`<store>.snapshot-<epoch>.enc`, plus any
-   `<store>.rebuild-key` not already accounted for above) — the tool never
+   artifact(s)** from steps 2/3 (`<store>.snapshot-<epoch>.enc`, plus each
+   one's own `<that-snapshot>.enc.key` escrow-key sidecar — one key file per
+   snapshot, never a shared name, so removing an older snapshot never
+   touches a newer one's key) — the tool never
    deletes these itself, they are 3.48 GB each on the live store, and a
    report-only run followed by a real `--yes` run leaves **two** of them on
    disk. Confirm you no longer need a given snapshot (i.e. you're past the

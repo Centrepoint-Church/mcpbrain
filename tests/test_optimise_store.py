@@ -1,11 +1,13 @@
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
-from bin.optimise_store import (UnmigratedStore, _copy_all, _populate_trigram,
-                                check_migrations, embedded_without_vectors,
-                                main, rebuild, report_orphans)
+from bin.optimise_store import (UnmigratedStore, _copy_all, _integrity,
+                                _populate_trigram, check_migrations,
+                                embedded_without_vectors, main, rebuild,
+                                report_orphans)
 from mcpbrain.store import Store
 
 
@@ -391,8 +393,9 @@ def test_main_snapshots_and_reports_but_does_not_rebuild_without_yes(tmp_path):
     src = _cli_store(tmp_path)
     rc = main(["--src", str(src), "--home", str(tmp_path)])
     assert rc == 0
-    assert len(list(tmp_path.glob("*.enc"))) == 1
-    assert (tmp_path / "brain.sqlite3.rebuild-key").exists()
+    encs = list(tmp_path.glob("*.enc"))
+    assert len(encs) == 1
+    assert Path(f"{encs[0]}.key").exists()   # named after its own snapshot
     assert not (tmp_path / "brain.sqlite3.new").exists()
 
 
@@ -405,6 +408,52 @@ def test_main_rebuilds_to_dot_new_and_never_swaps(tmp_path):
     assert rc == 0
     assert (tmp_path / "brain.sqlite3.new").exists()
     assert src.read_bytes() == before
+
+
+def test_a_second_run_does_not_orphan_the_first_snapshots_key(tmp_path, monkeypatch):
+    """PR #25 finding 3: the escrow key was written to a FIXED shared path
+    (`<store>.rebuild-key`) while each snapshot is timestamped and retained.
+    Running the tool twice -- the runbook's own step-2-then-step-3 sequence
+    -- generated a NEW random key on the second run and overwrote the shared
+    file, permanently orphaning the first snapshot: it stayed on disk
+    looking like a valid rollback but could never be decrypted again. The
+    key must be named after its own snapshot, one-to-one, so a later run
+    can never invalidate an earlier one."""
+    import itertools
+    import bin.optimise_store as optimise_store_mod
+    from mcpbrain import backup
+    # Force distinct snapshot timestamps -- a real run takes measurably
+    # longer than a second to snapshot+verify a multi-GB store, but this
+    # synthetic test store is tiny enough that two real calls could
+    # coincidentally land in the same wall-clock second. `time` is a shared
+    # module object, so this patches every caller's time.time() for the
+    # test's duration -- an always-increasing counter (rather than a
+    # 2-element iterator) keeps any incidental extra call elsewhere in the
+    # call graph harmless instead of raising StopIteration.
+    base, counter = time.time(), itertools.count()
+    monkeypatch.setattr(optimise_store_mod.time, "time", lambda: base + next(counter))
+
+    src = _cli_store(tmp_path)
+    assert main(["--src", str(src), "--home", str(tmp_path)]) == 0
+    first_enc = next(tmp_path.glob("*.enc"))
+    first_key = Path(f"{first_enc}.key")
+    assert first_key.exists()
+    first_key_bytes = first_key.read_bytes()
+
+    assert main(["--src", str(src), "--home", str(tmp_path)]) == 0
+    second_enc = [p for p in tmp_path.glob("*.enc") if p != first_enc][0]
+    assert first_enc.exists() and second_enc.exists()
+    assert Path(f"{second_enc}.key").exists()
+
+    # The first snapshot's own key must be untouched by the second run --
+    # and must still actually decrypt the first snapshot.
+    assert first_key.read_bytes() == first_key_bytes
+    out = backup.decrypt_file(first_enc, tmp_path / "restored.sqlite3", first_key_bytes)
+    assert out.exists()
+    # check_fk=False: _cli_store seeds a deliberate orphan (same reason
+    # _verified_snapshot itself checks integrity, not foreign keys).
+    ok, _ = _integrity(out, check_fk=False)
+    assert ok
 
 
 def test_main_swap_requires_yes_and_retains_the_old_file(tmp_path):
