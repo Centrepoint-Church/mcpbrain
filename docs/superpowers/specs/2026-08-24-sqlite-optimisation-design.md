@@ -150,6 +150,15 @@ cheapest possible moment to do it.
 documented limitation and removes one of the cost reasons
 `salience_require_drive_mention` is opt-in-OFF.
 
+**REVERTED 2026-08-25 (PR #25 finding 6):** this was built without a task to
+wire a reader (`email_mentions` never changed to use it) and without pricing
+the populate cost, which measured +1.089 GB on the live store — erasing
+most of this whole plan's storage saving for an index nothing queries. It
+shipped deferred (an opt-in `--populate-trigram` flag), then was removed
+entirely rather than left as unused infrastructure. `email_mentions`'
+`text LIKE` remains genuinely unindexable, unchanged from before this plan.
+A future reader would likely want different tokenizer settings anyway.
+
 ### B6. Foreign keys ON, after an orphan sweep
 
 `foreign_keys` is **OFF** today, so orphans accumulate unnoticed. Both the 0.7.74 structural

@@ -5,9 +5,8 @@ from pathlib import Path
 import pytest
 
 from bin.optimise_store import (UnmigratedStore, _copy_all, _integrity,
-                                _populate_trigram, check_migrations,
-                                embedded_without_vectors, main, rebuild,
-                                report_orphans)
+                                check_migrations, embedded_without_vectors,
+                                main, rebuild, report_orphans)
 from mcpbrain.store import Store
 
 
@@ -247,66 +246,6 @@ def test_rederived_fts_covers_every_chunk_with_the_prefix_off(monkeypatch):
             out.close()
 
 
-def test_rebuild_leaves_the_trigram_index_empty_by_default(tmp_path):
-    """fts_chunks_trigram has neither a writer nor a reader (email_mentions
-    still scans chunks.text). Filling it would be correct only until the next
-    write, then drift while LOOKING ready — so the default reports it empty.
-    """
-    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
-    s = Store(str(src), dim=4)
-    s.init()
-    with s._connect(write=True) as db:
-        db.execute("INSERT INTO chunks(doc_id,text,metadata,embedded) "
-                   "VALUES('d1','byford road','{}',1)")
-
-    r = rebuild(src, dst)
-
-    assert r["trigram_rows"] == 0
-    out = sqlite3.connect(dst)
-    try:
-        assert out.execute(
-            "SELECT count(*) FROM fts_chunks_trigram").fetchone()[0] == 0
-    finally:
-        out.close()
-
-
-def test_populate_trigram_indexes_raw_text_when_asked(tmp_path):
-    """The opt-in path, for whoever lands the writer + reader. Indexes RAW
-    chunks.text — email_mentions matches the body a user wrote, so a
-    synthesised contextual prefix would produce phantom hits."""
-    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
-    s = Store(str(src), dim=4)
-    s.init()
-    with s._connect(write=True) as db:
-        db.execute("INSERT INTO chunks(doc_id,text,metadata,embedded) "
-                   "VALUES('d1','byford road','{}',1)")
-
-    r = rebuild(src, dst, populate_trigram=True)
-
-    assert r["trigram_rows"] == 1
-    out = Store(str(dst), dim=4)
-    with out._connect() as db:
-        hit = db.execute("SELECT rowid FROM fts_chunks_trigram "
-                         "WHERE fts_chunks_trigram MATCH 'byford'").fetchone()
-        assert hit["rowid"] == 1
-
-
-def test_populate_trigram_is_not_run_by_the_default_rebuild(tmp_path):
-    """Guard on the DEFAULT, not just on the count: a future edit that wires
-    _populate_trigram into rebuild() unconditionally must fail here."""
-    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
-    Store(str(src), dim=4).init()
-    calls = []
-    import bin.optimise_store as mod
-    real = mod._populate_trigram
-    mod._populate_trigram = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
-    try:
-        rebuild(src, dst)
-    finally:
-        mod._populate_trigram = real
-    assert calls == []
-
-
 def test_rebuild_nullifies_a_dangling_self_reference(tmp_path):
     """The column declares ON DELETE SET NULL, so the rebuild repairs a
     dangling pointer the same way — it does NOT drop the observation, which
@@ -355,12 +294,6 @@ def test_copy_all_skips_only_derived_and_internal_tables(tmp_path):
     assert all(t.startswith(("fts_chunks", "vec_chunks", "sqlite_"))
                for t in out["skipped"]), out["skipped"]
     assert "chunks" in out["copied"]
-
-
-def test_populate_trigram_terminates_on_an_empty_store(tmp_path):
-    p = tmp_path / "s.sqlite3"
-    Store(str(p), dim=4).init()
-    assert _populate_trigram(p, 4) == 0
 
 
 # --- CLI safety gates ------------------------------------------------------
