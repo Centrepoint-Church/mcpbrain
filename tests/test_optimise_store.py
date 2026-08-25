@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from bin.optimise_store import (UnmigratedStore, _copy_all, _integrity,
-                                check_migrations, embedded_without_vectors,
-                                main, rebuild, report_orphans)
+from bin.optimise_store import (UnmigratedStore, _compare_counts, _copy_all,
+                                _integrity, check_migrations,
+                                embedded_without_vectors, main, rebuild,
+                                report_orphans)
 from mcpbrain.store import Store
 
 
@@ -284,6 +285,71 @@ def test_rebuild_result_passes_foreign_key_check(tmp_path):
     with out._connect() as db:
         assert [r[0] for r in db.execute("PRAGMA integrity_check")] == ["ok"]
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_compare_counts_row_drop_bound_excludes_nullify_only_columns(tmp_path):
+    """Review flag on PR #25: the row-drop bound summed EVERY _REFS column for
+    a table, including entity_relations.invalidated_by_relation_id -- which is
+    _NULLIFY'd, never row-dropped by the _KEEP filter. Padding the bound with
+    that count made the tripwire slacker than intended on exactly the table
+    it matters most for: a real over-drop bug (more rows removed than the
+    row-dropping columns' orphan counts justify) could hide behind a large,
+    unrelated invalidated_by_relation_id orphan count. The bound must only
+    sum columns that actually appear in _KEEP's referential filter."""
+    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
+    Store(str(src), dim=4).init()
+    Store(str(dst), dim=4).init()
+    # foreign_keys is ON now (Task 7); plant synthetic rows with enforcement
+    # off, matching how real orphans got onto the live store.
+    db = sqlite3.connect(src)
+    for i in range(13):
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b) "
+                   "VALUES(?,?,?,?)", (i, f"e{i}", "knows", f"e{i}"))
+    db.commit()
+    db.close()
+
+    r = {
+        "copied": {"entity_relations": 8}, "carried": {},
+        # 5 rows actually dropped, but only 1 real _KEEP-relevant orphan
+        # reference (entity_a) was reported -- structurally impossible if
+        # the drop were genuinely bounded by entity_a/entity_b alone.
+        "dropped_rows": {"entity_relations": 5},
+        "dropped": {
+            "entity_relations.entity_a": 1,
+            "entity_relations.entity_b": 0,
+            "entity_relations.invalidated_by_relation_id": 10,
+        },
+        "vectors": 0, "fts_rows": 0,
+    }
+
+    assert _compare_counts(src, dst, r) is False
+
+
+def test_compare_counts_row_drop_bound_accepts_a_consistent_drop(tmp_path):
+    """The tightened bound must not false-positive on the ordinary, correct
+    case: drop count within what the _KEEP-relevant columns justify."""
+    src, dst = tmp_path / "s.sqlite3", tmp_path / "d.sqlite3"
+    Store(str(src), dim=4).init()
+    Store(str(dst), dim=4).init()
+    db = sqlite3.connect(src)
+    for i in range(9):
+        db.execute("INSERT INTO entity_relations(id,entity_a,relation,entity_b) "
+                   "VALUES(?,?,?,?)", (i, f"e{i}", "knows", f"e{i}"))
+    db.commit()
+    db.close()
+
+    r = {
+        "copied": {"entity_relations": 8}, "carried": {},
+        "dropped_rows": {"entity_relations": 1},
+        "dropped": {
+            "entity_relations.entity_a": 1,
+            "entity_relations.entity_b": 0,
+            "entity_relations.invalidated_by_relation_id": 10,
+        },
+        "vectors": 0, "fts_rows": 0,
+    }
+
+    assert _compare_counts(src, dst, r) is True
 
 
 def test_copy_all_skips_only_derived_and_internal_tables(tmp_path):
