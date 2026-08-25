@@ -1911,7 +1911,12 @@ def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
     Returning '' (no owner node yet) is a normal outcome on a fresh store; the
     caller must then skip the relation rather than write a dangling edge.
     Deliberately no name/alias fallback: a display-name match on a graph full
-    of real people is how you attach the owner's edges to a stranger.
+    of real people is how you attach the owner's edges to a stranger. The
+    email-match path shares that exact hazard when the configured owner
+    address is a shared mailbox (office@, info@): every attendee/entity also
+    registered under that address would resolve to "the owner", attributing
+    someone else's whole meeting history. is_role_address() closes it, same
+    as every other identity resolution in this module (0.7.77).
     """
     eid = getattr(owner, "entity_id", "") or ""
     addrs = [a.lower() for a in ([owner_email] if owner_email else [])
@@ -1922,6 +1927,7 @@ def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
         cfg_email = ""
     if cfg_email and cfg_email not in addrs:
         addrs.append(cfg_email)
+    addrs = [a for a in addrs if a and not is_role_address(a)]
     with store._connect() as db:
         if eid and db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone():
             return eid
