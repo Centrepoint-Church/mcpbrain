@@ -140,9 +140,9 @@ def test_connect_busy_timeout_ms_param_is_forwarded_to_open_db(tmp_path, monkeyp
     seen = {}
     orig = store_module._open_db
 
-    def spy(path, read_only, *, busy_timeout_ms):
+    def spy(path, read_only, *, busy_timeout_ms, bulk=False):
         seen["busy_timeout_ms"] = busy_timeout_ms
-        return orig(path, read_only, busy_timeout_ms=busy_timeout_ms)
+        return orig(path, read_only, busy_timeout_ms=busy_timeout_ms, bulk=bulk)
 
     monkeypatch.setattr(store_module, "_open_db", spy)
     with s._connect(write=True, busy_timeout_ms=250) as db:

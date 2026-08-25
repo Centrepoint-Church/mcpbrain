@@ -174,9 +174,28 @@ def store_dim_from_path(path) -> int | None:
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
+# cache_size/mmap_size are PER CONNECTION (SQLite's own private page cache,
+# not shared OS-level memory the way an mmap'd file region can be), and the
+# daemon opens roughly one connection per call across ~21 threads (PR #25
+# finding 5) -- e.g. graph_write.upsert_relation opens one per relation. The
+# large tuned values below are sized for a single long-lived, throughput-
+# sensitive connection (a rebuild, a full-store snapshot, a multi-thousand-row
+# reindex batch); multiplied across many short-lived per-call connections they
+# could add on the order of a gigabyte of RSS, and this project gates
+# releases on peak RSS (226 MB verified in 0.7.113). Everyday per-call
+# connections get the smaller default; `bulk=True` opts a connection into the
+# larger values for the specific paths that actually benefit: the rebuild
+# tool (bin/optimise_store.py), Store.reindex_fts_batch, and backup's
+# VACUUM INTO snapshot.
+_DEFAULT_CACHE_KIB = 16384    # 16 MiB
+_DEFAULT_MMAP_BYTES = 67108864     # 64 MiB
+_BULK_CACHE_KIB = 65536       # 64 MiB
+_BULK_MMAP_BYTES = 268435456       # 256 MiB
+
 
 def _open_db(path, read_only: bool = False, *,
-            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+            bulk: bool = False) -> sqlite3.Connection:
     """Open a connection to the derived store with sqlite-vec loaded.
 
     read_only=True uses a mode=ro URI (the MCP server's read path); read_only=False
@@ -191,6 +210,10 @@ def _open_db(path, read_only: bool = False, *,
     RECALL_PATH_BEGIN_RETRIES) does not bound the wait, because even one
     attempt can sit here for the full timeout. Callers on a latency-sensitive
     path pass a smaller value; see RECALL_PATH_BUSY_TIMEOUT_MS.
+
+    bulk: opts into the larger cache_size/mmap_size (see the module-level
+    comment above _DEFAULT_CACHE_KIB) for a single long-lived, throughput-
+    sensitive connection. Leave False for the common per-call case.
     """
     if read_only:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -205,10 +228,16 @@ def _open_db(path, read_only: bool = False, *,
     # and the WAL grows without bound; this makes SQLite truncate it back after
     # a checkpoint instead. Chosen well above normal transaction size.
     db.execute("PRAGMA journal_size_limit=67108864")  # 64 MiB
-    # Tuned for a multi-GB, read-heavy derived store. Defaults left this at a
-    # 2 MB page cache on a 2.6 GB database.
-    db.execute("PRAGMA cache_size=-65536")    # 64 MiB
-    db.execute("PRAGMA mmap_size=268435456")  # 256 MiB
+    # Tuned for a multi-GB, read-heavy derived store. SQLite's own default
+    # left this at a 2 MB page cache on a 2.6 GB database -- too small. The
+    # much larger `bulk` values are reserved for the few connections that are
+    # actually long-lived and throughput-sensitive (see above); every other
+    # per-call connection gets this smaller default so ~21 concurrent daemon
+    # threads cannot multiply into a gigabyte of RSS between them.
+    cache_kib = _BULK_CACHE_KIB if bulk else _DEFAULT_CACHE_KIB
+    mmap_bytes = _BULK_MMAP_BYTES if bulk else _DEFAULT_MMAP_BYTES
+    db.execute(f"PRAGMA cache_size=-{int(cache_kib)}")
+    db.execute(f"PRAGMA mmap_size={int(mmap_bytes)}")
     db.execute("PRAGMA temp_store=2")         # MEMORY: FTS5/ORDER BY temp b-trees
     db.execute("PRAGMA threads=4")            # parallel sort
     db.execute("PRAGMA analysis_limit=400")   # bounds PRAGMA optimize (Task 3)
@@ -348,7 +377,8 @@ class Store:
 
     @contextmanager
     def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
-                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS):
+                busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+                bulk: bool = False):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
@@ -376,8 +406,15 @@ class Store:
         attempt can block for the full busy_timeout, so a caller that needs a
         hard latency bound (recall) must lower THIS, not just retries; see
         RECALL_PATH_BUSY_TIMEOUT_MS.
+
+        bulk: passed straight through to _open_db (PR #25 finding 5) --
+        opts THIS connection into the larger cache_size/mmap_size for a
+        genuinely long-lived, throughput-sensitive call (e.g.
+        reindex_fts_batch). Leave False for the common per-call case, or
+        many concurrent connections can add up to real RSS growth.
         """
-        db = _open_db(self.path, self.read_only, busy_timeout_ms=busy_timeout_ms)
+        db = _open_db(self.path, self.read_only, busy_timeout_ms=busy_timeout_ms,
+                      bulk=bulk)
         try:
             if write and not self.read_only:
                 # Manual transaction control: take the write lock up front.
@@ -2203,7 +2240,10 @@ class Store:
         returns that default for rows predating the ALTER), all three writers
         stamp an int, and the live store has zero NULLs in 170,695 rows.
         """
-        with self._connect(write=True) as db:
+        # bulk=True: up to `cap` (default 5000) rows re-derived through one
+        # connection -- exactly the throughput-sensitive case the larger
+        # cache_size/mmap_size are for (PR #25 finding 5).
+        with self._connect(write=True, bulk=True) as db:
             rows = db.execute(
                 "SELECT rowid, text, metadata FROM chunks "
                 "WHERE embedded=1 AND fts_context_version < ? LIMIT ?",

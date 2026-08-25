@@ -143,6 +143,21 @@ git commit -m "feat(bin): add store measurement + latency harness for the optimi
 - Consumes: nothing.
 - Produces: no signature change. `_open_db(path, read_only=False, *, busy_timeout_ms=...)` keeps its contract; only the pragmas it sets change.
 
+**CORRECTED 2026-08-25** (PR #25 finding 5): `cache_size`/`mmap_size` are set
+PER CONNECTION, and the daemon opens roughly one connection per call across
+~21 threads (e.g. `graph_write.upsert_relation` opens one per relation). The
+64 MiB/256 MiB values below, applied unconditionally to EVERY connection,
+could add on the order of a gigabyte of RSS between concurrent callers —
+this project gates releases on peak RSS (226 MB verified in 0.7.113), so
+this risked failing that gate. The tuned values are reserved for `bulk=True`
+connections only (the rebuild tool, `Store.reindex_fts_batch`, backup's
+`VACUUM INTO` snapshot) — genuinely long-lived, throughput-sensitive
+callers; the common per-call connection gets a smaller default (16 MiB
+cache / 64 MiB mmap — bigger than SQLite's own 2 MiB default, which this
+task's own rationale called too small, but not the full tuned value). Kept
+below for its historical record; the code and tests now reflect the
+corrected scoping.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -153,8 +168,8 @@ def test_open_db_sets_tuned_pragmas(tmp_path):
     Store(str(p)).init()
     db = _open_db(str(p))
     try:
-        assert db.execute("PRAGMA cache_size").fetchone()[0] == -65536
-        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 268435456
+        assert db.execute("PRAGMA cache_size").fetchone()[0] == -16384
+        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 67108864
         assert db.execute("PRAGMA temp_store").fetchone()[0] == 2
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 1
     finally:
@@ -166,6 +181,20 @@ def test_read_only_connection_also_gets_read_pragmas(tmp_path):
     Store(str(p)).init()
     db = _open_db(str(p), read_only=True)
     try:
+        assert db.execute("PRAGMA cache_size").fetchone()[0] == -16384
+        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 67108864
+    finally:
+        db.close()
+
+
+def test_bulk_connection_gets_the_larger_tuned_pragmas(tmp_path):
+    """CORRECTED per PR #25 finding 5: the original tuned values are
+    reserved for bulk=True (rebuild / reindex_fts_batch / backup) --
+    long-lived, throughput-sensitive callers, not the common per-call case."""
+    p = tmp_path / "b.sqlite3"
+    Store(str(p)).init()
+    db = _open_db(str(p), bulk=True)
+    try:
         assert db.execute("PRAGMA cache_size").fetchone()[0] == -65536
         assert db.execute("PRAGMA mmap_size").fetchone()[0] == 268435456
     finally:
@@ -175,17 +204,23 @@ def test_read_only_connection_also_gets_read_pragmas(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_store_pragmas.py -v`
-Expected: FAIL — `assert -2000 == -65536`
+Expected: FAIL — `assert -2000 == -16384`
 
 - [ ] **Step 3: Write minimal implementation**
 
 In `_open_db`, after the existing `journal_size_limit` line and **before** the extension load:
 
 ```python
-    # Tuned for a multi-GB, read-heavy derived store. Defaults left this at a
-    # 2 MB page cache on a 2.6 GB database.
-    db.execute("PRAGMA cache_size=-65536")    # 64 MiB
-    db.execute("PRAGMA mmap_size=268435456")  # 256 MiB
+    # Tuned for a multi-GB, read-heavy derived store, but SCOPED to genuinely
+    # long-lived, throughput-sensitive connections (bulk=True) -- unconditional
+    # 64 MiB/256 MiB per connection could add ~1 GB of RSS across the daemon's
+    # ~21 concurrent per-call threads. Everyday connections get a smaller
+    # default -- still bigger than SQLite's own 2 MiB default on a 2.6 GB
+    # database, just not the full tuned value.
+    cache_kib = 65536 if bulk else 16384
+    mmap_bytes = 268435456 if bulk else 67108864
+    db.execute(f"PRAGMA cache_size=-{cache_kib}")
+    db.execute(f"PRAGMA mmap_size={mmap_bytes}")
     db.execute("PRAGMA temp_store=2")         # MEMORY: FTS5/ORDER BY temp b-trees
     db.execute("PRAGMA threads=4")            # parallel sort
     db.execute("PRAGMA analysis_limit=400")   # bounds PRAGMA optimize (Task 3)
@@ -195,6 +230,11 @@ In `_open_db`, after the existing `journal_size_limit` line and **before** the e
         # durability guarantee we do not need.
         db.execute("PRAGMA synchronous=1")
 ```
+
+`_open_db` gains a `bulk: bool = False` keyword-only parameter (and
+`Store._connect` forwards its own `bulk: bool = False` through to it); pass
+`bulk=True` only from the rebuild tool, `reindex_fts_batch`, and backup's
+`VACUUM INTO` snapshot.
 
 - [ ] **Step 4: Run test to verify it passes**
 
