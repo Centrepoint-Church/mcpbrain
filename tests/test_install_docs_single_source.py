@@ -56,3 +56,38 @@ def test_canonical_install_command_keeps_the_daemon_alias():
     # no auto-update path back — `update.py`'s `_should_update` compares installed
     # vs latest and both are the same version until a release lands.
     assert '"mcpbrain[daemon]"' in _CANONICAL.read_text()
+
+
+def test_every_fresh_install_command_keeps_the_daemon_alias():
+    """Any index-based `uv tool install ... --force` must carry `mcpbrain[daemon]`.
+
+    This exact defect appeared three times from one root cause: drop the extra
+    from a fresh-install command and, until a wheel built with fastembed in base
+    deps is newest on the index, that command installs a brain with NO embedder —
+    mcp-server fails at startup, recall returns empty, and the daily auto-update
+    cannot repair it (installed == latest, so `_should_update` is False).
+
+    `"mcpbrain[daemon]"` is the one spelling correct against BOTH the pre-0.7.119
+    wheels (fastembed extra-only) and every wheel after (`daemon = []`, an empty
+    alias uv resolves silently). It stays, permanently, on every such command.
+
+    Scope is an explicit allowlist of SHIPPED surfaces. `docs/superpowers/` and
+    `.superpowers/` are excluded: they are historical plans, specs and agent
+    working notes recording what was true at the time, not instructions anyone
+    runs today. `--index` is required in the match, which excludes local-source
+    reinstalls like `uv tool install --force ".[daemon]"`.
+    """
+    shipped = [
+        *(_ROOT / "plugin").rglob("*.md"),
+        *(_ROOT / "plugin").rglob("*.ps1"),
+        *(p for p in (_ROOT / "docs").glob("*.md")),
+        *(_ROOT.glob("*.md")),
+    ]
+    offenders = []
+    for path in sorted(set(shipped)):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if all(tok in line for tok in ("uv tool install", "--force", "--index")):
+                if "mcpbrain[daemon]" not in line:
+                    offenders.append(f"{path.relative_to(_ROOT)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "fresh-install command(s) missing the [daemon] alias:\n  " + "\n  ".join(offenders))

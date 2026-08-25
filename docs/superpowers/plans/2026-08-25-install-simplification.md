@@ -419,13 +419,25 @@ it by hand is only for pulling a release early. It never touches your store, you
 config, or your Google token.
 ```
 
-- [ ] **Step 5: Fix DISTRIBUTION.md**
+- [ ] **Step 5: Fix DISTRIBUTION.md — CORRECTED 2026-08-25**
+
+**This step originally specified the fresh-install command WITHOUT the
+`[daemon]` extra. That was wrong for exactly the same reason Task 2 Step 5 was
+wrong, and is the second location of the same mistake — see that step's
+correction block. Keep the extra here too.**
 
 At `docs/DISTRIBUTION.md:104`, replace the command block with:
 
 ```bash
-uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" mcpbrain --force
+uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" "mcpbrain[daemon]" --force
 ```
+
+**Rule for every remaining stage: a complete fresh-install command line
+(`uv tool install … --force`) always carries `"mcpbrain[daemon]"`.** It is the
+only spelling correct against both the pre-0.7.119 wheels and everything after.
+`tests/test_install_docs_single_source.py::test_every_fresh_install_command_keeps_the_alias`
+enforces this across all docs and the PowerShell installer, so a third instance
+cannot appear silently.
 
 and at `:131-135`, delete the sentence explaining that `[daemon]` is required,
 replacing that block's trailing rationale with:
@@ -1675,6 +1687,11 @@ Expected: FAIL on `test_no_inert_persistence_planning`.
 
 Replace the whole file with:
 
+**Keep `"mcpbrain[daemon]"` in every `uv tool install` line below** — same rule as
+Task 2 Step 5 and Task 3 Step 5 (both corrected 2026-08-25). This file's three
+install attempts originally dropped it in this plan; that would have reintroduced
+the no-embedder bug on the Windows path.
+
 ```powershell
 # plugin/scripts/install.ps1
 param([switch]$DotSourceOnly)
@@ -1706,8 +1723,8 @@ function Install-VcRedistX64 {
 function Install-Mcpbrain {
   # uv provisions the x64 CPython (its default on ARM64; pinned here for future-proofing).
   $ok = $false
-  try { uv tool install --python $PY_REQUEST --index $INDEX mcpbrain --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
-  if (-not $ok) { try { uv tool install --python 3.12 --index $INDEX mcpbrain --force; $ok = ($LASTEXITCODE -eq 0) } catch {} }
+  try { uv tool install --python $PY_REQUEST --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {}
+  if (-not $ok) { try { uv tool install --python 3.12 --index $INDEX "mcpbrain[daemon]" --force; $ok = ($LASTEXITCODE -eq 0) } catch {} }
   if (-not $ok) {
     # uv can fail to finalize the minor-version link on ARM64 even though the x64
     # interpreter is fully extracted. Install the interpreter, resolve its concrete
@@ -1720,7 +1737,7 @@ function Install-Mcpbrain {
       $py = Get-ChildItem "$base\cpython-3.12*x86_64*\python.exe" -ErrorAction SilentlyContinue |
             Select-Object -First 1 -ExpandProperty FullName
     }
-    if ($py) { uv tool install --python "$py" --index $INDEX mcpbrain --force }
+    if ($py) { uv tool install --python "$py" --index $INDEX "mcpbrain[daemon]" --force }
     else { throw "Could not resolve an x64 python.exe for the uv-link fallback" }
   }
 }
