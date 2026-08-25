@@ -1013,9 +1013,17 @@ def _compare_counts(src: Path, dst: Path, r: dict) -> bool:
                 print(f"[optimise] MISMATCH {table}: rows dropped from a table "
                       "with no referential filter")
                 ok = False
+        # _NULLIFY'd columns never cause a row to be dropped (they're
+        # repaired in place, per the column's own ON DELETE SET NULL), so
+        # they must not pad this bound -- summing them made the tripwire
+        # slacker than intended on exactly the table it matters most for
+        # (entity_relations.invalidated_by_relation_id's 416 orphans on the
+        # live store dwarfing entity_a/entity_b's real row-dropping counts).
+        _nullify_only = {(child, col) for child, col, _, _ in _NULLIFY}
         for table, drop in r["dropped_rows"].items():
             bound = sum(v for k, v in r["dropped"].items()
-                        if k.split(".")[0] == table)
+                        if k.split(".", 1)[0] == table
+                        and tuple(k.split(".", 1)) not in _nullify_only)
             if drop > bound:
                 print(f"[optimise] MISMATCH {table}: dropped {drop} rows but "
                       f"only {bound} orphan references were reported")
