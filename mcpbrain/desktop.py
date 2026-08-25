@@ -28,24 +28,50 @@ _MANUAL = "restart Claude Desktop manually to load the brain"
 _EXIT_WAIT_S = 10.0
 _EXIT_POLL_S = 0.25
 
+# Every subprocess.run call in this module gets this timeout. This function runs
+# on the daemon's HTTP worker thread (via control_api.py's /api/connect-desktop
+# handler); without a timeout, a subprocess blocked on e.g. a modal dialog (the
+# app asking "save changes?") would hang the request forever. 5s is generous for
+# a quit/status-check command that should return near-instantly under normal
+# conditions, while still being far shorter than _EXIT_WAIT_S's 10s poll budget.
+_SUBPROCESS_TIMEOUT_S = 5.0
+
 
 def _claude_running() -> bool:  # pragma: no cover — touches the process table
     if sys.platform == "win32":
-        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Claude.exe"],
-                           capture_output=True, text=True, check=False)
+        try:
+            r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Claude.exe"],
+                               capture_output=True, text=True, check=False,
+                               timeout=_SUBPROCESS_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # Assume not running — the safer default, since callers already
+            # treat False as "safe to proceed".
+            return False
         return "Claude.exe" in (r.stdout or "")
-    r = subprocess.run(["pgrep", "-x", "Claude"], capture_output=True, check=False)
+    try:
+        r = subprocess.run(["pgrep", "-x", "Claude"], capture_output=True, check=False,
+                           timeout=_SUBPROCESS_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False
     return r.returncode == 0
 
 
 def quit_claude_desktop() -> dict:
     """Ask Claude Desktop to quit and wait (bounded) for it to actually exit."""
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/IM", "Claude.exe", "/F"],
-                       capture_output=True, check=False)
+        try:
+            subprocess.run(["taskkill", "/IM", "Claude.exe", "/F"],
+                           capture_output=True, check=False,
+                           timeout=_SUBPROCESS_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
     elif sys.platform == "darwin":
-        subprocess.run(["osascript", "-e", 'quit app "Claude"'],
-                       capture_output=True, check=False)
+        try:
+            subprocess.run(["osascript", "-e", 'quit app "Claude"'],
+                           capture_output=True, check=False,
+                           timeout=_SUBPROCESS_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
     else:
         return {"quit": False, "detail": f"auto-restart unsupported here; {_MANUAL}"}
     deadline = time.monotonic() + _EXIT_WAIT_S
@@ -59,17 +85,28 @@ def quit_claude_desktop() -> dict:
 
 
 def launch_claude_desktop() -> dict:
-    """Start Claude Desktop again."""
-    if sys.platform == "win32":
-        exe = _windows_claude_exe()
-        if not exe:
-            return {"launched": False, "detail": f"Claude.exe not found; {_MANUAL}"}
-        subprocess.Popen([exe])
-        return {"launched": True, "detail": "Claude Desktop is restarting"}
-    if sys.platform == "darwin":
-        subprocess.run(["open", "-a", "Claude"], capture_output=True, check=False)
-        return {"launched": True, "detail": "Claude Desktop is restarting"}
-    return {"launched": False, "detail": f"auto-restart unsupported here; {_MANUAL}"}
+    """Start Claude Desktop again. Never raises: any failure — including a
+    subprocess timeout or an OS-level error starting the process — is reported
+    back as a failure dict, matching this function's other failure modes."""
+    try:
+        if sys.platform == "win32":
+            exe = _windows_claude_exe()
+            if not exe:
+                return {"launched": False, "detail": f"Claude.exe not found; {_MANUAL}"}
+            subprocess.Popen([exe])
+            return {"launched": True, "detail": "Claude Desktop is restarting"}
+        if sys.platform == "darwin":
+            try:
+                subprocess.run(["open", "-a", "Claude"], capture_output=True, check=False,
+                               timeout=_SUBPROCESS_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                return {"launched": False,
+                        "detail": f"Claude Desktop launch timed out; {_MANUAL}"}
+            return {"launched": True, "detail": "Claude Desktop is restarting"}
+        return {"launched": False, "detail": f"auto-restart unsupported here; {_MANUAL}"}
+    except Exception as exc:  # noqa: BLE001 — this function must never raise
+        return {"launched": False,
+                "detail": f"could not restart Claude Desktop ({exc}); {_MANUAL}"}
 
 
 def relaunch_claude_desktop(on_quit=None) -> dict:
