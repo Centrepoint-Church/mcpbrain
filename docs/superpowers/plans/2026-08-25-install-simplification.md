@@ -25,12 +25,17 @@
   every task; push the branch and open the PR at that stage's ship point, then
   STOP and wait for review before starting the next stage. Never commit to `main`
   directly and never merge your own PR.
-- **Line numbers in this plan were captured on 2026-08-25 against commit
-  `10ea7bb`.** `mcpbrain/doctor.py` in particular has changed since (`ce1a4e7`
-  added a dangling-invalidator report line). Treat every `file:line` here as a
-  pointer to a named function or block, not a literal offset — locate the symbol,
-  then edit. If what you find differs materially from what a task describes, stop
-  and say so rather than forcing the edit.
+- **Every `file:line` in this plan was re-verified on 2026-08-25 against commit
+  `ba07840`** (main, 0.7.118 released). They are accurate as written. They will
+  still drift the moment anything else lands, so treat each as a pointer to a
+  NAMED function or block — locate the symbol, then edit. If what you find differs
+  materially from what a task describes, stop and say so rather than forcing it.
+- **This repo can have concurrent Claude sessions sharing ONE working tree.** Stage
+  only your own named files by explicit path — never `git add -A`, `git add .`, or
+  `git commit -a`. Re-check `git status` immediately before any checkout, not just
+  at the start of your work: a release bump touching `pyproject.toml` +
+  `mcpbrain/__init__.py` + both `plugin/.claude-plugin/*.json` + `uv.lock` can
+  appear in seconds, and uncommitted changes follow a checkout onto your branch.
 
 ---
 
@@ -43,7 +48,7 @@
 The `[daemon]` extra is one package. `mcp-server` itself dies without the embedder weights (`doctor.py:277-281`), so no consumer wants mcpbrain-without-it. The carve-out's stated reason (`DISTRIBUTION.md:130`) is the `.mcpb` bridge removed 2026-08-24. The extra stays **declared but empty** so the `"mcpbrain[daemon]"` command lines already baked into deployed `update.py` installs keep resolving silently — measured: uv warns on an undeclared extra, and is silent on a declared-empty one.
 
 **Files:**
-- Modify: `pyproject.toml:57,65`
+- Modify: `pyproject.toml:56` (end of `dependencies`), `:62-64` (`optional-dependencies`)
 - Test: `tests/test_packaging_extras.py` (create)
 
 **Interfaces:**
@@ -149,7 +154,7 @@ Stage 8 of the current install is ~10 of its ~20 actions and is the only step th
 Task content is unchanged — same names, prompts, models, cadences. Only who types them changes.
 
 **Files:**
-- Modify: `plugin/commands/install.md:56-70` (step 4)
+- Modify: `plugin/commands/install.md:49-62` (step 4)
 - Modify: `plugin/INSTALL.md` (add the manual fallback table)
 - Test: `tests/test_plugin_assets.py:test_install_is_a_command` (extend), plus two new tests
 
@@ -280,11 +285,22 @@ git commit -m "feat(install): the install command creates the four Local tasks i
 
 ### Task 3: Single-source the install documentation
 
-`README.md:11-17` is wrong today: it says clone a repo named `mcp-ops-brain` and run `./install/setup.sh`. Verified — `install/` does not exist in this repo, and `DISTRIBUTION.md:97` records that those scripts were removed. The README's "Updating" section is wrong in the same way: it describes `mcpbrain update` as pulling git commits fast-forward, when `update.py` reinstalls from the wheel index. **Both are in scope** as the same class of defect (documenting a mechanism that does not exist); this is a deliberate, named widening of the spec's `README.md:11-17`.
+`README.md:9-19` is wrong today: it says clone a repo named `mcp-ops-brain` and
+run `./install/setup.sh`. Verified — `install/` does not exist in this repo, and
+`DISTRIBUTION.md:98` records that those scripts were removed. The README's
+"Updating" section (`:33-39`) is wrong in the same way: it describes `mcpbrain
+update` as pulling git commits fast-forward, when `update.py` reinstalls from the
+wheel index.
+
+**Both are in scope — decided, not open.** They are one class of defect
+(documenting a mechanism that does not exist), the second is two sentences, and
+leaving it would mean shipping a PR that fixes half a broken page. This is a
+deliberate widening of the spec's `README.md:9-19`, recorded here and in the
+spec so the diff is not a surprise at review.
 
 **Files:**
-- Modify: `README.md:9-19` and the `## Updating` section
-- Modify: `docs/DISTRIBUTION.md:104,128-134`
+- Modify: `README.md:9-19` (Install) and `:33-39` (Updating)
+- Modify: `docs/DISTRIBUTION.md:104` and `:131-135`
 - Modify: `docs/RELEASE-RUNBOOK.md:312-314`
 - Test: `tests/test_install_docs_single_source.py` (create)
 
@@ -345,7 +361,7 @@ Expected: FAIL on all five — README still carries the clone block, the dead sc
 
 - [ ] **Step 3: Fix the README Install section**
 
-Replace `README.md` lines 9-19 (the `## Install` heading through the `On macOS, double-click...` paragraph) with:
+Replace `README.md:9-19` (the `## Install` heading at `:9` through the `On macOS, double-click...` paragraph at `:19`) with:
 
 ```markdown
 ## Install
@@ -375,7 +391,7 @@ Leave the numbered "Each installer does the same things" list in place but retit
 
 - [ ] **Step 4: Fix the README Updating section**
 
-Replace the paragraph beginning `This pulls the latest commits` with:
+Replace `README.md:39`, the paragraph beginning `This pulls the latest commits`, with:
 
 ```markdown
 This checks the wheel index for a newer published version and, if there is one,
@@ -393,8 +409,8 @@ At `docs/DISTRIBUTION.md:104`, replace the command block with:
 uv tool install --python 3.12 --index "mcpbrain=<INDEX_URL>" mcpbrain --force
 ```
 
-and in the paragraph below it, delete the sentence explaining that `[daemon]` is
-required, replacing the `128-134` block's trailing rationale with:
+and at `:131-135`, delete the sentence explaining that `[daemon]` is required,
+replacing that block's trailing rationale with:
 
 ```markdown
    The `[daemon]` extra is retained as an empty alias so this exact command line —
@@ -404,7 +420,7 @@ required, replacing the `128-134` block's trailing rationale with:
 
 - [ ] **Step 6: Fix the stale runbook note**
 
-At `docs/RELEASE-RUNBOOK.md:312-314`, delete the parenthetical `(Note: INSTALL.md is currently macOS-worded — the Windows install commands/PATH still need their own pass; see the gaps note below.)` — `INSTALL.md` has had a Windows section since 0.7.97.
+At `docs/RELEASE-RUNBOOK.md:312-313`, delete the parenthetical `(Note: INSTALL.md is currently macOS-worded — the Windows install commands/PATH still need their own pass; see the gaps note below.)` — `INSTALL.md` has had a Windows section since 0.7.97.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
@@ -830,7 +846,7 @@ Today `_register_desktop_mcp` is called from `setup.main`, `connect_main`, and `
 
 **Files:**
 - Modify: `mcpbrain/connector.py`
-- Modify: `mcpbrain/setup.py:55-110` (delete `_desktop_config_path` and `_register_desktop_mcp`), `:241`, `:263`
+- Modify: `mcpbrain/setup.py` — delete `_desktop_config_path` (`:55-66`) and `_register_desktop_mcp` (`:69-106`); update the two call sites at `:241` and `:263`
 - Modify: `mcpbrain/control_api.py:332-334`
 - Modify: `tests/test_setup_path_echo.py`
 - Test: `tests/test_connector_register.py` (create)
@@ -1081,7 +1097,7 @@ git commit -m "refactor(connector): one registration path across both Claude sur
 `_mcpbrain_bin()` calls `Path.resolve()`, which follows the uv shim into the tool venv — on the author's machine it produced `/Users/joshkemp/.local/share/uv/tools/mcpbrain/bin/mcpbrain`. The stable public entry point is the shim, `~/.local/bin/mcpbrain`; the venv path is an internal uv layout detail.
 
 **Files:**
-- Modify: `mcpbrain/setup.py:37-46`
+- Modify: `mcpbrain/setup.py:44-52` (`_mcpbrain_bin`)
 - Test: `tests/test_setup_bin_path.py` (create)
 
 **Interfaces:**
@@ -1344,7 +1360,7 @@ git commit -m "fix(connector): write the entry while Claude Desktop is down, not
 Nothing currently checks whether the connector actually landed. A doctor check is what would have caught the MSIX path bug before a hardware gate did. While in this code, also fix the neighbouring scheduled-tasks line, which points at `/mcpbrain-fix in Cowork` — a command the plugin does not contain (`plugin/commands/` holds only `install.md`).
 
 **Files:**
-- Modify: `mcpbrain/doctor.py:71-135` (`_default_repairs`), `:396-407` (appended lines)
+- Modify: `mcpbrain/doctor.py:71-135` (`_default_repairs`), `:342` (where appended lines begin), `:411-421` (the scheduled-tasks block), and the three `/mcpbrain-fix` references at `:20`, `:44`, `:418`
 - Test: `tests/test_doctor_connector.py` (create)
 
 **Interfaces:**
@@ -1484,9 +1500,25 @@ In `run_doctor`, immediately after the `lines.append(arch_line())` call, add:
     lines.extend(connector_lines(mcpbrain_bin=mcpbrain_bin))
 ```
 
-- [ ] **Step 5: Fix the stale scheduled-tasks guidance**
+- [ ] **Step 5: Fix the stale `/mcpbrain-fix` guidance — all THREE sites**
 
-In `run_doctor`, replace the `⚠️ Scheduled tasks` message body:
+`/mcpbrain-fix` does not exist: `plugin/commands/` contains only `install.md`.
+It is referenced three times in `doctor.py`; fix every one, or doctor keeps
+sending users to a command they cannot run.
+
+At `:20`, in the module docstring:
+
+```python
+(/mcpbrain:install), never auto.
+```
+
+At `:44`, in the `_DISPOSITIONS` entry's guided message:
+
+```python
+                   "guided": "Open Claude or run /mcpbrain:install in Claude Code"},
+```
+
+At `:417-419`, in the scheduled-tasks report line:
 
 ```python
         lines.append("⚠️  Scheduled tasks  not directly checkable → "
@@ -1494,7 +1526,7 @@ In `run_doctor`, replace the `⚠️ Scheduled tasks` message body:
                      "enrich/meeting-packs/gardener/reference-gardener tasks")
 ```
 
-(`/mcpbrain-fix` does not exist — `plugin/commands/` contains only `install.md`.)
+Verify none remain: `grep -n "mcpbrain-fix" mcpbrain/doctor.py` → no output.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -1710,7 +1742,7 @@ git commit -m "refactor(windows): drop install.ps1's inert plan layer and duplic
 `plugin/scripts/install.ps1` is the source of truth but is served from `mcpbrain-dist`, hand-copied per `RELEASE-RUNBOOK.md` §1b.1. Nothing guards the copy, so the published installer can go stale silently.
 
 **Files:**
-- Modify: `bin/release.py:38-52`
+- Modify: `bin/release.py:44-53` (inside `main`, after the wheel copy)
 - Modify: `docs/RELEASE-RUNBOOK.md:102-122`
 - Test: `tests/test_release_publishes_installer.py` (create)
 
@@ -2058,7 +2090,7 @@ git commit -m "fix(wizard): three real steps, fleet IDs from config, drop dead s
 `setup.py:144` runs `ocr.install_tesseract()` — a `brew install` / `winget install`, minutes long and possibly prompting — *before* `webbrowser.open(url)`, i.e. exactly when the user is waiting on a blank screen. It must **move, not be deleted**: its only other caller is the manual `doctor --repair` path, and removing the automatic one reinstates the regression its own docstring records ("nothing installed it and so every install had OCR silently off").
 
 **Files:**
-- Modify: `mcpbrain/setup.py:135-160` (delete `_install_ocr_best_effort` and its call)
+- Modify: `mcpbrain/setup.py:129-150` (delete `_install_ocr_best_effort`) and its call site in `main`
 - Modify: `mcpbrain/daemon.py` (`_CADENCE_PASSES`, new `_run_ocr_setup`, new interval/last attrs)
 - Test: `tests/test_ocr_first_run.py` (create)
 
@@ -2217,7 +2249,7 @@ and initialise the two attributes alongside the other cadence intervals in
 
 - [ ] **Step 5: Remove the call from `setup.py`**
 
-Delete `_install_ocr_best_effort` (the whole function, `setup.py:135-158`) and its
+Delete `_install_ocr_best_effort` (the whole function, `setup.py:129-150`) and its
 call site in `main`. Replace the call line with nothing — the wizard now opens
 that much sooner.
 
