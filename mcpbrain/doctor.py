@@ -393,6 +393,21 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Repair state':<16} skipped ({exc})")
 
+    # Bi-temporal back-pointers whose target row is gone. Surfaced because
+    # foreign_key_check is STRUCTURALLY BLIND to any of these columns that does
+    # not declare a REFERENCES clause -- which is every store that has not been
+    # rebuilt. Residue predates FK enforcement and cannot be produced by
+    # current code (tests/test_dangling_invalidators.py pins that), so a
+    # NON-ZERO count here on an already-rebuilt store means something
+    # reintroduced writes with foreign_keys OFF, and is worth investigating
+    # rather than just sweeping. Repair: `bin/optimise_store.py --nullify-dangling`.
+    try:
+        dangling = store.count_dangling_invalidators()
+        lines.append(f"{'✅' if not dangling else '⚠️'} dangling invalidator "
+                     f"pointers: {dangling}")
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        lines.append(f"➖ {'Invalidators':<16} skipped ({exc})")
+
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
     enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
