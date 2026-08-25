@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Feature version floors, guarded at runtime, never assumed:** `contentless_delete` needs SQLite **≥3.43**; JSONB needs **≥3.45**; STRICT needs **≥3.37**. Read `sqlite3.sqlite_version` and fall back to the current form below the floor. The version comes from whichever Python the wheel installs under, and the Windows path pins its own x64 interpreter.
-- **Gold bar:** recall@10 **≥ 0.750**, MRR **≥ 0.514**. Contentless FTS5 and JSONB are ranking-neutral by construction, so **any** movement is a defect to investigate, not a result to accept.
+- **Gold bar:** recall@10 **≥ 0.780**, MRR **≥ 0.550** (raised 2026-08-25 from the original 0.750/0.514 — see Task 9's Step 1, corrected below — which was stale relative to every actual pre-rebuild measurement taken during this work). Contentless FTS5 and JSONB are ranking-neutral by construction, so **any** movement is a defect to investigate, not a result to accept.
 - **`init()` uses `CREATE TABLE IF NOT EXISTS`,** so schema changes reach new installs only. Existing stores change *only* via `bin/optimise_store.py`. Never make the rebuild automatic — it is attended and backup-gated, following the `bin/consolidate.py` precedent.
 - **Read-only connections must never execute a writing pragma** (`optimize`, `analyze`). Guard on the existing `read_only` flag.
 - **Measured baseline to beat:** file 2.62 GB / 639,769 pages @ 4096 B; `fts_chunks_content` 0.78 GB; `fts_chunks_data` 93 MB; `chunks` 170,657 rows; metadata 86 MB; orphans **256 rows total** (`entity_relations.entity_a` 8, `entity_relations.entity_b` 0, `email_entities.entity_id` 146, `entity_observations.entity_id` 96, `entity_communities.entity_id` 6).
@@ -991,7 +991,16 @@ git commit -m "feat(bin): single-pass out-of-place store rebuild with orphan swe
 - [ ] **Step 1: Run the gold harness against the rebuilt copy**
 
 Run the `--gold` harness against `/tmp/rebuilt.sqlite3`.
-Expected: recall@10 **≥ 0.750**, MRR **≥ 0.514**.
+Expected: recall@10 **≥ 0.780**, MRR **≥ 0.550**.
+
+**CORRECTED 2026-08-25** (PR #25 review, flag-only): originally recorded as
+0.750/0.514, which was stale — every actual pre-rebuild measurement taken
+during this plan's work landed at recall@10=0.800 and MRR in the
+0.565–0.591 range, so a real regression down to e.g. MRR 0.52 would have
+passed the old floor. Raised with margin below the consistently-observed
+baseline, not raised to match it exactly (MRR has genuine run-to-run
+variance — see CLAUDE.md's SQLite optimisation entry for the actual
+measured numbers each time this gate ran).
 
 **Contentless FTS5 and JSONB are ranking-neutral by construction, so any movement at all is a defect.** Investigate rather than accept. Note the known blind spot: the harness calls `hybrid_search` directly and so does not exercise `recall_max_distance` — check the injection path separately via `prompt_recall`.
 

@@ -430,8 +430,10 @@ snapshot succeeded.
    cp <store>.new /tmp/gold-check/brain.sqlite3
    MCPBRAIN_HOME=/tmp/gold-check uv run python tests/eval/run_eval.py --gold --k 10
    ```
-   Expected: recall@10 **≥ 0.750**, MRR **≥ 0.514** (the plan's non-negotiable
-   floor). Contentless FTS5 is ranking-neutral by
+   Expected: recall@10 **≥ 0.780**, MRR **≥ 0.550** (the plan's non-negotiable
+   floor — raised 2026-08-25 from the original 0.750/0.514, which was stale
+   relative to every actual pre-rebuild measurement taken during this work,
+   consistently recall@10=0.800 / MRR 0.565–0.591). Contentless FTS5 is ranking-neutral by
    construction — same tokens indexed, same BM25 ranking — so if the numbers
    differ from the live store's own current gold run, explain why before
    proceeding. A small **upward** move is possible here: the rebuild's
