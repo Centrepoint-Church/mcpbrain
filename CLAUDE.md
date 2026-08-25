@@ -150,7 +150,9 @@ wrong and MUST be right:
   outright, and `bin/optimise_store.py`'s `_copy_all` copies `metadata`
   verbatim. Enabling it would need that column loosened to `ANY`/`BLOB` plus a
   dedicated rebuild — a separate follow-up, not this plan. `jsonb_supported()`
-  remains defined as an unused version-guard utility. **Not
+  was deleted (PR #25 finding 7): a dead, unused version-guard utility is a
+  trap that invites `_meta_extract` to call it again, exactly the mistake
+  that caused the outage above. **Not
   yet run against any user's actual live store** — that is a separate,
   explicit, attended operation per machine, to be scheduled deliberately.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
