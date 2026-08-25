@@ -81,9 +81,24 @@ wrong and MUST be right:
   dropped (`entity_relations.entity_a` 8, `email_entities.entity_id` 146,
   `entity_observations.entity_id` 96, `entity_communities.entity_id` 6) plus
   **416** `entity_relations.invalidated_by_relation_id` dangling pointers
-  nullified (the PR #25 finding 2 fix — this column has no `REFERENCES`
-  clause so `foreign_key_check` never saw these; going forward the new
-  `ON DELETE SET NULL` constraint self-heals this on this now-rebuilt store).
+  nullified. **Correction to an earlier claim here:** it was recorded that
+  `merge_entities`/`decay_relations` would keep producing these. They do
+  **not** — `d312b26` gave the column
+  `REFERENCES entity_relations(id) ON DELETE SET NULL`, and a reproduction
+  against current code (2026-08-25) shows a pointer to a nonexistent row is
+  rejected with `FOREIGN KEY constraint failed` and a parent delete NULLs its
+  children. That claim came from the PR body written *before* the constraint
+  landed. Pinned by `tests/test_dangling_invalidators.py`. A residue of **13**
+  rows survived the live rebuild by a route that could not be reconstructed
+  (the pre-rebuild store and its sidecar were already gone); swept on
+  2026-08-25 via `bin/optimise_store.py --nullify-dangling --yes`, leaving
+  `foreign_key_check` at 0. Two caveats that keep this worth watching:
+  `foreign_key_check` is **structurally blind** to any store that has not been
+  rebuilt (no `REFERENCES` clause on the column), and `PRAGMA foreign_keys` is
+  a **no-op inside an open transaction**, so enforcement depends on it being
+  set at connect time. `doctor` now reports the count every run, and a
+  non-zero on an already-rebuilt store means something wrote with foreign_keys
+  OFF — investigate before sweeping.
   Old store retained at `brain.sqlite3.pre-rebuild-1787623472`, per policy,
   until the next successful scheduled backup cycle confirms the new store
   backs up correctly.

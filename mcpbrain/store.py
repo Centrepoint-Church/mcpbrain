@@ -2462,6 +2462,64 @@ class Store:
                 "content_hash": r["content_hash"],
             }
 
+    # Bi-temporal back-pointers: which row superseded this one. Both columns
+    # declare REFERENCES ... ON DELETE SET NULL, so the FK keeps them honest
+    # going forward -- but that only reaches an EXISTING store through a
+    # rebuild, and only bites while foreign_keys=ON is set on the connection.
+    # Stores that predate either can still carry residue, and foreign_key_check
+    # only sees the columns that actually declare a REFERENCES clause.
+    _INVALIDATOR_COLUMNS = (
+        ("entity_relations", "invalidated_by_relation_id", "entity_relations", "id"),
+        ("entity_observations", "invalidated_by_observation_id",
+         "entity_observations", "id"),
+    )
+
+    def _dangling_invalidator_counts(self, db) -> dict[str, int]:
+        """Per-column count of back-pointers whose target row is gone."""
+        out: dict[str, int] = {}
+        for child, col, parent, pcol in self._INVALIDATOR_COLUMNS:
+            try:
+                n = db.execute(
+                    f'SELECT count(*) FROM "{child}" c WHERE c."{col}" IS NOT NULL '
+                    f'AND NOT EXISTS (SELECT 1 FROM "{parent}" p '
+                    f'WHERE p."{pcol}" = c."{col}")'
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                continue  # column or table absent on an older schema
+            if n:
+                out[f"{child}.{col}"] = n
+        return out
+
+    def count_dangling_invalidators(self) -> int:
+        """Total dangling bi-temporal back-pointers across both columns."""
+        with self._connect() as db:
+            return sum(self._dangling_invalidator_counts(db).values())
+
+    def nullify_dangling_invalidators(self) -> dict[str, int]:
+        """Null every back-pointer whose target is gone. Returns counts by column.
+
+        NULL is already the normal value for the overwhelming majority of these
+        rows -- a pointer to a row that no longer exists carries no provenance,
+        it just fails foreign_key_check. Idempotent: a second run returns {}.
+
+        Uses NOT EXISTS rather than `NOT IN (SELECT id ...)`, which returns NULL
+        (never true) for every row if the subquery yields a single NULL.
+        """
+        done: dict[str, int] = {}
+        with self._connect(write=True) as db:
+            for child, col, parent, pcol in self._INVALIDATOR_COLUMNS:
+                try:
+                    db.execute(
+                        f'UPDATE "{child}" SET "{col}"=NULL WHERE "{col}" IS NOT NULL '
+                        f'AND NOT EXISTS (SELECT 1 FROM "{parent}" p '
+                        f'WHERE p."{pcol}" = "{child}"."{col}")')
+                except sqlite3.OperationalError:
+                    continue
+                n = db.execute("SELECT changes()").fetchone()[0]
+                if n:
+                    done[f"{child}.{col}"] = n
+        return done
+
     def patch_chunk_metadata(self, doc_id: str, **patch) -> bool:
         """Merge kwargs into a chunk's metadata JSON without touching content_hash or embedded.
 
