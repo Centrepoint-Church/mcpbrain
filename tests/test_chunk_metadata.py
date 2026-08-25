@@ -74,12 +74,18 @@ def test_patch_resets_fts_version_when_the_contextual_prefix_changes(tmp_path):
     assert after == 0, "prefix-affecting metadata patch must re-arm reindex_fts_batch"
 
     s.reindex_fts_batch()
+    # fts_chunks is contentless (content='') -- it never stores retrievable
+    # text, only the search index, so prove re-indexing happened via MATCH
+    # rather than reading the column back. "budgets" (plural) is a token
+    # unicode61 only tokenizes out of the new folder_path clause -- the
+    # original text/filename only ever contain singular "budget".
     with s._connect() as db:
-        fts_text = db.execute(
-            "SELECT text FROM fts_chunks WHERE rowid="
-            "(SELECT rowid FROM chunks WHERE doc_id='gdrive-f1-0')"
-        ).fetchone()["text"]
-    assert "Church/Budgets" in fts_text
+        rowid = db.execute(
+            "SELECT rowid FROM chunks WHERE doc_id='gdrive-f1-0'").fetchone()["rowid"]
+        matched = db.execute(
+            "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH 'budgets'"
+        ).fetchall()
+    assert [r["rowid"] for r in matched] == [rowid]
 
 
 def test_patch_leaves_fts_version_alone_when_the_prefix_is_unaffected(tmp_path):

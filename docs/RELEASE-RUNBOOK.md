@@ -342,6 +342,196 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 add a regression assertion. **Record results here. Do not roll out to Windows until
 this gate passes.**
 
+## 7. Store maintenance: `bin/optimise_store.py` (attended SQLite rebuild)
+
+**This is an ATTENDED, backup-gated migration a human runs at the terminal. It is
+NEVER wired into a daemon cadence, a cron, or any automatic trigger — same
+posture as `bin/consolidate.py` (§ its own module docstring: "Attended,
+backup-gated consolidation migrations (curator-run)"). `init()` uses `CREATE
+TABLE IF NOT EXISTS`, so a schema change (page size, STRICT tables,
+contentless FTS5, FK constraints) reaches a
+**new** install for free but an **existing** store only picks it up by running
+this tool. There is no silent migration path and there should never be one.**
+
+**The same `IF NOT EXISTS` property also applies to `init()`'s five expression
+indexes on `chunks.metadata`, and there it is a TRAP:** `CREATE INDEX IF NOT
+EXISTS` keys on the index NAME, not its expression, so changing the SQL an index
+is built over does **not** rebuild an existing store's copy — the persisted index
+keeps the old expression while queries move to the new one, SQLite stops matching
+them, and every affected query silently degrades to a full `SCAN chunks` (the
+0.7.105 outage). That is why `store._meta_extract()` emits `json_extract`
+unconditionally and must never become version-dependent; see its docstring and
+`tests/test_metadata_jsonb.py::test_reinit_on_existing_store_*`. **If a metadata
+index expression ever legitimately has to change, the index must be renamed (or
+explicitly dropped) — never edited in place.** Relatedly: metadata is stored as
+JSON **TEXT**, not JSONB. Task 7's STRICT `chunks` table declares `metadata TEXT`,
+so a JSONB blob cannot be written to it at all; true JSONB storage would need
+that column loosened to `ANY`/`BLOB` plus a dedicated rebuild.
+
+Run this when: the live store is due for its (infrequent, one-off-per-schema-
+generation) physical rebuild — not on a schedule. **Budget disk generously: on
+the 2.62 GB live store, following the procedure below as written needs
+~12-13 GB free, not merely ~2.4x the store size.** The tool's snapshot step
+(Gate 2, inside `_verified_snapshot`) runs on **every**
+non-`--swap`/non-`--rollback` invocation — including the report-only run in
+step 2 below — writes a **timestamped** artifact
+(`<store>.snapshot-<epoch>.enc`, 3.48 GB — Fernet base64 costs 4/3 over the
+2.62 GB plaintext), and never deletes it. Each call to `_verified_snapshot`
+also materialises a **transient 2.62 GB cleartext copy twice**: once inside
+`backup.make_encrypted_snapshot` (a full plaintext snapshot, encrypted
+in place) and again when `_verified_snapshot` decrypts its own output back
+to a temp file to integrity-check it before trusting it as a rollback —
+both removed immediately after, but present on disk while that call runs.
+Doing step 2 and then step 3 as written therefore peaks (at step 3's own
+Gate 2, just before its transient cleartext is cleaned up, and *before* the
+rebuild file has even started writing) at: **two** 3.48 GB encrypted
+snapshots left over from steps 2 and 3 (6.96 GB) + **one** 2.62 GB transient
+snapshot-verify cleartext (step 3's own, still live at that instant) + the
+still-present 2.62 GB old/live store ≈ **12.2 GB** — before the up-to-1.49 GB
+rebuild file even starts growing. Delete the older
+`<store>.snapshot-*.enc` (and its own `<that-snapshot>.key`, if you don't
+need it retained — one key file per snapshot, never a shared name, so
+deleting an older snapshot's key can never affect a newer one) once you've
+moved past the step that produced it and confirmed the next step's own
+snapshot succeeded.
+
+### Procedure
+
+1. **Stop the daemon.** `launchctl bootout gui/$UID/com.mcpbrain` (macOS) /
+   the Windows scheduled-task equivalent. The tool's own Gate 1 refuses to run
+   against the live store while the daemon holds `daemon.lock`, but stopping it
+   first avoids a confusing refusal message and is the point at which "attended"
+   starts — nothing below should run with the daemon up.
+2. **Report only, no `--yes`.** `uv run python bin/optimise_store.py` — prints
+   orphan-row counts (rows whose FK parent is missing), the schema preflight
+   (unmanaged tables carried verbatim, dead columns to be dropped with their
+   non-null counts), and takes a **verified encrypted snapshot** first (Gate 2:
+   the snapshot is decrypted to a temp file and integrity-checked before the
+   tool proceeds at all — an unverified snapshot is not a rollback). **This
+   step does not touch the live store's own data or schema, but it is not a
+   no-op**: it writes a multi-GB encrypted snapshot artifact next to the store
+   (and an escrow-key file, if none is configured yet) every time it runs —
+   see the disk-budget note above. Read the report.
+3. **Rebuild, out of place.** `uv run python bin/optimise_store.py --yes` —
+   produces `<store>.new` next to the live file. The live file is **never**
+   touched by this step. Gates 5/6 (integrity_check + foreign_key_check, and a
+   row-count reconciliation against the orphan report) must both report `ok`
+   before the tool will say it is safe to promote; if either fails, `<store>.new`
+   is retained for inspection and the live store is untouched — do not proceed
+   to `--swap`.
+4. **Verify independently before swapping.** Beyond the tool's own gates, spot
+   check on `<store>.new` with `bin/measure_store.py --latency` (expect
+   `has_stat1: true` now that the rebuild ran `ANALYZE`, and the four 0.7.105
+   benchmark latencies at least as good as the live store's), and run the gold
+   harness against a **copy** of `<store>.new` renamed to `brain.sqlite3` under
+   a scratch `MCPBRAIN_HOME` (never against the live `MCPBRAIN_HOME` — that
+   would silently exercise the live store, not the rebuild):
+   ```bash
+   cp <store>.new /tmp/gold-check/brain.sqlite3
+   MCPBRAIN_HOME=/tmp/gold-check uv run python tests/eval/run_eval.py --gold --k 10
+   ```
+   Expected: recall@10 **≥ 0.780**, MRR **≥ 0.550** (the plan's non-negotiable
+   floor — raised 2026-08-25 from the original 0.750/0.514, which was stale
+   relative to every actual pre-rebuild measurement taken during this work,
+   consistently recall@10=0.800 / MRR 0.565–0.591). Contentless FTS5 is ranking-neutral by
+   construction — same tokens indexed, same BM25 ranking — so if the numbers
+   differ from the live store's own current gold run, explain why before
+   proceeding. A small **upward** move is possible here: the rebuild's
+   `_rederive_fts` unconditionally regenerates every row's FTS text from that
+   row's *current* metadata, which corrects any chunk whose indexed text had
+   drifted stale relative to its metadata — a real, pre-existing gap
+   (`Store.patch_chunk_metadata` updates `chunks.metadata` but never
+   refreshes the `fts_chunks` mirror or resets `fts_context_version`, so a
+   metadata-only write — e.g. a Drive re-sync backfilling `folder_path` onto
+   an already-indexed chunk — can leave the FTS index silently behind
+   metadata forever — see the "SQLite optimisation" entry under this repo's
+   root `CLAUDE.md` § "Shipping caveats" for the full worked example,
+   including the specific commit SHAs and the one gold-set chunk this was
+   confirmed against directly, not just inferred from score deltas). Also
+   spot-check the injection path (`daemon.search`/`prompt_recall`)
+   directly — the `--gold` harness calls `hybrid_search` and does not
+   exercise the `recall_max_distance` off-topic gate.
+5. **Promote.** `uv run python bin/optimise_store.py --swap --yes` — checkpoints
+   `<store>.new`'s WAL, re-verifies integrity, then swaps it over the live file.
+   **The old store is retained, never deleted**, at
+   `<store>.pre-rebuild-<timestamp>` (sidecars moved with it, so nothing is left
+   for a later re-open to silently replay into the wrong file).
+6. **Restart the daemon** and confirm it opens the promoted store normally
+   (`mcpbrain doctor`, a live `brain_search` call).
+7. **Keep the retained pre-rebuild file until the next successful scheduled
+   backup run** confirms the new store is being backed up correctly — only
+   then delete `<store>.pre-rebuild-<timestamp>`. Deleting it immediately after
+   swap removes your only same-machine fallback before the new store has had a
+   full cadence cycle to prove itself. **Also clean up the encrypted snapshot
+   artifact(s)** from steps 2/3 (`<store>.snapshot-<epoch>.enc`, plus each
+   one's own `<that-snapshot>.enc.key` escrow-key sidecar — one key file per
+   snapshot, never a shared name, so removing an older snapshot never
+   touches a newer one's key) — the tool never
+   deletes these itself, they are 3.48 GB each on the live store, and a
+   report-only run followed by a real `--yes` run leaves **two** of them on
+   disk. Confirm you no longer need a given snapshot (i.e. you're past the
+   step it protected) before removing it.
+
+### Emergency recovery: `--rollback --yes`
+
+If something is wrong post-swap and you need to go back **now**, on the same
+machine, prefer this over restoring the encrypted snapshot by hand — it is
+faster and, critically, it is **sidecar-aware** in a way a bare `mv` is not:
+
+```bash
+uv run python bin/optimise_store.py --src <store> --rollback --yes
+```
+
+This moves the *current* store aside (with its own `-wal`/`-shm`, so no
+foreign WAL is left behind to be replayed into the restored file), restores
+the newest `<store>.pre-rebuild-*` (or the one named by `--from`) together
+with **its own** sidecars, checkpoints it, and re-verifies integrity before
+declaring success. The tool's own docstring explains why the sidecar handling
+matters: a bare `mv <kept> <store>` used to be the documented rollback and it
+**silently corrupted the restored store** — SQLite replays whatever `-wal`
+happens to be sitting next to the file on next open, no error, `integrity_check`
+still reports `ok`, and the restored content and page size both come from the
+wrong store.
+
+**`--from` is validated in code, not left to operator care.** `_refuse_as_store`
+rejects a candidate before anything is promoted if it (a) has a `-wal`/`-shm`
+suffix, (b) opens as fewer than 16 pages (a fresh store is already 114, the live
+one ~640k — so this catches a 0-byte or truncated file), or (c) has no `chunks`
+table. This matters because `PRAGMA integrity_check` **cannot** catch any of
+them: a 0-byte sidecar opens as a perfectly valid, structurally sound, *empty*
+SQLite database, so every downstream gate passes and the tool would report
+`restored store: integrity_check=['ok']` having installed an empty brain over a
+real one. The retained generations (`.pre-rebuild-*`, `.rolled-back-*`, and both
+of their sidecars) all share the store name as a prefix, so that was one
+tab-completion away on the highest-stakes command here. Still prefer omitting
+`--from` and letting `_find_retained` pick the newest retained main file.
+
+### Cross-machine restore: SQLite version is a one-way door
+
+**A rebuilt (or freshly `init()`'d) store requires the SAME OR NEWER SQLite
+version on any machine it is later opened on for writes.** Restoring one onto a
+machine with an OLDER SQLite will fail. The binding constraint is contentless
+FTS5: `init()` creates `fts_chunks` with `contentless_delete=1` when SQLite is
+≥ 3.43 (`store.fts5_supports_contentless`), and an older FTS5 module does not
+recognise that option — it rejects the table rather than degrading. STRICT
+tables (≥ 3.37) are a second, lower floor.
+Practical consequences:
+
+- A store rebuilt on a modern machine is **not** portable backwards. Note down
+  the SQLite version it was built under (`uv run python -c "import sqlite3;
+  print(sqlite3.sqlite_version)"`) alongside the backup.
+- Restoring a backup onto a **new or reinstalled** machine: check that machine's
+  SQLite version *before* restoring, not after. `uv tool install --python 3.12`
+  (the pin § 1 already requires) is what keeps the fleet's interpreters —
+  and therefore their bundled SQLite — consistent enough for this not to bite.
+- The daemon does **not** currently detect this and refuse cleanly; an
+  incompatible open surfaces as a raw `sqlite3.OperationalError`. Stamping a
+  minimum-SQLite marker into the store's `meta` table with a startup check was
+  considered and deliberately deferred — it touches daemon startup and
+  `doctor.py`, so it is a separate change, not part of the rebuild work.
+- Metadata storage is *not* a factor here: it is JSON TEXT read with
+  `json_extract`, which every supported SQLite has.
+
 ## Environment note — repos live outside iCloud
 
 All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`

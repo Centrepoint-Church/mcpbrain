@@ -62,6 +62,99 @@ wrong and MUST be right:
   cold-exclusion is decoupled from `tiered_memory` into `recall_excludes_cold` (**default OFF**),
   so cold chunks stay in recall (recall restored to 0.750, MRR 0.556) while still being skipped
   for graph-extraction. `tiered_memory` now controls only the core-tier prepend.
+- **SQLite optimisation (2026-08-24 plan, Tasks 1-9): store rebuild is BUILT and
+  GATED, not yet run against the live store.** `bin/optimise_store.py`'s
+  `rebuild()`/`main()` performs a full out-of-place rewrite of `brain.sqlite3`
+  (page_size 4096→8192, contentless FTS5, STRICT tables + FK
+  constraints) behind an attended CLI (`--yes` gate,
+  verified encrypted snapshot before anything is written, `--swap` that
+  retains the old file, and a sidecar-aware `--rollback --yes`) — see
+  `docs/RELEASE-RUNBOOK.md` § 7 for the full procedure. **This is attended and
+  NEVER automatic**, same posture as `bin/consolidate.py`: nothing in the
+  daemon's cadences calls it. Gated on a real copy of the live store (2.62 GB,
+  170,705 chunks) rebuilt to 1.495 GB (57.1% of original), `has_stat1`
+  false→true, `integrity_check`/`foreign_key_check` clean, row-count
+  reconciliation clean. The four 0.7.105 benchmark latencies, warmed:
+  `doc_ids_for_messages` ~690ms→~50-100ms, `thread_chunks` ~234ms→~1ms,
+  `chunks_for_file` ~228ms→~0.8ms, `inbound_chunks_since` ~376ms→~135ms — the
+  live store currently has **no** `sqlite_stat1` at all (`has_stat1: false`),
+  so these expression-index queries are on a slow, stats-free plan today;
+  the rebuild's mandatory `ANALYZE` is what fixes that, independent of the
+  schema changes themselves. **Gold gate: recall@10 0.750 / MRR 0.514 is the
+  plan's non-negotiable floor; both the pre-rebuild copy (0.800/0.591) and the
+  rebuilt copy (0.850/0.599) clear it, and the small pre→post movement is
+  EXPLAINED, not a construction defect — but the mechanism is DATA drift from
+  a metadata-only writer, not a code-versioning gap.** `contextual_prefix()`'s
+  `folder_path` clause has existed since the initial commit (317ea4d,
+  2026-06-02); `FTS_CONTEXT_VERSION` was introduced seven weeks later
+  (731a620, 2026-07-22, Phase C), so the clause cannot be what escaped that
+  version. `folder_path` metadata itself only started being STAMPED onto
+  Drive chunks on 2026-07-28 (`b7bf024`, "C5"). The real gap:
+  `Store.patch_chunk_metadata` (`mcpbrain/store.py`) writes
+  `UPDATE chunks SET metadata=?` and returns — it never touches the
+  `fts_chunks` mirror and never resets `fts_context_version`.
+  `mcpbrain/sync/drive.py`'s re-sync path calls exactly this
+  (`store.patch_chunk_metadata(c.doc_id, **c.metadata)`) whenever a Drive
+  file's content is unchanged but its metadata should refresh — so a chunk
+  that already carried `fts_context_version=1` (from before `folder_path`
+  existed) silently acquires `folder_path` in `chunks.metadata` on its next
+  Drive sync, while its `fts_chunks` row keeps the old, folder-less text
+  forever: the version was never invalidated, so
+  `reindex_fts_batch`'s `fts_context_version < FTS_CONTEXT_VERSION` check can
+  never re-catch it. 7,343/170,705 chunks (4.3%) carry this drift today. The
+  rebuild's `_rederive_fts` unconditionally regenerates FTS text for every row
+  from current metadata, incidentally correcting all 7,343 in one pass.
+  Confirmed directly on the ONE gold case that flipped
+  (`gdrive_3_capes_budget_jan_to_sept`): its cross-acceptable P&L chunk
+  (`gdrive-1IfsM_VJGu81hOY_8DeEvJ6_-g0ib8FZ0-0`) is one of the 7,343 — its
+  stored FTS text lacked "in My Drive/…/2024 - Capes Church/Board
+  Meetings/2026 Capes Community Board Meetings/2026.07.02 Capes Board Pack",
+  a folder path that itself contains "Capes"/"Community"/"Board" — exactly
+  the query's own terms. Re-deriving it directly boosted this document's
+  keyword-search rank into the gold set's top 10 (a specific, direct token
+  match, not a diffuse corpus-wide BM25 stat shift). Vector search and the
+  `recall_max_distance` injection gate were spot-checked identical pre/post
+  on real queries (unaffected — vectors are copied byte-exact). **Follow-up,
+  not fixed here (out of this docs-only task's scope):**
+  `patch_chunk_metadata` (and any other metadata-only writer) needs to
+  refresh the `fts_chunks` mirror, or at least reset `fts_context_version` to
+  0, whenever it touches a metadata field `_fts_text`/`contextual_prefix`
+  reads — otherwise the exact same drift resumes on the very next Drive sync
+  after any future rebuild. Bumping `FTS_CONTEXT_VERSION` once would only
+  clear today's backlog, not stop it recurring.
+  **Metadata is JSON TEXT, NOT JSONB — Task 6 delivered the
+  `store._meta_extract()` single-source-of-truth pattern, not a storage-format
+  change, and the earlier "JSONB metadata" framing overstated it.** What is real
+  and valuable: every expression INDEX in `init()` and every one of the ~24 query
+  read sites that pull a value out of `chunks.metadata` now build their SQL
+  through one function, so an index's expression and its query's expression
+  cannot independently drift — which is exactly the 0.7.105 full-`SCAN chunks`
+  failure mode. That function emits **`json_extract` unconditionally**, never
+  `jsonb_extract` and never version-dependent: `CREATE INDEX IF NOT EXISTS` keys
+  on the index NAME, so an existing store's five expression indexes
+  (`idx_chunks_msgid`/`fileid`/`threadid`/`eventid`/`inbound_date`) are NOT
+  rebuilt when the fragment changes, and SQLite does not match a `jsonb_extract`
+  query against a `json_extract` index. The branch briefly did emit
+  `jsonb_extract` behind a 3.45 guard; measured on the real live store that
+  killed all five indexes on daemon restart (message_id 0.0ms→233.8ms, thread_id
+  0.0ms→215.9ms — full scans), i.e. it would have reinstated the 0.7.105 outage
+  fleet-wide, silently and with correct-but-slow results, the moment the wheel
+  shipped. Fixed before merge, and pinned by
+  `tests/test_metadata_jsonb.py::test_reinit_on_existing_store_*` (the missing
+  test class: re-`init()` an ALREADY-init'd store and assert the plan is still
+  `SEARCH … USING INDEX`; every prior index test built a FRESH store, where DDL
+  and query text necessarily agree). Cost of staying on `json_extract`: 15.6ms
+  vs 14.9ms over a 50k-row scan — noise. True JSONB *storage* was investigated
+  and is **structurally foreclosed** by Task 7: `metadata` is declared `TEXT`
+  inside a **STRICT** `chunks` table, so a `jsonb()` blob write is rejected
+  outright, and `bin/optimise_store.py`'s `_copy_all` copies `metadata`
+  verbatim. Enabling it would need that column loosened to `ANY`/`BLOB` plus a
+  dedicated rebuild — a separate follow-up, not this plan. `jsonb_supported()`
+  was deleted (PR #25 finding 7): a dead, unused version-guard utility is a
+  trap that invites `_meta_extract` to call it again, exactly the mistake
+  that caused the outage above. **Not
+  yet run against any user's actual live store** — that is a separate,
+  explicit, attended operation per machine, to be scheduled deliberately.
 - **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
   **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
