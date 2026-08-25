@@ -19,4 +19,4 @@ ESCROW_FOLDER_ID = "1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi"
 # test_the_org_pin_chunker_version_matches_the_code. The pin feeds
 # pipeline_fingerprint, so a drift here means installs keep importing
 # ingest-cache artifacts built by a superseded chunker.
-ORG_PIN_CHUNKER_VERSION = "2"
+ORG_PIN_CHUNKER_VERSION = "3"

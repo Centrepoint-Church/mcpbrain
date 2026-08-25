@@ -798,3 +798,107 @@ def test_note_chunks_exclude_distilled_keep_with_bad_timestamp_fails_safe(tmp_pa
                         keep_review_days=30, limit=500)}
 
     assert ids == set()
+
+
+def test_stale_chunker_ids_covers_gdrive_gmail_and_calendar(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-f1-0", "old drive content", "h1",
+                   {"source_type": "gdrive", "file_id": "f1", "chunker_version": 1})
+    s.upsert_chunk("gmail-m1-body-0", "old gmail content", "h2",
+                   {"source_type": "gmail", "thread_id": "t1", "chunker_version": 1})
+    s.upsert_chunk("cal-e1-0", "old calendar content", "h3",
+                   {"source_type": "calendar", "event_id": "e1", "chunker_version": 1})
+    # A chunk already at the prior version must NOT be selected (unaffected
+    # non-table content -- the other_version floor, not the table_version one).
+    s.upsert_chunk("gdrive-f2-0", "current", "h4",
+                   {"source_type": "gdrive", "file_id": "f2", "chunker_version": 2})
+
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+
+    assert {"source_type": "gdrive", "id": "f1"} in out
+    assert {"source_type": "gmail", "id": "t1"} in out
+    assert {"source_type": "calendar", "id": "e1"} in out
+    assert not any(item["id"] == "f2" for item in out)
+    # Drive entries sort before Gmail before Calendar.
+    types_in_order = [item["source_type"] for item in out]
+    assert types_in_order == sorted(
+        types_in_order, key=lambda t: {"gdrive": 0, "gmail": 1, "calendar": 2}[t])
+
+
+def test_stale_chunker_ids_does_not_sweep_unaffected_prose_at_the_prior_version(tmp_path):
+    """A table chunk at the OLD version is stale under the tabular-fix floor;
+    a prose chunk at that SAME old version is not -- chunk_text (which
+    renders every non-table chunk) didn't change between versions 2 and 3, so
+    re-fetching it would burn real API quota for a byte-identical re-chunk."""
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gdrive-table1-0", "old table render", "h1",
+                   {"source_type": "gdrive", "file_id": "table1",
+                    "content_subtype": "table", "chunker_version": 2})
+    s.upsert_chunk("gmail-prose1-body-0", "old prose", "h2",
+                   {"source_type": "gmail", "thread_id": "prose1",
+                    "content_subtype": "prose", "chunker_version": 2})
+
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+
+    assert {"source_type": "gdrive", "id": "table1"} in out
+    assert not any(item["id"] == "prose1" for item in out)
+
+
+def test_stale_chunker_ids_still_sweeps_prose_below_the_prior_version(tmp_path):
+    """The original legacy backlog (pre-2026-07-28 headroom-fix chunks, any
+    type) must still be caught -- only chunks already at other_version are
+    exempted from the table_version floor."""
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_chunk("gmail-legacy1-body-0", "legacy prose", "h1",
+                   {"source_type": "gmail", "thread_id": "legacy1",
+                    "content_subtype": "prose", "chunker_version": 1})
+
+    out = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+
+    assert {"source_type": "gmail", "id": "legacy1"} in out
+
+
+def test_thread_summary_digest_joins_messages_oldest_first(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    s.upsert_email_context("m1", thread_id="t1", date_iso="2026-06-01",
+                           content_type="request", summary="Joel asked about Hall B.")
+    s.upsert_email_context("m2", thread_id="t1", date_iso="2026-06-02",
+                           content_type="update", summary="Sam confirmed availability.")
+
+    digest = s.thread_summary_digest("t1")
+
+    lines = digest.split("\n")
+    assert lines[0].startswith("- 2026-06-01")
+    assert "Joel asked about Hall B." in lines[0]
+    assert lines[1].startswith("- 2026-06-02")
+    assert "Sam confirmed availability." in lines[1]
+
+
+def test_thread_summary_digest_drops_oldest_lines_when_over_budget(tmp_path):
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "test.db", dim=4)
+    s.init()
+    for i in range(20):
+        s.upsert_email_context(f"m{i}", thread_id="t1", date_iso=f"2026-06-{i+1:02d}",
+                               content_type="update",
+                               summary="A reasonably long summary line " * 5)
+
+    digest = s.thread_summary_digest("t1", max_chars=500)
+
+    assert len(digest) <= 500
+    # The MOST RECENT message must survive; an early one must have been dropped.
+    assert "2026-06-20" in digest
+    assert "2026-06-01" not in digest

@@ -1091,11 +1091,13 @@ class _FakeCreate:
 
 
 class _FakeList:
-    def __init__(self, calls, canned):
+    def __init__(self, calls, canned, executes=None):
         self.calls = calls
         self.canned = canned
+        self.executes = executes if executes is not None else []
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         return self.canned
 
 
@@ -1113,12 +1115,14 @@ class FakeFiles:
         self.file_id = file_id
         self.list_calls = []
         self.create_calls = []
+        # num_retries passed to each list(...).execute(), in call order.
+        self.list_retries = []
         # num_retries passed to each create(...).execute(), in call order.
         self.execute_retries = []
 
     def list(self, **kw):
         self.list_calls.append(kw)
-        return _FakeList(self.list_calls, self.list_response)
+        return _FakeList(self.list_calls, self.list_response, executes=self.list_retries)
 
     def create(self, **kw):
         self.create_calls.append(kw)
@@ -1375,7 +1379,7 @@ class _GReq:
     def __init__(self, result):
         self._r = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._r
 
 
@@ -1700,7 +1704,7 @@ class _FLReq:
     def __init__(self, result):
         self._r = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._r
 
 
@@ -1858,11 +1862,13 @@ def test_download_snapshot_writes_bytes_via_injected_factory(tmp_path):
 # --- snapshot retention (prune) ---------------------------------------------
 
 class _FakeDelete:
-    def __init__(self, deleted, file_id):
+    def __init__(self, deleted, file_id, executes=None):
         self.deleted = deleted
         self.file_id = file_id
+        self.executes = executes if executes is not None else []
 
     def execute(self, num_retries=0):
+        self.executes.append(num_retries)
         self.deleted.append(self.file_id)
         return {}
 
@@ -1875,15 +1881,17 @@ class FakeFilesPrune:
     def __init__(self, snapshot_files):
         self._snaps = snapshot_files
         self.deleted = []
+        self.list_retries = []
+        self.delete_retries = []
 
     def list(self, **kw):
         q = kw.get("q", "")
         if self.FOLDER_MIME in q:
-            return _FakeList([], {"files": [{"id": "folder-1"}]})
-        return _FakeList([], {"files": list(self._snaps)})
+            return _FakeList([], {"files": [{"id": "folder-1"}]}, executes=self.list_retries)
+        return _FakeList([], {"files": list(self._snaps)}, executes=self.list_retries)
 
     def delete(self, *, fileId, supportsAllDrives=False):
-        return _FakeDelete(self.deleted, fileId)
+        return _FakeDelete(self.deleted, fileId, self.delete_retries)
 
 
 def _snap(i, day):
@@ -1915,6 +1923,37 @@ def test_prune_keep_zero_is_noop():
     svc = FakeService(FakeFilesPrune(files))
     assert prune_snapshots(svc, "drive-X", "sam", keep=0) == 0
     assert svc._files.deleted == []
+
+
+def test_upload_snapshot_folder_lookup_and_create_pass_num_retries(tmp_path):
+    from mcpbrain.backup import upload_snapshot, _NUM_RETRIES, _MEDIA_NUM_RETRIES
+
+    src = tmp_path / "snap.enc"
+    src.write_bytes(b"ciphertext")
+    files = FakeFiles(list_response={"files": []})
+    service = FakeService(files)
+
+    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
+
+    # Folder lookup list uses _NUM_RETRIES.
+    assert files.list_retries == [_NUM_RETRIES]
+    # Folder create uses _NUM_RETRIES; media file upload uses _MEDIA_NUM_RETRIES.
+    assert files.execute_retries == [_NUM_RETRIES, _MEDIA_NUM_RETRIES]
+
+
+def test_prune_snapshots_list_and_delete_pass_num_retries():
+    from mcpbrain.backup import prune_snapshots, _NUM_RETRIES
+
+    files = [_snap(i, i) for i in range(1, 6)]
+    fake_files = FakeFilesPrune(files)
+    svc = FakeService(fake_files)
+
+    prune_snapshots(svc, "drive-X", "sam", keep=3)
+
+    # Folder lookup list and file list both use _NUM_RETRIES.
+    assert fake_files.list_retries == [_NUM_RETRIES, _NUM_RETRIES]
+    # Delete calls also use _NUM_RETRIES.
+    assert fake_files.delete_retries == [_NUM_RETRIES, _NUM_RETRIES]
 
 
 # --- Task 2: the artifact carries an intact vector index -----------------------
@@ -2008,14 +2047,14 @@ def test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve(tmp_path, mon
 
     real_verify = backup_mod._verify_artifact
 
-    def corrupt_then_verify(out_path):
+    def corrupt_then_verify(out_path, *, home=None):
         d = _open_db(out_path, read_only=False)
         try:
             d.execute("DELETE FROM vec_chunks")   # chunks still claim embedded=1
             d.commit()
         finally:
             d.close()
-        return real_verify(out_path)
+        return real_verify(out_path, home=home)
 
     monkeypatch.setattr(backup_mod, "_verify_artifact", corrupt_then_verify)
 
@@ -2077,6 +2116,120 @@ def test_verify_artifact_no_ops_when_the_chunks_table_does_not_exist(tmp_path):
         db.close()
 
     _verify_artifact(store.path)   # must not raise
+
+
+def test_verify_artifact_ignores_deliberately_vector_less_table_chunks(tmp_path):
+    """embedded=1 with no vec_chunks row is the DESIGNED state for table
+    chunks -- write_embedding(rowid, None) under embed_skip_tabular, and
+    bin/cleanup_tabular_vectors.py deleting existing oversize table vectors
+    while leaving embedded=1 so nothing re-queues them.
+
+    Verification samples the LOWEST rowids, so a table chunk at the front of
+    the store would have made every periodic backup AND bin/repair.py
+    --apply's pre-apply safety snapshot raise -- re-creating the very
+    "backup upload failing" outage this work exists to fix, and blocking the
+    sweep that repairs those chunks.
+    """
+    from mcpbrain.backup import _verify_artifact
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    # Lowest rowid FIRST, so the table chunk is unavoidably in the sample.
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table"})
+    store.upsert_chunk("d-prose", "hello there", "h2", {})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)          # no vector, by design
+    store.write_embedding(by_doc["d-prose"], [0.1, 0.2, 0.3, 0.4])
+
+    _verify_artifact(store.path)   # must not raise
+
+    out = snapshot(store.path, tmp_path / "snap.sqlite3")
+    assert out.exists()
+
+
+def test_verify_artifact_still_raises_for_a_non_table_chunk_missing_its_vector(tmp_path):
+    """The table-subtype exclusion must not weaken the probe it lives in: a
+    PROSE chunk marked embedded=1 whose vector does not resolve is genuine
+    vec0 loss and must still raise, even when a legitimately vector-less
+    table chunk sits alongside it."""
+    import pytest
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.store import _open_db
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table"})
+    store.upsert_chunk("d-prose", "hello there", "h2", {})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)
+    store.write_embedding(by_doc["d-prose"], [0.1, 0.2, 0.3, 0.4])
+
+    # Lose only the prose chunk's vector — the hazard the probe exists for.
+    db = _open_db(store.path, read_only=False)
+    try:
+        db.execute("DELETE FROM vec_chunks WHERE rowid=?", (by_doc["d-prose"],))
+        db.commit()
+    finally:
+        db.close()
+
+    with pytest.raises(RuntimeError, match="vector"):
+        _verify_artifact(store.path)
+
+
+def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_table_chunk(tmp_path):
+    """Without a `home` to check embed_skip_tabular against, the exclusion
+    must stay unconditional (the two tests above, run with no `home`, prove
+    that path still works). WITH `home` and the flag OFF, a table chunk
+    already re-rendered to CHUNKER_VERSION should have gotten a real vector
+    from index_pending same as any other chunk -- missing one there is
+    genuine corruption, not the designed state, and must still raise."""
+    import json
+
+    import pytest
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table", "chunker_version": CHUNKER_VERSION})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)   # missing, but should be real
+
+    with pytest.raises(RuntimeError, match="vector"):
+        _verify_artifact(store.path, home=str(home))
+
+
+def test_verify_artifact_with_home_and_flag_off_still_spares_a_pre_rerender_table_chunk(tmp_path):
+    """Same flag-off home, but the table chunk is still below CHUNKER_VERSION
+    -- i.e. it could legitimately be sitting in the transient post-cleanup
+    window (bin/cleanup_tabular_vectors.py deleted its vector, the version-
+    bump sweep hasn't re-rendered it yet). Must not raise."""
+    import json
+
+    from mcpbrain.backup import _verify_artifact
+    from mcpbrain.chunking import CHUNKER_VERSION
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
+
+    store = Store(tmp_path / "live.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("d-table", "Item: chair; Cost: 12", "h1",
+                       {"content_subtype": "table", "chunker_version": CHUNKER_VERSION - 1})
+    by_doc = {c["doc_id"]: c["rowid"] for c in store.unembedded_chunks()}
+    store.write_embedding(by_doc["d-table"], None)
+
+    _verify_artifact(store.path, home=str(home))   # must not raise
 
 
 def test_verify_artifact_raises_on_genuine_chunks_corruption(tmp_path, monkeypatch):

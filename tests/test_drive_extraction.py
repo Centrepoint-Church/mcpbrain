@@ -226,15 +226,17 @@ def test_normalise_drive_all_chunks_carry_metadata():
         assert "confidence" in chunk.metadata
 
 
-def test_xlsx_extracts_as_markdown_table():
-    """Q5: spreadsheets render as a markdown table (header + separator), not flat
-    lines. Third existing test broken by this plan's Task 2 (review Important #1):
-    `extract_text_from_xlsx` — which rendered a whole sheet to one markdown string
-    ahead of chunking — no longer exists, replaced by `extract_tables_from_xlsx`
-    (returns structured `Table`s) + `tabular.render_chunks` (decides chunk
-    boundaries, repeating the header per chunk instead of orphaning it in chunk 0,
-    the B2 defect). Rewritten as an integration test across both new calls instead
-    of deleted outright: `tests/test_tabular.py` covers render_chunks' shape in
+def test_xlsx_extracts_as_schema_enriched_rows():
+    """Q5: spreadsheets render as schema-enriched row sentences ("Header: Value"
+    per row), not flat character-split lines. Third existing test broken by this
+    plan's Task 2 (review Important #1): `extract_text_from_xlsx` — which
+    rendered a whole sheet to one markdown string ahead of chunking — no longer
+    exists, replaced by `extract_tables_from_xlsx` (returns structured `Table`s)
+    + `tabular.render_chunks` (decides chunk boundaries and, since Task 11,
+    renders each row independently with its own column labels rather than
+    sharing one markdown header/separator line across the sheet, the B2
+    defect). Rewritten as an integration test across both new calls instead of
+    deleted outright: `tests/test_tabular.py` covers render_chunks' shape in
     isolation, but this is the only place that checks the two functions still
     compose correctly for a real openpyxl-produced file end to end.
     """
@@ -254,9 +256,11 @@ def test_xlsx_extracts_as_markdown_table():
     rows_text = "\n".join(text for text, meta in chunks if meta["table_role"] == "rows")
 
     assert "### Sheet: Budget" in rows_text
-    assert "| Item | Cost |" in rows_text
-    assert "| --- | --- |" in rows_text
-    assert "| Camp | 500 |" in rows_text
+    assert "Item: Camp; Cost: 500" in rows_text
+    assert "Item: Bus; Cost: 200" in rows_text
+    # No markdown grid artifacts survive.
+    assert "| Item | Cost |" not in rows_text
+    assert "---" not in rows_text
 
 
 def test_a_spreadsheet_is_chunked_by_row_group_with_headers():
@@ -279,7 +283,12 @@ def test_a_spreadsheet_is_chunked_by_row_group_with_headers():
 
     assert len(row_chunks) > 1, "200 rows should not fit in one chunk"
     for c in row_chunks:
-        assert "| Item | Amount |" in c.text, "row group lost its header"
+        # No shared header line any more -- each row carries its own column
+        # labels, so every row (not just the chunk as a whole) must be
+        # independently interpretable.
+        n_rows = c.metadata["row_end"] - c.metadata["row_start"] + 1
+        assert c.text.count("Item:") == n_rows, "a row lost its column label"
+        assert c.text.count("Amount:") == n_rows, "a row lost its column label"
     assert any(c.metadata.get("table_role") == "summary" for c in chunks)
 
 
@@ -290,3 +299,27 @@ def test_a_content_free_document_produces_no_chunks():
     fmeta = {"id": "f1", "name": "Empty.txt", "mimeType": "text/plain"}
 
     assert normalise_drive(fmeta, "|  |  |  |\n\n|  |  |  |") == []
+
+
+def test_fetch_text_get_media_passes_num_retries():
+    from mcpbrain.sync import drive
+
+    calls = []
+
+    class _FakeExec:
+        def execute(self, num_retries=0):
+            calls.append(num_retries)
+            return b"file contents"  # get_media returns raw bytes, decoded below
+
+    class _FakeFiles:
+        def get_media(self, **kw):
+            return _FakeExec()
+
+    class _FakeService:
+        def files(self):
+            return _FakeFiles()
+
+    result = drive._fetch_text(_FakeService(), {"id": "f1", "mimeType": "text/plain"})
+
+    assert result == "file contents"  # _fetch_text decodes bytes -> str
+    assert calls == [drive._NUM_RETRIES]

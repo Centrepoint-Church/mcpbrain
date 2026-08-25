@@ -38,7 +38,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install mcpbrain as a tool
-        run: uv tool install --from . mcpbrain
+        # MUST carry the [daemon] extra: without it fastembed is absent and
+        # `daemon --once` dies on ModuleNotFoundError, which the retry loop
+        # then misreports as "a transient model download".
+        run: uv tool install --from ".[daemon]" mcpbrain
 
       - name: Put uv tool bin on PATH
         # uv installs console scripts into ~/.local/bin. Add it for later steps.
@@ -157,17 +160,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create venv and install with dev extra
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install with the dev dependency group
+        # `uv sync --group dev` reads [dependency-groups] (PEP 735), which is
+        # where pytest-xdist lives. The old `pip install -e ".[dev]"` read
+        # [project.optional-dependencies] instead -- a SEPARATE list that has no
+        # xdist -- so pytest exited 4 on `unrecognized arguments: -n` (addopts is
+        # `-n auto`) without running a single test. Use the same path developers
+        # use locally so the two cannot drift again.
+        run: uv sync --group dev
 
       - name: Run the offline suite
-        run: .venv/bin/pytest
+        run: uv run pytest
 
       - name: Run the end-to-end loop (gate)
         # The full sync→prepare→drain→graph+dashboard loop with only Google and
         # the Cowork extractor stubbed. Fast (small fixture, local sqlite, no
         # network). A red e2e fails the build.
-        run: .venv/bin/pytest -m e2e -q
+        run: uv run pytest -m e2e -q
