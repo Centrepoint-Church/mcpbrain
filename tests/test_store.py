@@ -1,7 +1,7 @@
 import pytest
 
 from mcpbrain.graph_write import upsert_relation
-from mcpbrain.store import Store
+from mcpbrain.store import Store, _meta_extract
 
 
 @pytest.fixture
@@ -80,8 +80,10 @@ def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
     metadata.message_id and metadata.file_id. Without an index on those JSON
     paths every call is a full `SCAN chunks` (~1.4s on the ~108k-chunk live
     store), so a drain cycle spends ~24 min scanning and starves recall. init()
-    must create expression indexes matching exactly the json_extract() paths the
-    query uses, so the planner can turn the SCAN into an index SEARCH."""
+    must create expression indexes matching exactly the _meta_extract() paths
+    the query uses (json_extract, unconditionally and on every SQLite version —
+    see store._meta_extract for why it must never be version-dependent), so the
+    planner can turn the SCAN into an index SEARCH."""
     s = Store(tmp_path / "b.sqlite3", dim=4); s.init()
     with s._connect() as db:
         idx_sql = {
@@ -90,11 +92,11 @@ def test_init_indexes_chunk_metadata_lookup_paths(tmp_path):
                 "SELECT name, sql FROM sqlite_master "
                 "WHERE type='index' AND tbl_name='chunks'").fetchall()
         }
-    # An index whose expression matches the query's json_extract() path exactly.
-    assert any("json_extract(metadata,'$.message_id')" in s.replace(" ", "")
+    # An index whose expression matches the query's _meta_extract() path exactly.
+    assert any(_meta_extract("$.message_id").replace(" ", "") in s.replace(" ", "")
                for s in idx_sql.values()), \
         f"no index on metadata.message_id; have {list(idx_sql)}"
-    assert any("json_extract(metadata,'$.file_id')" in s.replace(" ", "")
+    assert any(_meta_extract("$.file_id").replace(" ", "") in s.replace(" ", "")
                for s in idx_sql.values()), \
         f"no index on metadata.file_id; have {list(idx_sql)}"
 
@@ -187,10 +189,10 @@ def test_init_indexes_thread_and_date_lookup_paths(tmp_path):
             (row["sql"] or "").replace(" ", "")
             for row in db.execute("SELECT sql FROM sqlite_master "
                 "WHERE type='index' AND tbl_name='chunks'").fetchall())
-    assert "json_extract(metadata,'$.thread_id')" in have, \
+    assert _meta_extract("$.thread_id").replace(" ", "") in have, \
         f"no index on metadata.thread_id: {have}"
-    assert ("json_extract(metadata,'$.date')" in have
-            and "json_extract(metadata,'$.date_iso')" in have), \
+    assert (_meta_extract("$.date").replace(" ", "") in have
+            and _meta_extract("$.date_iso").replace(" ", "") in have), \
         f"no index on the inbound date expression: {have}"
 
 
@@ -286,6 +288,9 @@ def test_get_entity_returns_none_when_absent(tmp_path):
 
 def test_add_relation_dedups(tmp_path):
     s = _store(tmp_path)
+    # entity_relations endpoints are enforced foreign keys into entities.
+    for eid in ("taryn-hamilton", "joel-chelliah"):
+        s.upsert_entity(eid, eid.replace("-", " ").title(), "person", "Acme", "2026-05-12")
     first = s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", source_doc_id="d1")
     second = s.add_relation("taryn-hamilton", "reports_to", "joel-chelliah", source_doc_id="d2")
     assert first is True   # new triple inserted
@@ -1080,6 +1085,7 @@ def test_meeting_series_for_old_matches_via_calendar_evidence(store):
     store.upsert_entity("meeting-acme-standup", "Standup", "meeting", "Acme", "2026-05-12")
     store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup", "cal-evt123")
     store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
@@ -1095,6 +1101,7 @@ def test_meeting_series_for_old_matches_via_calendar_evidence_recurring_instance
     store.append_occurrence("meeting-acme-standup", "2026-05-12", "standup",
                             "cal-evt123_20260512T090000Z")
     store.link_email_entity("cal-evt123_20260512T090000Z", "meeting-acme-standup", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") == "meeting-acme-standup"
@@ -1111,6 +1118,7 @@ def test_meeting_series_for_old_calendar_evidence_ambiguous_returns_none(store):
     store.append_occurrence("meeting-acme-sync", "2026-05-12", "sync", "cal-evt123")
     store.link_email_entity("cal-evt123", "meeting-acme-standup", role="about")
     store.link_email_entity("cal-evt123", "meeting-acme-sync", role="about")
+    store.upsert_entity("topic-standup", "standup", "topic", "Acme", "2026-05-12")
     upsert_relation(store, "meeting-standup-20260512", "involved_in", "topic-standup",
                      valid_from="2026-05-12", evidence="evt123", source_doc_id="")
     assert store.meeting_series_for_old("meeting-standup-20260512") is None

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Feature version floors, guarded at runtime, never assumed:** `contentless_delete` needs SQLite **≥3.43**; JSONB needs **≥3.45**; STRICT needs **≥3.37**. Read `sqlite3.sqlite_version` and fall back to the current form below the floor. The version comes from whichever Python the wheel installs under, and the Windows path pins its own x64 interpreter.
-- **Gold bar:** recall@10 **≥ 0.750**, MRR **≥ 0.514**. Contentless FTS5 and JSONB are ranking-neutral by construction, so **any** movement is a defect to investigate, not a result to accept.
+- **Gold bar:** recall@10 **≥ 0.780**, MRR **≥ 0.550** (raised 2026-08-25 from the original 0.750/0.514 — see Task 9's Step 1, corrected below — which was stale relative to every actual pre-rebuild measurement taken during this work). Contentless FTS5 and JSONB are ranking-neutral by construction, so **any** movement is a defect to investigate, not a result to accept.
 - **`init()` uses `CREATE TABLE IF NOT EXISTS`,** so schema changes reach new installs only. Existing stores change *only* via `bin/optimise_store.py`. Never make the rebuild automatic — it is attended and backup-gated, following the `bin/consolidate.py` precedent.
 - **Read-only connections must never execute a writing pragma** (`optimize`, `analyze`). Guard on the existing `read_only` flag.
 - **Measured baseline to beat:** file 2.62 GB / 639,769 pages @ 4096 B; `fts_chunks_content` 0.78 GB; `fts_chunks_data` 93 MB; `chunks` 170,657 rows; metadata 86 MB; orphans **256 rows total** (`entity_relations.entity_a` 8, `entity_relations.entity_b` 0, `email_entities.entity_id` 146, `entity_observations.entity_id` 96, `entity_communities.entity_id` 6).
@@ -143,6 +143,21 @@ git commit -m "feat(bin): add store measurement + latency harness for the optimi
 - Consumes: nothing.
 - Produces: no signature change. `_open_db(path, read_only=False, *, busy_timeout_ms=...)` keeps its contract; only the pragmas it sets change.
 
+**CORRECTED 2026-08-25** (PR #25 finding 5): `cache_size`/`mmap_size` are set
+PER CONNECTION, and the daemon opens roughly one connection per call across
+~21 threads (e.g. `graph_write.upsert_relation` opens one per relation). The
+64 MiB/256 MiB values below, applied unconditionally to EVERY connection,
+could add on the order of a gigabyte of RSS between concurrent callers —
+this project gates releases on peak RSS (226 MB verified in 0.7.113), so
+this risked failing that gate. The tuned values are reserved for `bulk=True`
+connections only (the rebuild tool, `Store.reindex_fts_batch`, backup's
+`VACUUM INTO` snapshot) — genuinely long-lived, throughput-sensitive
+callers; the common per-call connection gets a smaller default (16 MiB
+cache / 64 MiB mmap — bigger than SQLite's own 2 MiB default, which this
+task's own rationale called too small, but not the full tuned value). Kept
+below for its historical record; the code and tests now reflect the
+corrected scoping.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -153,8 +168,8 @@ def test_open_db_sets_tuned_pragmas(tmp_path):
     Store(str(p)).init()
     db = _open_db(str(p))
     try:
-        assert db.execute("PRAGMA cache_size").fetchone()[0] == -65536
-        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 268435456
+        assert db.execute("PRAGMA cache_size").fetchone()[0] == -16384
+        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 67108864
         assert db.execute("PRAGMA temp_store").fetchone()[0] == 2
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 1
     finally:
@@ -166,6 +181,20 @@ def test_read_only_connection_also_gets_read_pragmas(tmp_path):
     Store(str(p)).init()
     db = _open_db(str(p), read_only=True)
     try:
+        assert db.execute("PRAGMA cache_size").fetchone()[0] == -16384
+        assert db.execute("PRAGMA mmap_size").fetchone()[0] == 67108864
+    finally:
+        db.close()
+
+
+def test_bulk_connection_gets_the_larger_tuned_pragmas(tmp_path):
+    """CORRECTED per PR #25 finding 5: the original tuned values are
+    reserved for bulk=True (rebuild / reindex_fts_batch / backup) --
+    long-lived, throughput-sensitive callers, not the common per-call case."""
+    p = tmp_path / "b.sqlite3"
+    Store(str(p)).init()
+    db = _open_db(str(p), bulk=True)
+    try:
         assert db.execute("PRAGMA cache_size").fetchone()[0] == -65536
         assert db.execute("PRAGMA mmap_size").fetchone()[0] == 268435456
     finally:
@@ -175,17 +204,23 @@ def test_read_only_connection_also_gets_read_pragmas(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_store_pragmas.py -v`
-Expected: FAIL — `assert -2000 == -65536`
+Expected: FAIL — `assert -2000 == -16384`
 
 - [ ] **Step 3: Write minimal implementation**
 
 In `_open_db`, after the existing `journal_size_limit` line and **before** the extension load:
 
 ```python
-    # Tuned for a multi-GB, read-heavy derived store. Defaults left this at a
-    # 2 MB page cache on a 2.6 GB database.
-    db.execute("PRAGMA cache_size=-65536")    # 64 MiB
-    db.execute("PRAGMA mmap_size=268435456")  # 256 MiB
+    # Tuned for a multi-GB, read-heavy derived store, but SCOPED to genuinely
+    # long-lived, throughput-sensitive connections (bulk=True) -- unconditional
+    # 64 MiB/256 MiB per connection could add ~1 GB of RSS across the daemon's
+    # ~21 concurrent per-call threads. Everyday connections get a smaller
+    # default -- still bigger than SQLite's own 2 MiB default on a 2.6 GB
+    # database, just not the full tuned value.
+    cache_kib = 65536 if bulk else 16384
+    mmap_bytes = 268435456 if bulk else 67108864
+    db.execute(f"PRAGMA cache_size=-{cache_kib}")
+    db.execute(f"PRAGMA mmap_size={mmap_bytes}")
     db.execute("PRAGMA temp_store=2")         # MEMORY: FTS5/ORDER BY temp b-trees
     db.execute("PRAGMA threads=4")            # parallel sort
     db.execute("PRAGMA analysis_limit=400")   # bounds PRAGMA optimize (Task 3)
@@ -195,6 +230,11 @@ In `_open_db`, after the existing `journal_size_limit` line and **before** the e
         # durability guarantee we do not need.
         db.execute("PRAGMA synchronous=1")
 ```
+
+`_open_db` gains a `bulk: bool = False` keyword-only parameter (and
+`Store._connect` forwards its own `bulk: bool = False` through to it); pass
+`bulk=True` only from the rebuild tool, `reindex_fts_batch`, and backup's
+`VACUUM INTO` snapshot.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -227,6 +267,20 @@ git commit -m "perf(store): tune connection pragmas (cache 64MiB, mmap, temp_sto
 - Consumes: `_open_db` from Task 2 (which sets `analysis_limit=400`).
 - Produces: no signature change.
 
+**CORRECTED 2026-08-25** (post-merge human review on PR #25, finding 1): the
+original Step 1/3 below gated `PRAGMA optimize` on `if not self.read_only`
+alone — that fires it on every `write=False` close too, not just after an
+actual write. `PRAGMA optimize` WRITES, so a read-only USE of a writable
+`Store` (e.g. `daemon.search`'s read path, or `graph_write.upsert_relation`,
+which opens one connection per relation) would acquire the write lock
+*after* the caller's read-only transaction had already finished — right
+into contention with a concurrent drain's writes, at exactly the latency
+budget `RECALL_PATH_BUSY_TIMEOUT_MS`/`RECALL_PATH_BEGIN_RETRIES` exist to
+protect. That reintroduces the 0.7.105 recall-starvation class this very
+pragma was meant to help fix. The gate must be `write and not self.read_only`
+— only an actual write transaction pays for the stats refresh. Kept below
+for its historical record; the code and tests now reflect the corrected gate.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -250,6 +304,32 @@ def test_read_only_connection_does_not_attempt_optimize(tmp_path):
     ro = Store(str(p), read_only=True)
     with ro._connect() as db:            # must not raise "attempt to write a readonly database"
         db.execute("SELECT count(*) FROM chunks").fetchone()
+
+
+def test_a_read_only_use_of_a_writable_store_does_not_attempt_optimize(tmp_path, monkeypatch):
+    """CORRECTED per PR #25 finding 1. A write=False use of a WRITABLE Store
+    must not attempt PRAGMA optimize either -- only self.read_only alone is
+    not the right gate."""
+    p = tmp_path / "b.sqlite3"
+    s = Store(str(p))
+    s.init()
+    calls = []
+
+    class _Spy(sqlite3.Connection):
+        def execute(self, sql, *a, **kw):
+            calls.append(sql)
+            return super().execute(sql, *a, **kw)
+
+    real_connect = sqlite3.connect
+
+    def spy_connect(*a, **kw):
+        kw.setdefault("factory", _Spy)
+        return real_connect(*a, **kw)
+
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+    with s._connect() as db:   # write=False (the default) on a WRITABLE Store
+        db.execute("SELECT count(*) FROM chunks")
+    assert "PRAGMA optimize" not in calls
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -265,8 +345,12 @@ Replace the `finally` block of `_connect`:
         finally:
             # PRAGMA optimize is the documented way to keep planner statistics
             # current; analysis_limit (set in _open_db) bounds its cost so it
-            # cannot stall a close. It WRITES, so never on a read-only handle.
-            if not self.read_only:
+            # cannot stall a close. It WRITES, so never on a read-only handle
+            # -- AND never on a write=False connection either, even on a
+            # writable Store: it would contend with a drain's writes at
+            # exactly the recall path's latency budget. Only an actual write
+            # transaction should pay for a stats refresh.
+            if write and not self.read_only:
                 try:
                     db.execute("PRAGMA optimize")
                 except sqlite3.Error:
@@ -279,7 +363,7 @@ Replace the `finally` block of `_connect`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_store_pragmas.py -v`
-Expected: PASS (both)
+Expected: PASS (all three)
 
 - [ ] **Step 5: Re-measure and compare**
 
@@ -616,6 +700,22 @@ git commit -m "perf(store): JSONB metadata via a single _meta_extract source of 
 
 ### Task 7: FK constraints, STRICT tables, trigram index in `init()`
 
+**REVERTED 2026-08-25** (PR #25 finding 6, spec/plan defect): this task's
+trigram index shipped with zero readers (`email_mentions` still scans
+`chunks.text` directly) and populating it on the live store measured
++1.089 GB — erasing most of this whole plan's 57% storage saving. The plan
+asked for the index without a task to wire a reader and without pricing the
+populate cost. Rather than defer it (which is what actually shipped first,
+behind an opt-in `--populate-trigram` flag on `bin/optimise_store.py`), it
+was removed entirely: the `fts_chunks_trigram` schema, `_populate_trigram`,
+`--populate-trigram`, and their tests are all gone. `email_mentions`'s
+`text LIKE` remains genuinely unindexable, same as CLAUDE.md recorded
+before this task — a future reader would likely want different tokenizer
+settings anyway, so this is left as a clean slate for whoever actually
+wires up a reader, rather than half-built infrastructure nothing uses. The
+FK constraints and STRICT tables parts of this task stand; only the
+trigram index was reverted. Kept below for its historical record.
+
 **Files:**
 - Modify: `mcpbrain/store.py` — `init()` table DDL, `_open_db` (`foreign_keys=ON`)
 - Test: `tests/test_store_constraints.py`
@@ -891,7 +991,16 @@ git commit -m "feat(bin): single-pass out-of-place store rebuild with orphan swe
 - [ ] **Step 1: Run the gold harness against the rebuilt copy**
 
 Run the `--gold` harness against `/tmp/rebuilt.sqlite3`.
-Expected: recall@10 **≥ 0.750**, MRR **≥ 0.514**.
+Expected: recall@10 **≥ 0.780**, MRR **≥ 0.550**.
+
+**CORRECTED 2026-08-25** (PR #25 review, flag-only): originally recorded as
+0.750/0.514, which was stale — every actual pre-rebuild measurement taken
+during this plan's work landed at recall@10=0.800 and MRR in the
+0.565–0.591 range, so a real regression down to e.g. MRR 0.52 would have
+passed the old floor. Raised with margin below the consistently-observed
+baseline, not raised to match it exactly (MRR has genuine run-to-run
+variance — see CLAUDE.md's SQLite optimisation entry for the actual
+measured numbers each time this gate ran).
 
 **Contentless FTS5 and JSONB are ranking-neutral by construction, so any movement at all is a defect.** Investigate rather than accept. Note the known blind spot: the harness calls `hybrid_search` directly and so does not exercise `recall_max_distance` — check the injection path separately via `prompt_recall`.
 

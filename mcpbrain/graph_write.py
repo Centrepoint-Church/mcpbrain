@@ -42,8 +42,13 @@ class OwnerIdentity:
     """Who this install belongs to, for action attribution and self-exclusion.
 
     name:      short name written to actions.owner
-    entity_id: the owner's entity slug — never upserted as an entity; used to
-               recognise and skip the owner in the graph
+    entity_id: the owner's entity slug — never upserted as an entity (_is_owner
+               filters the owner out of every extracted entity and relation).
+               It is a RECOGNISER, not a foreign key: a populated graph's real
+               owner node is minted by the email path under a different slug
+               (display name, not configured full name). Anything writing a
+               relation from the owner must resolve the live id via
+               resolve_owner_entity_id() — see the note there.
     aliases:   lowercased name variants treated as the owner
     """
     name: str = ""
@@ -1882,6 +1887,57 @@ def _ensure_works_at(conn, entity_id: str, org: str) -> None:
         "(entity_a, relation, entity_b, strength, last_seen) "
         "VALUES (?, 'works_at', ?, 1, ?)",
         (entity_id, org_id, today))
+
+
+def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
+    """The owner's REAL entity id in this graph, or '' if the graph has no
+    owner node. NEVER creates one.
+
+    Why this exists: owner.entity_id is DERIVED, slugify(configured full name).
+    The owner node that actually exists in a populated graph was minted by the
+    EMAIL path from the display name in message headers, so its id is
+    slugify(display name) — on the live store 'josh-kemp' (email_count 3378,
+    degree 7358), while owner.entity_id resolves to 'joshua-kemp', which has no
+    row at all. The calendar attendee pass wrote `attended` edges from that
+    second id: 7 dangling rows, exactly the entity_relations orphans the Task 4
+    reporter found (and an IntegrityError once foreign_keys=ON).
+
+    Resolution order — id first, then the email address, which is the identity
+    upsert_entity itself dedups on:
+      1. an entities row whose id IS owner.entity_id,
+      2. a person row whose email_addr matches the owner's email — the passed
+         one, any alias carrying an '@', or config's owner_email (aliases are
+         derived from the NAME fields, so they usually carry no address at all).
+    Returning '' (no owner node yet) is a normal outcome on a fresh store; the
+    caller must then skip the relation rather than write a dangling edge.
+    Deliberately no name/alias fallback: a display-name match on a graph full
+    of real people is how you attach the owner's edges to a stranger. The
+    email-match path shares that exact hazard when the configured owner
+    address is a shared mailbox (office@, info@): every attendee/entity also
+    registered under that address would resolve to "the owner", attributing
+    someone else's whole meeting history. is_role_address() closes it, same
+    as every other identity resolution in this module (0.7.77).
+    """
+    eid = getattr(owner, "entity_id", "") or ""
+    addrs = [a.lower() for a in ([owner_email] if owner_email else [])
+             + [a for a in getattr(owner, "aliases", ()) or () if "@" in a]]
+    try:
+        cfg_email = config.owner_email(str(config.app_dir())).strip().lower()
+    except Exception:  # noqa: BLE001 — resolution is best-effort, never fatal
+        cfg_email = ""
+    if cfg_email and cfg_email not in addrs:
+        addrs.append(cfg_email)
+    addrs = [a for a in addrs if a and not is_role_address(a)]
+    with store._connect() as db:
+        if eid and db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone():
+            return eid
+        for addr in addrs:
+            row = db.execute(
+                "SELECT id FROM entities WHERE lower(email_addr)=? AND type='person'",
+                (addr,)).fetchone()
+            if row:
+                return row["id"]
+    return ""
 
 
 def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
