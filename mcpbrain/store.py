@@ -1302,6 +1302,21 @@ class Store:
                     logic_version INTEGER DEFAULT 0,
                     at            TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
 
+            # One-time baseline stats. _connect's write-close PRAGMA optimize
+            # (below) is opportunistic and NOT guaranteed to create sqlite_stat1
+            # even on a pristine schema -- confirmed empirically: SQLite 3.45.1
+            # (Ubuntu's linked libsqlite3, vs 3.50+ elsewhere) declines to do so
+            # even after a real write plus a second, standalone PRAGMA optimize
+            # call. Run ANALYZE once here, unconditionally, so sqlite_stat1
+            # exists from the very first init() regardless of the linked
+            # SQLite version's heuristics -- a one-time cost against an empty
+            # store, not a per-write one, so it does not reintroduce the
+            # write-path latency PRAGMA optimize's write-only gating exists to
+            # avoid. It writes no per-index rows yet (nothing to sample on an
+            # empty table), but the table's existence is what every later
+            # ANALYZE / PRAGMA optimize call updates in place.
+            db.execute("ANALYZE")
+
     # --- S2 recall-acceptance feedback methods --------------------------------
 
     def record_recall_feedback(self, doc_id: str, session_id: str,
