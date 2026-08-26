@@ -1019,7 +1019,7 @@ class Daemon:
         # The interval only bounds how soon after boot it is first tried; the
         # marker file (not this timestamp) is what makes it once-ever.
         self._ocr_setup_interval_s = 86_400.0
-        self._last_ocr_setup = 0.0
+        self._last_ocr_setup = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -2540,17 +2540,29 @@ class Daemon:
     # -- OCR binary install (once-ever, background) --------------------------
 
     def _run_ocr_setup(self) -> dict | None:
-        """Once-ever background install of the tesseract OCR binary."""
+        """Once-ever background install of the tesseract OCR binary.
+
+        Runs on a background thread, not the maintenance thread: the install
+        (brew/winget) can block up to 600s, and a pass that long would park the
+        stall-watchdog check that runs immediately after _run_periodic_passes
+        returns (see the class docstring's note on why passes must stay well
+        under MAINTENANCE_TICK_S).
+        """
         if not self._is_due("_ocr_setup_interval_s", "_last_ocr_setup"):
             return None
-        now = self._clock()
-        try:
-            result = run_ocr_setup(str(app_dir()))
-        except Exception as exc:  # noqa: BLE001 — OCR is optional, never fatal
-            log.warning("ocr_setup failed: %s", exc, exc_info=True)
-            result = {"status": "error", "detail": str(exc)}
-        self._last_ocr_setup = now
-        return {"ocr_setup": result}
+        self._last_ocr_setup = self._clock()
+
+        def _run():
+            try:
+                result = run_ocr_setup(str(app_dir()))
+            except Exception as exc:  # noqa: BLE001 — OCR is optional, never fatal
+                log.warning("ocr_setup failed: %s", exc, exc_info=True)
+                result = {"status": "error", "detail": str(exc)}
+            else:
+                log.info("ocr_setup: %s", result)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ocr_setup": "started"}
 
     # -- periodic community detection ---------------------------------------
 
