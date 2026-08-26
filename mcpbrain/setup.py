@@ -11,7 +11,6 @@ browser.
 """
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -42,68 +41,47 @@ def _platform() -> str:
 
 
 def _mcpbrain_bin() -> str:
-    found = shutil.which("mcpbrain") or sys.argv[0] or "mcpbrain"
-    # Resolve to an absolute path: agent registration (launchd/schtasks) and the
-    # MCP registration below both run later under a minimal login PATH, so a bare
-    # name like "mcpbrain" would not resolve.
-    p = Path(found)
-    if p.exists():
-        return str(p.resolve())
-    return found
+    """Absolute path to the installed mcpbrain launcher.
 
+    Agent registration (launchd/schtasks) and connector registration both run
+    later under a minimal login PATH, so a bare name would not resolve — this
+    must be absolute.
 
-def _desktop_config_path() -> Path:
-    """Path to the Claude **Desktop** MCP config for this OS.
-
-    Claude Desktop — where the plugin runs and staff do their work — reads its
-    MCP servers from this file, *not* from Claude Code's ``~/.claude.json``.
+    Prefer the path `which` reports (uv's shim, ~/.local/bin/mcpbrain) WITHOUT
+    resolving it. Resolving follows the symlink into uv's tool venv, which is an
+    internal layout detail rather than a supported entry point. Only fall back to
+    resolving argv[0] when there is no shim on PATH at all.
     """
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(base) / "Claude" / "claude_desktop_config.json"
-    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+    found = shutil.which("mcpbrain")
+    if found:
+        return str(Path(found).absolute())
+    fallback = Path(sys.argv[0] or "mcpbrain")
+    return str(fallback.resolve()) if fallback.exists() else "mcpbrain"
 
 
-def _register_desktop_mcp(*, dry_run: bool = False) -> None:
-    """Connect the brain to **Claude Desktop** by writing its MCP config.
+def _register_connector(*, dry_run: bool = False) -> None:
+    """Register the brain with every Claude surface, reporting each outcome.
 
-    The brain is served through its stdio MCP server, ``mcpbrain mcp-server``.
-    Setup writes the entry directly into ``claude_desktop_config.json`` using the
-    *absolute* path to the installed binary — which only setup knows. A plain
-    JSON edit with an absolute command is fully cross-platform (no shell/PATH/
-    extension problem), and targets Claude Desktop rather than Claude Code. The
-    plugin's own ``.mcp.json`` deliberately bundles no server. Best-effort: a
-    write failure must never block onboarding.
-
-    Merges into any existing config, preserving other servers; idempotent.
+    Deliberately terse. This used to print a five-line block instructing the user
+    to quit Claude Desktop and re-run `mcpbrain connect` — advice that contradicted
+    both the install command and the wizard's final step, and which is obsolete now
+    that the wizard's Connect button writes inside the quit/relaunch window.
     """
-    cfg = _desktop_config_path()
-    entry = {"command": _mcpbrain_bin(), "args": ["mcp-server"]}
-    if dry_run:
-        print(f"would connect mcpbrain to Claude Desktop at {cfg}: {json.dumps(entry)}")
-        return
-    try:
-        data = json.loads(cfg.read_text()) if cfg.exists() else {}
-        if not isinstance(data, dict):
-            data = {}
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            servers = {}
-            data["mcpServers"] = servers
-        servers["mcpbrain"] = entry
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"Wrote the mcpbrain MCP server to Claude Desktop's config:\n  {cfg}\n"
-              "IMPORTANT: fully QUIT and REOPEN Claude Desktop to load the brain_* tools.\n"
-              "Claude Desktop owns this file and overwrites edits made while it's running,\n"
-              "so for a reliable result: quit Claude Desktop, run `mcpbrain connect` in a\n"
-              "terminal, then reopen Claude Desktop.")
-    except OSError as exc:
-        print(f"Could not write the Claude Desktop MCP config ({exc}). Add this to "
-              f"{cfg} under \"mcpServers\":\n  \"mcpbrain\": {json.dumps(entry)}",
-              file=sys.stderr)
+    from mcpbrain import connector
+    for path, ok, status, detail in connector.register_connector(
+            mcpbrain_bin=_mcpbrain_bin(), dry_run=dry_run):
+        if status == connector.STATUS_DRY_RUN:
+            continue  # register_connector already printed "would register ..."
+        if status == connector.STATUS_SKIPPED:
+            # Intentional (e.g. ~/.claude.json on a Claude-Desktop-only machine)
+            # — informational, never stderr. Branching on the status rather than
+            # on the detail text means rewording a message cannot turn this back
+            # into a spurious error.
+            print(f"Skipped: {detail}")
+        elif ok:
+            print(f"Connected the brain: {detail}")
+        else:
+            print(f"Could not connect the brain here: {detail}", file=sys.stderr)
 
 
 def _install_tray_best_effort(home: str) -> None:
@@ -227,18 +205,30 @@ def _ensure_daemon_running(home: str, *, dry_run: bool = False) -> int:
 
 
 def connect_main(argv=None) -> int:
-    """``mcpbrain connect``: (re)write ONLY the Claude Desktop MCP connector.
+    """``mcpbrain connect``: re-register the brain's MCP connector on every
+    Claude surface present, quitting and relaunching Claude Desktop around the
+    write so Desktop's own clobber-on-quit behaviour can't discard it.
 
-    Claude Desktop owns ``claude_desktop_config.json`` and overwrites entries
-    added while it is running, so the reliable way to register the connector is
-    to run this with **Claude Desktop quit**, then reopen it. Unlike ``setup``,
-    this touches nothing else — no daemon, no wizard.
+    This FORCE-QUITS Claude Desktop (``taskkill /IM Claude.exe /F`` on Windows,
+    ``osascript -e 'quit app "Claude"'`` on macOS). Since Claude Code Desktop
+    *is* Claude Desktop, running this from a terminal inside a Claude Code
+    Desktop session will close that very session. Unlike ``setup``, this
+    touches nothing else — no daemon, no wizard.
     """
     ap = argparse.ArgumentParser(prog="mcpbrain connect")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be written without writing")
     args = ap.parse_args(argv)
-    _register_desktop_mcp(dry_run=args.dry_run)
+    if args.dry_run:
+        # A dry-run must never take a real destructive/disruptive action
+        # against the user's actual running Claude Desktop.
+        _register_connector(dry_run=True)
+        return 0
+    print("This will quit and relaunch Claude Desktop (force-quit if needed) "
+          "to register the connector. If you are running this from a terminal "
+          "inside Claude Code Desktop, that session will close.")
+    from mcpbrain import desktop
+    desktop.relaunch_claude_desktop(on_quit=lambda: _register_connector())
     return 0
 
 
@@ -260,7 +250,7 @@ def main(argv=None) -> int:
     port = _ensure_daemon_running(home, dry_run=args.dry_run)
     url = f"http://127.0.0.1:{port}/"
 
-    _register_desktop_mcp(dry_run=args.dry_run)
+    _register_connector(dry_run=args.dry_run)
 
     if args.dry_run:
         print(f"would open {url}")
@@ -280,8 +270,8 @@ def main(argv=None) -> int:
     print(f"Opening the mcpbrain setup wizard at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
     print("Finish setup in the wizard (Google sign-in, your details), then click "
-          "'Connect & restart Claude Desktop' as the LAST step — that loads the brain_* "
-          "tools. Backup and recovery happen automatically.")
+          "'Connect & restart Claude Desktop' as the LAST step — that reloads Claude "
+          "so the brain_* tools appear. Backup and recovery happen automatically.")
     webbrowser.open(url)
     return 0
 
