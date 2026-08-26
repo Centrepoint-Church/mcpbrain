@@ -140,7 +140,7 @@
   </section>
 
   <section id="step-model" class="card">
-    <h2><span class="num">3</span>Search model</h2>
+    <h2>Search model</h2>
     <p class="desc">A small on-device embedding model (~130&nbsp;MB) powers search. It downloads once and stays on this machine.</p>
     <div class="row">
       <button class="primary" id="model-btn" onclick="ensureModel()">Download model</button>
@@ -149,7 +149,7 @@
   </section>
 
   <section id="step-connect" class="card">
-    <h2><span class="num">4</span>Connect Claude Desktop</h2>
+    <h2><span class="num">3</span>Connect Claude Desktop</h2>
     <p class="desc">Do this <strong>last</strong>. It restarts Claude Desktop so it loads your brain — any open Claude Desktop chat will close and reopen.</p>
     <div class="row">
       <button class="primary" id="connect-btn" onclick="connectDesktop()">Connect &amp; restart Claude Desktop</button>
@@ -158,12 +158,12 @@
   </section>
 
   <section id="step-projects" class="card">
-    <h2><span class="num">5</span>You're set up</h2>
-    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created back in the Claude Code session that installed mcpbrain — as <b>Local</b> scheduled tasks. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
+    <h2>You're set up</h2>
+    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created for you by <code>/mcpbrain:install</code> — there is nothing to set up here. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
   </section>
 
   <section id="step-backup" class="card">
-    <h2><span class="num">6</span>Backup &amp; recovery</h2>
+    <h2>Backup &amp; recovery</h2>
     <p class="desc">Automatic. Once you connect Google, mcpbrain either <b>restores your brain</b> if a backup already exists for your account, or <b>turns on encrypted backup</b> if it's a fresh start. Your data never leaves in cleartext — only an admin-escrowed key can restore it. No setting to choose.</p>
     <div class="row">
       <span id="backup-status" class="badge idle">Waiting for Google sign-in…</span>
@@ -172,10 +172,10 @@
       <summary>Fleet setup (Centrepoint org)</summary>
       <p class="desc">This is the Centrepoint mcpbrain-fleet folder. Leave as-is, or clear it if you're not part of the org fleet.</p>
       <label>Fleet folder ID
-        <input id="fleet_folder_id" type="text" value="1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o">
+        <input id="fleet_folder_id" type="text" placeholder="Loading…">
       </label>
       <label>Escrow folder ID (backup key)
-        <input id="fleet_escrow_folder_id" type="text" value="1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi">
+        <input id="fleet_escrow_folder_id" type="text" placeholder="Loading…">
       </label>
       <button class="primary" type="button" onclick="saveFleet()">Save fleet settings</button>
       <span id="fleet-status" class="badge idle hidden"></span>
@@ -183,7 +183,7 @@
   </section>
 
   <section id="step-status" class="card">
-    <h2><span class="num">7</span>Status</h2>
+    <h2>Status</h2>
     <p class="desc">Live state of the background daemon.</p>
     <dl class="status-list">
       <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
@@ -239,21 +239,6 @@ function collectOrgs(){
     out.push({name: name, domains: domains});
   });
   return out;
-}
-
-async function saveFleet(){
-  // The fleet block is shallow-merged server-side, so always post BOTH keys
-  // together — a partial post would wipe the other. Empty strings clear a key.
-  const body = {fleet: {
-    folder_id: $("fleet_folder_id").value.trim(),
-    escrow_folder_id: $("fleet_escrow_folder_id").value.trim(),
-  }};
-  try{
-    await P("/api/config", body);
-    badge("fleet-status", "Saved", "ok"); $("fleet-status").classList.remove("hidden");
-  }catch(e){
-    badge("fleet-status", "Could not save", "wait"); $("fleet-status").classList.remove("hidden");
-  }
 }
 
 async function saveProfile(){
@@ -349,6 +334,17 @@ async function ensureModel(){
   setTimeout(refreshModel, 500);
 }
 
+let _modelAutoStarted = false;
+async function autoEnsureModel(){
+  // The model is mandatory — mcp-server fails at startup without the weights —
+  // so downloading it was never a decision, just a button the user had to find.
+  // Fire once, automatically, as soon as there is a Google connection; the button
+  // remains for a manual re-download or repair.
+  if(_modelAutoStarted) return;
+  _modelAutoStarted = true;
+  await ensureModel();
+}
+
 async function connectDesktop(){
   const btn = $("connect-btn");
   btn.disabled = true;
@@ -386,6 +382,8 @@ function renderStatus(j){
     $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
     // Google is connected → run the one-shot automatic restore-or-backup.
     autoBackup();
+    // Google is connected → auto-download the (mandatory) search model.
+    autoEnsureModel();
   }
   // (Enrichment status is shown by the connection card; the old spool counters
   // were removed with the inline extractor step.)
@@ -545,8 +543,8 @@ async function prefillFromConfig(){
     });
   }
   const fleet = c.fleet || {};
-  if(fleet.folder_id !== undefined && fleet.folder_id !== "") $("fleet_folder_id").value = fleet.folder_id;
-  if(fleet.escrow_folder_id !== undefined && fleet.escrow_folder_id !== "") $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
+  if(fleet.folder_id) $("fleet_folder_id").value = fleet.folder_id;
+  if(fleet.escrow_folder_id) $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
   // Prefill name + email from the connected Google account when the user hasn't
   // saved their own yet (status carries google_name + google_account). Never
   // overrides a saved value.

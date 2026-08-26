@@ -1351,6 +1351,7 @@ class Daemon:
             "home_dir": str(app_dir()),
             "records_dir": config.records_dir(str(app_dir())),
             "project_instructions": config.render_project_instructions(cfg),
+            "fleet": config.fleet_defaults(cfg),
         }
 
     def _routed_tool_handlers(self) -> dict:
