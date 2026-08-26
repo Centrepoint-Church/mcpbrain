@@ -82,9 +82,10 @@ If something goes wrong after logon, check that file first.
 
 ## OCR for scanned PDFs
 
-`mcpbrain setup` also installs the `tesseract` OCR engine (Homebrew on macOS,
-winget on Windows). Scanned, image-only PDFs — signed contracts, letters,
-invoices, forms — have no text layer, so OCR is the only way to read them.
+The daemon installs the `tesseract` OCR engine in the background shortly after
+your first login (Homebrew on macOS, winget on Windows), so it never holds up
+setup. Scanned, image-only PDFs — signed contracts, letters, invoices, forms —
+have no text layer, so OCR is the only way to read them.
 
 It is best-effort and never blocks setup. If it is skipped (no Homebrew, no
 winget, or Linux, where every route needs root) everything else works normally;

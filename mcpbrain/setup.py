@@ -104,30 +104,6 @@ def _install_tray_best_effort(home: str) -> None:
         )
 
 
-def _install_ocr_best_effort() -> None:
-    """Install the OCR dependency (the `tesseract` CLI). Never fatal.
-
-    Scanned, image-only PDFs have no text layer, so OCR is the only way to read
-    them. extractors.py treats tesseract as an OPTIONAL external binary and
-    degrades to an empty text layer without it — which was right for robustness
-    and wrong for onboarding, because nothing installed it and so every install
-    had OCR silently off. Scanned PDFs skew towards signed contracts, letters and
-    invoices, so that absence cost exactly the documents that matter most.
-
-    Best-effort in both directions: a failure prints the one command to run and
-    onboarding continues, because everything except scanned-PDF text works fine
-    without it. `mcpbrain doctor --repair` retries the same install later.
-    """
-    from mcpbrain import ocr
-    ok, msg = ocr.install_tesseract()
-    if ok:
-        print(msg)
-    else:
-        print(f"Skipped OCR setup: {msg}. Scanned PDFs will be indexed without "
-              f"their text until then; everything else is unaffected.",
-              file=sys.stderr)
-
-
 def _start_tray_now(home: str) -> None:
     """Launch the tray immediately so it appears without waiting for next login.
     Best-effort — the login agent still starts it at next login regardless."""
@@ -258,7 +234,6 @@ def main(argv=None) -> int:
 
     _install_tray_best_effort(home)
     _start_tray_now(home)
-    _install_ocr_best_effort()
 
     try:
         from mcpbrain import agents
