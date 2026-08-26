@@ -19,59 +19,92 @@ def test_setup_dry_run_echoes_working_folder(monkeypatch, tmp_path, capsys):
     assert "brain folder" in out.lower()
 
 
-def test_setup_dry_run_registers_desktop_mcp(monkeypatch, tmp_path, capsys):
-    # setup connects the brain to Claude DESKTOP by writing its MCP config
-    # (claude_desktop_config.json), using the ABSOLUTE mcpbrain path. --dry-run
-    # must print the target config path and the mcp-server command.
+def test_setup_dry_run_registers_the_connector(monkeypatch, tmp_path, capsys):
+    # setup registers the brain with every Claude surface present. --dry-run must
+    # print each target path and the mcp-server command without writing anything.
+    from mcpbrain import connector
     monkeypatch.setattr(setup, "app_dir", lambda: tmp_path / "home")
     monkeypatch.setattr(setup, "_ensure_daemon_running", lambda h, dry_run=False: 8765)
     monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(connector, "desktop_config_paths",
+                        lambda: [tmp_path / "claude_desktop_config.json"])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
 
-    rc = setup.main(["--dry-run"])
-    assert rc == 0
+    assert setup.main(["--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "Claude Desktop" in out and "claude_desktop_config.json" in out
+    assert "claude_desktop_config.json" in out and ".claude.json" in out
     assert "/abs/bin/mcpbrain" in out and "mcp-server" in out
 
 
-def test_register_desktop_mcp_merges_and_preserves(monkeypatch, tmp_path):
-    # Writing the entry must create the file, preserve other servers, and be
-    # idempotent (overwrite the mcpbrain entry, not duplicate it).
-    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text('{"mcpServers": {"other": {"command": "x"}}, "keep": 1}')
-    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
-    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
-
-    setup._register_desktop_mcp()
-    setup._register_desktop_mcp()  # twice → idempotent
-
-    import json
-    data = json.loads(cfg.read_text())
-    assert data["keep"] == 1                                   # untouched
-    assert data["mcpServers"]["other"] == {"command": "x"}     # preserved
-    assert data["mcpServers"]["mcpbrain"] == {
-        "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
-
-
 def test_connect_main_writes_only_the_connector(tmp_path, monkeypatch):
-    # `mcpbrain connect` registers the Desktop connector and nothing else (no
-    # daemon, no wizard) — run with Claude Desktop quit so the entry survives.
-    from mcpbrain import setup
-    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
-    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
+    # `mcpbrain connect` registers the connector and nothing else — no daemon,
+    # no wizard, no tray. It now quits/relaunches Claude Desktop around the
+    # write (Task 8's fix), so fake that out rather than touching a real app:
+    # the fake proves the on_quit callback (the connector write) actually runs.
+    from mcpbrain import connector, desktop
+    desktop_cfg = tmp_path / "claude_desktop_config.json"
     monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [desktop_cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
+    monkeypatch.setattr(desktop, "relaunch_claude_desktop",
+                        lambda on_quit=None: (on_quit() if on_quit else None) or
+                                              {"relaunched": True, "detail": "ok"})
+
     assert setup.connect_main([]) == 0
-    data = json.loads(cfg.read_text())
+    data = json.loads(desktop_cfg.read_text())
     assert data["mcpServers"]["mcpbrain"] == {
         "command": "/abs/bin/mcpbrain", "args": ["mcp-server"]}
+
+
+def test_register_connector_reports_intentional_skip_as_skipped_not_error(
+        tmp_path, monkeypatch, capsys):
+    # ~/.claude.json doesn't exist (Claude Code has never run here) while
+    # Claude Desktop's config does. The code_config_path skip is intentional
+    # and correct (per merge_server_into's create=False contract), so it must
+    # print "Skipped: ..." to stdout, not "Could not connect ..." to stderr.
+    from mcpbrain import connector
+    desktop_cfg = tmp_path / "claude_desktop_config.json"
+    desktop_cfg.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [desktop_cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
+
+    setup._register_connector(dry_run=False)
+
+    captured = capsys.readouterr()
+    assert "Skipped: not present" in captured.out
+    assert "Connected the brain" in captured.out
+    assert "Could not connect" not in captured.out
+    assert "Could not connect" not in captured.err
 
 
 def test_connect_main_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
-    from mcpbrain import setup
-    cfg = tmp_path / "Claude" / "claude_desktop_config.json"
-    monkeypatch.setattr(setup, "_desktop_config_path", lambda: cfg)
+    from mcpbrain import connector
+    desktop_cfg = tmp_path / "claude_desktop_config.json"
     monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [desktop_cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
     setup.connect_main(["--dry-run"])
-    assert not cfg.exists()
-    assert "would connect" in capsys.readouterr().out
+    assert not desktop_cfg.exists()
+    assert "would register" in capsys.readouterr().out
+
+
+def test_skip_routing_survives_a_reworded_detail_message(tmp_path, monkeypatch, capsys):
+    # The point of the STATUS_* constants: _register_connector must decide
+    # "deliberate skip or real failure?" from the status, never from the detail
+    # text. It previously did `detail.startswith("not present:")`, so rewording
+    # that message would have silently turned every Claude-Desktop-only user's
+    # intentional skip into a stderr error. Reword it here and assert the
+    # routing is unchanged.
+    from mcpbrain import connector
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(
+        connector, "register_connector",
+        lambda **kw: [(tmp_path / "x.json", True, connector.STATUS_SKIPPED,
+                       "totally different wording, no 'not present' anywhere")])
+
+    setup._register_connector(dry_run=False)
+
+    captured = capsys.readouterr()
+    assert "Skipped: totally different wording" in captured.out
+    assert captured.err == ""
