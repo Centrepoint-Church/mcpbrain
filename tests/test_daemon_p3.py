@@ -803,6 +803,7 @@ def test_apply_config_rewires_cadences(tmp_path):
              "org_contrib_upload_interval_s": None,
              "org_import_interval_s": None,
              "org_curate_interval_s": None,
+             "ocr_setup_interval_s": None,
          }):
         daemon.apply_config(new_config)
 

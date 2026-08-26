@@ -124,29 +124,6 @@ def test_availability_check_is_not_stale_after_an_install(monkeypatch):
     assert ocr.tesseract_available() is True
 
 
-def test_setup_installs_ocr_without_blocking_on_failure(monkeypatch, capsys):
-    """Onboarding must survive an OCR install failure — everything else works
-    without it, so a missing package manager cannot be allowed to end setup."""
-    from mcpbrain import setup
-
-    monkeypatch.setattr("mcpbrain.ocr.install_tesseract",
-                        lambda *a, **kw: (False, "no brew here"))
-
-    setup._install_ocr_best_effort()          # must not raise
-
-    assert "no brew here" in capsys.readouterr().err
-
-
-def test_setup_reports_a_successful_ocr_install(monkeypatch, capsys):
-    from mcpbrain import setup
-
-    monkeypatch.setattr("mcpbrain.ocr.install_tesseract",
-                        lambda *a, **kw: (True, "OCR enabled (tesseract installed)"))
-
-    setup._install_ocr_best_effort()
-
-    assert "OCR enabled" in capsys.readouterr().out
-
 
 def test_doctor_reports_ocr_availability(tmp_path, monkeypatch):
     """The absence used to surface only as a per-file log line during ingestion,
