@@ -103,7 +103,7 @@ fine — but keep the index to the current wheel for clarity.
 
 ### 1b.1 Publish install.ps1 to dist repo
 
- > **The `.mcpb` Desktop Extension was REMOVED (2026-08-24) and must not be reintroduced.**
+> **The `.mcpb` Desktop Extension was REMOVED (2026-08-24) and must not be reintroduced.**
 > It registered a server under the same name (`mcpbrain`) as the connector `mcpbrain setup`
 > writes into `claude_desktop_config.json`, won that collision, and then failed to launch —
 > mcpb's `server.type: "uv"` drops the `--from mcpbrain mcpbrain` argv, so Desktop ran a bare

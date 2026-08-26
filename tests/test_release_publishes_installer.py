@@ -40,3 +40,44 @@ def test_returns_none_when_source_is_absent(tmp_path):
     dist = tmp_path / "dist"
     dist.mkdir()
     assert release.copy_installer(tmp_path / "repo", dist) is None
+
+
+def test_main_exits_nonzero_when_installer_is_missing(tmp_path, monkeypatch):
+    """A scripted release must not report success while quietly skipping the
+    Windows installer -- the exact "hand-copied, nothing verifying it" failure
+    this whole mechanism exists to close, just moved from "forgot to run the
+    cp command" to "the warning scrolled past in CI output"."""
+    repo, dist = tmp_path / "repo", tmp_path / "dist"
+    repo.mkdir()
+    dist.mkdir()
+    # No plugin/scripts/install.ps1 under repo -> copy_installer returns None.
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: _FakeCompleted())
+
+    rc = release.main(["--dist", str(dist), "--repo", str(repo)])
+
+    assert rc != 0
+
+
+def test_main_exits_zero_when_installer_is_published(tmp_path, monkeypatch):
+    repo, dist = tmp_path / "repo", tmp_path / "dist"
+    (repo / "plugin" / "scripts").mkdir(parents=True)
+    (repo / "plugin" / "scripts" / "install.ps1").write_text("# installer\n")
+    dist.mkdir()
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: _FakeCompleted())
+
+    rc = release.main(["--dist", str(dist), "--repo", str(repo)])
+
+    assert rc == 0
+    assert (dist / "install.ps1").read_text() == "# installer\n"

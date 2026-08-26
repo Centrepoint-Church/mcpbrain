@@ -52,6 +52,47 @@ def test_skips_entirely_when_already_available(tmp_path, monkeypatch):
     assert not (tmp_path / "ocr_install_attempted.json").exists()
 
 
+def test_marker_is_stamped_before_the_install_starts(tmp_path, monkeypatch):
+    from mcpbrain import daemon as daemon_mod
+    marker = tmp_path / "ocr_install_attempted.json"
+    seen_before_install = {}
+
+    def _spy_install(*a, **k):
+        # The marker must already exist, recording a started-not-finished
+        # attempt, at the moment install_tesseract is actually invoked — this
+        # is what lets a killed-mid-install restart see "already attempted"
+        # instead of launching a second install against the same package
+        # manager state as the orphaned first one.
+        seen_before_install["marker"] = json.loads(marker.read_text())
+        return (True, "installed")
+
+    monkeypatch.setattr(ocr, "tesseract_available", lambda: False)
+    monkeypatch.setattr(ocr, "install_tesseract", _spy_install)
+
+    daemon_mod.run_ocr_setup(str(tmp_path))
+
+    assert seen_before_install["marker"]["ok"] is None
+    final = json.loads(marker.read_text())
+    assert final["ok"] is True and final["detail"] == "installed"
+
+
+def test_a_restart_mid_install_does_not_retry(tmp_path, monkeypatch):
+    from mcpbrain import daemon as daemon_mod
+    # Simulate the marker state left behind by a process killed (watchdog
+    # restart, auto-update, machine reboot) after the "started" stamp but
+    # before install_tesseract returned — the orphaned brew/winget child may
+    # still be running.
+    (tmp_path / "ocr_install_attempted.json").write_text(json.dumps(
+        {"ok": None, "detail": "install started", "attempted_at": "2026-08-26T00:00:00Z"}))
+    monkeypatch.setattr(ocr, "tesseract_available", lambda: False)
+    monkeypatch.setattr(ocr, "install_tesseract",
+                        lambda *a, **k: pytest.fail("must not launch a second install"))
+
+    result = daemon_mod.run_ocr_setup(str(tmp_path))
+
+    assert result["status"] == "already_attempted"
+
+
 def test_setup_no_longer_installs_ocr():
     import inspect
 

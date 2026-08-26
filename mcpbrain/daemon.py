@@ -224,6 +224,18 @@ def run_ocr_setup(home: str) -> dict:
     Attempted exactly ONCE, recorded in a marker file. A daily retry of a package
     install that already failed (no Homebrew, no winget, Linux) is noise;
     `mcpbrain doctor --repair` is the deliberate retry.
+
+    The marker is stamped BEFORE the install starts, not just after it
+    completes. This runs on a background thread (see Daemon._run_ocr_setup)
+    that a watchdog/auto-update restart can kill mid-install via os._exit --
+    an untracked subprocess.run(..., timeout=600) gets no chance to finish or
+    report anything. Without the early stamp, a killed-mid-install successor
+    process sees no marker, is due again on its very next tick, and launches a
+    SECOND `brew install`/`winget install` against the same package-manager
+    state as the orphaned first one. Recording "started" first means a restart
+    mid-install is treated the same as a completed attempt -- never
+    auto-retried, consistent with "attempted exactly once"; `doctor --repair`
+    remains the deliberate retry either way.
     """
     import datetime as _dt
     from mcpbrain import ocr
@@ -233,14 +245,19 @@ def run_ocr_setup(home: str) -> dict:
         return {"status": "present"}
     if marker.exists():
         return {"status": "already_attempted"}
+
+    def _stamp(payload: dict) -> None:
+        try:
+            marker.write_text(json.dumps({
+                **payload,
+                "attempted_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }, indent=2))
+        except OSError as exc:
+            log.warning("could not write the OCR marker: %s", exc)
+
+    _stamp({"ok": None, "detail": "install started"})
     ok, detail = ocr.install_tesseract()
-    try:
-        marker.write_text(json.dumps({
-            "ok": bool(ok), "detail": detail,
-            "attempted_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }, indent=2))
-    except OSError as exc:
-        log.warning("could not write the OCR marker: %s", exc)
+    _stamp({"ok": bool(ok), "detail": detail})
     log.info("ocr_setup: ok=%s detail=%s", ok, detail)
     return {"status": "ok" if ok else "skipped", "detail": detail}
 
@@ -299,10 +316,13 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
                 "_run_verify", needs_configured=False, needs_backfill_clear=False),
     # OCR binary install: a once-ever background attempt, gated on its own marker
     # (needs_configured=False — OCR is identity-agnostic and useful from the first
-    # sync). The interval only bounds how soon after boot it is first tried; the
-    # marker is what makes it once-ever.
+    # sync; needs_backfill_clear=False — installing a background binary has
+    # nothing to do with whether a graph backfill is in progress, same
+    # reasoning as auto_update/verify above). The interval only bounds how
+    # soon after boot it is first tried; the marker is what makes it
+    # once-ever.
     CadencePass("ocr_setup", "_ocr_setup_interval_s", "_last_ocr_setup",
-                "_run_ocr_setup", needs_configured=False),
+                "_run_ocr_setup", needs_configured=False, needs_backfill_clear=False),
     CadencePass("communities", "_communities_interval_s", "_last_communities",
                 "_run_communities"),
     CadencePass("lint", "_lint_interval_s", "_last_lint", "_run_lint"),
@@ -1016,9 +1036,14 @@ class Daemon:
         self._verify_interval_s: float | None = verify_interval_s
         self._last_verify = None
         # OCR binary install: once-ever background attempt (see run_ocr_setup).
-        # The interval only bounds how soon after boot it is first tried; the
-        # marker file (not this timestamp) is what makes it once-ever.
-        self._ocr_setup_interval_s = 86_400.0
+        # OFF by default; enabled via cadences config, same as the S2/Q4/B3/B5/
+        # B4/B6 group above — a bare Daemon() (every test that constructs one
+        # directly without going through apply_config()/main()'s cadences
+        # wiring) must not reach a real `brew install`/`winget install` on its
+        # first _run_periodic_passes() tick. Once configured, the interval only
+        # bounds how soon after boot it is first tried; the marker file (not
+        # this timestamp) is what makes it once-ever.
+        self._ocr_setup_interval_s: float | None = None
         self._last_ocr_setup = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
@@ -1770,6 +1795,7 @@ class Daemon:
             self._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
             self._org_import_interval_s = cadences["org_import_interval_s"]
             self._org_curate_interval_s = cadences["org_curate_interval_s"]
+            self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -4302,6 +4328,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "org_contrib_upload_interval_s":  86400.0,   # Phase 0 stub: daily contribution upload
     "org_import_interval_s":          86400.0,   # Phase 0 stub: daily snapshot import
     "org_curate_interval_s":          86400.0,   # Phase 0 stub: daily curator adjudication
+    "ocr_setup_interval_s":           86400.0,   # once-ever OCR binary install (marker-gated)
 }
 
 _CADENCE_KEYS = (
@@ -4330,6 +4357,7 @@ _CADENCE_KEYS = (
     "org_contrib_upload_interval_s",
     "org_import_interval_s",
     "org_curate_interval_s",
+    "ocr_setup_interval_s",
 )
 
 
@@ -4469,6 +4497,7 @@ def main(argv=None) -> None:
     daemon._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
     daemon._org_import_interval_s = cadences["org_import_interval_s"]
     daemon._org_curate_interval_s = cadences["org_curate_interval_s"]
+    daemon._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
     # Task 7 tuning knobs: not constructor params either, wired the same way
     # as the cadences just above (see _tuning_from_config / Daemon.__init__).
     daemon._cycle_budget_s = tuning["cycle_budget_s"]

@@ -72,7 +72,12 @@ def main(argv=None) -> int:
     print(f"Index refreshed at {ns.dist}/simple/ ({len(wheels)} wheels)"
           f"{'; install.ps1 published' if installer else ''}. "
           f"Commit + push the dist repo to publish.")
-    return 0
+    # A missing installer must not read as a clean release: this whole function
+    # exists to replace a hand-copy step that had nothing verifying it, and a
+    # `return 0` here would reproduce exactly that failure mode, just moved
+    # from "forgot to run the cp command" to "the warning scrolled past in
+    # scripted/CI output."
+    return 0 if installer is not None else 1
 
 
 if __name__ == "__main__":

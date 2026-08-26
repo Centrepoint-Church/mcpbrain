@@ -231,6 +231,14 @@ def _tesseract_bin() -> str:
                     found = p
                     break
         _tesseract_cache = found
+        # Return the local `found`, not a re-read of the global: this now runs
+        # inside the long-lived daemon, where ocr.tesseract_available() busts
+        # the cache (sets it to None) from a background thread to force a
+        # fresh resolve. A concurrent extraction thread's own call here could
+        # land between the assignment above and a `return _tesseract_cache`
+        # re-read, observing a bust from that other caller and returning None
+        # even though THIS call just successfully resolved a real path.
+        return found
     return _tesseract_cache
 
 

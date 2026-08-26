@@ -159,7 +159,7 @@
 
   <section id="step-projects" class="card">
     <h2>You're set up</h2>
-    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created for you by <code>/mcpbrain:install</code> as Local scheduled tasks — there is nothing to set up here. There's nothing to attach here: the brain is served through its MCP tools, so just start asking questions in Claude or Cowork.</p>
+    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created for you by <code>/mcpbrain:install</code> as Local scheduled tasks, and the brain is served through its MCP tools — there's nothing to set up or attach here, just start asking questions in Claude or Cowork.</p>
   </section>
 
   <section id="step-backup" class="card">
@@ -170,14 +170,14 @@
     </div>
     <details class="sub">
       <summary>Fleet setup (Centrepoint org)</summary>
-      <p class="desc">This is the Centrepoint mcpbrain-fleet folder. Leave as-is, or clear it if you're not part of the org fleet.</p>
+      <p class="desc">This is the Centrepoint mcpbrain-fleet folder, used automatically. Change it only if a different fleet folder was set up for you.</p>
       <label>Fleet folder ID
         <input id="fleet_folder_id" type="text" placeholder="Loading…">
       </label>
       <label>Escrow folder ID (backup key)
         <input id="fleet_escrow_folder_id" type="text" placeholder="Loading…">
       </label>
-      <button class="primary" type="button" onclick="saveFleet()">Save fleet settings</button>
+      <button id="fleet-save-btn" class="primary" type="button" onclick="saveFleet()" disabled>Save fleet settings</button>
       <span id="fleet-status" class="badge idle hidden"></span>
     </details>
   </section>
@@ -338,8 +338,9 @@ let _modelAutoStarted = false;
 async function autoEnsureModel(){
   // The model is mandatory — mcp-server fails at startup without the weights —
   // so downloading it was never a decision, just a button the user had to find.
-  // Fire once, automatically, as soon as there is a Google connection; the button
-  // remains for a manual re-download or repair.
+  // Fire once, automatically, on the first status poll — independent of
+  // Google, which has nothing to do with the model; the button remains for a
+  // manual re-download or repair.
   if(_modelAutoStarted) return;
   _modelAutoStarted = true;
   await ensureModel();
@@ -371,6 +372,13 @@ function renderStatus(j){
     : (j.google_connected ? "Connected" : "Not connected");
   badge("st-google", who, j.google_connected ? "ok" : "idle");
   badge("st-daemon", j.paused ? "Paused" : "Running", j.paused ? "wait" : "ok");
+  // The search model is mandatory regardless of Google — mcp-server fails at
+  // startup without the weights — so its auto-download must not be gated on
+  // a Google connection that has nothing to do with it. A user who declines
+  // or fails Google sign-in must still get the model. autoEnsureModel()'s own
+  // _modelAutoStarted guard keeps this a true one-shot despite firing on
+  // every status poll.
+  autoEnsureModel();
   // Mirror google_connected into Step 1's badge so the wizard reflects reality
   // on page load, not just after the user clicks "Connect Google".
   if(j.google_connected){
@@ -382,8 +390,6 @@ function renderStatus(j){
     $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
     // Google is connected → run the one-shot automatic restore-or-backup.
     autoBackup();
-    // Google is connected → auto-download the (mandatory) search model.
-    autoEnsureModel();
   }
   // (Enrichment status is shown by the connection card; the old spool counters
   // were removed with the inline extractor step.)
@@ -525,7 +531,8 @@ async function populateTimezones(selected){
 
 async function prefillFromConfig(){
   let c = {};
-  try{ c = await (await fetch("/api/config", H)).json(); }catch(e){ c = {}; }
+  let configLoaded = false;
+  try{ c = await (await fetch("/api/config", H)).json(); configLoaded = true; }catch(e){ c = {}; }
   if(c.owner_full_name) $("owner_name").value = c.owner_full_name;
   if(c.owner_email) $("owner_email").value = c.owner_email;
   if(c.owner_role) $("owner_role").value = c.owner_role;
@@ -545,6 +552,11 @@ async function prefillFromConfig(){
   const fleet = c.fleet || {};
   if(fleet.folder_id) $("fleet_folder_id").value = fleet.folder_id;
   if(fleet.escrow_folder_id) $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
+  // Only allow saving once the real saved/default values have loaded —
+  // clicking Save before that (a slow or failed /api/config fetch) would post
+  // whatever the inputs currently hold, and an empty string clears the key
+  // server-side rather than leaving it untouched.
+  if(configLoaded) $("fleet-save-btn").disabled = false;
   // Prefill name + email from the connected Google account when the user hasn't
   // saved their own yet (status carries google_name + google_account). Never
   // overrides a saved value.
