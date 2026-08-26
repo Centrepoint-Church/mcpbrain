@@ -368,6 +368,49 @@ def _no_real_exit(monkeypatch, request):
         monkeypatch.setattr(subprocess, "Popen", _boom_popen)
 
 
+# The one file that legitimately calls the real ocr.install_tesseract(),
+# mocking only its internals (subprocess.run, _brew, install_command,
+# tesseract_available) to exercise its own subprocess-calling logic.
+_OCR_INSTALL_REACHABLE_FILES = {"test_ocr_install.py"}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ocr_install(monkeypatch, request):
+    """ocr.install_tesseract() shells out to `brew install`/`winget install` via
+    subprocess.run(..., timeout=600) -- a call _no_real_exit above does NOT
+    neutralise (that fixture only touches subprocess.Popen, for the unrelated
+    watchdog-restart path). daemon.py's ocr_setup cadence pass can reach this
+    from any bare Daemon() that runs _run_periodic_passes(); before the
+    interval-config fix (Centrepoint-Church/mcpbrain#30 review, HIGH finding),
+    a plain `pytest tests/` on a macOS/Windows dev box without tesseract
+    already installed triggered real package-manager installs from the test
+    suite -- invisible on CI (Linux, where install_command() returns None) and
+    on a box that already has tesseract (tesseract_available() short-circuits
+    first). That interval fix should make the pass unreachable from a bare
+    Daemon in the first place; this is the second, independent layer: any test
+    outside test_ocr_install.py (which deliberately exercises the real
+    function, mocking only its internals) that still reaches
+    install_tesseract for real gets an immediate AssertionError instead of a
+    silent multi-minute subprocess call. Note this only guarantees the
+    subprocess never runs -- daemon.py's _run_ocr_setup now dispatches the
+    call on a background thread whose own `except Exception` catches and logs
+    this AssertionError rather than failing the test outright, so a violation
+    here surfaces in captured log output, not necessarily as a red test.
+    """
+    if request.node.path.name in _OCR_INSTALL_REACHABLE_FILES:
+        return
+    from mcpbrain import ocr
+
+    def _boom_install(*args, **kwargs):
+        raise AssertionError(
+            "ocr.install_tesseract() called for real in a test outside "
+            "test_ocr_install.py -- mock it, or add this file to "
+            "_OCR_INSTALL_REACHABLE_FILES in conftest.py if it deliberately "
+            "exercises the real function")
+
+    monkeypatch.setattr(ocr, "install_tesseract", _boom_install)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_daemon_tempdir(tmp_path, monkeypatch):
     """Keep the snapshot-orphan sweep away from the real OS temp dir.

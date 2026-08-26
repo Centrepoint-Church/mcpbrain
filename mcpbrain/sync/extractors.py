@@ -222,7 +222,17 @@ def _tesseract_bin() -> str:
     Set TESSERACT_BIN to override explicitly.
     """
     global _tesseract_cache
-    if _tesseract_cache is None:
+    # Read the global ONCE into a local, and return from that snapshot in both
+    # branches. ocr.tesseract_available() busts this cache (sets it to None) to
+    # force a fresh resolve, and since the OCR-setup cadence it now runs on lives
+    # in the long-lived daemon alongside extraction threads, a re-read on the way
+    # out could in principle return None for a path this call just resolved.
+    # Measured, that interleaving is not actually reachable — the window is one
+    # bytecode boundary and 300k calls under setswitchinterval(1e-9) never hit it
+    # — so this is not a bug fix; it just makes the invariant local and obvious
+    # rather than something a future reader has to re-derive.
+    cached = _tesseract_cache
+    if cached is None:
         env = os.environ.get("TESSERACT_BIN", "")
         found = env or shutil.which("tesseract") or ""
         if not found:
@@ -231,7 +241,8 @@ def _tesseract_bin() -> str:
                     found = p
                     break
         _tesseract_cache = found
-    return _tesseract_cache
+        return found
+    return cached
 
 
 def _tesseract_available() -> bool:

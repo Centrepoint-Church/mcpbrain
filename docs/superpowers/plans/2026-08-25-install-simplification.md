@@ -2308,6 +2308,63 @@ and initialise the two attributes alongside the other cadence intervals in
         self._last_ocr_setup = 0.0
 ```
 
+> **CORRECTED 2026-08-26:** The code above is **wrong in two independent ways** and
+> must not be implemented as written — caught in human PR review (#30) on the
+> already-merged Task 13 commit, both confirmed by direct reproduction against the
+> live daemon and fixed on `feat/install-simplification-stage-3` after the fact.
+> If executing this plan from scratch, implement `_run_ocr_setup` and its
+> `__init__`/`apply_config`/`main()` wiring as they exist on that branch after the
+> fix, not as specified in Step 4's two code blocks above.
+>
+> 1. **`self._last_ocr_setup = 0.0` is not "never run" — `None` is.** Every other
+>    `_last_*` cadence attribute in the file is initialised to `None`; `_is_due`
+>    treats `last is None` as immediately due, but with `last = 0.0` it instead
+>    computes `self._clock() - 0.0 >= interval` using `time.monotonic()`, whose
+>    epoch is process/system boot, not install time. On a machine that reboots
+>    daily, `time.monotonic()` rarely accumulates 86,400s of continuous uptime, so
+>    the once-ever OCR install could silently never fire — the exact regression
+>    this task exists to prevent. Fix: `self._last_ocr_setup = None`.
+> 2. **`self._ocr_setup_interval_s = 86_400.0` hardcoded in `__init__` is not the
+>    same shape as every sibling cadence.** Every other `_X_interval_s` in this
+>    file is either a constructor kwarg defaulting to `None` or is initialised to
+>    `None` in `__init__` and wired to its real value only later, from
+>    `_cadences_from_config()`'s `cadences` dict, inside `apply_config` (the
+>    HTTP-triggered re-wire) and `main()` (the real entry point) — see the
+>    `communities_interval_s`/`decay_pass_interval_s`/etc. pattern already used
+>    throughout `__init__`, `apply_config`, and `main`. A hardcoded `86_400.0`
+>    bypasses that: it is unconditionally ON for **any** `Daemon(...)` the moment
+>    it is constructed, including a bare `Daemon(store, embedder, services={})`
+>    built directly in a test with no `apply_config`/`main()` cadences wiring at
+>    all — which is exactly how most of this suite's cadence-dispatch tests
+>    construct one. Combined with defect 1, a plain `pytest tests/` on a
+>    macOS/Windows dev box **without tesseract already installed** was
+>    reproduced shelling out to a real `brew install tesseract`/`winget install`
+>    (600s timeout each) from `tests/test_cadence_dispatch.py`,
+>    `tests/test_maintenance_scheduler.py`, and `tests/test_run_loop_wiring.py`
+>    alone — 4 real install attempts across 13 passing tests. Invisible on CI
+>    (Linux, where `ocr.install_command()` returns `None`) and on a box that
+>    already has tesseract (`tesseract_available()` short-circuits first) — both
+>    true of the author's and the first reviewer's boxes, which is why neither
+>    caught it before human review. Fix: add `"ocr_setup_interval_s": 86400.0`
+>    to `_CADENCE_DEFAULTS` and `_CADENCE_KEYS` (`daemon.py`, near the other
+>    entries), initialise `self._ocr_setup_interval_s: float | None = None` in
+>    `__init__` (matching the S2/Q4/B3/B5/B4/B6 "not a constructor param, wired
+>    after construction" group), and add
+>    `self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]` to both
+>    `apply_config`'s re-wire block and `main()`'s post-construction wiring
+>    block, exactly like every sibling. This also gives the pass the same
+>    `cadences.ocr_setup_interval_s: 0` power-user kill switch every other
+>    cadence already has, and production behaviour is unchanged (still 86400s
+>    by default once a real Daemon is started through `main()`).
+>
+> A defence-in-depth second layer was added alongside the fix: an autouse
+> `conftest.py` fixture (`_no_real_ocr_install`) that replaces
+> `ocr.install_tesseract` with a function that raises `AssertionError` for every
+> test file except `tests/test_ocr_install.py` (the one file that deliberately
+> exercises the real function, mocking only its internals) — so any future
+> cadence-dispatch path that reaches it again cannot execute a real subprocess
+> call, even if the interval-config fix above is ever weakened by a later change.
+
 - [ ] **Step 5: Remove the call from `setup.py`**
 
 Delete `_install_ocr_best_effort` (the whole function, `setup.py:129-150`) and its

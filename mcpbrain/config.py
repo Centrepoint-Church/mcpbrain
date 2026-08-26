@@ -37,6 +37,25 @@ def app_dir() -> Path:
     return d
 
 
+def fleet_defaults(cfg: dict) -> dict:
+    """The fleet folder ids to show in the wizard: saved config, else org default.
+
+    These ids used to be hardcoded in the wizard HTML — a silent duplicate of
+    org_defaults with no way to correct it centrally — while `config_profile()`
+    returned no `fleet` key at all, so the wizard's own prefill branch could never
+    fire. An empty string counts as unset: the wizard clears a field to opt out of
+    the org fleet, and treating that as a saved value would mean the default could
+    never come back.
+    """
+    from mcpbrain import org_defaults
+    saved = cfg.get("fleet") or {}
+    return {
+        "folder_id": saved.get("folder_id") or org_defaults.FLEET_FOLDER_ID,
+        "escrow_folder_id": (saved.get("escrow_folder_id")
+                             or org_defaults.ESCROW_FOLDER_ID),
+    }
+
+
 def store_path() -> Path:
     return app_dir() / "brain.sqlite3"
 
