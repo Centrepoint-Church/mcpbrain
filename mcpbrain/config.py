@@ -139,9 +139,35 @@ def embed_skip_tabular_enabled(home) -> bool:
     salience gate already treats tabular content as low-signal for
     graph-extraction -- this extends that same judgment to dense embedding.
 
-    Default: FALSE. Ships off until validated on the live gold-eval harness
-    that recall@10/MRR are unaffected -- same rollout discipline as
-    salience_gate and recall_excludes_cold before it.
+    Default: FALSE, and **the recommendation is to leave it off permanently as
+    written** -- not "off pending validation". Investigated end-to-end
+    2026-08-26; do not re-litigate without reading this.
+
+    1. It is the WRONG LEVER for the goal it is usually reached for. Keeping
+       tabular content out of ENTITY EXTRACTION is already done, completely, by
+       the salience gate: on the author's live store all 62,878 table chunks are
+       `enrich_state='cold'` and `should_enrich()` returns False for
+       content_subtype=='table' from any source. This flag does not touch
+       enrichment. It removes the dense VECTOR -- exactly the half that is
+       wanted -- from 36.1% of the corpus, leaving those chunks contributing
+       nothing to the graph AND barely reachable by search.
+    2. Its original gate ("validated on the gold-eval harness") is UNMEETABLE.
+       The gold set has 0 tabular cases out of 35 expected chunks (19 gmail,
+       16 gdrive prose), so the harness reports "no change" (0.850 -> 0.850)
+       whatever this flag does. A null result there is not evidence.
+    3. Measured harm, manually. Query "Music Academy actual versus budget":
+       the MUSIC SCHOOL/BUDGET sheet ranks #2 with its dense vector and is
+       ABSENT from the top 10 without it, replaced by a 2021 board minute
+       mentioning "Music Books". Specific line-item lookup -- the query class
+       tables exist to answer -- is where the loss lands. Literal-token queries
+       survive keyword-only (10/10 sampled) and paraphrase queries never reach
+       tables in either condition, which is why cruder tests came back clean.
+
+    The RESEARCH BEHIND IT IS STILL SOUND: raw pipe-delimited markdown embeds
+    poorly next to schema-enriched row sentences. The useful version of this
+    work is to CHANGE HOW tabular chunks are embedded ("Music Academy, actual
+    YTD $12k, budget $25.2k") rather than to stop embedding them. That is a
+    feature, not a flag flip, and it is the thing worth building.
 
     Resolved through `fleet_flag`, not a bare read_config: the whole point of
     shipping OFF is that it gets flipped ON once the gold harness clears it,
@@ -266,7 +292,24 @@ def schema_grounding_enabled(home) -> bool:
     stronger but is deferred; see #9). Relation TYPES are constrained by
     RELATION_TYPES in contract.py regardless of this flag.
 
-    Default: False — safe rollout. Enable via config 'schema_grounding': true.
+    Default: False. **Currently INERT — do not enable expecting it to work**
+    (investigated 2026-08-26).
+
+    _grounding_filter builds its source from extraction["messages"][].text/body,
+    but pushed payloads carry message METADATA only (message_id/sender/date/
+    labels/subject) — bodies stopped being echoed back by the model in 0.7.72
+    and nothing in drain re-hydrates them. There is nothing to ground against,
+    so the filter is a no-op.
+
+    Worse before 2026-08-26: for a MULTI-message thread " ".join(["", ""]) is
+    " ", which is truthy, so the empty-source guard was skipped and every name
+    was judged against a single space — measured on real pushed payloads,
+    entities 5->0 and relations 18->2, discarding whole extractions. drain.py
+    now .strip()s, making the no-op uniform and the flag SAFE but still useless.
+
+    To make it work, drain must re-hydrate source text from the store before
+    calling the filter — it already holds `store` and doc_ids_for_messages at
+    that exact call site. Enable via config 'schema_grounding': true.
     """
     return bool(read_config(home).get("schema_grounding", False))
 
@@ -338,8 +381,16 @@ def recall_excludes_cold(home) -> bool:
     as a retrieval filter. When the salience backfill grew the cold set to ~40% of
     the corpus, excluding cold from recall halved gold recall@10 (0.75→0.35) because
     genuinely-relevant docs were cold-marked. Keeping cold in recall honors the
-    gate's original 'stays embedded/searchable' guarantee. Opt back in (e.g. after a
-    validated, narrower cold definition) via 'recall_excludes_cold': true.
+    gate's original 'stays embedded/searchable' guarantee.
+
+    **DO NOT ENABLE.** It sits beside tiered_memory (default ON) and reads like
+    its natural companion; it is not. Cold-marking is an ENRICHMENT-cost
+    optimisation and must never double as a retrieval filter — on the author's
+    live store all 62,878 table chunks are cold precisely so they stay
+    SEARCHABLE while skipping extraction. Turning this on hides them.
+
+    Opt back in ONLY after a validated, narrower cold definition, and only with
+    a fresh gold measurement, via 'recall_excludes_cold': true.
     """
     return bool(read_config(home).get("recall_excludes_cold", False))
 
