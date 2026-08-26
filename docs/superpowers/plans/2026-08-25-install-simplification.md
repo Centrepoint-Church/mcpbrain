@@ -665,6 +665,32 @@ def code_config_path() -> Path:
     return (Path(base) if base else Path.home()) / ".claude.json"
 ```
 
+> **CORRECTED 2026-08-25:** The `desktop_config_paths()` body above is
+> **wrong** and must not be implemented as written — a human reviewer caught
+> this as a HIGH-severity bug in PR #29 (Stage 2), independently confirmed,
+> and fixed in `mcpbrain/connector.py`. It keys MSIX detection on whether
+> `msix.exists()` — i.e. whether the config FILE already exists at the
+> MSIX-virtualised path. Claude Desktop never creates
+> `claude_desktop_config.json` itself; it appears only once someone manually
+> opens Settings → Developer → Edit Config. So on a fresh Windows MSIX
+> machine with no config file written yet in either location — exactly the
+> situation when `mcpbrain setup` runs for a brand-new user — this code finds
+> nothing and silently falls back to the non-MSIX `%APPDATA%\Claude\` path,
+> which the containerised MSIX app never reads. That is precisely the silent
+> failure this whole task exists to eliminate.
+>
+> MSIX detection must key on the **MSIX package directory**
+> (`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\`), which exists on any MSIX
+> install regardless of whether a config file was ever written — not on the
+> config file's existence. The shipped fix also extracts a pure,
+> injectable-`exists` helper `_windows_desktop_paths(appdata, localappdata,
+> *, exists=os.path.exists)` so the branching logic can be tested with real
+> `Path` objects on any dev platform, without monkeypatching `os.name`. If
+> executing this plan from scratch, implement `mcpbrain/connector.py` and
+> `tests/test_connector_paths.py` as they exist on
+> `feat/install-simplification-stage-2` after this fix, not as specified in
+> the Step 1/Step 3 code blocks in this task.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_connector_paths.py -v`

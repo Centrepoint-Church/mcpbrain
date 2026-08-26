@@ -1,6 +1,7 @@
 import json
 import urllib.request
 
+from mcpbrain import connector
 from mcpbrain import daemon as daemon_mod
 from mcpbrain.control_api import ControlServer
 from mcpbrain.daemon import Daemon
@@ -443,18 +444,21 @@ def test_connect_desktop_endpoint(tmp_path, monkeypatch):
     Claude Desktop, returning the relaunch helper's dict as-is. Both side effects
     are monkeypatched to no-ops so this only pins the wiring/response shape."""
     import mcpbrain.desktop as desktop
-    import mcpbrain.setup as setup
 
     calls = {"registered": False}
 
     def fake_register(**kwargs):
         calls["registered"] = True
 
-    monkeypatch.setattr(setup, "_register_desktop_mcp", fake_register)
-    monkeypatch.setattr(
-        desktop, "relaunch_claude_desktop",
-        lambda: {"relaunched": True, "detail": "Claude Desktop is restarting"},
-    )
+    monkeypatch.setattr(connector, "register_connector",
+                        lambda **kw: fake_register() or [])
+
+    def fake_relaunch(on_quit=None):
+        if on_quit is not None:
+            on_quit()
+        return {"relaunched": True, "detail": "Claude Desktop is restarting"}
+
+    monkeypatch.setattr(desktop, "relaunch_claude_desktop", fake_relaunch)
 
     d = FakeDaemon()
     srv = ControlServer(d, home=str(tmp_path))

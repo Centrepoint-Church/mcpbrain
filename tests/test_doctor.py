@@ -6,7 +6,30 @@ real launchd/git/agent side effects occur. The disposition table lives in
 doctor; these tests assert the behaviour it drives.
 """
 
+import pytest
+
 from mcpbrain import doctor
+
+
+@pytest.fixture(autouse=True)
+def _isolated_connector_paths(tmp_path, monkeypatch):
+    """Never let these tests read the real machine's actual config files.
+
+    connector_lines() (called unconditionally inside run_doctor) is not
+    injectable the way conns/repairs are — it reads connector.desktop_config_paths()
+    and connector.code_config_path() for real. Left unstubbed, every run_doctor()
+    call in this file would read whatever the ACTUAL machine running the tests has
+    registered, which is not just cosmetic: a machine with no connector registered
+    would see a ⚠️ line and an incremented need_action from every single test here.
+    Point both at nonexistent paths under tmp_path so connector_lines reports
+    informational ➖ ("not present") lines by default — never touching the real
+    machine's files, never incrementing need_action — unless a specific test
+    deliberately overrides these mocks.
+    """
+    from mcpbrain import connector
+    monkeypatch.setattr(connector, "desktop_config_paths",
+                        lambda: [tmp_path / "claude_desktop_config.json"])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / ".claude.json")
 
 
 def _conns(**states):
@@ -130,7 +153,7 @@ def test_scheduled_tasks_inferred_from_enrichment():
     code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True, conns=conns, repairs=repairs,
                                   reprobe=lambda h, k, f: f)
     assert "Scheduled tasks" in msg
-    assert "/mcpbrain-fix" in msg
+    assert "/mcpbrain:install" in msg
     assert all(r.calls == 0 for r in repairs.values())
     # enrichment is guided (1 need_action) + scheduled-tasks is NOT double-counted
     # so code == 1 (one issue: enrichment itself)
@@ -261,7 +284,7 @@ def test_default_repairs_dispatch_to_real_agents_and_records(monkeypatch, tmp_pa
 
     repairs = doctor._default_repairs(str(tmp_path), "darwin", "/usr/local/bin/mcpbrain")
     assert set(repairs) == {"daemon", "agent", "records", "embedder", "baseline",
-                            "ocr"}
+                            "ocr", "connector"}
 
     # Invoking each closure must dispatch to the real function with valid kwargs
     # (a TypeError here is exactly the production-only failure we're guarding).
