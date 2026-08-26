@@ -116,8 +116,23 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
     source = " ".join(
         (m.get("text") or m.get("body") or "")
         for m in (extraction.get("messages") or [])
-    ).lower()
+    ).lower().strip()
     if not source:
+        # .strip() is load-bearing, not tidying. Pushed payloads carry message
+        # METADATA only (message_id/sender/date/subject) — bodies stopped being
+        # echoed back by the model in 0.7.72 — so every message contributes "".
+        # For a single-message thread " ".join([""]) == "" and this guard fires
+        # correctly; for TWO messages it is " ", which is truthy, so the guard
+        # was skipped and every name was then judged ungrounded against a lone
+        # space. Measured on real pushed payloads: entities 5->0, 6->0, i.e. the
+        # whole extraction discarded for any multi-message thread. Stripping
+        # makes the no-op uniform.
+        #
+        # This keeps the flag SAFE, not useful: with no body text there is
+        # nothing to ground against, so schema_grounding is inert either way.
+        # Making it do real work needs drain to re-hydrate the source text from
+        # the store (it has `store` and doc_ids_for_messages right here) before
+        # calling this — that is the actual fix, and it is not this one.
         return extraction, 0
 
     out = dict(extraction)
