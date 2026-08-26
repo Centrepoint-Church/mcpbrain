@@ -229,7 +229,35 @@ wrong and MUST be right:
   runbook was stale (see above); the latency table above is the
   re-measurement that finding asked for. PR #25 merged to `main` 2026-08-25
   (`ff77176`) before this rebuild ran.
-- **Current state (2026-08-04):** the **five** version files (+ `uv.lock`) are at `0.7.113`,
+- **Current state (2026-08-26): the four version files (+ `uv.lock`) are at `0.7.119`,
+  RELEASED** — source `8734fa2`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
+  `mcpbrain-0.7.119-py3-none-any.whl` and `install.ps1` is live (200). Full suite 3464 passed.
+  **0.7.119 is the three-stage install simplification (#28/#29/#30) plus a flag audit.**
+  Install goes from ~20 manual actions to ~6: `/mcpbrain:install` now CREATES the four Local
+  scheduled tasks itself (checking for pre-existing ones) instead of printing a table to
+  retype; `fastembed` moves to base deps with `daemon = []` kept as a permanently-declared
+  empty alias so deployed `update.py` command lines keep resolving silently; a new
+  `mcpbrain/connector.py` registers the MCP connector on BOTH surfaces with MSIX-aware
+  Windows path detection keyed on the PACKAGE DIRECTORY (not a config file, which never
+  exists on a fresh box) and writes it while Claude Desktop is DOWN; `install.ps1` drops an
+  inert plan layer (100→58 lines); OCR moves off the pre-wizard critical path to a
+  once-ever daemon cadence that is OFF by default on a bare `Daemon()` and enabled via the
+  cadences config — before that fix any `_run_periodic_passes()` tick, including from seven
+  test files, could shell out to a real `brew install`.
+  **Every fresh-install command keeps `"mcpbrain[daemon]"` permanently** — the one spelling
+  correct against both pre-0.7.119 wheels (fastembed extra-only) and every wheel after;
+  `tests/test_install_docs_single_source.py` enforces it across all shipped surfaces.
+  **Flag audit (2026-08-26), findings recorded in `config.py` docstrings — read them before
+  touching these:** `schema_grounding` is INERT and was DESTRUCTIVE on multi-message threads
+  (fixed); `embed_skip_tabular` is the wrong lever and should stay off permanently;
+  `recall_excludes_cold` must not be enabled; `incremental_communities` saves 2.66s on a
+  daily pass and would not even engage at the live 29.8% new-entity fraction. `drift_monitor`
+  was flipped ON locally (author's box only). The accept signal that gates
+  `bandit_auto_apply`/`lessons` had produced 12 events ever and none since 2026-06-24; it now
+  excludes scheduled-task runs and records score buckets so a threshold can be set from data.
+  **The Windows HARDWARE QA GATE remains OPEN** — 0.7.119 changes `install.ps1` and adds MSIX
+  detection derived from bug reports, neither validated on real hardware. Do not onboard
+  Windows users. Earlier: the **five** version files were at `0.7.113`,
   **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
   and it was URGENT:** the published 0.7.112 wheel was built with an unbounded `"mcp>=1.2"`, and
