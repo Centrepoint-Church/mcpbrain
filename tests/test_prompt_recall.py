@@ -2,7 +2,6 @@
 de-dup, and fail-open. Never hits the network — _recall is monkeypatched."""
 import io
 import json
-from pathlib import Path
 
 from mcpbrain import prompt_recall as pr
 
@@ -142,7 +141,7 @@ def test_quoteback_credits_when_snippet_reappears(tmp_path, monkeypatch):
              "used": []}
     tp = _transcript(tmp_path,
                      "As noted, Taryn leads the Easter launch volunteer team this year.")
-    newly = pr._detect_quoteback(str(tmp_path), tp, state, "s1")
+    newly, _, _ = pr._detect_quoteback(str(tmp_path), tp, state, "s1")
     assert newly == ["d1"]
     assert "d1" in state["used"]          # idempotency guard updated
 
@@ -151,7 +150,7 @@ def test_quoteback_no_credit_when_absent(tmp_path):
     state = {"injected": {"d1": "Taryn leads the Easter launch volunteer team"},
              "used": []}
     tp = _transcript(tmp_path, "Let me check the budget spreadsheet figures instead.")
-    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1") == []
+    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1")[0] == []
     assert state["used"] == []
 
 
@@ -159,14 +158,14 @@ def test_quoteback_not_recredited(tmp_path):
     state = {"injected": {"d1": "Taryn leads the Easter launch volunteer team"},
              "used": ["d1"]}            # already credited
     tp = _transcript(tmp_path, "Taryn leads the Easter launch volunteer team.")
-    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1") == []
+    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1")[0] == []
 
 
 def test_quoteback_ignores_short_snippets(tmp_path):
     # too few distinctive tokens (<_QB_MIN_TOKENS) to judge reliably
     state = {"injected": {"d1": "ok sure yes"}, "used": []}
     tp = _transcript(tmp_path, "ok sure yes indeed absolutely certainly")
-    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1") == []
+    assert pr._detect_quoteback(str(tmp_path), tp, state, "s1")[0] == []
 
 
 # --- expansion (retrieval_expand) --------------------------------------------
@@ -253,3 +252,76 @@ def test_recall_requests_expand_when_flag_on(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"retrieval_expand": False}))
     pr._recall(str(tmp_path), "some query")
     assert captured["body"]["expand"] is False
+
+
+# -- accept-signal calibration (2026-08-26 audit) -----------------------------
+
+def test_scheduled_task_session_never_credits_used(tmp_path):
+    """An automated run quoting its own prompt boilerplate is not a human using
+    recalled context. Crediting it would feed that noise straight to the bandit
+    (S4) and lessons (S5) writers, which is how the signal is consumed."""
+    from mcpbrain import prompt_recall as pr
+
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": '<scheduled-task name="brain-gardener-weekly">'},
+    }) + "\n" + json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "alpha bravo charlie delta echo"}]},
+    }) + "\n")
+    state = {"injected": {"note-1": "alpha bravo charlie delta echo"}, "used": []}
+
+    newly, bucket, ids = pr._detect_quoteback(str(tmp_path), str(tr), state, "s1")
+
+    assert newly == [], "a scheduled-task run must never be credited"
+    assert state["used"] == []
+    # ...but the score is still reported, so calibration data keeps accumulating.
+    assert bucket.startswith("qb") and ids == ["note-1"]
+
+
+def test_human_session_still_credits_a_genuine_quoteback(tmp_path):
+    from mcpbrain import prompt_recall as pr
+
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "alpha bravo charlie delta echo"}]},
+    }) + "\n")
+    state = {"injected": {"note-1": "alpha bravo charlie delta echo"}, "used": []}
+
+    newly, _, _ = pr._detect_quoteback(str(tmp_path), str(tr), state, "s1")
+
+    assert newly == ["note-1"]
+    assert state["used"] == ["note-1"]
+
+
+def test_near_miss_reports_its_bucket_without_crediting(tmp_path):
+    """The whole point of the buckets: a fire that credits nothing must still say
+    WHERE it landed, so `_QB_THRESHOLD` can be set from measured data rather than
+    guessed. Before this, a 0.15 score and a 0.0 score were indistinguishable."""
+    from mcpbrain import prompt_recall as pr
+
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "alpha zulu"}]},
+    }) + "\n")
+    state = {"injected": {"note-1": "alpha bravo charlie delta echo"}, "used": []}
+
+    newly, bucket, ids = pr._detect_quoteback(str(tmp_path), str(tr), state, "s1")
+
+    assert newly == []
+    assert bucket == "qb20"            # 1 of 5 distinctive tokens matched
+    assert ids == ["note-1"]
+
+
+def test_score_bucket_labels():
+    from mcpbrain import prompt_recall as pr
+    assert pr._score_bucket(0.0) == "qb00"
+    assert pr._score_bucket(0.07) == "qb00"
+    assert pr._score_bucket(0.15) == "qb10"
+    assert pr._score_bucket(0.62) == "qb60"
+    assert pr._score_bucket(1.0) == "qb90"     # clamped, never qb100
