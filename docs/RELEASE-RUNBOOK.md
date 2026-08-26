@@ -103,9 +103,7 @@ fine — but keep the index to the current wheel for clarity.
 
 ### 1b.1 Publish install.ps1 to dist repo
 
-The Windows installer script must also be published:
-
-> **The `.mcpb` Desktop Extension was REMOVED (2026-08-24) and must not be reintroduced.**
+ > **The `.mcpb` Desktop Extension was REMOVED (2026-08-24) and must not be reintroduced.**
 > It registered a server under the same name (`mcpbrain`) as the connector `mcpbrain setup`
 > writes into `claude_desktop_config.json`, won that collision, and then failed to launch —
 > mcpb's `server.type: "uv"` drops the `--from mcpbrain mcpbrain` argv, so Desktop ran a bare
@@ -114,15 +112,10 @@ The Windows installer script must also be published:
 > deliberately bundles no server (`plugin/.mcp.json`, guarded by
 > `tests/test_plugin_manifest.py`).
 
-```bash
-cp plugin/scripts/install.ps1 ~/GitHub/mcpbrain-dist/
-cd ~/GitHub/mcpbrain-dist
-git add install.ps1 \
-  && git commit -m "release: mcpbrain <version> (install.ps1)" && git push origin main
-```
-
-`install.ps1` is often byte-identical between releases; `git add` then simply stages nothing for
-it, which is fine.
+`bin/release.py --dist` now copies `plugin/scripts/install.ps1` into the dist repo
+root for you; you only need to commit and push it along with the index. It is
+often byte-identical between releases, in which case `git add` stages nothing —
+that is expected, not a failure.
 
 
 ### 1c. Sync the plugin assets to `mcpbrain-plugin`

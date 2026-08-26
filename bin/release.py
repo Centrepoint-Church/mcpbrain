@@ -24,6 +24,23 @@ def render_root_index() -> str:
             '</body></html>\n')
 
 
+def copy_installer(repo: Path, dist: Path) -> Path | None:
+    """Publish plugin/scripts/install.ps1 to the dist repo root.
+
+    Windows installs fetch this from GitHub Pages
+    (…/mcpbrain-dist/install.ps1), but the source of truth is this repo. It used
+    to be hand-copied at release time with nothing verifying it, so a fixed
+    installer could sit unpublished for releases at a time. Returns the written
+    path, or None if the source is missing.
+    """
+    src = Path(repo) / "plugin" / "scripts" / "install.ps1"
+    if not src.is_file():
+        return None
+    dest = Path(dist) / "install.ps1"
+    shutil.copy2(src, dest)
+    return dest
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dist", required=True, help="path to the public dist repo checkout")
@@ -48,7 +65,12 @@ def main(argv=None) -> int:
     wheels = [p.name for p in pkg_dir.glob("mcpbrain-*.whl")]
     (pkg_dir / "index.html").write_text(render_package_index(wheels))
     (Path(ns.dist) / "simple" / "index.html").write_text(render_root_index())
-    print(f"Index refreshed at {ns.dist}/simple/ ({len(wheels)} wheels). "
+    installer = copy_installer(Path(ns.repo), Path(ns.dist))
+    if installer is None:
+        print("WARNING: plugin/scripts/install.ps1 not found — Windows installer "
+              "NOT published.", file=sys.stderr)
+    print(f"Index refreshed at {ns.dist}/simple/ ({len(wheels)} wheels)"
+          f"{'; install.ps1 published' if installer else ''}. "
           f"Commit + push the dist repo to publish.")
     return 0
 
