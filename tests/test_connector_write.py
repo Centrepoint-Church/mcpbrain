@@ -24,7 +24,7 @@ def test_merge_preserves_every_other_key(tmp_path):
         "preferences": {"menuBarEnabled": True},
         "coworkUserFilesPath": "/Users/x/Claude",
     }))
-    ok, _ = connector.merge_server_into(
+    ok, _, _ = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
     assert ok
     data = json.loads(cfg.read_text())
@@ -46,7 +46,7 @@ def test_merge_is_idempotent(tmp_path):
 def test_unparseable_file_is_left_byte_identical(tmp_path):
     cfg = tmp_path / "c.json"
     cfg.write_text("{ this is not json")
-    ok, detail = connector.merge_server_into(
+    ok, status, detail = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
     assert ok is False
     assert "parse" in detail.lower()
@@ -55,9 +55,10 @@ def test_unparseable_file_is_left_byte_identical(tmp_path):
 
 def test_missing_file_is_skipped_when_create_is_false(tmp_path):
     cfg = tmp_path / "nope.json"
-    ok, detail = connector.merge_server_into(
+    ok, status, detail = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=False)
-    assert ok is False and "not present" in detail.lower()
+    assert ok is True and status == connector.STATUS_SKIPPED
+    assert "not present" in detail.lower()
     assert not cfg.exists()
 
 
@@ -66,7 +67,7 @@ def test_non_dict_top_level_is_refused(tmp_path):
     # whatever it is. Refuse rather than replace.
     cfg = tmp_path / "c.json"
     cfg.write_text("[1, 2, 3]")
-    ok, _ = connector.merge_server_into(
+    ok, _, _ = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
     assert ok is False
     assert cfg.read_text() == "[1, 2, 3]"
@@ -79,7 +80,7 @@ def test_non_dict_mcp_servers_value_is_refused(tmp_path):
     # top level.
     cfg = tmp_path / "c.json"
     cfg.write_text(json.dumps({"mcpServers": [1, 2]}))
-    ok, detail = connector.merge_server_into(
+    ok, status, detail = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
     assert ok is False
     assert "mcpServers" in detail
@@ -95,7 +96,7 @@ def test_write_is_atomic_no_partial_file(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(connector.os, "replace", boom)
-    ok, _ = connector.merge_server_into(
+    ok, _, _ = connector.merge_server_into(
         cfg, connector.server_entry("/abs/bin/mcpbrain", typed=False), create=True)
     assert ok is False
     assert json.loads(cfg.read_text()) == {"keep": 1}

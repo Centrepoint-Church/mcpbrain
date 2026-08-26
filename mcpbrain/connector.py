@@ -33,6 +33,17 @@ _MSIX_RELATIVE = _MSIX_PACKAGE / "LocalCache" / "Roaming" / "Claude"
 
 _CONFIG_NAME = "claude_desktop_config.json"
 
+# Outcomes of a single merge_server_into call. Callers branch on these rather
+# than on the human-readable detail string: `setup` used to decide "was this a
+# deliberate skip or a real failure?" with detail.startswith("not present:"),
+# which silently turns a reworded message into a spurious error on every
+# Claude-Desktop-only machine.
+STATUS_WRITTEN = "written"    # the entry was added or updated
+STATUS_ALREADY = "already"    # already correct; nothing written
+STATUS_SKIPPED = "skipped"    # deliberately not written (create=False, file absent)
+STATUS_ERROR = "error"        # could not read/parse/write; file left untouched
+STATUS_DRY_RUN = "dry-run"    # --dry-run: nothing was written
+
 
 def _windows_desktop_paths(appdata: str, localappdata: str, *,
                             exists=os.path.exists) -> list[Path]:
@@ -106,8 +117,12 @@ def server_entry(mcpbrain_bin: str, *, typed: bool) -> dict:
     return {"command": mcpbrain_bin, "args": ["mcp-server"]}
 
 
-def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, str]:
-    """Merge ``entry`` in as ``mcpServers.mcpbrain``. Returns (wrote, detail).
+def merge_server_into(path: Path, entry: dict, *, create: bool
+                      ) -> tuple[bool, str, str]:
+    """Merge ``entry`` in as ``mcpServers.mcpbrain``. Returns (ok, status, detail).
+
+    ``status`` is one of the STATUS_* constants above; ``ok`` is False only for
+    STATUS_ERROR, so a deliberate skip is not a failure.
 
     Never destructive. The file is parsed first and left byte-identical if it does
     not parse, or if its top level is not an object — both are states where a
@@ -134,25 +149,25 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
     """
     if not path.exists():
         if not create:
-            return False, f"not present: {path}"
+            return True, STATUS_SKIPPED, f"not present: {path}"
         data: dict = {}
     else:
         try:
             data = json.loads(path.read_text())
         except OSError as exc:
-            return False, f"could not read {path} ({exc}); left unchanged"
+            return False, STATUS_ERROR, f"could not read {path} ({exc}); left unchanged"
         except ValueError as exc:
-            return False, f"could not parse {path} ({exc}); left unchanged"
+            return False, STATUS_ERROR, f"could not parse {path} ({exc}); left unchanged"
         if not isinstance(data, dict):
-            return False, f"{path} is not a JSON object; left unchanged"
+            return False, STATUS_ERROR, f"{path} is not a JSON object; left unchanged"
 
     servers = data.get("mcpServers")
     if servers is not None and not isinstance(servers, dict):
-        return False, f"{path}'s mcpServers is not a JSON object; left unchanged"
+        return False, STATUS_ERROR, f"{path}'s mcpServers is not a JSON object; left unchanged"
     if servers is None:
         servers = {}
     if servers.get("mcpbrain") == entry and path.exists():
-        return True, f"already registered in {path}"
+        return True, STATUS_ALREADY, f"already registered in {path}"
     servers["mcpbrain"] = entry
     data["mcpServers"] = servers
 
@@ -165,15 +180,15 @@ def merge_server_into(path: Path, entry: dict, *, create: bool) -> tuple[bool, s
         os.replace(tmp, path)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
-        return False, f"could not write {path} ({exc})"
-    return True, f"registered in {path}"
+        return False, STATUS_ERROR, f"could not write {path} ({exc})"
+    return True, STATUS_WRITTEN, f"registered in {path}"
 
 
 def register_connector(*, mcpbrain_bin: str, dry_run: bool = False
-                       ) -> list[tuple[Path, bool, str]]:
+                       ) -> list[tuple[Path, bool, str, str]]:
     """Register the brain with every Claude surface present on this machine.
 
-    Returns one (path, wrote, detail) per file attempted, so a caller can report
+    Returns one (path, ok, status, detail) per file attempted, so a caller can report
     honestly rather than claiming success. One unwritable file never stops the
     others: a machine with a corrupt chat config still gets a working Code-tab
     registration, and vice versa.
@@ -188,12 +203,12 @@ def register_connector(*, mcpbrain_bin: str, dry_run: bool = False
     ]
     targets.append((code_config_path(), server_entry(mcpbrain_bin, typed=True), False))
 
-    results: list[tuple[Path, bool, str]] = []
+    results: list[tuple[Path, bool, str, str]] = []
     for path, entry, create in targets:
         if dry_run:
             print(f"would register mcpbrain in {path}: {json.dumps(entry)}")
-            results.append((path, True, "dry-run"))
+            results.append((path, True, STATUS_DRY_RUN, "dry-run"))
             continue
-        ok, detail = merge_server_into(path, entry, create=create)
-        results.append((path, ok, detail))
+        ok, status, detail = merge_server_into(path, entry, create=create)
+        results.append((path, ok, status, detail))
     return results

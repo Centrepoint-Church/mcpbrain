@@ -35,7 +35,7 @@ the Desktop config and `~/.claude.json` — rather than picking one:
 | OS | Claude Desktop MCP config |
 |---|---|
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` (or, on MSIX installs, the app actually reads `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` instead — mcpbrain writes to whichever of the two actually exist, both if both do) |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` (or, on MSIX installs, the app actually reads `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` instead — mcpbrain detects MSIX by the presence of the package DIRECTORY `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\`, not by whether a config file exists, because Claude Desktop never creates that file itself; on an MSIX box it writes the virtualised path, plus the plain `%APPDATA%` one when that config also exists) |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
 Setup merges this entry in (preserving any other servers, idempotent):

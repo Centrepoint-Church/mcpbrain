@@ -68,16 +68,18 @@ def _register_connector(*, dry_run: bool = False) -> None:
     that the wizard's Connect button writes inside the quit/relaunch window.
     """
     from mcpbrain import connector
-    for path, ok, detail in connector.register_connector(
+    for path, ok, status, detail in connector.register_connector(
             mcpbrain_bin=_mcpbrain_bin(), dry_run=dry_run):
-        if detail == "dry-run":
+        if status == connector.STATUS_DRY_RUN:
             continue  # register_connector already printed "would register ..."
-        if ok:
-            print(f"Connected the brain: {detail}")
-        elif detail.startswith("not present:"):
-            # Intentional skip (e.g. ~/.claude.json on a Claude-Desktop-only
-            # machine) — not a failure, just informational.
+        if status == connector.STATUS_SKIPPED:
+            # Intentional (e.g. ~/.claude.json on a Claude-Desktop-only machine)
+            # — informational, never stderr. Branching on the status rather than
+            # on the detail text means rewording a message cannot turn this back
+            # into a spurious error.
             print(f"Skipped: {detail}")
+        elif ok:
+            print(f"Connected the brain: {detail}")
         else:
             print(f"Could not connect the brain here: {detail}", file=sys.stderr)
 

@@ -416,6 +416,11 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             conn_lines = connector_lines(mcpbrain_bin=mcpbrain_bin)
             if any(line.startswith("⚠️") for line in conn_lines):
                 need_action += 1
+            else:
+                # Mirror the embedder block fully: a repair that actually worked
+                # is reported as fixed, not silently folded into "0 fixed, 0 need
+                # your action" — which is what the summary said before.
+                fixed += 1
     lines.extend(conn_lines)
 
     drift_line = version_drift_line(home)

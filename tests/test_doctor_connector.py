@@ -150,3 +150,45 @@ def test_run_doctor_connector_repair_still_broken_counts_as_need_action(tmp_path
     assert "⚠️" in msg
     assert "Connector" in msg
     assert code == 1
+
+
+def test_successful_connector_repair_is_reported_as_fixed(tmp_path, monkeypatch):
+    """A repair that WORKED must be counted in the summary's "fixed" tally.
+
+    The block increments need_action when the post-repair state is still bad,
+    but originally incremented nothing when the repair succeeded — so doctor
+    silently healed the connector and then printed "0 fixed automatically, 0
+    need your action". Its own comment says it mirrors the embedder block, and
+    that block does `fixed += 1`.
+    """
+    from mcpbrain import doctor as doctor_mod
+
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}))          # entry missing -> ⚠️
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / "absent.json")
+
+    new_bin_path = tmp_path / "new-mcpbrain"
+    new_bin_path.write_text("#!/bin/sh\n")
+    new_bin = str(new_bin_path)
+
+    def fake_repair():
+        data = json.loads(cfg.read_text())
+        data.setdefault("mcpServers", {})["mcpbrain"] = {
+            "command": new_bin, "args": ["mcp-server"]}
+        cfg.write_text(json.dumps(data))
+
+    conns = {k: {"state": "ok", "detail": "Connected", "last_verified": None}
+             for k in ("google", "claude", "backup", "records", "enrichment")}
+    repairs = {"daemon": lambda: None, "agent": lambda: None,
+               "records": lambda: None, "connector": fake_repair}
+
+    code, msg = doctor_mod.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                      conns=conns, repairs=repairs,
+                                      mcpbrain_bin=new_bin)
+
+    assert "✅ Connector" in msg
+    assert "0 fixed automatically" not in msg, \
+        "a successful connector repair must not report zero fixes"
+    assert "1 fixed automatically" in msg
+    assert code == 0

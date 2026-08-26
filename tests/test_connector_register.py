@@ -1,6 +1,5 @@
 """register_connector writes every surface present, and reports each outcome."""
 import json
-from pathlib import Path
 
 from mcpbrain import connector
 
@@ -15,7 +14,7 @@ def test_registers_both_surfaces(tmp_path, monkeypatch):
 
     results = connector.register_connector(mcpbrain_bin="/abs/bin/mcpbrain")
 
-    assert all(ok for _, ok, _ in results)
+    assert all(ok for _, ok, _, _ in results)
     d = json.loads(desktop.read_text())
     assert d["preferences"] == {"a": 1}
     assert d["mcpServers"]["mcpbrain"] == {
@@ -56,7 +55,7 @@ def test_one_broken_file_does_not_stop_the_other(tmp_path, monkeypatch):
 
     results = connector.register_connector(mcpbrain_bin="/abs/bin/mcpbrain")
 
-    assert any(ok for _, ok, _ in results) and any(not ok for _, ok, _ in results)
+    assert any(ok for _, ok, _, _ in results) and any(not ok for _, ok, _, _ in results)
     assert desktop.read_text() == "{ broken"
     assert json.loads(code.read_text())["mcpServers"]["mcpbrain"]
 

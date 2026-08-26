@@ -87,3 +87,24 @@ def test_connect_main_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     setup.connect_main(["--dry-run"])
     assert not desktop_cfg.exists()
     assert "would register" in capsys.readouterr().out
+
+
+def test_skip_routing_survives_a_reworded_detail_message(tmp_path, monkeypatch, capsys):
+    # The point of the STATUS_* constants: _register_connector must decide
+    # "deliberate skip or real failure?" from the status, never from the detail
+    # text. It previously did `detail.startswith("not present:")`, so rewording
+    # that message would have silently turned every Claude-Desktop-only user's
+    # intentional skip into a stderr error. Reword it here and assert the
+    # routing is unchanged.
+    from mcpbrain import connector
+    monkeypatch.setattr(setup, "_mcpbrain_bin", lambda: "/abs/bin/mcpbrain")
+    monkeypatch.setattr(
+        connector, "register_connector",
+        lambda **kw: [(tmp_path / "x.json", True, connector.STATUS_SKIPPED,
+                       "totally different wording, no 'not present' anywhere")])
+
+    setup._register_connector(dry_run=False)
+
+    captured = capsys.readouterr()
+    assert "Skipped: totally different wording" in captured.out
+    assert captured.err == ""
