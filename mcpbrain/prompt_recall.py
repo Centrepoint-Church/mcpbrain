@@ -208,23 +208,73 @@ def _recent_assistant_text(transcript_path: str) -> str:
     return " ".join(texts)[:_QB_MAX_CHARS]
 
 
+def _is_scheduled_task_session(transcript_path: str) -> bool:
+    """True when this transcript belongs to an automated scheduled-task run.
+
+    Claude Code wraps a scheduled task's prompt in a <scheduled-task ...> block,
+    so the first user turn identifies it. Fail-open (False) on any read problem:
+    treating a human session as automated would silently drop real signal, which
+    is worse than the reverse.
+    """
+    if not transcript_path:
+        return False
+    try:
+        for line in Path(transcript_path).read_text(errors="ignore").splitlines()[:40]:
+            if "<scheduled-task" in line:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _score_bucket(score: float) -> str:
+    """Overlap score -> a coarse bucket label, e.g. 0.07 -> 'qb00', 0.42 -> 'qb40'."""
+    return f"qb{min(int(score * 10) * 10, 90):02d}"
+
+
 def _detect_quoteback(home: str, transcript_path: str, state: dict,
-                      session_id: str) -> list:
+                      session_id: str) -> tuple[list, str, list]:
     """Credit injected docs whose content reappears in the assistant's recent
-    response. Mutates state['used']; returns the doc_ids newly credited."""
+    response. Mutates state['used'].
+
+    Returns (newly_credited, bucket_label, bucket_doc_ids).
+
+    Two things changed after the 2026-08-26 audit found this signal had produced
+    12 events ever and none since 2026-06-24:
+
+    * **Automated runs no longer credit.** A scheduled task quoting its own
+      prompt boilerplate is not a human using recalled context, and crediting it
+      would feed exactly that noise to the bandit (S4) and lessons (S5) writers
+      that consume this signal.
+    * **The score distribution is reported even when nothing clears the bar.**
+      `_QB_THRESHOLD` (0.6) asks for 60% of a 200-char snippet's distinctive
+      tokens to reappear, i.e. near-verbatim quoting; measured scores on the
+      sessions available at audit time topped out at 0.15. That sample was too
+      small and too skewed to automated runs to set a new threshold from, so
+      rather than guess a number this records the observed bucket per fire
+      (`qb00`, `qb10`, …) through the existing recall-feedback path. Once real
+      human-session buckets accumulate, the threshold can be set from data.
+    """
     injected = state.get("injected") or {}
     already = set(state.get("used") or [])
     candidates = {d: t for d, t in injected.items() if d not in already and t}
     if not candidates:
-        return []
+        return [], "", []
     response_tokens = _tokens(_recent_assistant_text(transcript_path))
     if not response_tokens:
-        return []
-    newly = [d for d, text in candidates.items()
-             if _overlap(text, response_tokens) >= _QB_THRESHOLD]
+        return [], "", []
+
+    scores = {d: _overlap(text, response_tokens) for d, text in candidates.items()}
+    best_doc = max(scores, key=lambda d: scores[d])
+    bucket, bucket_ids = _score_bucket(scores[best_doc]), [best_doc]
+
+    if _is_scheduled_task_session(transcript_path):
+        return [], bucket, bucket_ids
+
+    newly = [d for d, s in scores.items() if s >= _QB_THRESHOLD]
     if newly:
         state["used"] = sorted(already | set(newly))
-    return newly
+    return newly, bucket, bucket_ids
 
 
 def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -> tuple[str, dict]:
@@ -281,12 +331,16 @@ def _format_context(results: list[dict], seen: set, *, expanded: bool = False) -
     return _HEADER + "\n" + "\n".join(lines), injected
 
 
-def _record_used(home: str, doc_ids: list, session_id: str) -> None:
-    """Fire-and-forget POST of a 'used' accept signal to the daemon. Best-effort."""
+def _record_used(home: str, doc_ids: list, session_id: str,
+                 *, event: str = "used") -> None:
+    """Fire-and-forget POST of a recall-feedback event. Best-effort.
+
+    `event` defaults to the 'used' accept signal; the quote-back path also
+    uses it to record score buckets (qb00/qb10/…) for threshold calibration."""
     try:
         port = (Path(home) / "control_port").read_text().strip()
         token = (Path(home) / "control_token").read_text().strip()
-        payload = json.dumps({"doc_ids": doc_ids, "event": "used",
+        payload = json.dumps({"doc_ids": doc_ids, "event": event,
                               "session_id": session_id}).encode()
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/recall-feedback",
@@ -345,10 +399,15 @@ def user_prompt_submit(home: str, stdin=None, out=None, *, now=None) -> None:
     # the transcript (not the model grading itself); only scores docs we injected.
     # This is the real positive signal the bandit (S4) and lessons (S5) consume.
     if config.feedback_enabled(home):
-        newly_used = _detect_quoteback(
+        newly_used, qb_bucket, qb_ids = _detect_quoteback(
             home, hook.get("transcript_path") or "", state, session_id)
         if newly_used:
             _record_used(home, newly_used, session_id)
+        elif qb_bucket and qb_ids:
+            # No credit this fire — record where the best candidate actually
+            # landed, so the threshold can eventually be set from measured data
+            # instead of guessed. One row per fire, not per candidate.
+            _record_used(home, qb_ids, session_id, event=qb_bucket)
 
     results = _recall(home, prompt)
     seen = set(state.get("injected") or {})
