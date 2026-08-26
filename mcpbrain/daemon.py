@@ -210,6 +210,41 @@ def _graph_apply():
     return graph_write.apply
 
 
+_OCR_MARKER = "ocr_install_attempted.json"
+
+
+def run_ocr_setup(home: str) -> dict:
+    """Install the tesseract OCR binary once, in the background. Never raises.
+
+    Scanned, image-only PDFs have no text layer, so OCR is the only way to read
+    them — and those skew towards signed contracts, letters and invoices. This ran
+    inside `mcpbrain setup` before the wizard opened, which put a multi-minute
+    package install directly in front of a waiting user.
+
+    Attempted exactly ONCE, recorded in a marker file. A daily retry of a package
+    install that already failed (no Homebrew, no winget, Linux) is noise;
+    `mcpbrain doctor --repair` is the deliberate retry.
+    """
+    import datetime as _dt
+    from mcpbrain import ocr
+
+    marker = Path(home) / _OCR_MARKER
+    if ocr.tesseract_available():
+        return {"status": "present"}
+    if marker.exists():
+        return {"status": "already_attempted"}
+    ok, detail = ocr.install_tesseract()
+    try:
+        marker.write_text(json.dumps({
+            "ok": bool(ok), "detail": detail,
+            "attempted_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }, indent=2))
+    except OSError as exc:
+        log.warning("could not write the OCR marker: %s", exc)
+    log.info("ocr_setup: ok=%s detail=%s", ok, detail)
+    return {"status": "ok" if ok else "skipped", "detail": detail}
+
+
 @dataclass
 class BackupConfig:
     """Config for the daemon's periodic encrypted backup (Task H2).
@@ -262,6 +297,12 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
                 "_run_auto_update", needs_configured=False, needs_backfill_clear=False),
     CadencePass("verify", "_verify_interval_s", "_last_verify",
                 "_run_verify", needs_configured=False, needs_backfill_clear=False),
+    # OCR binary install: a once-ever background attempt, gated on its own marker
+    # (needs_configured=False — OCR is identity-agnostic and useful from the first
+    # sync). The interval only bounds how soon after boot it is first tried; the
+    # marker is what makes it once-ever.
+    CadencePass("ocr_setup", "_ocr_setup_interval_s", "_last_ocr_setup",
+                "_run_ocr_setup", needs_configured=False),
     CadencePass("communities", "_communities_interval_s", "_last_communities",
                 "_run_communities"),
     CadencePass("lint", "_lint_interval_s", "_last_lint", "_run_lint"),
@@ -974,6 +1015,11 @@ class Daemon:
         # Writes connections.json which all_connections() overlays.
         self._verify_interval_s: float | None = verify_interval_s
         self._last_verify = None
+        # OCR binary install: once-ever background attempt (see run_ocr_setup).
+        # The interval only bounds how soon after boot it is first tried; the
+        # marker file (not this timestamp) is what makes it once-ever.
+        self._ocr_setup_interval_s = 86_400.0
+        self._last_ocr_setup = 0.0
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -2490,6 +2536,21 @@ class Daemon:
         OFF unless configured; default hourly when configured without an explicit
         interval. Time-gated via self._clock."""
         return self._run_verify()
+
+    # -- OCR binary install (once-ever, background) --------------------------
+
+    def _run_ocr_setup(self) -> dict | None:
+        """Once-ever background install of the tesseract OCR binary."""
+        if not self._is_due("_ocr_setup_interval_s", "_last_ocr_setup"):
+            return None
+        now = self._clock()
+        try:
+            result = run_ocr_setup(str(app_dir()))
+        except Exception as exc:  # noqa: BLE001 — OCR is optional, never fatal
+            log.warning("ocr_setup failed: %s", exc, exc_info=True)
+            result = {"status": "error", "detail": str(exc)}
+        self._last_ocr_setup = now
+        return {"ocr_setup": result}
 
     # -- periodic community detection ---------------------------------------
 
