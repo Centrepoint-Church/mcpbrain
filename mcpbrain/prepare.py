@@ -252,6 +252,13 @@ _COLD_DRIVE_MIMES = frozenset({
     "application/csv",
     "text/tab-separated-values",
     "application/vnd.ms-excel",
+    "text/html",
+    # Drive text/html is an UPLOADED .html file — a saved web page, never an
+    # authored document (a Google Doc has its own mime). On the live store this
+    # was exactly two files totalling 5.07MB: a 4.95MB SHEIN shop page and a
+    # Bookabin payment page. The shop page alone was 2,904 hot chunks and formed
+    # a 5,075,515-byte work unit no drainer could hold, re-produced every spool
+    # cycle. Cold is reversible: the chunks stay embedded, in FTS, and in recall.
 })
 
 # Gmail category labels that indicate bulk / non-correspondence mail and are safe

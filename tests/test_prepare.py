@@ -960,3 +960,25 @@ def test_write_units_emits_a_unit_per_review_block(tmp_path):
     assert "org_merge_review" in blocks, f"got block units: {sorted(blocks)}"
     assert blocks["review_orphan"][0]["finding_id"] == 1
     assert summary["units_written"] == 2
+
+
+# --- 2.7 should_enrich gate: cold-marking by source -----
+
+def test_should_enrich_cold_marks_drive_html():
+    """Drive text/html is a saved web page, not a document. On the live store it
+    was exactly two files (5.07MB) — a SHEIN shop page and a Bookabin payment
+    page. Cold is reversible and keeps them searchable."""
+    from mcpbrain.prepare import should_enrich
+    chunk = {"text": "x" * 5000,
+             "metadata": {"source_type": "gdrive", "file_id": "f1",
+                          "mime_type": "text/html", "content_subtype": "prose"}}
+    assert should_enrich(chunk) is False
+
+
+def test_should_enrich_keeps_drive_pdf():
+    """Guard against over-broadening: a long PDF is still extracted."""
+    from mcpbrain.prepare import should_enrich
+    chunk = {"text": "x" * 5000,
+             "metadata": {"source_type": "gdrive", "file_id": "f2",
+                          "mime_type": "application/pdf", "content_subtype": "prose"}}
+    assert should_enrich(chunk) is True
