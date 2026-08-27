@@ -1955,6 +1955,25 @@ class Store:
                 for r in cur.fetchall()
             ]
 
+    def iter_hot_chunks(self):
+        """Yield every non-cold chunk as {doc_id, text, metadata}, streaming.
+
+        Feeds bin/resalience.py, which re-applies prepare.should_enrich to the
+        existing corpus after a gate change. Streams rather than materialising:
+        the live store is ~109k non-cold rows and this is an attended,
+        daemon-stopped sweep, not a cycle pass.
+        """
+        with self._connect() as db:
+            for r in db.execute(
+                "SELECT doc_id, text, metadata FROM chunks "
+                "WHERE COALESCE(enrich_state,'') != 'cold' ORDER BY rowid"
+            ):
+                try:
+                    meta = json.loads(r["metadata"])
+                except (TypeError, ValueError):
+                    meta = {}
+                yield {"doc_id": r["doc_id"], "text": r["text"], "metadata": meta}
+
     def mark_enriched(self, doc_ids: list[str], version: int = ENRICH_LOGIC_VERSION) -> None:
         """Set enriched=1 and stamp the enrichment-logic version for the given
         doc_ids, so reflow_outdated_chunks can later re-extract anything enriched
