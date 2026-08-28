@@ -30,3 +30,22 @@ def test_note_chunks_legacy_single_chunk_note_unchanged(tmp_path):
     assert len(rows) == 1
     assert rows[0]["doc_id"] == "note-xyz"
     assert rows[0]["text"] == "body"
+
+
+def test_patch_note_metadata_stamps_every_sibling(tmp_path):
+    s = _store(tmp_path)
+    base = "note-abc"
+    for i in range(3):
+        s.upsert_chunk(f"{base}-{i}", f"p{i}", "h",
+                       {"source": "note", "observation_type": "memory",
+                        "note_id": base, "chunk_index": i, "chunk_total": 3})
+    assert s.patch_note_metadata(base, distilled_at="2026-08-27", distilled_verdict="keep") is True
+    rows = s.note_chunks(observation_type="memory", include_expired=True)
+    assert rows[0]["metadata"]["distilled_verdict"] == "keep"
+
+
+def test_patch_note_metadata_falls_back_to_the_bare_doc_id(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_chunk("note-xyz", "body", "h",
+                   {"source": "note", "observation_type": "memory"})
+    assert s.patch_note_metadata("note-xyz", expired=True) is True
