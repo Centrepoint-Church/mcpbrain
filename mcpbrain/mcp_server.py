@@ -851,9 +851,10 @@ def build_server(store, draft_store, client, home: str):
         if name == "brain_read":
             # First tool routed through the daemon (Phase 4). The lambda is the
             # kill-switch path only: with the flag on, run_tool never calls it and
-            # this branch touches no Store.
+            # this branch touches no Store. read_doc (not a bare get_chunk)
+            # transparently reassembles a chunked note -- see Store.read_doc.
             out = await run_tool(name, arguments,
-                                 lambda: store.get_chunk(arguments["doc_id"]))
+                                 lambda: store.read_doc(arguments["doc_id"]))
         elif name == "brain_context":
             out = await run_tool(name, arguments, lambda: context(
                 entity=arguments.get("entity", ""),

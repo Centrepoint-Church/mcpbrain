@@ -139,7 +139,7 @@ def make_brain_search(client):
 
 
 # brain_read has no factory -- it is dispatched inline in on_call_tool as a bare
-# store.get_chunk(...) -- so it declares itself here, in the position it is
+# store.read_doc(...) -- so it declares itself here, in the position it is
 # advertised in (registration order == tools/list order).
 declare(
     "brain_read",
