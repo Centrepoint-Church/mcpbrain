@@ -227,6 +227,15 @@ def _build_known_people(store, batch_thread_ids):
     return prompt.build_known_people(store, batch_thread_ids=batch_thread_ids)
 
 
+def _build_candidate_people(store):
+    # Indirection kept as the unit-test seam; backed by the real mcpbrain.prompt.
+    # Same pattern (and the same reason) as _build_known_people above: prepare_units
+    # must reach the people pool THROUGH here, never prompt.* directly, or tests
+    # that stub the pool silently become inert and the populated-pool path loses
+    # its only coverage.
+    return prompt.build_candidate_people(store)
+
+
 # --- per-unit known_people scoping (Task 12) -------------------------------
 #
 # Every enrichment unit today gets the SAME shared known_people list
@@ -1094,13 +1103,16 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     # store error degrades to an empty pool/core (core-only context per unit,
     # matching write_units' own failure posture) rather than failing the whole
     # cycle — this is reference data, not work.
+    # Both go through the module seams (_build_known_people /
+    # _build_candidate_people), not prompt.* directly, so the tests that stub
+    # them actually govern what runs here.
     try:
-        data["people_core"] = prompt.build_known_people(store, batch_thread_ids=[])
+        data["people_core"] = _build_known_people(store, batch_thread_ids=[])
     except Exception as exc:  # noqa: BLE001
         log.warning("prepare_units: build_known_people failed: %s", exc)
         data["people_core"] = []
     try:
-        data["people_pool"] = prompt.build_candidate_people(store)
+        data["people_pool"] = _build_candidate_people(store)
     except Exception as exc:  # noqa: BLE001
         log.warning("prepare_units: build_candidate_people failed: %s", exc)
         data["people_pool"] = []
