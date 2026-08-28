@@ -49,8 +49,9 @@ def score(a_dir: str, b_dir: str) -> dict:
 def prep(units_dir: str, out_dir: str, n: int, full_context_path: str) -> int:
     """Emit N paired payloads: a/ = full context, b/ = the unit's scoped context."""
     from mcpbrain import config, prepare, prompt
+    from mcpbrain.embed import get_embedder
     from mcpbrain.store import Store
-    store = Store(str(config.app_dir()))
+    store = Store(config.store_path(), dim=get_embedder("bge-small").dim, read_only=True)
     core = prompt.build_known_people(store, batch_thread_ids=[])
     pool = prompt.build_candidate_people(store)
     index = prepare._build_people_index(pool)
