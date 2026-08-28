@@ -1033,14 +1033,27 @@ def _bump_unit_attempts(home, d: dict) -> None:
 
     Best-effort and store-optional: this runs on the MCP claim path, which must
     stay cheap and must never fail a claim.
+
+    `embedder_dim` (a dict lookup), NOT `get_embedder(...).dim` — the latter
+    constructs a _LocalEmbedder, which loads the ONNX model eagerly, and this is
+    the claim hot path. The value is the same 384 either way, and
+    bump_enrich_attempts is a plain UPDATE that never touches the vec table.
     """
     try:
         ids = [i for t in (d.get("threads") or [])
                for i in (t.get("part_doc_ids") or [])]
         if not ids:
             return
+        from pathlib import Path
+
+        from mcpbrain.embed import embedder_dim
         from mcpbrain.store import Store
-        Store(str(home)).bump_enrich_attempts(ids)
+        # Store's real signature is (path, dim, read_only=False). `Store(str(home))`
+        # raised TypeError on EVERY call and was swallowed by the except below, so
+        # this whole backstop was inert in production while its tests — whose fakes
+        # matched the wrong one-argument signature — passed.
+        Store(Path(home) / "brain.sqlite3",
+              dim=embedder_dim("bge-small")).bump_enrich_attempts(ids)
     except Exception:  # noqa: BLE001 — bookkeeping must never break a claim
         _log.debug("claim: attempt bump failed", exc_info=True)
 
