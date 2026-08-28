@@ -758,7 +758,8 @@ def test_split_long_thread_splits_within_a_single_message():
         "org_hint": "",
         "messages": [{"message_id": "f", "sender": "", "date": "", "labels": "",
                       "subject": "doc.pdf", "text": "\n\n".join(pieces),
-                      "chunk_doc_ids": [f"gdrive-f-{i}" for i in range(10)]}],
+                      "chunk_doc_ids": [f"gdrive-f-{i}" for i in range(10)],
+                      "chunk_pieces": pieces, "chunk_has_gap": False}],
     }
     parts = _split_long_thread(block, 300)
     assert len(parts) > 1
@@ -779,6 +780,56 @@ def test_split_long_thread_short_message_is_untouched():
              "messages": [{"message_id": "m1", "text": "short",
                            "chunk_doc_ids": ["gmail-m1-0"]}]}
     assert _split_long_thread(block, 24000) == [block]
+
+
+def test_split_message_at_seams_when_chunks_pack_several_paragraphs():
+    """The common real case, which the old "\\n\\n"-re-split derivation could not
+    handle: chunk_text packs several paragraphs into ONE chunk whenever they fit
+    the budget, so a chunk's stored text contains internal blank lines. Splitting
+    the JOINED message on "\\n\\n" then produced more pieces than chunk_doc_ids
+    (60 paragraphs / 8 chunks, measured) and the length guard shipped the message
+    whole — defeating the whole point of seam splitting for ordinary documents."""
+    from mcpbrain.thread_enrich import _CHUNK_JOIN
+    from mcpbrain.prepare import _split_message_at_seams
+
+    # 4 chunks, each holding 3 paragraphs -> 12 pieces if naively re-split.
+    chunk_pieces = [_CHUNK_JOIN.join(f"c{c}p{p} " + "x" * 60 for p in range(3))
+                    for c in range(4)]
+    msg = {"message_id": "f", "text": _CHUNK_JOIN.join(chunk_pieces),
+           "chunk_doc_ids": [f"gdrive-f-{i}" for i in range(4)],
+           "chunk_pieces": chunk_pieces, "chunk_has_gap": False}
+    assert len(msg["text"].split(_CHUNK_JOIN)) == 12 != len(msg["chunk_doc_ids"])
+
+    out = _split_message_at_seams(msg, 500)
+
+    assert len(out) > 1                                   # it now actually splits
+    covered = [d for p in out for d in p["chunk_doc_ids"]]
+    assert covered == [f"gdrive-f-{i}" for i in range(4)]  # every chunk once, in order
+    assert _CHUNK_JOIN.join(p["text"] for p in out) == msg["text"]   # lossless
+
+
+def test_split_message_at_seams_bails_on_a_gap_marker():
+    """A partially-enriched/cold document gets a gap marker, so the pieces no
+    longer reconstruct the text. Ship whole rather than mark the wrong rows."""
+    from mcpbrain.thread_enrich import _CHUNK_JOIN, _GAP_MARKER
+    from mcpbrain.prepare import _split_message_at_seams
+
+    pieces = ["a" * 300, "b" * 300, "c" * 300]
+    msg = {"message_id": "f",
+           "text": pieces[0] + _GAP_MARKER + pieces[1] + _CHUNK_JOIN + pieces[2],
+           "chunk_doc_ids": ["d0", "d2", "d3"],
+           "chunk_pieces": pieces, "chunk_has_gap": True}
+    assert _split_message_at_seams(msg, 400) == [msg]
+
+
+def test_split_message_at_seams_bails_without_chunk_pieces():
+    """A unit written before this change carries no chunk_pieces; splitting on a
+    guess is exactly what this fix removes."""
+    from mcpbrain.prepare import _split_message_at_seams
+
+    msg = {"message_id": "f", "text": "a" * 300 + "\n\n" + "b" * 300,
+           "chunk_doc_ids": ["d0", "d1"]}
+    assert _split_message_at_seams(msg, 100) == [msg]
 
 
 # --- 2.5 merge-review block ------------------------------------------------
