@@ -256,6 +256,18 @@ def _split_paragraph(para: str, max_chars: int, overlap: int) -> list[str]:
 # chunk_text cannot bound.
 _PREFIX_HEADROOM_CHARS = 200
 
+# The separator chunk_text splits paragraphs on — and therefore the one any
+# caller that REASSEMBLES a chunked body must re-join with (store.note_chunks,
+# thread_enrich._join_with_gaps).
+#
+# chunk_text is not a lossless splitter and is not meant to be: _split_paragraph
+# duplicates the last `overlap` words across a boundary and paragraph whitespace
+# is stripped/collapsed, both correct for its embedding callers, which never
+# rejoin. A caller that DOES rejoin (drain.drain_captures' note path,
+# bin/rechunk_notes.py) must verify `CHUNK_JOIN.join(chunk_text(t)) == t` before
+# treating the split as a faithful representation of `t`.
+CHUNK_JOIN = "\n\n"
+
 
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
     """Split text into embeddable chunks on paragraph boundaries.

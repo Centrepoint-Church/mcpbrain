@@ -74,3 +74,58 @@ def test_apply_is_a_noop_on_empty(tmp_path):
 
     s = _store(tmp_path)
     assert rechunk_notes.apply(s, []) == 0
+
+
+def test_plan_skips_notes_that_cannot_be_re_chunked_losslessly(tmp_path):
+    """chunk_text duplicates overlap words when ONE paragraph exceeds max_chars,
+    so its round-trip is not exact. apply() DELETES the original whole-body row,
+    which is the only copy of the note's text — so plan() must exclude any note
+    whose re-chunk cannot be verified lossless, leaving it exactly as it is."""
+    from mcpbrain.chunking import chunk_text
+    from bin import rechunk_notes
+
+    s = _store(tmp_path)
+    body = " ".join(f"word{i}" for i in range(700))   # ONE paragraph, no blank lines
+    assert len(chunk_text(body)) > 1                  # it does split…
+    assert "\n\n".join(chunk_text(body)) != body      # …but not losslessly
+    s.upsert_chunk("note-para", body, "h", {"source": "note", "title": "b"})
+
+    assert rechunk_notes.plan(s) == []
+    # And the note is left completely untouched.
+    rows = s.note_chunks()
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "note-para"
+    assert rows[0]["text"] == body
+
+
+def test_scan_reports_the_skipped_count(tmp_path):
+    """main() prints it, so an operator can see a note was deliberately left."""
+    from bin import rechunk_notes
+
+    s = _store(tmp_path)
+    s.upsert_chunk("note-para", " ".join(f"word{i}" for i in range(700)), "h",
+                   {"source": "note", "title": "b"})
+    s.upsert_chunk("note-ok", "\n\n".join(f"para{i} " + "z" * 500 for i in range(20)),
+                   "h2", {"source": "note", "title": "c"})
+    items, skipped = rechunk_notes.scan(s)
+    assert [i["note_id"] for i in items] == ["note-ok"]
+    assert skipped == 1
+
+
+def test_apply_never_deletes_a_note_whose_pieces_are_lossy(tmp_path):
+    """Defense in depth: even handed a hand-built plan item whose pieces do not
+    round-trip, apply() must not delete the only copy of the note's text."""
+    from bin import rechunk_notes
+
+    s = _store(tmp_path)
+    body = " ".join(f"word{i}" for i in range(700))
+    s.upsert_chunk("note-para", body, "h", {"source": "note", "title": "b"})
+    item = {"note_id": "note-para", "text": body,
+            "metadata": {"source": "note", "title": "b"},
+            "pieces": ["not", "the", "original"]}
+    assert rechunk_notes.apply(s, [item]) == 0
+    with s._connect() as db:
+        assert db.execute("SELECT 1 FROM chunks WHERE doc_id=?",
+                          ("note-para",)).fetchone() is not None
+        assert db.execute("SELECT 1 FROM chunks WHERE doc_id=?",
+                          ("note-para-0",)).fetchone() is None

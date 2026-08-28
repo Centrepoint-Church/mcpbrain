@@ -686,7 +686,8 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """
     if bulk_section is None:
         bulk_section = nullcontext
-    from mcpbrain.chunking import action_fingerprint, chunk_text, content_hash
+    from mcpbrain.chunking import (CHUNK_JOIN as NOTE_CHUNK_JOIN,
+                                   action_fingerprint, chunk_text, content_hash)
     from mcpbrain.contract import validate_capture
 
     home_dir = _home(home)
@@ -736,6 +737,24 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                     # migration. chash stays the FULL-note hash on every piece, so
                     # re-capturing identical content is still a no-op.
                     pieces = chunk_text(text)
+                    # chunk_text is NOT a lossless splitter, and the note path is
+                    # the one caller that needs it to be: store.note_chunks()
+                    # reassembles a chunked note by re-joining its pieces on
+                    # NOTE_CHUNK_JOIN, so anything the split added or dropped
+                    # becomes the note's text forever. _split_paragraph
+                    # deliberately duplicates the last `overlap` words across a
+                    # piece boundary whenever ONE paragraph exceeds max_chars
+                    # (and strips/collapses paragraph whitespace) — a 4,069-char
+                    # single-paragraph note round-trips to 5,311 chars. That
+                    # overlap is correct for chunk_text's other callers, which
+                    # chunk for EMBEDDING and never rejoin, so it is verified
+                    # here rather than changed there. When the round-trip is not
+                    # exact, store the note the way it was stored before
+                    # chunking existed: one row, bare id, whole text.
+                    if len(pieces) > 1 and NOTE_CHUNK_JOIN.join(pieces) != text:
+                        log.info("capture: note %s could not be split losslessly "
+                                 "(%d chars); storing it whole", base_doc_id, len(text))
+                        pieces = [text]
                     changed = False
                     for i, piece in enumerate(pieces):
                         doc_id = (base_doc_id if len(pieces) == 1
