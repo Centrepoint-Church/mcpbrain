@@ -102,16 +102,17 @@ def _write_units(tmp_path, **data):
     return prepare.write_units(data, home=str(tmp_path))
 
 
-def test_producer_writes_sized_units_and_shared_context(tmp_path):
+def test_producer_writes_sized_units_and_per_unit_context(tmp_path):
     # The producer chunks threads + blocks into immutable unit files (sized so a pull
-    # fits the cap) and writes one shared context.json. Unit ids are content hashes.
+    # fits the cap), each carrying its own scoped context -- no shared context.json.
+    # Unit ids are content hashes.
     threads = [{"thread_id": f"t{i}", "body": "x" * 6000} for i in range(8)]
     summary = _write_units(tmp_path, threads=threads,
                            merge_review=[{"pair_id": "a|b"}],
                            context={"owner_name": "Jo", "known_people": [{"name": "Ann"}]})
     units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
     assert summary["units_written"] == len(units) > 1            # threads split + 1 block unit
-    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    assert not (tmp_path / "enrich_queue" / "context.json").exists()
     kinds = [json.loads(u.read_text())["kind"] for u in units]
     assert "thread" in kinds and "block" in kinds
     # content-addressed: re-running writes the SAME files (idempotent, no dupes)
@@ -198,20 +199,36 @@ def test_pull_response_stays_under_consumer_limit(tmp_path):
     # per unit. But the assembled pull RESPONSE must still stay under Claude Code's
     # ~50KB consumer limit, or it spills to a file the caller must Read back. A
     # with_rules=True pull (the default) on a big unit + big context must trim context
-    # to essentials rather than emit a 58KB+ blob.
+    # via the relevance-preserving trim (Task 14: pop from the WEAKEST/last end of
+    # the already-ranked known_people list) rather than emit a 58KB+ blob -- and
+    # rather than drop known_people wholesale, which is the old inversion this
+    # replaced (the largest units used to get the LEAST context).
+    #
+    # This unit file is written DIRECTLY (not via prepare.write_units, whose own
+    # per-unit scoping is covered in tests/test_prepare.py) so the huge known_people
+    # list here exercises _unit_payload's pull-time trim in isolation.
     # Size the response into the (50KB, 60KB) gap: rules ~11.5KB + context ~27KB +
     # thread ~18KB ~= 57KB — OVER the ~50KB consumer limit but UNDER the 60k packing
     # cap, so the old cap-based trim would NOT fire and the blob would spill to a file.
     big_people = [{"name": f"Person {i}", "blurb": "x" * 175} for i in range(125)]
-    _write_units(tmp_path,
-                 threads=[{"thread_id": "t1", "body": "y" * 18000}],
-                 context={"owner_name": "Jo", "valid_orgs": ["A"],
-                          "org_domain_map": ["a.org"], "known_people": big_people})
-    uid = asyncio.run(mcp_server.make_brain_enrich_units(str(tmp_path))())["units"][0]["unit_id"]
-    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id=uid))  # with_rules=True default
+    units_dir = tmp_path / "enrich_queue" / "units"
+    units_dir.mkdir(parents=True)
+    unit = {
+        "unit_id": "u-big", "kind": "thread",
+        "threads": [{"thread_id": "t1", "body": "y" * 18000}],
+        "context": {"owner_name": "Jo", "valid_orgs": ["A"],
+                    "org_domain_map": ["a.org"], "known_people": big_people},
+    }
+    (units_dir / "u-big.json").write_text(json.dumps(unit))
+
+    out = asyncio.run(mcp_server.make_brain_enrich_pull(str(tmp_path))(unit_id="u-big"))  # with_rules=True default
+
     assert len(json.dumps(out)) <= 51200, "pull response must stay under the ~50KB consumer limit"
     assert out["rules"]                                  # still self-contained (rules kept)
-    assert "known_people" not in out["context"]          # bulky context trimmed to essentials
+    trimmed = out["context"]["known_people"]
+    assert 0 < len(trimmed) < len(big_people), "trim must be partial, not wholesale"
+    assert trimmed == big_people[:len(trimmed)], "trim pops from the end, preserving rank order"
+    assert out["context"]["owner_name"] == "Jo"
     assert out["context"]["owner_name"] == "Jo"
 
 

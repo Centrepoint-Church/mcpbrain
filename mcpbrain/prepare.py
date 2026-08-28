@@ -872,34 +872,20 @@ def _merge_review_block(store, *, cap: int = _MERGE_REVIEW_CAP) -> list:
 
 # --- context assembly ------------------------------------------------------
 
-def _community_summaries_for_people(store, known_people: list) -> list[dict]:
-    """Deduplicated community summaries for the communities the known-people
-    entities belong to. Degrades to [] on any error."""
-    if not known_people:
-        return []
-    try:
-        entity_ids = [p["id"] for p in known_people if p.get("id")]
-        if not entity_ids:
-            return []
-        memberships = store.communities_for(entity_ids)
-        cids = {m["community_id"] for m in memberships}
-        if not cids:
-            return []
-        return [s for s in store.list_communities() if s["community_id"] in cids]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("_community_summaries_for_people failed: %s", exc)
-        return []
-
-
 def _build_context(store, thread_ids) -> dict:
+    """The STANDING reference block, shared by every unit and tiny (~150 bytes).
+
+    known_people is no longer here: it is scoped per unit in write_units, because
+    the batch-wide list had grown to 405 people / 39,017 bytes and was being
+    re-sent with every one of 860 units — 88.7% of everything reaching the model.
+
+    community_summaries is gone entirely: it had no consumer.
+    """
     home = str(config.app_dir())
-    known_people = _build_known_people(store, batch_thread_ids=thread_ids)
     return {
         "owner_name": config.owner_full_name(home) or config.owner_name(home),
-        "known_people": known_people,
         "org_domain_map": _org_domain_lines(),
         "valid_orgs": _valid_org_tags(),
-        "community_summaries": _community_summaries_for_people(store, known_people),
     }
 
 
@@ -927,9 +913,10 @@ def _atomic_write(target, text: str) -> None:
 
 # --- work-queue producer ---------------------------------------------------
 # The daemon produces a bounded queue of immutable, pre-sized WORK UNITS under
-# enrich_queue/units/, plus a shared enrich_queue/context.json. The enrich session
-# consumes them one subagent per unit (see mcp_server.brain_enrich_units / _pull /
-# _push). This replaces the single churning pending.json + read-time manifest.
+# enrich_queue/units/, each carrying its OWN scoped `context` (Task 14: no more
+# shared enrich_queue/context.json). The enrich session consumes them one
+# subagent per unit (see mcp_server.brain_enrich_units / _pull / _push). This
+# replaces the single churning pending.json + read-time manifest.
 
 # A unit is sized so its pull (unit work + rules + context) fits the cap.
 # _UNIT_RULES_RESERVE is the room left for the rules block the pull attaches.
@@ -963,47 +950,60 @@ def _pack_by_size(items, budget, sizer):
 
 def write_units(data: dict, *, home=None, pull_cap=None,
                 window: int = 600) -> dict:
-    """Turn a prepared batch dict (threads + optional blocks + context) into
-    immutable, pre-sized work-unit files under enrich_queue/units/, plus a shared
-    enrich_queue/context.json the pull attaches. Each unit is sized so its pull
-    (work + rules + context) fits the cap. Unit ids are content hashes, so
-    re-running on the same un-enriched work is idempotent. Honors a window cap
-    (backpressure): when the queue already holds >= window undrained units, the
-    cycle produces no new ones. Returns a summary."""
+    """Turn a prepared batch dict (threads + optional blocks + standing context +
+    people pool/core) into immutable, pre-sized work-unit files under
+    enrich_queue/units/. Each unit carries its OWN `context`: the standing block
+    (owner_name/org_domain_map/valid_orgs) plus a known_people list SCOPED to
+    that unit's own text (Task 12's _scoped_known_people) — there is no more
+    shared enrich_queue/context.json. Each unit is sized so its pull (work +
+    rules + context) fits the cap. Unit ids are content hashes, so re-running on
+    the same un-enriched work is idempotent. Honors a window cap (backpressure):
+    when the queue already holds >= window undrained units, the cycle produces
+    no new ones. Returns a summary."""
     if pull_cap is None:
         pull_cap = config.unit_pull_cap(home)
     from pathlib import Path
     queue = (config.app_dir() if home is None else Path(home)) / "enrich_queue"
     units_dir = queue / "units"
     units_dir.mkdir(parents=True, exist_ok=True)
-    # Shared standing context, refreshed each cycle. It is reference data
-    # (known_people, valid_orgs, …), not work, so refreshing it under in-flight
-    # units is harmless — a unit's WORK never changes.
-    context = data.get("context") or {}
-    _atomic_write(queue / "context.json", json.dumps(context, ensure_ascii=False))
     existing = list(units_dir.glob("*.json"))
     if len(existing) >= window:
         return {"units_written": 0, "units_pending": len(existing),
                 "skipped": "window_full"}
-    ctx_len = len(json.dumps(context, ensure_ascii=False))
-    budget = max(2000, pull_cap - _UNIT_RULES_RESERVE - ctx_len - 1500)
+    standing = data.get("context") or {}
+    pool = data.get("people_pool") or []
+    core = data.get("people_core") or []
+    # The token index is built ONCE per write_units call (not per unit): an
+    # O(people) scan per unit would be ~5,000 names x ~130 units of wasted work
+    # every cycle (see _build_people_index's own docstring).
+    index = _build_people_index(pool)
+    # CONTEXT_CAP replaces the old context-length term: context no longer grows
+    # with the batch (it's per-unit and capped), so the budget is deterministic
+    # and independent of corpus size.
+    budget = max(2000, pull_cap - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
     written = 0
     for chunk in _pack_by_size(data.get("threads") or [], budget,
                                lambda t: len(json.dumps(t)) + 1):
         tids = sorted(str(t.get("thread_id")) for t in chunk)
         uid = _unit_id("thread", ",".join(tids))
+        body = {"unit_id": uid, "kind": "thread", "threads": chunk}
+        body["context"] = {**standing,
+                           "known_people": _scoped_known_people(
+                               core, index, json.dumps(chunk, ensure_ascii=False))}
         _atomic_write(units_dir / f"{uid}.json",
-                      json.dumps({"unit_id": uid, "kind": "thread",
-                                  "threads": chunk}, ensure_ascii=False))
+                      json.dumps(body, ensure_ascii=False))
         written += 1
     for k in _UNIT_BLOCKS:
         for chunk in _pack_by_size(data.get(k) or [], budget,
                                    lambda it: len(json.dumps(it)) + 1):
             sig = k + ":" + json.dumps(chunk, sort_keys=True, ensure_ascii=False)
             uid = _unit_id("block", sig)
+            body = {"unit_id": uid, "kind": "block", "block": k, "items": chunk}
+            body["context"] = {**standing,
+                               "known_people": _scoped_known_people(
+                                   core, index, json.dumps(chunk, ensure_ascii=False))}
             _atomic_write(units_dir / f"{uid}.json",
-                          json.dumps({"unit_id": uid, "kind": "block",
-                                      "block": k, "items": chunk}, ensure_ascii=False))
+                          json.dumps(body, ensure_ascii=False))
             written += 1
     return {"units_written": written, "units_pending": len(existing) + written}
 
@@ -1076,6 +1076,21 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
                          resolution_due=resolution_due,
                          synthesis_requests=synthesis_requests,
                          extra_blocks=extra_blocks, budget=budget)
+    # The per-unit known_people pool (Task 12/14): built once per cycle here,
+    # then indexed once per write_units() call and scoped per unit there. A
+    # store error degrades to an empty pool/core (core-only context per unit,
+    # matching write_units' own failure posture) rather than failing the whole
+    # cycle — this is reference data, not work.
+    try:
+        data["people_core"] = prompt.build_known_people(store, batch_thread_ids=[])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prepare_units: build_known_people failed: %s", exc)
+        data["people_core"] = []
+    try:
+        data["people_pool"] = prompt.build_candidate_people(store)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prepare_units: build_candidate_people failed: %s", exc)
+        data["people_pool"] = []
     summary = write_units(data, home=home, window=window)
     summary["threads"] = len(data.get("threads") or [])
     summary["batch_id"] = data.get("batch_id")

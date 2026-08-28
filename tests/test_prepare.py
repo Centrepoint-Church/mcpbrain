@@ -270,8 +270,9 @@ def test_guard_peak_consultancy_real_correspondence_not_noise():
 
 def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     # The work-queue producer: prepare_units groups + builds + writes immutable unit
-    # files + a shared context.json (no pending.json), skipping noise threads and
-    # marking their chunks enriched so they never re-queue.
+    # files, each carrying its own scoped context (no shared context.json, no
+    # pending.json), skipping noise threads and marking their chunks enriched so
+    # they never re-queue.
     import json
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     # This test exercises unit-writing mechanics with stub batches; the salience
@@ -297,13 +298,14 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
 
     units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
     assert summary["units_written"] == len(units) >= 1
-    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    assert not (tmp_path / "enrich_queue" / "context.json").exists()
     # only the non-noise thread is enriched (noise filtered, like the old prepare())
     tids = set()
     for u in units:
         d = json.loads(u.read_text())
         if d["kind"] == "thread":
             tids.update(t["thread_id"] for t in d["threads"])
+            assert "context" in d  # every unit carries its own scoped context
     assert tids == {"t-good"}
     assert not (tmp_path / "enrich_queue" / "pending.json").exists()  # no single spool
     # the noise thread's chunk was marked enriched by _filter_noise so it never re-queues
@@ -624,19 +626,15 @@ def test_thread_block_prefers_real_synthesis_over_digest(monkeypatch):
 # --- 2.4 context + cap + long-thread guard ---------------------------------
 
 def test_build_pending_attaches_context(tmp_path, monkeypatch):
+    # build_pending's context is now the STANDING-only block (Task 14):
+    # known_people moved to write_units, scoped per unit, and is no longer
+    # part of what _build_context/build_pending produce.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"],
                       [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore()
     _stub_reassemble(monkeypatch)
 
-    captured = {}
-
-    def fake_people(store, batch_thread_ids):
-        captured["ids"] = batch_thread_ids
-        return [{"name": "Joel Chelliah", "org": "Acme", "role": "Senior Pastor"}]
-
-    monkeypatch.setattr(prepare, "_build_known_people", fake_people)
     monkeypatch.setattr(prepare, "_org_domain_lines",
                         lambda: ["example.org → Acme"])
 
@@ -644,8 +642,8 @@ def test_build_pending_attaches_context(tmp_path, monkeypatch):
                                  now=_NOW, resolution_due=False)
     ctx = data["context"]
 
-    assert captured["ids"] == ["t-a"]
-    assert ctx["known_people"][0]["name"] == "Joel Chelliah"
+    assert "known_people" not in ctx
+    assert "community_summaries" not in ctx
     assert "projects" not in ctx
     assert "areas" not in ctx
     assert ctx["org_domain_map"] == ["example.org → Acme"]
@@ -902,8 +900,9 @@ def test_prepare_units_no_unenriched_writes_no_unit_files(tmp_path, monkeypatch)
     units_dir = tmp_path / "enrich_queue" / "units"
     units = list(units_dir.glob("*.json")) if units_dir.exists() else []
     assert units == []
-    # context.json is reference data, refreshed every cycle regardless of work.
-    assert (tmp_path / "enrich_queue" / "context.json").exists()
+    # No shared context.json: context is scoped and written per unit now, and
+    # there is no work here to write any unit for.
+    assert not (tmp_path / "enrich_queue" / "context.json").exists()
     assert not (tmp_path / "enrich_queue" / "pending.json").exists()
 
 
@@ -1110,3 +1109,92 @@ def test_scoped_known_people_respects_the_cap_and_keeps_core_first():
     import json
     assert len(json.dumps(out)) <= 500
     assert out and out[0]["id"] == "c0"      # core ranks first, never trimmed away
+
+
+# --- Task 14: per-unit context replaces context.json ------------------------
+
+def test_write_units_writes_context_into_each_unit(tmp_path):
+    from mcpbrain.prepare import write_units
+    data = {"threads": [{"thread_id": "t1",
+                         "messages": [{"message_id": "m1", "text": "hi taryn"}]}],
+            "context": {"owner_name": "Josh", "valid_orgs": ["Acme"],
+                        "org_domain_map": [], "known_people": []}}
+    write_units(data, home=str(tmp_path))
+    import glob
+    import json
+    (f,) = glob.glob(str(tmp_path / "enrich_queue" / "units" / "*.json"))
+    unit = json.loads(open(f).read())
+    assert unit["context"]["owner_name"] == "Josh"
+    assert not (tmp_path / "enrich_queue" / "context.json").exists()
+
+
+def test_unit_payload_reads_the_units_own_context(tmp_path):
+    from mcpbrain.tools import _unit_payload
+    d = {"kind": "thread", "threads": [],
+         "context": {"owner_name": "Josh", "known_people": [{"id": "a"}]}}
+    out = _unit_payload(str(tmp_path), d, "u-1", False)
+    assert out["context"]["known_people"] == [{"id": "a"}]
+
+
+def test_context_carries_no_community_summaries():
+    """Dead payload: 6,255 bytes/unit that nothing reads — not enrich_prompt.md,
+    not the enrich-batch agent, not routines/enrich.md."""
+    from mcpbrain.prepare import _build_context
+    assert "community_summaries" not in _build_context(None, [])
+
+
+def test_write_units_scopes_known_people_per_unit(tmp_path):
+    # The unit's known_people must reflect what THAT unit's text mentions, not
+    # a batch-wide list: a person mentioned in unit A's text should not appear
+    # in unit B's context when unit B never mentions them.
+    from mcpbrain.prepare import write_units
+    core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
+    pool = [{"id": "p1", "name": "Taryn Hansen", "org": "Acme", "role": "Pastor",
+             "aliases": []}]
+    # Padded so two threads together exceed the packing budget (>= 2000 bytes),
+    # forcing each into its OWN unit -- scoping must be per-unit, not per-batch.
+    filler = "padding " * 150
+    data = {
+        "threads": [
+            {"thread_id": "t-a", "messages": [{"message_id": "m1",
+                                               "text": f"ask taryn hansen {filler}"}]},
+            {"thread_id": "t-b", "messages": [{"message_id": "m2",
+                                               "text": f"totally unrelated {filler}"}]},
+        ],
+        "context": {"owner_name": "Josh"},
+        "people_core": core, "people_pool": pool,
+    }
+    write_units(data, home=str(tmp_path), pull_cap=2_100)
+    import json
+    units = {}
+    for f in (tmp_path / "enrich_queue" / "units").glob("*.json"):
+        d = json.loads(f.read_text())
+        units[d["threads"][0]["thread_id"]] = d
+    assert len(units) == 2, "test setup must actually split into two units"
+    a_ids = {p["id"] for p in units["t-a"]["context"]["known_people"]}
+    b_ids = {p["id"] for p in units["t-b"]["context"]["known_people"]}
+    assert "p1" in a_ids and "p1" not in b_ids
+    assert "c1" in a_ids and "c1" in b_ids  # core is on every unit
+
+
+def test_write_units_builds_the_people_index_once_per_call(tmp_path, monkeypatch):
+    # The whole point of indexing once per write_units() call (not once per
+    # unit) is avoiding an O(people) scan repeated per unit -- ~5,000 names x
+    # ~130 units of wasted work every cycle on the live corpus.
+    from mcpbrain import prepare
+    calls = {"n": 0}
+    real_index = prepare._build_people_index
+
+    def counting_index(pool):
+        calls["n"] += 1
+        return real_index(pool)
+
+    monkeypatch.setattr(prepare, "_build_people_index", counting_index)
+    threads = [{"thread_id": f"t-{i}", "messages": [{"message_id": f"m{i}",
+                                                     "text": "x" * 500}]}
+              for i in range(5)]
+    data = {"threads": threads, "context": {}, "people_pool": [], "people_core": []}
+    prepare.write_units(data, home=str(tmp_path), pull_cap=2_100)
+    units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
+    assert len(units) > 1, "test setup must actually produce multiple units"
+    assert calls["n"] == 1
