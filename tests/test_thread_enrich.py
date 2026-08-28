@@ -519,3 +519,19 @@ def test_a_single_chunk_calendar_event_keeps_its_doc_id_as_its_identity(tmp_path
 
     assert messages[0]["message_id"] == "cal-solo"
     assert store.doc_ids_for_messages(["cal-solo"]) == ["cal-solo"]
+
+
+def test_reassemble_thread_carries_chunk_doc_ids_in_order():
+    """A message body IS a join of chunks. Splitting it back at those seams is
+    what lets a part be marked against exactly the chunks it covered."""
+    from mcpbrain.thread_enrich import reassemble_thread
+    chunks = [
+        {"doc_id": "gdrive-f-1", "text": "second",
+         "metadata": {"file_id": "f", "chunk_index": 1, "chunk_total": 2}},
+        {"doc_id": "gdrive-f-0", "text": "first",
+         "metadata": {"file_id": "f", "chunk_index": 0, "chunk_total": 2}},
+    ]
+    msgs = reassemble_thread(chunks)
+    assert len(msgs) == 1
+    assert msgs[0]["chunk_doc_ids"] == ["gdrive-f-0", "gdrive-f-1"]
+    assert msgs[0]["text"] == "first\n\nsecond"
