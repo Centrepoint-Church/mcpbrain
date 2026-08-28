@@ -149,6 +149,40 @@ def test_long_note_is_chunked_with_suffixed_doc_ids(tmp_path):
     assert rows[0]["text"] == f"T\n\n{body}"
 
 
+def test_note_that_cannot_split_losslessly_is_stored_whole(tmp_path):
+    """chunk_text is NOT a lossless splitter.
+
+    Its _split_paragraph helper duplicates the last `overlap` (50) words across
+    a piece boundary whenever ONE paragraph exceeds max_chars, and it strips and
+    collapses paragraph whitespace. Re-joining such a note through
+    store.note_chunks() therefore hands back MORE text than was captured (a
+    4,069-char single-paragraph note round-trips to 5,311 chars). The ingest path
+    must verify the round-trip and, when it fails, store the note exactly as it
+    was stored before chunking existed — one row under the bare note-<hash> id
+    with chunk_total 1 — rather than corrupt it.
+    """
+    from mcpbrain.chunking import chunk_text
+
+    body = " ".join(f"word{i}" for i in range(700))   # ONE paragraph, no blank lines
+    assert len(chunk_text(body)) > 1                  # it does split…
+    assert "\n\n".join(chunk_text(body)) != body      # …but not losslessly
+
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-para.json", _ingest_env(title="T", content=body))
+    drain.drain_captures(s, home=tmp_path)
+
+    with s._connect() as db:
+        ids = [r[0] for r in db.execute(
+            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%'")]
+    assert len(ids) == 1                              # stored whole, not split
+    assert "-" not in ids[0].removeprefix("note-")    # bare base id
+    rows = s.note_chunks(observation_type="memory")
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == ids[0]
+    assert rows[0]["metadata"]["chunk_total"] == 1
+    assert rows[0]["text"] == f"T\n\n{body}"          # nothing lost, nothing added
+
+
 def test_action_update_reopen(tmp_path):
     """Reopening a done action succeeds and is logged."""
     s = _store(tmp_path)
