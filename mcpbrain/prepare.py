@@ -308,9 +308,19 @@ def _scoped_known_people(core: list[dict], index: dict, unit_text: str,
     """
     from mcpbrain.chunking import name_in_text, name_tokens
     hay = (unit_text or "").lower()
-    ranked: list[tuple[int, dict]] = [(0, p) for p in core]
+    # (rank, seq, id, person). `seq` preserves core's own order — build_known_people
+    # returns it email_count DESC, i.e. most-corresponded-with first — so a cap
+    # trim still drops the least important core entry, not an arbitrary one.
+    # Pool matches all carry seq 0 and tiebreak on id instead.
+    ranked: list[tuple[int, int, str, dict]] = [
+        (0, i, p["id"], p) for i, p in enumerate(core)]
     seen = {p["id"] for p in core}
-    for tok in set(re.split(r"[^a-z0-9]+", hay)):
+    # sorted(), not bare set(): set iteration order depends on PYTHONHASHSEED,
+    # and with the cap trimming ~90% of real units that made the SAME unit text
+    # select a DIFFERENT set of people per process (measured: 5 seeds, 5
+    # different selections). Units are content-addressed and rewritten in place,
+    # so that is a real reproducibility defect, not just cosmetic ordering.
+    for tok in sorted(set(re.split(r"[^a-z0-9]+", hay))):
         for p in index.get(tok, ()):
             if p["id"] in seen:
                 continue
@@ -339,10 +349,12 @@ def _scoped_known_people(core: list[dict], index: dict, unit_text: str,
             else:
                 continue
             seen.add(p["id"])
-            ranked.append((rank, p))
-    ranked.sort(key=lambda r: r[0])
+            ranked.append((rank, 0, p["id"], p))
+    # Tiebreak past rank, so equally-ranked entries have ONE total order; rank
+    # alone left the cap trim deciding by hash-dependent insertion order.
+    ranked.sort(key=lambda r: (r[0], r[1], r[2]))
     out: list[dict] = []
-    for _, p in ranked:
+    for *_, p in ranked:
         entry = {"id": p["id"], "name": p["name"], "org": p.get("org", ""),
                  "role": p.get("role")}
         trial = out + [entry]
