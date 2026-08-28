@@ -154,6 +154,41 @@ def test_duplicate_org_canonicalize_risk_judgment_documented():
         )
 
 
+def test_thread_rules_exclude_block_protocols():
+    from mcpbrain.tools import _enrich_rules_for
+    r = _enrich_rules_for("thread")
+    assert "## The extraction envelope" in r
+    assert "## Entity and relation discipline" in r
+    assert "## Thread-mode rules" in r
+    assert "## Memory-distil rules" not in r
+    assert "## Org-hygiene review rules" not in r
+
+
+def test_block_rules_carry_only_that_block():
+    from mcpbrain.tools import _enrich_rules_for
+    r = _enrich_rules_for("block", "memory_distil")
+    assert "## Memory-distil rules" in r
+    assert "## Thread-mode rules" not in r
+    assert "## The extraction envelope" in r      # common preamble
+
+
+def test_every_unit_block_has_a_rules_section():
+    """Guards the same drift class tests/test_enrich_blocks.py already pins."""
+    from mcpbrain.enrich_blocks import UNIT_BLOCKS
+    from mcpbrain.tools import _enrich_rules_for
+    for b in UNIT_BLOCKS:
+        assert len(_enrich_rules_for("block", b)) > 0, b
+
+
+def test_reserve_covers_every_kind():
+    from mcpbrain.enrich_blocks import UNIT_BLOCKS
+    from mcpbrain.tools import _enrich_rules_for, enrich_rules_reserve
+    reserve = enrich_rules_reserve()
+    assert len(_enrich_rules_for("thread")) <= reserve
+    for b in UNIT_BLOCKS:
+        assert len(_enrich_rules_for("block", b)) <= reserve
+
+
 def test_coordinator_runs_on_sonnet_for_auto_mode():
     # The scheduled/hourly enrich task must run the COORDINATOR on Sonnet: Claude Code
     # scheduled tasks only offer Auto permission mode on Sonnet, and a Haiku coordinator
