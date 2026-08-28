@@ -317,7 +317,22 @@ def _scoped_known_people(core: list[dict], index: dict, unit_text: str,
             name = (p.get("name") or "").strip().lower()
             if name and name in hay:
                 rank = 1
-            elif any(t in hay for t in name_tokens(name)):
+            elif name_tokens(name) and all(t in hay for t in name_tokens(name)):
+                # EVERY distinctive token must appear (not adjacently — just
+                # each present). Matching on ANY one token made a multi-token
+                # name fire on a single coincidental word: on one real 24,800-
+                # byte unit, 36 of 40 non-core selections were that class
+                # ('Anthony Park' via "wetherill park", 'Kylie Beach' via
+                # "mission beach", 'Syft Billing' via "billing console"). Since
+                # enrich_prompt.md tells the model to TRUST an entry's org/role,
+                # those are mis-attribution risk, not just token cost. A
+                # one-token name is unaffected: all() over one element == any().
+                #
+                # This is deliberately STRICTER than chunking.name_in_text,
+                # which drain._name_grounded runs in the opposite direction
+                # (is an EXTRACTED name grounded in short source text?) where a
+                # false negative silently drops a real relation. Do not push
+                # this back into the shared primitive.
                 rank = 2
             elif any(name_in_text(a, hay) for a in _parse_aliases(p.get("aliases"))):
                 rank = 3
