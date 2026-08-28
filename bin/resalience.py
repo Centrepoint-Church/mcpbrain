@@ -13,6 +13,7 @@ import argparse
 import sys
 
 from mcpbrain import config
+from mcpbrain.embed import get_embedder
 from mcpbrain.prepare import should_enrich
 from mcpbrain.store import Store
 
@@ -39,7 +40,7 @@ def main(argv=None) -> int:
                     help="actually write; without it this is a dry run")
     args = ap.parse_args(argv)
 
-    store = Store(str(config.app_dir()))
+    store = Store(config.store_path(), dim=get_embedder("bge-small").dim)
     doc_ids = scan(store)
     print(f"[resalience] {len(doc_ids)} non-cold chunk(s) now fail the gate")
     if not doc_ids:

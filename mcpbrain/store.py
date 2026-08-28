@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 
 import sqlite_vec
 
@@ -1955,7 +1956,7 @@ class Store:
                 for r in cur.fetchall()
             ]
 
-    def iter_hot_chunks(self):
+    def iter_hot_chunks(self) -> Iterator[dict]:
         """Yield every non-cold chunk as {doc_id, text, metadata}, streaming.
 
         Feeds bin/resalience.py, which re-applies prepare.should_enrich to the
