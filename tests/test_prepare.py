@@ -1067,3 +1067,46 @@ def test_should_enrich_keeps_drive_pdf():
              "metadata": {"source_type": "gdrive", "file_id": "f2",
                           "mime_type": "application/pdf", "content_subtype": "prose"}}
     assert should_enrich(chunk) is True
+
+
+# --- Task 12: per-unit known_people scoping --------------------------------
+
+def test_parse_aliases_splits_json_list_and_pipes():
+    """entities.aliases stores pipe-delimited strings INSIDE JSON list elements."""
+    from mcpbrain.prepare import _parse_aliases
+    assert _parse_aliases('["Pete|Peter", "Ps Pete"]') == ["Pete", "Peter", "Ps Pete"]
+    assert _parse_aliases("") == []
+    assert _parse_aliases(None) == []
+
+
+def test_scoped_known_people_keeps_core_and_mentioned_only():
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
+    pool = [
+        {"id": "p1", "name": "Taryn Hamilton", "org": "Acme", "role": "Pastor",
+         "aliases": []},
+        {"id": "p2", "name": "Nobody Mentioned", "org": "Acme", "role": "X",
+         "aliases": []},
+    ]
+    out = _scoped_known_people(core, _build_people_index(pool),
+                               "please ask taryn hamilton about hall b")
+    ids = [p["id"] for p in out]
+    assert "c1" in ids and "p1" in ids and "p2" not in ids
+
+
+def test_scoped_known_people_matches_on_alias():
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    pool = [{"id": "p1", "name": "Peter Hammer", "org": "Acme", "role": "X",
+             "aliases": ["Pete|Peter"]}]
+    out = _scoped_known_people([], _build_people_index(pool), "pete is away")
+    assert [p["id"] for p in out] == ["p1"]
+
+
+def test_scoped_known_people_respects_the_cap_and_keeps_core_first():
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    core = [{"id": f"c{i}", "name": f"Core{i} Person", "org": "Acme", "role": "R"}
+            for i in range(40)]
+    out = _scoped_known_people(core, _build_people_index([]), "", cap=500)
+    import json
+    assert len(json.dumps(out)) <= 500
+    assert out and out[0]["id"] == "c0"      # core ranks first, never trimmed away

@@ -227,6 +227,107 @@ def _build_known_people(store, batch_thread_ids):
     return prompt.build_known_people(store, batch_thread_ids=batch_thread_ids)
 
 
+# --- per-unit known_people scoping (Task 12) -------------------------------
+#
+# Every enrichment unit today gets the SAME shared known_people list
+# (build_known_people's core + batch overlay), regardless of what that unit's
+# content actually mentions. The functions below build the SELECTION
+# machinery: given a pool of candidate people (prompt.build_candidate_people)
+# indexed once per write_units call, pick only the people a given unit's text
+# actually mentions, plus the standing core. Not yet wired into the write path
+# (Task 14 does that) — these are pure functions, exercised directly by tests.
+
+# Max serialized bytes of a unit's known_people block. p95 of the measured
+# distribution over 860 real units (p50 5,618 / p90 7,643 / p95 8,312 / max
+# 14,679), so it trims ~7% of units — and it trims the WEAKEST-ranked matches
+# rather than dropping known_people wholesale, which is what the old 50KB
+# soft-limit fallback did (inverting quality: the largest, most substantive
+# units got the least context). Also makes the packing budget deterministic.
+CONTEXT_CAP = 8_000
+
+
+def _parse_aliases(raw) -> list[str]:
+    """Flatten entities.aliases into alias strings.
+
+    The column is a JSON list whose ELEMENTS may themselves be pipe-delimited
+    ('Pete|Peter', 'Taryn Hansen|Taryn'), so both levels must be split. Coverage
+    is 2.9% today (175 of 5,992 people, and zero of the 405 that were in the old
+    shared context), so this earns nothing yet — it grows on its own through
+    merge_entities' loser-alias carry. It must NOT be treated as justifying a
+    smaller core.
+    """
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+    except (TypeError, ValueError):
+        val = raw
+    if isinstance(val, str):
+        val = [val]
+    if not isinstance(val, list):
+        return []
+    return [piece.strip() for item in val
+            for piece in str(item).split("|") if piece.strip()]
+
+
+def _build_people_index(people: list[dict]) -> dict:
+    """token -> [person], built ONCE per write_units call.
+
+    An O(people) substring scan per unit would be ~5,000 names x ~130 units of
+    work every cycle. Inverting to a token index makes selection O(unit tokens)
+    instead: tokenize the unit once, look each token up.
+    """
+    from mcpbrain.chunking import name_tokens
+    idx: dict = {}
+    for p in people:
+        toks = set(name_tokens(p.get("name") or ""))
+        for a in _parse_aliases(p.get("aliases")):
+            toks.update(name_tokens(a))
+        for t in toks:
+            idx.setdefault(t, []).append(p)
+    return idx
+
+
+def _scoped_known_people(core: list[dict], index: dict, unit_text: str,
+                         *, cap: int = CONTEXT_CAP) -> list[dict]:
+    """The known people this unit actually mentions, plus the standing core.
+
+    Ranked core -> exact full name -> name token -> alias token, then trimmed to
+    `cap` bytes from the weakest end. Core is never trimmed away: it is what
+    carries the nickname case ("Bob" for "Robert Smith") that a lexical scan
+    structurally cannot.
+    """
+    from mcpbrain.chunking import name_in_text, name_tokens
+    hay = (unit_text or "").lower()
+    ranked: list[tuple[int, dict]] = [(0, p) for p in core]
+    seen = {p["id"] for p in core}
+    for tok in set(re.split(r"[^a-z0-9]+", hay)):
+        for p in index.get(tok, ()):
+            if p["id"] in seen:
+                continue
+            name = (p.get("name") or "").strip().lower()
+            if name and name in hay:
+                rank = 1
+            elif any(t in hay for t in name_tokens(name)):
+                rank = 2
+            elif any(name_in_text(a, hay) for a in _parse_aliases(p.get("aliases"))):
+                rank = 3
+            else:
+                continue
+            seen.add(p["id"])
+            ranked.append((rank, p))
+    ranked.sort(key=lambda r: r[0])
+    out: list[dict] = []
+    for _, p in ranked:
+        entry = {"id": p["id"], "name": p["name"], "org": p.get("org", ""),
+                 "role": p.get("role")}
+        trial = out + [entry]
+        if out and len(json.dumps(trial)) > cap:
+            break
+        out = trial
+    return out
+
+
 def _org_domain_lines():
     # Indirection kept as the unit-test seam; backed by the configured taxonomy.
     from mcpbrain import orgs

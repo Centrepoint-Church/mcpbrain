@@ -150,3 +150,41 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> l
                 _add(r["id"], r["name"], r["org"], r["best_role"])
 
     return out
+
+
+def build_candidate_people(store, *, owner=None) -> list[dict]:
+    """Every person with a confirmed org, for per-unit context scoping.
+
+    This is a POOL, not a payload: prepare indexes it once per write_units call
+    and selects only the people a given unit actually mentions. It is
+    deliberately wider than build_known_people's batch overlay — a body mention
+    of someone outside this batch now resolves, which the old shared-context
+    shape could not do.
+    """
+    if owner is None:
+        owner = owner_identity_from_config()
+    owner_like = f"%{owner.name.lower()}%" if owner.name else "\x00"
+    with store._connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.id, e.name, e.org, e.aliases,
+                   (SELECT eo.value FROM entity_observations eo
+                    WHERE eo.entity_id = e.id AND eo.attribute = 'role'
+                      AND eo.valid_to IS NULL AND eo.invalidated_at IS NULL
+                      AND length(eo.value) BETWEEN 3 AND 70
+                    ORDER BY {_ROLE_SOURCE_CASE} DESC, eo.confidence DESC
+                    LIMIT 1) AS best_role
+            FROM entities e
+            WHERE e.type = 'person'
+              AND e.org NOT IN ('', 'unknown')
+              AND lower(e.name) NOT LIKE ?
+            """,
+            (owner_like,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        if _is_install_owner(r["id"], r["name"], owner):
+            continue
+        out.append({"id": r["id"], "name": r["name"], "org": r["org"] or "",
+                    "role": _clean_role(r["best_role"]), "aliases": r["aliases"]})
+    return out
