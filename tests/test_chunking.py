@@ -197,3 +197,17 @@ def test_the_headroom_is_not_taken_out_of_a_small_explicit_budget():
     assert max(len(c) for c in chunks) > 40, (
         "the small budget was reduced anyway"
     )
+
+
+def test_name_tokens_keeps_distinctive_tokens_only():
+    from mcpbrain.chunking import name_tokens
+    assert name_tokens("Joel Chelliah") == ["joel", "chelliah"]
+    assert name_tokens("A B") == []          # nothing >= 4 chars
+
+
+def test_name_in_text_matches_full_name_and_tokens():
+    from mcpbrain.chunking import name_in_text
+    assert name_in_text("Joel Chelliah", "spoke to joel chelliah today")
+    assert name_in_text("Joel Chelliah", "ps joel will confirm")
+    assert not name_in_text("Joel Chelliah", "nothing relevant here")
+    assert not name_in_text("", "anything")
