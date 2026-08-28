@@ -535,3 +535,59 @@ def test_reassemble_thread_carries_chunk_doc_ids_in_order():
     assert len(msgs) == 1
     assert msgs[0]["chunk_doc_ids"] == ["gdrive-f-0", "gdrive-f-1"]
     assert msgs[0]["text"] == "first\n\nsecond"
+
+
+def test_reassemble_thread_carries_the_real_chunk_pieces():
+    """The per-chunk text, carried verbatim — never re-derived by splitting the
+    joined body on _CHUNK_JOIN.
+
+    chunking.chunk_text PACKS several paragraphs into one chunk whenever they fit
+    the budget together, so a chunk's own stored text routinely contains internal
+    "\\n\\n". Re-splitting the joined message therefore yields MORE pieces than
+    there are chunk_doc_ids, and prepare._split_message_at_seams' length guard
+    then bails on ordinary real documents — one paragraph per chunk is the
+    exception, not the rule.
+    """
+    from mcpbrain.thread_enrich import _CHUNK_JOIN, reassemble_thread
+
+    chunks = [
+        {"doc_id": "gdrive-f-0", "text": "para a\n\npara b",
+         "metadata": {"file_id": "f", "chunk_index": 0, "chunk_total": 2}},
+        {"doc_id": "gdrive-f-1", "text": "para c\n\npara d",
+         "metadata": {"file_id": "f", "chunk_index": 1, "chunk_total": 2}},
+    ]
+    m = reassemble_thread(chunks)[0]
+
+    assert m["chunk_pieces"] == ["para a\n\npara b", "para c\n\npara d"]
+    assert len(m["chunk_pieces"]) == len(m["chunk_doc_ids"])
+    assert m["chunk_has_gap"] is False
+    # The invariant that makes a seam split provably lossless.
+    assert _CHUNK_JOIN.join(m["chunk_pieces"]) == m["text"]
+    # …and the naive re-derivation the old code used does NOT hold. This is the bug.
+    assert len(m["text"].split(_CHUNK_JOIN)) != len(m["chunk_doc_ids"])
+
+
+def test_reassemble_thread_flags_a_gap_so_seam_splitting_stops():
+    """With a gap marker inserted, _CHUNK_JOIN.join(chunk_pieces) no longer
+    reproduces the text, so splitting at seams cannot be proven lossless."""
+    from mcpbrain.thread_enrich import _CHUNK_JOIN, reassemble_thread
+
+    chunks = [
+        {"doc_id": f"gmail-m1-{i}", "text": f"part {i}",
+         "metadata": {"message_id": "m1", "chunk_index": i, "chunk_total": 3}}
+        for i in (0, 2)
+    ]
+    m = reassemble_thread(chunks)[0]
+    assert m["chunk_has_gap"] is True
+    assert _CHUNK_JOIN.join(m["chunk_pieces"]) != m["text"]
+
+
+def test_reassemble_thread_flags_a_truncated_tail_as_a_gap():
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": f"gmail-m1-{i}", "text": f"part {i}",
+         "metadata": {"message_id": "m1", "chunk_index": i, "chunk_total": 5}}
+        for i in (0, 1)
+    ]
+    assert reassemble_thread(chunks)[0]["chunk_has_gap"] is True

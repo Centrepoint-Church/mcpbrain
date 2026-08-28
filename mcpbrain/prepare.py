@@ -627,28 +627,46 @@ def _split_message_at_seams(msg: dict, char_budget: int) -> list[dict]:
     row written before notes were chunked) cannot be split and is returned
     whole — the caller's existing over-budget warning still fires, and the
     claim-time attempt cap bounds the retry loop.
+
+    The pieces are READ from the message (`chunk_pieces`, stamped by
+    reassemble_thread from the real chunk rows), never re-derived by splitting
+    `text` on _CHUNK_JOIN. chunk_text PACKS several paragraphs into one chunk
+    whenever they fit the budget together, so a chunk's own text routinely
+    contains internal "\\n\\n" — re-splitting the joined body then produced MORE
+    pieces than there were chunk_doc_ids (60 paragraphs / 8 chunks on a real
+    document), the length guard fired, and the message shipped whole. One
+    paragraph per chunk is the exception, not the rule, so that derivation
+    defeated seam splitting for ordinary documents.
     """
     ids = msg.get("chunk_doc_ids") or []
     if len(ids) <= 1:
         return [msg]
-    pieces = msg.get("text", "").split(_CHUNK_JOIN)
-    if len(pieces) != len(ids):
-        # A gap marker was inserted (a partially-enriched/cold document), so the
-        # text pieces no longer align 1:1 with the ids. Splitting here would
-        # mis-attribute chunks, so ship whole rather than mark the wrong rows.
+    pieces = msg.get("chunk_pieces")
+    if pieces is None or msg.get("chunk_has_gap") or len(pieces) != len(ids):
+        # No pieces (a unit written before they were carried); or a gap marker
+        # was inserted (a partially-enriched/cold document), so _CHUNK_JOIN.join
+        # of the pieces does NOT reproduce the text and a part's body could not
+        # be reconstructed losslessly; or — defensively — the two lists have
+        # drifted out of step. Splitting here would mis-attribute chunks, so ship
+        # whole rather than mark the wrong rows.
         return [msg]
+    def _piece(txts: list[str], dids: list[str]) -> dict:
+        # chunk_pieces/chunk_has_gap are re-derived for the emitted piece so a
+        # part never carries its parent's full piece list.
+        return {**msg, "text": _CHUNK_JOIN.join(txts), "chunk_doc_ids": dids,
+                "chunk_pieces": txts, "chunk_has_gap": False}
+
     out, cur_txt, cur_ids = [], [], []
     for piece, did in zip(pieces, ids):
-        projected = sum(len(t) for t in cur_txt) + len(cur_txt) * 2 + len(piece)
+        projected = (sum(len(t) for t in cur_txt)
+                     + len(cur_txt) * len(_CHUNK_JOIN) + len(piece))
         if cur_txt and projected > char_budget:
-            out.append({**msg, "text": _CHUNK_JOIN.join(cur_txt),
-                        "chunk_doc_ids": cur_ids})
+            out.append(_piece(cur_txt, cur_ids))
             cur_txt, cur_ids = [], []
         cur_txt.append(piece)
         cur_ids.append(did)
     if cur_txt:
-        out.append({**msg, "text": _CHUNK_JOIN.join(cur_txt),
-                    "chunk_doc_ids": cur_ids})
+        out.append(_piece(cur_txt, cur_ids))
     return out
 
 
@@ -1004,7 +1022,17 @@ def build_pending(store, batches, *, char_budget: int, now,
             log.info("prepare_units: budget spent after %d threads", len(threads))
             break
         block = _thread_block(store, batch)
-        threads.extend(_split_long_thread(block, char_budget))
+        for part in _split_long_thread(block, char_budget):
+            # chunk_pieces is reassembly-only: a message's `text` IS their join,
+            # so carrying it into the unit file would roughly DOUBLE every unit's
+            # payload for data nothing downstream reads. The seam split happens
+            # here; drain only ever needs the resulting part_doc_ids.
+            # chunk_doc_ids is deliberately kept — part_doc_ids derives from it,
+            # and it is the per-message provenance drain falls back on.
+            for m in part.get("messages", []):
+                m.pop("chunk_pieces", None)
+                m.pop("chunk_has_gap", None)
+            threads.append(part)
 
     context = _build_context(store, [b.thread_id for b in batches])
     merge_review = _merge_review_block(store) if resolution_due else []
