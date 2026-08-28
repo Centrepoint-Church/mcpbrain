@@ -54,3 +54,38 @@ def test_patch_note_metadata_falls_back_to_the_bare_doc_id(tmp_path):
     s.upsert_chunk("note-xyz", "body", "h",
                    {"source": "note", "observation_type": "memory"})
     assert s.patch_note_metadata("note-xyz", expired=True) is True
+
+
+def test_read_doc_reassembles_a_chunked_note(tmp_path):
+    """brain_read's plain get_chunk(doc_id) returns None for a chunked note's
+    base id -- only its `-0`/`-1`/... siblings have rows. note_chunks() (and
+    memory_index, which renders exactly this base id) still hand out that
+    base id as the note's identity, so the documented "read it with
+    brain_read" path silently failed for every multi-chunk note. read_doc is
+    the single place both brain_read dispatch sites call."""
+    s = _store(tmp_path)
+    base = "note-abc"
+    for i, piece in enumerate(["first", "second", "third"]):
+        s.upsert_chunk(f"{base}-{i}", piece, "h",
+                       {"source": "note", "observation_type": "memory",
+                        "title": "T", "note_id": base,
+                        "chunk_index": i, "chunk_total": 3})
+    assert s.get_chunk(base) is None          # the failure mode
+    doc = s.read_doc(base)
+    assert doc["doc_id"] == base
+    assert doc["text"] == "first\n\nsecond\n\nthird"
+    assert doc["metadata"]["title"] == "T"
+
+
+def test_read_doc_falls_through_to_get_chunk_for_ordinary_docs(tmp_path):
+    """The common case (email/drive chunks, a legacy or single-piece note)
+    must behave exactly like get_chunk, unchanged."""
+    s = _store(tmp_path)
+    s.upsert_chunk("gmail-m1-0", "hello", "h", {"source_type": "gmail"})
+    assert s.read_doc("gmail-m1-0") == s.get_chunk("gmail-m1-0")
+    assert s.read_doc("missing-entirely") is None
+
+
+def test_read_doc_missing_note_returns_none(tmp_path):
+    s = _store(tmp_path)
+    assert s.read_doc("note-never-captured") is None

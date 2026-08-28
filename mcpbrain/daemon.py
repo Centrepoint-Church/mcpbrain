@@ -1491,11 +1491,11 @@ class Daemon:
             # side uses -- the two must agree, which is what
             # test_tool_exec_routing's local-vs-routed agreement tests pin.
             # brain_read is the one routed tool with no make_brain_* factory: the
-            # MCP server dispatches it inline as a bare store.get_chunk (see the
+            # MCP server dispatches it inline as a bare store.read_doc (see the
             # declare(...) comment in mcpbrain/tools.py), so its handler is that
             # same call.
             self._tool_handlers = {
-                "brain_read": lambda a: store.get_chunk(a["doc_id"]),
+                "brain_read": lambda a: store.read_doc(a["doc_id"]),
                 "brain_context": lambda a: context(
                     entity=a.get("entity", ""),
                     mode=a.get("mode", "profile"),

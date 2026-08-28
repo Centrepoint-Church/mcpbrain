@@ -660,7 +660,7 @@ class _CountingStore:
         self.opened.append(read_only)
         return self
 
-    def get_chunk(self, doc_id):       # the one method a fallback path may hit
+    def read_doc(self, doc_id):        # the one method a fallback path may hit
         return {"doc_id": doc_id, "text": "read from a local Store"}
 
     @property
@@ -1054,8 +1054,8 @@ class _Recorder:
 
         class _Store:
             # brain_read's "handler" on both sides. Synchronous, like the real
-            # store.get_chunk it stands in for.
-            def get_chunk(self, *args, **kwargs):
+            # store.read_doc it stands in for.
+            def read_doc(self, *args, **kwargs):
                 recorder.calls["brain_read"] = (args, kwargs)
                 return {"recorded": "brain_read"}
 
