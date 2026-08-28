@@ -173,11 +173,21 @@ def test_block_rules_carry_only_that_block():
 
 
 def test_every_unit_block_has_a_rules_section():
-    """Guards the same drift class tests/test_enrich_blocks.py already pins."""
+    """Guards the same drift class tests/test_enrich_blocks.py already pins.
+
+    `len(...) > 0` alone could NOT catch that drift: _enrich_rules_for always
+    returns the ~4.2KB common preamble, even for a block name that is missing
+    from _RULES_BLOCK or misspelled in it — an unmapped block just appends no
+    section. So assert the mapping covers UNIT_BLOCKS exactly, and that each
+    block's OWN section title actually lands in its output.
+    """
     from mcpbrain.enrich_blocks import UNIT_BLOCKS
-    from mcpbrain.tools import _enrich_rules_for
+    from mcpbrain.tools import _RULES_BLOCK, _enrich_rules_for
+    assert set(_RULES_BLOCK) == set(UNIT_BLOCKS)
     for b in UNIT_BLOCKS:
-        assert len(_enrich_rules_for("block", b)) > 0, b
+        out = _enrich_rules_for("block", b)
+        # the mapped title must resolve to a real "## " heading in enrich_prompt.md
+        assert f"## {_RULES_BLOCK[b]}" in out, b
 
 
 def test_reserve_covers_every_kind():
