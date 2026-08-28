@@ -2600,11 +2600,23 @@ class Store:
         (ORDER BY rowid DESC). The limit is applied AFTER the Python-side expired/
         distilled/observation_type filter, so a store full of expired or already-distilled
         notes never truncates live/fresh ones — we iterate the cursor and stop once
-        `limit` live rows are collected rather than pre-truncating in SQL.
+        `limit` live (complete) notes are collected rather than pre-truncating in SQL.
+
+        A note that needed more than one `chunk_text` piece (see drain.py's
+        `drain_captures`, `kind == "ingest"`) is stored as several rows sharing one
+        `metadata["note_id"]` (the base `note-<hash>` id) and distinguished by
+        `chunk_index`/`chunk_total`. Those rows are reassembled here into a single
+        logical note — doc_id = note_id, text = pieces joined in chunk_index order
+        with the same "\n\n" separator `chunk_text` split on — so callers (memory_index,
+        memory_distil) keep seeing one row per captured note, same as before chunking
+        existed. A row with no `note_id` (every note captured before this, plus any
+        single-piece note, which keeps the bare id) is its own one-row group, unchanged.
         """
         sql = ("SELECT doc_id, text, metadata FROM chunks "
                "WHERE doc_id LIKE 'note-%' ORDER BY rowid DESC")
-        results = []
+        groups: dict[str, list[dict]] = {}
+        order: list[str] = []
+        completed = 0
         with self._connect() as db:
             for r in db.execute(sql):
                 try:
@@ -2627,13 +2639,34 @@ class Store:
                         continue
                 if observation_type is not None and meta.get("observation_type") != observation_type:
                     continue
-                results.append({
-                    "doc_id": r["doc_id"],
-                    "text": r["text"],
-                    "metadata": meta,
-                })
-                if len(results) == limit:
-                    break
+                key = meta.get("note_id") or r["doc_id"]
+                if key not in groups:
+                    groups[key] = []
+                    order.append(key)
+                groups[key].append({"doc_id": r["doc_id"], "text": r["text"], "metadata": meta})
+                # Pieces of one note are written consecutively (ascending chunk_index
+                # -> ascending rowid), so under this DESC scan they arrive contiguously
+                # counting down from chunk_total-1 to 0: once a group holds
+                # chunk_total rows it cannot grow further, so it's safe to count
+                # toward `limit` now instead of scanning the whole table.
+                total = meta.get("chunk_total") or 1
+                if len(groups[key]) >= total:
+                    completed += 1
+                    if completed >= limit:
+                        break
+
+        results = []
+        for key in order:
+            pieces = groups[key]
+            if len(pieces) == 1:
+                results.append(pieces[0])
+            else:
+                pieces.sort(key=lambda p: p["metadata"].get("chunk_index", 0))
+                text = "\n\n".join(p["text"] for p in pieces)
+                meta = dict(pieces[0]["metadata"])
+                results.append({"doc_id": key, "text": text, "metadata": meta})
+            if len(results) == limit:
+                break
         return results
 
     def get_cursor(self, source: str) -> str | None:
