@@ -57,10 +57,11 @@ def test_claim_never_hands_out_the_same_unit_twice(tmp_path):
 
 
 def test_claim_with_rules_inlines_rules(tmp_path):
-    _write_unit(tmp_path, "u-a")
+    _write_unit(tmp_path, "u-a")  # kind="thread" by default
     claim = mcp_server.make_brain_enrich_claim(str(tmp_path))
     out = asyncio.run(claim(with_rules=True))
-    assert out.get("rules") and out["rules"] == tools._enrich_rules()
+    # Only the thread-relevant rule sections, not the full block-protocol text.
+    assert out.get("rules") and out["rules"] == tools._enrich_rules_for("thread")
 
 
 def test_claim_reclaims_a_stale_lease(tmp_path):

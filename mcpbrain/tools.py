@@ -30,6 +30,7 @@ registration order, i.e. top-to-bottom through this file, so moving a factory
 reorders the surface the model sees (test_advertised_order_is_registration_order).
 """
 import logging
+import re
 
 from mcpbrain import config
 from mcpbrain.enrich_blocks import PUSH_BLOCKS as _PUSH_BLOCKS
@@ -881,6 +882,73 @@ def _enrich_rules() -> str:
     return _ENRICH_RULES_CACHE
 
 
+# Section titles in enrich_prompt.md, keyed to what each unit kind needs. The
+# prompt is NOT rewritten — it is split on its existing "## " headings.
+_RULES_COMMON = ("The extraction envelope", "Using the standing context")
+_RULES_THREAD = ("Entity and relation discipline", "Drive document mode",
+                 "Thread-mode rules")
+_RULES_BLOCK = {
+    "merge_review": "Merge-review rules",
+    "org_merge_review": "Org merge-review rules (curator only)",
+    "review_orphan": "Orphan-entity review rules",
+    "review_missing_org": "Missing-org review rules",
+    "review_ownerless": "Ownerless-action review rules",
+    "review_org": "Org-hygiene review rules",
+    "synthesis": "Thread-synthesis rules",
+    "profile_synthesis": "Profile-synthesis rules",
+    "community_synthesis": "Community-synthesis rules",
+    "memory_distil": "Memory-distil rules",
+    "profile_audit": "Profile-audit rules",
+}
+
+
+def _rules_sections() -> dict:
+    """Split the canonical rules on their '## ' headings. Cached."""
+    global _RULES_SECTIONS_CACHE
+    try:
+        return _RULES_SECTIONS_CACHE
+    except NameError:
+        pass
+    out = {}
+    for chunk in re.split(r"\n(?=## )", _enrich_rules()):
+        line = chunk.split("\n", 1)[0]
+        if line.startswith("## "):
+            out[line[3:].strip()] = chunk.rstrip()
+    _RULES_SECTIONS_CACHE = out
+    return out
+
+
+def _enrich_rules_for(kind: str, block: str | None = None) -> str:
+    """Only the rule sections this unit kind needs.
+
+    A thread unit does not need the 11 block protocols (~12.1KB of 24,554), and
+    850 of 868 live units are threads. The drainer's system-prompt copy stays
+    WHOLE — it handles every kind and its prefix is cached across the pool — so
+    bin/sync_agents.py is unaffected.
+    """
+    sections = _rules_sections()
+    wanted = list(_RULES_COMMON)
+    if kind == "block":
+        title = _RULES_BLOCK.get(block or "")
+        if title:
+            wanted.append(title)
+    else:
+        wanted.extend(_RULES_THREAD)
+    return "\n\n".join(sections[t] for t in wanted if t in sections)
+
+
+def enrich_rules_reserve() -> int:
+    """Max serialized rules length across every unit kind.
+
+    prepare's packing budget subtracts this. It was a stale 11_000 literal while
+    the real block is 24,554 chars, which is why EVERY live unit exceeded
+    unit_pull_cap on the with_rules=True path. Derived, never hardcoded.
+    """
+    from mcpbrain.enrich_blocks import UNIT_BLOCKS
+    return max([len(_enrich_rules_for("thread"))]
+               + [len(_enrich_rules_for("block", b)) for b in UNIT_BLOCKS])
+
+
 # The RESPONSE consumer limit, SEPARATE from the packing budget in prepare.py. A pull result
 # above ~50KB is persisted by Claude Code to a file the caller must Read back, which
 # defeats the flat-context fan-out. The packing budget (60k) lets the agent path
@@ -1008,7 +1076,7 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
         ctx = {}
     out = {}
     if with_rules:
-        out["rules"] = _enrich_rules()
+        out["rules"] = _enrich_rules_for(d.get("kind"), d.get("block"))
     out["context"] = ctx
     out["kind"] = d.get("kind")
     out["unit_id"] = unit_id
