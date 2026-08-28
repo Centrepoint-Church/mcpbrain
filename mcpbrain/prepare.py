@@ -923,7 +923,20 @@ def _atomic_write(target, text: str) -> None:
 # The cap itself is read from config.unit_pull_cap() AT CALL TIME (not import) so
 # a config change takes effect on the next write_units() call, no daemon restart
 # needed. write_units accepts pull_cap= so callers can still override explicitly.
-_UNIT_RULES_RESERVE = 11_000
+def _rules_reserve() -> int:
+    """Room the pull's rules block needs, derived from the real rules.
+
+    Was a hardcoded 11_000 while _enrich_rules() had grown to 24,554 chars, so
+    the budget under-reserved by 13,554 and no unit could meet unit_pull_cap.
+    Derived from tools.enrich_rules_reserve(), which takes the MAX across kinds
+    and is applied uniformly — one budget, kind-agnostic packing, never able to
+    under-reserve.
+    """
+    from mcpbrain.tools import enrich_rules_reserve
+    return enrich_rules_reserve()
+
+
+_UNIT_RULES_RESERVE = _rules_reserve()
 
 
 def _unit_id(kind: str, signature: str) -> str:
