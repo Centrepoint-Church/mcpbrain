@@ -2588,16 +2588,54 @@ class Store:
         _fts_text or contextual_prefix, so this does not add to the known
         patch_chunk_metadata FTS-mirror drift.
         """
-        ids = []
-        if note_id:
-            with self._connect() as db:
-                ids = [r["doc_id"] for r in db.execute(
-                    "SELECT doc_id FROM chunks WHERE "
-                    + _meta_extract("$.note_id") + " = ? ORDER BY doc_id",
-                    (note_id,)).fetchall()]
+        ids = self._note_sibling_ids(note_id)
         if not ids:
             ids = [note_id]          # legacy single-chunk note
-        return any(self.patch_chunk_metadata(d, **patch) for d in ids)
+        # A LIST, then any() — never `any(generator)`, which short-circuits on
+        # the first True and leaves siblings 1..N unpatched. That silently made
+        # this "patch every sibling" function patch exactly one row: an expired
+        # note's remaining chunks still grouped into a live note_chunks() row, so
+        # the note stayed live and was re-offered for distillation anyway.
+        patched = [self.patch_chunk_metadata(d, **patch) for d in ids]
+        return any(patched)
+
+    def _note_sibling_ids(self, note_id: str) -> list[str]:
+        """doc_ids of every chunk carrying metadata.note_id == note_id, ordered.
+
+        Empty for a legacy single-chunk note (no note_id stamped) and for an id
+        that matches nothing at all — the callers distinguish the two.
+        """
+        if not note_id:
+            return []
+        with self._connect() as db:
+            return [r["doc_id"] for r in db.execute(
+                "SELECT doc_id FROM chunks WHERE "
+                + _meta_extract("$.note_id") + " = ? ORDER BY doc_id",
+                (note_id,)).fetchall()]
+
+    def get_note_metadata(self, note_id: str) -> dict | None:
+        """The metadata dict of a note's FIRST chunk, or None if it has no rows.
+
+        Same sibling lookup as patch_note_metadata, with the same fallback to the
+        bare doc_id for a legacy single-chunk note. A chunked note has no row at
+        its bare `note-<hash>` id, so `get_chunk(note_id)` returns None for it and
+        any caller that gates on that silently skips the whole note (memory_distil
+        did, on both the expire and promote branches). Always a dict when a row
+        exists — the JSON is parsed here, so callers need no defensive re-parse.
+        """
+        ids = self._note_sibling_ids(note_id) or ([note_id] if note_id else [])
+        for doc_id in ids:
+            row = self.get_chunk(doc_id)
+            if row is None:
+                continue
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:  # noqa: BLE001 — malformed metadata is not fatal
+                    meta = {}
+            return meta if isinstance(meta, dict) else {}
+        return None
 
     def note_chunks(self, *, observation_type: str | None = None,
                     include_expired: bool = False, exclude_distilled: bool = False,

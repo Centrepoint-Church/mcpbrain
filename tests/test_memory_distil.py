@@ -162,3 +162,67 @@ def test_build_distil_requests_leaves_fresh_keep_note_excluded(tmp_path):
     reqs = memory_distil.build_distil_requests(s, cap=30, keep_review_days=30)
 
     assert reqs == []
+
+
+# Task 9 gap: a multi-chunk note has NO row at its bare note-<hash> id — only its
+# note-<hash>-<i> siblings do — but store.note_chunks() (and therefore every
+# distil request) reports the BASE id. The expire/promote branches gated on
+# store.get_chunk(doc_id), which is None for that id, so both bailed before
+# patching anything: the note was silently re-offered for distillation forever,
+# the exact failure Task 9 exists to eliminate.
+
+def _chunked_note(s, base, title, pieces, **extra):
+    for i, piece in enumerate(pieces):
+        s.upsert_chunk(doc_id=f"{base}-{i}", text=piece, content_hash=base,
+                       metadata={"source": "note", "title": title,
+                                 "observation_type": "memory",
+                                 "captured_at": "2026-06-01T00:00:00Z",
+                                 "note_id": base, "chunk_index": i,
+                                 "chunk_total": len(pieces), **extra})
+
+
+def test_expire_works_on_a_chunked_note(tmp_path):
+    s = _store(tmp_path)
+    _chunked_note(s, "note-multi", "Long note", ["first", "second", "third"])
+    assert s.get_chunk("note-multi") is None          # the base id has no row
+    assert [r["doc_id"] for r in s.note_chunks(observation_type="memory")] == [
+        "note-multi"]                                  # …yet this is what is offered
+
+    n = memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-multi", "verdict": "expire", "reason": "superseded"}]})
+
+    assert n["expired"] == 1
+    assert s.note_chunks(observation_type="memory") == []   # actually expired
+    for i in range(3):
+        meta = s.get_chunk(f"note-multi-{i}")["metadata"]
+        assert meta["expired"] is True
+        assert meta["distilled_verdict"] == "expire"
+    assert "memory_expired" in {c["change_type"] for c in s.recent_changes(10)}
+
+
+def test_promote_works_on_a_chunked_note(tmp_path):
+    s = _store(tmp_path)
+    _chunked_note(s, "note-multi", "Long note", ["first", "second"], org="Acme")
+
+    n = memory_distil.drain_distil(s, {"memory_distil": [
+        {"doc_id": "note-multi", "verdict": "promote",
+         "reason": "stated 4 times", "target_hint": "preferences.md"}]})
+
+    assert n["promotions_flagged"] == 1
+    finds = s.open_findings("memory_promotion")
+    assert finds and finds[0]["ref_id"] == "note-multi"
+    assert finds[0]["org"] == "Acme"                   # org read off a sibling
+    for i in range(2):
+        assert s.get_chunk(f"note-multi-{i}")["metadata"]["distilled_verdict"] == "promote"
+    # promote keeps the note live
+    assert [r["doc_id"] for r in s.note_chunks(observation_type="memory")] == [
+        "note-multi"]
+
+
+def test_get_note_metadata_returns_a_dict_or_none(tmp_path):
+    s = _store(tmp_path)
+    _chunked_note(s, "note-multi", "Long note", ["first", "second"], org="Acme")
+    _note(s, "note-legacy", "Legacy")
+    assert s.get_note_metadata("note-multi")["org"] == "Acme"
+    assert s.get_note_metadata("note-legacy")["title"] == "Legacy"
+    assert s.get_note_metadata("ghost") is None

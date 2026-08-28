@@ -42,6 +42,11 @@ def test_patch_note_metadata_stamps_every_sibling(tmp_path):
     assert s.patch_note_metadata(base, distilled_at="2026-08-27", distilled_verdict="keep") is True
     rows = s.note_chunks(observation_type="memory", include_expired=True)
     assert rows[0]["metadata"]["distilled_verdict"] == "keep"
+    # EVERY sibling, not just the first: note_chunks() reports the group's
+    # metadata from one piece, so checking only that hid an `any(generator)`
+    # short-circuit that patched exactly one row.
+    for i in range(3):
+        assert s.get_chunk(f"{base}-{i}")["metadata"]["distilled_verdict"] == "keep"
 
 
 def test_patch_note_metadata_falls_back_to_the_bare_doc_id(tmp_path):
