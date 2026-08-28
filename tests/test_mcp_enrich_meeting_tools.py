@@ -349,7 +349,10 @@ def test_bump_unit_attempts_bumps_every_part_doc_id(tmp_path, monkeypatch):
     seen = []
 
     class FakeStore:
-        def __init__(self, home):
+        # The REAL Store signature. A fake that accepts (self, home) passes even
+        # against a call site that cannot construct a Store at all — which is
+        # exactly how Store(str(home)) (TypeError: missing 'dim') shipped inert.
+        def __init__(self, path, dim, read_only=False):
             pass
 
         def bump_enrich_attempts(self, ids):
@@ -368,7 +371,7 @@ def test_bump_unit_attempts_is_a_noop_without_part_ids(tmp_path, monkeypatch):
     from mcpbrain import tools
 
     class Boom:
-        def __init__(self, home):
+        def __init__(self, path, dim, read_only=False):
             raise AssertionError("must not touch the store with no ids")
 
     monkeypatch.setattr("mcpbrain.store.Store", Boom)
@@ -380,9 +383,32 @@ def test_bump_unit_attempts_never_raises(tmp_path, monkeypatch):
     from mcpbrain import tools
 
     class Boom:
-        def __init__(self, home):
+        def __init__(self, path, dim, read_only=False):
             raise RuntimeError("store down")
 
     monkeypatch.setattr("mcpbrain.store.Store", Boom)
     tools._bump_unit_attempts(str(tmp_path), {
         "threads": [{"part_doc_ids": ["a"]}]})   # must not raise
+
+
+def test_bump_unit_attempts_against_a_real_store(tmp_path):
+    """The fakes above all matched a WRONG one-argument Store signature, so they
+    passed against `Store(str(home))` — which raises TypeError (dim is required)
+    on every call, swallowed by the function's own except. The whole claim-time
+    backstop was inert in production. Drive it against a REAL Store."""
+    from mcpbrain import tools
+    from mcpbrain.store import Store
+
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    s.upsert_chunk("a", "text a", "h1", {"source": "note"})
+    s.upsert_chunk("b", "text b", "h2", {"source": "note"})
+
+    tools._bump_unit_attempts(str(tmp_path), {
+        "unit_id": "u-1", "kind": "thread",
+        "threads": [{"thread_id": "t1", "part_doc_ids": ["a", "b"]}]})
+
+    with s._connect() as db:
+        rows = {r["doc_id"]: r["enrich_attempts"] for r in db.execute(
+            "SELECT doc_id, enrich_attempts FROM chunks ORDER BY doc_id")}
+    assert rows == {"a": 1, "b": 1}
