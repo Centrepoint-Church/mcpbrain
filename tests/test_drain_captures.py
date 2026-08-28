@@ -117,6 +117,38 @@ def test_store_write_failure_preserves_file(tmp_path, monkeypatch):
     assert list((tmp_path / "capture_inbox").glob("cap-fail.json"))
 
 
+def test_short_note_stays_one_chunk_with_bare_doc_id(tmp_path):
+    """The common case — 2,109 of 3,299 live notes — must not change shape."""
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-short.json", _ingest_env(title="T", content="a short body"))
+    drain.drain_captures(s, home=tmp_path)
+    rows = s.note_chunks(observation_type="memory")
+    assert len(rows) == 1
+    assert "-" not in rows[0]["doc_id"].removeprefix("note-")
+    assert rows[0]["metadata"]["note_id"] == rows[0]["doc_id"]
+    assert rows[0]["metadata"]["chunk_total"] == 1
+
+
+def test_long_note_is_chunked_with_suffixed_doc_ids(tmp_path):
+    """Notes bypassed chunk_text entirely, so only the first ~2,000 chars of a
+    133,791-char note were ever embedded. 1,192 live notes / 21.1MB are affected."""
+    body = "\n\n".join(f"para {i} " + "y" * 400 for i in range(30))
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-long.json", _ingest_env(title="T", content=body))
+    drain.drain_captures(s, home=tmp_path)
+    with s._connect() as db:
+        ids = [r[0] for r in db.execute(
+            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%' ORDER BY doc_id")]
+    assert len(ids) > 1
+    assert all(i.rsplit("-", 1)[1].isdigit() for i in ids)
+    base = ids[0].rsplit("-", 1)[0]
+    # Lossless: note_chunks reassembles the original body verbatim.
+    rows = s.note_chunks(observation_type="memory")
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == base
+    assert rows[0]["text"] == f"T\n\n{body}"
+
+
 def test_action_update_reopen(tmp_path):
     """Reopening a done action succeeds and is logged."""
     s = _store(tmp_path)

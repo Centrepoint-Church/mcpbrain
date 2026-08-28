@@ -686,7 +686,7 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """
     if bulk_section is None:
         bulk_section = nullcontext
-    from mcpbrain.chunking import action_fingerprint, content_hash
+    from mcpbrain.chunking import action_fingerprint, chunk_text, content_hash
     from mcpbrain.contract import validate_capture
 
     home_dir = _home(home)
@@ -720,17 +720,32 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
             if kind == "ingest":
                 text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
                 chash = content_hash(text)
-                doc_id = f"note-{chash[:32]}"
+                base_doc_id = f"note-{chash[:32]}"
+                base_meta = {"source": "note", "title": env["title"],
+                             "observation_type": env.get("observation_type", "note"),
+                             "tags": env.get("tags", ""),
+                             "org": env.get("org", ""),
+                             "captured_at": env.get("captured_at", ""),
+                             "note_id": base_doc_id}
                 try:
-                    changed = store.upsert_chunk(doc_id, text, chash,
-                                       {"source": "note", "title": env["title"],
-                                        "observation_type": env.get("observation_type", "note"),
-                                        # tags stored for future FTS indexing (not yet live)
-                                        "tags": env.get("tags", ""),
-                                        "org": env.get("org", ""),
-                                        "captured_at": env.get("captured_at", "")})
+                    # Notes used to bypass chunk_text entirely: one row per note,
+                    # up to 133,791 chars, of which only the first ~2,000 were
+                    # ever embedded (the BGE window). Same shape as
+                    # consolidation.write_consolidated_note: a note that fits one
+                    # chunk keeps the BARE id, so the common case needs no
+                    # migration. chash stays the FULL-note hash on every piece, so
+                    # re-capturing identical content is still a no-op.
+                    pieces = chunk_text(text)
+                    changed = False
+                    for i, piece in enumerate(pieces):
+                        doc_id = (base_doc_id if len(pieces) == 1
+                                  else f"{base_doc_id}-{i}")
+                        meta = {**base_meta, "chunk_index": i,
+                                "chunk_total": len(pieces)}
+                        if store.upsert_chunk(doc_id, piece, chash, meta):
+                            changed = True
                     if changed:
-                        store.record_change("capture_ingest", ref_id=doc_id,
+                        store.record_change("capture_ingest", ref_id=base_doc_id,
                                             summary=f"Saved note '{env['title'][:60]}'")
                         applied += 1
                 except Exception as exc:
