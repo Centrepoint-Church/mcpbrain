@@ -1023,6 +1023,28 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
     return out
 
 
+def _bump_unit_attempts(home, d: dict) -> None:
+    """Bump the extraction-attempt counter for a claimed unit's chunks.
+
+    drain._give_up_or_bump only fires on PUSH, so a unit no drainer can process
+    (too large to hold, malformed) never increments and re-queues forever — the
+    5,075,515-byte unit's failure mode. Bumping at CLAIM time bounds it: after
+    _EMPTY_ATTEMPT_CAP claims the chunks are consumed by the push-side give-up.
+
+    Best-effort and store-optional: this runs on the MCP claim path, which must
+    stay cheap and must never fail a claim.
+    """
+    try:
+        ids = [i for t in (d.get("threads") or [])
+               for i in (t.get("part_doc_ids") or [])]
+        if not ids:
+            return
+        from mcpbrain.store import Store
+        Store(str(home)).bump_enrich_attempts(ids)
+    except Exception:  # noqa: BLE001 — bookkeeping must never break a claim
+        _log.debug("claim: attempt bump failed", exc_info=True)
+
+
 @tool(
     "brain_enrich_units",
     description="List ready enrichment work units (descriptors only — unit_id, kind, block, count; NO payloads, so the caller stays context-flat) and claim each with a short lease. Recipe: call this, then for each unit_id, brain_enrich_pull(unit_id) to fetch its payload, extract, and brain_enrich_push(unit_id, …) to write the result. Returns {\"empty\": true} when the queue is dry. Loop it (with brain_enrich_advance) to drain a backlog.",
@@ -1306,6 +1328,7 @@ def make_brain_enrich_claim(home: str):
                 continue                              # skip garbage without leasing
             if not _atomic_claim(claims, uid, now):
                 continue                              # lost the race; try the next
+            _bump_unit_attempts(home, d)
             return _unit_payload(home, d, uid, with_rules)
         return {"empty": True}
     return brain_enrich_claim
