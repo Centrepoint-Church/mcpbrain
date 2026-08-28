@@ -40,6 +40,7 @@ from contextlib import nullcontext
 from mcpbrain import config, prompt, thread_enrich
 from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
 from mcpbrain.resolve import _candidate_pairs
+from mcpbrain.thread_enrich import _CHUNK_JOIN
 
 log = logging.getLogger("mcpbrain.prepare")
 
@@ -612,49 +613,95 @@ def _thread_block(store, batch) -> dict:
     }
 
 
+def _split_message_at_seams(msg: dict, char_budget: int) -> list[dict]:
+    """Split ONE over-long message into pieces at its chunk boundaries.
+
+    A message body is a join of chunks (thread_enrich.reassemble_thread), so it
+    splits back losslessly at those same seams — no truncation, and each piece
+    knows exactly which chunks it covers (`chunk_doc_ids`), which is what lets
+    drain mark part-precisely instead of marking a whole Drive document off the
+    first part.
+
+    chunking.chunk_text bounds chunks at ~1800 chars, so any budget >= that is
+    reachable. A message with no chunk_doc_ids (a pre-Task-3 unit, or a store
+    row written before notes were chunked) cannot be split and is returned
+    whole — the caller's existing over-budget warning still fires, and the
+    claim-time attempt cap bounds the retry loop.
+    """
+    ids = msg.get("chunk_doc_ids") or []
+    if len(ids) <= 1:
+        return [msg]
+    pieces = msg.get("text", "").split(_CHUNK_JOIN)
+    if len(pieces) != len(ids):
+        # A gap marker was inserted (a partially-enriched/cold document), so the
+        # text pieces no longer align 1:1 with the ids. Splitting here would
+        # mis-attribute chunks, so ship whole rather than mark the wrong rows.
+        return [msg]
+    out, cur_txt, cur_ids = [], [], []
+    for piece, did in zip(pieces, ids):
+        projected = sum(len(t) for t in cur_txt) + len(cur_txt) * 2 + len(piece)
+        if cur_txt and projected > char_budget:
+            out.append({**msg, "text": _CHUNK_JOIN.join(cur_txt),
+                        "chunk_doc_ids": cur_ids})
+            cur_txt, cur_ids = [], []
+        cur_txt.append(piece)
+        cur_ids.append(did)
+    if cur_txt:
+        out.append({**msg, "text": _CHUNK_JOIN.join(cur_txt),
+                    "chunk_doc_ids": cur_ids})
+    return out
+
+
 def _split_long_thread(block, char_budget: int) -> list:
     """Split a thread whose joined message bodies exceed char_budget into ordered
     sub-batches. Each sub-batch shares the thread_id, prior_thread_context,
     open_actions, and org_hint (all thread-level metadata, not per-message), and
     carries {"part": i, "of": k} so the drain can re-group them by thread_id
     before apply. Message order is preserved across the split.
+
+    Over-long individual messages are first expanded at their chunk seams
+    (_split_message_at_seams) so a single-message thread — every Drive
+    document, every captured note — is splittable at all, not just threads
+    with multiple messages.
     """
     messages = block["messages"]
     total = sum(len(m.get("text", "")) for m in messages)
     if total <= char_budget:
         return [block]
-    if len(messages) <= 1:
-        # A single message can't be split across messages; it ships as one
-        # over-budget part. Log it so the breach of the size guard is visible
-        # (the extractor session may need to truncate this one itself).
-        log.warning("prepare: thread %s is a single message of %d chars, over "
-                    "the %d budget; shipping unsplit",
-                    block.get("thread_id"), total, char_budget)
-        return [block]
 
-    groups = []
-    current = []
-    current_chars = 0
+    # Expand any over-long message into seam-split pieces FIRST, so a
+    # single-message thread (every Drive document, every captured note) is
+    # splittable at all. This is the fix for the 5,075,515-byte unit.
+    expanded = []
     for m in messages:
+        if len(m.get("text", "")) > char_budget:
+            pieces = _split_message_at_seams(m, char_budget)
+            if len(pieces) == 1:
+                log.warning("prepare: thread %s has an unsplittable message of "
+                            "%d chars, over the %d budget; shipping whole",
+                            block.get("thread_id"), len(m.get("text", "")),
+                            char_budget)
+            expanded.extend(pieces)
+        else:
+            expanded.append(m)
+
+    groups, current, current_chars = [], [], 0
+    for m in expanded:
         size = len(m.get("text", ""))
         if current and current_chars + size > char_budget:
             groups.append(current)
-            current = []
-            current_chars = 0
+            current, current_chars = [], 0
         current.append(m)
         current_chars += size
     if current:
         groups.append(current)
 
+    if len(groups) <= 1:
+        return [block]
+
     k = len(groups)
     parts = []
     for i, group in enumerate(groups, start=1):
-        group_chars = sum(len(m.get("text", "")) for m in group)
-        if group_chars > char_budget:
-            # A single message larger than the budget lands alone in its group.
-            log.warning("prepare: thread %s part %d/%d is %d chars, over the %d "
-                        "budget (a single oversized message)",
-                        block.get("thread_id"), i, k, group_chars, char_budget)
         parts.append({
             "thread_id": block["thread_id"],
             "prior_thread_context": block["prior_thread_context"],
@@ -662,6 +709,10 @@ def _split_long_thread(block, char_budget: int) -> list:
             "org_hint": block.get("org_hint", ""),
             "part": i,
             "of": k,
+            # Exactly the chunks this part's text covers. drain prefers this
+            # over doc_ids_for_messages, which for a Drive doc resolves the
+            # file_id to EVERY chunk of the document.
+            "part_doc_ids": [d for m in group for d in (m.get("chunk_doc_ids") or [])],
             "messages": group,
         })
     return parts
