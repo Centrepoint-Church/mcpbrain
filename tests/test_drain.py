@@ -1047,3 +1047,50 @@ def test_review_orphan_round_trip_resolves_the_finding(store, home):
 
     assert summary["review_orphan_drained"] == 1
     assert store.get_finding(finding_id)["resolved_at"] != ""
+
+
+# Task 5: part-precise marking. A Drive file_id resolves to EVERY chunk of the
+# document (doc_ids_for_messages), so a seam-split part must mark only the
+# chunks it actually covered (part_doc_ids), not the whole file.
+
+def test_regroup_parts_unions_part_doc_ids():
+    from mcpbrain.drain import _regroup_parts
+    out = _regroup_parts([
+        {"thread_id": "f", "part": 1, "of": 2, "part_doc_ids": ["a", "b"],
+         "messages": [{"message_id": "f"}]},
+        {"thread_id": "f", "part": 2, "of": 2, "part_doc_ids": ["c"],
+         "messages": [{"message_id": "f"}]},
+    ])
+    assert len(out) == 1
+    assert out[0]["part_doc_ids"] == ["a", "b", "c"]
+    assert "part" not in out[0]
+
+
+def test_drain_marks_only_the_parts_chunks(tmp_path, monkeypatch):
+    """A Drive file_id resolves to EVERY chunk of the document. A part must mark
+    only the chunks it covered, or part 1 consumes the whole file."""
+    from mcpbrain import drain as drain_mod
+
+    class FakeStore:
+        def doc_ids_for_messages(self, mids):
+            raise AssertionError("part_doc_ids must win over the file-wide resolve")
+        def drop_cold(self, ids):
+            return ids
+
+    ext = {"thread_id": "f", "part_doc_ids": ["a", "b"],
+           "messages": [{"message_id": "f"}]}
+    resolved = drain_mod._resolve_doc_ids(FakeStore(), ext, {})
+    assert resolved == ["a", "b"]
+
+
+def test_resolve_doc_ids_falls_back_when_no_part_ids():
+    from mcpbrain import drain as drain_mod
+
+    class FakeStore:
+        def doc_ids_for_messages(self, mids):
+            return ["a", "b", "c", "d"]
+        def drop_cold(self, ids):
+            return ids
+
+    ext = {"thread_id": "f", "messages": [{"message_id": "f"}]}
+    assert drain_mod._resolve_doc_ids(FakeStore(), ext, {}) == ["a", "b", "c", "d"]
