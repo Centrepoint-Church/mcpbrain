@@ -747,6 +747,40 @@ def test_split_long_thread_carries_org_hint_across_parts():
     assert all(p["org_hint"] == "Centrepoint" for p in parts)
 
 
+def test_split_long_thread_splits_within_a_single_message():
+    """A Drive doc is ONE message, so the old between-messages split could not
+    touch it — it logged a warning and shipped a 5MB unit no drainer could hold.
+    Splitting at chunk seams is lossless: the parts concatenate to the original."""
+    from mcpbrain.prepare import _split_long_thread
+    pieces = [f"chunk{i} " + "x" * 90 for i in range(10)]
+    block = {
+        "thread_id": "f", "prior_thread_context": "", "open_actions": [],
+        "org_hint": "",
+        "messages": [{"message_id": "f", "sender": "", "date": "", "labels": "",
+                      "subject": "doc.pdf", "text": "\n\n".join(pieces),
+                      "chunk_doc_ids": [f"gdrive-f-{i}" for i in range(10)]}],
+    }
+    parts = _split_long_thread(block, 300)
+    assert len(parts) > 1
+    assert [p["part"] for p in parts] == list(range(1, len(parts) + 1))
+    assert all(p["of"] == len(parts) for p in parts)
+    # Lossless: every chunk appears exactly once, in order.
+    covered = [d for p in parts for d in p["part_doc_ids"]]
+    assert covered == [f"gdrive-f-{i}" for i in range(10)]
+    # And the text survives intact.
+    rejoined = "\n\n".join(m["text"] for p in parts for m in p["messages"])
+    assert rejoined == "\n\n".join(pieces)
+
+
+def test_split_long_thread_short_message_is_untouched():
+    from mcpbrain.prepare import _split_long_thread
+    block = {"thread_id": "t", "prior_thread_context": "", "open_actions": [],
+             "org_hint": "",
+             "messages": [{"message_id": "m1", "text": "short",
+                           "chunk_doc_ids": ["gmail-m1-0"]}]}
+    assert _split_long_thread(block, 24000) == [block]
+
+
 # --- 2.5 merge-review block ------------------------------------------------
 
 def test_build_pending_no_merge_review_when_not_due(tmp_path, monkeypatch):
