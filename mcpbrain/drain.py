@@ -422,20 +422,21 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
             summary["files"] += 1
             file_ok = True
 
-            extractions = _regroup_parts(data["extractions"])
-            taxonomy = orgs.taxonomy_from_config(home)
-            # Fail loudly on a misconfigured call rather than letting the per-
-            # extraction handler swallow the TypeError, set file_ok=False, keep the
-            # file, and loop forever. Raised before the loop so it is never caught.
-            if extractions and apply is None:
-                raise TypeError("drain() requires an apply callable; inject graph_write.apply")
-
-            # Build a thread_id -> messages lookup from the unit file (when present).
-            # Message metadata is system-owned: sender/date/message_id come from
-            # prepare._thread_block, not the model. We read them back from the unit
-            # file so drain can inject them when the model omits messages[] (Task 2.3).
+            # Build the system-owned lookups from the unit file (when present)
+            # BEFORE anything reads the model's output. Message metadata and
+            # part_doc_ids come from prepare._thread_block/_split_long_thread,
+            # not the model; we read them back here so drain can inject them.
+            #
+            # part_doc_ids is keyed by (thread_id, part), NOT by thread_id alone:
+            # prepare's packing can put SEVERAL parts of one split thread in a
+            # single unit, and a thread-only key unioned all of them, so a model
+            # that merged or dropped a part attached — and therefore marked
+            # enriched — chunks that extraction never covered. A unit entry for an
+            # ordinary unsplit thread carries no `part` and keys as
+            # (thread_id, None), which is exactly how an extraction with no `part`
+            # key looks itself up.
             unit_messages_by_thread: dict = {}
-            unit_part_ids_by_thread: dict = {}
+            unit_part_ids_by_part: dict = {}
             unit_id = data.get("unit_id")
             if unit_id:
                 unit_path = home_dir / "enrich_queue" / "units" / f"{unit_id}.json"
@@ -447,12 +448,37 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                         if tid and isinstance(msgs, list) and msgs:
                             unit_messages_by_thread[tid] = msgs
                         if tid and t.get("part_doc_ids"):
-                            # System-owned, exactly like messages[]: accumulate
-                            # across this unit's parts of the same thread.
-                            unit_part_ids_by_thread.setdefault(tid, []).extend(
+                            unit_part_ids_by_part[(tid, t.get("part"))] = list(
                                 t["part_doc_ids"])
                 except (OSError, ValueError) as exc:
                     log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
+
+            # Stamp each RAW extraction's part_doc_ids from the unit file, before
+            # _regroup_parts (which unions them) ever reads them. UNCONDITIONAL —
+            # no "only if absent" guard: _unit_payload ships the unit's threads[],
+            # part_doc_ids included, to the model verbatim as its input context, so
+            # the model can echo the key back into its output. part_doc_ids decides
+            # which chunks are marked enriched, so the system's value always wins.
+            # `part` is model-echoed and reliable for this (enrich_prompt.md asks
+            # for it explicitly on a split thread); part_doc_ids is never asked for.
+            # No entry for this key means we have no unit-file data for it — leave
+            # the extraction alone and let _resolve_doc_ids' message-id fallback
+            # handle it, rather than inventing a resolution here.
+            for raw in data["extractions"]:
+                if not isinstance(raw, dict):
+                    continue
+                own_ids = unit_part_ids_by_part.get(
+                    (raw.get("thread_id"), raw.get("part")))
+                if own_ids is not None:
+                    raw["part_doc_ids"] = list(own_ids)
+
+            extractions = _regroup_parts(data["extractions"])
+            taxonomy = orgs.taxonomy_from_config(home)
+            # Fail loudly on a misconfigured call rather than letting the per-
+            # extraction handler swallow the TypeError, set file_ok=False, keep the
+            # file, and loop forever. Raised before the loop so it is never caught.
+            if extractions and apply is None:
+                raise TypeError("drain() requires an apply callable; inject graph_write.apply")
 
             for extraction in extractions:
                 # Message metadata is system-owned: attach the unit's original messages
@@ -462,10 +488,12 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                 # has ids available even when the model omitted messages[] AND the extraction
                 # is contract-invalid — without this the chunk re-queues forever on empty
                 # content without bumping the attempt counter.
+                # part_doc_ids is NOT injected here: it is stamped per (thread_id,
+                # part) on the raw extractions above, before _regroup_parts unions
+                # them. A thread-only key here attached the union of every packed
+                # part's ids to whichever extraction came back.
                 if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
                     extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
-                if not extraction.get("part_doc_ids") and unit_part_ids_by_thread.get(extraction.get("thread_id")):
-                    extraction["part_doc_ids"] = unit_part_ids_by_thread[extraction["thread_id"]]
 
                 # Per-extraction contract check (post-sanitise). A structurally
                 # invalid extraction (missing thread_id, bad messages, unknown

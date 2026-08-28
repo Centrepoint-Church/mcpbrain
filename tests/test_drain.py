@@ -1094,3 +1094,107 @@ def test_resolve_doc_ids_falls_back_when_no_part_ids():
 
     ext = {"thread_id": "f", "messages": [{"message_id": "f"}]}
     assert drain_mod._resolve_doc_ids(FakeStore(), ext, {}) == ["a", "b", "c", "d"]
+
+
+# Fix C2/C3: part_doc_ids is system-owned. It is read from the unit file
+# UNCONDITIONALLY (never trusted from the model's echo) and keyed per PART, not
+# per thread — a unit can legitimately pack several parts of one split thread.
+
+def _write_unit(home, unit_id, threads):
+    d = home / "enrich_queue" / "units"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{unit_id}.json").write_text(json.dumps(
+        {"unit_id": unit_id, "kind": "thread", "threads": threads}))
+
+
+def test_model_echoed_part_doc_ids_are_overwritten_by_the_unit_file(home, store):
+    """_unit_payload ships the unit's threads[] — part_doc_ids included — to the
+    model verbatim as its input context, so the model can echo the key back into
+    its output. part_doc_ids decides which chunks get marked enriched, so the
+    system's own value must win unconditionally, not only when the key is absent.
+    """
+    _seed_chunk(store, "real-0", "t1")
+    _seed_chunk(store, "real-1", "t1")
+    _seed_chunk(store, "victim", "t1", message_id="unrelated")
+    _write_unit(home, "u-echo", [
+        {"thread_id": "t1", "part": 1, "of": 1,
+         "part_doc_ids": ["real-0", "real-1"],
+         "messages": [{"message_id": "t1-m1"}]}])
+    _write_inbox(home, "b-echo.json", {
+        "unit_id": "u-echo", "merge_answers": [],
+        "extractions": [_envelope("t1", part=1, of=1,
+                                  part_doc_ids=["victim"])]})
+
+    rec = RecordingApply()
+    drain.drain(store, home=home, apply=rec)
+
+    assert rec.calls[0]["doc_ids"] == ["real-0", "real-1"]
+    assert _enriched_count(store, ["real-0", "real-1", "victim"]) == {
+        "real-0": 1, "real-1": 1, "victim": 0}
+
+
+def test_a_unit_packing_two_parts_attaches_only_the_returned_parts_chunks(home, store):
+    """prepare's packing can put several parts of ONE split thread in a single
+    unit. Keyed by thread_id alone, the union of every part's ids was attached to
+    whatever extraction came back — so a model that merged or dropped a part
+    marked chunks that extraction never covered."""
+    for doc_id in ("p1-a", "p1-b", "p2-a"):
+        _seed_chunk(store, doc_id, "t1")
+    _write_unit(home, "u-two", [
+        {"thread_id": "t1", "part": 1, "of": 2, "part_doc_ids": ["p1-a", "p1-b"],
+         "messages": [{"message_id": "t1-m1"}]},
+        {"thread_id": "t1", "part": 2, "of": 2, "part_doc_ids": ["p2-a"],
+         "messages": [{"message_id": "t1-m1"}]},
+    ])
+    # The model returned ONE extraction, for part 1 only.
+    _write_inbox(home, "b-two.json", {
+        "unit_id": "u-two", "merge_answers": [],
+        "extractions": [_envelope("t1", part=1, of=2)]})
+
+    rec = RecordingApply()
+    drain.drain(store, home=home, apply=rec)
+
+    assert rec.calls[0]["doc_ids"] == ["p1-a", "p1-b"]
+    assert _enriched_count(store, ["p1-a", "p1-b", "p2-a"]) == {
+        "p1-a": 1, "p1-b": 1, "p2-a": 0}, (
+        "part 2's chunks were never extracted; they must stay enriched=0 and "
+        "re-queue rather than be consumed by part 1")
+
+
+def test_both_parts_returned_each_mark_their_own_chunks(home, store):
+    """The complement: when the model DOES return both parts, _regroup_parts
+    unions them and the whole document is marked — one apply, all six chunks."""
+    for doc_id in ("p1-a", "p1-b", "p2-a"):
+        _seed_chunk(store, doc_id, "t1")
+    _write_unit(home, "u-both", [
+        {"thread_id": "t1", "part": 1, "of": 2, "part_doc_ids": ["p1-a", "p1-b"],
+         "messages": [{"message_id": "t1-m1"}]},
+        {"thread_id": "t1", "part": 2, "of": 2, "part_doc_ids": ["p2-a"],
+         "messages": [{"message_id": "t1-m1"}]},
+    ])
+    _write_inbox(home, "b-both.json", {
+        "unit_id": "u-both", "merge_answers": [],
+        "extractions": [_envelope("t1", part=1, of=2),
+                        _envelope("t1", part=2, of=2)]})
+
+    rec = RecordingApply()
+    drain.drain(store, home=home, apply=rec)
+
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["doc_ids"] == ["p1-a", "p1-b", "p2-a"]
+
+
+def test_unsplit_thread_entry_still_stamps_its_part_doc_ids(home, store):
+    """A unit thread entry with no `part` key keys as (thread_id, None), and an
+    extraction with no `part` key looks up the same way."""
+    _seed_chunk(store, "c-0", "t1")
+    _write_unit(home, "u-plain", [
+        {"thread_id": "t1", "part_doc_ids": ["c-0"],
+         "messages": [{"message_id": "t1-m1"}]}])
+    _write_inbox(home, "b-plain.json", {
+        "unit_id": "u-plain", "merge_answers": [],
+        "extractions": [_envelope("t1")]})
+
+    rec = RecordingApply()
+    drain.drain(store, home=home, apply=rec)
+    assert rec.calls[0]["doc_ids"] == ["c-0"]
