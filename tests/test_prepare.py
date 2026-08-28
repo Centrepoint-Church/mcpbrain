@@ -1350,10 +1350,17 @@ def test_write_units_builds_the_people_index_once_per_call(tmp_path, monkeypatch
 def test_packing_budget_is_deterministic_and_large():
     """The old budget was max(2000, 60000 - 11000 - 45508 - 1500) = 2000 — the
     floor — because context.json had grown to 45KB. That is what made units
-    one-thread-each and 7x underfilled."""
-    from mcpbrain.prepare import CONTEXT_CAP, _UNIT_RULES_RESERVE
-    budget = max(2000, 60_000 - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
-    assert budget > 30_000
+    one-thread-each and 7x underfilled.
+
+    The real ceiling is min(pull_cap, _PULL_SOFT_LIMIT), not pull_cap alone —
+    _PULL_SOFT_LIMIT (a real Claude Code response-persistence threshold) is
+    tighter and binds first. Asserting the OLD pull_cap-only formula here
+    would silently stop guarding the shipped budget the moment the two
+    diverged, which is exactly what happened once this test's own fix
+    landed: production budget is 28,100, not 38,100."""
+    from mcpbrain.prepare import CONTEXT_CAP, _PULL_SOFT_LIMIT, _UNIT_RULES_RESERVE
+    budget = max(2000, min(60_000, _PULL_SOFT_LIMIT) - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
+    assert budget > 25_000
 
 
 def test_reserve_is_not_the_stale_literal():
