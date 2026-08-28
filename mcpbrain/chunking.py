@@ -67,6 +67,31 @@ def _canonical_name(name) -> str:
     return s
 
 
+_NAME_TOKEN_MIN = 4
+
+
+def name_tokens(name: str) -> list[str]:
+    """Distinctive (>= 4 char) lowercase alphanumeric tokens of a name.
+
+    Shared by drain._name_grounded ("is this extracted name present in the
+    source?") and prepare's context scoping ("which known people does this unit
+    mention?"). Same heuristic run in opposite directions — one owner so they
+    cannot drift.
+    """
+    return [t for t in re.split(r"[^a-z0-9]+", (name or "").strip().lower())
+            if len(t) >= _NAME_TOKEN_MIN]
+
+
+def name_in_text(name: str, haystack_lower: str) -> bool:
+    """True when the full name, or any distinctive token of it, is in the text."""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if n in haystack_lower:
+        return True
+    return any(t in haystack_lower for t in name_tokens(n))
+
+
 # Near-duplicate action fingerprint normalisation (memory_db.py:1748-1777).
 # Single source of truth shared by graph_write (insert path) and store (text
 # rewrite path) — both must produce byte-for-byte equal fingerprints for the

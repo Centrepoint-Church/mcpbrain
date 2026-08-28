@@ -87,21 +87,11 @@ def _give_up_or_bump(store, doc_ids, summary) -> tuple[bool, int | None]:
 def _name_grounded(name: str, source_lower: str) -> bool:
     """True if an extracted name is plausibly grounded in the source text.
 
-    Anti-hallucination heuristic, deterministic (no LLM). Grounded if the full
-    name appears as a substring OR any distinctive token (alphabetic, len >= 4)
-    of the name appears. The token path is deliberate: extraction NORMALISES
-    names ('Joel Chelliah' from an email that says 'Ps Joel' / 'Pastor Chelliah'),
-    so requiring the full normalised string as a substring (the old behaviour)
-    wrongly dropped correctly-extracted entities. Matching a distinctive token
-    keeps those while still rejecting names with no lexical anchor in the text.
+    Delegates to chunking.name_in_text, which prepare's context scoping also
+    uses in the opposite direction.
     """
-    name = (name or "").strip().lower()
-    if not name:
-        return False
-    if name in source_lower:
-        return True
-    toks = [t for t in re.split(r"[^a-z0-9]+", name) if len(t) >= 4]
-    return any(t in source_lower for t in toks)
+    from mcpbrain.chunking import name_in_text
+    return name_in_text(name, source_lower)
 
 
 def _grounding_filter(extraction: dict) -> tuple[dict, int]:
