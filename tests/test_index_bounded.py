@@ -287,6 +287,7 @@ def _stub_prepare_seams(monkeypatch):
                         lambda chunks: sorted(chunks, key=lambda c: c["date"]))
     monkeypatch.setattr(prepare, "_build_known_people",
                         lambda store, batch_thread_ids: [])
+    monkeypatch.setattr(prepare, "_build_candidate_people", lambda store: [])
     monkeypatch.setattr(prepare, "_org_domain_lines", lambda: [])
 
 
@@ -461,6 +462,7 @@ def test_prepare_units_does_no_per_batch_work_at_all_on_an_expired_budget(
     batches = _spy_batches(200)
     monkeypatch.setattr(prepare, "_group_unenriched_threads", lambda store, **kw: batches)
     monkeypatch.setattr(prepare, "_build_known_people", lambda store, batch_thread_ids: [])
+    monkeypatch.setattr(prepare, "_build_candidate_people", lambda store: [])
     monkeypatch.setattr(prepare, "_org_domain_lines", lambda: [])
 
     touched: list = []

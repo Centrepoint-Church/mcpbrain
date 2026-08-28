@@ -149,6 +149,7 @@ def _patch_prepare_seams(monkeypatch, batches, messages_by_thread,
 
     monkeypatch.setattr(prepare, "_build_known_people",
                         lambda store, batch_thread_ids: [])
+    monkeypatch.setattr(prepare, "_build_candidate_people", lambda store: [])
     monkeypatch.setattr(prepare, "_org_domain_lines",
                         lambda: ["example.org -> Acme"])
 
