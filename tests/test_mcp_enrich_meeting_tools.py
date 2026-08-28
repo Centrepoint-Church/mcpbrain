@@ -338,3 +338,51 @@ def test_meetings_today_annotates_has_pack(tmp_path, monkeypatch):
     by_id = {e["id"]: e for e in out}
     assert by_id["evt1"]["has_pack"] is True
     assert by_id["evt2"]["has_pack"] is False
+
+
+# --- claim-time attempt bump ------------------------------------------------
+
+def test_bump_unit_attempts_bumps_every_part_doc_id(tmp_path, monkeypatch):
+    """A unit no drainer can process never reaches push, so the push-side
+    give-up never fires and it re-queues forever. Bumping on CLAIM bounds it."""
+    from mcpbrain import tools
+    seen = []
+
+    class FakeStore:
+        def __init__(self, home):
+            pass
+
+        def bump_enrich_attempts(self, ids):
+            seen.extend(ids)
+            return 1
+
+    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
+    tools._bump_unit_attempts(str(tmp_path), {
+        "unit_id": "u-1", "kind": "thread",
+        "threads": [{"thread_id": "t1", "part_doc_ids": ["a", "b"]},
+                    {"thread_id": "t2", "part_doc_ids": ["c"]}]})
+    assert seen == ["a", "b", "c"]
+
+
+def test_bump_unit_attempts_is_a_noop_without_part_ids(tmp_path, monkeypatch):
+    from mcpbrain import tools
+
+    class Boom:
+        def __init__(self, home):
+            raise AssertionError("must not touch the store with no ids")
+
+    monkeypatch.setattr("mcpbrain.store.Store", Boom)
+    tools._bump_unit_attempts(str(tmp_path), {"unit_id": "u-1", "threads": []})
+
+
+def test_bump_unit_attempts_never_raises(tmp_path, monkeypatch):
+    """It runs on the claim hot path and must never fail a claim."""
+    from mcpbrain import tools
+
+    class Boom:
+        def __init__(self, home):
+            raise RuntimeError("store down")
+
+    monkeypatch.setattr("mcpbrain.store.Store", Boom)
+    tools._bump_unit_attempts(str(tmp_path), {
+        "threads": [{"part_doc_ids": ["a"]}]})   # must not raise
