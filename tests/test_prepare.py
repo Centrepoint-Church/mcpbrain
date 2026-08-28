@@ -1198,3 +1198,36 @@ def test_write_units_builds_the_people_index_once_per_call(tmp_path, monkeypatch
     units = list((tmp_path / "enrich_queue" / "units").glob("*.json"))
     assert len(units) > 1, "test setup must actually produce multiple units"
     assert calls["n"] == 1
+
+
+def test_packing_budget_is_deterministic_and_large():
+    """The old budget was max(2000, 60000 - 11000 - 45508 - 1500) = 2000 — the
+    floor — because context.json had grown to 45KB. That is what made units
+    one-thread-each and 7x underfilled."""
+    from mcpbrain.prepare import CONTEXT_CAP, _UNIT_RULES_RESERVE
+    budget = max(2000, 60_000 - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
+    assert budget > 30_000
+
+
+def test_reserve_is_not_the_stale_literal():
+    from mcpbrain.prepare import _UNIT_RULES_RESERVE
+    assert _UNIT_RULES_RESERVE != 11_000
+    assert _UNIT_RULES_RESERVE >= 12_000
+
+
+def test_no_unit_exceeds_pull_cap_with_rules(tmp_path):
+    """The invariant ALL 868 live units violate today: 45,511 (context)
+    + 24,554 (rules) = 70,065 > 60,000 before any work is added."""
+    import glob, json
+    from mcpbrain.prepare import write_units
+    from mcpbrain.tools import _unit_payload
+    data = {"threads": [{"thread_id": f"t{i}",
+                         "messages": [{"message_id": f"m{i}", "text": "x" * 3000}]}
+                        for i in range(20)],
+            "context": {"owner_name": "Josh", "valid_orgs": [], "org_domain_map": []},
+            "people_core": [], "people_pool": []}
+    write_units(data, home=str(tmp_path))
+    for f in glob.glob(str(tmp_path / "enrich_queue" / "units" / "*.json")):
+        d = json.load(open(f))
+        payload = _unit_payload(str(tmp_path), d, d["unit_id"], True)
+        assert len(json.dumps(payload)) <= 60_000, f
