@@ -1145,6 +1145,48 @@ def test_scoped_known_people_keeps_core_and_mentioned_only():
     assert "c1" in ids and "p1" in ids and "p2" not in ids
 
 
+def test_scoped_known_people_ignores_a_single_coincidental_token():
+    """A multi-token name needs EVERY distinctive token present, not just one.
+
+    Measured on one real 24,800-byte unit: 36 of 40 non-core selections were
+    this exact false-positive class — 'Anthony Park' pulled in by the bare word
+    "park" inside the place name "Wetherill Park", 'Kylie Beach' by "beach" in
+    "Mission Beach", 'Syft Billing' by "billing" in "billing console". That is
+    not just token cost: enrich_prompt.md tells the model to TRUST a
+    known_people entry's org/role and resolve mentions against it, so ~35
+    coincidental names per unit is an active mis-attribution risk.
+    """
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    pool = [{"id": "p1", "name": "Anthony Park", "org": "Acme", "role": "X",
+             "aliases": []}]
+    out = _scoped_known_people([], _build_people_index(pool),
+                               "the wetherill park site booking is confirmed")
+    assert out == []
+
+
+def test_scoped_known_people_matches_when_every_token_appears():
+    """Tokens need only be PRESENT, not adjacent — a mention split across the
+    unit's text still resolves."""
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    pool = [{"id": "p1", "name": "Anthony Park", "org": "Acme", "role": "X",
+             "aliases": []}]
+    out = _scoped_known_people([], _build_people_index(pool),
+                               "anthony mentioned the park project again")
+    assert [p["id"] for p in out] == ["p1"]
+
+
+def test_scoped_known_people_still_matches_a_lone_distinctive_token():
+    """all() over a one-element token list behaves exactly like any() did, so a
+    name with only ONE distinctive (>= 4 char) token is unaffected by the
+    tightening ('Xy' is dropped as too short; 'Beacon' carries the match)."""
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    pool = [{"id": "p1", "name": "Xy Beacon", "org": "Acme", "role": "X",
+             "aliases": []}]
+    out = _scoped_known_people([], _build_people_index(pool),
+                               "chasing the beacon lighting quote")
+    assert [p["id"] for p in out] == ["p1"]
+
+
 def test_scoped_known_people_matches_on_alias():
     from mcpbrain.prepare import _build_people_index, _scoped_known_people
     pool = [{"id": "p1", "name": "Peter Hammer", "org": "Acme", "role": "X",
