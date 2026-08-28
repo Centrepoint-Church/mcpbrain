@@ -968,7 +968,7 @@ def test_build_pending_returns_dict_without_writing(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "_reassemble_thread",
                         lambda chunks: [{"message_id": "m1", "date": "2026-01-01",
                                          "sender": "a@x.org", "subject": "Hi", "text": "hello"}])
-    monkeypatch.setattr(prepare, "_build_context", lambda store, tids: {"owner_name": "Sam"})
+    monkeypatch.setattr(prepare, "_build_context", lambda: {"owner_name": "Sam"})
 
     class _Batch:
         thread_id = "t1"; doc_ids = ["d1"]; chunks = [{"doc_id": "d1"}]
@@ -1287,7 +1287,7 @@ def test_context_carries_no_community_summaries():
     """Dead payload: 6,255 bytes/unit that nothing reads — not enrich_prompt.md,
     not the enrich-batch agent, not routines/enrich.md."""
     from mcpbrain.prepare import _build_context
-    assert "community_summaries" not in _build_context(None, [])
+    assert "community_summaries" not in _build_context()
 
 
 def test_write_units_scopes_known_people_per_unit(tmp_path):

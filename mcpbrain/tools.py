@@ -1093,6 +1093,14 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
         while kp and len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
             kp.pop()
             out["context"] = {**ctx, "known_people": kp}
+        if len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
+            # known_people is now empty and the payload is STILL over the
+            # soft limit -- the work content itself is the overflow, not
+            # anything this trim can address. Silent otherwise: an operator
+            # has no way to know a unit is shipping over budget.
+            _log.warning("_unit_payload: unit %s exceeds _PULL_SOFT_LIMIT "
+                        "(%d bytes) even with known_people emptied",
+                        unit_id, len(_json.dumps(out)))
     return out
 
 

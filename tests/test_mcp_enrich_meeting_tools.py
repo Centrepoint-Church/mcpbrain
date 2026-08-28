@@ -229,7 +229,6 @@ def test_pull_response_stays_under_consumer_limit(tmp_path):
     assert 0 < len(trimmed) < len(big_people), "trim must be partial, not wholesale"
     assert trimmed == big_people[:len(trimmed)], "trim pops from the end, preserving rank order"
     assert out["context"]["owner_name"] == "Jo"
-    assert out["context"]["owner_name"] == "Jo"
 
 
 def test_pull_unit_block_returns_items(tmp_path):
