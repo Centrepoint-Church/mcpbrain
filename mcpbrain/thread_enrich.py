@@ -267,6 +267,11 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
                        key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
         meta = parts[0].get("metadata") or {}
         text = _join_with_gaps(parts)
+        # Chunk-level provenance, ordered exactly as _join_with_gaps consumed
+        # the pieces. prepare._split_long_thread splits an over-long message at
+        # these seams and carries the covered ids as part_doc_ids, so drain can
+        # mark exactly the chunks a part covered instead of the whole document.
+        chunk_doc_ids = [p["doc_id"] for p in parts]
         messages.append({
             # The GROUP key can be finer than message identity (attachments);
             # the emitted id must stay the resolvable one — see _reassembly_key.
@@ -284,6 +289,7 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
             # Drive docs use "file_name" as the subject equivalent.
             "subject": meta.get("subject") or meta.get("file_name", ""),
             "text": text,
+            "chunk_doc_ids": chunk_doc_ids,
         })
 
     messages.sort(key=lambda m: m.get("date", ""))
