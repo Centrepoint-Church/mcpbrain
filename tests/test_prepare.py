@@ -1187,6 +1187,59 @@ def test_scoped_known_people_still_matches_a_lone_distinctive_token():
     assert [p["id"] for p in out] == ["p1"]
 
 
+_NONDET_REPRO = """
+import json, sys
+sys.path.insert(0, __REPO__)
+from mcpbrain.prepare import _build_people_index, _scoped_known_people
+pool = [{"id": "p{:02d}".format(i), "name": "Zeta Token{:02d}".format(i),
+         "org": "Acme", "role": "R", "aliases": []} for i in range(30)]
+text = "zeta " + " ".join("token{:02d}".format(i) for i in range(30))
+out = _scoped_known_people([], _build_people_index(pool), text, cap=400)
+print(json.dumps([p["id"] for p in out]))
+"""
+
+
+def test_scoped_known_people_selection_is_deterministic():
+    """Same inputs -> byte-identical output, across processes.
+
+    The selection loop iterated `set(...)` of the unit's tokens and sorted only
+    on rank, with no tiebreak — so PYTHONHASHSEED decided which equally-ranked
+    people survived the cap trim. Verified against the pre-fix code: five seeds
+    produced five different selections of the same 30-person pool. Units are
+    content-addressed and rewritten in place, so the same unit's context could
+    differ cycle to cycle.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = str(Path(__file__).resolve().parent.parent)
+    src = _NONDET_REPRO.replace("__REPO__", repr(repo))
+    outs = []
+    for seed in ("0", "1", "2", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        r = subprocess.run([sys.executable, "-c", src], capture_output=True,
+                           text=True, env=env, check=True)
+        outs.append(r.stdout.strip())
+    assert len(set(outs)) == 1, outs
+
+
+def test_scoped_known_people_cap_trim_keeps_cores_own_order():
+    """The rank tiebreak must not re-order core.
+
+    build_known_people returns core ordered email_count DESC (most-
+    corresponded-with first), and the cap trims from the weakest end — so the
+    determinism tiebreak keys core on its own position, not on entity id.
+    Here the id order (x2, y1, z0) is the REVERSE of the list order, so an
+    id-keyed sort would drop the most important core person first.
+    """
+    from mcpbrain.prepare import _build_people_index, _scoped_known_people
+    core = [{"id": i, "name": "Core Person", "org": "Acme", "role": "R"}
+            for i in ("z0", "y1", "x2")]
+    out = _scoped_known_people(core, _build_people_index([]), "", cap=140)
+    assert [p["id"] for p in out] == ["z0", "y1"]
+
+
 def test_scoped_known_people_matches_on_alias():
     from mcpbrain.prepare import _build_people_index, _scoped_known_people
     pool = [{"id": "p1", "name": "Peter Hammer", "org": "Acme", "role": "X",
