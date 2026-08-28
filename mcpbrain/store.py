@@ -2576,6 +2576,29 @@ class Store:
                     (json.dumps(meta), doc_id))
             return True
 
+    def patch_note_metadata(self, note_id: str, **patch) -> bool:
+        """Merge kwargs into EVERY chunk of a note. Returns True if any updated.
+
+        A chunked note has no row at its bare `note-<hash>` id — only
+        `note-<hash>-<i>` siblings — so memory_distil's patch_chunk_metadata call
+        would silently no-op and the note would be re-offered for distillation
+        forever. Falls back to the bare doc_id for legacy single-chunk notes.
+
+        These fields (expired / distilled_at / distilled_verdict) are not read by
+        _fts_text or contextual_prefix, so this does not add to the known
+        patch_chunk_metadata FTS-mirror drift.
+        """
+        ids = []
+        if note_id:
+            with self._connect() as db:
+                ids = [r["doc_id"] for r in db.execute(
+                    "SELECT doc_id FROM chunks WHERE "
+                    + _meta_extract("$.note_id") + " = ? ORDER BY doc_id",
+                    (note_id,)).fetchall()]
+        if not ids:
+            ids = [note_id]          # legacy single-chunk note
+        return any(self.patch_chunk_metadata(d, **patch) for d in ids)
+
     def note_chunks(self, *, observation_type: str | None = None,
                     include_expired: bool = False, exclude_distilled: bool = False,
                     keep_review_days: int = 30, limit: int = 500) -> list[dict]:

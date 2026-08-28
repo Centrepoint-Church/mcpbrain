@@ -88,11 +88,11 @@ def drain_distil(store, inbox_obj: dict) -> dict:
             # different answer on the next distil run, so re-asking Haiku
             # about it forever is pure recurring cost. This is a deferral,
             # not a decision — note_chunks re-includes it once distilled_at
-            # is stale (see keep_review_days). patch_chunk_metadata's own
+            # is stale (see keep_review_days). patch_note_metadata's own
             # existence guard (returns False, harmlessly) covers a doc_id
             # gone stale between listing and draining, so no separate
             # get_chunk check is needed for this branch.
-            store.patch_chunk_metadata(doc_id, distilled_at=now, distilled_verdict="keep")
+            store.patch_note_metadata(doc_id, distilled_at=now, distilled_verdict="keep")
             continue
 
         # Verify the chunk exists before acting.
@@ -102,8 +102,8 @@ def drain_distil(store, inbox_obj: dict) -> dict:
             continue
 
         if verdict == "expire":
-            ok = store.patch_chunk_metadata(doc_id, expired=True, distilled_at=now,
-                                            distilled_verdict="expire")
+            ok = store.patch_note_metadata(doc_id, expired=True, distilled_at=now,
+                                           distilled_verdict="expire")
             if ok:
                 reason = item.get("reason", "")
                 store.record_change(
@@ -133,7 +133,7 @@ def drain_distil(store, inbox_obj: dict) -> dict:
                 summary=f"Memory note flagged for promotion: {doc_id}",
                 detail=f"reason={reason} target_hint={target_hint}",
             )
-            ok = store.patch_chunk_metadata(doc_id, distilled_at=now, distilled_verdict="promote")
+            ok = store.patch_note_metadata(doc_id, distilled_at=now, distilled_verdict="promote")
             if ok:
                 promoted_count += 1
 
