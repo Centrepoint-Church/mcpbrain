@@ -949,13 +949,24 @@ def enrich_rules_reserve() -> int:
                + [len(_enrich_rules_for("block", b)) for b in UNIT_BLOCKS])
 
 
-# The RESPONSE consumer limit, SEPARATE from the packing budget in prepare.py. A pull result
-# above ~50KB is persisted by Claude Code to a file the caller must Read back, which
-# defeats the flat-context fan-out. The packing budget (60k) lets the agent path
-# (with_rules=False ≈ work+context) sit safely under this, but a with_rules=True pull
-# adds the ~11.5KB rules block and can land in the (50KB, 60KB) gap — so the assembled
-# response trims context to essentials when it crosses this limit, regardless of cap.
+# The RESPONSE consumer limit. A pull result above ~50KB is persisted by
+# Claude Code to a file the caller must Read back, which defeats the
+# flat-context fan-out. prepare.write_units' packing budget targets
+# min(pull_cap, this) (see pull_soft_limit()) so a with_rules=True pull lands
+# under it by construction; this trim stays as a defensive fallback for
+# anything that still lands over it (a pre-fix unit still in the queue, a
+# config override), not the primary mechanism.
 _PULL_SOFT_LIMIT = 50_000
+
+
+def pull_soft_limit() -> int:
+    """The response consumer limit, for prepare.py's packing budget to target.
+
+    A function, not a raw import of the private constant, matching
+    enrich_rules_reserve()'s crossing pattern — so prepare.py has one call
+    site to update if this ever needs to be config-derived instead of fixed.
+    """
+    return _PULL_SOFT_LIMIT
 
 
 _ROUTINES = ("enrich", "meeting-packs", "gardener", "reference-gardener")
