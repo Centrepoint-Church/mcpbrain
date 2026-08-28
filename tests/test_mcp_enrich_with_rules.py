@@ -25,9 +25,10 @@ PRODUCT_ROOT = Path(__file__).resolve().parent.parent
 def _seed_unit(home: Path):
     q = home / "enrich_queue"
     (q / "units").mkdir(parents=True, exist_ok=True)
-    (q / "context.json").write_text(json.dumps({"owner_name": "Josh"}))
+    # Task 14: context lives on the unit itself now, not a shared context.json.
     (q / "units" / "u-abc.json").write_text(json.dumps(
-        {"unit_id": "u-abc", "kind": "thread", "threads": [{"thread_id": "t1"}]}))
+        {"unit_id": "u-abc", "kind": "thread", "threads": [{"thread_id": "t1"}],
+         "context": {"owner_name": "Josh"}}))
 
 
 async def _run_session(home: Path):

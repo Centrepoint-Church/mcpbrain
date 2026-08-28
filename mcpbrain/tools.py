@@ -1069,11 +1069,11 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
     caller's serialized prefix stays cacheable; variable per-unit fields trail.
     """
     import json as _json
-    from pathlib import Path
-    try:
-        ctx = _json.loads((Path(home) / "enrich_queue" / "context.json").read_text())
-    except (OSError, ValueError):
-        ctx = {}
+    # The unit carries its own scoped context (prepare.write_units). This keeps
+    # _unit_payload pure file I/O — no store access on the claim hot path — and
+    # is why context.json no longer exists. A pre-migration unit has no context
+    # key and degrades to {}; the queue is rebuilt, so that is transitional only.
+    ctx = d.get("context") or {}
     out = {}
     if with_rules:
         out["rules"] = _enrich_rules_for(d.get("kind"), d.get("block"))
@@ -1086,8 +1086,13 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
     else:
         out["threads"] = d.get("threads") or []
     if len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
-        out["context"] = {k: ctx[k] for k in ("owner_name", "valid_orgs",
-                                              "org_domain_map") if k in ctx}
+        # Trim from the WEAKEST end (the list is already relevance-ranked by
+        # prepare._scoped_known_people) rather than dropping known_people
+        # wholesale, which starved exactly the largest units.
+        kp = list(ctx.get("known_people") or [])
+        while kp and len(_json.dumps(out)) > _PULL_SOFT_LIMIT:
+            kp.pop()
+            out["context"] = {**ctx, "known_people": kp}
     return out
 
 
