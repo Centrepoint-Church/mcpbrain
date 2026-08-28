@@ -976,6 +976,26 @@ def _rules_reserve() -> int:
 _UNIT_RULES_RESERVE = _rules_reserve()
 
 
+def _pull_soft_limit() -> int:
+    """The response consumer limit the packing budget must also respect.
+
+    Was NOT accounted for here: the budget below used to target only
+    pull_cap (60,000), while tools._unit_payload's SEPARATE 50,000-byte
+    _PULL_SOFT_LIMIT (a real Claude Code response-persistence threshold, not
+    an arbitrary tunable) still fired on any fully-packed unit -- measured on
+    the live queue, 69% of units crossed it and 20% were served with
+    known_people emptied entirely by that trim. Targeting the tighter of the
+    two ceilings here means a unit's packed size respects _PULL_SOFT_LIMIT by
+    construction, so that trim goes back to being the defensive fallback it
+    was meant to be, not the normal path for most units.
+    """
+    from mcpbrain.tools import pull_soft_limit
+    return pull_soft_limit()
+
+
+_PULL_SOFT_LIMIT = _pull_soft_limit()
+
+
 def _unit_id(kind: str, signature: str) -> str:
     """Content-addressed unit id, so re-producing the same un-enriched work writes
     the same file (idempotent dedupe — no double-queueing)."""
@@ -1030,7 +1050,13 @@ def write_units(data: dict, *, home=None, pull_cap=None,
     # CONTEXT_CAP replaces the old context-length term: context no longer grows
     # with the batch (it's per-unit and capped), so the budget is deterministic
     # and independent of corpus size.
-    budget = max(2000, pull_cap - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
+    # Target the TIGHTER of the two consumer ceilings: pull_cap (a hard reject)
+    # and _PULL_SOFT_LIMIT (Claude Code's ~50KB response-persistence threshold —
+    # see _pull_soft_limit()). Packing only against pull_cap left the soft limit
+    # unreconciled, so it fired on 69% of real units and emptied known_people on
+    # 20% of them via _unit_payload's own trim.
+    ceiling = min(pull_cap, _PULL_SOFT_LIMIT)
+    budget = max(2000, ceiling - _UNIT_RULES_RESERVE - CONTEXT_CAP - 1500)
     written = 0
     for chunk in _pack_by_size(data.get("threads") or [], budget,
                                lambda t: len(json.dumps(t)) + 1):
