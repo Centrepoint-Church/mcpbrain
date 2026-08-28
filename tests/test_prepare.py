@@ -58,9 +58,13 @@ def _msg(message_id, sender, date, subject, text, labels="INBOX"):
     }
 
 
-def _stub_context(monkeypatch, *, people=None, domains=None):
+def _stub_context(monkeypatch, *, people=None, domains=None, pool=None):
     monkeypatch.setattr(prepare, "_build_known_people",
                         lambda store, batch_thread_ids: people or [])
+    # The per-unit people pool is reached through its own seam too; stub it so
+    # prepare_units never touches a real store here.
+    monkeypatch.setattr(prepare, "_build_candidate_people",
+                        lambda store: pool or [])
     monkeypatch.setattr(prepare, "_org_domain_lines", lambda: domains or [])
 
 
@@ -310,6 +314,54 @@ def test_prepare_units_writes_unit_files_and_context(tmp_path, monkeypatch):
     assert not (tmp_path / "enrich_queue" / "pending.json").exists()  # no single spool
     # the noise thread's chunk was marked enriched by _filter_noise so it never re-queues
     assert ["d-n1"] in store.marked
+
+
+def test_prepare_units_scopes_a_real_people_pool_into_the_unit(tmp_path, monkeypatch):
+    """The happy path, end to end: a populated people pool must reach the unit.
+
+    prepare_units used to call prompt.build_known_people / prompt.build_candidate_people
+    DIRECTLY, bypassing the module seams. With a FakeStore (no _connect) both
+    calls raised and every run silently took the degrade-to-[] branch, so no
+    test anywhere ever drove this path with real people — a broken
+    build_candidate_people (wrong column, schema drift) would have degraded
+    every unit to core-only forever and nothing would have noticed.
+    """
+    import json
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
+    good = FakeBatch("t-good", ["d-g1"],
+                     [_msg("m2", "joel@example.org", "2026-06-01", "Hall B",
+                           "Can you confirm Hall B with Taryn Hansen on Sunday?")])
+    store = FakeStore()
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [good])
+    _stub_reassemble(monkeypatch)
+    monkeypatch.setattr(prepare, "_org_domain_lines", lambda: [])
+    core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
+    pool = [
+        {"id": "p1", "name": "Taryn Hansen", "org": "Acme", "role": "Pastor",
+         "aliases": []},
+        {"id": "p2", "name": "Nobody Elsewhere", "org": "Acme", "role": "X",
+         "aliases": []},
+    ]
+    monkeypatch.setattr(prepare, "_build_known_people",
+                        lambda store, batch_thread_ids: list(core))
+    monkeypatch.setattr(prepare, "_build_candidate_people", lambda store: list(pool))
+
+    prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                          resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    thread_units = []
+    for u in (tmp_path / "enrich_queue" / "units").glob("*.json"):
+        d = json.loads(u.read_text())
+        if d["kind"] == "thread":
+            thread_units.append(d)
+    assert thread_units, "the non-noise thread must produce a unit"
+    known = thread_units[0]["context"]["known_people"]
+    assert known, "the pool must reach the unit, not degrade to []"
+    # core is always carried; the mentioned person is scoped in; the unmentioned
+    # one is not.
+    assert {p["id"] for p in known} == {"c1", "p1"}
 
 
 def test_filter_noise_runs_on_reassembled_messages(monkeypatch):
