@@ -188,8 +188,16 @@ def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:
 _GAP_MARKER = "\n\n[…]\n\n"
 
 
-def _join_with_gaps(parts: list[dict]) -> str:
+def _join_with_gaps(parts: list[dict]) -> tuple[str, bool]:
     """Join one message's chunks in index order, marking any missing piece.
+
+    Returns ``(text, had_gap)``. ``had_gap`` is True when a _GAP_MARKER was
+    inserted anywhere, and it is the signal prepare._split_message_at_seams keys
+    on: a gap marker is not _CHUNK_JOIN, so with one present
+    ``_CHUNK_JOIN.join(chunk_pieces)`` no longer reproduces this text and a seam
+    split could not be proven lossless. Without a gap that equality holds
+    exactly, which is what makes reconstructing a part's body from a subset of
+    the pieces safe.
 
     B8: this function only ever sees the chunks its CALLER selected, and
     group_unenriched_threads selects UNENRICHED chunks while
@@ -206,18 +214,24 @@ def _join_with_gaps(parts: list[dict]) -> str:
     degradation. `parts` is already sorted by chunk_index by the caller.
     """
     out: list[str] = []
+    had_gap = False
     prev = None
     for p in parts:
         idx = int((p.get("metadata") or {}).get("chunk_index", 0) or 0)
         if prev is not None:
-            out.append(_GAP_MARKER if idx != prev + 1 else _CHUNK_JOIN)
+            if idx != prev + 1:
+                out.append(_GAP_MARKER)
+                had_gap = True
+            else:
+                out.append(_CHUNK_JOIN)
         out.append(p.get("text", ""))
         prev = idx
     if parts and prev is not None:
         total = int((parts[-1].get("metadata") or {}).get("chunk_total", 0) or 0)
         if total and prev < total - 1:
             out.append(_GAP_MARKER)
-    return "".join(out)
+            had_gap = True
+    return "".join(out), had_gap
 
 
 def reassemble_thread(chunks: list[dict]) -> list[dict]:
@@ -266,12 +280,22 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         parts = sorted(by_group[key],
                        key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
         meta = parts[0].get("metadata") or {}
-        text = _join_with_gaps(parts)
+        text, chunk_has_gap = _join_with_gaps(parts)
         # Chunk-level provenance, ordered exactly as _join_with_gaps consumed
         # the pieces. prepare._split_long_thread splits an over-long message at
         # these seams and carries the covered ids as part_doc_ids, so drain can
         # mark exactly the chunks a part covered instead of the whole document.
         chunk_doc_ids = [p["doc_id"] for p in parts]
+        # The REAL per-chunk text, parallel and same-length to chunk_doc_ids —
+        # never re-derived by splitting `text` on _CHUNK_JOIN. chunking.chunk_text
+        # PACKS several paragraphs into one chunk whenever they fit the budget
+        # together, so a chunk's own stored text routinely contains internal
+        # "\n\n"; re-splitting the join yields more pieces than there are chunks
+        # (60 paragraphs / 8 chunks on a real document) and prepare's
+        # length-mismatch guard then ships every ordinary document unsplit.
+        # With chunk_has_gap False, _CHUNK_JOIN.join(chunk_pieces) == text
+        # exactly, which is what makes a seam split provably lossless.
+        chunk_pieces = [p.get("text", "") for p in parts]
         messages.append({
             # The GROUP key can be finer than message identity (attachments);
             # the emitted id must stay the resolvable one — see _reassembly_key.
@@ -290,6 +314,8 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
             "subject": meta.get("subject") or meta.get("file_name", ""),
             "text": text,
             "chunk_doc_ids": chunk_doc_ids,
+            "chunk_pieces": chunk_pieces,
+            "chunk_has_gap": chunk_has_gap,
         })
 
     messages.sort(key=lambda m: m.get("date", ""))
