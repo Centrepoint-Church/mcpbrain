@@ -2637,6 +2637,35 @@ class Store:
             return meta if isinstance(meta, dict) else {}
         return None
 
+    def read_doc(self, doc_id: str) -> dict | None:
+        """get_chunk(doc_id), transparently reassembling a chunked note.
+
+        get_chunk covers every ordinary case -- email/drive/calendar chunks,
+        and a legacy or single-piece note. A multi-chunk note (drain.py's
+        ingest branch, Task 7) has no row at its own bare `note-<hash>` id --
+        only `note-<hash>-<i>` siblings -- so a plain get_chunk(doc_id) call
+        silently returned None for every long captured note once chunking
+        landed. note_chunks() (and memory_index, which renders exactly this
+        base id under "read it with brain_read") still hand out that base id
+        as the note's identity, so both brain_read dispatch sites
+        (mcp_server.py, daemon.py) call this instead of get_chunk directly --
+        one place, so the two can't drift.
+        """
+        row = self.get_chunk(doc_id)
+        if row is not None:
+            return row
+        if not doc_id.startswith("note-"):
+            return None
+        rows = [r for r in (self.get_chunk(d) for d in self._note_sibling_ids(doc_id))
+                if r is not None]
+        if not rows:
+            return None
+        rows.sort(key=lambda r: (r.get("metadata") or {}).get("chunk_index", 0))
+        first = rows[0]
+        return {"doc_id": doc_id, "text": "\n\n".join(r["text"] for r in rows),
+                "metadata": first["metadata"], "memory_tier": first["memory_tier"],
+                "content_hash": first["content_hash"]}
+
     def note_chunks(self, *, observation_type: str | None = None,
                     include_expired: bool = False, exclude_distilled: bool = False,
                     keep_review_days: int = 30, limit: int = 500) -> list[dict]:
