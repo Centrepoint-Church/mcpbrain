@@ -281,11 +281,17 @@ def _regroup_parts(extractions: list) -> list:
         ordered = sorted(parts, key=lambda e: e.get("part", 0))
         of = ordered[0].get("of")
         if of and len(ordered) != of:
-            # The extractor dropped or truncated a part. Apply what we have
-            # (better than nothing, and a real partial would otherwise retry
-            # forever), but log so a truncated batch is observable.
-            log.warning("drain: thread %s received %d parts but declared of=%d; "
-                        "applying incomplete thread", tid, len(ordered), of)
+            # A part count that doesn't match `of` is not necessarily evidence of
+            # a dropped part: parts split across separate enrich units (each
+            # carrying its own part_doc_ids) drain independently and apply fine
+            # on their own, one merged-group-per-unit here. Only warn when that
+            # is NOT the case for every part present.
+            independent = all(p.get("part_doc_ids") for p in ordered)
+            (log.info if independent else log.warning)(
+                "drain: thread %s received %d parts but declared of=%d; %s",
+                tid, len(ordered), of,
+                "parts are independently applicable (part_doc_ids present)"
+                if independent else "applying incomplete thread")
         merged = dict(ordered[0])
         messages = []
         for p in ordered:
@@ -293,8 +299,44 @@ def _regroup_parts(extractions: list) -> list:
         merged["messages"] = messages
         merged.pop("part", None)
         merged.pop("of", None)
+        # Union the parts' chunk provenance so the merged extraction marks every
+        # chunk its combined text covered. Only parts that landed in the SAME
+        # inbox file reach here; parts split across units drain separately and
+        # each marks its own chunks, which is correct by construction.
+        part_ids = [d for p in ordered for d in (p.get("part_doc_ids") or [])]
+        if part_ids:
+            merged["part_doc_ids"] = part_ids
         recombined.append(merged)
     return recombined
+
+
+def _resolve_doc_ids(store, extraction: dict, unit_messages_by_thread: dict) -> list[str]:
+    """The chunks this extraction covers, cold-filtered, ready for apply/mark.
+
+    Precedence:
+      1. `part_doc_ids` — exactly the chunks a seam-split part covered. System-
+         owned (prepare writes it into the unit; drain reads it from there, never
+         from the model's echo). Required for correctness on Drive documents,
+         where doc_ids_for_messages resolves a file_id to EVERY chunk of the file
+         — so without this, part 1 marks the whole document and parts 2..N are
+         wasted.
+      2. the model's message ids.
+      3. the unit's canonical message ids, when the model echoed bad ones.
+
+    drop_cold applies to every branch: a file-wide resolve returns cold chunks the
+    extraction never covered (the 0.7.103 fix).
+    """
+    part_ids = extraction.get("part_doc_ids")
+    if part_ids:
+        return store.drop_cold(list(part_ids))
+    msg_ids = [m.get("message_id") for m in extraction.get("messages", [])
+               if m.get("message_id")]
+    doc_ids = store.doc_ids_for_messages(msg_ids) if msg_ids else []
+    if not doc_ids:
+        _u = unit_messages_by_thread.get(extraction.get("thread_id")) or []
+        _umids = [m.get("message_id") for m in _u if m.get("message_id")]
+        doc_ids = store.doc_ids_for_messages(_umids) if _umids else []
+    return store.drop_cold(doc_ids) if doc_ids else []
 
 
 def drain(store, *, home=None, apply=None, embedder=None, budget=None,
@@ -393,6 +435,7 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
             # prepare._thread_block, not the model. We read them back from the unit
             # file so drain can inject them when the model omits messages[] (Task 2.3).
             unit_messages_by_thread: dict = {}
+            unit_part_ids_by_thread: dict = {}
             unit_id = data.get("unit_id")
             if unit_id:
                 unit_path = home_dir / "enrich_queue" / "units" / f"{unit_id}.json"
@@ -403,6 +446,11 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                         msgs = t.get("messages")
                         if tid and isinstance(msgs, list) and msgs:
                             unit_messages_by_thread[tid] = msgs
+                        if tid and t.get("part_doc_ids"):
+                            # System-owned, exactly like messages[]: accumulate
+                            # across this unit's parts of the same thread.
+                            unit_part_ids_by_thread.setdefault(tid, []).extend(
+                                t["part_doc_ids"])
                 except (OSError, ValueError) as exc:
                     log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
 
@@ -416,6 +464,8 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                 # content without bumping the attempt counter.
                 if not extraction.get("messages") and unit_messages_by_thread.get(extraction.get("thread_id")):
                     extraction["messages"] = unit_messages_by_thread[extraction["thread_id"]]
+                if not extraction.get("part_doc_ids") and unit_part_ids_by_thread.get(extraction.get("thread_id")):
+                    extraction["part_doc_ids"] = unit_part_ids_by_thread[extraction["thread_id"]]
 
                 # Per-extraction contract check (post-sanitise). A structurally
                 # invalid extraction (missing thread_id, bad messages, unknown
@@ -478,21 +528,13 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                                   grounding_dropped, thread_id)
                         summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
 
-                # Recover the chunks this extraction covers by message id, NOT by a
-                # thread-wide query. Marking only the messages that were actually
+                # Recover the chunks this extraction covers, part-precise when a
+                # seam-split part's part_doc_ids are present, else by message id
+                # (NOT by a thread-wide query). Marking only the chunks actually
                 # extracted means a late-arriving message (synced after prepare) or a
                 # dropped long-thread part stays enriched=0 and re-queues next cycle,
                 # instead of being silently marked done without ever being enriched.
-                msg_ids = [m.get("message_id") for m in extraction.get("messages", [])
-                           if m.get("message_id")]
-                doc_ids = store.doc_ids_for_messages(msg_ids)
-                if not doc_ids:
-                    # The model's message ids didn't resolve (it may have echoed bad or
-                    # normalised ids). Recover from the unit's CANONICAL messages for this
-                    # thread — the same authoritative source the injection step uses.
-                    _u = unit_messages_by_thread.get(thread_id) or []
-                    _umids = [m.get("message_id") for m in _u if m.get("message_id")]
-                    doc_ids = store.doc_ids_for_messages(_umids) if _umids else []
+                doc_ids = _resolve_doc_ids(store, extraction, unit_messages_by_thread)
                 if not doc_ids:
                     # Still nothing: a valid, content-bearing extraction we cannot tie to
                     # ANY chunk (e.g. the model rewrote the thread_id). Applying here would
@@ -511,15 +553,15 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                                 thread_id, path.name)
                     summary["skipped"] = summary.get("skipped", 0) + 1
                     continue
-                # Fix #2: a Drive file-wide resolve (the file_id branch of
-                # doc_ids_for_messages) returns EVERY chunk of the document, even
-                # ones the salience gate has since marked cold -- but the
-                # extraction's batch text only ever covered the hot chunks
-                # should_enrich() queued. Drop cold chunks here, right before
-                # apply/mark_enriched, so a Drive extraction marks only the chunks
-                # it actually covered (matching the message-precise email path).
-                # No-op for email doc_ids, which aren't cold-gated the same way.
-                doc_ids = store.drop_cold(doc_ids)
+                # Fix #2 (now inside _resolve_doc_ids): a Drive file-wide resolve
+                # (the file_id branch of doc_ids_for_messages) returns EVERY chunk
+                # of the document, even ones the salience gate has since marked
+                # cold -- but the extraction's batch text only ever covered the hot
+                # chunks should_enrich() queued. _resolve_doc_ids drops cold chunks
+                # on every branch, right before apply/mark_enriched, so a Drive
+                # extraction marks only the chunks it actually covered (matching
+                # the message-precise email path). No-op for email doc_ids, which
+                # aren't cold-gated the same way.
                 try:
                     # Pass the run-scoped dedup index only when built (flag on) so an
                     # injected/legacy apply that doesn't accept the kwarg is unaffected.
