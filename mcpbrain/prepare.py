@@ -908,14 +908,15 @@ def _merge_review_block(store, *, cap: int = _MERGE_REVIEW_CAP) -> list:
 
 # --- context assembly ------------------------------------------------------
 
-def _build_context(store, thread_ids) -> dict:
+def _build_context() -> dict:
     """The STANDING reference block, shared by every unit and tiny (~150 bytes).
 
     known_people is no longer here: it is scoped per unit in write_units, because
     the batch-wide list had grown to 405 people / 39,017 bytes and was being
     re-sent with every one of 860 units — 88.7% of everything reaching the model.
 
-    community_summaries is gone entirely: it had no consumer.
+    community_summaries is gone entirely: it had no consumer. Takes no
+    arguments -- store/thread_ids were unused once known_people moved out.
     """
     home = str(config.app_dir())
     return {
@@ -1202,7 +1203,7 @@ def build_pending(store, batches, *, char_budget: int, now,
                 m.pop("chunk_has_gap", None)
             threads.append(part)
 
-    context = _build_context(store, [b.thread_id for b in batches])
+    context = _build_context()
     merge_review = _merge_review_block(store) if resolution_due else []
 
     if batch_id is None:
