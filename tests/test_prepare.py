@@ -1364,17 +1364,66 @@ def test_reserve_is_not_the_stale_literal():
 
 def test_no_unit_exceeds_pull_cap_with_rules(tmp_path):
     """The invariant ALL 868 live units violate today: 45,511 (context)
-    + 24,554 (rules) = 70,065 > 60,000 before any work is added."""
-    import glob, json
-    from mcpbrain.prepare import write_units
-    from mcpbrain.tools import _unit_payload
-    data = {"threads": [{"thread_id": f"t{i}",
-                         "messages": [{"message_id": f"m{i}", "text": "x" * 3000}]}
-                        for i in range(20)],
-            "context": {"owner_name": "Josh", "valid_orgs": [], "org_domain_map": []},
-            "people_core": [], "people_pool": []}
+    + 24,554 (rules) = 70,065 > 60,000 before any work is added.
+
+    The data here has to STRESS the boundary or the test is vacuous. It needs
+    two things the earlier version lacked:
+
+    * a realistic people_core/people_pool, so each unit's context lands at the
+      real ~8,000-byte CONTEXT_CAP rather than the ~120 bytes an empty pool
+      produces;
+    * enough threads, small enough, that greedy packing fills a unit close to
+      the whole budget.
+
+    It also has to assert on the UNTRIMMED pull. _unit_payload's
+    _PULL_SOFT_LIMIT (50,000) fallback pops known_people until the response
+    fits, so measuring only its output hides a budget that under-reserves —
+    the cap looks respected while the context W1 exists to deliver is being
+    silently stripped. The packing budget is what must guarantee the fit; the
+    soft-limit trim is a backstop, not a substitute.
+
+    Verified against the stale reserve: with _UNIT_RULES_RESERVE = 11_000 the
+    budget rises 38,100 -> 39,500, units pack 12 -> 13 threads, and the
+    untrimmed pull goes 57,398 -> 60,427 — over the cap, and this test fails.
+    """
+    import glob
+    import json
+    from mcpbrain.prepare import CONTEXT_CAP, write_units
+    from mcpbrain.tools import _enrich_rules_for, _unit_payload
+    core = [{"id": f"e-core-{i:03d}", "name": f"Coreperson Number{i:02d}",
+             "org": "Centrepoint Church", "role": "Operations Coordinator"}
+            for i in range(40)]
+    pool = [{"id": f"e-pool-{i:03d}", "name": f"Poolperson Surname{i:02d}",
+             "org": "Courageous Church", "role": "Ministry Team Leader",
+             "aliases": []} for i in range(120)]
+    # Every thread names the whole roster, so every unit's scoped context fills
+    # to CONTEXT_CAP the way a real, densely-populated unit does.
+    roster = " ".join(p["name"] for p in pool)
+    data = {"threads": [{"thread_id": f"t{i:03d}",
+                         "messages": [{"message_id": f"m{i:03d}",
+                                       "text": f"can you confirm {roster} " + "x" * 400}]}
+                        for i in range(60)],
+            "context": {"owner_name": "Josh", "valid_orgs": ["Acme"],
+                        "org_domain_map": []},
+            "people_core": core, "people_pool": pool}
     write_units(data, home=str(tmp_path))
-    for f in glob.glob(str(tmp_path / "enrich_queue" / "units" / "*.json")):
+    files = glob.glob(str(tmp_path / "enrich_queue" / "units" / "*.json"))
+    assert files
+    stressed = 0
+    for f in files:
         d = json.load(open(f))
+        ctx_len = len(json.dumps(d["context"]))
+        # The untrimmed pull: exactly what _unit_payload assembles BEFORE its
+        # soft-limit fallback pops known_people.
+        untrimmed = {"rules": _enrich_rules_for(d.get("kind"), d.get("block")),
+                     "context": d["context"], "kind": d["kind"],
+                     "unit_id": d["unit_id"], "threads": d["threads"]}
+        assert len(json.dumps(untrimmed)) <= 60_000, (f, len(json.dumps(untrimmed)))
+        # and the served response, per the original contract
         payload = _unit_payload(str(tmp_path), d, d["unit_id"], True)
         assert len(json.dumps(payload)) <= 60_000, f
+        if ctx_len >= CONTEXT_CAP and len(d["threads"]) > 1:
+            stressed += 1
+    # Guard the guard: if the fixture ever stops producing full contexts and
+    # multi-thread packs, this test has quietly gone back to proving nothing.
+    assert stressed, "test data must actually stress the cap"
