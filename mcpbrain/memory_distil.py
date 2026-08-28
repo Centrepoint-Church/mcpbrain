@@ -20,7 +20,6 @@ Block contract:
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 
@@ -95,37 +94,42 @@ def drain_distil(store, inbox_obj: dict) -> dict:
             store.patch_note_metadata(doc_id, distilled_at=now, distilled_verdict="keep")
             continue
 
-        # Verify the chunk exists before acting.
-        chunk = store.get_chunk(doc_id)
-        if chunk is None:
-            log.debug("memory_distil: doc_id=%s not found, skipping", doc_id)
-            continue
-
+        # Existence is checked through the note-aware helpers, NOT
+        # store.get_chunk(doc_id): a multi-chunk note has no row at its bare
+        # `note-<hash>` id — only its `-<i>` siblings do — while note_chunks()
+        # (and therefore the distil request the verdict answers) reports that
+        # base id. Gating on get_chunk skipped every chunked note before it
+        # patched anything, so the note was re-offered for distillation forever.
         if verdict == "expire":
+            # patch_note_metadata already answers "did anything exist to patch?"
+            # — it returns False when no sibling and no bare row matched.
             ok = store.patch_note_metadata(doc_id, expired=True, distilled_at=now,
                                            distilled_verdict="expire")
-            if ok:
-                reason = item.get("reason", "")
-                store.record_change(
-                    "memory_expired",
-                    ref_id=doc_id,
-                    summary=f"Memory note expired: {doc_id}",
-                    detail=reason,
-                    source="memory_distil",
-                )
-                expired_count += 1
+            if not ok:
+                log.debug("memory_distil: doc_id=%s not found, skipping", doc_id)
+                continue
+            store.record_change(
+                "memory_expired",
+                ref_id=doc_id,
+                summary=f"Memory note expired: {doc_id}",
+                detail=item.get("reason", ""),
+                source="memory_distil",
+            )
+            expired_count += 1
 
         elif verdict == "promote":
             reason = item.get("reason", "")
             target_hint = item.get("target_hint", "")
-            # get_chunk returns metadata already parsed to a dict; guard for a
-            # raw JSON string defensively.
-            meta = chunk.get("metadata") or {}
-            if isinstance(meta, str):
-                try:
-                    meta = json.loads(meta)
-                except Exception:
-                    meta = {}
+            # get_note_metadata resolves the base id to a real sibling row and
+            # always returns a parsed dict (or None when the note has no rows at
+            # all), so no defensive re-parse is needed here.
+            meta = store.get_note_metadata(doc_id)
+            if meta is None and not store.patch_note_metadata(
+                    doc_id, distilled_at=now, distilled_verdict="promote"):
+                # Genuinely nothing to act on.
+                log.debug("memory_distil: doc_id=%s not found, skipping", doc_id)
+                continue
+            meta = meta or {}
             store.record_finding(
                 "memory_promotion",
                 ref_id=doc_id,
