@@ -34,7 +34,6 @@ one.
 import json
 import logging
 import os
-import re
 from contextlib import nullcontext
 from pathlib import Path
 
