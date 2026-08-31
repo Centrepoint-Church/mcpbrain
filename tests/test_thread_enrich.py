@@ -591,3 +591,29 @@ def test_reassemble_thread_flags_a_truncated_tail_as_a_gap():
         for i in (0, 1)
     ]
     assert reassemble_thread(chunks)[0]["chunk_has_gap"] is True
+
+
+def test_reassemble_thread_stamps_chunk_indexes_and_total():
+    """prepare needs the per-piece indexes to rebuild gap markers when it splits
+    a gapped message, instead of refusing to split it at all."""
+    from mcpbrain.thread_enrich import reassemble_thread
+    chunks = [
+        {"doc_id": "gdrive-f-0", "text": "a",
+         "metadata": {"file_id": "f", "chunk_index": 0, "chunk_total": 5}},
+        {"doc_id": "gdrive-f-2", "text": "c",
+         "metadata": {"file_id": "f", "chunk_index": 2, "chunk_total": 5}},
+    ]
+    (m,) = reassemble_thread(chunks)
+    assert m["chunk_indexes"] == [0, 2]
+    assert m["chunk_total"] == 5
+    assert m["chunk_has_gap"] is True
+
+
+def test_join_pieces_marks_an_internal_gap_and_a_truncated_tail():
+    from mcpbrain.thread_enrich import join_pieces
+    text, gap = join_pieces(["a", "c"], [0, 2], 5)
+    assert gap is True
+    assert text == "a\n\n[…]\n\nc\n\n[…]\n\n"[: len(text)]
+    assert "[…]" in text
+    text2, gap2 = join_pieces(["a", "b"], [0, 1], 2)
+    assert (text2, gap2) == ("a\n\nb", False)
