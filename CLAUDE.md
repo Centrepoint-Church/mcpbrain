@@ -404,10 +404,28 @@ wrong and MUST be right:
   to reintroduce it without a SEPARATE counter. Live counters reset (434 un-enriched hot
   chunks): the bump inflated them indiscriminately, so the true count is unknowable and 0
   is honest for chunks nothing gave up on.
-  **Known residual gap, accepted:** a document with a GAP in its chunk sequence falls back
-  to ship-whole and is NOT size-bounded (one unit at 142,666 bytes today — large but well
-  within a drainer's context). Bounding it belongs in `prepare`, where the unit is built,
-  not in a counter the push path depends on.
+  **That residual gap is now CLOSED (2026-09-01).** A document with a HOLE in its chunk
+  sequence used to fall back to ship-whole and was the last unbounded unit shape (one at
+  142,666 bytes). The refusal was unnecessary: `chunk_pieces` and `chunk_doc_ids` stay
+  correctly aligned across a gap — only the JOINED text differs — so the split was always
+  safe; what was missing was knowing WHERE the holes are, the splitter having only a
+  boolean `chunk_has_gap`. `reassemble_thread` now stamps `chunk_indexes`/`chunk_total`,
+  the gap-joining logic is extracted into `thread_enrich.join_pieces` (pure, over parallel
+  lists), and `_split_message_at_seams` REBUILDS each part's body with the same semantics —
+  markers re-inserted where indexes are actually discontinuous, truncated-tail marker
+  re-derived for whichever part ends the message. **The gap signal is preserved exactly:** a
+  hole landing on a part boundary produces no stray marker; one inside a part keeps it.
+  Verified end-to-end on the real document (`Hardy Final Report.pdf`, 92 hot chunks,
+  indexes starting at 1 and skipping 6, `chunk_total` 94): **5 parts, largest body 28,090
+  chars, all within budget, doc_ids covered in order, nothing lost.** No unbounded shape
+  remains — the largest single hot chunk in the store is 2,836 chars and none exceed 4,000,
+  so a single-chunk message cannot be oversize either.
+  **Also guarded:** `bin/rechunk_notes.py` must never split `note-core-identity-seed`.
+  `memory_tier.seed_core_identity` writes it at a FIXED doc_id and then calls
+  `set_chunk_type`/`set_chunk_tier`/`set_chunk_salience` on that exact id, so splitting it
+  into `-0`/`-1` leaves the base id with no row and silently breaks all four. The next
+  `--yes` run would have done exactly that. It is 2,836 chars, so leaving it whole costs a
+  ~1,000-char tail past the embed window — far cheaper than breaking core-tier identity.
   **(4) A test-fixture trap worth knowing:** a dangling row cannot be seeded through the
   store. `_connect` turns FKs ON at connect time and `PRAGMA foreign_keys=OFF` inside an
   already-open transaction is a **documented no-op**, so
