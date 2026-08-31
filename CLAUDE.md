@@ -420,12 +420,33 @@ wrong and MUST be right:
   chars, all within budget, doc_ids covered in order, nothing lost.** No unbounded shape
   remains — the largest single hot chunk in the store is 2,836 chars and none exceed 4,000,
   so a single-chunk message cannot be oversize either.
-  **Also guarded:** `bin/rechunk_notes.py` must never split `note-core-identity-seed`.
+  **Also guarded (and it had ALREADY fired — found pre-release, 2026-09-01):**
+  `bin/rechunk_notes.py` must never split `note-core-identity-seed`.
   `memory_tier.seed_core_identity` writes it at a FIXED doc_id and then calls
   `set_chunk_type`/`set_chunk_tier`/`set_chunk_salience` on that exact id, so splitting it
   into `-0`/`-1` leaves the base id with no row and silently breaks all four. The next
   `--yes` run would have done exactly that. It is 2,836 chars, so leaving it whole costs a
   ~1,000-char tail past the embed window — far cheaper than breaking core-tier identity.
+  **It had already happened.** The live store held the seed THREE times: the bare row plus
+  `-0`/`-1` from an earlier sweep, after which `seed_core_identity` re-created the bare row
+  on its next cadence. All three were embedded (duplicate identity text in recall),
+  `note_chunks` returned TWO entries claiming the same `doc_id`, and the two pieces carried
+  neither the tier nor the salience `memory_tier` sets by exact id. Cleaned: pieces
+  deleted, authoritative bare row kept (existence verified first); the sweep is now a
+  no-op on this store.
+  **The guard was upgraded from a denylist to a SHAPE ALLOWLIST.** A denylist only covers
+  what someone remembered. `bin/rechunk_notes.py` now sweeps only `note-<32 hex>` — the
+  shape `drain_captures` mints (`content_hash[:32]`). Every other `note-` id belongs to
+  code that references it verbatim, so this also protects `note-consolidated-<hash>`
+  (consolidation.py owns that namespace and chunks it itself at write time) and anything
+  added later. **Test fixtures must use that shape** — a made-up id like `"note-long"` now
+  hits the exclusion path and silently tests nothing, so the fixtures moved to a `_nid()`
+  helper.
+  **Found alongside it:** `consolidation._write_note`'s multi-chunk path wrote
+  `chunk_index`/`chunk_total` but NOT `note_id`. `store.note_chunks` groups on `note_id`
+  falling back to `doc_id`, so every piece grouped to ITSELF — one consolidated note would
+  surface as N notes in `memory_index` and collect N distil verdicts. Dormant (no such rows
+  live), fixed at the source so both note-writing paths agree.
   **(4) A test-fixture trap worth knowing:** a dangling row cannot be seeded through the
   store. `_connect` turns FKs ON at connect time and `PRAGMA foreign_keys=OFF` inside an
   already-open transaction is a **documented no-op**, so
