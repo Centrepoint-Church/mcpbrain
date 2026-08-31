@@ -358,127 +358,14 @@ def test_meetings_today_annotates_has_pack(tmp_path, monkeypatch):
 
 # --- claim-time attempt bump ------------------------------------------------
 
-def test_bump_unit_attempts_bumps_every_part_doc_id(tmp_path, monkeypatch):
-    """A unit no drainer can process never reaches push, so the push-side
-    give-up never fires and it re-queues forever. Bumping on CLAIM bounds it."""
+
+def test_claim_does_not_touch_the_attempt_counter(tmp_path, monkeypatch):
+    """The claim path must NOT bump enrich_attempts. That counter is the push
+    path's give-up signal (drain._give_up_or_bump consumes chunks at the cap),
+    and a claim-time bump hits every chunk of every thread in the unit -- a
+    median of 14 threads post-W1. Acting on it would have marked ~14 threads of
+    real, never-extracted content as enriched. Live evidence before removal: a
+    9-message board thread at 39 attempts and four calendar events at 89-91,
+    none with any logged failure."""
     from mcpbrain import tools
-    seen = []
-
-    class FakeStore:
-        # The REAL Store signature. A fake that accepts (self, home) passes even
-        # against a call site that cannot construct a Store at all — which is
-        # exactly how Store(str(home)) (TypeError: missing 'dim') shipped inert.
-        def __init__(self, path, dim, read_only=False):
-            pass
-
-        def bump_enrich_attempts(self, ids):
-            seen.extend(ids)
-            return 1
-
-    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
-    tools._bump_unit_attempts(str(tmp_path), {
-        "unit_id": "u-1", "kind": "thread",
-        "threads": [{"thread_id": "t1", "part_doc_ids": ["a", "b"]},
-                    {"thread_id": "t2", "part_doc_ids": ["c"]}]})
-    assert seen == ["a", "b", "c"]
-
-
-def test_bump_unit_attempts_is_a_noop_without_part_ids(tmp_path, monkeypatch):
-    from mcpbrain import tools
-
-    class Boom:
-        def __init__(self, path, dim, read_only=False):
-            raise AssertionError("must not touch the store with no ids")
-
-    monkeypatch.setattr("mcpbrain.store.Store", Boom)
-    tools._bump_unit_attempts(str(tmp_path), {"unit_id": "u-1", "threads": []})
-
-
-def test_bump_unit_attempts_never_raises(tmp_path, monkeypatch):
-    """It runs on the claim hot path and must never fail a claim."""
-    from mcpbrain import tools
-
-    class Boom:
-        def __init__(self, path, dim, read_only=False):
-            raise RuntimeError("store down")
-
-    monkeypatch.setattr("mcpbrain.store.Store", Boom)
-    tools._bump_unit_attempts(str(tmp_path), {
-        "threads": [{"part_doc_ids": ["a"]}]})   # must not raise
-
-
-def test_bump_unit_attempts_against_a_real_store(tmp_path):
-    """The fakes above all matched a WRONG one-argument Store signature, so they
-    passed against `Store(str(home))` — which raises TypeError (dim is required)
-    on every call, swallowed by the function's own except. The whole claim-time
-    backstop was inert in production. Drive it against a REAL Store."""
-    from mcpbrain import tools
-    from mcpbrain.store import Store
-
-    s = Store(tmp_path / "brain.sqlite3", dim=4)
-    s.init()
-    s.upsert_chunk("a", "text a", "h1", {"source": "note"})
-    s.upsert_chunk("b", "text b", "h2", {"source": "note"})
-
-    tools._bump_unit_attempts(str(tmp_path), {
-        "unit_id": "u-1", "kind": "thread",
-        "threads": [{"thread_id": "t1", "part_doc_ids": ["a", "b"]}]})
-
-    with s._connect() as db:
-        rows = {r["doc_id"]: r["enrich_attempts"] for r in db.execute(
-            "SELECT doc_id, enrich_attempts FROM chunks ORDER BY doc_id")}
-    assert rows == {"a": 1, "b": 1}
-
-
-def test_bump_unit_attempts_falls_back_to_chunk_doc_ids(tmp_path, monkeypatch):
-    """A unit that could NOT be split carries no part_doc_ids — and that is
-    exactly the class this backstop exists for (the unsplittable oversize unit
-    that no drainer can hold, so push-side give-up never fires).
-
-    Measured on the live queue before this fix: 357 of 457 thread units (78.1%)
-    had no part_doc_ids and were therefore skipped entirely, including the one
-    unit over pull_cap. All 357 carried chunk_doc_ids on their messages, which
-    reassemble_thread stamps on every message whether or not it was split.
-    """
-    from mcpbrain import tools
-    seen = []
-
-    class FakeStore:
-        def __init__(self, *a, **k):
-            pass
-
-        def bump_enrich_attempts(self, ids):
-            seen.extend(ids)
-            return 1
-
-    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
-    tools._bump_unit_attempts(str(tmp_path), {
-        "unit_id": "u-1", "kind": "thread",
-        "threads": [{"thread_id": "t1", "messages": [
-            {"message_id": "f", "chunk_doc_ids": ["a", "b"]},
-            {"message_id": "g", "chunk_doc_ids": ["c"]}]}]})
-    assert seen == ["a", "b", "c"]
-
-
-def test_bump_unit_attempts_prefers_part_doc_ids_over_chunk_doc_ids(tmp_path, monkeypatch):
-    """A SPLIT part must bump only the chunks it covered, never its parent
-    message's full chunk list — that is the same over-marking the part-precise
-    drain resolve exists to prevent."""
-    from mcpbrain import tools
-    seen = []
-
-    class FakeStore:
-        def __init__(self, *a, **k):
-            pass
-
-        def bump_enrich_attempts(self, ids):
-            seen.extend(ids)
-            return 1
-
-    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
-    tools._bump_unit_attempts(str(tmp_path), {
-        "unit_id": "u-1", "kind": "thread",
-        "threads": [{"thread_id": "t1", "part": 1, "part_doc_ids": ["a"],
-                     "messages": [{"message_id": "f",
-                                   "chunk_doc_ids": ["a", "b", "c"]}]}]})
-    assert seen == ["a"]
+    assert not hasattr(tools, "_bump_unit_attempts")
