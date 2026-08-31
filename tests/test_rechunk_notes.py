@@ -171,3 +171,20 @@ def test_sweep_no_longer_skips_single_paragraph_notes(tmp_path):
     items, skipped = rechunk_notes.scan(s)
     assert skipped == 0
     assert len(items) == 1
+
+
+def test_sweep_never_splits_the_fixed_id_identity_seed(tmp_path):
+    """memory_tier.seed_core_identity writes note-core-identity-seed at a FIXED
+    doc_id and then calls set_chunk_type / set_chunk_tier / set_chunk_salience
+    on that exact id. Splitting it into -0/-1 silently breaks all four: the base
+    id would have no row. It is 2,836 chars live — a ~1,000-char tail past the
+    embed window, which is a far smaller cost than breaking core-tier identity.
+    """
+    from bin import rechunk_notes
+    s = _store(tmp_path)
+    body = "\n\n".join(f"para{i} " + "z" * 400 for i in range(12))
+    s.upsert_chunk("note-core-identity-seed", body, "h",
+                   {"source": "note", "observation_type": "memory", "title": "T"})
+    items, skipped = rechunk_notes.scan(s)
+    assert items == []
+    assert skipped == 0                      # deliberately excluded, not a failure

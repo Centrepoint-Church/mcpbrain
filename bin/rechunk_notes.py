@@ -19,7 +19,17 @@ import sys
 from mcpbrain import config
 from mcpbrain.chunking import NOTE_MAX_CHARS, content_hash, split_lossless
 from mcpbrain.embed import get_embedder
+from mcpbrain.memory_tier import _IDENTITY_SEED_DOC_ID
 from mcpbrain.store import Store
+
+# Notes whose doc_id is referenced verbatim elsewhere and therefore must stay a
+# single row. memory_tier.seed_core_identity writes _IDENTITY_SEED_DOC_ID at a
+# FIXED id and then calls set_chunk_type / set_chunk_tier / set_chunk_salience
+# on that exact id; splitting it into -0/-1 leaves the base id with no row and
+# silently breaks all four. It is 2,836 chars live, so the cost of leaving it
+# whole is a ~1,000-char tail past the embed window — far cheaper than breaking
+# core-tier identity.
+_NEVER_SPLIT = frozenset({_IDENTITY_SEED_DOC_ID})
 
 
 def _is_lossless(text: str, pieces: list[str]) -> bool:
@@ -46,6 +56,8 @@ def scan(store) -> tuple[list[dict], int]:
     """(notes to re-chunk, notes skipped because the re-chunk is not lossless)."""
     out, skipped = [], 0
     for row in store.note_chunks(include_expired=True, limit=10 ** 9):
+        if row["doc_id"] in _NEVER_SPLIT:
+            continue                       # fixed-id note — see _NEVER_SPLIT
         meta = row["metadata"]
         if meta.get("chunk_total", 1) > 1:
             continue                       # already chunked
