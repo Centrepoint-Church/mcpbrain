@@ -410,3 +410,26 @@ def test_consolidate_triggers_graduation(store, home_consolidation, monkeypatch)
     assert result["notes_written"] >= 1
     assert len(graduated) >= 1
     assert graduated[0]["n"] == 4
+
+
+def test_consolidated_multi_chunk_note_carries_note_id(tmp_path):
+    """store.note_chunks groups on note_id, falling back to doc_id. Without
+    note_id every piece of a chunked consolidated note groups to ITSELF, so one
+    note surfaces as N separate notes in memory_index and gets N distil verdicts.
+    The capture path stamps it; this path must too."""
+    from mcpbrain.consolidation import _write_note
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    summary = "\n\n".join(f"para{i} " + "z" * 700 for i in range(8))
+    base = _write_note(s, [{"doc_id": "src-1"}], summary)
+    assert base is not None
+    with s._connect() as db:
+        rows = db.execute(
+            "SELECT doc_id, metadata FROM chunks WHERE doc_id LIKE 'note-consolidated-%'"
+        ).fetchall()
+    assert len(rows) > 1                       # genuinely multi-chunk
+    import json
+    ids = {json.loads(r[1]).get("note_id") for r in rows}
+    assert len(ids) == 1 and None not in ids   # all pieces share one note_id
+    assert s.note_chunks() and len(s.note_chunks()) == 1   # one note, not N
