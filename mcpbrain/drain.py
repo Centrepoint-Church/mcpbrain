@@ -299,6 +299,68 @@ def _regroup_parts(extractions: list) -> list:
     return recombined
 
 
+def _stamp_part_doc_ids(extractions: list, unit_part_ids_by_part: dict) -> None:
+    """Stamp each RAW extraction's part_doc_ids from the unit file, in place.
+
+    UNCONDITIONAL — no "only if absent" guard: _unit_payload ships the unit's
+    threads[], part_doc_ids included, to the model verbatim as its input context,
+    so the model can echo the key back into its output. part_doc_ids decides which
+    chunks are marked enriched, so the system's value always wins.
+
+    Keyed by (thread_id, part), not thread_id alone: prepare's packing can put
+    SEVERAL parts of one split thread in a single unit, and a thread-only key
+    unioned all of them, so a model that merged or dropped a part attached — and
+    therefore marked enriched — chunks that extraction never covered. An unsplit
+    thread carries no `part` and keys as (thread_id, None), exactly how an
+    extraction with no `part` looks itself up.
+
+    `part` is MODEL-ECHOED, so it is verified, not trusted. Per thread, the
+    echoed parts must be a clean permutation of the parts the unit actually
+    holds; when they are not (a duplicate, or a number the unit has no part
+    for) we fall back to POSITIONAL assignment — extractions in order against
+    the unit's parts in order, which is how the model is asked to emit them
+    (one extraction per threads[] entry).
+
+    The bad echo this guards is not cosmetic. If part 1's extraction claims
+    part 2's number, part 2's chunks get marked enriched while only part 1's
+    text was ever extracted — silent content loss, and the chunks never
+    re-queue. The duplicate case is milder (the un-stamped part simply
+    re-queues), but both are corrected the same way.
+
+    A thread with no unit-file entry at all is left alone, so
+    _resolve_doc_ids' message-id fallback handles it rather than this
+    inventing a resolution.
+    """
+    by_thread: dict = {}
+    for raw in extractions:
+        if isinstance(raw, dict) and raw.get("thread_id") is not None:
+            by_thread.setdefault(raw["thread_id"], []).append(raw)
+
+    unit_parts: dict = {}
+    for (tid, part), ids in unit_part_ids_by_part.items():
+        unit_parts.setdefault(tid, []).append((part, ids))
+    # Sort by part so positional fallback pairs part 1 with the first
+    # extraction. None (an unsplit thread) is the only entry when present.
+    for tid in unit_parts:
+        unit_parts[tid].sort(key=lambda pi: (pi[0] is not None, pi[0]))
+
+    for tid, raws in by_thread.items():
+        parts = unit_parts.get(tid)
+        if not parts:
+            continue                       # no unit data; leave for the fallback
+        echoed = [r.get("part") for r in raws]
+        declared = [p for p, _ in parts]
+        if sorted(echoed, key=lambda p: (p is not None, p)) == declared:
+            lookup = dict(parts)
+            for raw in raws:
+                raw["part_doc_ids"] = list(lookup[raw.get("part")])
+            continue
+        log.warning("drain: thread %s echoed parts %r but the unit holds %r; "
+                    "assigning part_doc_ids positionally", tid, echoed, declared)
+        for raw, (_, ids) in zip(raws, parts):
+            raw["part_doc_ids"] = list(ids)
+
+
 def _resolve_doc_ids(store, extraction: dict, unit_messages_by_thread: dict) -> list[str]:
     """The chunks this extraction covers, cold-filtered, ready for apply/mark.
 
@@ -442,24 +504,11 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                 except (OSError, ValueError) as exc:
                     log.debug("drain: could not read unit file for %s: %s", unit_id, exc)
 
-            # Stamp each RAW extraction's part_doc_ids from the unit file, before
-            # _regroup_parts (which unions them) ever reads them. UNCONDITIONAL —
-            # no "only if absent" guard: _unit_payload ships the unit's threads[],
-            # part_doc_ids included, to the model verbatim as its input context, so
-            # the model can echo the key back into its output. part_doc_ids decides
-            # which chunks are marked enriched, so the system's value always wins.
-            # `part` is model-echoed and reliable for this (enrich_prompt.md asks
-            # for it explicitly on a split thread); part_doc_ids is never asked for.
-            # No entry for this key means we have no unit-file data for it — leave
-            # the extraction alone and let _resolve_doc_ids' message-id fallback
-            # handle it, rather than inventing a resolution here.
-            for raw in data["extractions"]:
-                if not isinstance(raw, dict):
-                    continue
-                own_ids = unit_part_ids_by_part.get(
-                    (raw.get("thread_id"), raw.get("part")))
-                if own_ids is not None:
-                    raw["part_doc_ids"] = list(own_ids)
+            # Stamp part_doc_ids from the unit file BEFORE _regroup_parts (which
+            # unions them) ever reads them. See _stamp_part_doc_ids for why this
+            # is unconditional and why the model's `part` is verified, not
+            # trusted.
+            _stamp_part_doc_ids(data["extractions"], unit_part_ids_by_part)
 
             extractions = _regroup_parts(data["extractions"])
             taxonomy = orgs.taxonomy_from_config(home)
