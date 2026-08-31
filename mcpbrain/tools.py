@@ -1132,8 +1132,24 @@ def _bump_unit_attempts(home, d: dict) -> None:
     bump_enrich_attempts is a plain UPDATE that never touches the vec table.
     """
     try:
+        # part_doc_ids when the thread was seam-split (exactly the chunks that
+        # part covers), else the messages' own chunk_doc_ids. The fallback is
+        # load-bearing, not defensive: a unit that could NOT be split carries no
+        # part_doc_ids, and that is precisely the class this backstop exists for
+        # — the unsplittable oversize unit no drainer can hold, whose extraction
+        # therefore never reaches push and never trips the push-side give-up.
+        # Measured on the live queue before the fallback existed: 357 of 457
+        # thread units (78.1%) were skipped here, including the ONE unit over
+        # pull_cap. reassemble_thread stamps chunk_doc_ids on every message,
+        # split or not, so the data was always there.
+        #
+        # Per THREAD, not per unit: a split part must bump only its own chunks,
+        # never its parent message's full list — the same over-marking the
+        # part-precise drain resolve exists to prevent.
         ids = [i for t in (d.get("threads") or [])
-               for i in (t.get("part_doc_ids") or [])]
+               for i in (t.get("part_doc_ids")
+                         or [c for m in (t.get("messages") or [])
+                             for c in (m.get("chunk_doc_ids") or [])])]
         if not ids:
             return
         from pathlib import Path
