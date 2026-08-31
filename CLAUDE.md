@@ -361,9 +361,56 @@ wrong and MUST be right:
   work against a 7,680-chunk backlog, while the new queue carries 2.3x more actual work. The
   honest metric is overhead per byte of work: **8.87 → 1.31 bytes sent per byte of work, an
   85.2% reduction** — essentially the plan's 87% projection.
-  **Not yet done: a version bump / release.** This entry records the LOCAL, live-validated
-  state; shipping to other users is a separate, explicit, not-yet-requested step.
-- **Current state (2026-08-26): the four version files (+ `uv.lock`) are at `0.7.119`,
+  **Shipped in 0.7.120** (see the entry above).
+- **Current state (2026-08-31): the five version files are at `0.7.120`, RELEASED** — source
+  `189bb9a`, dist `5293c6f`, plugin `f93683e`; the index serves only
+  `mcpbrain-0.7.120-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3555
+  passed**. Fleet resolution verified end-to-end (`uv pip compile` against the published
+  index): `mcpbrain==0.7.120`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
+  Wheel CONTENTS asserted, not just the build: `split_lossless`/`NOTE_MAX_CHARS` in
+  `chunking.py`, `chunk_doc_ids` in `tools.py`, `_stamp_part_doc_ids` in `drain.py`.
+  **0.7.120 is the post-review fix set for the enrichment-efficiency work**, three defects
+  the merged branch shipped with:
+  (1) **the claim-time backstop was inert for 78% of units** — `_bump_unit_attempts` read
+  `part_doc_ids` only and returned when empty, but an unsplittable unit has none, which is
+  exactly the class it exists to bound. 357 of 457 thread units skipped, including the one
+  unit over `pull_cap`. Now falls back to the messages' `chunk_doc_ids`; 457/457 covered.
+  (This is the SECOND time that one function shipped inert — the first was the
+  `Store(str(home))` signature bug — and both times its tests passed against fakes.)
+  (2) **the model-echoed `part` was trusted outright** — it selects which `part_doc_ids` get
+  stamped, so a bad echo marks chunks enriched that were never extracted: silent content
+  loss, and they never re-queue. Now verified per thread as a permutation of the unit's real
+  parts, with a logged positional fallback (`drain._stamp_part_doc_ids`).
+  (3) **the W2 note fix closed only ~17% of the recall hole it targeted.** 930 notes still
+  held **16,022,678 chars of tail with no vector**. The recorded cause ("notes without
+  blank-line paragraph breaks") was WRONG — the largest skipped note has them throughout.
+  The real cause: **`chunk_text` is a RETRIEVAL chunker and cannot round-trip a paragraph
+  larger than the budget** — `_split_paragraph` word-splits via `para.split()` (collapsing
+  every internal run of whitespace) and the caller rejoins with `\n\n`. The 50-word
+  `overlap` also duplicates words but is NOT the binding constraint: measured against all
+  930, `overlap=0` rescues **zero**. New `chunking.split_lossless` carries each break's
+  separator on the preceding piece, so `"".join(pieces) == text` by construction for any
+  input; pieces are marked `"split": "lossless"` so `store.note_chunks` rejoins with `""`
+  while the 250 notes chunked under the old convention keep their `\n\n` reassembly. The
+  round-trip check stays in both the capture path and the sweep as a GUARD, not a gate —
+  the sweep deletes the only whole-body row.
+  **Live migration (attended, 2026-08-31):** daemon stopped, backup verified fresh (50 min
+  old). `bin/rechunk_notes.py --yes`: **944 notes / 17,909,097 chars re-chunked, 0 skipped**
+  (it was 250 re-chunked / 944 skipped before `split_lossless`). Notes with an unembedded
+  tail: **930 → 0**; 1,194 notes now chunked across 16,083 rows; all 11,794 new pieces
+  embedded. **Gold: 0.850/0.574 before → 0.850/0.601 after** — recall held, MRR UP, well
+  clear of the 0.780/0.550 floor. The MRR gain is the point: that text had no vector at all
+  before. Daemon restarted and confirmed running.
+  **Payload result of the whole effort, measured live:** context/unit 45,511 → 7,564 bytes;
+  0 of 467 units without a `context` key; 0 with an emptied `known_people`. Do NOT quote the
+  raw total-payload drop (66%) on its own — it understates the change, because the OLD queue
+  was throttled (868 units against `window=600`, so `write_units` returned `window_full` and
+  produced nothing) and held only 4.98MB of work against a 7,680-chunk backlog, while the new
+  queue carries 2.3x more actual work. The honest metric is overhead per byte of work:
+  **8.87 → 1.31 bytes sent per byte of work, −85.2%.**
+  **The Windows HARDWARE QA GATE remains OPEN** — unchanged by this release; do not onboard
+  Windows users.
+- **Earlier: the four version files (+ `uv.lock`) were at `0.7.119`,
   RELEASED** — source `8734fa2`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
   `mcpbrain-0.7.119-py3-none-any.whl` and `install.ps1` is live (200). Full suite 3464 passed.
   **0.7.119 is the three-stage install simplification (#28/#29/#30) plus a flag audit.**
