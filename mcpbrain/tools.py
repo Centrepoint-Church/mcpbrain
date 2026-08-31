@@ -1115,55 +1115,35 @@ def _unit_payload(home, d: dict, unit_id: str, with_rules: bool) -> dict:
     return out
 
 
-def _bump_unit_attempts(home, d: dict) -> None:
-    """Bump the extraction-attempt counter for a claimed unit's chunks.
-
-    drain._give_up_or_bump only fires on PUSH, so a unit no drainer can process
-    (too large to hold, malformed) never increments and re-queues forever — the
-    5,075,515-byte unit's failure mode. Bumping at CLAIM time bounds it: after
-    _EMPTY_ATTEMPT_CAP claims the chunks are consumed by the push-side give-up.
-
-    Best-effort and store-optional: this runs on the MCP claim path, which must
-    stay cheap and must never fail a claim.
-
-    `embedder_dim` (a dict lookup), NOT `get_embedder(...).dim` — the latter
-    constructs a _LocalEmbedder, which loads the ONNX model eagerly, and this is
-    the claim hot path. The value is the same 384 either way, and
-    bump_enrich_attempts is a plain UPDATE that never touches the vec table.
-    """
-    try:
-        # part_doc_ids when the thread was seam-split (exactly the chunks that
-        # part covers), else the messages' own chunk_doc_ids. The fallback is
-        # load-bearing, not defensive: a unit that could NOT be split carries no
-        # part_doc_ids, and that is precisely the class this backstop exists for
-        # — the unsplittable oversize unit no drainer can hold, whose extraction
-        # therefore never reaches push and never trips the push-side give-up.
-        # Measured on the live queue before the fallback existed: 357 of 457
-        # thread units (78.1%) were skipped here, including the ONE unit over
-        # pull_cap. reassemble_thread stamps chunk_doc_ids on every message,
-        # split or not, so the data was always there.
-        #
-        # Per THREAD, not per unit: a split part must bump only its own chunks,
-        # never its parent message's full list — the same over-marking the
-        # part-precise drain resolve exists to prevent.
-        ids = [i for t in (d.get("threads") or [])
-               for i in (t.get("part_doc_ids")
-                         or [c for m in (t.get("messages") or [])
-                             for c in (m.get("chunk_doc_ids") or [])])]
-        if not ids:
-            return
-        from pathlib import Path
-
-        from mcpbrain.embed import embedder_dim
-        from mcpbrain.store import Store
-        # Store's real signature is (path, dim, read_only=False). `Store(str(home))`
-        # raised TypeError on EVERY call and was swallowed by the except below, so
-        # this whole backstop was inert in production while its tests — whose fakes
-        # matched the wrong one-argument signature — passed.
-        Store(Path(home) / "brain.sqlite3",
-              dim=embedder_dim("bge-small")).bump_enrich_attempts(ids)
-    except Exception:  # noqa: BLE001 — bookkeeping must never break a claim
-        _log.debug("claim: attempt bump failed", exc_info=True)
+# The claim-time attempt bump was REMOVED (2026-09-01). Do not reintroduce it
+# without a SEPARATE counter.
+#
+# Intent was to bound a unit no drainer can process: such a unit never reaches
+# brain_enrich_push, so drain._give_up_or_bump -- which is the only thing that
+# consumes chunks at _EMPTY_ATTEMPT_CAP -- never fires for it. Two things were
+# wrong with doing that here.
+#
+# 1. It terminated nothing. The claim path bumped the counter and discarded the
+#    return value; only the PUSH path acts on the cap. Live evidence: 108
+#    unenriched chunks sat at or past the cap of 3, one at 91, none consumed.
+#
+# 2. Making it act on the cap would have been far worse than leaving it inert.
+#    The bump hits every chunk of every thread in the claimed unit, not the
+#    thread that failed -- and post-W1 a unit packs a median of 14 threads. So
+#    "3 claims" would have marked ~14 threads of real, never-extracted content
+#    as enriched. The chunks that accrued 39 and 91 attempts are a 9-message
+#    board thread and four calendar events, all with no logged failure at all:
+#    the counter was recording "a unit containing this chunk was handed out",
+#    not "this extraction failed".
+#
+# The failure it targeted is now prevented at the source instead:
+# prepare._split_message_at_seams splits an over-long message losslessly at
+# chunk boundaries, and W3 cold-marks the saved web pages that produced the one
+# genuinely unprocessable unit (4.95MB). Residual gap, accepted and known: a
+# document with a GAP in its chunk sequence falls back to ship-whole and is not
+# size-bounded (currently one unit at 142,666 bytes -- large but well within a
+# drainer's context). Bounding that belongs in prepare, where the unit is built,
+# not in a counter the push path also depends on.
 
 
 @tool(
@@ -1449,7 +1429,6 @@ def make_brain_enrich_claim(home: str):
                 continue                              # skip garbage without leasing
             if not _atomic_claim(claims, uid, now):
                 continue                              # lost the race; try the next
-            _bump_unit_attempts(home, d)
             return _unit_payload(home, d, uid, with_rules)
         return {"empty": True}
     return brain_enrich_claim
