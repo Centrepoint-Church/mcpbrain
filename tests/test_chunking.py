@@ -211,3 +211,67 @@ def test_name_in_text_matches_full_name_and_tokens():
     assert name_in_text("Joel Chelliah", "ps joel will confirm")
     assert not name_in_text("Joel Chelliah", "nothing relevant here")
     assert not name_in_text("", "anything")
+
+
+# --- split_lossless -------------------------------------------------------
+
+def _joins_back(text, max_chars=1800):
+    from mcpbrain.chunking import split_lossless
+    pieces = split_lossless(text, max_chars)
+    return "".join(pieces) == text, pieces
+
+
+def test_split_lossless_round_trips_one_giant_paragraph():
+    """The case chunk_text structurally cannot do: a single paragraph larger
+    than the budget. _split_paragraph word-splits via para.split(), collapsing
+    internal whitespace, and its caller rejoins with '\\n\\n' — so an over-budget
+    paragraph is unreconstructable by any join. Every one of the 930 notes still
+    carrying an unembedded tail is this shape."""
+    text = "y" * 5000
+    ok, pieces = _joins_back(text)
+    assert ok
+    assert len(pieces) > 1
+    assert all(len(p) <= 1800 for p in pieces)
+
+
+def test_split_lossless_preserves_exact_whitespace():
+    text = "alpha  beta\tgamma\n\n\n" + "z" * 4000 + "   trailing  "
+    ok, _ = _joins_back(text)
+    assert ok
+
+
+def test_split_lossless_prefers_paragraph_then_line_then_word_breaks():
+    from mcpbrain.chunking import split_lossless
+    para = "\n\n".join("w" * 500 for _ in range(6))
+    pieces = split_lossless(para, 1200)
+    assert "".join(pieces) == para
+    # A break lands right after a paragraph separator, so no piece starts mid-word.
+    assert all(p.endswith("\n\n") or p is pieces[-1] for p in pieces)
+
+
+def test_split_lossless_short_text_is_one_piece():
+    from mcpbrain.chunking import split_lossless
+    assert split_lossless("short", 1800) == ["short"]
+
+
+def test_split_lossless_handles_an_unbreakable_token():
+    """A base64 blob or minified line with no separator at all still has to be
+    bounded — a hard cut is lossless because pieces rejoin with ''."""
+    ok, pieces = _joins_back("Q" * 4000, 1000)
+    assert ok
+    assert all(len(p) <= 1000 for p in pieces)
+
+
+def test_split_lossless_every_piece_is_non_empty():
+    ok, pieces = _joins_back("a\n\n\n\n" + "b" * 3000)
+    assert ok
+    assert all(p for p in pieces)
+
+
+def test_split_lossless_round_trips_real_note_shapes():
+    from mcpbrain.chunking import split_lossless
+    for text in ("x" * 133791,
+                 "\n\n".join("para " + "p" * 900 for _ in range(40)),
+                 "intro\n\n" + "q" * 60000 + "\n\noutro",
+                 "line\n" * 5000):
+        assert "".join(split_lossless(text, 1800)) == text

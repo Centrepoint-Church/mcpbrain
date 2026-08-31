@@ -89,3 +89,32 @@ def test_read_doc_falls_through_to_get_chunk_for_ordinary_docs(tmp_path):
 def test_read_doc_missing_note_returns_none(tmp_path):
     s = _store(tmp_path)
     assert s.read_doc("note-never-captured") is None
+
+
+def test_note_chunks_reassembles_a_lossless_split_note_with_empty_join(tmp_path):
+    """Lossless pieces carry their own separators, so they rejoin with "" — not
+    CHUNK_JOIN, which would inject a blank line that was never in the note."""
+    s = _store(tmp_path)
+    base = "note-lossless"
+    for i, piece in enumerate(["first\n\n", "second\n", "third"]):
+        s.upsert_chunk(f"{base}-{i}", piece, "h",
+                       {"source": "note", "observation_type": "memory",
+                        "title": "T", "note_id": base, "split": "lossless",
+                        "chunk_index": i, "chunk_total": 3})
+    rows = s.note_chunks(observation_type="memory")
+    assert len(rows) == 1
+    assert rows[0]["text"] == "first\n\nsecond\nthird"
+
+
+def test_note_chunks_legacy_chunk_text_pieces_still_join_with_blank_lines(tmp_path):
+    """The 250 notes already re-chunked under the old convention must keep
+    reassembling the way they were written."""
+    s = _store(tmp_path)
+    base = "note-legacy"
+    for i, piece in enumerate(["first", "second"]):
+        s.upsert_chunk(f"{base}-{i}", piece, "h",
+                       {"source": "note", "observation_type": "memory",
+                        "title": "T", "note_id": base,
+                        "chunk_index": i, "chunk_total": 2})
+    rows = s.note_chunks(observation_type="memory")
+    assert rows[0]["text"] == "first\n\nsecond"
