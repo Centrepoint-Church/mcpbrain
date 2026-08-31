@@ -3815,8 +3815,11 @@ class Store:
 
     # --- Phase 3, Task 0.5A: community reader/writer methods ----------------
 
-    def replace_communities(self, partition: dict, summaries: dict) -> None:
+    def replace_communities(self, partition: dict, summaries: dict) -> int:
         """Atomically replace all community membership and summary data.
+
+        Returns the number of partition ids SKIPPED for having no entities row
+        (store.py carries no logger; communities._save logs the count).
 
         partition: {entity_id: community_id} — every entity's community at level 0.
         summaries: {community_id: {"member_count": int, "key_entities": str,
@@ -3828,10 +3831,27 @@ class Store:
         with self._connect(write=True) as db:
             db.execute("DELETE FROM entity_communities")  # admin-delete-ok
             db.execute("DELETE FROM community_summaries")  # admin-delete-ok
+            # Skip ids with no entities row. communities.build_graph reads
+            # entity_relations, so a relation still pointing at a merged-away
+            # entity puts a dead id in the partition; with the FK enforced (the
+            # 2026-08-25 rebuild) that INSERT fails and rolls back the WHOLE
+            # transaction. Nothing looks broken -- the rollback leaves the old
+            # rows in place -- so the data silently freezes. Live: 714 failures
+            # over three days, every one of them caused by a SINGLE dead id
+            # (`joshua-kemp`, residue from a merge into `josh-kemp`), while
+            # community_summaries sat stale for five days and brain_context
+            # (mode="communities") kept serving it.
+            #
+            # One dangling id must degrade one node, not the cadence. The
+            # residue is still worth sweeping -- this makes the pass survive it,
+            # it does not make it correct to leave.
+            live = {r["id"] for r in db.execute("SELECT id FROM entities")}
+            rows = [(eid, cid) for eid, cid in partition.items() if eid in live]
+            skipped = len(partition) - len(rows)
             db.executemany(
                 "INSERT INTO entity_communities(entity_id, community_id, level) "
                 "VALUES(?, ?, 0)",
-                [(eid, cid) for eid, cid in partition.items()],
+                rows,
             )
             db.executemany(
                 "INSERT INTO community_summaries"
@@ -3849,6 +3869,7 @@ class Store:
                     for cid, meta in summaries.items()
                 ],
             )
+        return skipped
 
     def communities_for(self, entity_ids: list) -> list[dict]:
         """Return entity_communities rows for the given entity_ids."""

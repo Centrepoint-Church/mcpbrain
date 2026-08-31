@@ -155,8 +155,16 @@ def _save(store, partition: dict) -> None:
                 "updated": today,
             }
 
-    store.replace_communities(partition, summaries)
-    log.info("saved %d community assignments", len(partition))
+    skipped = store.replace_communities(partition, summaries)
+    if skipped:
+        # Merge residue: build_graph reads entity_relations, so a relation still
+        # pointing at a merged-away entity puts a dead id in the partition. The
+        # store now skips those rather than letting one FK violation roll back
+        # the whole pass (which froze this data silently for five days). Worth
+        # sweeping at the source -- see merge_entities' repointing.
+        log.warning("communities: %d partition id(s) had no entities row and were "
+                    "skipped (merge residue)", skipped)
+    log.info("saved %d community assignments", len(partition) - skipped)
 
 
 def run(store) -> dict:
