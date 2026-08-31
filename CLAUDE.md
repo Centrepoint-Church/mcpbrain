@@ -362,7 +362,25 @@ wrong and MUST be right:
   honest metric is overhead per byte of work: **8.87 → 1.31 bytes sent per byte of work, an
   85.2% reduction** — essentially the plan's 87% projection.
   **Shipped in 0.7.120** (see the entry above).
-- **Post-0.7.120 (2026-09-01), UNRELEASED — source only.** Four findings from asking
+- **Current state (2026-09-01): the five version files are at `0.7.121`, RELEASED** —
+  source `3646dbc`, dist `a62f9b6`, plugin `a346a90`; the index serves only
+  `mcpbrain-0.7.121-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3566
+  passed**, ruff clean. Fleet resolution verified against the published index:
+  `mcpbrain==0.7.121`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
+  CONTENTS asserted, not just the build (`join_pieces`, `chunk_indexes`, the gapped-split
+  docstring, `replace_communities`' live-id filter, `consolidation`'s `note_id`, and the
+  ABSENCE of `_bump_unit_attempts`).
+  **Local machine fully restarted on the shipped code:** daemon + tray stopped,
+  `uv tool install --force ".[daemon]"` (the extra is mandatory — a bare `.` breaks the
+  embedder), `__pycache__` cleared under the uv tool's site-packages per the 0.7.120
+  gotcha, both restarted. **Verified against the RUNNING process, not the files:** the
+  control API reports `version: 0.7.121`, and the community cadence — dead for three days
+  — has logged **zero** FK errors since the restart (last one 06:26, restart 07:13).
+  **A verification trap worth remembering:** running
+  `<uv-tool-python> -c "import mcpbrain; ..."` from inside the repo imports the WORKING
+  TREE, not site-packages (cwd is `sys.path[0]`), so it proves nothing about what is
+  installed. Check `module.__file__`, or run from a neutral cwd.
+  **0.7.121 is the four findings below**, from asking
   whether `_bump_unit_attempts` needed anything. Full suite **3557 passed**, ruff clean.
   **(1) Community detection had been dead for three days, silently.**
   `replace_communities` inserts `entity_communities` from the partition; `build_graph`
