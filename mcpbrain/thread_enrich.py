@@ -188,6 +188,40 @@ def group_unenriched_threads(store, *, thread_cap: int) -> list[ThreadBatch]:
 _GAP_MARKER = "\n\n[…]\n\n"
 
 
+def join_pieces(pieces: list[str], indexes: list[int],
+                chunk_total: int = 0) -> tuple[str, bool]:
+    """Join per-chunk pieces in index order, marking any missing piece.
+
+    The pure core of _join_with_gaps, over parallel lists rather than chunk
+    dicts, so prepare._split_message_at_seams can REBUILD a part's body with the
+    same gap semantics after splitting. Before this existed, a gapped document
+    could not be split at all: the splitter had only a boolean `chunk_has_gap`
+    and no way to know WHERE the holes were, so it shipped the whole document
+    unsplit and was therefore never size-bounded.
+
+    A gap is an index discontinuity between adjacent pieces; a truncated tail is
+    the last index falling short of chunk_total - 1 (chunk_total 0/absent simply
+    disables that check, the correct degradation for chunks written before it
+    was stamped). Returns (text, had_gap).
+    """
+    out: list[str] = []
+    had_gap = False
+    prev = None
+    for piece, idx in zip(pieces, indexes):
+        if prev is not None:
+            if idx != prev + 1:
+                out.append(_GAP_MARKER)
+                had_gap = True
+            else:
+                out.append(_CHUNK_JOIN)
+        out.append(piece)
+        prev = idx
+    if prev is not None and chunk_total and prev < chunk_total - 1:
+        out.append(_GAP_MARKER)
+        had_gap = True
+    return "".join(out), had_gap
+
+
 def _join_with_gaps(parts: list[dict]) -> tuple[str, bool]:
     """Join one message's chunks in index order, marking any missing piece.
 
@@ -213,25 +247,10 @@ def _join_with_gaps(parts: list[dict]) -> tuple[str, bool]:
     chunks it is absent and the check simply does not fire, which is the correct
     degradation. `parts` is already sorted by chunk_index by the caller.
     """
-    out: list[str] = []
-    had_gap = False
-    prev = None
-    for p in parts:
-        idx = int((p.get("metadata") or {}).get("chunk_index", 0) or 0)
-        if prev is not None:
-            if idx != prev + 1:
-                out.append(_GAP_MARKER)
-                had_gap = True
-            else:
-                out.append(_CHUNK_JOIN)
-        out.append(p.get("text", ""))
-        prev = idx
-    if parts and prev is not None:
-        total = int((parts[-1].get("metadata") or {}).get("chunk_total", 0) or 0)
-        if total and prev < total - 1:
-            out.append(_GAP_MARKER)
-            had_gap = True
-    return "".join(out), had_gap
+    pieces = [p.get("text", "") for p in parts]
+    indexes = [int((p.get("metadata") or {}).get("chunk_index", 0) or 0) for p in parts]
+    total = int((parts[-1].get("metadata") or {}).get("chunk_total", 0) or 0) if parts else 0
+    return join_pieces(pieces, indexes, total)
 
 
 def reassemble_thread(chunks: list[dict]) -> list[dict]:
@@ -296,6 +315,13 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
         # With chunk_has_gap False, _CHUNK_JOIN.join(chunk_pieces) == text
         # exactly, which is what makes a seam split provably lossless.
         chunk_pieces = [p.get("text", "") for p in parts]
+        # Parallel to chunk_pieces/chunk_doc_ids. prepare needs the INDEXES (not
+        # just a had-gap boolean) to rebuild each part's gap markers when it
+        # splits a gapped document — without them the splitter could only refuse
+        # to split, leaving such a document unbounded in size.
+        chunk_indexes = [int((p.get("metadata") or {}).get("chunk_index", 0) or 0)
+                         for p in parts]
+        chunk_total = int((parts[-1].get("metadata") or {}).get("chunk_total", 0) or 0)
         messages.append({
             # The GROUP key can be finer than message identity (attachments);
             # the emitted id must stay the resolvable one — see _reassembly_key.
@@ -315,6 +341,8 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
             "text": text,
             "chunk_doc_ids": chunk_doc_ids,
             "chunk_pieces": chunk_pieces,
+            "chunk_indexes": chunk_indexes,
+            "chunk_total": chunk_total,
             "chunk_has_gap": chunk_has_gap,
         })
 

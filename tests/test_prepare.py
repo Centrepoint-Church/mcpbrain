@@ -858,23 +858,54 @@ def test_split_message_at_seams_when_chunks_pack_several_paragraphs():
     assert _CHUNK_JOIN.join(p["text"] for p in out) == msg["text"]   # lossless
 
 
-def test_split_message_at_seams_bails_on_a_gap_marker():
-    """A partially-enriched/cold document gets a gap marker, so the pieces no
-    longer reconstruct the text. Ship whole rather than mark the wrong rows."""
-    from mcpbrain.thread_enrich import _CHUNK_JOIN, _GAP_MARKER
+def test_split_message_at_seams_splits_a_gapped_document_and_keeps_the_marker():
+    """A partially-enriched/cold document carries a gap marker. It used to ship
+    WHOLE for that reason, which left it the only unbounded unit shape on the
+    queue (142,666 bytes live). chunk_pieces and chunk_doc_ids stay aligned
+    across a hole — only the joined text differs — so the split was always safe;
+    each part's body is rebuilt with join_pieces so the gap SIGNAL survives
+    wherever the hole actually falls."""
+    from mcpbrain.thread_enrich import _CHUNK_JOIN, _GAP_MARKER, join_pieces
     from mcpbrain.prepare import _split_message_at_seams
 
     pieces = ["a" * 300, "b" * 300, "c" * 300]
-    msg = {"message_id": "f",
-           "text": pieces[0] + _GAP_MARKER + pieces[1] + _CHUNK_JOIN + pieces[2],
+    indexes = [0, 2, 3]                                  # hole between 0 and 2
+    text, _ = join_pieces(pieces, indexes, 4)
+    msg = {"message_id": "f", "text": text,
            "chunk_doc_ids": ["d0", "d2", "d3"],
-           "chunk_pieces": pieces, "chunk_has_gap": True}
-    assert _split_message_at_seams(msg, 400) == [msg]
+           "chunk_pieces": pieces, "chunk_indexes": indexes,
+           "chunk_total": 4, "chunk_has_gap": True}
+    parts = _split_message_at_seams(msg, 400)
+    assert len(parts) == 3                               # each piece its own part
+    assert [p["chunk_doc_ids"] for p in parts] == [["d0"], ["d2"], ["d3"]]
+    # The hole is now a part BOUNDARY, so no part carries a stray marker...
+    assert all(_GAP_MARKER not in p["text"] for p in parts)
+    # ...and nothing is lost: the pieces still cover the whole document in order.
+    assert [t for p in parts for t in p["chunk_pieces"]] == pieces
+    assert _CHUNK_JOIN not in parts[0]["text"]
+
+
+def test_split_message_at_seams_keeps_a_gap_marker_that_falls_inside_a_part():
+    from mcpbrain.thread_enrich import _GAP_MARKER, join_pieces
+    from mcpbrain.prepare import _split_message_at_seams
+
+    pieces = ["a" * 50, "b" * 50, "c" * 50]
+    indexes = [0, 2, 3]
+    text, _ = join_pieces(pieces, indexes, 4)
+    msg = {"message_id": "f", "text": text,
+           "chunk_doc_ids": ["d0", "d2", "d3"],
+           "chunk_pieces": pieces, "chunk_indexes": indexes,
+           "chunk_total": 4, "chunk_has_gap": True}
+    (part,) = _split_message_at_seams(msg, 10_000)       # all pieces fit one part
+    assert _GAP_MARKER in part["text"]                   # signal preserved
+    assert part["chunk_has_gap"] is True
 
 
 def test_split_message_at_seams_bails_without_chunk_pieces():
     """A unit written before this change carries no chunk_pieces; splitting on a
-    guess is exactly what this fix removes."""
+    guess is exactly what that fix removed. Missing chunk_indexes is different
+    and does NOT bail — it degrades to contiguous numbering, reproducing the old
+    no-gap behaviour exactly."""
     from mcpbrain.prepare import _split_message_at_seams
 
     msg = {"message_id": "f", "text": "a" * 300 + "\n\n" + "b" * 300,
@@ -1434,3 +1465,61 @@ def test_no_unit_exceeds_pull_cap_with_rules(tmp_path):
     # Guard the guard: if the fixture ever stops producing full contexts and
     # multi-thread packs, this test has quietly gone back to proving nothing.
     assert stressed, "test data must actually stress the cap"
+
+
+def _gapped_block(n_pieces, piece_len, budget_indexes, chunk_total):
+    """A document with a HOLE in its chunk sequence, shaped exactly as
+    reassemble_thread emits one (text is the real gap-marked join, so
+    _split_long_thread's size check sees the true body length)."""
+    from mcpbrain.thread_enrich import join_pieces
+    pieces = ["x" * piece_len for _ in budget_indexes]
+    text, had_gap = join_pieces(pieces, list(budget_indexes), chunk_total)
+    return {
+        "thread_id": "f", "prior_thread_context": "", "open_actions": [],
+        "org_hint": "",
+        "messages": [{
+            "message_id": "f", "sender": "", "date": "", "labels": "",
+            "subject": "doc.pdf",
+            "text": text,
+            "chunk_doc_ids": [f"gdrive-f-{i}" for i in budget_indexes],
+            "chunk_pieces": pieces,
+            "chunk_indexes": list(budget_indexes),
+            "chunk_total": chunk_total,
+            "chunk_has_gap": had_gap,
+        }],
+    }
+
+
+def test_split_long_thread_now_splits_a_gapped_document(tmp_path=None):
+    """A document with a HOLE in its chunk sequence (partially enriched or
+    partially cold) used to fall back to ship-whole and was therefore not
+    size-bounded at all — the last unbounded unit on the live queue (142,666
+    bytes). chunk_pieces and chunk_doc_ids stay correctly aligned across a gap;
+    only the JOINED text differs, so the split was always safe."""
+    from mcpbrain.prepare import _split_long_thread
+    idx = [0, 1, 2, 4, 5, 6]                      # hole at 3
+    block = _gapped_block(6, 400, idx, 8)
+    parts = _split_long_thread(block, 900)
+    assert len(parts) > 1
+    covered = [d for p in parts for d in p["part_doc_ids"]]
+    assert covered == [f"gdrive-f-{i}" for i in idx]     # nothing lost, order kept
+
+
+def test_split_gapped_document_keeps_the_gap_marker_inside_a_part():
+    """The gap SIGNAL must survive the split — the model must not extract
+    confidently across a hole it cannot see."""
+    from mcpbrain.prepare import _split_long_thread
+    block = _gapped_block(3, 100, [0, 2, 3], 4)
+    parts = _split_long_thread(block, 10_000)      # fits: one part, gap retained
+    assert len(parts) == 1
+    assert "[…]" in parts[0]["messages"][0]["text"]
+
+
+def test_split_gapped_document_marks_a_truncated_tail_on_the_last_part_only():
+    from mcpbrain.prepare import _split_long_thread
+    idx = [0, 1, 2, 3]
+    block = _gapped_block(4, 400, idx, 9)          # tail truncated: 4 of 9
+    parts = _split_long_thread(block, 900)
+    assert len(parts) > 1
+    assert not parts[0]["messages"][0]["text"].endswith("[…]\n\n")
+    assert parts[-1]["messages"][0]["text"].endswith("[…]\n\n")

@@ -40,7 +40,7 @@ from contextlib import nullcontext
 from mcpbrain import config, prompt, thread_enrich
 from mcpbrain.enrich_blocks import UNIT_BLOCKS as _UNIT_BLOCKS
 from mcpbrain.resolve import _candidate_pairs
-from mcpbrain.thread_enrich import _CHUNK_JOIN
+from mcpbrain.thread_enrich import _CHUNK_JOIN, join_pieces
 
 log = logging.getLogger("mcpbrain.prepare")
 
@@ -754,57 +754,71 @@ def _split_message_at_seams(msg: dict, char_budget: int) -> list[dict]:
     """Split ONE over-long message into pieces at its chunk boundaries.
 
     A message body is a join of chunks (thread_enrich.reassemble_thread), so it
-    splits back losslessly at those same seams — no truncation, and each piece
-    knows exactly which chunks it covers (`chunk_doc_ids`), which is what lets
-    drain mark part-precisely instead of marking a whole Drive document off the
-    first part.
+    splits back at those same seams — no truncation, and each piece knows exactly
+    which chunks it covers (`chunk_doc_ids`), which is what lets drain mark
+    part-precisely instead of marking a whole Drive document off the first part.
 
-    chunking.chunk_text bounds chunks at ~1800 chars, so any budget >= that is
-    reachable. A message with no chunk_doc_ids (a pre-Task-3 unit, or a store
-    row written before notes were chunked) cannot be split and is returned
-    whole — the caller's existing over-budget warning still fires, and the
-    claim-time attempt cap bounds the retry loop.
+    The pieces are READ from the message (`chunk_pieces`, stamped from the real
+    chunk rows), never re-derived by splitting `text` on _CHUNK_JOIN. chunk_text
+    PACKS several paragraphs into one chunk whenever they fit the budget
+    together, so a chunk's own text routinely contains internal "\n\n" —
+    re-splitting the joined body produced MORE pieces than there were
+    chunk_doc_ids (60 paragraphs / 8 chunks on a real document), the length
+    guard fired, and the message shipped whole.
 
-    The pieces are READ from the message (`chunk_pieces`, stamped by
-    reassemble_thread from the real chunk rows), never re-derived by splitting
-    `text` on _CHUNK_JOIN. chunk_text PACKS several paragraphs into one chunk
-    whenever they fit the budget together, so a chunk's own text routinely
-    contains internal "\\n\\n" — re-splitting the joined body then produced MORE
-    pieces than there were chunk_doc_ids (60 paragraphs / 8 chunks on a real
-    document), the length guard fired, and the message shipped whole. One
-    paragraph per chunk is the exception, not the rule, so that derivation
-    defeated seam splitting for ordinary documents.
+    GAPS no longer prevent a split. chunk_pieces and chunk_doc_ids stay
+    correctly aligned across a hole — only the JOINED text differs — so each
+    part's body is rebuilt with thread_enrich.join_pieces, which re-inserts the
+    gap markers where the indexes are actually discontinuous and re-derives the
+    truncated-tail marker for whichever part ends the message. Previously a
+    gapped document (partially enriched, or partially cold) fell back to
+    ship-whole and was therefore NOT size-bounded at all: it was the last
+    unbounded unit on the live queue at 142,666 bytes. Refusing to split also
+    lost nothing to gain — the gap SIGNAL is what mattered, and rebuilding it
+    per part preserves it exactly.
+
+    A message with fewer than two chunks, or one missing the parallel arrays
+    (a unit written before they were carried), still cannot be split and is
+    returned whole; the caller's over-budget warning fires.
     """
     ids = msg.get("chunk_doc_ids") or []
     if len(ids) <= 1:
         return [msg]
     pieces = msg.get("chunk_pieces")
-    if pieces is None or msg.get("chunk_has_gap") or len(pieces) != len(ids):
-        # No pieces (a unit written before they were carried); or a gap marker
-        # was inserted (a partially-enriched/cold document), so _CHUNK_JOIN.join
-        # of the pieces does NOT reproduce the text and a part's body could not
-        # be reconstructed losslessly; or — defensively — the two lists have
-        # drifted out of step. Splitting here would mis-attribute chunks, so ship
-        # whole rather than mark the wrong rows.
+    indexes = msg.get("chunk_indexes")
+    if pieces is None or len(pieces) != len(ids):
+        # No pieces, or the two lists have drifted out of step. Splitting would
+        # mis-attribute chunks, so ship whole rather than mark the wrong rows.
         return [msg]
-    def _piece(txts: list[str], dids: list[str]) -> dict:
-        # chunk_pieces/chunk_has_gap are re-derived for the emitted piece so a
-        # part never carries its parent's full piece list.
-        return {**msg, "text": _CHUNK_JOIN.join(txts), "chunk_doc_ids": dids,
-                "chunk_pieces": txts, "chunk_has_gap": False}
+    if indexes is None or len(indexes) != len(ids):
+        # Pre-index unit: fall back to contiguous numbering, which reproduces
+        # the old no-gap behaviour exactly (join_pieces then inserts no marker).
+        indexes = list(range(len(ids)))
+    total = int(msg.get("chunk_total") or 0)
 
-    out, cur_txt, cur_ids = [], [], []
-    for piece, did in zip(pieces, ids):
+    def _piece(txts, dids, idxs, is_last):
+        # Only the part that ends the message carries the truncated-tail marker;
+        # an earlier part is followed by more content, not by a hole.
+        text, had_gap = join_pieces(txts, idxs, total if is_last else 0)
+        return {**msg, "text": text, "chunk_doc_ids": dids,
+                "chunk_pieces": txts, "chunk_indexes": idxs,
+                "chunk_total": total, "chunk_has_gap": had_gap}
+
+    groups: list[tuple[list, list, list]] = []
+    cur_txt, cur_ids, cur_idx = [], [], []
+    for piece, did, idx in zip(pieces, ids, indexes):
         projected = (sum(len(t) for t in cur_txt)
                      + len(cur_txt) * len(_CHUNK_JOIN) + len(piece))
         if cur_txt and projected > char_budget:
-            out.append(_piece(cur_txt, cur_ids))
-            cur_txt, cur_ids = [], []
+            groups.append((cur_txt, cur_ids, cur_idx))
+            cur_txt, cur_ids, cur_idx = [], [], []
         cur_txt.append(piece)
         cur_ids.append(did)
+        cur_idx.append(idx)
     if cur_txt:
-        out.append(_piece(cur_txt, cur_ids))
-    return out
+        groups.append((cur_txt, cur_ids, cur_idx))
+    return [_piece(t, d, i, n == len(groups) - 1)
+            for n, (t, d, i) in enumerate(groups)]
 
 
 def _split_long_thread(block, char_budget: int) -> list:
