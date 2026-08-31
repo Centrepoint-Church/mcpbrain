@@ -14,22 +14,28 @@ Floor: recall@10 >= 0.780 / MRR >= 0.550. It should IMPROVE — 21.1MB currently
 has no vector past each note's first ~2,000 chars.
 """
 import argparse
+import re
 import sys
 
 from mcpbrain import config
 from mcpbrain.chunking import NOTE_MAX_CHARS, content_hash, split_lossless
 from mcpbrain.embed import get_embedder
-from mcpbrain.memory_tier import _IDENTITY_SEED_DOC_ID
 from mcpbrain.store import Store
 
-# Notes whose doc_id is referenced verbatim elsewhere and therefore must stay a
-# single row. memory_tier.seed_core_identity writes _IDENTITY_SEED_DOC_ID at a
-# FIXED id and then calls set_chunk_type / set_chunk_tier / set_chunk_salience
-# on that exact id; splitting it into -0/-1 leaves the base id with no row and
-# silently breaks all four. It is 2,836 chars live, so the cost of leaving it
-# whole is a ~1,000-char tail past the embed window — far cheaper than breaking
-# core-tier identity.
-_NEVER_SPLIT = frozenset({_IDENTITY_SEED_DOC_ID})
+# Only CAPTURE-shaped note ids are ever re-chunked. drain_captures mints
+# `note-<32 hex>` (content_hash[:32]); every other `note-` id belongs to code
+# that references it verbatim, so splitting it changes an id something still
+# looks up.
+#
+# An allowlist, not a denylist, because a denylist only covers what someone
+# remembered. Live proof: `note-core-identity-seed` (memory_tier writes it at a
+# FIXED id, then calls set_chunk_type / set_chunk_tier / set_chunk_salience on
+# that exact id) was split into -0/-1 by an earlier run, and seed_core_identity
+# then re-created the bare row on its next cadence — leaving the same identity
+# text stored THREE times, all embedded, with note_chunks returning two entries
+# for one doc_id. `note-consolidated-<hash>` is excluded for the same reason:
+# consolidation.py owns that namespace and chunks it itself at write time.
+_CAPTURE_NOTE_ID = re.compile(r"^note-[0-9a-f]{32}$")
 
 
 def _is_lossless(text: str, pieces: list[str]) -> bool:
@@ -56,8 +62,8 @@ def scan(store) -> tuple[list[dict], int]:
     """(notes to re-chunk, notes skipped because the re-chunk is not lossless)."""
     out, skipped = [], 0
     for row in store.note_chunks(include_expired=True, limit=10 ** 9):
-        if row["doc_id"] in _NEVER_SPLIT:
-            continue                       # fixed-id note — see _NEVER_SPLIT
+        if not _CAPTURE_NOTE_ID.match(row["doc_id"]):
+            continue                       # not a capture note — see _CAPTURE_NOTE_ID
         meta = row["metadata"]
         if meta.get("chunk_total", 1) > 1:
             continue                       # already chunked

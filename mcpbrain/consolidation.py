@@ -215,6 +215,11 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
             "source_doc_ids": source_ids,
             "captured_at": ts,
             "title": "Consolidated note",
+            # store.note_chunks groups on note_id, falling back to doc_id.
+            # Without this every piece groups to ITSELF, so one consolidated
+            # note surfaces as N separate notes in memory_index and collects N
+            # distil verdicts. The capture path stamps it; this one must too.
+            "note_id": base_doc_id,
             "chunk_index": i,
             "chunk_total": len(pieces),
         }
