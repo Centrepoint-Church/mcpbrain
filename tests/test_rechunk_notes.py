@@ -9,6 +9,16 @@ whole-body row. Round-trip through store.note_chunks() must be lossless.
 from mcpbrain.store import Store
 
 
+def _nid(tag: str) -> str:
+    """A capture-shaped note id (`note-<32 hex>`) carrying a readable tag.
+
+    bin/rechunk_notes.py only sweeps ids of this shape — every other `note-` id
+    belongs to code that references it verbatim — so fixtures must use it or
+    they silently test the exclusion path instead of the sweep.
+    """
+    return "note-" + (tag.encode().hex() + "0" * 32)[:32]
+
+
 def _store(tmp_path):
     s = Store(tmp_path / "b.sqlite3", dim=4)
     s.init()
@@ -19,18 +29,18 @@ def test_plan_selects_only_oversize_single_chunk_notes(tmp_path):
     from bin import rechunk_notes
 
     s = _store(tmp_path)
-    s.upsert_chunk("note-short", "tiny", "h1", {"source": "note", "title": "a"})
-    s.upsert_chunk("note-long", "\n\n".join("z" * 500 for _ in range(20)), "h2",
+    s.upsert_chunk(_nid("short"), "tiny", "h1", {"source": "note", "title": "a"})
+    s.upsert_chunk(_nid("long"), "\n\n".join("z" * 500 for _ in range(20)), "h2",
                    {"source": "note", "title": "b"})
     plan = rechunk_notes.plan(s)
-    assert [p["note_id"] for p in plan] == ["note-long"]
+    assert [p["note_id"] for p in plan] == [_nid("long")]
 
 
 def test_plan_skips_notes_already_split(tmp_path):
     from bin import rechunk_notes
 
     s = _store(tmp_path)
-    base = "note-abc"
+    base = _nid("abc")
     for i, piece in enumerate(["first", "second", "third"]):
         s.upsert_chunk(f"{base}-{i}", piece, "h",
                        {"source": "note", "title": "T", "note_id": base,
@@ -44,13 +54,13 @@ def test_apply_is_lossless(tmp_path):
 
     s = _store(tmp_path)
     body = "\n\n".join(f"para{i} " + "z" * 500 for i in range(20))
-    s.upsert_chunk("note-long", body, "h2", {"source": "note", "title": "b"})
+    s.upsert_chunk(_nid("long"), body, "h2", {"source": "note", "title": "b"})
     n = rechunk_notes.apply(s, rechunk_notes.plan(s))
     assert n == 1
     rows = s.note_chunks()
     assert len(rows) == 1
     assert rows[0]["text"] == body          # round-trips exactly
-    assert rows[0]["doc_id"] == "note-long"
+    assert rows[0]["doc_id"] == _nid("long")
 
 
 def test_apply_deletes_the_old_whole_body_row(tmp_path):
@@ -58,10 +68,10 @@ def test_apply_deletes_the_old_whole_body_row(tmp_path):
 
     s = _store(tmp_path)
     body = "\n\n".join(f"para{i} " + "z" * 500 for i in range(20))
-    s.upsert_chunk("note-long", body, "h2", {"source": "note", "title": "b"})
+    s.upsert_chunk(_nid("long"), body, "h2", {"source": "note", "title": "b"})
     rechunk_notes.apply(s, rechunk_notes.plan(s))
     with s._connect() as db:
-        row = db.execute("SELECT 1 FROM chunks WHERE doc_id=?", ("note-long",)).fetchone()
+        row = db.execute("SELECT 1 FROM chunks WHERE doc_id=?", (_nid("long"),)).fetchone()
         assert row is None
         fts_row = db.execute(
             "SELECT 1 FROM fts_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)"
@@ -89,14 +99,14 @@ def test_plan_skips_a_note_whose_split_is_not_lossless(tmp_path, monkeypatch):
 
     s = _store(tmp_path)
     body = " ".join(f"word{i}" for i in range(700))
-    s.upsert_chunk("note-para", body, "h", {"source": "note", "title": "b"})
+    s.upsert_chunk(_nid("para"), body, "h", {"source": "note", "title": "b"})
     monkeypatch.setattr(rechunk_notes, "split_lossless",
                         lambda text, max_chars=1800: ["broken", "pieces"])
 
     assert rechunk_notes.plan(s) == []
     rows = s.note_chunks()
     assert len(rows) == 1
-    assert rows[0]["doc_id"] == "note-para"
+    assert rows[0]["doc_id"] == _nid("para")
     assert rows[0]["text"] == body            # completely untouched
 
 
@@ -110,14 +120,14 @@ def test_scan_reports_the_skipped_count(tmp_path):
     from bin import rechunk_notes
 
     s = _store(tmp_path)
-    s.upsert_chunk("note-para", " ".join(f"word{i}" for i in range(700)), "h",
+    s.upsert_chunk(_nid("para"), " ".join(f"word{i}" for i in range(700)), "h",
                    {"source": "note", "title": "b"})
-    s.upsert_chunk("note-ok", "\n\n".join(f"para{i} " + "z" * 500 for i in range(20)),
+    s.upsert_chunk(_nid("ok"), "\n\n".join(f"para{i} " + "z" * 500 for i in range(20)),
                    "h2", {"source": "note", "title": "c"})
     # Both re-chunk losslessly now; the skip path is exercised by forcing a bad
     # split in test_plan_skips_a_note_whose_split_is_not_lossless above.
     items, skipped = rechunk_notes.scan(s)
-    assert sorted(i["note_id"] for i in items) == ["note-ok", "note-para"]
+    assert sorted(i["note_id"] for i in items) == sorted([_nid("ok"), _nid("para")])
     assert skipped == 0
 
 
@@ -128,16 +138,16 @@ def test_apply_never_deletes_a_note_whose_pieces_are_lossy(tmp_path):
 
     s = _store(tmp_path)
     body = " ".join(f"word{i}" for i in range(700))
-    s.upsert_chunk("note-para", body, "h", {"source": "note", "title": "b"})
-    item = {"note_id": "note-para", "text": body,
+    s.upsert_chunk(_nid("para"), body, "h", {"source": "note", "title": "b"})
+    item = {"note_id": _nid("para"), "text": body,
             "metadata": {"source": "note", "title": "b"},
             "pieces": ["not", "the", "original"]}
     assert rechunk_notes.apply(s, [item]) == 0
     with s._connect() as db:
         assert db.execute("SELECT 1 FROM chunks WHERE doc_id=?",
-                          ("note-para",)).fetchone() is not None
+                          (_nid("para"),)).fetchone() is not None
         assert db.execute("SELECT 1 FROM chunks WHERE doc_id=?",
-                          ("note-para-0",)).fetchone() is None
+                          (_nid("para") + "-0",)).fetchone() is None
 
 
 def test_sweep_marks_pieces_lossless_so_they_reassemble_exactly(tmp_path):
@@ -148,16 +158,16 @@ def test_sweep_marks_pieces_lossless_so_they_reassemble_exactly(tmp_path):
     from bin import rechunk_notes
     s = _store(tmp_path)
     body = " ".join(f"word{i}" for i in range(700))    # one oversize paragraph
-    s.upsert_chunk("note-para", body, "h",
+    s.upsert_chunk(_nid("para"), body, "h",
                    {"source": "note", "observation_type": "memory", "title": "T"})
 
     items = rechunk_notes.plan(s)
-    assert [i["note_id"] for i in items] == ["note-para"]
+    assert [i["note_id"] for i in items] == [_nid("para")]
     assert rechunk_notes.apply(s, items) == 1
 
     rows = s.note_chunks(observation_type="memory")
     assert len(rows) == 1
-    assert rows[0]["doc_id"] == "note-para"
+    assert rows[0]["doc_id"] == _nid("para")
     assert rows[0]["metadata"]["split"] == "lossless"
     assert rows[0]["text"] == body                     # byte-exact
 
@@ -166,11 +176,40 @@ def test_sweep_no_longer_skips_single_paragraph_notes(tmp_path):
     """These were the 930 skipped on the live store — the whole remaining hole."""
     from bin import rechunk_notes
     s = _store(tmp_path)
-    s.upsert_chunk("note-para", "z" * 9000, "h",
+    s.upsert_chunk(_nid("para"), "z" * 9000, "h",
                    {"source": "note", "observation_type": "memory", "title": "T"})
     items, skipped = rechunk_notes.scan(s)
     assert skipped == 0
     assert len(items) == 1
+
+
+def test_sweep_only_touches_capture_shaped_note_ids(tmp_path):
+    """A shape ALLOWLIST, not a denylist. drain_captures mints note-<32 hex>;
+    anything else is a note whose doc_id some other code owns and references
+    verbatim, so splitting it changes an id that code still looks up.
+
+    Live proof this matters: note-core-identity-seed was split by an earlier run
+    into -0/-1, then memory_tier.seed_core_identity re-created the bare row on
+    its next cadence — leaving the same identity text stored THREE times, all
+    embedded, and note_chunks returning two entries for one doc_id.
+    """
+    from bin import rechunk_notes
+    s = _store(tmp_path)
+    body = "\n\n".join(f"para{i} " + "z" * 400 for i in range(12))
+    for doc_id in ("note-core-identity-seed",
+                   "note-consolidated-abc123",
+                   "note-not-a-hash"):
+        s.upsert_chunk(doc_id, body, "h",
+                       {"source": "note", "observation_type": "memory", "title": "T"})
+    items, skipped = rechunk_notes.scan(s)
+    assert items == []
+    assert skipped == 0                      # excluded by shape, not a failure
+
+    # ...and a real capture-shaped note IS still swept.
+    s.upsert_chunk("note-" + "a" * 32, body, "h2",
+                   {"source": "note", "observation_type": "memory", "title": "T"})
+    items, _ = rechunk_notes.scan(s)
+    assert [i["note_id"] for i in items] == ["note-" + "a" * 32]
 
 
 def test_sweep_never_splits_the_fixed_id_identity_seed(tmp_path):
