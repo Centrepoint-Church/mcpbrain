@@ -1198,3 +1198,60 @@ def test_unsplit_thread_entry_still_stamps_its_part_doc_ids(home, store):
     rec = RecordingApply()
     drain.drain(store, home=home, apply=rec)
     assert rec.calls[0]["doc_ids"] == ["c-0"]
+
+
+def test_stamp_part_doc_ids_uses_the_models_part_when_it_is_a_clean_permutation():
+    from mcpbrain.drain import _stamp_part_doc_ids
+    unit = {("t1", 1): ["a"], ("t1", 2): ["b"], ("t1", 3): ["c"]}
+    exts = [{"thread_id": "t1", "part": 2}, {"thread_id": "t1", "part": 1},
+            {"thread_id": "t1", "part": 3}]
+    _stamp_part_doc_ids(exts, unit)
+    assert [e["part_doc_ids"] for e in exts] == [["b"], ["a"], ["c"]]
+
+
+def test_stamp_part_doc_ids_falls_back_positionally_on_a_duplicate_part():
+    """The dangerous echo: two extractions claiming part 1 means part 2's chunks
+    would be stamped onto nothing and part 1's onto both — so part 2's chunks
+    get marked enriched without ever having been extracted. Silent content loss.
+    Positional assignment matches how the model emits output: one extraction per
+    threads[] entry, in order."""
+    from mcpbrain.drain import _stamp_part_doc_ids
+    unit = {("t1", 1): ["a"], ("t1", 2): ["b"]}
+    exts = [{"thread_id": "t1", "part": 1}, {"thread_id": "t1", "part": 1}]
+    _stamp_part_doc_ids(exts, unit)
+    assert [e["part_doc_ids"] for e in exts] == [["a"], ["b"]]
+
+
+def test_stamp_part_doc_ids_falls_back_positionally_on_an_unknown_part():
+    from mcpbrain.drain import _stamp_part_doc_ids
+    unit = {("t1", 1): ["a"], ("t1", 2): ["b"]}
+    exts = [{"thread_id": "t1", "part": 1}, {"thread_id": "t1", "part": 7}]
+    _stamp_part_doc_ids(exts, unit)
+    assert [e["part_doc_ids"] for e in exts] == [["a"], ["b"]]
+
+
+def test_stamp_part_doc_ids_leaves_unknown_threads_alone():
+    """No unit-file data for this thread: leave it for _resolve_doc_ids'
+    message-id fallback rather than inventing a resolution."""
+    from mcpbrain.drain import _stamp_part_doc_ids
+    exts = [{"thread_id": "other", "part": 1}]
+    _stamp_part_doc_ids(exts, {("t1", 1): ["a"]})
+    assert "part_doc_ids" not in exts[0]
+
+
+def test_stamp_part_doc_ids_handles_unsplit_threads():
+    """An unsplit thread keys as (thread_id, None) in both the unit and the
+    extraction, and must still be stamped."""
+    from mcpbrain.drain import _stamp_part_doc_ids
+    exts = [{"thread_id": "t1"}]
+    _stamp_part_doc_ids(exts, {("t1", None): ["a", "b"]})
+    assert exts[0]["part_doc_ids"] == ["a", "b"]
+
+
+def test_stamp_part_doc_ids_overrides_a_model_echoed_value():
+    """part_doc_ids is shipped to the model in threads[], so it can be echoed
+    back. The system's value must always win — it decides what gets marked."""
+    from mcpbrain.drain import _stamp_part_doc_ids
+    exts = [{"thread_id": "t1", "part": 1, "part_doc_ids": ["evil"]}]
+    _stamp_part_doc_ids(exts, {("t1", 1): ["a"]})
+    assert exts[0]["part_doc_ids"] == ["a"]
