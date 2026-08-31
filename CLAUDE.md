@@ -362,6 +362,57 @@ wrong and MUST be right:
   honest metric is overhead per byte of work: **8.87 → 1.31 bytes sent per byte of work, an
   85.2% reduction** — essentially the plan's 87% projection.
   **Shipped in 0.7.120** (see the entry above).
+- **Post-0.7.120 (2026-09-01), UNRELEASED — source only.** Four findings from asking
+  whether `_bump_unit_attempts` needed anything. Full suite **3557 passed**, ruff clean.
+  **(1) Community detection had been dead for three days, silently.**
+  `replace_communities` inserts `entity_communities` from the partition; `build_graph`
+  reads `entity_relations`, so a relation still pointing at a merged-away entity puts a
+  dead id in it, the FK insert fails, and the **whole transaction rolls back** — which
+  leaves the OLD rows in place, so nothing looks broken. 714 failures since 2026-08-28
+  18:xx, every one caused by a SINGLE dead id, while `entity_communities`/
+  `community_summaries` sat stale at 2026-08-26 and `brain_context(mode="communities")`
+  and `/graph` kept serving it. Fixed: the store now skips partition ids with no
+  `entities` row and returns the count (store.py carries no logger) for
+  `communities._save` to log. **One dangling id must degrade one node, not the cadence.**
+  **(2) The residue itself, swept.** `joshua-kemp` → `josh-kemp` (3 relations + 1
+  community row) and `australian-christian-churches` →
+  `australian-christian-churches-international` (2 email links), winners taken from
+  `entity_merge_log`, never guessed. New attended `bin/sweep_merge_residue.py` (dry-run
+  default, `--yes`, driven by the merge log, `UPDATE OR IGNORE` + delete mirroring
+  `merge_entities`). Run live: 6 rows, `foreign_key_check` **6 → 0**, and community
+  detection immediately recovered (**21,167 assignments / 40 summaries**, `updated`
+  2026-08-26 → current).
+  **Why residue existed at all:** `merge_entities` repoints relations/observations/email
+  links correctly but is a **no-op once the loser row is gone**
+  (`if loser is None or win is None: return`), so it cannot clean up after the fact; and
+  it never touches `entity_communities`, relying on `ON DELETE CASCADE` — which cannot
+  fire for a row inserted AFTER the entity was already deleted, which is exactly what
+  `replace_communities` did while `foreign_keys` was off. The write path that minted the
+  dead id (calendar attendee pass using `slugify(configured owner name)`) was already
+  fixed by `graph_write.resolve_owner_entity_id` in PR #25 — **verified holding: zero
+  dangling relations touched since 0.7.119 shipped on 2026-08-26**, so this was pre-fix
+  residue and the sweep is sufficient.
+  **(3) The claim-time attempt bump was REMOVED — reverting my own 0.7.120 addition.**
+  It terminated nothing (the claim path bumped and discarded the return; only
+  `drain._give_up_or_bump` acts on the cap), and making it enforce the cap — the obvious
+  next step — **would have been a data-loss bug**: it bumps every chunk of every thread in
+  the claimed unit, and post-W1 a unit packs a **median of 14 threads**, so "3 claims"
+  would have marked ~14 threads of real, never-extracted content as enriched. The chunks
+  found at 39 and 91 attempts are a 9-message board thread and four calendar events, with
+  **no logged failure at all** — the counter was recording "a unit containing this chunk
+  was handed out", not "this extraction failed". `tools.py` carries a comment saying not
+  to reintroduce it without a SEPARATE counter. Live counters reset (434 un-enriched hot
+  chunks): the bump inflated them indiscriminately, so the true count is unknowable and 0
+  is honest for chunks nothing gave up on.
+  **Known residual gap, accepted:** a document with a GAP in its chunk sequence falls back
+  to ship-whole and is NOT size-bounded (one unit at 142,666 bytes today — large but well
+  within a drainer's context). Bounding it belongs in `prepare`, where the unit is built,
+  not in a counter the push path depends on.
+  **(4) A test-fixture trap worth knowing:** a dangling row cannot be seeded through the
+  store. `_connect` turns FKs ON at connect time and `PRAGMA foreign_keys=OFF` inside an
+  already-open transaction is a **documented no-op**, so
+  `tests/test_sweep_merge_residue.py` seeds via a raw `sqlite3` connection — which is also
+  how the real residue got written.
 - **Current state (2026-08-31): the five version files are at `0.7.120`, RELEASED** — source
   `189bb9a`, dist `5293c6f`, plugin `f93683e`; the index serves only
   `mcpbrain-0.7.120-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3555
