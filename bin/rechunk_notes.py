@@ -17,7 +17,7 @@ import argparse
 import sys
 
 from mcpbrain import config
-from mcpbrain.chunking import CHUNK_JOIN, chunk_text, content_hash
+from mcpbrain.chunking import NOTE_MAX_CHARS, content_hash, split_lossless
 from mcpbrain.embed import get_embedder
 from mcpbrain.store import Store
 
@@ -25,15 +25,21 @@ from mcpbrain.store import Store
 def _is_lossless(text: str, pieces: list[str]) -> bool:
     """True when re-joining `pieces` reproduces `text` exactly.
 
-    chunk_text is NOT a lossless splitter — _split_paragraph duplicates the last
-    `overlap` words across a boundary whenever ONE paragraph exceeds max_chars,
-    and paragraph whitespace is stripped/collapsed. That is correct for its
-    embedding callers, which never rejoin, but this sweep DELETES the original
-    whole-body row, which is the only copy of the note's text, and
-    store.note_chunks() will thereafter serve `CHUNK_JOIN.join(pieces)` as the
-    note. So a note is only re-chunked when the round-trip is provably exact.
+    Retained as a GUARD, not a gate. It used to reject most of the corpus: the
+    sweep split with chunk_text, which is a retrieval chunker and cannot
+    round-trip a paragraph larger than the budget (_split_paragraph word-splits
+    via para.split(), collapsing internal whitespace, and duplicates the last
+    `overlap` words across a boundary). On the live store that skipped 930 of
+    the 1,180 oversize notes -- 16,022,678 chars of tail left with no vector --
+    and no overlap setting changed it: overlap=0 rescued zero of them.
+
+    split_lossless carries each break's separator on the preceding piece, so ""
+    rejoins it byte-for-byte and all 930 now pass. The check stays because this
+    sweep DELETES the original whole-body row -- the only copy of the note's
+    text -- and store.note_chunks() thereafter serves the reassembly AS the
+    note. Verifying is cheap; being wrong is unrecoverable.
     """
-    return CHUNK_JOIN.join(pieces) == text
+    return "".join(pieces) == text
 
 
 def scan(store) -> tuple[list[dict], int]:
@@ -43,12 +49,13 @@ def scan(store) -> tuple[list[dict], int]:
         meta = row["metadata"]
         if meta.get("chunk_total", 1) > 1:
             continue                       # already chunked
-        pieces = chunk_text(row["text"])
+        pieces = split_lossless(row["text"], NOTE_MAX_CHARS)
         if len(pieces) <= 1:
             continue                       # fits one chunk; nothing to do
         if not _is_lossless(row["text"], pieces):
-            # Left exactly as it is — a whole-body row. Losing 2,000+ chars of
-            # embedding on this note is strictly better than rewriting its text.
+            # Should now be unreachable (split_lossless is lossless by
+            # construction), but left in: a whole-body row with an unembedded
+            # tail is strictly better than a rewritten one that lost text.
             skipped += 1
             continue
         out.append({"note_id": row["doc_id"], "text": row["text"],
@@ -73,7 +80,10 @@ def apply(store, items: list[dict]) -> int:
             print(f"[rechunk] SKIP {base}: re-chunk is not lossless")
             continue
         chash = content_hash(it["text"])
-        base_meta = {**it["metadata"], "note_id": base}
+        # "split": "lossless" tells store.note_chunks to rejoin these pieces
+        # with "" rather than the legacy "\n\n" — they already carry their own
+        # separators, so a blank-line join would corrupt the note it serves.
+        base_meta = {**it["metadata"], "note_id": base, "split": "lossless"}
         for i, piece in enumerate(pieces):
             store.upsert_chunk(f"{base}-{i}", piece, chash,
                                {**base_meta, "chunk_index": i,

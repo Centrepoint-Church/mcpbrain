@@ -76,30 +76,37 @@ def test_apply_is_a_noop_on_empty(tmp_path):
     assert rechunk_notes.apply(s, []) == 0
 
 
-def test_plan_skips_notes_that_cannot_be_re_chunked_losslessly(tmp_path):
-    """chunk_text duplicates overlap words when ONE paragraph exceeds max_chars,
-    so its round-trip is not exact. apply() DELETES the original whole-body row,
-    which is the only copy of the note's text — so plan() must exclude any note
-    whose re-chunk cannot be verified lossless, leaving it exactly as it is."""
-    from mcpbrain.chunking import chunk_text
+def test_plan_skips_a_note_whose_split_is_not_lossless(tmp_path, monkeypatch):
+    """apply() DELETES the original whole-body row -- the only copy of the note's
+    text -- so plan() must exclude any note whose re-chunk cannot be VERIFIED
+    lossless, leaving it exactly as it is.
+
+    split_lossless makes this unreachable in practice (all 930 previously-skipped
+    live notes now round-trip), so the guard is exercised by forcing a bad split
+    rather than by a real input. Keeping it matters: the delete is irreversible.
+    """
     from bin import rechunk_notes
 
     s = _store(tmp_path)
-    body = " ".join(f"word{i}" for i in range(700))   # ONE paragraph, no blank lines
-    assert len(chunk_text(body)) > 1                  # it does split…
-    assert "\n\n".join(chunk_text(body)) != body      # …but not losslessly
+    body = " ".join(f"word{i}" for i in range(700))
     s.upsert_chunk("note-para", body, "h", {"source": "note", "title": "b"})
+    monkeypatch.setattr(rechunk_notes, "split_lossless",
+                        lambda text, max_chars=1800: ["broken", "pieces"])
 
     assert rechunk_notes.plan(s) == []
-    # And the note is left completely untouched.
     rows = s.note_chunks()
     assert len(rows) == 1
     assert rows[0]["doc_id"] == "note-para"
-    assert rows[0]["text"] == body
+    assert rows[0]["text"] == body            # completely untouched
 
 
 def test_scan_reports_the_skipped_count(tmp_path):
-    """main() prints it, so an operator can see a note was deliberately left."""
+    """main() prints it, so an operator can see a note was deliberately left.
+
+    Both of these now re-chunk losslessly -- the single-paragraph note is
+    exactly the shape split_lossless was added for -- so the expected count is
+    zero. It was 1 while the sweep split with chunk_text.
+    """
     from bin import rechunk_notes
 
     s = _store(tmp_path)
@@ -107,9 +114,11 @@ def test_scan_reports_the_skipped_count(tmp_path):
                    {"source": "note", "title": "b"})
     s.upsert_chunk("note-ok", "\n\n".join(f"para{i} " + "z" * 500 for i in range(20)),
                    "h2", {"source": "note", "title": "c"})
+    # Both re-chunk losslessly now; the skip path is exercised by forcing a bad
+    # split in test_plan_skips_a_note_whose_split_is_not_lossless above.
     items, skipped = rechunk_notes.scan(s)
-    assert [i["note_id"] for i in items] == ["note-ok"]
-    assert skipped == 1
+    assert sorted(i["note_id"] for i in items) == ["note-ok", "note-para"]
+    assert skipped == 0
 
 
 def test_apply_never_deletes_a_note_whose_pieces_are_lossy(tmp_path):
@@ -129,3 +138,36 @@ def test_apply_never_deletes_a_note_whose_pieces_are_lossy(tmp_path):
                           ("note-para",)).fetchone() is not None
         assert db.execute("SELECT 1 FROM chunks WHERE doc_id=?",
                           ("note-para-0",)).fetchone() is None
+
+
+def test_sweep_marks_pieces_lossless_so_they_reassemble_exactly(tmp_path):
+    """The sweep DELETES the whole-body row, so note_chunks' reassembly becomes
+    the note. Pieces from split_lossless carry their own separators and must be
+    marked so note_chunks rejoins them with "" — without the marker it would
+    inject a blank line at every boundary that was never in the note."""
+    from bin import rechunk_notes
+    s = _store(tmp_path)
+    body = " ".join(f"word{i}" for i in range(700))    # one oversize paragraph
+    s.upsert_chunk("note-para", body, "h",
+                   {"source": "note", "observation_type": "memory", "title": "T"})
+
+    items = rechunk_notes.plan(s)
+    assert [i["note_id"] for i in items] == ["note-para"]
+    assert rechunk_notes.apply(s, items) == 1
+
+    rows = s.note_chunks(observation_type="memory")
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "note-para"
+    assert rows[0]["metadata"]["split"] == "lossless"
+    assert rows[0]["text"] == body                     # byte-exact
+
+
+def test_sweep_no_longer_skips_single_paragraph_notes(tmp_path):
+    """These were the 930 skipped on the live store — the whole remaining hole."""
+    from bin import rechunk_notes
+    s = _store(tmp_path)
+    s.upsert_chunk("note-para", "z" * 9000, "h",
+                   {"source": "note", "observation_type": "memory", "title": "T"})
+    items, skipped = rechunk_notes.scan(s)
+    assert skipped == 0
+    assert len(items) == 1
