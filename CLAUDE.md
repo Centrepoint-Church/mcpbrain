@@ -294,9 +294,28 @@ wrong and MUST be right:
   to this plan, the sweep's first-ever live run). `bin/rechunk_notes.py --yes`: 250 notes
   re-chunked (3,270,319 chars); **944 notes skipped** — far more than the plan's ~2,109-
   untouched projection, because the losslessness-verification fix (W2) correctly declines
-  to split any note whose content isn't provably byte-identical after chunking (in practice:
-  any oversize note without blank-line paragraph breaks). Both are the safety fix working
-  as designed, not a defect. Queue rebuilt (767 stale units / 151 stale claims /
+  to split any note whose content isn't provably byte-identical after chunking. The skip
+  itself is the safety fix working as designed, not a defect.
+  **CORRECTION (2026-08-31 review) — the CAUSE recorded here was wrong, and it pointed at
+  the wrong fix.** It said the skips were "any oversize note without blank-line paragraph
+  breaks". They are not: the largest skipped note (133,791 chars) has blank-line breaks
+  throughout. The real cause is that **`chunk_text` is a RETRIEVAL chunker and was never
+  lossless for a paragraph larger than the chunk budget** — `_split_paragraph` word-splits
+  via `para.split()` (collapsing every internal run of whitespace to one space) and the
+  caller rejoins pieces with `\n\n`, so an over-budget paragraph cannot be reconstructed
+  byte-exactly by any join. The 50-word `overlap` also duplicates words, but that is NOT
+  the binding constraint: measured against all 930 still-unchunked oversize notes,
+  `overlap=0` rescues **zero** of them. So the rule is "any note containing at least one
+  paragraph longer than ~1,600 chars", and **it cannot be fixed by tuning `chunk_text`.**
+  **OPEN FOLLOW-UP, not done:** 930 notes still hold **16,022,678 chars of tail that no
+  vector covers** — the sweep fixed 250 notes / 3.27M chars, i.e. ~17% of the problem. The
+  W2 capture-path and sweep are both correct and safe; the recall hole they were meant to
+  close is still mostly open. Closing it needs a DIFFERENT mechanism than re-chunking in
+  place — most likely keeping the canonical full-text row and writing ADDITIONAL
+  embedding-only chunk rows beside it, so losslessness is never at stake. Do not "fix" this
+  by relaxing the round-trip check: that check is what stops a note being split and its
+  original deleted when the pieces cannot reproduce it.
+  Queue rebuilt (767 stale units / 151 stale claims /
   `context.json` removed) after a local reinstall (`uv tool install --force ".[daemon]"`)
   so the restarted daemon actually runs this session's code — **an operational gotcha found
   live and worth recording generally: the first post-reinstall daemon restart served STALE
@@ -316,6 +335,32 @@ wrong and MUST be right:
   rather than risk mis-attribution; not a defect. `bin/resalience.py` and
   `bin/rechunk_notes.py` remain attended-only, dry-run default, `--yes`-gated, and are
   called from no daemon cadence (grepped both the pre- and post-fix trees to confirm).
+  **Post-merge review (2026-08-31) found two real defects in the merged work; both fixed.**
+  (1) **The claim-time backstop was inert for 78% of units** (`cb428c0`).
+  `tools._bump_unit_attempts` collected ids from `part_doc_ids` only and returned when
+  empty — but a unit that could NOT be seam-split carries no `part_doc_ids`, and that is
+  exactly the class the backstop exists to bound (the unsplittable oversize unit no drainer
+  can hold, whose extraction never reaches push and so never trips
+  `drain._give_up_or_bump`). Measured live: 357 of 457 thread units skipped, **including the
+  one unit over `pull_cap`**. Now falls back to the messages' `chunk_doc_ids`, which
+  `reassemble_thread` already stamps on every message split or not — 457/457 covered.
+  Note this is the SECOND time this one function shipped inert (the first was the
+  `Store(str(home))` signature bug); both times its tests passed against fakes.
+  (2) **The model-echoed `part` was trusted outright** (`8f4a3ca`). `part_doc_ids` is looked
+  up by `(thread_id, part)` and decides which chunks get marked enriched, but `part` comes
+  back from the model. If part 1's extraction claims part 2's number, part 2's chunks are
+  marked enriched while only part 1's text was extracted — **silent content loss, and those
+  chunks never re-queue**. Now verified per thread as a permutation of the unit's real
+  parts, falling back to positional assignment (+ a warning) when it isn't; extracted to
+  `drain._stamp_part_doc_ids` so the rule is testable alone.
+  **Measured payload result (live, post-rebuild):** context/unit 45,511 → 7,564 bytes;
+  0 of 467 units without a `context` key; 0 with an emptied `known_people`. Total payload
+  fell 66% (44.1MB → 14.9MB), but that UNDERSTATES the change and the raw figure should not
+  be quoted on its own: the old queue was **throttled** (868 units against `window=600`, so
+  `write_units` was returning `window_full` and producing nothing) and held only 4.98MB of
+  work against a 7,680-chunk backlog, while the new queue carries 2.3x more actual work. The
+  honest metric is overhead per byte of work: **8.87 → 1.31 bytes sent per byte of work, an
+  85.2% reduction** — essentially the plan's 87% projection.
   **Not yet done: a version bump / release.** This entry records the LOCAL, live-validated
   state; shipping to other users is a separate, explicit, not-yet-requested step.
 - **Current state (2026-08-26): the four version files (+ `uv.lock`) are at `0.7.119`,
