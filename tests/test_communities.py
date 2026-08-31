@@ -270,3 +270,44 @@ def test_greedy_modularity_fallback_populates(monkeypatch):
     assert isinstance(part, dict)
     assert "skipped" not in part
     assert len(part) >= 1
+
+
+def test_replace_communities_skips_entities_that_no_longer_exist(tmp_path):
+    """One dangling id must degrade ONE node, not take down the whole cadence.
+
+    build_graph reads entity_relations, so a relation left pointing at a merged-
+    away entity puts that id in the partition. With FKs enforced (the 2026-08-25
+    rebuild), the INSERT then fails and the WHOLE transaction rolls back --
+    community data silently freezes while the old rows survive and nothing looks
+    broken. Live: 714 failures over 3 days, all caused by ONE id (`joshua-kemp`,
+    merge residue), with community_summaries stale since 2026-08-26.
+    """
+    s = _store(tmp_path)
+    _add_entities(s, "real-one", "real-two")
+
+    partition = {"real-one": 0, "real-two": 0, "ghost-id": 1}
+    summaries = {0: {"member_count": 2, "key_entities": "Real One", "title": "",
+                     "summary": "", "updated": "2026-09-01"},
+                 1: {"member_count": 1, "key_entities": "", "title": "",
+                     "summary": "", "updated": "2026-09-01"}}
+    s.replace_communities(partition, summaries)          # must not raise
+
+    with s._connect() as db:
+        got = {r[0] for r in db.execute("SELECT entity_id FROM entity_communities")}
+    assert got == {"real-one", "real-two"}               # ghost skipped, rest written
+    assert db_count(s, "community_summaries") == 2       # summaries still written
+
+
+def db_count(store, table):
+    with store._connect() as db:
+        return db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_replace_communities_writes_everything_when_all_ids_exist(tmp_path):
+    s = _store(tmp_path)
+    _add_entities(s, "a", "b")
+    s.replace_communities({"a": 0, "b": 0},
+                          {0: {"member_count": 2, "key_entities": "A, B", "title": "",
+                               "summary": "", "updated": "2026-09-01"}})
+    with s._connect() as db:
+        assert {r[0] for r in db.execute("SELECT entity_id FROM entity_communities")} == {"a", "b"}
