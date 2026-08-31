@@ -428,3 +428,57 @@ def test_bump_unit_attempts_against_a_real_store(tmp_path):
         rows = {r["doc_id"]: r["enrich_attempts"] for r in db.execute(
             "SELECT doc_id, enrich_attempts FROM chunks ORDER BY doc_id")}
     assert rows == {"a": 1, "b": 1}
+
+
+def test_bump_unit_attempts_falls_back_to_chunk_doc_ids(tmp_path, monkeypatch):
+    """A unit that could NOT be split carries no part_doc_ids — and that is
+    exactly the class this backstop exists for (the unsplittable oversize unit
+    that no drainer can hold, so push-side give-up never fires).
+
+    Measured on the live queue before this fix: 357 of 457 thread units (78.1%)
+    had no part_doc_ids and were therefore skipped entirely, including the one
+    unit over pull_cap. All 357 carried chunk_doc_ids on their messages, which
+    reassemble_thread stamps on every message whether or not it was split.
+    """
+    from mcpbrain import tools
+    seen = []
+
+    class FakeStore:
+        def __init__(self, *a, **k):
+            pass
+
+        def bump_enrich_attempts(self, ids):
+            seen.extend(ids)
+            return 1
+
+    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
+    tools._bump_unit_attempts(str(tmp_path), {
+        "unit_id": "u-1", "kind": "thread",
+        "threads": [{"thread_id": "t1", "messages": [
+            {"message_id": "f", "chunk_doc_ids": ["a", "b"]},
+            {"message_id": "g", "chunk_doc_ids": ["c"]}]}]})
+    assert seen == ["a", "b", "c"]
+
+
+def test_bump_unit_attempts_prefers_part_doc_ids_over_chunk_doc_ids(tmp_path, monkeypatch):
+    """A SPLIT part must bump only the chunks it covered, never its parent
+    message's full chunk list — that is the same over-marking the part-precise
+    drain resolve exists to prevent."""
+    from mcpbrain import tools
+    seen = []
+
+    class FakeStore:
+        def __init__(self, *a, **k):
+            pass
+
+        def bump_enrich_attempts(self, ids):
+            seen.extend(ids)
+            return 1
+
+    monkeypatch.setattr("mcpbrain.store.Store", FakeStore)
+    tools._bump_unit_attempts(str(tmp_path), {
+        "unit_id": "u-1", "kind": "thread",
+        "threads": [{"thread_id": "t1", "part": 1, "part_doc_ids": ["a"],
+                     "messages": [{"message_id": "f",
+                                   "chunk_doc_ids": ["a", "b", "c"]}]}]})
+    assert seen == ["a"]
