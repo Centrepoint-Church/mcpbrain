@@ -752,8 +752,8 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """
     if bulk_section is None:
         bulk_section = nullcontext
-    from mcpbrain.chunking import (CHUNK_JOIN as NOTE_CHUNK_JOIN,
-                                   action_fingerprint, chunk_text, content_hash)
+    from mcpbrain.chunking import (NOTE_MAX_CHARS, action_fingerprint,
+                                   content_hash, split_lossless)
     from mcpbrain.contract import validate_capture
 
     home_dir = _home(home)
@@ -795,32 +795,38 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                              "captured_at": env.get("captured_at", ""),
                              "note_id": base_doc_id}
                 try:
-                    # Notes used to bypass chunk_text entirely: one row per note,
+                    # Notes used to bypass chunking entirely: one row per note,
                     # up to 133,791 chars, of which only the first ~2,000 were
                     # ever embedded (the BGE window). Same shape as
                     # consolidation.write_consolidated_note: a note that fits one
                     # chunk keeps the BARE id, so the common case needs no
                     # migration. chash stays the FULL-note hash on every piece, so
                     # re-capturing identical content is still a no-op.
-                    pieces = chunk_text(text)
-                    # chunk_text is NOT a lossless splitter, and the note path is
-                    # the one caller that needs it to be: store.note_chunks()
-                    # reassembles a chunked note by re-joining its pieces on
-                    # NOTE_CHUNK_JOIN, so anything the split added or dropped
-                    # becomes the note's text forever. _split_paragraph
-                    # deliberately duplicates the last `overlap` words across a
-                    # piece boundary whenever ONE paragraph exceeds max_chars
-                    # (and strips/collapses paragraph whitespace) — a 4,069-char
-                    # single-paragraph note round-trips to 5,311 chars. That
-                    # overlap is correct for chunk_text's other callers, which
-                    # chunk for EMBEDDING and never rejoin, so it is verified
-                    # here rather than changed there. When the round-trip is not
-                    # exact, store the note the way it was stored before
-                    # chunking existed: one row, bare id, whole text.
-                    if len(pieces) > 1 and NOTE_CHUNK_JOIN.join(pieces) != text:
-                        log.info("capture: note %s could not be split losslessly "
-                                 "(%d chars); storing it whole", base_doc_id, len(text))
+                    #
+                    # split_lossless, NOT chunk_text. The note path is the one
+                    # caller that needs the split to round-trip: note_chunks()
+                    # serves the reassembled pieces AS the note, so anything the
+                    # split adds or drops becomes the note's text forever.
+                    # chunk_text cannot do that for a paragraph larger than the
+                    # budget -- it word-splits via para.split(), collapsing
+                    # internal whitespace, and duplicates the last `overlap`
+                    # words across a boundary. Measured on the live store, that
+                    # rejected EVERY one of 930 oversize notes (16,022,678 chars
+                    # of tail with no vector), and no overlap setting fixes it:
+                    # overlap=0 rescues zero. split_lossless carries each break's
+                    # separator on the preceding piece, so "" rejoins it exactly
+                    # -- 930/930 round-trip.
+                    pieces = split_lossless(text, NOTE_MAX_CHARS)
+                    # Kept as a guard, not a gate: it should now be unreachable,
+                    # and if a future change to split_lossless breaks the
+                    # invariant the note must still be stored whole rather than
+                    # split into something that cannot be reassembled.
+                    if len(pieces) > 1 and "".join(pieces) != text:
+                        log.error("capture: note %s failed the lossless round-trip "
+                                  "(%d chars); storing it whole", base_doc_id, len(text))
                         pieces = [text]
+                    if len(pieces) > 1:
+                        base_meta = {**base_meta, "split": "lossless"}
                     changed = False
                     for i, piece in enumerate(pieces):
                         doc_id = (base_doc_id if len(pieces) == 1

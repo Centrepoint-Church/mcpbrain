@@ -294,6 +294,68 @@ _PREFIX_HEADROOM_CHARS = 200
 CHUNK_JOIN = "\n\n"
 
 
+# Separators a lossless split prefers to break AFTER, strongest first. The
+# separator stays with the piece that precedes it, which is what makes
+# "".join(pieces) reproduce the input byte-for-byte.
+_LOSSLESS_BREAKS = ("\n\n", "\n", " ")
+
+
+# Per-piece char budget for a losslessly-split note. Derived from the SAME
+# window chunk_text lands on (max_tokens*4 minus the contextual-prefix
+# headroom) so the two paths cannot drift apart on the embedder's 512-token
+# window -- a note piece is embedded exactly like any other chunk.
+NOTE_MAX_CHARS = 500 * 4 - _PREFIX_HEADROOM_CHARS
+
+
+def split_lossless(text: str, max_chars: int = NOTE_MAX_CHARS) -> list[str]:
+    """Split `text` into pieces of at most `max_chars` such that
+    ``"".join(split_lossless(t, n)) == t`` for ANY input.
+
+    This is the counterpart to chunk_text, not a replacement for it. chunk_text
+    is a RETRIEVAL chunker: it strips and collapses paragraph whitespace and,
+    via _split_paragraph, duplicates the last `overlap` words across a boundary.
+    Both are correct for callers that only ever embed the pieces and never
+    rejoin them. They make it structurally unable to round-trip a paragraph
+    larger than the budget -- measured on the live store, that is EVERY one of
+    the 930 captured notes still carrying an unembedded tail, and no `overlap`
+    setting changes it (overlap=0 rescues zero of them).
+
+    Notes need both properties at once: the whole body embedded, and the exact
+    original recoverable, because store.note_chunks() serves the reassembled
+    text AS the note and bin/rechunk_notes.py deletes the only whole-body row.
+    Carrying each break's separator on the preceding piece and rejoining with
+    "" gives losslessness by construction rather than by verification.
+
+    Breaks are preferred after a blank line, then a newline, then a space, and
+    fall back to a hard cut for a token with no separator at all (a base64 blob,
+    a minified line) -- still lossless, since nothing is inserted or dropped.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if len(text) <= max_chars:
+        return [text] if text else []
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if n - i <= max_chars:
+            out.append(text[i:])
+            break
+        window = text[i:i + max_chars]
+        cut = -1
+        for sep in _LOSSLESS_BREAKS:
+            # rfind, and +len(sep) so the separator ends the CURRENT piece.
+            found = window.rfind(sep)
+            if found > 0:
+                cut = found + len(sep)
+                break
+        if cut <= 0:
+            cut = max_chars          # unbreakable run: hard cut
+        out.append(text[i:i + cut])
+        i += cut
+    return out
+
+
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
     """Split text into embeddable chunks on paragraph boundaries.
 

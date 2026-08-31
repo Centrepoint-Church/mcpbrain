@@ -2752,7 +2752,14 @@ class Store:
                 results.append(pieces[0])
             else:
                 pieces.sort(key=lambda p: p["metadata"].get("chunk_index", 0))
-                text = "\n\n".join(p["text"] for p in pieces)
+                # Pieces produced by chunking.split_lossless carry their own
+                # trailing separators, so they rejoin with "" and reproduce the
+                # note byte-for-byte. Joining those with "\n\n" would inject a
+                # blank line that was never in the note. Pieces written by the
+                # older chunk_text path carry no marker and keep the "\n\n"
+                # convention they were written under.
+                sep = "" if pieces[0]["metadata"].get("split") == "lossless" else "\n\n"
+                text = sep.join(p["text"] for p in pieces)
                 meta = dict(pieces[0]["metadata"])
                 results.append({"doc_id": key, "text": text, "metadata": meta})
             if len(results) == limit:

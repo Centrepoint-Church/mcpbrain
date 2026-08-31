@@ -2,6 +2,7 @@
 import json
 
 from mcpbrain import drain
+import mcpbrain.chunking as drain_chunking
 from mcpbrain.store import Store
 
 
@@ -149,23 +150,24 @@ def test_long_note_is_chunked_with_suffixed_doc_ids(tmp_path):
     assert rows[0]["text"] == f"T\n\n{body}"
 
 
-def test_note_that_cannot_split_losslessly_is_stored_whole(tmp_path):
-    """chunk_text is NOT a lossless splitter.
+def test_single_paragraph_note_is_split_losslessly(tmp_path):
+    """The case that used to be stored whole, and is the ENTIRE remaining recall
+    hole: a note whose body is one paragraph larger than the chunk budget.
 
-    Its _split_paragraph helper duplicates the last `overlap` (50) words across
-    a piece boundary whenever ONE paragraph exceeds max_chars, and it strips and
-    collapses paragraph whitespace. Re-joining such a note through
-    store.note_chunks() therefore hands back MORE text than was captured (a
-    4,069-char single-paragraph note round-trips to 5,311 chars). The ingest path
-    must verify the round-trip and, when it fails, store the note exactly as it
-    was stored before chunking existed — one row under the bare note-<hash> id
-    with chunk_total 1 — rather than corrupt it.
+    chunk_text cannot round-trip it -- _split_paragraph word-splits via
+    para.split() (collapsing internal whitespace) and duplicates the last
+    `overlap` words across a boundary, so the capture path used to detect the
+    failed round-trip and store the note whole, leaving everything past the
+    first ~2,000 chars unembedded. Measured on the live store that was 930
+    notes / 16,022,678 chars of tail, and no overlap setting fixed it
+    (overlap=0 rescued zero). split_lossless carries each break's separator on
+    the preceding piece, so "" rejoins it exactly.
     """
-    from mcpbrain.chunking import chunk_text
+    from mcpbrain.chunking import CHUNK_JOIN, chunk_text, split_lossless
 
     body = " ".join(f"word{i}" for i in range(700))   # ONE paragraph, no blank lines
-    assert len(chunk_text(body)) > 1                  # it does split…
-    assert "\n\n".join(chunk_text(body)) != body      # …but not losslessly
+    assert CHUNK_JOIN.join(chunk_text(body)) != body   # chunk_text still cannot
+    assert "".join(split_lossless(body)) == body       # split_lossless can
 
     s = _store(tmp_path)
     _spool(tmp_path, "cap-para.json", _ingest_env(title="T", content=body))
@@ -173,15 +175,35 @@ def test_note_that_cannot_split_losslessly_is_stored_whole(tmp_path):
 
     with s._connect() as db:
         ids = [r[0] for r in db.execute(
-            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%'")]
-    assert len(ids) == 1                              # stored whole, not split
-    assert "-" not in ids[0].removeprefix("note-")    # bare base id
+            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%' ORDER BY doc_id")]
+    assert len(ids) > 1                               # split, not stored whole
+    assert all(i.rsplit("-", 1)[1].isdigit() for i in ids)
+
     rows = s.note_chunks(observation_type="memory")
     assert len(rows) == 1
-    assert rows[0]["doc_id"] == ids[0]
-    assert rows[0]["metadata"]["chunk_total"] == 1
-    assert rows[0]["text"] == f"T\n\n{body}"          # nothing lost, nothing added
+    assert rows[0]["metadata"]["split"] == "lossless"
+    assert rows[0]["text"] == f"T{CHUNK_JOIN}{body}"  # byte-exact round trip
 
+
+def test_unsplittable_note_falls_back_to_one_whole_row(tmp_path, monkeypatch):
+    """The guard behind split_lossless. It should be unreachable, but if a future
+    change ever broke the round-trip invariant the note must still be stored
+    whole -- never split into pieces that cannot reassemble it, because
+    note_chunks serves the reassembly AS the note and the sweep deletes the only
+    whole-body row."""
+    monkeypatch.setattr(drain_chunking, "split_lossless",
+                        lambda text, max_chars=1800: ["broken", "pieces"])
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-bad.json",
+           _ingest_env(title="T", content="x" * 5000))
+    drain.drain_captures(s, home=tmp_path)
+
+    with s._connect() as db:
+        ids = [r[0] for r in db.execute(
+            "SELECT doc_id FROM chunks WHERE doc_id LIKE 'note-%'")]
+    assert len(ids) == 1                              # stored whole
+    assert "-" not in ids[0].removeprefix("note-")    # bare base id
+    assert s.note_chunks(observation_type="memory")[0]["metadata"]["chunk_total"] == 1
 
 def test_action_update_reopen(tmp_path):
     """Reopening a done action succeeds and is logged."""
