@@ -229,6 +229,95 @@ wrong and MUST be right:
   runbook was stale (see above); the latency table above is the
   re-measurement that finding asked for. PR #25 merged to `main` 2026-08-25
   (`ff77176`) before this rebuild ran.
+- **Current state (2026-08-31): the enrichment pipeline efficiency plan (Tasks 1-17,
+  workstreams W3→W2→W1→W0→live validation) is IMPLEMENTED, REVIEWED, AND LIVE-VALIDATED
+  on the author's real store — not yet version-bumped or released** (source only; local
+  reinstall picked it up under the still-current `0.7.119` version string). Spec/plan:
+  `docs/superpowers/specs/2026-08-27-enrichment-efficiency-design.md` /
+  `docs/superpowers/plans/2026-08-27-enrichment-efficiency.md`. Built via
+  `superpowers:subagent-driven-development` with a workstream-boundary review cadence
+  (one consolidated two-stage review per workstream, not per task) and, at the packing-
+  budget checkpoint, a live decision put to Josh rather than resolved unilaterally.
+  **What shipped, by workstream:**
+  W3 — Drive `text/html` (saved web pages) cold-marked; `bin/resalience.py` generalised
+  sweep re-applies `should_enrich` to the existing corpus after any gate change.
+  W2 — lossless message splitting at chunk seams (`_split_message_at_seams`, carrying real
+  per-chunk pieces + a gap signal, not a re-split guess); part-precise chunk marking in
+  `drain()` (`part_doc_ids` now stamped unconditionally from the unit file, keyed per
+  `(thread_id, part)` — never trusted from the model's echo); captured notes now chunk
+  through `chunk_text` instead of one giant row; `bin/rechunk_notes.py` backfill sweep,
+  gated on a round-trip losslessness check (`chunk_text` is NOT lossless for single-
+  paragraph oversize text — verified, and both the forward capture path and the sweep now
+  refuse to split/delete when the check fails); `Store.read_doc` so a chunked note stays
+  readable via `brain_read`/`memory_index` (the note-id base id has no row of its own).
+  W1 — the core payload-economics change: `write_units` computes a PER-UNIT scoped
+  `known_people` list (lexical + alias + the top-40 core, capped at 8,000 bytes) instead of
+  writing a single shared `context.json` re-sent to every unit; rules served by unit kind
+  (a thread unit gets ~12.4KB of the 24.5KB canonical block, not all of it); the packing
+  budget is derived from the real rules reserve (was a stale `11_000` literal) AND targets
+  the TIGHTER of `unit_pull_cap` (60,000) and a separate, pre-existing, real Claude-Code
+  response-persistence threshold (`_PULL_SOFT_LIMIT`, 50,000) that the budget had never
+  been reconciled against — unreconciled, it fired on 69% of real units and served 20% of
+  them with `known_people` completely emptied; reconciled, non-legacy residual is ~1.4%/0%.
+  A real, reproduced quality defect was also found and fixed in this workstream: the
+  per-unit token-matching selector matched a multi-word name (`"Anthony Park"`) on ANY ONE
+  of its tokens appearing anywhere in the unit text — including a coincidental match inside
+  an unrelated place name (`"Wetherill Park"`) — feeding the model person entities it is
+  told to TRUST or/role on. Fixed to require every token of a multi-word name; alias/core
+  matching untouched. Also fixed: nondeterministic selection order (unseeded `set()`
+  iteration + no sort tiebreak — the SAME unit could get a DIFFERENT `known_people` list
+  across runs).
+  W0 — `bin/enrich_ab.py`, a two-halves A/B extraction-quality harness (`prep`/`score`;
+  mcpbrain has no model API key, so a human-driven Claude Code session runs the actual
+  drain in between).
+  **A recurring defect class, found and fixed THREE separate times in this plan**
+  (`bin/resalience.py`, `tools._bump_unit_attempts`, `bin/enrich_ab.py`'s `prep()`): each
+  one's own plan-brief code constructed `Store(str(config.app_dir()))` — missing the
+  required `dim` argument, and passing the home directory rather than the sqlite file path
+  (`config.store_path()`). Every instance was invisible to its own task's tests (all used
+  `FakeStore`/mocks that never exercised the real constructor) and was only caught by
+  actually running the script against a real store. No general fix landed for the pattern
+  itself — each site was fixed individually — worth a fourth eye if a fifth `bin/*.py`
+  script is ever added that touches the store directly.
+  **Live validation (attended, Task 17, 2026-08-31):** A/B gate (n=5, reduced from the
+  plan's example n=30 given session scope — 10 real units drained through ad-hoc Haiku
+  subagents given the real thread-mode rules text, since `brain_enrich_claim`/`push` only
+  work against the live queue, not arbitrary files): `entities_lost=[]`, `org_lost=[]`,
+  one `role_lost` entry inspected and explained as a scoring-harness artifact (side A wrote
+  the literal string `"Unknown"` into a role field for an unresolvable name; side B
+  correctly omitted the field for the identical source text) — gate passed, no real
+  regression found. Verified encrypted backup (decrypted to a throwaway temp dir,
+  `integrity_check` = `ok`, 175,272 chunk rows) before anything destructive. Gold:
+  recall@10 0.850/MRR 0.574 before the sweeps, 0.850/0.577 after — clears the 0.780/0.550
+  floor, no regression. `bin/resalience.py --yes`: 3,006 chunks cold-marked (2,981 the W3
+  Drive `text/html` fix; 25 a pre-existing `CATEGORY_PROMOTIONS` catch-up backlog unrelated
+  to this plan, the sweep's first-ever live run). `bin/rechunk_notes.py --yes`: 250 notes
+  re-chunked (3,270,319 chars); **944 notes skipped** — far more than the plan's ~2,109-
+  untouched projection, because the losslessness-verification fix (W2) correctly declines
+  to split any note whose content isn't provably byte-identical after chunking (in practice:
+  any oversize note without blank-line paragraph breaks). Both are the safety fix working
+  as designed, not a defect. Queue rebuilt (767 stale units / 151 stale claims /
+  `context.json` removed) after a local reinstall (`uv tool install --force ".[daemon]"`)
+  so the restarted daemon actually runs this session's code — **an operational gotcha found
+  live and worth recording generally: the first post-reinstall daemon restart served STALE
+  bytecode from a `__pycache__` that `uv tool install --force` did not invalidate**
+  (verified: the exact running interpreter's `_build_context` returned the OLD shape —
+  `known_people`/`community_summaries` present — while every static read of the same
+  site-packages `.py` file showed the correct, fixed source; stopping the daemon
+  deterministically halted the bad writes, proving it was that process). 234 units were
+  written with this stale code before it was caught (no `context` key at all — matching the
+  pre-Task-14 shape) and had to be deleted; the underlying chunks re-packed correctly (with
+  per-unit `context`) on the next cycle once `__pycache__` was cleared and the daemon
+  restarted again. **Any future local reinstall that changes `prepare.py`/`tools.py` should
+  clear `__pycache__` under the uv tool's site-packages before trusting the first restart.**
+  Confirmed post-rebuild: 458 units, 0 without a `context` key, 1 unit (0.2%) over 60,000
+  bytes — a Drive document with a gap in its chunk sequence (partial prior enrichment),
+  correctly falling back to ship-whole per the seam-splitter's documented safety behaviour
+  rather than risk mis-attribution; not a defect. `bin/resalience.py` and
+  `bin/rechunk_notes.py` remain attended-only, dry-run default, `--yes`-gated, and are
+  called from no daemon cadence (grepped both the pre- and post-fix trees to confirm).
+  **Not yet done: a version bump / release.** This entry records the LOCAL, live-validated
+  state; shipping to other users is a separate, explicit, not-yet-requested step.
 - **Current state (2026-08-26): the four version files (+ `uv.lock`) are at `0.7.119`,
   RELEASED** — source `8734fa2`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
   `mcpbrain-0.7.119-py3-none-any.whl` and `install.ps1` is live (200). Full suite 3464 passed.
