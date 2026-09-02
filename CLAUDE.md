@@ -48,6 +48,31 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
+- **Current state (2026-09-02): the five version files are at `0.7.122`, RELEASED** —
+  source `e070c31`, dist `dbe7b11`, plugin `ec89092`; the index serves only
+  `mcpbrain-0.7.122-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3565
+  passed**, ruff clean. Fleet resolution verified against the published index:
+  `mcpbrain==0.7.122`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
+  contents asserted directly (not just the build): `mcpbrain/wizard/index.html` inside the
+  built wheel no longer contains `model-btn` or `autoEnsureModel`.
+  **0.7.122 removes the wizard's "Search model" step** (card + `ensureModel`/
+  `autoEnsureModel`/`refreshModel` JS + the `/api/model/status`/`/api/model/ensure` calls) —
+  it told the user to click "Download model", but `Daemon._embedder` already builds the
+  embedder lazily (and therefore downloads the same `bge-small` weights) on the daemon's
+  first sync/enrich/search cycle after install, so the wizard step never gated anything real.
+  The backend (`daemon.ensure_model`/`model_status`, the `/api/model/*` control-API routes,
+  `tests/test_control_api_model.py`) was left in place — nothing else calls it, but removing
+  it was out of scope for this change. `docs/RELEASE-RUNBOOK.md` §5's Windows QA checklist
+  still has one stale line ("Wizard launches and model-download step reaches 'Ready'") from
+  before this removal — harmless (that gate is already open/unvalidated) but worth fixing the
+  next time §5 is touched. Local machine reinstalled from the published wheel (`uv tool
+  install --force`, `[daemon]` extra, `__pycache__` cleared under the uv tool's
+  site-packages per the 0.7.120 gotcha, daemon restarted): `mcpbrain doctor` confirms
+  `installed is 0.7.122` and the daemon connected/healthy: `1 fixed automatically, 0 need
+  your action`. The `MCP version` doctor line reports the **6 live MCP server processes**
+  are still on `0.7.121` — expected, not a defect: a running MCP server holds its start-time
+  code until its client (Claude Desktop) restarts, per the documented per-process lifecycle
+  gap; resolves itself on next Claude Desktop restart, same as every prior release.
 - Some feature flags (`schema_grounding`, `write_time_dedup`) still default **OFF** in
   `config.py` — releasing the wheel does NOT activate them; they need config + real-data validation.
 - The **Q1 salience gate (`salience_gate`) is the exception: validated on the live store
