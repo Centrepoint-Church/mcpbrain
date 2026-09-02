@@ -958,90 +958,105 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     live_ids: set = set()
     interrupted = pagination_interrupted
 
-    if not pagination_interrupted:
-        live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
+    # Process what this round DID page, even when paging was interrupted.
+    # Skipping it was the other half of the sync_drive livelock: nothing
+    # reached resumed_ids, so `all_handled` stayed False and the paging offset
+    # could never move -- the drive was pinned at its cursor forever once the
+    # backlog outgrew one budget.
+    #
+    # Safe because `events` is a fileId-collapsed view and every write is
+    # checkpointed by id+version: acting on a PREFIX of the feed can only be
+    # superseded by a later page, never contradicted. A change later followed
+    # by a removal ingests then deletes; a removal later followed by a change
+    # deletes then re-ingests. Either way the drive converges on the file's
+    # true final state -- the collapse is a work-saving optimisation, not a
+    # correctness requirement. `live_ids` therefore becomes a partial set on an
+    # interrupted round, which is harmless: sync_shared_drives does not
+    # propagate it and deliberately never calls sweep_drive with it (see its
+    # NOTE), precisely because a delta is not a full listing.
+    live_ids = {fid for fid, ev in events.items() if not ev["removed"]}
 
-        # Both loops below persist their resume set PER FILE (not once after
-        # the whole loop) so an exception (an unhandled store error, a
-        # process death, a STALL_S watchdog restart) never discards the
-        # checkpoint for files already durably handled earlier in this call.
-        for fid, ev in events.items():
-            if ev["removed"]:
-                continue
-            # Keyed on id+version (_file_resume_key), NOT bare id: a file
-            # edited mid-round (while its id is already resumed from an
-            # earlier budget-truncated call) must be recognized as new work.
-            rkey = _file_resume_key(ev["fmeta"])
-            if rkey and rkey in resumed_ids:
-                continue
-            # Minimum forward progress: honour the budget only once this call
-            # has written something. Checking before the first item means a
-            # budget already spent upstream yields zero writes, leaves the
-            # resume set unchanged, and re-does identical work next cycle --
-            # the livelock reproduced in sync_drive. One item per call keeps
-            # the round monotonic.
-            if processed and budget is not None and budget.expired():
-                interrupted = True
-                break
-            try:
-                did_process, file_miss = _cache_first_extract_one(
-                    service, store, fleet_storage, drive_id, ev["fmeta"], pin,
-                    contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-                    folder_cache=folder_cache, report=skip_report)
-                if did_process:
-                    processed += 1
-                if file_miss:
-                    miss.append(file_miss)
-            except Exception as exc:  # noqa: BLE001 — isolate one file's failure
-                # Without this, one poison file (corrupt doc, transient export
-                # error, decode failure) would propagate up to sync_shared_drives'
-                # per-drive handler, which skips the WHOLE DRIVE for the cycle
-                # WITHOUT advancing the cursor — so the same poison file would be
-                # re-fetched and re-fail forever, permanently blocking the drive.
-                log.warning(
-                    "drive: extraction failed for file %s in drive %s; this "
-                    "version is DROPPED and will not be retried until the file "
-                    "changes again: %s", fid, drive_id, exc)
-                # Still marked done: a poison file must not permanently block
-                # the cursor from ever advancing past this round (matches the
-                # pre-checkpoint behaviour of "skip it, keep moving").
-                #
-                # KNOWN GAP: this is genuinely lossy for a TRANSIENT failure (a
-                # TLS reset, a 5xx export). An earlier version of this comment
-                # claimed the file "will simply be re-attempted-and-fail again
-                # next DELTA round" — that is wrong: once the round closes the
-                # cursor advances, and the delta from the new cursor no longer
-                # contains this change, so the file's current version is never
-                # re-fetched. Distinguishing transient from permanent failures
-                # (a bounded per-file attempt counter, like chunks.enrich_attempts)
-                # is the real fix and is deliberately not attempted here.
-                if rkey:
-                    resumed_ids.add(rkey)
-                    store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
-                continue
+    # Both loops below persist their resume set PER FILE (not once after
+    # the whole loop) so an exception (an unhandled store error, a
+    # process death, a STALL_S watchdog restart) never discards the
+    # checkpoint for files already durably handled earlier in this call.
+    for fid, ev in events.items():
+        if ev["removed"]:
+            continue
+        # Keyed on id+version (_file_resume_key), NOT bare id: a file
+        # edited mid-round (while its id is already resumed from an
+        # earlier budget-truncated call) must be recognized as new work.
+        rkey = _file_resume_key(ev["fmeta"])
+        if rkey and rkey in resumed_ids:
+            continue
+        # Minimum forward progress: honour the budget only once this call
+        # has written something. Checking before the first item means a
+        # budget already spent upstream yields zero writes, leaves the
+        # resume set unchanged, and re-does identical work next cycle --
+        # the livelock reproduced in sync_drive. One item per call keeps
+        # the round monotonic.
+        if processed and budget is not None and budget.expired():
+            interrupted = True
+            break
+        try:
+            did_process, file_miss = _cache_first_extract_one(
+                service, store, fleet_storage, drive_id, ev["fmeta"], pin,
+                contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+                folder_cache=folder_cache, report=skip_report)
+            if did_process:
+                processed += 1
+            if file_miss:
+                miss.append(file_miss)
+        except Exception as exc:  # noqa: BLE001 — isolate one file's failure
+            # Without this, one poison file (corrupt doc, transient export
+            # error, decode failure) would propagate up to sync_shared_drives'
+            # per-drive handler, which skips the WHOLE DRIVE for the cycle
+            # WITHOUT advancing the cursor — so the same poison file would be
+            # re-fetched and re-fail forever, permanently blocking the drive.
+            log.warning(
+                "drive: extraction failed for file %s in drive %s; this "
+                "version is DROPPED and will not be retried until the file "
+                "changes again: %s", fid, drive_id, exc)
+            # Still marked done: a poison file must not permanently block
+            # the cursor from ever advancing past this round (matches the
+            # pre-checkpoint behaviour of "skip it, keep moving").
+            #
+            # KNOWN GAP: this is genuinely lossy for a TRANSIENT failure (a
+            # TLS reset, a 5xx export). An earlier version of this comment
+            # claimed the file "will simply be re-attempted-and-fail again
+            # next DELTA round" — that is wrong: once the round closes the
+            # cursor advances, and the delta from the new cursor no longer
+            # contains this change, so the file's current version is never
+            # re-fetched. Distinguishing transient from permanent failures
+            # (a bounded per-file attempt counter, like chunks.enrich_attempts)
+            # is the real fix and is deliberately not attempted here.
             if rkey:
                 resumed_ids.add(rkey)
                 store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
+            continue
+        if rkey:
+            resumed_ids.add(rkey)
+            store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
 
-        for fid, ev in events.items():
-            if not ev["removed"]:
-                continue
-            if fid in resumed_removed_ids:
-                continue
-            if budget is not None and budget.expired():
-                interrupted = True
-                break
-            with bulk_section():
-                doc_ids = store.doc_ids_for_file(fid)
-                if doc_ids:
-                    store.invalidate_local_relations_for_docs(doc_ids)
-                    store.delete_chunks(doc_ids)
-            try:
-                ingest_cache.remove_file_artifacts(fleet_storage, fid)
-            except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
-                log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
-            resumed_removed_ids.add(fid)
-            store.set_cursor(resume_removed_key, json.dumps(sorted(resumed_removed_ids)))
+    for fid, ev in events.items():
+        if not ev["removed"]:
+            continue
+        if fid in resumed_removed_ids:
+            continue
+        if budget is not None and budget.expired():
+            interrupted = True
+            break
+        with bulk_section():
+            doc_ids = store.doc_ids_for_file(fid)
+            if doc_ids:
+                store.invalidate_local_relations_for_docs(doc_ids)
+                store.delete_chunks(doc_ids)
+        try:
+            ingest_cache.remove_file_artifacts(fleet_storage, fid)
+        except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
+            log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
+        resumed_removed_ids.add(fid)
+        store.set_cursor(resume_removed_key, json.dumps(sorted(resumed_removed_ids)))
 
     # live_keys (id+version composites, matching what resumed_ids actually
     # holds — both loops above persist incrementally per file, not once
