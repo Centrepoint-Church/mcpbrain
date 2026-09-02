@@ -10,8 +10,8 @@ _HTML = (Path(__file__).parent.parent / "mcpbrain" / "wizard" / "index.html").re
 
 def test_no_duplicate_function_definitions():
     # saveFleet was defined twice, byte-identically; the first copy was dead.
-    for name in ("saveFleet", "connectDesktop", "ensureModel", "prefillFromConfig",
-                 "saveProfile", "startAuth", "refreshModel"):
+    for name in ("saveFleet", "connectDesktop", "prefillFromConfig",
+                 "saveProfile", "startAuth"):
         count = len(re.findall(rf"function {name}\(", _HTML))
         assert count == 1, f"{name} defined {count} times"
 
@@ -32,30 +32,26 @@ def test_the_three_steps_are_the_three_actions():
 
 
 def test_retains_every_functional_panel():
-    # Renumbering must not delete controls. The fleet block, the status panel and
-    # the model button all still exist.
+    # Renumbering must not delete controls. The fleet block and the status
+    # panel still exist. (The model-download step was removed: the daemon's
+    # lazy embedder already downloads the weights on its first sync/enrich/
+    # search cycle, so there was nothing left for the wizard to trigger.)
     for token in ('id="fleet_folder_id"', 'id="fleet_escrow_folder_id"',
                   'onclick="saveFleet()"', 'id="st-daemon"', 'id="st-count"',
-                  'id="model-btn"', 'id="backup-status"'):
+                  'id="backup-status"'):
         assert token in _HTML, token
 
 
-def test_model_download_auto_fires():
-    assert "autoEnsureModel" in _HTML
-
-
-def test_model_download_is_not_gated_on_google():
-    # The search model is mandatory regardless of Google — mcp-server fails at
-    # startup without the weights — so its auto-fire must not live inside the
-    # `if(j.google_connected)` block (autoBackup() legitimately does; the model
-    # download must not).
-    m = re.search(r"function renderStatus\(j\)\{.*?\n\}", _HTML, re.S)
-    assert m, "renderStatus(j) not found"
-    body = m.group(0)
-    auto_call = body.index("autoEnsureModel();")
-    guard_open = body.index("if(j.google_connected){")
-    assert auto_call < guard_open, \
-        "autoEnsureModel() must fire before/outside the google_connected guard"
+def test_model_download_step_removed():
+    # The wizard used to have an explicit "Search model" step (a button plus
+    # an auto-firing background trigger) instructing the user to download the
+    # embedding model. That is redundant with the daemon's lazy embedder,
+    # which downloads the same weights automatically on its first sync/
+    # enrich/search cycle once installed — no wizard involvement needed.
+    for token in ('id="step-model"', 'id="model-btn"', "ensureModel",
+                  "autoEnsureModel", "refreshModel", "/api/model/status",
+                  "/api/model/ensure"):
+        assert token not in _HTML, token
 
 
 def test_fleet_save_disabled_until_prefill_completes():
