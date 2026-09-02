@@ -97,6 +97,7 @@ A committed `mcpbrain/tenant.json`, bundled into the wheel via
 {
   "tenant_id": "centrepoint",
   "display_name": "Centrepoint Church",
+  "oauth_project_id": "mcpbrain-498...",
   "fleet_folder_id": "1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o",
   "escrow_folder_id": "1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi",
   "index_url": "https://centrepoint-church.github.io/mcpbrain-dist/simple/",
@@ -113,6 +114,7 @@ Module surface:
 class TenantProfile:
     tenant_id: str
     display_name: str
+    oauth_project_id: str
     fleet_folder_id: str | None
     escrow_folder_id: str | None
     index_url: str | None
@@ -237,9 +239,12 @@ checks reported as explicitly *skipped* rather than silently passing:
 - it is an **`installed`** (Desktop) client, not `web` — a wrong client type fails
   later with an opaque redirect-URI error
 - `client_id` ends `.apps.googleusercontent.com`
-- **it is not still Centrepoint's client_id** — the single most likely fork mistake,
-  and the one whose symptoms are most confusing (consent screen shows the wrong
-  organisation). Checked against a constant recorded in `tenant.py`.
+- **its `installed.project_id` equals `tenant.json`'s `oauth_project_id`** — this
+  catches the single most likely fork mistake, reusing the upstream OAuth client,
+  whose symptoms are otherwise baffling (the consent screen names the wrong
+  organisation). Expressing it as an agreement between the two files rather than a
+  denylist of upstream client_ids means no upstream identifier has to be hardcoded,
+  and the check keeps working for a fork of a fork.
 - the five version files agree (`pyproject.toml`, `mcpbrain/__init__.py`,
   `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`,
   `uv.lock`)
@@ -345,9 +350,24 @@ it sits in a public repository. Full inventory:
 | `mcpbrain/routines/meeting-packs.md` | 1: attendee list `Joel Chelliah,Sam Admin` |
 | `plugin/skills/mcpbrain-bootstrap/SKILL.md` | 1: `(e.g. "Centrepoint")` |
 | `mcpbrain/wizard/index.html` | 3 — see below |
+| `mcpbrain/chunking.py:130` | `slugify` docstring: `"Taryn Hamilton"`, `"ACC (National)"` |
+| `mcpbrain/orgs.py:90-93` | fold-logic comments: `"Centrepoint"`, `"Centrepoint Church"`, `"ACC"` vs `"ACCI"` |
+| `mcpbrain/graph_write.py:13` | display-form example `"ACC"` |
+| `mcpbrain/query_router.py:100` | expansion example `"Taryn Hamilton Centrepoint Maddington"` |
+| `mcpbrain/maintenance/graph_cleanup.py:10` | org-tag drift example `"Centrepoint"` |
 
 `mcpbrain/records_templates/` and `mcpbrain/prompts/draft-reply.md` are already
 neutral and need no change.
+
+The last five are **Python docstrings and comments, not shipped prompt text** — found
+by running the §5 guard regex rather than by reading the prompt directories, which is
+why an earlier pass of this section undercounted at six files. They are in scope for
+the same two reasons as the rest: they name a real person in a public repository, and
+they would fail the guard. `orgs.py`'s comments are load-bearing in the same way the
+prompt examples are — they explain why `"ACC"` must not fold into `"ACCI"` — so they
+take the same NCF/NCFI substitution. `tests/test_graph_cleanup.py` and
+`tests/test_resolve.py` assert that behaviour with the real strings and are left
+alone: tests are fixtures and history, per §5's exclusion.
 
 **The wizard splits into two different jobs.** Lines 163-164 are not cosmetic —
 `<summary>Fleet setup (Centrepoint org)</summary>` and *"This is the Centrepoint
