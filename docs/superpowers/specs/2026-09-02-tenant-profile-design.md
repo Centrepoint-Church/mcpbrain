@@ -51,6 +51,7 @@ nothing anywhere says so.
 4. Centrepoint's existing fleet sees no behaviour change and needs no re-consent,
    no re-config, no manual step on any user's machine.
 5. Releasing stays a local, attended, runbook-driven process. No CI migration.
+6. Nothing shipped — prompts, routines, skills, wizard UI — names a real Centrepoint person or organisation.
 
 ## Non-goals
 
@@ -64,7 +65,6 @@ nothing anywhere says so.
   regenerating an installed-app secret invalidates existing refresh tokens — a
   fleet-wide re-consent event for every Centrepoint user. It is a deliberate
   operational decision, recorded in *Follow-ups*, not a side effect of this work.
-- **Rewriting the extraction prompts.** See *Follow-ups*.
 
 ## What is secret, and what only looks it
 
@@ -267,8 +267,9 @@ Exit non-zero on any failure so it is usable as a release gate.
   them returns a Centrepoint value.**
 - **`tests/test_tenant_check.py`** — each offline check fails the case it exists for,
   including the still-Centrepoint's-client_id check and a `web`-typed client.
-- **`tests/test_no_tenant_literals.py`** — no Centrepoint literal (`centrepoint`,
-  `Centrepoint-Church`, the fleet/escrow folder IDs, the client_id) appears anywhere
+- **`tests/test_no_tenant_literals.py`** — no tenant-identifying literal — `centrepoint`,
+  `Centrepoint-Church`, `courageous`, the acronym orgs (`ACC`, `ACCI`), the
+  fleet/escrow folder IDs, the client_id — appears anywhere
   under `mcpbrain/` or `plugin/` **except** `mcpbrain/tenant.json` and the files
   generated from it. `tests/` and `docs/` are excluded — they are history and
   fixtures. This is the guard that keeps the repo neutral as it evolves, rather than
@@ -330,20 +331,97 @@ predate the profile entirely. The wheel-content assertion should therefore run
 against **the wheel just built**, identified by version, not against whatever the
 glob happens to find.
 
+### 8. Neutral examples in shipped prompts and the wizard
+
+Illustrative content across the shipped surface names real Centrepoint and ACC
+people and organisations. It reads as someone else's install to a forking org, and
+it sits in a public repository. Full inventory:
+
+| File | Occurrences |
+|---|---|
+| `mcpbrain/enrich_prompt.md` | 13 lines: Taryn Hamilton, Joel Chelliah, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `taryn-hamilton` |
+| `plugin/agents/enrich-batch.md` | the same 13 — **generated**, kept byte-identical by `bin/sync_agents.py` |
+| `mcpbrain/cowork/enrichment.md` | 3: "Joel" = "Joel Chelliah", `taryn-hamilton` ×2 |
+| `mcpbrain/routines/meeting-packs.md` | 1: attendee list `Joel Chelliah,Sam Admin` |
+| `plugin/skills/mcpbrain-bootstrap/SKILL.md` | 1: `(e.g. "Centrepoint")` |
+| `mcpbrain/wizard/index.html` | 3 — see below |
+
+`mcpbrain/records_templates/` and `mcpbrain/prompts/draft-reply.md` are already
+neutral and need no change.
+
+**The wizard splits into two different jobs.** Lines 163-164 are not cosmetic —
+`<summary>Fleet setup (Centrepoint org)</summary>` and *"This is the Centrepoint
+mcpbrain-fleet folder"* are **tenant values rendered in the UI on every install.**
+They become `display_name`-driven: `daemon.config_profile()` (served at
+`/api/config`, already the source of the wizard's `fleet` prefill at
+`index.html:498-500`) gains a `tenant` block, and the wizard renders the name from
+it. When no tenant is configured the section falls back to a neutral "Fleet setup"
+with the folder inputs blank — consistent with §2's degrade-to-disabled. Line 114's
+`placeholder="Your full name (e.g. Josh Kemp)"` is the only genuinely cosmetic one.
+
+**The substitution rule: preserve the linguistic property, do not find-and-replace.**
+Each example teaches something specific, and a careless swap silently deletes the
+lesson while leaving the sentence standing:
+
+| Current | What it teaches | Replacement |
+|---|---|---|
+| "Taryn" → `waiting_on: "Taryn Hamilton"` | bare first name resolves to a full name | "Dana" → "Dana Okafor" |
+| "Pastor Joel Chelliah" → `Joel Chelliah` | strip a **non-standard** honorific `nameparser` will not know | "Principal Marcus Reyes" → `Marcus Reyes` |
+| "Franz from The Church Co" → `Franz`, org "The Church Co" | strip an employer phrase whose org name is an article plus a common noun | "Priya from The Lantern Co" → `Priya`, org "The Lantern Co" |
+| `Franz from The Church Co <franz@thechurchco.com>` | the same in a header, with a matching domain | `Priya from The Lantern Co <priya@thelanternco.com>` |
+| "the Optus Stadium team" → `Optus Stadium` | strip the `the … team` wrapper from a venue name | "the Harbourview Arena team" → `Harbourview Arena` |
+| "moved from Centrepoint Church to Capes Community Church" | `org_move` between two same-type orgs sharing a common noun | "moved from Northgate Trust to Southbank Community Trust" |
+| "Joel" = "Joel Chelliah"; `canonical: "Joel Chelliah"` | a short form matching a full name | "Marcus" = "Marcus Reyes" |
+| `[ACC]` | a short bracketed document-category tag | `[NCF]` |
+| "Donna K, ACC finance lead" | abbreviated surname + role + org = a statement of the person's **own** affiliation | "Rina T, NCF finance lead" |
+| **"ACC" vs "ACCI"** | a shared-prefix acronym pair likely naming genuinely **different** orgs — paired in the same sentence against "Acme Corp" vs "Acme Corporation" as the typo case | **"NCF" vs "NCFI"** — same prefix-plus-one-letter shape |
+| `{"entity_id": "taryn-hamilton", "profile": "Executive Pastor at..."}` | a slug id plus a role-and-org profile string | `{"entity_id": "dana-okafor", "profile": "Operations Director at..."}` |
+| `Joel Chelliah,Sam Admin` (meeting-packs) | a comma-joined attendee list | `Marcus Reyes,Sam Admin` |
+| `(e.g. "Centrepoint")` (bootstrap skill) | a short org name | `(e.g. "Northgate Trust")` |
+
+One fictional cast is used consistently across all six files — **Dana Okafor,
+Marcus Reyes, Priya Anand, Rina T; Northgate Trust, Southbank Community Trust, The
+Lantern Co, Harbourview Arena, NCF/NCFI** — so the examples read as one coherent
+world. "Acme Corp"/"Acme Corporation" stays reserved for the typo-variant example it
+already serves; the new names deliberately avoid it.
+
+**Verification is the whole risk, and it is the only gate.** No test asserts any of
+these strings — `tests/test_enrich_prompt_doc.py` checks rule headings and schema
+keys (`"Orphan-entity review rules"`, `review_missing_org`, `taxonomy`), and its one
+`[ACC]` mention is in a docstring recording a real past adjudication failure. So the
+suite will stay green whether or not extraction quality moved, and the A/B must
+actually be run.
+
+The harness exists: `bin/enrich_ab.py prep` / `score`, the same one used for the
+0.7.120 live validation. Side A is the current prompt, side B the rewritten one,
+over the same real units. **Gate: `entities_lost` empty, `org_lost` empty, any
+`role_lost` entry individually inspected and explained** — the criteria that run
+recorded. Attended, since mcpbrain holds no model API key and a human-driven session
+performs the drain between `prep` and `score`.
+
+**If the A/B shows a real regression, the data wins.** There is a plausible argument
+that in-domain examples help precisely because they resemble the corpus. Restore the
+specific examples that measurably mattered, rewrite the rest, and record which and
+why. This section does not pre-commit to a full rewrite the measurement rejects.
+
+`bin/sync_agents.py` is re-run after editing `enrich_prompt.md` so
+`plugin/agents/enrich-batch.md` stays byte-identical; the existing tests in
+`test_enrich_prompt_doc.py` already enforce that pairing.
+
+**One thing deliberately not done:** the §5 tenant-literal guard covers
+tenant-identifying strings — `centrepoint`, `Centrepoint-Church`, `courageous`, the
+acronym orgs, the folder IDs, the client_id. It does **not** enumerate staff
+surnames. A permanent test listing real people's names in a public repo in order to
+assert their absence reintroduces the problem it is meant to solve. A comment at the
+top of `enrich_prompt.md` states that examples must be fictional; the org-identifier
+guard catches the tenant half, which is the part that actually recurs.
+
 ## Follow-ups (recorded, not in scope)
 
 1. **Rotate the client secret.** It has been public in git history and rotating it
    does not remove it from history. On Google, regenerating an installed-app secret
    invalidates existing refresh tokens, so this is a fleet-wide re-consent event and
    needs its own scheduling.
-2. **Prompt examples name real people.** `enrich_prompt.md` and `cowork/enrichment.md`
-   use Centrepoint and ACC staff as illustrative examples ("Taryn Hamilton",
-   "Ps Joel Chelliah", "Donna K, ACC"), and are mirrored into
-   `plugin/agents/enrich-batch.md`. Another organisation would find them odd and they
-   sit in a public repo. Deliberately excluded: the prompt is tuned, and a rewrite
-   needs an extraction-quality A/B (`bin/enrich_ab.py`) to prove no regression.
-   `plugin/skills/mcpbrain-bootstrap/SKILL.md`'s `(e.g. "Centrepoint")` is a trivial
-   example that can change freely.
-3. **Consider making the source repo private anyway.** Out of scope given the split
+2. **Consider making the source repo private anyway.** Out of scope given the split
    design, but sharing would then be an explicit act rather than something anyone can
    do silently.
