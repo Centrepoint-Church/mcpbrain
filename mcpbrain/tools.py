@@ -254,6 +254,31 @@ def make_brain_actions(store):
     return brain_actions
 
 
+# Breadth bounds, the companions to GRAPH_MAX_HOPS below. Depth alone never
+# bounded this walk: the live store's owner entity carries ~7,262 relations, so
+# ANY 2-hop walk that reached it fanned out to 18,397 nodes / 55,034 edges -- a
+# 14 MB payload, 34s at hops=2 and 177s at hops=3, which times out real clients.
+#
+# GRAPH_HUB_DEGREE is set above the live graph's p99 degree (81) and below its
+# smallest genuine hub, so an ordinary entity is unaffected. A node past it is
+# still REPORTED (you want to see "X is connected to Josh"); it is just not
+# traversed THROUGH, because a node adjacent to everything carries no
+# information about how its neighbours relate to each other.
+#
+# GRAPH_MAX_NODES/GRAPH_MAX_EDGES are the backstop for a graph that is merely
+# wide rather than hubbed, and they are sized for THIS tool's only consumer --
+# a model reading the result. The /graph web explorer does not come through
+# here (it has its own /api/graph/* routes over graph_view.py), so these need
+# not carry a renderer's appetite. 150 nodes sits far above the live graph's
+# p95 degree (19), so an ordinary entity returns complete.
+#
+# All three bounds report themselves in the result (`truncated`,
+# `hubs_not_expanded`) -- a silently truncated graph is indistinguishable from
+# a sparse one, and that is exactly the class of bug this replaces.
+GRAPH_HUB_DEGREE = 150
+GRAPH_MAX_NODES = 150
+GRAPH_MAX_EDGES = 1500
+
 GRAPH_MAX_HOPS = 3  # traversal cap; on_call_tool's brain_graph branch reads
                     # this too, so a reported progress `total` can never drift
                     # from the depth the BFS below actually runs.
@@ -261,7 +286,11 @@ GRAPH_MAX_HOPS = 3  # traversal cap; on_call_tool's brain_graph branch reads
 
 @tool(
     "brain_graph",
-    description="Traverse the relationship graph from an entity up to `hops` (max 3).",
+    description=("Traverse the relationship graph from an entity up to `hops` (max 3). "
+                 "The walk is bounded: `hubs_not_expanded` lists nodes returned but not "
+                 "traversed through (they connect to too much to be informative), and "
+                 "`truncated` means the node/edge budget was reached, so absence of a "
+                 "connection is not proof there is none."),
     input_schema={
         "type": "object",
         "properties": {
@@ -281,7 +310,15 @@ def make_brain_graph(store):
         GRAPH_MAX_HOPS).
         at_time scopes the traversal to relations valid at that ISO date;
         include_invalidated also follows superseded edges.
-        Returns {center, nodes:[entity dicts], edges:[{entity_a,relation,entity_b}]}; {} if unknown.
+        Returns {center, nodes:[entity dicts], edges:[{entity_a,relation,entity_b}],
+        truncated: bool, hubs_not_expanded: [ids]}; {} if unknown.
+
+        The walk is bounded in BREADTH as well as depth (GRAPH_HUB_DEGREE,
+        GRAPH_MAX_NODES, GRAPH_MAX_EDGES) -- see those constants for why. The
+        bounds surface in the result so a bounded graph is never mistaken for a
+        sparse one: `hubs_not_expanded` lists nodes included but not traversed
+        through, and `truncated` says a node/edge budget was hit. `edges` is the
+        subgraph induced on `nodes`, so every endpoint resolves.
 
         on_hop, if given, is awaited once per completed hop with the 1-based hop
         number -- optional and keyword-only so every existing direct caller
@@ -295,11 +332,14 @@ def make_brain_graph(store):
             if not center:
                 return {}
             depth = max(0, min(hops, GRAPH_MAX_HOPS))  # cap; guard against runaway traversal
-            visited = {center["id"]}
+            visited = [center["id"]]        # list, not set: preserves BFS order
+            seen = {center["id"]}
             edges = {}  # (entity_a, relation, entity_b) -> dict, dedup
-            frontier = {center["id"]}
+            frontier = [center["id"]]
+            hubs: list[str] = []
+            truncated = False
             for hop in range(1, depth + 1):
-                next_frontier = set()
+                next_frontier = []
                 for ent_id in frontier:
                     for r in store.relations_for(ent_id, at_time=at_time,
                                                  include_invalidated=include_invalidated):
@@ -308,16 +348,46 @@ def make_brain_graph(store):
                             edges[key] = {"entity_a": r["entity_a"], "relation": r["relation"],
                                           "entity_b": r["entity_b"]}
                         for nbr in (r["entity_a"], r["entity_b"]):
-                            if nbr not in visited:
-                                visited.add(nbr)
-                                next_frontier.add(nbr)
+                            if nbr in seen:
+                                continue
+                            if len(visited) >= GRAPH_MAX_NODES:
+                                truncated = True
+                                continue
+                            seen.add(nbr)
+                            visited.append(nbr)
+                            next_frontier.append(nbr)
+                # Decide what the NEXT hop may expand through. One batched degree
+                # query per hop, not one per node. The center is never withheld:
+                # asking about a hub must still return its neighbourhood.
+                if next_frontier and hop < depth:
+                    degrees = store.entity_degrees(next_frontier)
+                    keep = []
+                    for nbr in next_frontier:
+                        if degrees.get(nbr, 0) > GRAPH_HUB_DEGREE:
+                            hubs.append(nbr)
+                        else:
+                            keep.append(nbr)
+                    next_frontier = keep
                 frontier = next_frontier
                 if on_hop is not None:
                     await on_hop(hop)
                 if not frontier:
                     break
-            nodes = [n for n in (store.get_entity(i) for i in visited) if n]
-            return {"center": center, "nodes": nodes, "edges": list(edges.values())}
+            fetched = store.get_entities(visited)
+            nodes = [fetched[i] for i in visited if i in fetched]
+            # Induced subgraph: an edge survives only if BOTH endpoints made it
+            # into `nodes`. The walk records every relation it reads, including
+            # ones reaching neighbours the node budget then refused, and an edge
+            # pointing at an id absent from `nodes` is a dangling reference no
+            # consumer can resolve.
+            kept = {n["id"] for n in nodes}
+            out_edges = [e for e in edges.values()
+                         if e["entity_a"] in kept and e["entity_b"] in kept]
+            if len(out_edges) > GRAPH_MAX_EDGES:
+                out_edges = out_edges[:GRAPH_MAX_EDGES]
+                truncated = True
+            return {"center": center, "nodes": nodes, "edges": out_edges,
+                    "truncated": truncated, "hubs_not_expanded": sorted(hubs)}
         except Exception:
             _log.exception("brain_graph failed for %r", entity)
             return {}

@@ -293,6 +293,18 @@ def _chunk_index_from_doc_id(doc_id: str) -> int | None:
     return int(m.group(2)) if m else None
 
 
+# SQLite's compiled-in host-parameter ceiling is 999 on older builds (32766 on
+# newer), so any IN (...) built from a caller-supplied list is split to stay
+# under the lower bound rather than depending on which SQLite is linked.
+_SQL_VAR_BATCH = 900
+
+
+def _chunked(seq, size):
+    """Yield successive `size`-length slices of `seq`."""
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 _BEGIN_RETRIES = 3
 _BEGIN_BASE_SLEEP_S = 0.05
 
@@ -3478,6 +3490,50 @@ class Store:
         with self._connect() as db:
             r = db.execute("SELECT * FROM entities WHERE id=?", (ent_id,)).fetchone()
             return dict(r) if r else None
+
+    def get_entities(self, ent_ids) -> dict[str, dict]:
+        """id -> entity dict, for the ids that exist. One query, not N.
+
+        brain_graph's traversal used to call get_entity() once per visited node
+        (18,397 queries on a live hub walk). Missing ids are simply absent from
+        the result, so callers keep the get_entity contract of "no row, no key"
+        without needing a second existence check.
+        """
+        ids = list(dict.fromkeys(ent_ids))  # de-dup, preserve caller order
+        if not ids:
+            return {}
+        out: dict[str, dict] = {}
+        with self._connect() as db:
+            for batch in _chunked(ids, _SQL_VAR_BATCH):
+                q = ",".join("?" * len(batch))
+                for r in db.execute(
+                        f"SELECT * FROM entities WHERE id IN ({q})", batch).fetchall():
+                    out[r["id"]] = dict(r)
+        return out
+
+    def entity_degrees(self, ent_ids) -> dict[str, int]:
+        """id -> number of non-invalidated relations touching it (0 if none).
+
+        Every requested id gets a key, so a caller can compare against a
+        threshold without a `.get(id, 0)` at each site. Counts BOTH directions,
+        matching what relations_for(id) would return, because that is the cost
+        the traversal is deciding whether to pay.
+        """
+        ids = list(dict.fromkeys(ent_ids))
+        if not ids:
+            return {}
+        deg = dict.fromkeys(ids, 0)
+        with self._connect() as db:
+            for batch in _chunked(ids, _SQL_VAR_BATCH):
+                q = ",".join("?" * len(batch))
+                for col in ("entity_a", "entity_b"):
+                    rows = db.execute(
+                        f"SELECT {col} AS eid, COUNT(*) AS n FROM entity_relations "
+                        f"WHERE {col} IN ({q}) AND invalidated_at IS NULL "
+                        f"GROUP BY {col}", batch).fetchall()
+                    for r in rows:
+                        deg[r["eid"]] += r["n"]
+        return deg
 
     def find_entity(self, query: str) -> dict | None:
         """Resolve an entity by id, then by slug of a display name, then by name.
