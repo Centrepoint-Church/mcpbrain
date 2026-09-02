@@ -139,15 +139,6 @@
     </div>
   </section>
 
-  <section id="step-model" class="card">
-    <h2>Search model</h2>
-    <p class="desc">A small on-device embedding model (~130&nbsp;MB) powers search. It downloads once and stays on this machine.</p>
-    <div class="row">
-      <button class="primary" id="model-btn" onclick="ensureModel()">Download model</button>
-      <span id="model-state" class="badge idle">Checking…</span>
-    </div>
-  </section>
-
   <section id="step-connect" class="card">
     <h2><span class="num">3</span>Connect Claude Desktop</h2>
     <p class="desc">Do this <strong>last</strong>. It restarts Claude Desktop so it loads your brain — any open Claude Desktop chat will close and reopen.</p>
@@ -309,43 +300,6 @@ async function pollAuth(armed){
 }
 
 
-async function refreshModel(){
-  try{
-    const j = await (await fetch("/api/model/status", H)).json();
-    const btn = $("model-btn");
-    if(j.cached){
-      badge("model-state", "Ready", "ok"); btn.disabled = true;
-    }else if(j.downloading){
-      badge("model-state", "Downloading…", "wait"); btn.disabled = true;
-      setTimeout(refreshModel, 2000);
-    }else if(j.error){
-      // No dedicated "error" badge kind exists (only ok/wait/idle) — "wait" is
-      // the same amber used for other failed-action states in this file.
-      badge("model-state", "Failed: " + j.error, "wait"); btn.disabled = false;
-      setTimeout(refreshModel, 4000);
-    }else{
-      badge("model-state", "Not downloaded", "idle"); btn.disabled = false;
-      setTimeout(refreshModel, 4000);
-    }
-  }catch(e){ setTimeout(refreshModel, 4000); }
-}
-async function ensureModel(){
-  try{ await P("/api/model/ensure"); }catch(e){}
-  setTimeout(refreshModel, 500);
-}
-
-let _modelAutoStarted = false;
-async function autoEnsureModel(){
-  // The model is mandatory — mcp-server fails at startup without the weights —
-  // so downloading it was never a decision, just a button the user had to find.
-  // Fire once, automatically, on the first status poll — independent of
-  // Google, which has nothing to do with the model; the button remains for a
-  // manual re-download or repair.
-  if(_modelAutoStarted) return;
-  _modelAutoStarted = true;
-  await ensureModel();
-}
-
 async function connectDesktop(){
   const btn = $("connect-btn");
   btn.disabled = true;
@@ -372,13 +326,6 @@ function renderStatus(j){
     : (j.google_connected ? "Connected" : "Not connected");
   badge("st-google", who, j.google_connected ? "ok" : "idle");
   badge("st-daemon", j.paused ? "Paused" : "Running", j.paused ? "wait" : "ok");
-  // The search model is mandatory regardless of Google — mcp-server fails at
-  // startup without the weights — so its auto-download must not be gated on
-  // a Google connection that has nothing to do with it. A user who declines
-  // or fails Google sign-in must still get the model. autoEnsureModel()'s own
-  // _modelAutoStarted guard keeps this a true one-shot despite firing on
-  // every status poll.
-  autoEnsureModel();
   // Mirror google_connected into Step 1's badge so the wizard reflects reality
   // on page load, not just after the user clicks "Connect Google".
   if(j.google_connected){
@@ -510,7 +457,6 @@ async function refresh(){
   setTimeout(refresh, 3000);
 }
 refresh();
-refreshModel();
 
 // Populate the timezone dropdown, then prefill the whole form from saved config.
 async function populateTimezones(selected){
