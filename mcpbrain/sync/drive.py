@@ -688,13 +688,22 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
         return 0
 
     resume_key = f"{source}:resume_ids"
+    page_key = f"{source}:page_token"
     try:
         resumed_ids: set = set(json.loads(store.get_cursor(resume_key) or "[]"))
     except (ValueError, TypeError):
         resumed_ids = set()
 
-    # Delta: page through changes.list
-    page_token = cursor
+    # Delta: page through changes.list, RESUMING where a budget-truncated round
+    # left off. Restarting at `cursor` every round is a livelock whenever the
+    # feed is longer than one budget: `newStartPageToken` comes back only on the
+    # final page, so a round that never reaches it can never advance `cursor`,
+    # and the next round re-walks the identical prefix. Live (2026-07-29 ->
+    # 2026-09-02, author's store): five weeks of re-walking ~5,000 changes every
+    # ~80s, ~25% of a core, and not one Drive change ingested in that window.
+    # The durable watermark stays `cursor`; this is only a within-feed offset,
+    # so a lost/cleared page_token costs a re-walk, never a missed change.
+    page_token = store.get_cursor(page_key) or cursor
     new_start = None
     interrupted = False
     # Collect (file_meta, content, folder) across all pages before writing to
@@ -785,9 +794,17 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
 
     pending_keys = {_file_resume_key(fmeta) for fmeta, _, _ in pending
                    if _file_resume_key(fmeta)}
-    if new_start and not interrupted and pending_keys <= resumed_ids:
+    # Everything this round PAGED PAST is now durably handled: skipped files
+    # write nothing, and collected ones are in resumed_ids. Only then may the
+    # paging offset move -- advancing it past a file the write loop did not
+    # reach would step over that file for good.
+    all_written = pending_keys <= resumed_ids
+    if new_start and not interrupted and all_written:
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
+        store.set_cursor(page_key, "")      # round complete; start clean
+    elif all_written:
+        store.set_cursor(page_key, str(page_token))
 
     flush_skip_report(store, skip_report, source=source)
     return processed
@@ -874,6 +891,7 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
 
     resume_key = f"{source}:resume_ids"
     resume_removed_key = f"{source}:resume_removed_ids"
+    page_key = f"{source}:page_token"
     try:
         resumed_ids: set = set(json.loads(store.get_cursor(resume_key) or "[]"))
     except (ValueError, TypeError):
@@ -883,7 +901,10 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     except (ValueError, TypeError):
         resumed_removed_ids = set()
 
-    page_token = cursor
+    # Resume paging where a budget-truncated round stopped -- see sync_drive's
+    # page_key comment for the livelock this closes (every shared-drive cursor
+    # on the author's store was stuck at 2026-07-29 alongside `drive`).
+    page_token = store.get_cursor(page_key) or cursor
     new_start = None
     pagination_interrupted = False
     # Collapse the whole delta into ONE ordered, deduplicated view keyed by
@@ -1029,11 +1050,17 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     live_keys = {_file_resume_key(ev["fmeta"]) for fid, ev in events.items()
                 if not ev["removed"] and _file_resume_key(ev["fmeta"])}
     removed_ids = {fid for fid, ev in events.items() if ev["removed"]}
-    if (new_start and not interrupted
-            and live_keys <= resumed_ids and removed_ids <= resumed_removed_ids):
+    # As in sync_drive: the paging offset may only move once everything this
+    # round paged past is durably handled -- here that means both the live
+    # files and the removals.
+    all_handled = live_keys <= resumed_ids and removed_ids <= resumed_removed_ids
+    if new_start and not interrupted and all_handled:
         store.set_cursor(source, str(new_start))
         store.set_cursor(resume_key, "[]")
         store.set_cursor(resume_removed_key, "[]")
+        store.set_cursor(page_key, "")      # round complete; start clean
+    elif all_handled:
+        store.set_cursor(page_key, str(page_token))
     flush_skip_report(store, skip_report, source=source)
     return {"processed": processed, "miss": miss, "live_file_ids": live_ids}
 
