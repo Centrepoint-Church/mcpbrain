@@ -17,8 +17,6 @@ The write loop already guarantees forward progress ("Guaranteeing one item per
 call is what makes the round monotonic and the livelock impossible"). The
 PAGING loop had no such guarantee. These tests pin it.
 """
-import pytest
-
 from mcpbrain.org_contracts import FleetPin
 from mcpbrain.store import Store
 from mcpbrain.sync.drive import sync_drive, sync_shared_drive
@@ -116,18 +114,6 @@ def test_my_drive_does_not_refetch_page_one_every_round(tmp_path):
         f"page 1 re-walked {svc.pages_fetched.count('1')}x: {svc.pages_fetched}"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "LATENT, not live: sync_shared_drive has the same paging shape, and its "
-    "page_key advance is wired, but it still cannot converge because it skips "
-    "ALL processing when paging is interrupted (`if not pagination_interrupted`), "
-    "so nothing reaches resumed_ids and the offset may never move. Closing it "
-    "means processing a partially-paged, fileId-collapsed event view -- safe on "
-    "the convergence argument (a later page's event simply supersedes an earlier "
-    "one) but a deliberate design decision to reverse. Left undone because the "
-    "live store shows ZERO shared-drive sync activity (434 My Drive ingest_skip "
-    "rows today, none for any drive:<id>), so there is no traffic to verify a "
-    "change against. My Drive -- the source actually livelocked -- is fixed and "
-    "covered by the tests above."))
 def test_shared_drive_paging_converges(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     svc = _Service()
@@ -137,6 +123,22 @@ def test_shared_drive_paging_converges(tmp_path):
                           budget=_OneShotBudget(1))
     assert s.get_cursor("drive:D1") == "DONE", \
         f"cursor stuck at {s.get_cursor('drive:D1')!r}"
+
+
+def test_shared_drive_processes_a_partially_paged_round(tmp_path):
+    """An interrupted round must still checkpoint what it paged.
+
+    This is the half that kept the shared-drive cursor pinned: paging stopped
+    early, ALL processing was skipped, so resumed_ids stayed empty and the
+    paging offset could never advance.
+    """
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    svc = _Service()
+    s.set_cursor("drive:D1", "1")
+    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN,
+                      budget=_OneShotBudget(1))
+    assert (s.get_cursor("drive:D1:page_token") or "") != "", \
+        "an interrupted round left no paging progress"
 
 
 def test_completed_round_clears_paging_state(tmp_path):
