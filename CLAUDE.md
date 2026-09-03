@@ -48,6 +48,75 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
+- **Current state (2026-09-03): the five version files are at `0.7.123`, RELEASED** —
+  source `7ebf1a0`, dist `3bd3b69`, plugin `2710e04`; the index serves only
+  `mcpbrain-0.7.123-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3576
+  passed**, ruff clean. Fleet resolution verified against the published index:
+  `mcpbrain==0.7.123`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
+  CONTENTS asserted, not just the build (`page_token` resume, the `all_written`/
+  `all_handled` gates, the ABSENCE of `if not pagination_interrupted:`, `GRAPH_HUB_DEGREE`,
+  `GRAPH_MAX_EDGES`, `store.get_entities`/`entity_degrees`).
+  **0.7.123 is two independent fixes, both found by investigating "searches are timing
+  out" and "the daemon is burning a core".**
+  **(1) `brain_graph` was unbounded in BREADTH.** Depth was capped (`GRAPH_MAX_HOPS`),
+  breadth never was, and `josh-kemp` carries **7,262 relations** — so any 2-hop walk that
+  reached the owner node fanned out to 18,397 nodes / 55,034 edges. Measured on the real
+  store through the MCP protocol: hops=2 **34.2s / 14.2 MB**, hops=3 **177.5s / 17.9 MB**
+  (a 12.4 MB result blew the tool-result token limit outright). hops=2 is the depth the
+  MCP server instructions actively RECOMMEND, so the advertised usage was the broken one.
+  It also ran one `get_entity` per visited node — 18,397 single-row queries.
+  Now bounded three ways, none silent: a hub (degree > `GRAPH_HUB_DEGREE` 150, above the
+  graph's p99 of 81) is still RETURNED but not traversed THROUGH — a node adjacent to
+  everything says nothing about how its neighbours relate — while the CENTER always
+  expands, so asking about a hub still works; `GRAPH_MAX_NODES` 150 / `GRAPH_MAX_EDGES`
+  1500 backstop a merely-wide graph, sized for this tool's only consumer (a model reading
+  the result — the `/graph` explorer has its own routes and does NOT come through here);
+  and `edges` is now the subgraph INDUCED on `nodes`, because the walk records every
+  relation it reads including ones reaching neighbours the budget refused, so edges could
+  previously reference ids absent from `nodes`. `truncated`/`hubs_not_expanded` ride in the
+  result AND the advertised description — a silently truncated graph is indistinguishable
+  from a sparse one. After: hops=2 **1.39s / 162 KB**, hops=3 **1.17s / 162 KB**; ordinary
+  low-degree entities return complete and unflagged, which is the regression that matters.
+  **`brain_search` was NOT the problem and was measured healthy** (91 `/api/recall` probes
+  across two full daemon cycles, max 0.86s, none over the 5s client budget; cold MCP stdio
+  path 1.09s) — do not go looking there again.
+  **(2) The Drive sync was LIVELOCKED, and had been since 2026-07-29 — five weeks.** The
+  `drive` cursor had not advanced in that time while `gmail`/`calendar` advanced daily. A
+  round advances the cursor only if it finishes clean
+  (`if new_start and not interrupted and pending_keys <= resumed_ids`), and
+  **`newStartPageToken` is returned ONLY on the feed's last page** — so once the backlog
+  outgrew one `CYCLE_BUDGET_S` (60s), every round ended with `new_start=None` AND
+  `interrupted=True`: two independent reasons the cursor could not move. Each cycle
+  re-walked the same ~5,000-change prefix and threw it away. The write loop already had a
+  forward-progress guarantee ("Guaranteeing one item per call is what makes the round
+  monotonic and the livelock impossible") — **the PAGING loop had none.** This is a
+  livelock, not slow convergence: waiting longer never fixes it.
+  Cost: ~25% of a core burned continuously (in ~20s bursts at ~85% every 60s — NOT a full
+  core; a `ps` %CPU snapshot is a decaying average and will lie to you here), 434
+  `ingest_skip` rows/day into the user-facing `change_log`, and **not one Drive change
+  ingested for five weeks** — the freshness cost, far worse than the CPU.
+  Fixed in BOTH functions. `sync_drive` persists its paging offset
+  (`<source>:page_token`) and resumes from it, clearing it on a completed round; the offset
+  moves only once everything the round paged past is durably handled (`all_written`),
+  because paging past a file the write loop never reached would step over it for good. The
+  durable watermark is still `cursor`, so a lost page_token costs a re-walk, never a missed
+  change. `sync_shared_drive` needed that AND the removal of `if not
+  pagination_interrupted:`, which skipped ALL processing on an interrupted round so nothing
+  ever reached `resumed_ids` and its offset could never move either — safe because `events`
+  is a fileId-collapsed view and every write is checkpointed by id+version, so acting on a
+  PREFIX can only be superseded by a later page, never contradicted (the collapse is a
+  work-saving optimisation, not a correctness requirement). `live_ids` becomes partial on an
+  interrupted round, which is harmless and was CHECKED not assumed: `sync_shared_drives`
+  does not propagate `live_file_ids` and deliberately never calls `sweep_drive` with it.
+  **Verified in production, not just in tests:** after the reinstall the paging offset
+  advanced 336793 → 339421 → 343514 → 348561 where it had been pinned at 336793 for five
+  weeks; `drive:resume_ids` grows steadily and Drive chunks are being written again. Daemon
+  CPU is now **3-10% of a core with no bursts**, and the per-cycle `ingest skip` tally fell
+  from thousands of files to single digits because it resumes instead of re-walking.
+  Progress is ~1 file/cycle while it works through a span of OCR-heavy PDFs — that is the
+  60s budget being spent on real extraction, not waste. **`brain_actions` at ~8.9s and the
+  68,007-item `bin/repair.py` re-chunk backlog were both seen and NOT addressed** — neither
+  is implicated in either fix.
 - **Current state (2026-09-02): the five version files are at `0.7.122`, RELEASED** —
   source `e070c31`, dist `dbe7b11`, plugin `ec89092`; the index serves only
   `mcpbrain-0.7.122-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3565
