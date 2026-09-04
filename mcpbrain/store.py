@@ -2858,6 +2858,25 @@ class Store:
             return db.execute("SELECT count(*) FROM sync_queue WHERE source=?",
                               (source,)).fetchone()[0]
 
+    def due_sync_items(self, *, limit: int, now: str) -> list[dict]:
+        """Queue rows ready to work, newest-first. A PURE READ -- no lease.
+
+        The daemon is the only worker and holds the single-writer lock, and a
+        crash mid-item leaves the row present (deletion happens only on
+        success), so a claim/lease would be machinery with no failure to catch.
+
+        Filtering on next_attempt_at is what makes "retry forever" safe: a
+        backed-off item is simply not selected, so it can never sit at the head
+        of the queue and stall everything behind it.
+        """
+        with self._connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT source, ref_id, version, event, modified_at, discovered_at, "
+                "       attempts, next_attempt_at, last_error "
+                "FROM sync_queue "
+                "WHERE next_attempt_at IS NULL OR next_attempt_at <= ? "
+                "ORDER BY modified_at DESC LIMIT ?", (now, limit)).fetchall()]
+
     # --- generic meta accessors -------------------------------------------
 
     def set_meta(self, k: str, v: str) -> None:
