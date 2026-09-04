@@ -551,6 +551,31 @@ class Store:
             db.execute(f"""CREATE TABLE IF NOT EXISTS sync_cursors(
                 source TEXT PRIMARY KEY, cursor TEXT, updated_at TEXT){_S}""")
 
+            # --- sync work queue -------------------------------------------
+            # The durable seam between discovery (page the provider delta) and
+            # work (fetch/extract/upsert). Presence IS pending; success deletes
+            # the row, so `SELECT count(*)` is the backlog as a FACT, not an
+            # estimate -- the thing whose absence hid a five-week Drive outage.
+            # PRIMARY KEY (source, ref_id) gives per-item event collapse for
+            # free: re-discovering a file supersedes its earlier event.
+            # modified_at is NOT NULL so the newest-first ORDER BY can use a
+            # PLAIN index; discovery falls back to the discovery timestamp for
+            # sources (Gmail history) that expose no per-item mtime. An
+            # expression index here would reintroduce the 0.7.105 drift class.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS sync_queue(
+                source          TEXT NOT NULL,
+                ref_id          TEXT NOT NULL,
+                version         TEXT NOT NULL DEFAULT '',
+                event           TEXT NOT NULL,
+                modified_at     TEXT NOT NULL,
+                discovered_at   TEXT NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error      TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (source, ref_id)){_S}""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_due "
+                       "ON sync_queue(next_attempt_at, modified_at DESC)")
+
             # --- enrichment graph tables (Task 4.2) -----------------------
             db.execute(f"""CREATE TABLE IF NOT EXISTS entities(
                 id          TEXT PRIMARY KEY,
@@ -2789,6 +2814,49 @@ class Store:
                 "INSERT INTO sync_cursors(source, cursor, updated_at) VALUES(?,?,datetime('now')) "
                 "ON CONFLICT(source) DO UPDATE SET cursor=excluded.cursor, updated_at=datetime('now')",
                 (source, cursor))
+
+    def enqueue_and_advance(self, items, *, source: str, cursor: str) -> int:
+        """UPSERT queue rows and advance this source's cursor in ONE transaction.
+
+        THE invariant of the sync redesign: the cursor can never be ahead of
+        what is recorded. Discovery advances per PAGE rather than per completed
+        round, which is what makes a budget cutoff free -- the next cycle
+        resumes at the last committed page and re-does nothing.
+
+        A differing `version` on an existing row resets attempts/backoff: a
+        genuinely new edit is new work, not a continuation of a failing one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect(write=True) as db:
+            for it in items:
+                db.execute(
+                    "INSERT INTO sync_queue(source, ref_id, version, event, "
+                    "  modified_at, discovered_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(source, ref_id) DO UPDATE SET "
+                    "  event=excluded.event, modified_at=excluded.modified_at, "
+                    "  attempts=CASE WHEN sync_queue.version=excluded.version "
+                    "                THEN sync_queue.attempts ELSE 0 END, "
+                    "  next_attempt_at=CASE WHEN sync_queue.version=excluded.version "
+                    "                       THEN sync_queue.next_attempt_at ELSE NULL END, "
+                    "  last_error=CASE WHEN sync_queue.version=excluded.version "
+                    "                  THEN sync_queue.last_error ELSE '' END, "
+                    "  version=excluded.version",
+                    (source, it["ref_id"], it.get("version", ""), it["event"],
+                     it["modified_at"], now))
+            db.execute(
+                "INSERT INTO sync_cursors(source, cursor, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(source) DO UPDATE SET cursor=excluded.cursor, "
+                "updated_at=excluded.updated_at",
+                (source, str(cursor), now))
+        return len(items)
+
+    def sync_queue_pending(self, source: str | None = None) -> int:
+        """Rows still to be worked. Presence is pending, so this is a count."""
+        with self._connect() as db:
+            if source is None:
+                return db.execute("SELECT count(*) FROM sync_queue").fetchone()[0]
+            return db.execute("SELECT count(*) FROM sync_queue WHERE source=?",
+                              (source,)).fetchone()[0]
 
     # --- generic meta accessors -------------------------------------------
 
