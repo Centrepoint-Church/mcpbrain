@@ -562,3 +562,97 @@ def sync_calendar(
         store.set_cursor(resume_key, "[]")
 
     return count
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def discover_calendar(service, store, source: str = "calendar",
+                      calendar_id: str = "primary", time_min: str | None = None,
+                      time_max: str | None = None, *, budget=None,
+                      bulk_section=None) -> int:
+    """List calendar events via _list_events and enqueue them.
+
+    _list_events already pages events().list() to completion (or budget
+    expiry) entirely in memory -- reused here rather than reimplemented.
+    Rows are enqueued whether or not the list completed; the cursor advances
+    to next_sync ONLY when it did (interrupted=False), because Google emits
+    nextSyncToken only on the final page. An interrupted call costs a re-list
+    next cycle, never a re-work -- what was enqueued here is already durable.
+    """
+    bulk_section = bulk_section or nullcontext
+    cursor = store.get_cursor(source)
+    now = datetime.now(timezone.utc)
+    if time_min is None:
+        time_min = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if time_max is None:
+        time_max = (now + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Window-hygiene eviction: idempotent, not per-item, so it belongs in
+    # discovery even though it mutates chunks -- see the module-level design
+    # note in the plan brief for why this is a deliberate exception to
+    # "discovery never touches chunks."
+    with bulk_section():
+        store.delete_calendar_chunks_after(time_max)
+
+    try:
+        items, next_sync, interrupted = _list_events(
+            service, calendar_id, cursor, time_min, time_max, budget=budget)
+    except HttpError as e:
+        resp = getattr(e, "resp", None)
+        if resp is not None and resp.status == 410:
+            items, next_sync, interrupted = _list_events(
+                service, calendar_id, None, time_min, time_max, budget=budget)
+        else:
+            raise
+
+    queue_items = []
+    for ev in items:
+        eid = ev.get("id")
+        if not eid:
+            continue
+        queue_items.append({
+            "ref_id": eid,
+            "version": ev.get("updated", ""),
+            "event": "remove" if ev.get("status") == "cancelled" else "upsert",
+            "modified_at": ev.get("updated") or _utc_now_iso(),
+        })
+
+    if next_sync and not interrupted:
+        store.enqueue_and_advance(queue_items, source=source, cursor=next_sync)
+    else:
+        # Enqueue without moving the cursor: durable partial progress, and the
+        # next call re-lists from the SAME cursor (cheap: listing only).
+        store.enqueue_and_advance(queue_items, source=source, cursor=cursor)
+    return len(queue_items)
+
+
+def handle_calendar_item(service, store, item, *, calendar_id: str = "primary",
+                         bulk_section=None) -> None:
+    """Work one queued calendar event. Raises on failure so the loop backs it off."""
+    bulk_section = bulk_section or nullcontext
+    if item["event"] == "remove":
+        with bulk_section():
+            # Mirrors Drive's doc_ids_for_file: doc_ids_for_messages resolves a
+            # 'cal-<event_id>' key against chunks.metadata.event_id (see its
+            # own docstring's "Calendar events are the fourth" case), which is
+            # exactly how a split event's cal-<id>-<i> chunks are found -- no
+            # per-event delete existed before this task; sync_calendar handled
+            # removal only implicitly via the window-wide
+            # delete_calendar_chunks_after sweep.
+            doc_ids = store.doc_ids_for_messages([f"cal-{item['ref_id']}"])
+            if doc_ids:
+                store.delete_chunks(doc_ids)
+        return
+    ev = service.events().get(calendarId=calendar_id,
+                              eventId=item["ref_id"]).execute(num_retries=_NUM_RETRIES)
+    owner = owner_identity_from_config()
+    with bulk_section():
+        chunks = normalise_calendar(ev)
+        for ch in chunks:
+            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+        if chunks:
+            _apply_attendees_to_graph(store, ev, owner)
+            _annotate_series_from_event(store, ev, owner)
