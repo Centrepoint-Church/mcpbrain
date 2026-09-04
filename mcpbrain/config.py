@@ -816,6 +816,20 @@ def spool_thread_cap(home) -> int:
         return 2000
 
 
+def sync_work_limit(home) -> int:
+    """Items the sync work loop handles per cycle (config 'sync_work_limit',
+    default 50).
+
+    This replaces the wall-clock budgets as the real operator knob. "How many
+    items" has an obvious meaning; "how many seconds of mixed-cost work" does
+    not, when a unit spans a microsecond mime-skip to a 60-second OCR PDF.
+    """
+    try:
+        return max(1, int(read_config(home).get("sync_work_limit", 50)))
+    except (TypeError, ValueError):
+        return 50
+
+
 def review_max_apply_per_run(home) -> int:
     """Per-run ceiling on how many review rules to apply (config 'review_max_apply_per_run', default 50).
 
