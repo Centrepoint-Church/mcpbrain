@@ -242,6 +242,138 @@ def sync_gmail(service, store, source: str = "gmail", *, budget=None,
     return messages_processed
 
 
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _parse_gmail_cursor(raw: str) -> tuple[str, str | None]:
+    """Split a persisted gmail cursor into (history_id, page_token).
+
+    Unlike Drive's changes.list, Gmail's history.list needs TWO pieces of
+    state to resume mid-round: the fixed `startHistoryId` the whole delta is
+    anchored to, and the `pageToken` for the specific page to continue from —
+    a single rolling token (Drive's shape) isn't self-sufficient here. So the
+    persisted cursor is JSON `{"history_id": ..., "page_token": ...}` while a
+    round is still in progress, and collapses back to a bare historyId string
+    (this function's fallback branch) once the round completes -- the same
+    steady-state shape every other source's cursor already has.
+    """
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw, None
+    if isinstance(obj, dict) and "history_id" in obj:
+        return str(obj["history_id"]), obj.get("page_token")
+    return raw, None
+
+
+def discover_gmail(service, store, source: str = "gmail", *, budget=None) -> int:
+    """Page history().list, enqueue message ids, advance the cursor per page.
+
+    modified_at is the DISCOVERY time: the history API exposes no per-message
+    mtime, and a messageAdded event is new mail by definition, so discovery
+    order is chronological order.
+
+    Each page's rows and this page's resume state commit together via
+    enqueue_and_advance, mirroring Drive's per-page invariant (Task 5): a
+    budget cutoff mid-round costs nothing but a re-list of the current page,
+    never a re-walk of the whole delta and never lost work -- the exact
+    livelock this module's old sync_gmail docstring described in its own
+    words ("PERMANENTLY never ingested").
+    """
+    cursor_raw = store.get_cursor(source)
+    if cursor_raw is None:
+        hid = service.users().getProfile(
+            userId="me").execute(num_retries=_NUM_RETRIES)["historyId"]
+        store.set_cursor(source, str(hid))
+        return 0
+
+    history_id, page_token = _parse_gmail_cursor(cursor_raw)
+
+    enqueued = 0
+    while True:
+        if budget is not None and budget.expired():
+            break
+        kwargs: dict = {"userId": "me", "startHistoryId": history_id,
+                        "historyTypes": ["messageAdded"]}
+        if page_token is not None:
+            kwargs["pageToken"] = page_token
+        try:
+            resp = service.users().history().list(
+                **kwargs).execute(num_retries=_NUM_RETRIES)
+        except HttpError as e:
+            if getattr(e, "resp", None) is not None and e.resp.status in (404, 410):
+                # historyId too old: reset to head and let backfill cover the gap.
+                hid = service.users().getProfile(
+                    userId="me").execute(num_retries=_NUM_RETRIES)["historyId"]
+                store.set_cursor(source, str(hid))
+                return enqueued
+            raise
+
+        latest = resp.get("historyId", history_id)
+        items = []
+        for record in resp.get("history", []):
+            for added in record.get("messagesAdded", []):
+                mid = (added.get("message") or {}).get("id")
+                if mid:
+                    items.append({"ref_id": mid, "version": "", "event": "upsert",
+                                  "modified_at": _utc_now_iso()})
+
+        nxt = resp.get("nextPageToken")
+        next_cursor = (json.dumps({"history_id": history_id, "page_token": nxt})
+                      if nxt else str(latest))
+        # THE invariant: this page's rows and this page's resume state, one commit.
+        store.enqueue_and_advance(items, source=source, cursor=next_cursor)
+        enqueued += len(items)
+
+        if nxt is None:
+            break
+        page_token = nxt
+    return enqueued
+
+
+def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
+                      bulk_section=None) -> None:
+    """Work one queued Gmail message. Raises on failure so the loop backs off.
+
+    Copied from the real per-message body of the (still-present, pre-queue)
+    sync_gmail's `for mid in new_message_ids:` loop -- verbatim, not invented:
+    normalise_gmail takes a `report` dict and writes chunk-by-chunk via
+    store.upsert_chunk (singular), and attachments are a SEPARATE fetch
+    (attachments.fetch_and_normalise) hoisted OUTSIDE bulk_section because it
+    is network I/O, not a store write.
+
+    A 404 means the message was deleted between discovery and now: that is
+    DONE, not a failure -- returning (rather than raising) deletes the row.
+
+    `fetch_attachments` must be read ONCE (config.gmail_attachments(home)) and
+    passed in by the Task 8 wiring, not re-read per call -- config.read_config
+    does an uncached exists()+read_text()+json.loads() per call, and paying
+    that once per message is the exact overhead class the 0.7.105 fix removed
+    from metadata queries.
+    """
+    bulk_section = bulk_section or nullcontext
+    try:
+        raw = service.users().messages().get(
+            userId="me", id=item["ref_id"], format="full").execute(
+                num_retries=_NUM_RETRIES)
+    except HttpError as e:
+        if getattr(e, "resp", None) is not None and e.resp.status == 404:
+            return
+        raise
+    skips: dict = {}
+    att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
+                  if fetch_attachments else [])
+    with bulk_section():
+        for chunk in normalise_gmail(raw, report=skips):
+            store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                               chunk.metadata)
+        for chunk in att_chunks:
+            store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                               chunk.metadata)
+
+
 def _fetch_one(service, mid: str, *, fetch_attachments: bool,
                att_report: dict | None) -> tuple[dict | None, list]:
     """Fetch one message and its attachments. Returns (raw, attachment_chunks).
