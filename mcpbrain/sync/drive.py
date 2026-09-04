@@ -810,6 +810,96 @@ def sync_drive(service, store, source: str = "drive", *, budget=None,
     return processed
 
 
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def discover_drive(service, store, source: str = "drive", *, budget=None) -> int:
+    """Page changes().list, enqueue each change, advance the cursor PER PAGE.
+
+    No fetch, no export, no extraction -- discovery is listing only, which is
+    why it is cheap enough to run to completion almost every cycle.
+
+    Advancing per page is what removes the 0.7.123 livelock at the root:
+    newStartPageToken arrives only on the feed's last page, so a round that
+    could not reach it never advanced. nextPageToken is itself a valid resume
+    point, so progress no longer requires finishing the feed.
+    """
+    cursor = store.get_cursor(source)
+    if cursor is None:                      # bootstrap: start from the head
+        tok = service.changes().getStartPageToken().execute(
+            num_retries=_NUM_RETRIES)["startPageToken"]
+        store.set_cursor(source, str(tok))
+        return 0
+
+    enqueued = 0
+    page_token = cursor
+    while True:
+        if budget is not None and budget.expired():
+            break
+        resp = service.changes().list(
+            pageToken=page_token, spaces="drive", includeRemoved=True,
+            fields=_CHANGES_FIELDS).execute(num_retries=_NUM_RETRIES)
+
+        items = []
+        for ch in resp.get("changes", []):
+            if ch.get("removed"):
+                fid = ch.get("fileId")
+                if fid:
+                    items.append({"ref_id": fid, "version": "", "event": "remove",
+                                  "modified_at": _utc_now_iso()})
+                continue
+            fmeta = ch.get("file") or {}
+            fid = fmeta.get("id")
+            if not fid:
+                continue
+            items.append({
+                "ref_id": fid,
+                "version": str(fmeta.get("version", "")),
+                "event": "upsert",
+                # NOT NULL: fall back to discovery time when Drive omits it.
+                "modified_at": fmeta.get("modifiedTime") or _utc_now_iso(),
+            })
+
+        nxt = resp.get("nextPageToken")
+        advance_to = nxt or resp.get("newStartPageToken") or page_token
+        # THE invariant: this page's rows and this page's cursor, one commit.
+        store.enqueue_and_advance(items, source=source, cursor=advance_to)
+        enqueued += len(items)
+
+        if not nxt:
+            break
+        page_token = nxt
+    return enqueued
+
+
+def handle_drive_item(service, store, item, *, folder_cache=None,
+                      bulk_section=None, report=None) -> None:
+    """Work one queued Drive item. Raises on failure so the loop backs it off."""
+    bulk_section = bulk_section or nullcontext
+    fid = item["ref_id"]
+    if item["event"] == "remove":
+        with bulk_section():
+            doc_ids = store.doc_ids_for_file(fid)
+            if doc_ids:
+                store.invalidate_local_relations_for_docs(doc_ids)
+                store.delete_chunks(doc_ids)
+        return
+    fmeta = service.files().get(
+        fileId=fid, supportsAllDrives=True,
+        fields="id,name,mimeType,modifiedTime,version,parents").execute(
+            num_retries=_NUM_RETRIES)
+    content = fetch_content(service, fmeta, store=store, report=report)
+    if content is None or (not content.text and not content.tables):
+        return                      # unsupported/empty: done, nothing to write
+    folder = folder_path(service, fmeta, folder_cache if folder_cache is not None else {})
+    with bulk_section():
+        chunks = normalise_drive(fmeta, content.text, tables=content.tables,
+                                 folder=folder)
+        upsert_file_chunks(store, chunks, file_id=fid, partial=content.partial)
+
+
 def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                       contextual_retrieval: bool = False, budget=None,
                       bulk_section=None) -> dict:
