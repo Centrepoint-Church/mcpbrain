@@ -180,7 +180,7 @@ def test_run_cycle_runs_one_cycle_against_fixtures(tmp_path):
 
     res = run_cycle(store, emb, gmail_service=fake)
 
-    assert res["gmail"] >= 1
+    assert res["discovered"]["gmail"] >= 1
     assert res["embedded"] >= 1
     assert store.get_chunk("gmail-m1-body-0") is not None
 
@@ -259,7 +259,7 @@ def test_run_one_runs_one_cycle_against_fixtures(tmp_path):
     res = daemon.run_one()
 
     assert res is not None
-    assert res["gmail"] >= 1
+    assert res["discovered"]["gmail"] >= 1
     assert res["embedded"] >= 1
     assert store.get_chunk("gmail-m1-body-0") is not None
 
@@ -352,7 +352,7 @@ def test_resume_re_enables_the_cycle(tmp_path):
 
     res = daemon.run_one()
     assert res is not None
-    assert res["gmail"] >= 1
+    assert res["discovered"]["gmail"] >= 1
     assert store.get_chunk("gmail-m1-body-0") is not None
 
 

@@ -2349,9 +2349,10 @@ class Daemon:
         -- this is a lock DUTY-CYCLE problem, not only a fairness problem. So
         every caller now enters this section around ONE message/event/file/
         embed-batch/inbox-file (see run_sync_cycle, index_pending, drain,
-        sync_gmail/calendar/drive, prepare_units's per-batch helpers), not
-        once per whole call, releasing the lock in between so the
-        maintenance thread has a real, frequent chance to acquire it.
+        work_queue's handle_gmail_item/handle_calendar_item/handle_drive_item,
+        prepare_units's per-batch helpers), not once per whole call, releasing
+        the lock in between so the maintenance thread has a real, frequent
+        chance to acquire it.
 
         `_bulk_lock_wanted()` is an explicit fairness hand-off on top of that:
         a waiter marks intent (`_bulk_lock_intent`) before blocking on the

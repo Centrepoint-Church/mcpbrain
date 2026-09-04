@@ -23,13 +23,25 @@ class FakeEmbedder:
 
 
 class FakeStore:
-    """Minimal store: run_sync_cycle with no services touches nothing."""
+    """Minimal store: run_sync_cycle with no services touches nothing else."""
 
     def __init__(self, unenriched=None):
         self._unenriched = unenriched or []
 
     def unenriched_chunks(self, limit=None):
         return self._unenriched if limit is None else self._unenriched[:limit]
+
+    def due_sync_items(self, *, limit, now):
+        # work_queue calls this unconditionally every cycle, even with no
+        # services configured. These tests are about enrich-mode/cadence
+        # gating, not sync/queue behaviour -- an empty queue is faithful,
+        # since nothing here ever seeds one.
+        return []
+
+    def unembedded_chunks(self, limit=None):
+        # index_pending calls this every cycle too. Same rationale as
+        # due_sync_items above: nothing here ever seeds pending chunks.
+        return []
 
 
 def _spy(calls, name):

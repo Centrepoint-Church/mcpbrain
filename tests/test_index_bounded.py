@@ -139,7 +139,12 @@ def test_run_sync_cycle_propagates_the_embed_cap(tmp_path, monkeypatch):
     from mcpbrain import sync as sync_mod
 
     s = _store_with_pending(tmp_path, 50)
-    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store, **kw: 0)
+    # discover_gmail is imported at MODULE level into mcpbrain.sync (so
+    # run_sync_cycle's bare-name call resolves the patched version through
+    # sync_mod's own __dict__) -- patching the source module
+    # mcpbrain.sync.gmail.discover_gmail would be inert; see the comment atop
+    # mcpbrain/sync/__init__.py's imports.
+    monkeypatch.setattr(sync_mod, "discover_gmail", lambda svc, store, **kw: 0)
     monkeypatch.setattr(sync_mod, "progressive_backfill_step",
                         lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
     res = sync_mod.run_sync_cycle(s, _FakeEmbedder(), gmail_service=object(),
@@ -152,7 +157,7 @@ def test_run_sync_cycle_leaves_embed_capped_unset_when_the_backlog_fits(tmp_path
     from mcpbrain import sync as sync_mod
 
     s = _store_with_pending(tmp_path, 5)
-    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", lambda svc, store, **kw: 0)
+    monkeypatch.setattr(sync_mod, "discover_gmail", lambda svc, store, **kw: 0)
     monkeypatch.setattr(sync_mod, "progressive_backfill_step",
                         lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
     res = sync_mod.run_sync_cycle(s, _FakeEmbedder(), gmail_service=object(),
@@ -160,25 +165,36 @@ def test_run_sync_cycle_leaves_embed_capped_unset_when_the_backlog_fits(tmp_path
     assert res.get("embed_capped") is None
 
 
-def test_run_sync_cycle_stops_between_sources_once_the_budget_expires(tmp_path, monkeypatch):
-    """The inter-source `budget_spent` early return: once the budget expires
-    after gmail's own block finishes, run_sync_cycle must return immediately
-    -- calendar/drive must NEVER be reached this cycle, not just be bounded
-    internally. Nothing in the suite drove all three services through
-    run_sync_cycle with a budget that flips mid-cycle; the existing budget
-    tests here only check embed_capped propagation with gmail alone.
+def test_run_sync_cycle_stops_before_the_shared_drive_block_once_the_budget_expires(
+        tmp_path, monkeypatch):
+    """The Task 8/9 discovery/work split changed what the main `budget` gates.
+    Discovery for every source now ALWAYS runs each cycle -- it's bounded only
+    by its own small, separate DISCOVERY_BUDGET_S slice, specifically so a
+    large work queue can never starve discovery of new changes (see
+    run_sync_cycle's own docstring). So "calendar/drive discovery never runs
+    once the budget expires" -- true of the OLD per-source sync_gmail/
+    sync_calendar/sync_drive round bodies this replaced -- is no longer the
+    right thing to assert; it would assert the opposite of what the redesign
+    intentionally changed.
 
-    Each source function is patched at its SOURCE module (mcpbrain.sync.gmail /
-    .calendar / .drive / mcpbrain.index), matching run_sync_cycle's own
-    `from mcpbrain.sync.gmail import sync_gmail`-style local imports, which
-    re-resolve the attribute on that module at call time -- patching an
-    attribute on the `mcpbrain.sync` package itself (which doesn't define
-    these names) would silently not take effect.
+    What the main `budget` DOES still gate: once it is expired (checked once,
+    after work_queue + the embed pass), run_sync_cycle returns immediately
+    with `budget_spent=True`, and everything after that check -- the shared
+    Drive ingest-cache block AND the progressive-backfill step -- never runs
+    this cycle.
+
+    discover_gmail/discover_calendar/discover_drive are patched on the
+    `mcpbrain.sync` package itself (not their source modules): they're
+    imported at MODULE level into `mcpbrain.sync.__init__` specifically so
+    tests can monkeypatch them there and have run_sync_cycle's bare-name
+    calls resolve the patched version (see the comment atop that file's
+    imports) -- patching the source module would be inert. work_queue and
+    index_pending are still imported LOCALLY inside run_sync_cycle, so
+    patching their source modules continues to work.
     """
     from mcpbrain import sync as sync_mod
 
-    calendar_calls = []
-    drive_calls = []
+    discovery_calls = []
 
     class _FlipBudget:
         def __init__(self):
@@ -189,19 +205,21 @@ def test_run_sync_cycle_stops_between_sources_once_the_budget_expires(tmp_path, 
 
     budget = _FlipBudget()
 
-    def _fake_sync_gmail(svc, store, **kw):
-        # Simulate the budget running out during/after gmail's own work.
+    def _fake_discover_gmail(svc, store, **kw):
+        discovery_calls.append("gmail")
+        # Simulate the work phase (work_queue/_embed, both mocked below)
+        # having spent the budget by the time it's checked.
         budget._expired = True
-        return 5
+        return 0
 
-    monkeypatch.setattr("mcpbrain.sync.gmail.sync_gmail", _fake_sync_gmail)
+    monkeypatch.setattr(sync_mod, "discover_gmail", _fake_discover_gmail)
+    monkeypatch.setattr(sync_mod, "discover_calendar",
+                        lambda *a, **kw: discovery_calls.append("calendar") or 0)
+    monkeypatch.setattr(sync_mod, "discover_drive",
+                        lambda *a, **kw: discovery_calls.append("drive") or 0)
+    monkeypatch.setattr("mcpbrain.sync.queue.work_queue",
+                        lambda *a, **kw: {"processed": 0, "failed": 0})
     monkeypatch.setattr("mcpbrain.index.index_pending", lambda *a, **kw: 0)
-    monkeypatch.setattr(
-        "mcpbrain.sync.calendar.sync_calendar",
-        lambda *a, **kw: calendar_calls.append(1) or 0)
-    monkeypatch.setattr(
-        "mcpbrain.sync.drive.sync_drive",
-        lambda *a, **kw: drive_calls.append(1) or 0)
     monkeypatch.setattr(sync_mod, "progressive_backfill_step",
                         lambda store, **kw: {"gmail": 0, "drive": 0, "calendar": 0})
 
@@ -210,12 +228,17 @@ def test_run_sync_cycle_stops_between_sources_once_the_budget_expires(tmp_path, 
         gmail_service=object(), calendar_service=object(), drive_service=object(),
         budget=budget)
 
-    assert res["gmail"] == 5
+    assert discovery_calls == ["gmail", "calendar", "drive"], (
+        "discovery for every source must still run this cycle -- it is "
+        "bounded by its own small DISCOVERY_BUDGET_S slice, not the cycle's "
+        "main budget"
+    )
     assert res["budget_spent"] is True
-    assert calendar_calls == [], "calendar must not run once the budget expired after gmail"
-    assert drive_calls == [], "drive must not run once the budget expired after gmail"
-    assert "calendar" not in res or res["calendar"] == 0, (
-        "calendar's result slot must stay untouched -- proves the source never ran")
+    assert "backfill" not in res, (
+        "the progressive-backfill step (and the shared-drive block before "
+        "it) must never run once the main budget is spent -- both live "
+        "after the budget_spent early return"
+    )
 
 
 def test_run_cycle_more_work_on_an_item_cap_not_only_budget_expiry(tmp_path, monkeypatch):

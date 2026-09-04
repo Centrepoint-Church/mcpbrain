@@ -305,8 +305,9 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
     doc_id = gmail-<id>-body-<i>. Empty body -> [].
 
     `report`, when passed, is mutated in place to {reason: count} for every
-    message that produced no chunks. Without it a drop is invisible: sync_gmail
-    counts a bulk-filtered message as processed either way (A4).
+    message that produced no chunks. Without it a drop is invisible:
+    handle_gmail_item counts a bulk-filtered message as processed either way
+    (A4).
     """
     msg_id = raw["id"]
     payload = raw.get("payload", {})
