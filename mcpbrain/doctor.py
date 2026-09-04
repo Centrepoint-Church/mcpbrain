@@ -474,6 +474,25 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Repair state':<16} skipped ({exc})")
 
+    # Sync queue backlog (spec: presence IS pending, so this is a fact, not an
+    # estimate). oldest_discovered_at is deliberate: it exposes the
+    # tail-starvation risk accepted with newest-first ordering — a backlog
+    # that is not shrinking shows as an age that climbs.
+    try:
+        q = store.sync_queue_stats()
+        if q["pending"]:
+            lines.append(f"⚠️ {'Sync queue':<16} {q['pending']:,} pending "
+                         f"(oldest discovered {q['oldest_discovered_at']})")
+        else:
+            lines.append(f"✅ {'Sync queue':<16} 0 pending")
+        if q["failing"]:
+            detail = ", ".join(f"{f['ref_id']} ({f['attempts']} attempts: "
+                               f"{f['last_error']})" for f in q["failing"])
+            lines.append(f"⚠️ {'Sync failures':<16} "
+                         f"{len(q['failing'])} items retrying — {detail}")
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        lines.append(f"➖ {'Sync queue':<16} skipped ({exc})")
+
     # Bi-temporal back-pointers whose target row is gone. Surfaced because
     # foreign_key_check is STRUCTURALLY BLIND to any of these columns that does
     # not declare a REFERENCES clause -- which is every store that has not been

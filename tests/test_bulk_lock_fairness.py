@@ -658,6 +658,18 @@ def test_bulk_section_argument_reaches_drain_and_prepare_units(monkeypatch):
         def unenriched_chunks(self, limit=None):
             return []
 
+        def unembedded_chunks(self, limit=None):
+            # index_pending calls this every cycle; this test has nothing
+            # pending to embed and isn't testing the embed path.
+            return []
+
+        def due_sync_items(self, *, limit, now):
+            # work_queue calls this unconditionally every cycle; this test has
+            # no queued sync work to drain and isn't testing sync/queue
+            # behaviour, only that run_cycle forwards bulk_section unchanged
+            # into prepare_units/drain.
+            return []
+
     class _FakeEmbedder:
         dim = 4
 

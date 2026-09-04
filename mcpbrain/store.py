@@ -1364,6 +1364,28 @@ class Store:
             # ANALYZE / PRAGMA optimize call updates in place.
             db.execute("ANALYZE")
 
+            # One-shot: drop per-round state the queue replaces, for the
+            # sources that actually got migrated (drive/gmail/calendar's bare
+            # discover_*/handle_*_item split). resume_ids tracked which files
+            # a ROUND had written; rounds no longer exist for these sources.
+            # page_token (0.7.123) existed because the cursor could not
+            # advance per page; it now does. The real cursors are untouched.
+            #
+            # Deliberately an exact-match list, NOT `source LIKE '%:resume_ids'`
+            # etc.: `sync_shared_drive` (mcpbrain/sync/drive.py) was NOT
+            # migrated by this plan and still depends on its own per-round
+            # state, keyed `f"drive:{drive_id}:resume_ids"` etc. -- a suffix
+            # wildcard also matches those three-segment shared-drive keys, so
+            # it would wipe a shared drive's in-progress resume state on every
+            # daemon restart (verified live) and reintroduce, for shared
+            # drives specifically, the exact multi-week livelock this whole
+            # effort exists to fix. Only the bare two-segment keys below are
+            # actually dead.
+            db.execute(
+                "DELETE FROM sync_cursors WHERE source IN "
+                "('drive:resume_ids', 'drive:resume_removed_ids', "
+                "'drive:page_token', 'gmail:resume_ids', 'calendar:resume_ids')")
+
     # --- S2 recall-acceptance feedback methods --------------------------------
 
     def record_recall_feedback(self, doc_id: str, session_id: str,

@@ -438,3 +438,21 @@ def test_doctor_reports_repair_state(tmp_path, monkeypatch):
     assert "⚠️ content-free chunks: 1" in msg, msg
     assert "⚠️ Items awaiting re-chunk: 1" in msg, msg
     assert "Repair state" not in msg, f"the repair-state block was skipped: {msg}"
+
+
+def test_doctor_reports_sync_backlog_and_failures(tmp_path, monkeypatch):
+    from mcpbrain.store import Store
+
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    s.enqueue_and_advance(
+        [{"ref_id": "f1", "version": "1", "event": "upsert",
+          "modified_at": "2026-09-04T00:00:00"}], source="drive", cursor="1")
+    for _ in range(3):
+        s.fail_sync_item("drive", "f1", "export timeout", now="2026-09-04T10:00:00")
+
+    code, msg = doctor.run_doctor(str(tmp_path), model_present=lambda h: True,
+                                  conns=_conns(), repairs={})
+    assert "Sync queue" in msg and "1 pending" in msg, msg
+    assert "Sync failures" in msg and "export timeout" in msg, msg

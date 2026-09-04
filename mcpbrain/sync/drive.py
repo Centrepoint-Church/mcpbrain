@@ -615,201 +615,6 @@ def _cache_first_extract_one(
     return True, (fid, content_h)
 
 
-# ---------------------------------------------------------------------------
-# Sync entry point
-# ---------------------------------------------------------------------------
-
-def sync_drive(service, store, source: str = "drive", *, budget=None,
-               bulk_section=None) -> int:
-    """Incremental Drive sync via the Changes API.
-
-    First run (no cursor): calls changes.getStartPageToken, stores the token
-    as the cursor, and returns 0. No files are fetched; the next run will
-    pick up all changes since that point.
-
-    Subsequent runs: pages through changes.list since the stored cursor.
-    For each non-removed change with a text-native MIME type, text is fetched
-    and buffered. After all pages are consumed, every pending file is
-    normalised and upserted. The cursor advances to newStartPageToken only
-    after all upserts are durable.
-
-    Any exception during fetch or upsert propagates before the cursor is
-    written, leaving the cursor unchanged (safe to retry).
-
-    Bounded and INCREMENTALLY checkpoint-safe (Task 2 duty-cycle fix):
-    `budget` (a `Budget`, or None for unbounded) is checked once per
-    changes.list page (that loop only fetches+buffers text, it does not
-    write the store) and once per not-yet-resumed pending file in the upsert
-    loop. On expiry the REAL cursor is NOT advanced — `newStartPageToken` is
-    only emitted by Google on the FINAL page anyway (mirroring Gmail's
-    historyId, an intermediate advance would silently skip unvisited
-    changes).
-
-    Merely "don't advance the cursor" is not enough once one delta exceeds a
-    single budget's worth of files: every subsequent call would re-list the
-    same cursor, collect the same pending list, and upsert the same prefix
-    every time — the cursor would never advance and files past the prefix
-    would never be durably ingested (this exact livelock was reproduced and
-    fixed for Gmail; see sync_gmail's docstring). So a second piece of
-    state — `f"{source}:resume_ids"` (a JSON list of `_file_resume_key`
-    id+version composites already durably upserted for the CURRENT,
-    not-yet-committed delta round) — is checked in the upsert loop: a key
-    already in it is skipped (genuine forward progress, not just an
-    idempotent re-upsert), and the set is grown and persisted after each
-    call. Keying on id+version rather than bare id matters: a file EDITED
-    mid-round (while its id is already resumed from an earlier
-    budget-truncated call) produces a DIFFERENT key and is therefore
-    reprocessed, not silently skipped for the rest of the round (Critical bug
-    found in adversarial review — reproduced directly: an edited file's
-    stored text stayed at its pre-edit content after the round closed and the
-    cursor advanced past it). Only once every pending file this round is
-    accounted for does the real cursor advance and the resume set clear.
-    (The pagination loop's own `fetch_content`/`folder_path` calls ARE gated
-    on the resume set — see the `rkey in resumed_ids` check below — so a
-    resumed round does not re-fetch already-checkpointed files; the upsert
-    loop repeats the SAME check independently because `pending` is rebuilt
-    fresh each call.) `bulk_section` (a zero-arg context-manager factory,
-    default `contextlib.nullcontext`) brackets each file's writes so
-    `_bulk_lock` is released between files.
-
-    Returns the number of files processed (files that yielded at least one
-    chunk) THIS call. May be a partial count when the budget expired
-    mid-run; already-resumed files from a prior call are not re-counted.
-    """
-    if bulk_section is None:
-        bulk_section = nullcontext
-    cursor = store.get_cursor(source)
-
-    # Bootstrap: no prior cursor
-    if cursor is None:
-        tok = service.changes().getStartPageToken().execute(
-            num_retries=_NUM_RETRIES)["startPageToken"]
-        store.set_cursor(source, str(tok))
-        return 0
-
-    resume_key = f"{source}:resume_ids"
-    page_key = f"{source}:page_token"
-    try:
-        resumed_ids: set = set(json.loads(store.get_cursor(resume_key) or "[]"))
-    except (ValueError, TypeError):
-        resumed_ids = set()
-
-    # Delta: page through changes.list, RESUMING where a budget-truncated round
-    # left off. Restarting at `cursor` every round is a livelock whenever the
-    # feed is longer than one budget: `newStartPageToken` comes back only on the
-    # final page, so a round that never reaches it can never advance `cursor`,
-    # and the next round re-walks the identical prefix. Live (2026-07-29 ->
-    # 2026-09-02, author's store): five weeks of re-walking ~5,000 changes every
-    # ~80s, ~25% of a core, and not one Drive change ingested in that window.
-    # The durable watermark stays `cursor`; this is only a within-feed offset,
-    # so a lost/cleared page_token costs a re-walk, never a missed change.
-    page_token = store.get_cursor(page_key) or cursor
-    new_start = None
-    interrupted = False
-    # Collect (file_meta, content, folder) across all pages before writing to
-    # the store. This keeps the advance-after-durable-write guarantee simple:
-    # the cursor is set only after every upsert completes.
-    pending: list[tuple[dict, Content, str]] = []
-    # C5: owned by this whole sync call (not per file) — folder_path's own
-    # cache contract, so a Drive with many files in few folders costs one
-    # lookup per folder, not per file.
-    folder_cache: dict = {}
-    # Review finding (post-Task-4-approval): fetch_content used to record one
-    # change_log row per skipped file. A window with a few hundred images
-    # would flood the 500-row-pruned, user-facing digest. Tallied here for
-    # this whole round and flushed as one bounded summary row per kind — see
-    # flush_skip_report.
-    skip_report: dict = {}
-
-    while True:
-        if budget is not None and budget.expired():
-            interrupted = True
-            break
-        resp = service.changes().list(
-            pageToken=page_token,
-            spaces="drive",
-            includeRemoved=True,
-            fields=_CHANGES_FIELDS,
-        ).execute(num_retries=_NUM_RETRIES)
-
-        for ch in resp.get("changes", []):
-            if ch.get("removed"):
-                continue
-            fmeta = ch.get("file") or {}
-            if not fmeta.get("id"):
-                continue
-            # Skip files this round already durably wrote BEFORE paying for the
-            # download. _file_resume_key is computable from the change metadata
-            # alone, so a truncated round no longer re-exports work it has
-            # already checkpointed -- pure waste, and charged against the very
-            # budget that is running out.
-            rkey = _file_resume_key(fmeta)
-            if rkey and rkey in resumed_ids:
-                continue
-            content = fetch_content(service, fmeta, store=store, report=skip_report)
-            if content is None or (not content.text and not content.tables):
-                continue
-            folder = folder_path(service, fmeta, folder_cache)
-            pending.append((fmeta, content, folder))
-
-        new_start = resp.get("newStartPageToken", new_start)
-        nxt = resp.get("nextPageToken")
-        if not nxt:
-            break
-        page_token = nxt
-
-    # Upsert all collected files not already resumed, then advance cursor.
-    # Keyed on id+version (_file_resume_key), NOT bare id: a file edited
-    # mid-round (after its id was already resumed from an earlier
-    # budget-truncated call) must be recognized as new work, not skipped.
-    # The resume set is persisted PER FILE (not once after the whole loop) so
-    # an exception partway through (a poison file, a process death, a
-    # STALL_S watchdog restart) never discards the checkpoint for files
-    # already durably upserted earlier in this same call.
-    processed = 0
-    for fmeta, content, folder in pending:
-        rkey = _file_resume_key(fmeta)
-        if rkey and rkey in resumed_ids:
-            continue
-        # Minimum forward progress: honour the budget only once this call has
-        # written something. The fetch phase above is unbounded (one network
-        # export per changed file), so the budget is routinely already spent by
-        # the time we get here -- checking it before the first item yields zero
-        # writes, leaves resumed_ids unchanged, and re-does the identical work
-        # next cycle. Guaranteeing one item per call is what makes the round
-        # monotonic and the livelock impossible.
-        if processed and budget is not None and budget.expired():
-            interrupted = True
-            break
-        with bulk_section():
-            chunks = normalise_drive(fmeta, content.text, tables=content.tables,
-                                     folder=folder)
-            upsert_file_chunks(store, chunks, file_id=fmeta["id"],
-                               partial=content.partial)
-            if chunks:
-                processed += 1
-        if rkey:
-            resumed_ids.add(rkey)
-            store.set_cursor(resume_key, json.dumps(sorted(resumed_ids)))
-
-    pending_keys = {_file_resume_key(fmeta) for fmeta, _, _ in pending
-                   if _file_resume_key(fmeta)}
-    # Everything this round PAGED PAST is now durably handled: skipped files
-    # write nothing, and collected ones are in resumed_ids. Only then may the
-    # paging offset move -- advancing it past a file the write loop did not
-    # reach would step over that file for good.
-    all_written = pending_keys <= resumed_ids
-    if new_start and not interrupted and all_written:
-        store.set_cursor(source, str(new_start))
-        store.set_cursor(resume_key, "[]")
-        store.set_cursor(page_key, "")      # round complete; start clean
-    elif all_written:
-        store.set_cursor(page_key, str(page_token))
-
-    flush_skip_report(store, skip_report, source=source)
-    return processed
-
-
 def _utc_now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -905,6 +710,15 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                       bulk_section=None) -> dict:
     """Incremental sync for ONE Shared Drive via the Changes API, cache-first.
 
+    NOT YET migrated to the sync_queue discover/work split (Task 9 of the
+    2026-09-04 sync-queue plan deliberately left this function alone — no
+    discover_shared_drive/handle_shared_drive_item exists, and this is still
+    the live path `sync_shared_drives` calls). It therefore still needs its
+    own per-round resume state below; deleting that state here (as was done
+    for the fully-migrated `discover_drive`/`discover_gmail`/
+    `discover_calendar`) would reintroduce the exact livelock this whole
+    effort exists to fix, for shared drives specifically.
+
     Cursor key is 'drive:<driveId>' in sync_cursors. First run stores
     getStartPageToken(driveId=...) and returns. Delta runs page through
     changes.list(driveId=..., includeItemsFromAllDrives=True). NOTE:
@@ -934,8 +748,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     untouched is not enough once ONE collapsed delta is bigger than one
     budget's worth of files, though — every subsequent call would re-collapse
     the same window and re-attempt the same prefix of files every time,
-    livelocking exactly like the reproduced-and-fixed Gmail case (see
-    sync_gmail's docstring). So two separate pieces of resume state — one for
+    livelocking exactly like the class of bug reproduced and fixed for Gmail
+    and My-Drive (see the 2026-09-04 sync-queue design doc). So two separate
+    pieces of resume state — one for
     the add/change loop (`f"{source}:resume_ids"`) and one for the removal
     loop (`f"{source}:resume_removed_ids"`) — are checked and grown the same
     way as the other three sources. The cursor only advances, and both
@@ -991,9 +806,11 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     except (ValueError, TypeError):
         resumed_removed_ids = set()
 
-    # Resume paging where a budget-truncated round stopped -- see sync_drive's
-    # page_key comment for the livelock this closes (every shared-drive cursor
-    # on the author's store was stuck at 2026-07-29 alongside `drive`).
+    # Resume paging where a budget-truncated round stopped -- this closes the
+    # same livelock the deleted (now-migrated) sync_drive's page_key used to
+    # (every shared-drive cursor on the author's store was stuck at
+    # 2026-07-29 alongside `drive`, before discover_drive fixed the My-Drive
+    # side of it).
     page_token = store.get_cursor(page_key) or cursor
     new_start = None
     pagination_interrupted = False
@@ -1049,8 +866,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     interrupted = pagination_interrupted
 
     # Process what this round DID page, even when paging was interrupted.
-    # Skipping it was the other half of the sync_drive livelock: nothing
-    # reached resumed_ids, so `all_handled` stayed False and the paging offset
+    # Skipping it was the other half of the same livelock class the deleted
+    # sync_drive had: nothing reached resumed_ids, so `all_handled` stayed
+    # False and the paging offset
     # could never move -- the drive was pinned at its cursor forever once the
     # backlog outgrew one budget.
     #
@@ -1083,8 +901,11 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
         # has written something. Checking before the first item means a
         # budget already spent upstream yields zero writes, leaves the
         # resume set unchanged, and re-does identical work next cycle --
-        # the livelock reproduced in sync_drive. One item per call keeps
-        # the round monotonic.
+        # the same livelock class the now-deleted sync_drive/sync_gmail/
+        # sync_calendar reproduced. One item per call keeps the round
+        # monotonic. (This guard is still load-bearing here because
+        # sync_shared_drive is not yet migrated to the queue -- see this
+        # function's docstring.)
         if processed and budget is not None and budget.expired():
             interrupted = True
             break
@@ -1155,9 +976,9 @@ def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
     live_keys = {_file_resume_key(ev["fmeta"]) for fid, ev in events.items()
                 if not ev["removed"] and _file_resume_key(ev["fmeta"])}
     removed_ids = {fid for fid, ev in events.items() if ev["removed"]}
-    # As in sync_drive: the paging offset may only move once everything this
-    # round paged past is durably handled -- here that means both the live
-    # files and the removals.
+    # As the deleted sync_drive did: the paging offset may only move once
+    # everything this round paged past is durably handled -- here that means
+    # both the live files and the removals.
     all_handled = live_keys <= resumed_ids and removed_ids <= resumed_removed_ids
     if new_start and not interrupted and all_handled:
         store.set_cursor(source, str(new_start))
@@ -1435,8 +1256,9 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
                    service_factory=None) -> dict:
     """Re-fetch and re-chunk specific Drive files by id.
 
-    The mechanism the repair needs and the sync layer lacked: `sync_drive` only
-    sees files the Changes API reports as MODIFIED, and `backfill_drive` filters
+    The mechanism the repair needs and the sync layer lacked: ordinary delta
+    sync (`discover_drive`/`handle_drive_item`) only sees files the Changes
+    API reports as MODIFIED, and `backfill_drive` filters
     on modifiedTime — so a file whose bytes are unchanged but whose CHUNKING is
     out of date (455 spreadsheets clipped at row 200, 9,351 files extracted by
     the pre-per-type extractor) could never be revisited by either.

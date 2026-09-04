@@ -2,10 +2,10 @@
 
 import threading
 
-import pytest
-
 from mcpbrain.store import Store
-from mcpbrain.sync.drive import sync_drive, backfill_drive, normalise_drive, _fetch_text
+from mcpbrain.sync.drive import (
+    backfill_drive, discover_drive, handle_drive_item, normalise_drive, _fetch_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -49,16 +49,32 @@ class _Changes:
 
 
 class _Files:
-    def __init__(self, exports=None, media=None, export_raises=None, file_list=None):
+    def __init__(self, exports=None, media=None, export_raises=None, file_list=None,
+                by_id=None):
         self._exports = exports or {}
         self._media = media or {}
         self._raise = export_raises or {}
         # file_list: list of file metadata dicts returned by files().list()
         self._file_list = file_list or []
+        # by_id: fileId -> metadata dict, served by files().get() -- the
+        # re-fetch handle_drive_item makes (the sync_queue row only carries
+        # ref_id/version, not the full metadata blob discovery saw).
+        self._by_id = by_id or {}
         # Instrumentation for tests that need to assert de-dup: how many times
         # export()/get_media() was actually called per fileId.
         self.export_calls: dict[str, int] = {}
         self.get_media_calls: dict[str, int] = {}
+
+    def get(self, fileId, supportsAllDrives=None, fields=None):
+        if fileId in self._by_id:
+            return _Req(self._by_id[fileId])
+        for f in self._file_list:
+            if f.get("id") == fileId:
+                return _Req(f)
+        # Tolerant fallback: a minimal but usable metadata dict, so a test
+        # that never registered this fileId still gets something plausible
+        # rather than a KeyError deep inside handle_drive_item.
+        return _Req({"id": fileId, "name": fileId, "mimeType": "application/octet-stream"})
 
     def export(self, fileId, mimeType):
         # Mirror the real Drive v3 API: files.export does NOT accept
@@ -96,12 +112,29 @@ class FakeDriveService:
         # routes correctly without needing to pass it explicitly.
         start = kw.get("start_token", "100")
         initial = kw.get("initial_cursor", start)
-        self._changes = _Changes(start, kw.get("pages"), initial_cursor=initial)
+        pages = kw.get("pages")
+        self._changes = _Changes(start, pages, initial_cursor=initial)
+        # Build a fileId -> metadata map from every change's embedded "file"
+        # dict across all pages, so handle_drive_item's own files().get()
+        # re-fetch (the sync_queue row only carries ref_id/version) can be
+        # served without every test having to pass file metadata twice.
+        # Explicit files_by_id entries win over anything derived from pages.
+        file_meta: dict = {}
+        for page in (pages or []):
+            for ch in page.get("changes", []):
+                f = ch.get("file")
+                if f and f.get("id"):
+                    file_meta[f["id"]] = f
+        for f in (kw.get("file_list") or []):
+            if f.get("id"):
+                file_meta.setdefault(f["id"], f)
+        file_meta.update(kw.get("files_by_id") or {})
         self._files = _Files(
             kw.get("exports"),
             kw.get("media"),
             kw.get("export_raises"),
             kw.get("file_list"),
+            by_id=file_meta,
         )
         self._drives = _Drives(kw.get("shared_drives"))
 
@@ -167,11 +200,11 @@ def _store(tmp_path):
 
 def test_bootstrap_sets_cursor_no_files(tmp_path):
     """First run: no cursor. getStartPageToken returns "100".
-    sync_drive returns 0, cursor is set to "100", no chunks upserted."""
+    discover_drive returns 0, cursor is set to "100", no chunks upserted."""
     store = _store(tmp_path)
     svc = FakeDriveService(start_token="100")
 
-    result = sync_drive(svc, store)
+    result = discover_drive(svc, store)
 
     assert result == 0
     assert store.get_cursor("drive") == "100"
@@ -179,8 +212,8 @@ def test_bootstrap_sets_cursor_no_files(tmp_path):
 
 
 def test_delta_google_doc_exported_and_upserted(tmp_path):
-    """Delta run: cursor "100", one Google Doc change, text exported and upserted.
-    Cursor advances to "105", return value 1, chunk present."""
+    """Delta run: cursor "100", one Google Doc change is enqueued (discover)
+    and, once worked, exported and upserted (handle)."""
     store = _store(tmp_path)
     store.set_cursor("drive", "100")
 
@@ -195,10 +228,13 @@ def test_delta_google_doc_exported_and_upserted(tmp_path):
         exports={"f1": b"Budget plan for Q3"},
     )
 
-    result = sync_drive(svc, store)
-
-    assert result == 1
+    n = discover_drive(svc, store)
+    assert n == 1
     assert store.get_cursor("drive") == "105"
+
+    row = store.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    handle_drive_item(svc, store, row)
+
     chunk = store.get_chunk("gdrive-f1-0")
     assert chunk is not None
     assert "Budget plan" in chunk["text"]
@@ -220,16 +256,18 @@ def test_text_file_via_get_media(tmp_path):
         media={"f2": b"meeting notes here"},
     )
 
-    result = sync_drive(svc, store)
+    discover_drive(svc, store)
+    row = store.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    handle_drive_item(svc, store, row)
 
-    assert result == 1
     chunk = store.get_chunk("gdrive-f2-0")
     assert chunk is not None
     assert "meeting notes" in chunk["text"]
 
 
-def test_removed_change_skipped(tmp_path):
-    """A change with removed=True is not upserted and not counted."""
+def test_removed_change_enqueued_as_remove_and_deletes_nothing_new(tmp_path):
+    """A change with removed=True is enqueued as a 'remove' event; working it
+    deletes any existing chunks (none here) rather than upserting."""
     store = _store(tmp_path)
     store.set_cursor("drive", "100")
 
@@ -239,14 +277,17 @@ def test_removed_change_skipped(tmp_path):
     ]
     svc = FakeDriveService(pages=pages)
 
-    result = sync_drive(svc, store)
+    discover_drive(svc, store)
+    row = store.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    assert row["event"] == "remove"
 
-    assert result == 0
+    handle_drive_item(svc, store, row)
     assert store.get_chunk("gdrive-f3-0") is None
 
 
 def test_unsupported_mime_skipped(tmp_path):
-    """image/png file: _fetch_text returns None, not upserted, not counted."""
+    """image/png file: _fetch_text returns None via fetch_content, so
+    handle_drive_item writes nothing."""
     store = _store(tmp_path)
     store.set_cursor("drive", "100")
 
@@ -266,15 +307,17 @@ def test_unsupported_mime_skipped(tmp_path):
     ]
     svc = FakeDriveService(pages=pages)
 
-    result = sync_drive(svc, store)
+    discover_drive(svc, store)
+    row = store.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    handle_drive_item(svc, store, row)
 
-    assert result == 0
     assert store.get_chunk("gdrive-f4-0") is None
 
 
 def test_pagination_processes_all(tmp_path):
     """Two pages: page 0 has nextPageToken -> page 1; page 1 has newStartPageToken.
-    Files on both pages are upserted; cursor equals last newStartPageToken."""
+    Both files are enqueued and, once worked, upserted; cursor equals the last
+    page's cursor."""
     store = _store(tmp_path)
     store.set_cursor("drive", "0")  # '0' maps to pages[0]
 
@@ -298,39 +341,15 @@ def test_pagination_processes_all(tmp_path):
         },
     )
 
-    result = sync_drive(svc, store)
+    n = discover_drive(svc, store)
 
-    assert result == 2
+    assert n == 2
+    assert store.get_cursor("drive") == "200"
+    for row in store.due_sync_items(limit=10, now="2099-01-01T00:00:00"):
+        handle_drive_item(svc, store, row)
     assert store.get_chunk("gdrive-fa-0") is not None
     assert store.get_chunk("gdrive-fb-0") is not None
-    assert store.get_cursor("drive") == "200"
 
-
-def test_cursor_not_advanced_on_fetch_error(tmp_path):
-    """If export raises RuntimeError, sync_drive propagates it and cursor stays unchanged."""
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-
-    pages = [
-        _page(
-            [_gdoc_change("f5", "Failing Doc")],
-            new_start_page_token="110",
-        )
-    ]
-    svc = FakeDriveService(
-        pages=pages,
-        export_raises={"f5": RuntimeError("export failed")},
-    )
-
-    with pytest.raises(RuntimeError, match="export failed"):
-        sync_drive(svc, store)
-
-    assert store.get_cursor("drive") == "100"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests for helpers
-# ---------------------------------------------------------------------------
 
 def test_fetch_text_google_doc():
     """_fetch_text routes Google Doc to export and returns decoded text."""
@@ -446,276 +465,6 @@ def test_fetch_text_sheets_export_csv():
 # ---------------------------------------------------------------------------
 # Task 2 duty-cycle fix: budget-interrupted mid-upsert must checkpoint safely
 # ---------------------------------------------------------------------------
-
-class _FakeBudget:
-    """expired() returns False for the first `expire_after_calls` calls, True
-    from then on — pins EXACTLY which iteration a real Budget's wall-clock
-    expiry would have landed on, deterministically."""
-
-    def __init__(self, expire_after_calls):
-        self.calls = 0
-        self.expire_after_calls = expire_after_calls
-
-    def expired(self) -> bool:
-        self.calls += 1
-        return self.calls > self.expire_after_calls
-
-
-def test_budget_interrupted_mid_upsert_resumes_without_skip_or_duplicate(tmp_path):
-    """Mirrors test_gmail_sync.py's checkpoint-resume test for the Drive delta
-    path. `newStartPageToken` is only emitted once ALL pages are consumed, so
-    (like Gmail's historyId) advancing the cursor before every pending file
-    is durably upserted would silently skip whatever wasn't reached yet.
-
-    Verifies: (1) an interrupted run upserts only the files it reached and
-    leaves the cursor at its OLD value; (2) a follow-up call with no budget
-    completes the resume — f1 (already durably done in the first call) is
-    genuinely SKIPPED in the upsert loop via the persisted `drive:resume_ids`
-    set, only f2 is newly processed — and the cursor advances to the true
-    newStartPageToken. (Unlike Gmail, the PAGINATION loop's own `_fetch_text`
-    calls are not gated on the resume set here — see sync_drive's docstring
-    for why that's an accepted, documented trade-off — so f1's export IS
-    still re-fetched during pagination on resume; only the upsert/count is
-    genuinely incremental.)
-    """
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-
-    pages = [
-        _page(
-            [_gdoc_change("f1", "Doc One"), _gdoc_change("f2", "Doc Two")],
-            new_start_page_token="105",
-        )
-    ]
-    svc = FakeDriveService(
-        pages=pages,
-        exports={"f1": b"first document content, long enough to matter",
-                "f2": b"second document content, long enough to matter"},
-    )
-
-    # Call 1: pagination check before the (only) page (not expired -> both
-    # f1/f2 fetched+buffered into `pending` during that one page). f1 is then
-    # written WITHOUT consulting the budget -- the minimum-forward-progress
-    # guarantee (see sync_drive): a budget already spent by the fetch phase must
-    # still yield one write, or the resume set never grows and the round
-    # livelocks. Call 2: upsert-loop check before f2 (expired -> stop).
-    budget = _FakeBudget(expire_after_calls=1)
-    result = sync_drive(svc, store, budget=budget)
-
-    assert result == 1, "only the file(s) upserted before budget expiry should count"
-    assert store.get_cursor("drive") == "100", (
-        "cursor must NOT advance on a partial run — an early advance would "
-        "silently and permanently skip f2 (newStartPageToken is only valid "
-        "once every pending file from this delta window is durable)"
-    )
-    assert store.get_chunk("gdrive-f1-0") is not None
-    assert store.get_chunk("gdrive-f2-0") is None
-
-    # Resume: cursor unchanged, so pagination re-lists the SAME page (and
-    # re-fetches f1's/f2's text — see docstring), but the upsert loop must
-    # SKIP f1 (already resumed) and process only f2.
-    result2 = sync_drive(svc, store, budget=None)
-
-    assert result2 == 1, "only the genuinely new file (f2) should be counted/upserted on resume"
-    assert store.get_cursor("drive") == "105"
-    assert store.get_chunk("gdrive-f1-0") is not None
-    assert store.get_chunk("gdrive-f2-0") is not None
-    assert store.get_cursor("drive:resume_ids") == "[]", "resume set must be cleared once the round closes"
-
-    # No duplicate-visible-effect regardless: f1 stayed one row (upsert keyed
-    # on doc_id), never inserted twice.
-    with store._connect() as db:
-        count = db.execute(
-            "SELECT COUNT(*) FROM chunks WHERE doc_id='gdrive-f1-0'"
-        ).fetchone()[0]
-    assert count == 1
-
-
-def test_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
-    """Critical-B reproduction, My-Drive variant (adversarial review, Task 2
-    round 3): a delta bigger than one budget's worth of files must not
-    livelock. Drives a 7-file delta through repeated budget-truncated calls
-    (2 files' worth of upsert capacity each) and asserts the cursor
-    eventually reaches the true final newStartPageToken and every file is
-    durably upserted exactly once."""
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-
-    n = 7
-    changes = [_gdoc_change(f"f{i}", f"Doc {i}") for i in range(1, n + 1)]
-    exports = {f"f{i}": f"document body number {i}, long enough to matter".encode()
-              for i in range(1, n + 1)}
-    pages = [_page(changes, new_start_page_token="200")]
-    svc = FakeDriveService(pages=pages, exports=exports)
-
-    per_call_capacity = 2
-    max_cycles = 20
-    for _cycle in range(max_cycles):
-        if store.get_cursor("drive") != "100":
-            break
-        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
-        sync_drive(svc, store, budget=budget)
-    else:
-        raise AssertionError(
-            f"cursor never advanced past the original delta window after "
-            f"{max_cycles} cycles — this is the livelock the fix targets"
-        )
-
-    assert store.get_cursor("drive") == "200"
-    assert store.get_cursor("drive:resume_ids") == "[]"
-    for i in range(1, n + 1):
-        doc_id = f"gdrive-f{i}-0"
-        assert store.get_chunk(doc_id) is not None, f"f{i} was never ingested"
-        with store._connect() as db:
-            count = db.execute(
-                "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (doc_id,)
-            ).fetchone()[0]
-        assert count == 1, f"f{i} produced more than one chunk row"
-
-
-def test_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
-    """New Critical found in adversarial review round 4: once a file's id
-    landed in the resume set (round 3's fix), it was skipped for the REST OF
-    THAT ROUND no matter what -- including if the file changed in between.
-    The round then closed and the real cursor advanced PAST the file's
-    change record, with nothing left to re-surface it until the file
-    happened to change again after the cursor had already moved on.
-
-    Reproduced directly before this fix (against the round-3 code): an
-    edited file's stored text stayed at its pre-edit content forever after
-    the round closed. Fixed by keying the resume set on id+version
-    (_file_resume_key: md5Checksum, or version+modifiedTime), not bare id,
-    so an edit produces a DIFFERENT key and is recognized as new work rather
-    than matched against the stale resume entry.
-    """
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-
-    f1 = _gdoc_change("f1", "Doc One")
-    f1["file"]["md5Checksum"] = "hash-v1"
-    f2 = _gdoc_change("f2", "Doc Two")
-    f2["file"]["md5Checksum"] = "hash-v1-f2"
-    pages = [_page([f1, f2], new_start_page_token="200")]
-    svc = FakeDriveService(pages=pages, exports={
-        "f1": b"ORIGINAL f1 body content, long enough to matter",
-        "f2": b"f2 body content, long enough to matter",
-    })
-
-    upsert_calls = []
-    orig_upsert = store.upsert_chunk
-
-    def spy_upsert(*a, **kw):
-        upsert_calls.append(a[0])  # doc_id
-        return orig_upsert(*a, **kw)
-
-    store.upsert_chunk = spy_upsert
-
-    # Call 1: budget cuts off right after f1 is processed with its ORIGINAL
-    # content -- f1's (stale-version) key lands in the resume set. f1 itself is
-    # written unconditionally under the minimum-forward-progress guarantee, so
-    # the cut-off lands one expired() call earlier than it used to.
-    budget = _FakeBudget(expire_after_calls=1)
-    sync_drive(svc, store, budget=budget)
-    assert store.get_cursor("drive") == "100", "round must still be open"
-    assert store.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
-
-    # f1 is edited in Drive (content AND version change) WHILE the round is
-    # still open.
-    svc._files._exports["f1"] = b"REVISED f1 body content, long enough to matter"
-    f1_edited = _gdoc_change("f1", "Doc One")
-    f1_edited["file"]["md5Checksum"] = "hash-v2"
-    svc._changes._pages[0] = {"changes": [f1_edited, f2], "newStartPageToken": "200"}
-
-    # Call 2: unbounded, completes the round.
-    sync_drive(svc, store, budget=None)
-
-    assert store.get_cursor("drive") == "200", "round must close"
-    assert store.get_chunk("gdrive-f1-0")["text"].startswith("REVISED"), (
-        "f1's edit must land -- the resume set must not have permanently "
-        "skipped it just because its OLD id+version key was already "
-        "resumed from call 1"
-    )
-    assert store.get_cursor("drive:resume_ids") == "[]"
-
-    # f1 was upserted exactly twice total across the two calls (once with
-    # its original content, once with the edit) -- proving the edit is
-    # picked up exactly once per version, not repeatedly re-applied within
-    # the same round nor silently dropped.
-    assert upsert_calls.count("gdrive-f1-0") == 2
-
-
-_EXPORTS_3 = {f"f{i}": (f"document {i} content, long enough to matter".encode())
-              for i in range(3)}
-
-
-def test_budget_spent_during_downloads_still_makes_forward_progress(tmp_path):
-    """A budget spent inside the FETCH phase must not livelock sync_drive.
-
-    _fetch_text runs for every changed file inside the pagination loop, with no
-    budget check and no resume-set consultation. The write loop then checks the
-    budget BEFORE its first item, so if the downloads spent it, zero items are
-    written, resumed_ids never grows, and the cursor never advances -- the next
-    cycle re-downloads exactly the same files, forever. Reproduced over 6
-    consecutive cycles: processed=0, cursor frozen, 3 downloads re-issued each
-    time.
-
-    Two guarantees are asserted: at least one item is written per call (so the
-    resume set always grows), and repeated cycles eventually complete the round.
-    """
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-    pages = [_page([_gdoc_change(f"f{i}", f"Doc {i}") for i in range(3)],
-                   new_start_page_token="105")]
-
-    total = 0
-    for cycle in range(6):
-        svc = FakeDriveService(pages=list(pages), start_token="100",
-                               exports=_EXPORTS_3)
-        # Survives the pagination check (call 1), then dies before the write
-        # loop's first item -- i.e. consumed by the per-file downloads that
-        # happen between the two. Expiring at call 0 instead would mean the
-        # page is never even fetched, where doing nothing IS correct.
-        got = sync_drive(svc, store, budget=_FakeBudget(expire_after_calls=1))
-        total += got
-        if store.get_cursor("drive") == "105":
-            break
-
-    assert total >= 1, (
-        "no forward progress across 6 cycles with an immediately-expired "
-        "budget -- this is the livelock"
-    )
-    assert store.get_cursor("drive") == "105", "round never closed"
-
-
-def test_already_resumed_files_are_not_re_downloaded(tmp_path, monkeypatch):
-    """Skipping must happen BEFORE _fetch_text, not after: otherwise a truncated
-    cycle re-issues network exports for files it already durably wrote."""
-    from mcpbrain.sync import drive as drive_mod
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-    pages = [_page([_gdoc_change(f"f{i}", f"Doc {i}") for i in range(3)],
-                   new_start_page_token="105")]
-
-    calls = []
-    real = drive_mod._fetch_text
-    monkeypatch.setattr(drive_mod, "_fetch_text",
-                        lambda svc, fmeta: calls.append(fmeta.get("id")) or real(svc, fmeta))
-
-    # First cycle: budget allows exactly one write, so 2 files stay pending.
-    svc = FakeDriveService(pages=list(pages), start_token="100",
-                           exports=_EXPORTS_3)
-    sync_drive(svc, store, budget=_FakeBudget(expire_after_calls=1))
-    first_round = len(calls)
-    assert first_round == 3, "all three should be fetched on the first pass"
-
-    calls.clear()
-    svc2 = FakeDriveService(pages=list(pages), start_token="100",
-                            exports=_EXPORTS_3)
-    sync_drive(svc2, store, budget=_FakeBudget(expire_after_calls=1))
-    assert len(calls) < first_round, (
-        f"re-downloaded {len(calls)} of {first_round} already-checkpointed files"
-    )
-
 
 # ---------------------------------------------------------------------------
 # Gate 3 / Task 4: fetch_content, folder_path, upsert_file_chunks
@@ -909,41 +658,6 @@ def test_flush_skip_report_is_a_noop_on_an_empty_report():
     store = _Store()
     drive.flush_skip_report(store, {})
     assert store.changes == []
-
-
-def test_many_skipped_files_in_one_sync_round_produce_one_summary_row_not_one_per_file(tmp_path):
-    """Review finding (post-Task-4-approval): fetch_content used to call
-    ingest_report.record_skip once per skipped file inside sync_drive's
-    listing loop — one store.record_change write, one change_log row, per
-    file. change_log is pruned to 500 rows and doubles as the user-facing
-    change digest (dashboard.py's recent_changes); a Drive sync whose window
-    contains a few hundred images (a common real case) would evict the
-    entire genuine audit trail and fill the digest with per-file noise.
-    sync_drive must flush ONE aggregated row for the whole round instead."""
-    store = _store(tmp_path)
-    store.set_cursor("drive", "100")
-
-    n = 50
-    changes = [
-        {"fileId": f"img{i}", "removed": False,
-         "file": {"id": f"img{i}", "name": f"photo{i}.png", "mimeType": "image/png",
-                  "modifiedTime": "2026-05-01T10:00:00Z", "owners": []}}
-        for i in range(n)
-    ]
-    pages = [_page(changes, new_start_page_token="900")]
-    svc = FakeDriveService(pages=pages)
-
-    result = sync_drive(svc, store)
-
-    assert result == 0, "every file is an unsupported image; none should count as processed"
-    skip_rows = [c for c in store.recent_changes(limit=1000) if c["change_type"] == "ingest_skip"]
-    assert len(skip_rows) == 1, (
-        f"expected exactly one aggregated ingest_skip row for {n} skipped "
-        f"files, got {len(skip_rows)} — the per-file flood is back"
-    )
-    assert "unsupported_mime" in skip_rows[0]["summary"]
-    assert "image/png" in skip_rows[0]["summary"]
-    assert str(n) in skip_rows[0]["summary"]
 
 
 def test_backfill_drive_also_aggregates_skips_across_its_bounded_window(tmp_path):

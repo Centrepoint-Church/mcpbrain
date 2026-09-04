@@ -1646,7 +1646,8 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
     # 5. DELTA-SYNC — catch the gap. The fake Gmail service, reading the
     # RESTORED cursor "1000", returns ONE new message in a history page whose
     # historyId is "1042" (after the snapshot point). run_sync_cycle reuses the
-    # real sync path (sync_gmail + index_pending).
+    # real sync path (discover_gmail + work_queue/handle_gmail_item +
+    # index_pending).
     new_msg = _plain_msg(
         "m-new",
         "Post-snapshot roster",
@@ -1680,7 +1681,8 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
         f"called {fake_gmail.get_profile_calls} time(s)"
     )
 
-    assert res["gmail"] == 1, f"expected 1 new message synced, got {res['gmail']}"
+    assert res["discovered"]["gmail"] == 1, (
+        f"expected 1 new message discovered, got {res['discovered']}")
     assert res["embedded"] >= 1, "the new message's chunk should have been embedded"
 
     # The new message's chunk is now indexed and searchable.

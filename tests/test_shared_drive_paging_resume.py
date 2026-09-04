@@ -1,25 +1,23 @@
-"""A budget-truncated Drive round must resume its PAGING, not restart it.
+"""A budget-truncated shared-drive round must resume its PAGING, not restart it.
 
-Live livelock (found 2026-09-02, author's store): the `drive` cursor had not
-advanced since 2026-07-29 -- five weeks. The changes() backlog was longer than
-one CYCLE_BUDGET_S (60s) could page through, and the cursor advances only when
-a round finishes uninterrupted:
+Split out of the deleted `test_drive_paging_resume.py` (2026-09-04 sync-queue
+Task 9): that file's `sync_drive`/My-Drive tests were superseded by
+`test_drive_discovery.py` once `discover_drive`/`handle_drive_item` replaced
+`sync_drive` -- but `sync_shared_drive` was deliberately NOT migrated (no
+`discover_shared_drive`/`handle_shared_drive_item` exists; see
+`sync_shared_drive`'s own docstring in `mcpbrain/sync/drive.py`), so it still
+needs this same per-round paging-resume guarantee, and nothing else in the
+suite exercises it. Deleting this coverage alongside the My-Drive tests would
+have silently dropped it.
 
-    if new_start and not interrupted and pending_keys <= resumed_ids:
-
-`newStartPageToken` is returned only on the feed's LAST page, so a round that
-never reaches it has new_start=None AND interrupted=True -- two independent
-reasons the cursor cannot move. Every cycle re-walked the same ~5,000-change
-prefix and threw it away: ~25% of a core burned continuously, and no Drive
-change ingested for five weeks.
-
-The write loop already guarantees forward progress ("Guaranteeing one item per
-call is what makes the round monotonic and the livelock impossible"). The
-PAGING loop had no such guarantee. These tests pin it.
+Live livelock this guards against (found 2026-09-02, author's store): a
+changes() backlog longer than one budget's worth of pages meant the cursor
+never advanced -- `newStartPageToken` is only returned on the feed's LAST
+page, so a round that never reaches it can never move the real cursor.
 """
 from mcpbrain.org_contracts import FleetPin
 from mcpbrain.store import Store
-from mcpbrain.sync.drive import sync_drive, sync_shared_drive
+from mcpbrain.sync.drive import sync_shared_drive
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
 PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
@@ -93,27 +91,6 @@ def _store(tmp_path, name="d.sqlite3"):
     return s
 
 
-def test_my_drive_paging_converges_across_budgeted_rounds(tmp_path):
-    s, svc = _store(tmp_path), _Service()
-    s.set_cursor("drive", "1")
-    # One page per round -- the live shape, where the feed outruns the budget.
-    for _ in range(PAGES + 2):
-        sync_drive(svc, s, budget=_OneShotBudget(1))
-    assert s.get_cursor("drive") == "DONE", (
-        f"cursor stuck at {s.get_cursor('drive')!r}; "
-        f"pages fetched: {svc.pages_fetched}")
-
-
-def test_my_drive_does_not_refetch_page_one_every_round(tmp_path):
-    """The livelock's signature: page 1 walked over and over."""
-    s, svc = _store(tmp_path), _Service()
-    s.set_cursor("drive", "1")
-    for _ in range(4):
-        sync_drive(svc, s, budget=_OneShotBudget(1))
-    assert svc.pages_fetched.count("1") == 1, \
-        f"page 1 re-walked {svc.pages_fetched.count('1')}x: {svc.pages_fetched}"
-
-
 def test_shared_drive_paging_converges(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     svc = _Service()
@@ -139,13 +116,3 @@ def test_shared_drive_processes_a_partially_paged_round(tmp_path):
                       budget=_OneShotBudget(1))
     assert (s.get_cursor("drive:D1:page_token") or "") != "", \
         "an interrupted round left no paging progress"
-
-
-def test_completed_round_clears_paging_state(tmp_path):
-    """A finished round leaves no resume crumbs to confuse the next one."""
-    s, svc = _store(tmp_path), _Service()
-    s.set_cursor("drive", "1")
-    for _ in range(PAGES + 2):
-        sync_drive(svc, s, budget=_OneShotBudget(1))
-    assert s.get_cursor("drive") == "DONE"
-    assert (s.get_cursor("drive:page_token") or "") == ""

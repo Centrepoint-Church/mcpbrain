@@ -184,7 +184,10 @@ def test_attended_edge_attaches_to_the_owners_real_node_id(tmp_path):
     assert [r["entity_a"] for r in rows] == ["j-kemp-from-email"]
 
 
-def test_sync_calendar_applies_attendees_to_graph(tmp_path, monkeypatch):
+def test_handle_calendar_item_applies_attendees_to_graph(tmp_path, monkeypatch):
+    """Working a queued calendar event (via discover_calendar + handle_calendar_item,
+    the discover/work split that replaced sync_calendar) still writes the chunk
+    AND applies attendees to the graph."""
     import mcpbrain.sync.calendar as calmod
     from tests.test_calendar_sync import FakeCalService, _event as _sync_event, _resp
 
@@ -195,10 +198,14 @@ def test_sync_calendar_applies_attendees_to_graph(tmp_path, monkeypatch):
     ev = _sync_event("evtX", "Project sync", attendees=[
         {"displayName": "Sam Chen", "email": "sam@partner.org"},
     ])
-    svc = FakeCalService(on_full=_resp([ev], next_sync_token="tok1"))
+    svc = FakeCalService(on_full=_resp([ev], next_sync_token="tok1"),
+                         by_id={"evtX": ev})
 
-    result = calmod.sync_calendar(svc, s)
-    assert result == 1
+    n = calmod.discover_calendar(svc, s)
+    assert n == 1
+    row = s.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    calmod.handle_calendar_item(svc, s, row)
+
     # Chunk still written (unchanged behaviour) ...
     assert s.get_chunk("cal-evtX") is not None
     # ... AND the attendee is now in the graph.
