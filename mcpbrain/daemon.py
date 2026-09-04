@@ -113,6 +113,13 @@ REEXTRACT_CAP = 50
 # run_one(), and an unbounded cycle starved them for four days (2026-07-23..27).
 CYCLE_BUDGET_S = 60.0
 
+# Discovery's slice of CYCLE_BUDGET_S. Discovery only LISTS (no fetch), so it
+# is cheap and normally finishes well inside this; the slice exists so a large
+# work queue can never starve discovery of new changes. Unlike the budgets this
+# design replaces, it is a fairness knob, not a correctness mechanism -- a
+# cutoff on either side of it now costs nothing.
+DISCOVERY_BUDGET_S = 15.0
+
 # Separate, independent wall-clock slice for drain_captures — the ONLY
 # consumer of the MCP write-tool spool (brain_note/brain_decision/
 # brain_memory_write/brain_action_create). It must NOT share CYCLE_BUDGET_S:

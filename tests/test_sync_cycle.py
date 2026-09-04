@@ -47,17 +47,30 @@ class _DriveChanges:
 
 
 class _DriveFiles:
-    def __init__(self, exports=None):
+    def __init__(self, exports=None, file_meta=None):
         self._exports = exports or {}
+        self._file_meta = file_meta or {}
 
     def export(self, fileId, mimeType, **_kw):
         return _DriveReq(self._exports.get(fileId, b""))
+
+    def get(self, fileId, fields=None, supportsAllDrives=None):
+        # handle_drive_item re-fetches current metadata by id (discovery only
+        # carries the minimal changes-page fields); the fake serves back
+        # whatever "file" dict the changes pages advertised for this id.
+        return _DriveReq(self._file_meta.get(fileId, {"id": fileId}))
 
 
 class FakeDriveService:
     def __init__(self, pages, exports, initial_cursor="100"):
         self._changes = _DriveChanges(pages, initial_cursor)
-        self._files = _DriveFiles(exports)
+        file_meta = {}
+        for page in pages:
+            for ch in page.get("changes", []):
+                f = ch.get("file")
+                if f and f.get("id"):
+                    file_meta[f["id"]] = f
+        self._files = _DriveFiles(exports, file_meta)
 
     def changes(self):
         return self._changes
@@ -221,7 +234,7 @@ def test_sync_cycle_makes_gmail_content_searchable(tmp_path, emb):
     res = run_sync_cycle(store, emb, gmail_service=fake)
 
     # Sync count
-    assert res["gmail"] == 1
+    assert res["discovered"]["gmail"] == 1
     # At least one chunk embedded
     assert res["embedded"] >= 1
 
@@ -242,9 +255,8 @@ def test_sync_cycle_skips_absent_sources(tmp_path, emb):
 
     # Live deltas all skipped; the backfill step adds a `backfill` sub-dict
     # whose source counts are zero because no services were provided.
-    assert res["gmail"] == 0
-    assert res["calendar"] == 0
-    assert res["drive"] == 0
+    assert res["discovered"] == {}
+    assert res["worked"] == {"processed": 0, "failed": 0}
     assert res["embedded"] == 0
     assert res["backfill"]["gmail"] == 0
     assert res["backfill"]["drive"] == 0
@@ -324,8 +336,10 @@ def test_sync_cycle_multi_source_accumulates_and_no_double_embed(tmp_path, emb):
     # First cycle: both sources sync and embed.
     res = run_sync_cycle(store, emb, gmail_service=fake_gmail, drive_service=fake_drive)
 
-    assert res["gmail"] == 1, f"Expected 1 Gmail message synced, got {res['gmail']}"
-    assert res["drive"] == 1, f"Expected 1 Drive file synced, got {res['drive']}"
+    assert res["discovered"]["gmail"] == 1, (
+        f"Expected 1 Gmail message discovered, got {res['discovered'].get('gmail')}")
+    assert res["discovered"]["drive"] == 1, (
+        f"Expected 1 Drive file discovered, got {res['discovered'].get('drive')}")
 
     # All chunks must be embedded and the total must match the embedded counter.
     assert store.unembedded_chunks() == [], "Expected all chunks embedded after first cycle"
@@ -370,7 +384,7 @@ def test_sync_cycle_multi_source_accumulates_and_no_double_embed(tmp_path, emb):
 
 
 def test_drive_failure_does_not_abort_cycle(monkeypatch, tmp_path, emb):
-    """A raising My-Drive sync must be logged and skipped; the cycle completes.
+    """A raising Drive discovery must be logged and skipped; the cycle completes.
 
     Note: this file has no fixtures literally named `tmp_store`/`fake_embedder`;
     it uses `tmp_path` (build a Store) and the module-scoped `emb` embedder
@@ -384,10 +398,16 @@ def test_drive_failure_does_not_abort_cycle(monkeypatch, tmp_path, emb):
     def boom(*a, **k):
         raise RuntimeError("[SSL] record layer failure")
 
-    monkeypatch.setattr("mcpbrain.sync.drive.sync_drive", boom)
+    # Patched as an attribute of `mcpbrain.sync` (not `mcpbrain.sync.drive`):
+    # run_sync_cycle resolves `discover_drive` as a bare name through this
+    # module's own globals (it is imported at the top of
+    # mcpbrain/sync/__init__.py precisely so it CAN be monkeypatched this
+    # way) -- patching mcpbrain.sync.drive.discover_drive instead would leave
+    # the already-bound reference here untouched.
+    monkeypatch.setattr(sync, "discover_drive", boom)
 
     result = sync.run_sync_cycle(store, emb, drive_service=object(), home=None)
-    assert result["drive"] == 0  # skipped, not crashed
+    assert result["discovered"].get("drive", 0) == 0  # skipped, not crashed
 
 
 def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
@@ -704,7 +724,7 @@ def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(t
     # The cycle returned normally — no exception propagated out of run_sync_cycle —
     # and the work that ran before AND after the failed shared-drive block
     # (gmail sync/embed, the My-Drive progressive-backfill step) completed.
-    assert res["gmail"] == 1
+    assert res["discovered"]["gmail"] == 1
     assert res["embedded"] >= 1
     assert "backfill" in res
     # The shared-drive block's own keys were never populated (it failed before
@@ -960,3 +980,28 @@ def test_publish_drive_misses_lists_cache_folder_once_not_once_per_file(tmp_path
     names = {p.rsplit("/", 1)[-1] for p in real_fs.list_paths(ingest_cache.CACHE_DIR + "/")}
     for fid in file_ids:
         assert any(n.startswith(f"{fid}.") for n in names), f"missing artifact for {fid}"
+
+
+def test_cycle_discovers_then_works(tmp_path, monkeypatch):
+    """run_sync_cycle must run discovery first, then drain the queue."""
+    from mcpbrain import sync as sync_mod
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "c.sqlite3", dim=4)
+    s.init()
+    order = []
+
+    def fake_discover(service, store, source="drive", *, budget=None):
+        order.append("discover")
+        store.enqueue_and_advance(
+            [{"ref_id": "f1", "version": "1", "event": "upsert",
+              "modified_at": "2026-09-04T00:00:00"}], source="drive", cursor="2")
+        return 1
+
+    monkeypatch.setattr(sync_mod, "discover_drive", fake_discover)
+    monkeypatch.setattr(sync_mod, "handle_drive_item",
+                        lambda *a, **k: order.append("work"))
+    out = sync_mod.run_sync_cycle(s, embedder=None, drive_service=object(),
+                                  home=str(tmp_path))
+    assert order == ["discover", "work"]
+    assert out["worked"]["processed"] == 1
+    assert s.sync_queue_pending() == 0

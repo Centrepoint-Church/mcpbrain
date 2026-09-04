@@ -1,6 +1,17 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
+# Module-level (not lazy-inside-the-function) so tests can monkeypatch these
+# as attributes of THIS module (mcpbrain.sync) -- e.g.
+# monkeypatch.setattr(sync_mod, "discover_drive", fake) -- and have
+# run_sync_cycle's bare-name calls resolve the patched version through this
+# module's own __dict__ at call time. A lazy `from mcpbrain.sync.drive import
+# discover_drive` inside the function body would instead re-fetch the
+# unpatched original from mcpbrain.sync.drive every call.
+from mcpbrain.sync.calendar import discover_calendar, handle_calendar_item
+from mcpbrain.sync.drive import discover_drive, handle_drive_item
+from mcpbrain.sync.gmail import discover_gmail, handle_gmail_item
+
 log = logging.getLogger(__name__)
 
 
@@ -25,13 +36,20 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                    bulk_section=None) -> dict:
     """Run a sync+embed cycle over whichever services are provided.
 
-    For each provided service: run its source delta-sync, then index_pending
-    so the new chunks are embedded immediately. After the live deltas, run
-    one progressive-backfill step that walks one historical window per source
+    Discovery/work split (Task 8): for each provided service, `discover_*`
+    lists that source's changes and enqueues them (cheap, list-only, bounded
+    by its own small `DISCOVERY_BUDGET_S` slice); ONE shared `work_queue` call
+    then drains up to `config.sync_work_limit(home)` due items across every
+    source via `handle_*_item`, and index_pending embeds whatever it wrote.
+    Splitting listing from fetching is what makes a budget cutoff free: a
+    round that could not finish still leaves durable, resumable rows in
+    `sync_queue` rather than losing or repeating work. After that, run one
+    progressive-backfill step that walks one historical window per source
     (newest-to-oldest) so the corpus eventually contains everything. Live
-    delta-sync runs FIRST every cycle so anything new always reaches the store
-    before older history is processed. Returns counts: per-source items
-    synced, backfill counts, and total chunks embedded this cycle.
+    discovery+work runs FIRST every cycle so anything new always reaches the
+    store before older history is processed. Returns `"discovered"`
+    (per-source enqueued counts), `"worked"` (`{"processed", "failed"}` from
+    `work_queue`), backfill counts, and total chunks embedded this cycle.
 
     When `drive_service` and `home` are both given AND `config.ingest_cache_enabled(home)`
     AND `config.fleet_pin(home).is_pinned`, also runs the Shared Drive ingest-cache
@@ -60,21 +78,24 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     predicate-driven, so nothing is lost).
 
     `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
-    default `contextlib.nullcontext`) is threaded into `sync_gmail`/
-    `sync_calendar`/`sync_drive`/`sync_shared_drives`/`index_pending`, each of
-    which brackets its OWN small units of work (one message/event/file/embed-
-    batch) with it, rather than this function holding one `_bulk_lock` for its
-    entire body. A soak test showed the latter shape (one lock hold per whole
-    call, even budget-bounded) still starves the maintenance thread's 5s
-    acquire almost every time on a sustained backlog; per-item sections give
-    it a real chance throughout the cycle instead of once.
+    default `contextlib.nullcontext`) is threaded into `discover_calendar`
+    (its window-hygiene eviction), each `handle_*_item` call (via the
+    `handlers` closures below), `sync_shared_drives`, and `index_pending`,
+    each of which brackets its OWN small units of work (one message/event/
+    file/embed-batch) with it, rather than this function holding one
+    `_bulk_lock` for its entire body. A soak test showed the latter shape (one
+    lock hold per whole call, even budget-bounded) still starves the
+    maintenance thread's 5s acquire almost every time on a sustained backlog;
+    per-item sections give it a real chance throughout the cycle instead of
+    once.
     """
+    from mcpbrain import config
+    from mcpbrain.budget import Budget
+    from mcpbrain.daemon import DISCOVERY_BUDGET_S
     from mcpbrain.index import index_pending
-    from mcpbrain.sync.gmail import sync_gmail
-    from mcpbrain.sync.calendar import sync_calendar
-    from mcpbrain.sync.drive import sync_drive
+    from mcpbrain.sync.queue import work_queue
 
-    result = {"gmail": 0, "calendar": 0, "drive": 0, "embedded": 0}
+    result = {"embedded": 0}
 
     def _embed() -> None:
         """One bounded embed pass, accumulating count AND the cap signal.
@@ -91,30 +112,62 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         if st.get("capped"):
             result["embed_capped"] = True
 
+    # Discovery only LISTS (no fetch/extract/upsert), so it is cheap and
+    # bounded by its own small DISCOVERY_BUDGET_S slice (a fairness knob, not
+    # a correctness mechanism -- see that constant's docstring) rather than
+    # the cycle's own `budget`, so a large work queue can never starve
+    # discovery of new changes. Drive discovery keeps the SAME try/except
+    # protection sync_drive used to have here — a live Drive/TLS SSL failure
+    # observed in production must not abort the work loop below or the
+    # shared-drive/backfill steps that follow; gmail/calendar discovery are
+    # deliberately NOT wrapped, matching that same pre-existing precedent
+    # (only Drive ever needed it).
+    discovered = {}
+    disc_budget = Budget(DISCOVERY_BUDGET_S)
     if gmail_service is not None:
-        result["gmail"] = sync_gmail(gmail_service, store, budget=budget,
-                                     bulk_section=bulk_section)
-        _embed()
-        if budget is not None and budget.expired():
-            result["budget_spent"] = True
-            return result
+        discovered["gmail"] = discover_gmail(gmail_service, store, budget=disc_budget)
     if calendar_service is not None:
-        result["calendar"] = sync_calendar(calendar_service, store, budget=budget,
-                                           bulk_section=bulk_section)
-        _embed()
-        if budget is not None and budget.expired():
-            result["budget_spent"] = True
-            return result
+        discovered["calendar"] = discover_calendar(calendar_service, store,
+                                                   budget=disc_budget,
+                                                   bulk_section=bulk_section)
     if drive_service is not None:
         try:
-            result["drive"] = sync_drive(drive_service, store, budget=budget,
-                                         bulk_section=bulk_section)
-            _embed()
+            discovered["drive"] = discover_drive(drive_service, store, budget=disc_budget)
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
-            log.warning("sync: My-Drive sync failed (cycle continues, retries next cycle): %s", exc)
-        if budget is not None and budget.expired():
-            result["budget_spent"] = True
-            return result
+            log.warning("sync: Drive discovery failed (cycle continues, retries next cycle): %s", exc)
+    result["discovered"] = discovered
+
+    # folder_cache and fetch_attachments are hoisted ONCE per cycle and closed
+    # over below -- NOT rebuilt per item. folder_path's own docstring says its
+    # cache is "owned by the CALLER for a whole sync round" (5,000 files in 40
+    # folders costs 40 lookups, not 5,000); gmail's fetch_attachments flag has
+    # the identical per-call-config-read cost the 0.7.105 fix removed
+    # elsewhere. Building either fresh inside the lambda would silently defeat
+    # them -- a lambda called once per item would rebuild the "cache" on every
+    # call.
+    folder_cache: dict = {}
+    fetch_attachments = config.gmail_attachments(home) if home else False
+
+    handlers = {}
+    if drive_service is not None:
+        handlers["drive"] = lambda it: handle_drive_item(
+            drive_service, store, it, folder_cache=folder_cache,
+            bulk_section=bulk_section)
+    if gmail_service is not None:
+        handlers["gmail"] = lambda it: handle_gmail_item(
+            gmail_service, store, it, fetch_attachments=fetch_attachments,
+            bulk_section=bulk_section)
+    if calendar_service is not None:
+        handlers["calendar"] = lambda it: handle_calendar_item(
+            calendar_service, store, it, bulk_section=bulk_section)
+    result["worked"] = work_queue(
+        store, handlers=handlers,
+        limit=config.sync_work_limit(home) if home else 50,
+        budget=budget)
+    _embed()
+    if budget is not None and budget.expired():
+        result["budget_spent"] = True
+        return result
 
     # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
     # to read config from, the cache enabled, and a fleet pin present. Without a
