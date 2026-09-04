@@ -308,6 +308,15 @@ def _chunked(seq, size):
 _BEGIN_RETRIES = 3
 _BEGIN_BASE_SLEEP_S = 0.05
 
+# Retry backoff for sync_queue, in seconds by attempt number. The last value is
+# the cap and repeats forever: nothing is ever abandoned, so a permanently
+# broken file settles at one retry per day -- bounded cost, permanently visible
+# (doctor surfaces attempts >= 3). This closes sync/drive.py's KNOWN GAP, where
+# a transient export failure silently dropped a file version because the cursor
+# moved past it.
+_SYNC_BACKOFF_S = (120, 600, 3600, 21600, 86400)
+_SYNC_FAILING_ATTEMPTS = 3
+
 # A smaller retry budget for writes that run inline on the /api/recall path
 # (currently decay.update_on_recall -> update_memory_strength_batch). update_on_recall
 # is fire-and-forget (its caller already swallows exceptions), so failing fast
@@ -2876,6 +2885,57 @@ class Store:
                 "FROM sync_queue "
                 "WHERE next_attempt_at IS NULL OR next_attempt_at <= ? "
                 "ORDER BY modified_at DESC LIMIT ?", (now, limit)).fetchall()]
+
+    def complete_sync_item(self, source: str, ref_id: str) -> None:
+        """Delete the queue row, marking the item done.
+
+        Delivery is AT-LEAST-ONCE, not exactly-once: a crash between the
+        handler's chunk write and this call leaves the row queued, so the item
+        is re-worked next cycle. That is safe because the handlers are
+        idempotent -- upsert_file_chunks keys on positional gdrive-<fid>-<i>
+        doc_ids and reconciles orphans, so re-working converges on the same
+        state. The crash window resume_ids papered over still exists; it is now
+        harmless rather than lossy.
+        """
+        with self._connect(write=True) as db:
+            db.execute("DELETE FROM sync_queue WHERE source=? AND ref_id=?",
+                       (source, ref_id))
+
+    def fail_sync_item(self, source: str, ref_id: str, error: str, *,
+                       now: str) -> int:
+        """Record a failed attempt and schedule the next one. Returns attempts.
+
+        The row is never deleted: retry-forever with a capped backoff. Safe only
+        because due_sync_items filters on next_attempt_at, so this row cannot
+        block the queue behind it.
+        """
+        with self._connect(write=True) as db:
+            row = db.execute("SELECT attempts FROM sync_queue "
+                             "WHERE source=? AND ref_id=?",
+                             (source, ref_id)).fetchone()
+            if row is None:
+                return 0
+            attempts = int(row["attempts"]) + 1
+            delay = _SYNC_BACKOFF_S[min(attempts, len(_SYNC_BACKOFF_S)) - 1]
+            nxt = (datetime.fromisoformat(now) + timedelta(seconds=delay)).isoformat()
+            db.execute("UPDATE sync_queue SET attempts=?, next_attempt_at=?, "
+                       "last_error=? WHERE source=? AND ref_id=?",
+                       (attempts, nxt, str(error)[:200], source, ref_id))
+        return attempts
+
+    def sync_queue_stats(self) -> dict:
+        """Backlog as a fact, for doctor. `failing` is advisory, not terminal --
+        those rows are still retrying."""
+        with self._connect() as db:
+            pending = db.execute("SELECT count(*) FROM sync_queue").fetchone()[0]
+            oldest = db.execute(
+                "SELECT min(discovered_at) FROM sync_queue").fetchone()[0]
+            failing = [dict(r) for r in db.execute(
+                "SELECT source, ref_id, attempts, last_error FROM sync_queue "
+                "WHERE attempts >= ? ORDER BY attempts DESC LIMIT 5",
+                (_SYNC_FAILING_ATTEMPTS,)).fetchall()]
+        return {"pending": pending, "oldest_discovered_at": oldest,
+                "failing": failing}
 
     # --- generic meta accessors -------------------------------------------
 
