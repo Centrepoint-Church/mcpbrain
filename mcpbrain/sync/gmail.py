@@ -303,12 +303,20 @@ def discover_gmail(service, store, source: str = "gmail", *, budget=None) -> int
             resp = service.users().history().list(
                 **kwargs).execute(num_retries=_NUM_RETRIES)
         except HttpError as e:
-            if getattr(e, "resp", None) is not None and e.resp.status in (404, 410):
+            status = getattr(e, "resp", None) and e.resp.status
+            if status in (404, 410):
                 # historyId too old: reset to head and let backfill cover the gap.
                 hid = service.users().getProfile(
                     userId="me").execute(num_retries=_NUM_RETRIES)["historyId"]
                 store.set_cursor(source, str(hid))
                 return enqueued
+            if page_token is not None:
+                # A resumed page's pageToken itself went stale. The round's anchor
+                # (history_id) is still valid -- only persist THAT, discarding the
+                # broken resume position, so the next call restarts the round
+                # cleanly from page 1 instead of retrying the same dead pageToken
+                # forever (a bounded re-list, never data loss).
+                store.set_cursor(source, str(history_id))
             raise
 
         latest = resp.get("historyId", history_id)
