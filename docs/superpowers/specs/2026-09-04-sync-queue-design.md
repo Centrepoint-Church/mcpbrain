@@ -85,10 +85,17 @@ durable SQLite queue between them.
 through MCP tools. Sync's consumer is the daemon itself, in-process, so the constraint
 is different and two properties decide it:
 
-- **Atomicity.** The queue row and the chunk write commit in **one transaction**, so
-  "these chunks exist" and "this item is done" are a single fact. That removes by
-  construction the crash-between-write-and-checkpoint window that `resume_ids` exists to
-  paper over.
+- **At-least-once delivery over idempotent writes.** A crash between the chunk write and
+  the row deletion leaves the item queued, so it is simply re-worked;
+  `upsert_file_chunks` is idempotent (positional `gdrive-<fid>-<i>` doc_ids plus orphan
+  reconciliation), so re-working converges on the same state. This is what removes the
+  crash-between-write-and-checkpoint window `resume_ids` exists to paper over — the
+  window still exists, but it is now harmless instead of lossy.
+  *(Correction: an earlier draft of this spec claimed the row deletion and the chunk
+  write commit in ONE transaction. They do not — the handler opens its own transaction
+  via `upsert_file_chunks`, and threading a single connection through every per-source
+  extract path would be invasive for no gain. Idempotency, not atomicity, is what makes
+  this safe. The discovery side IS genuinely transactional; see `enqueue_and_advance`.)*
 - **Consistent restore.** Backup/restore takes the SQLite file. Queue, cursors and
   chunks come back at the same point in time. This matters more than usual because the
   cursor now advances at *discovery* time, ahead of the work — see Risks.
@@ -165,7 +172,7 @@ work_queue(store, services, *, limit, budget):
             break                      # free: the row is still queued
         try:
             handle(item)               # per-source fetch → extract → chunks
-            store.complete_sync_item(item)   # SAME transaction as the chunk write
+            store.complete_sync_item(item)   # at-least-once; handler is idempotent
         except Exception as exc:
             store.fail_sync_item(item, exc)
 ```
@@ -286,8 +293,8 @@ oldest-`discovered_at` line rather than mitigated by a reserve quota.
   against an **already-initialised** store. This is the 0.7.105 + `test_metadata_jsonb`
   lesson: every prior index test built a *fresh* store, where DDL and query text
   necessarily agree, so none could catch drift on an existing store.
-- **Atomicity:** fail between the chunk write and completion; assert the item is still
-  queued and no chunks are orphaned.
+- **At-least-once:** fail between the chunk write and completion; assert the item is
+  still queued, and that re-working it converges (no duplicate or orphaned chunks).
 - The 0.7.123 livelock tests (`tests/test_drive_paging_resume.py`) are rewritten against
   the new shape; they should pass by construction.
 - **Live validation** against the real feed in a throwaway store: discovery reaches the
