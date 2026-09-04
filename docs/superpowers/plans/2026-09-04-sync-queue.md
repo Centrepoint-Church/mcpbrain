@@ -1060,29 +1060,51 @@ Add `_utc_now_iso()` to `gmail.py` if absent (same body as Task 5).
 Reuse the existing per-message fetch/normalise/upsert code that `sync_gmail` used, extracted verbatim into:
 
 ```python
-def handle_gmail_item(service, store, item, *, bulk_section=None) -> None:
+def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
+                      bulk_section=None) -> None:
     """Work one queued Gmail message. Raises on failure so the loop backs off.
+
+    Copied from the real per-message body of the current sync_gmail (its
+    `for mid in new_message_ids:` loop) -- verbatim, not invented: normalise_gmail
+    takes a `report` dict and writes chunk-by-chunk via store.upsert_chunk
+    (singular), and attachments are a SEPARATE fetch (attachments.fetch_and_normalise)
+    hoisted OUTSIDE bulk_section because it is network I/O, not a store write.
 
     A 404 means the message was deleted between discovery and now: that is
     DONE, not a failure -- returning (rather than raising) deletes the row.
+
+    `fetch_attachments` must be read ONCE (config.gmail_attachments(home)) and
+    passed in by the Task 8 wiring, not re-read per call -- config.read_config
+    does an uncached exists()+read_text()+json.loads() per call, and paying
+    that once per message is the exact overhead class the 0.7.105 fix removed
+    from metadata queries.
     """
     from contextlib import nullcontext
+    from mcpbrain.sync import attachments
     bulk_section = bulk_section or nullcontext
     try:
-        msg = service.users().messages().get(
+        raw = service.users().messages().get(
             userId="me", id=item["ref_id"], format="full").execute(
                 num_retries=_NUM_RETRIES)
     except HttpError as e:
         if getattr(e, "resp", None) is not None and e.resp.status == 404:
             return
         raise
+    skips: dict = {}
+    att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
+                  if fetch_attachments else [])
     with bulk_section():
-        chunks = normalise_gmail(msg)
-        if chunks:
-            store.upsert_chunks(chunks)
+        for chunk in normalise_gmail(raw, report=skips):
+            store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                               chunk.metadata)
+        for chunk in att_chunks:
+            store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                               chunk.metadata)
 ```
 
-Check the exact normalise/upsert calls the current `sync_gmail` body makes and copy them verbatim — do not invent names. Read `mcpbrain/sync/gmail.py` lines 170-260 first.
+This is copied from `mcpbrain/sync/gmail.py`'s current per-message loop (~line 190-225)
+— read it first and confirm the signatures match before writing; the current file is
+the source of truth if it has since changed.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -1100,27 +1122,57 @@ git commit -m "feat(sync): Gmail discovery enqueues and advances per page"
 ### Task 7: Calendar discovery
 
 **Files:**
-- Modify: `mcpbrain/sync/calendar.py` — replace `sync_calendar`'s body (~line 375+)
+- Modify: `mcpbrain/sync/calendar.py` — replace `sync_calendar`'s body (~line 375-479)
 - Test: `tests/test_calendar_discovery.py` (create)
 
 **Interfaces:**
 - Consumes: `Store.enqueue_and_advance`.
 - Produces:
-  - `discover_calendar(service, store, source="calendar", *, budget=None) -> int`
-  - `handle_calendar_item(service, store, item, *, bulk_section=None) -> None`
+  - `discover_calendar(service, store, source="calendar", calendar_id="primary", time_min=None, time_max=None, *, budget=None, bulk_section=None) -> int`
+  - `handle_calendar_item(service, store, item, *, calendar_id="primary", bulk_section=None) -> None`
 
-Calendar pages with `pageToken` and returns `nextSyncToken` on the final page — structurally identical to Drive, so the same per-page advance applies. Events carry an `updated` field, used directly as `modified_at`.
+**Calendar is structurally different from Drive/Gmail — read this before writing code.**
+`calendar.py` already has a private helper, `_list_events(service, calendar_id,
+sync_token, time_min, time_max, *, budget=None) -> (items, next_sync, interrupted)`,
+that pages `events().list()` to completion (or budget expiry) ENTIRELY IN MEMORY — it
+performs no store writes. Reuse it; do not reimplement raw pagination. There is no
+separate bootstrap helper — `sync_calendar` calls `_list_events(..., None, ...)` for
+the initial full fetch and `_list_events(..., cursor, ...)` for a delta, in the same
+function.
+
+Because `_list_events` returns only once (after completion or interruption) rather than
+yielding per page, the per-page cursor-advance used in Tasks 5-6 does not map onto it
+without changing that helper's shape — out of scope for this task. Instead: **advance
+the cursor only when `_list_events` reports `interrupted=False`; enqueue whatever it
+returned regardless.** This is still strictly better than today (a full ROUND — listing
+AND writing AND graph updates — had to complete for the cursor to move; now only
+LISTING has to). If `_list_events` is interrupted, its rows are already durably
+enqueued and the next discovery call re-lists from the same `syncToken` — a wasted
+re-list, never a re-work. Given `DISCOVERY_BUDGET_S` (15s, listing-only) is generous
+relative to Calendar's historically small deltas (its own cursor advanced daily with no
+livelock reported), this is a deliberate, bounded trade — not a defect.
+
+**`delete_calendar_chunks_after(time_max)` moves into `discover_calendar`**, called
+once per discovery pass, still bracketed by `bulk_section()`. This is a chunk-mutating
+call, a deliberate exception to "discovery never touches chunks": it is idempotent
+window-hygiene (evicting recurring-event expansions past the forward horizon), not
+per-item extraction, and was already unconditional in the current code.
+
+**Event identity uses `ev.get("updated", "")` as `version`**, matching the existing
+`_event_resume_key(ev)` helper's id+`updated` composite — NOT `etag`. This is not a
+style choice: an adversarial review found a Critical bug from keying on bare id (a
+rescheduled event's old text survived a round close), and `updated` is the
+proven-correct field for that fix.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_calendar_discovery.py
-"""Calendar discovery: nextSyncToken arrives only on the last page, exactly the
-Drive shape, so it gets the same per-page cursor advance."""
+"""Calendar discovery reuses _list_events (which already pages to completion in
+memory) and advances the cursor only when it completes uninterrupted. Rows are
+enqueued regardless, so an interruption never loses work -- only re-lists."""
 from mcpbrain.store import Store
 from mcpbrain.sync.calendar import discover_calendar
-
-PAGES = 3
 
 
 class _Req:
@@ -1129,33 +1181,24 @@ class _Req:
 
 
 class _Events:
+    """One page of 3 events, syncToken on request."""
     def __init__(self, svc): self._svc = svc
 
     def list(self, **kw):
-        tok = kw.get("pageToken")
-        self._svc.pages.append(tok)
-        i = 1 if tok is None else int(tok)
-        body = {"items": [{"id": f"e{i}", "status": "confirmed",
-                           "updated": f"2026-09-0{i}T00:00:00Z"}]}
-        if i < PAGES:
-            body["nextPageToken"] = str(i + 1)
-        else:
-            body["nextSyncToken"] = "SYNCED"
-        return _Req(body)
+        self._svc.calls.append(kw.get("pageToken"))
+        return _Req({
+            "items": [
+                {"id": "e1", "status": "confirmed", "updated": "2026-09-01T00:00:00Z"},
+                {"id": "e2", "status": "confirmed", "updated": "2026-09-02T00:00:00Z"},
+                {"id": "e3", "status": "cancelled", "updated": "2026-09-03T00:00:00Z"},
+            ],
+            "nextSyncToken": "SYNCED",
+        })
 
 
 class _Service:
-    def __init__(self): self.pages = []
+    def __init__(self): self.calls = []
     def events(self): return _Events(self)
-
-
-class _OneShotBudget:
-    def __init__(self, allow=1): self._left = allow
-    def expired(self):
-        if self._left > 0:
-            self._left -= 1
-            return False
-        return True
 
 
 def _store(tmp_path):
@@ -1164,32 +1207,47 @@ def _store(tmp_path):
     return s
 
 
-def test_calendar_discovery_enqueues_and_does_not_rewalk(tmp_path):
+def test_calendar_discovery_enqueues_and_advances_when_uninterrupted(tmp_path):
     s, svc = _store(tmp_path), _Service()
     s.set_cursor("calendar", "TOK0")
-    for _ in range(PAGES + 1):
-        discover_calendar(svc, s, budget=_OneShotBudget(1))
-    assert s.sync_queue_pending("calendar") == PAGES
-    assert svc.pages.count(None) == 1, f"first page re-walked: {svc.pages}"
+    n = discover_calendar(svc, s)
+    assert n == 3
+    assert s.sync_queue_pending("calendar") == 3
     assert s.get_cursor("calendar") == "SYNCED"
 
 
 def test_cancelled_event_is_a_remove(tmp_path):
-    s = _store(tmp_path)
-
-    class _Cancelled(_Events):
-        def list(self, **kw):
-            return _Req({"items": [{"id": "e9", "status": "cancelled",
-                                    "updated": "2026-09-01T00:00:00Z"}],
-                         "nextSyncToken": "SYNCED"})
-
-    class _S(_Service):
-        def events(self): return _Cancelled(self)
-
+    s, svc = _store(tmp_path), _Service()
     s.set_cursor("calendar", "TOK0")
-    discover_calendar(_S(), s)
-    row = s.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
-    assert row["event"] == "remove" and row["ref_id"] == "e9"
+    discover_calendar(svc, s)
+    rows = {r["ref_id"]: r for r in s.due_sync_items(limit=10, now="2099-01-01T00:00:00")}
+    assert rows["e3"]["event"] == "remove"
+    assert rows["e1"]["event"] == "upsert"
+
+
+def test_version_is_the_updated_field_not_etag(tmp_path):
+    """The proven-correct dedup key from _event_resume_key: id + updated."""
+    s, svc = _store(tmp_path), _Service()
+    s.set_cursor("calendar", "TOK0")
+    discover_calendar(svc, s)
+    rows = {r["ref_id"]: r for r in s.due_sync_items(limit=10, now="2099-01-01T00:00:00")}
+    assert rows["e1"]["version"] == "2026-09-01T00:00:00Z"
+
+
+def test_interrupted_call_enqueues_but_does_not_advance_cursor(tmp_path, monkeypatch):
+    import mcpbrain.sync.calendar as cal
+    s, svc = _store(tmp_path), _Service()
+    s.set_cursor("calendar", "TOK0")
+
+    def fake_list_events(service, calendar_id, sync_token, time_min, time_max, *,
+                         budget=None):
+        return ([{"id": "e1", "status": "confirmed",
+                  "updated": "2026-09-01T00:00:00Z"}], None, True)
+
+    monkeypatch.setattr(cal, "_list_events", fake_list_events)
+    discover_calendar(svc, s)
+    assert s.sync_queue_pending("calendar") == 1, "interrupted call must still enqueue"
+    assert s.get_cursor("calendar") == "TOK0", "cursor must not advance when interrupted"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1197,58 +1255,104 @@ def test_cancelled_event_is_a_remove(tmp_path):
 Run: `uv run pytest tests/test_calendar_discovery.py -q`
 Expected: FAIL — `cannot import name 'discover_calendar'`
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement `discover_calendar`**
 
 ```python
-def discover_calendar(service, store, source: str = "calendar", *,
-                      budget=None) -> int:
-    """Page events().list, enqueue each event, advance the cursor per page.
+def discover_calendar(service, store, source: str = "calendar",
+                      calendar_id: str = "primary", time_min: str | None = None,
+                      time_max: str | None = None, *, budget=None,
+                      bulk_section=None) -> int:
+    """List calendar events via _list_events and enqueue them.
 
-    nextSyncToken arrives only on the final page -- the same shape that made
-    Drive livelock -- so mid-feed pages commit their rows against the CURRENT
-    cursor and only the last page advances it to the new sync token. Rows are
-    still durable per page, so a cutoff re-lists but never re-works.
+    _list_events already pages events().list() to completion (or budget
+    expiry) entirely in memory -- reused here rather than reimplemented.
+    Rows are enqueued whether or not the list completed; the cursor advances
+    to next_sync ONLY when it did (interrupted=False), because Google emits
+    nextSyncToken only on the final page. An interrupted call costs a re-list
+    next cycle, never a re-work -- what was enqueued here is already durable.
     """
+    from contextlib import nullcontext
+    bulk_section = bulk_section or nullcontext
     cursor = store.get_cursor(source)
-    if cursor is None:
-        return _bootstrap_calendar(service, store, source)   # existing helper
+    now = datetime.now(timezone.utc)
+    if time_min is None:
+        time_min = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if time_max is None:
+        time_max = (now + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    enqueued = 0
-    page_token = None
-    while True:
-        if budget is not None and budget.expired():
-            break
-        kwargs = {"calendarId": "primary", "syncToken": cursor,
-                  "showDeleted": True}
-        if page_token is not None:
-            kwargs["pageToken"] = page_token
-        resp = service.events().list(**kwargs).execute(num_retries=_NUM_RETRIES)
+    # Window-hygiene eviction: idempotent, not per-item, so it belongs in
+    # discovery even though it mutates chunks -- see the task docstring.
+    with bulk_section():
+        store.delete_calendar_chunks_after(time_max)
 
-        items = []
-        for ev in resp.get("items", []):
-            eid = ev.get("id")
-            if not eid:
-                continue
-            items.append({
-                "ref_id": eid,
-                "version": str(ev.get("etag", "")),
-                "event": "remove" if ev.get("status") == "cancelled" else "upsert",
-                "modified_at": ev.get("updated") or _utc_now_iso(),
-            })
+    try:
+        items, next_sync, interrupted = _list_events(
+            service, calendar_id, cursor, time_min, time_max, budget=budget)
+    except HttpError as e:
+        resp = getattr(e, "resp", None)
+        if resp is not None and resp.status == 410:
+            items, next_sync, interrupted = _list_events(
+                service, calendar_id, None, time_min, time_max, budget=budget)
+        else:
+            raise
 
-        nxt = resp.get("nextPageToken")
-        advance_to = cursor if nxt else (resp.get("nextSyncToken") or cursor)
-        store.enqueue_and_advance(items, source=source, cursor=advance_to)
-        enqueued += len(items)
-        if not nxt:
-            break
-        page_token = nxt
-    return enqueued
+    queue_items = []
+    for ev in items:
+        eid = ev.get("id")
+        if not eid:
+            continue
+        queue_items.append({
+            "ref_id": eid,
+            "version": ev.get("updated", ""),
+            "event": "remove" if ev.get("status") == "cancelled" else "upsert",
+            "modified_at": ev.get("updated") or _utc_now_iso(),
+        })
+
+    if next_sync and not interrupted:
+        store.enqueue_and_advance(queue_items, source=source, cursor=next_sync)
+    else:
+        # Enqueue without moving the cursor: durable partial progress, and the
+        # next call re-lists from the SAME cursor (cheap: listing only).
+        store.enqueue_and_advance(queue_items, source=source, cursor=cursor)
+    return len(queue_items)
 ```
 
-Read `mcpbrain/sync/calendar.py` first: use its ACTUAL bootstrap helper name and its actual `events().list` kwargs (calendar id may not be hard-coded to `"primary"`). Do not invent `_bootstrap_calendar` if the file names it differently.
+Add `_utc_now_iso()` to `calendar.py` if it lacks one (same body as Task 5).
 
-- [ ] **Step 4: Implement `handle_calendar_item`** by extracting the existing per-event normalise/upsert body from `sync_calendar` verbatim, in the same shape as Task 5's `handle_drive_item` (remove → `delete_calendar_chunks`/`delete_chunks`; upsert → fetch, normalise, upsert).
+- [ ] **Step 4: Implement `handle_calendar_item`**
+
+Extracted from the real per-event body of the current `sync_calendar` (its `for ev in
+items:` loop) — read that section (`mcpbrain/sync/calendar.py`, inside `sync_calendar`,
+after the resume-set setup) before writing this, and copy its calls verbatim:
+
+```python
+def handle_calendar_item(service, store, item, *, calendar_id: str = "primary",
+                         bulk_section=None) -> None:
+    """Work one queued calendar event. Raises on failure so the loop backs it off."""
+    from contextlib import nullcontext
+    bulk_section = bulk_section or nullcontext
+    if item["event"] == "remove":
+        with bulk_section():
+            store.delete_calendar_chunks_for_event(item["ref_id"])  # verify this
+        return                                                       # exact name
+    ev = service.events().get(calendarId=calendar_id,
+                              eventId=item["ref_id"]).execute(num_retries=_NUM_RETRIES)
+    owner = owner_identity_from_config()
+    with bulk_section():
+        for chunk in normalise_calendar(ev):
+            store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
+                               chunk.metadata)
+        _apply_attendees_to_graph(store, ev, owner)
+        _annotate_series_from_event(store, ev, owner)
+```
+
+Before writing `handle_calendar_item`'s removal branch, grep `calendar.py` and
+`store.py` for the actual function that deletes ONE event's chunks — the current
+`sync_calendar` handles removal only implicitly via `delete_calendar_chunks_after`'s
+window sweep, so there may be no existing per-event delete. If none exists, use
+`store.doc_ids_for_event(item["ref_id"])` (or the equivalent lookup — check
+`store.py` for what Drive's `doc_ids_for_file` mirrors for calendar) plus
+`store.delete_chunks(doc_ids)`, matching Task 5's Drive removal pattern.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -1258,10 +1362,8 @@ Expected: ALL PASS.
 ```bash
 uv run ruff check mcpbrain/
 git add mcpbrain/sync/calendar.py tests/test_calendar_discovery.py
-git commit -m "feat(sync): Calendar discovery enqueues and advances per page"
+git commit -m "feat(sync): Calendar discovery via _list_events, advancing on completion"
 ```
-
----
 
 ### Task 8: Wire discovery + work into the cycle
 
@@ -1361,13 +1463,26 @@ Replace the three `sync_*` call sites (lines 95, 102, 110) with discovery calls 
         discovered["drive"] = discover_drive(drive_service, store, budget=disc_budget)
     result["discovered"] = discovered
 
+    # folder_cache and fetch_attachments are hoisted ONCE per cycle and closed
+    # over below -- NOT rebuilt per item. folder_path's own docstring says its
+    # cache is "owned by the CALLER for a whole sync round" (5,000 files in 40
+    # folders costs 40 lookups, not 5,000); gmail's fetch_attachments flag has
+    # the identical per-call-config-read cost the 0.7.105 fix removed
+    # elsewhere. Building either fresh inside the lambda would silently defeat
+    # them -- a lambda called once per item would rebuild the "cache" on every
+    # call.
+    folder_cache: dict = {}
+    fetch_attachments = config.gmail_attachments(home) if home else False
+
     handlers = {}
     if drive_service is not None:
         handlers["drive"] = lambda it: handle_drive_item(
-            drive_service, store, it, bulk_section=bulk_section)
+            drive_service, store, it, folder_cache=folder_cache,
+            bulk_section=bulk_section)
     if gmail_service is not None:
         handlers["gmail"] = lambda it: handle_gmail_item(
-            gmail_service, store, it, bulk_section=bulk_section)
+            gmail_service, store, it, fetch_attachments=fetch_attachments,
+            bulk_section=bulk_section)
     if calendar_service is not None:
         handlers["calendar"] = lambda it: handle_calendar_item(
             calendar_service, store, it, bulk_section=bulk_section)
