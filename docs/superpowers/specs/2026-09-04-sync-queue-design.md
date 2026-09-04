@@ -264,6 +264,33 @@ walk the remaining ~37,000 changes and enqueue them within a few cycles — toda
 *work* that makes walking slow. Work then drains newest-first, so recent edits land
 almost immediately and the older tail fills in behind.
 
+## Scope correction (found during Task 9's review, 2026-09-04)
+
+**`sync_shared_drive` is NOT migrated by this design.** The Goals and Approach sections
+above discuss "Drive, Gmail, Calendar" as three sources without distinguishing My Drive
+from Shared Drives as separate code paths — an oversight caught only when Task 9's
+cursor-cleanup step traced a wildcard `DELETE` against the real cursor table and found it
+would also match shared-drive's still-live `drive:<driveId>:resume_ids`-shaped state.
+
+`sync_shared_drive` (`mcpbrain/sync/drive.py`) remains the OLD, batch-then-commit function,
+unreplaced by any `discover_*`/`handle_*_item` pair. It is not currently broken — it
+already carries its own 0.7.123-era fix (a `page_token`-equivalent resume mechanism, and
+the removal of `if not pagination_interrupted:`) — but it does not get this design's
+durable-queue properties: no `sync_queue` visibility, no capped-backoff retry, no
+`doctor` line, and it remains subject to the same class of bug this design otherwise
+retires, should a shared drive's delta ever again outgrow one cycle's discovery budget.
+
+This was never the source of the live incident this design investigates — the five-week
+`drive` outage showed **zero** shared-drive sync activity throughout. Migrating
+`sync_shared_drive` to `discover_shared_drive`/`handle_shared_drive_item` is legitimate,
+real follow-up work: the same shape as Tasks 5-7, plus threading `fleet_storage`/`pin`
+(shared-drive-specific arguments `sync_drive` doesn't take) through `enqueue_and_advance`'s
+`items` or a `source`-keyed lookup at work time. Not started here.
+
+Task 9's cursor cleanup was corrected to an exact-match allowlist of the five keys that
+are actually dead, rather than the suffix-wildcard pattern this section originally implied
+— see `store.py`'s `init()` and `tests/test_sync_queue_cleanup.py::test_init_spares_shared_drive_resume_state`.
+
 ## Risks
 
 **The cursor advances before the work is done.** If the queue were lost while the cursor
