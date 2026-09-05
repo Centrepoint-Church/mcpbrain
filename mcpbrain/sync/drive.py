@@ -679,6 +679,93 @@ def discover_drive(service, store, source: str = "drive", *, budget=None) -> int
     return enqueued
 
 
+def discover_shared_drive(service, store, drive_id: str, source: str, *,
+                          budget=None) -> int:
+    """Page ONE Shared Drive's changes().list() and enqueue. Identical
+    per-page cursor-advance invariant to discover_drive -- see that
+    function's docstring for the mechanism and why it closes the livelock.
+
+    `source` is the caller's `f"drive:{drive_id}"` cursor key -- passed in
+    rather than computed here so discover_shared_drives (the fleet-wide
+    caller) and any direct test both use the exact same key shape without
+    duplicating the f-string.
+    """
+    cursor = store.get_cursor(source)
+    if cursor is None:
+        tok = service.changes().getStartPageToken(
+            driveId=drive_id, supportsAllDrives=True).execute(
+            num_retries=_NUM_RETRIES)["startPageToken"]
+        store.set_cursor(source, str(tok))
+        return 0
+
+    enqueued = 0
+    page_token = cursor
+    while True:
+        if budget is not None and budget.expired():
+            break
+        resp = service.changes().list(
+            pageToken=page_token, driveId=drive_id,
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            includeRemoved=True, fields=_CHANGES_FIELDS,
+        ).execute(num_retries=_NUM_RETRIES)
+
+        items = []
+        for ch in resp.get("changes", []):
+            if ch.get("removed"):
+                fid = ch.get("fileId")
+                if fid:
+                    items.append({"ref_id": fid, "version": "", "event": "remove",
+                                  "modified_at": _utc_now_iso()})
+                continue
+            fmeta = ch.get("file") or {}
+            fid = fmeta.get("id")
+            if not fid:
+                continue
+            items.append({
+                "ref_id": fid,
+                "version": str(fmeta.get("version", "")),
+                "event": "upsert",
+                "modified_at": fmeta.get("modifiedTime") or _utc_now_iso(),
+            })
+
+        nxt = resp.get("nextPageToken")
+        advance_to = nxt or resp.get("newStartPageToken") or page_token
+        store.enqueue_and_advance(items, source=source, cursor=advance_to)
+        enqueued += len(items)
+        if not nxt:
+            break
+        page_token = nxt
+    return enqueued
+
+
+def discover_shared_drives(service, store, *, pin, budget=None) -> dict:
+    """Enumerate pinned Shared Drives and discover each. Per-drive failures
+    are isolated -- one broken drive must not abort the others, exactly as
+    today's sync_shared_drives.
+
+    Deliberately does not run note_drive_presence/revocation -- that stays
+    an unmigrated, per-cycle, full-enumeration concern (see this plan's
+    Global Constraints).
+    """
+    drives = list_shared_drives(service)
+    out = {}
+    for d in drives:
+        drive_id = d.get("id")
+        if not drive_id:
+            continue
+        source = f"drive:{drive_id}"
+        try:
+            out[drive_id] = discover_shared_drive(service, store, drive_id,
+                                                  source, budget=budget)
+        except Exception as exc:  # noqa: BLE001 — isolate one drive's failure
+            log.warning("shared-drive discovery failed for %s (skipped): %s",
+                       drive_id, exc)
+            continue
+        if budget is not None and budget.expired():
+            break
+    return out
+
+
 def handle_drive_item(service, store, item, *, folder_cache=None,
                       bulk_section=None, report=None) -> None:
     """Work one queued Drive item. Raises on failure so the loop backs it off."""
