@@ -410,12 +410,14 @@ def test_drive_failure_does_not_abort_cycle(monkeypatch, tmp_path, emb):
     assert result["discovered"].get("drive", 0) == 0  # skipped, not crashed
 
 
-def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
+def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path, monkeypatch):
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
     from mcpbrain import ingest_cache
+    from mcpbrain import fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _Emb:
         dim = 4
@@ -432,39 +434,40 @@ def test_run_sync_cycle_shared_drive_publishes_after_embed(tmp_path):
     store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
     store.set_cursor("drive:D1", "100")
 
-    # Route DriveFleetStorage at a local dir by monkeypatching the factory hook.
-    from mcpbrain.sync import drive as drivemod
-    from tests.helpers.org_fleet import LocalDirFleetStorage
+    # Route the ingest-cache storage the new discover/work/publish path builds
+    # (via cache_storage_factory) at a local dir instead of a real Drive-backed
+    # DriveFleetStorage -- the FakeDriveService below doesn't implement enough
+    # of the Drive API (no files().create()) for a real publish to succeed.
     fsmap = {}
-    orig = drivemod.sync_shared_drives
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig(service, s, pin=pin,
-                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-                    absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval, **kw)
-    drivemod.sync_shared_drives = _patched
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}],
-            initial_cursor="100",
-            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-            exports={"FID": b"shared drive body content"})
-        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
-    assert res["shared_drives"]["D1"] == 1
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"shared drive body content"})
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+
+    assert res["discovered"]["drive:D1"] == 1
+    assert res["shared_drives_published"]["D1"] == 1
     # the miss was published after embedding: an artifact now exists for FID
     names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
     assert any(n.rsplit("/", 1)[-1].startswith("FID.") for n in names)
 
 
 def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
+    """The REAL cache_storage_factory (unmocked) must be handed each
+    discovered drive id -- captured via a spy wrapper around it, since the
+    new discover/work/publish split builds `drives_fs` internally to
+    run_sync_cycle rather than passing a storage_factory into a single
+    orchestrator call the test can intercept."""
     from mcpbrain import config, org_defaults
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
-    from mcpbrain.sync import drive as drivemod
+    import mcpbrain.sync as syncmod
+    from mcpbrain import fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService
 
     class _Emb:
@@ -482,34 +485,48 @@ def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
     store = Store(tmp_path / "b.sqlite3", dim=4); store.init()
 
     captured = {}
+    orig_csf = fsmod.cache_storage_factory
 
-    def _spy(service, s, *, pin, storage_factory, absence_threshold=3,
-             contextual_retrieval=False, **kw):
-        captured["fs"] = storage_factory("D1")
-        return {"_revoked": []}
+    def _spy_csf(home_, drive_service_):
+        real_factory = orig_csf(home_, drive_service_)
+        def _wrapped(d):
+            fs = real_factory(d)
+            captured[d] = fs
+            return fs
+        return _wrapped
 
-    monkeypatch.setattr(drivemod, "sync_shared_drives", _spy)
-    # Stub the post-block progressive backfill so the minimal FakeDriveService
-    # (no pages/exports seeded) can't trip it — this test only cares which
-    # storage the shared-drive block hands to sync_shared_drives.
-    import mcpbrain.sync as syncmod
+    monkeypatch.setattr(fsmod, "cache_storage_factory", _spy_csf)
+    # Discovery only needs to report D1 exists -- no items to work, so no
+    # extraction/publish network calls happen against the minimal
+    # FakeDriveService (no pages/exports seeded) below.
+    monkeypatch.setattr(syncmod, "discover_shared_drives", lambda *a, **k: {"D1": 0})
+    monkeypatch.setattr(syncmod, "_shared_drive_backfill_step", lambda *a, **k: {})
+    # Stub the post-block progressive backfill (My-Drive/gmail/calendar) so
+    # the minimal FakeDriveService can't trip it -- this test only cares
+    # which storage the shared-drive path hands to cache_storage_factory.
     monkeypatch.setattr(syncmod, "progressive_backfill_step", lambda *a, **k: {})
     svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
     run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
-    assert captured["fs"]._root == org_defaults.FLEET_FOLDER_ID
-    assert captured["fs"]._base_parts == ["ingest-cache", "D1"]
+    assert captured["D1"]._root == org_defaults.FLEET_FOLDER_ID
+    assert captured["D1"]._base_parts == ["ingest-cache", "D1"]
 
 
-def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path):
-    """The cycle result must surface shared-drive cache hit/miss counts so
-    they can be exposed via daemon.status() (observability). One file is
-    already cached (pre-published artifact -> hit), the other is new
-    (extracted locally -> miss)."""
+def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path, monkeypatch):
+    """One file is already cached (pre-published artifact -> hit: imported
+    verbatim, never re-extracted, never re-published), the other is new
+    (extracted locally -> miss: extracted AND published this cycle). The
+    discover/work/publish split (Task 5) no longer computes a single
+    `shared_drive_cache` hits/misses summary in run_sync_cycle -- that
+    distinction is now internal to handle_shared_drive_item/
+    _cache_first_extract_one and isn't surfaced back to the caller (see this
+    function's docstring); this test instead verifies the hit/miss behaviour
+    directly: FID1's chunk text is the CACHED body (never overwritten by the
+    "DIFFERENT" export) and only FID2 (the genuine miss) was published."""
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
-    from mcpbrain import ingest_cache
+    from mcpbrain import ingest_cache, fleet_storage as fsmod
     from mcpbrain.org_contracts import FleetPin
     from mcpbrain.sync.drive import _file_content_hash
     from tests.test_drive_sync import FakeDriveService, _gdoc_change
@@ -548,30 +565,29 @@ def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path):
     # with the same flag or it will (correctly) miss.
     ingest_cache.publish_file(src, fs_pre, "D1", "FID1", ch1, pin, contextual_retrieval=True)
 
-    from mcpbrain.sync import drive as drivemod
     fsmap = {}
-    orig = drivemod.sync_shared_drives
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig(service, s, pin=pin,
-                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-                    absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval, **kw)
-    drivemod.sync_shared_drives = _patched
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}],
-            initial_cursor="100",
-            pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
-                    "newStartPageToken": "101"}],
-            exports={"FID1": b"DIFFERENT - must NOT be extracted",
-                     "FID2": b"brand new shared drive content"})
-        result = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
-    assert result["shared_drives"]["D1"] == 2
-    assert result["shared_drive_cache"] == {"hits": 1, "misses": 1}
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
+                "newStartPageToken": "101"}],
+        exports={"FID1": b"DIFFERENT - must NOT be extracted",
+                 "FID2": b"brand new shared drive content"})
+    result = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+
+    assert result["discovered"]["drive:D1"] == 2
+    # Only FID2 (the miss) was published this cycle -- FID1 (the hit) never
+    # needed publishing, it was already the published artifact.
+    assert result["shared_drives_published"]["D1"] == 1
+    # FID1 was imported from the cache verbatim, not re-extracted.
+    assert store.get_chunk("gdrive-FID1-0")["text"] == "cached body"
+    # FID2 was genuinely extracted+published: an artifact now exists for it.
+    names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
+    assert any(n.rsplit("/", 1)[-1].startswith("FID2.") for n in names)
 
 
 def test_run_sync_cycle_no_pin_skips_shared_drives(tmp_path):
@@ -593,15 +609,17 @@ def test_run_sync_cycle_no_pin_skips_shared_drives(tmp_path):
     assert "shared_drives" not in res      # gated off without a pin
 
 
-def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
+def test_run_sync_cycle_isolates_publish_file_failures(tmp_path, monkeypatch):
     """A publish_file failure for one miss must not abort the rest of the cycle:
     other misses (same drive AND a second drive) still get published, and
-    run_sync_cycle returns normally with shared_drives reflecting success."""
+    run_sync_cycle returns normally with shared_drives_published reflecting
+    only the successes."""
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
-    from mcpbrain import ingest_cache
+    from mcpbrain import ingest_cache, fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _Emb:
         dim = 4
@@ -622,17 +640,10 @@ def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
     store.set_cursor("drive:D1", "100")
     store.set_cursor("drive:D2", "100")
 
-    from mcpbrain.sync import drive as drivemod
-    from tests.helpers.org_fleet import LocalDirFleetStorage
     fsmap = {}
-    orig_sync_shared_drives = drivemod.sync_shared_drives
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig_sync_shared_drives(
-            service, s, pin=pin,
-            storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-            absence_threshold=absence_threshold, **kw)
-    drivemod.sync_shared_drives = _patched
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
     # Fail publish_file only for FID1, on every drive; FID2 must still succeed,
     # in the SAME drive (after FID1) and in the SECOND drive.
@@ -641,28 +652,30 @@ def test_run_sync_cycle_isolates_publish_file_failures(tmp_path):
         if file_id == "FID1":
             raise RuntimeError("simulated transient Drive API error")
         return orig_publish_file(store, fs, drive_id, file_id, content_hash, pin, **kw)
-    ingest_cache.publish_file = _flaky_publish_file
+    monkeypatch.setattr(ingest_cache, "publish_file", _flaky_publish_file)
 
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}, {"id": "D2", "name": "Legal"}],
-            initial_cursor="100",
-            pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
-                    "newStartPageToken": "101"}],
-            exports={"FID1": b"shared drive body one", "FID2": b"shared drive body two"})
-        # (a) must return normally — no exception propagates out of run_sync_cycle.
-        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig_sync_shared_drives
-        ingest_cache.publish_file = orig_publish_file
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}, {"id": "D2", "name": "Legal"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID1"), _gdoc_change("FID2")],
+                "newStartPageToken": "101"}],
+        exports={"FID1": b"shared drive body one", "FID2": b"shared drive body two"})
+    # (a) must return normally — no exception propagates out of run_sync_cycle.
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
-    # (b) shared_drives still reflects successful local processing for both drives,
-    # despite FID1's publish failure in each.
-    assert res["shared_drives"]["D1"] == 2
-    assert res["shared_drives"]["D2"] == 2
+    # (b) both drives' items were discovered+worked despite FID1's publish
+    # failure in each (the failure is isolated to the publish step, which
+    # runs strictly after extraction).
+    assert res["discovered"]["drive:D1"] == 2
+    assert res["discovered"]["drive:D2"] == 2
 
-    # (c) the OTHER miss — FID2 — was published in both the same drive (D1, after
-    # FID1's failure) and the second drive (D2) despite FID1 failing everywhere.
+    # (c) only the OTHER miss — FID2 — counts as published, in both drives.
+    assert res["shared_drives_published"]["D1"] == 1
+    assert res["shared_drives_published"]["D2"] == 1
+
+    # (d) the OTHER miss — FID2 — was published in both the same drive (D1,
+    # after FID1's failure) and the second drive (D2) despite FID1 failing
+    # everywhere.
     for drive_id in ("D1", "D2"):
         names = fsmap[drive_id].list_paths(ingest_cache.CACHE_DIR + "/")
         basenames = [n.rsplit("/", 1)[-1] for n in names]
@@ -733,7 +746,7 @@ def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(t
     assert "revoked_drives" not in res
 
 
-def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured(tmp_path):
+def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured(tmp_path, monkeypatch):
     """A pinned+enabled install with an empty owner_email (config.owner_email
     can return "" when unconfigured) must not publish artifacts stamped with an
     empty published_by. Files are still synced/embedded locally; only the
@@ -742,8 +755,9 @@ def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
-    from mcpbrain import ingest_cache
+    from mcpbrain import ingest_cache, fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _Emb:
         dim = 4
@@ -761,45 +775,39 @@ def test_run_sync_cycle_shared_drive_skips_publish_when_owner_email_unconfigured
     store.init()
     store.set_cursor("drive:D1", "100")
 
-    from mcpbrain.sync import drive as drivemod
-    from tests.helpers.org_fleet import LocalDirFleetStorage
     fsmap = {}
-    orig = drivemod.sync_shared_drives
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig(service, s, pin=pin,
-                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-                    absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval, **kw)
-    drivemod.sync_shared_drives = _patched
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}],
-            initial_cursor="100",
-            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-            exports={"FID": b"shared drive body content"})
-        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"shared drive body content"})
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
     # The file was still synced/processed locally...
-    assert res["shared_drives"]["D1"] == 1
+    assert res["discovered"]["drive:D1"] == 1
     # ...but nothing was published to the fleet cache (no owner_email to stamp).
+    assert "shared_drives_published" not in res
     names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
     assert names == [], f"expected no artifacts published without owner_email, got {names}"
 
 
-def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_path):
+def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_path, monkeypatch):
     """A newly-pinned Shared Drive's PRE-EXISTING documents (everything before
     the pin, invisible to the live delta sync because they haven't changed
     recently) must get ingested via the progressive-backfill wiring, not just
-    files touched after the pin."""
+    files touched after the pin. Its miss must be published THIS cycle, via
+    the second publish_pending_shared_drive_artifacts call that runs after
+    backfill's own embed (Task 5 point 5)."""
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
-    from mcpbrain import ingest_cache
+    from mcpbrain import ingest_cache, fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService
+    from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _Emb:
         dim = 4
@@ -818,56 +826,52 @@ def test_run_sync_cycle_backfills_pinned_shared_drive_pre_existing_files(tmp_pat
     # Delta cursor already bootstrapped; this cycle's live delta sees nothing new.
     store.set_cursor("drive:D1", "100")
 
-    from mcpbrain.sync import drive as drivemod
-    from tests.helpers.org_fleet import LocalDirFleetStorage
     fsmap = {}
-    orig = drivemod.sync_shared_drives
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig(service, s, pin=pin,
-                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-                    absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval, **kw)
-    drivemod.sync_shared_drives = _patched
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}],
-            initial_cursor="100",
-            pages=[{"changes": [], "newStartPageToken": "101"}],  # nothing new via delta
-            # Only visible via files().list — a document that predates the pin
-            # and hasn't changed since, so the delta/changes feed never surfaces it.
-            file_list=[{
-                "id": "OLD1", "name": "Old Doc",
-                "mimeType": "application/vnd.google-apps.document",
-                "modifiedTime": "2020-01-01T00:00:00Z",
-                "owners": [{"displayName": "Someone"}],
-            }],
-            exports={"OLD1": b"pre-existing shared drive content from before the pin"})
-        res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [], "newStartPageToken": "101"}],  # nothing new via delta
+        # Only visible via files().list — a document that predates the pin
+        # and hasn't changed since, so the delta/changes feed never surfaces it.
+        file_list=[{
+            "id": "OLD1", "name": "Old Doc",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2020-01-01T00:00:00Z",
+            "owners": [{"displayName": "Someone"}],
+        }],
+        exports={"OLD1": b"pre-existing shared drive content from before the pin"})
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
     # The live delta saw nothing new for D1...
-    assert res["shared_drives"]["D1"] == 0
+    assert res["discovered"]["drive:D1"] == 0
     # ...but the progressive-backfill step picked up the pre-existing file via
-    # backfill_shared_drive, and it was processed and published to the cache.
+    # backfill_shared_drive, and it was processed and published to the cache
+    # (via the second, post-backfill publish call).
     assert res["shared_drives_backfill"]["D1"] == 1
+    assert res["shared_drives_published"]["D1"] == 1
     names = fsmap["D1"].list_paths(ingest_cache.CACHE_DIR + "/")
     assert any(n.rsplit("/", 1)[-1].startswith("OLD1.") for n in names), (
         f"expected OLD1 artifact published via shared-drive backfill, got {names}"
     )
 
 
-def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
-    """Success path logs exactly one summary line (drives/files/published/
-    revoked), matching the "one line per pass" convention used by other
-    periodic subsystems in daemon.py. No revocations this cycle -> info level."""
+def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog, monkeypatch):
+    """Success path logs exactly one summary line (drives/published), matching
+    the "one line per pass" convention used by other periodic subsystems in
+    daemon.py. Drive-presence revocation is no longer tracked by the
+    discover/work/publish split (Task 5), so unlike the old
+    sync_shared_drives-based summary this carries no "revoked=" field."""
     import logging
     from mcpbrain import config
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import fleet_storage as fsmod
     from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _Emb:
         dim = 4
@@ -885,28 +889,18 @@ def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
     store.init()
     store.set_cursor("drive:D1", "100")
 
-    from mcpbrain.sync import drive as drivemod
-    from tests.helpers.org_fleet import LocalDirFleetStorage
     fsmap = {}
-    orig = drivemod.sync_shared_drives
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
 
-    def _patched(service, s, *, pin, storage_factory, absence_threshold=3,
-                 contextual_retrieval=False, **kw):
-        return orig(service, s, pin=pin,
-                    storage_factory=lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d)),
-                    absence_threshold=absence_threshold,
-                    contextual_retrieval=contextual_retrieval, **kw)
-    drivemod.sync_shared_drives = _patched
-    try:
-        svc = FakeDriveService(
-            shared_drives=[{"id": "D1", "name": "Ops"}],
-            initial_cursor="100",
-            pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-            exports={"FID": b"shared drive body content"})
-        with caplog.at_level(logging.INFO, logger="mcpbrain.sync"):
-            run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        initial_cursor="100",
+        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
+        exports={"FID": b"shared drive body content"})
+    with caplog.at_level(logging.INFO, logger="mcpbrain.sync"):
+        run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
     summary = [r for r in caplog.records if r.getMessage().startswith("shared_drives: drives=")]
     assert len(summary) == 1, (
@@ -916,7 +910,6 @@ def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog):
     msg = summary[0].getMessage()
     assert "drives=1" in msg
     assert "published=1" in msg
-    assert "revoked=none" in msg
 
 
 def test_publish_drive_misses_lists_cache_folder_once_not_once_per_file(tmp_path):
@@ -1004,4 +997,57 @@ def test_cycle_discovers_then_works(tmp_path, monkeypatch):
                                   home=str(tmp_path))
     assert order == ["discover", "work"]
     assert out["worked"]["processed"] == 1
+
+
+def test_cycle_discovers_and_publishes_shared_drive_items(tmp_path, monkeypatch):
+    """Task 5: shared-drive discovery/work/publish must be wired into the
+    SAME discover -> work_queue -> embed -> publish cycle as every other
+    source, through discover_shared_drives / handle_shared_drive_item /
+    publish_pending_shared_drive_artifacts -- not the old sync_shared_drives."""
+    from mcpbrain import sync as sync_mod
+    from mcpbrain.store import Store
+    from mcpbrain import config
+    s = Store(tmp_path / "c.sqlite3", dim=4)
+    s.init()
+    order = []
+
+    def fake_discover_shared_drives(service, store, *, pin, budget=None):
+        order.append("discover_shared")
+        store.enqueue_and_advance(
+            [{"ref_id": "f1", "version": "1", "event": "upsert",
+              "modified_at": "2026-09-05T00:00:00"}], source="drive:D1", cursor="2")
+        return {"D1": 1}
+
+    def fake_handle_shared(service, store, item, **kw):
+        order.append("work_shared")
+        store.record_pending_publish("D1", item["ref_id"], "hash1")
+
+    def fake_publish_pending(store, ingest_cache, *, drives_fs, pin, published_by,
+                             contextual_retrieval=False, budget=None):
+        order.append("publish_pending")
+        for did in drives_fs:
+            for fid, _h in store.pending_publishes(did):
+                store.clear_pending_publish(did, fid)
+        return {did: 1 for did in drives_fs}
+
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", fake_discover_shared_drives)
+    monkeypatch.setattr(sync_mod, "handle_shared_drive_item", fake_handle_shared)
+    monkeypatch.setattr(sync_mod, "publish_pending_shared_drive_artifacts",
+                        fake_publish_pending)
+    # _shared_drive_backfill_step does real Drive-API-shaped work against a
+    # bare `object()` drive_service below; it isn't under test here (Task 5
+    # explicitly leaves its internals untouched), so make it a clean no-op.
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+    monkeypatch.setattr(config, "ingest_cache_enabled", lambda home: True)
+    monkeypatch.setattr(config, "fleet_pin", lambda home: __import__(
+        "mcpbrain.org_contracts", fromlist=["FleetPin"]).FleetPin(
+        embed_model="bge-small", dim=4, chunker_version="v1",
+        enrich_logic_floor=1, fleet_secret="s"))
+    monkeypatch.setattr(config, "owner_email", lambda home: "a@b.c")
+
+    out = sync_mod.run_sync_cycle(s, embedder=None, drive_service=object(),
+                                  home=str(tmp_path))
+    assert order == ["discover_shared", "work_shared", "publish_pending"]
+    assert out["shared_drives_published"] == {"D1": 1}
+    assert s.pending_publishes("D1") == []
     assert s.sync_queue_pending() == 0

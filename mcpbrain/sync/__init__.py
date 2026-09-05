@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 # discover_drive` inside the function body would instead re-fetch the
 # unpatched original from mcpbrain.sync.drive every call.
 from mcpbrain.sync.calendar import discover_calendar, handle_calendar_item
-from mcpbrain.sync.drive import discover_drive, handle_drive_item
+from mcpbrain.sync.drive import (
+    discover_drive, discover_shared_drives, handle_drive_item, handle_shared_drive_item,
+)
 from mcpbrain.sync.gmail import discover_gmail, handle_gmail_item
 
 log = logging.getLogger(__name__)
@@ -53,21 +55,46 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
 
     When `drive_service` and `home` are both given AND `config.ingest_cache_enabled(home)`
     AND `config.fleet_pin(home).is_pinned`, also runs the Shared Drive ingest-cache
-    path (spec §A): `sync_shared_drives` for the live delta, one progressive-
-    backfill window per pinned drive via `backfill_shared_drive` (so a newly-
-    pinned drive's PRE-EXISTING documents get ingested too, not just files
-    touched after the pin), embed the misses from both, then `publish_file` each
-    miss (batch-GC'd per drive) now that its vectors exist. Adds
-    `"shared_drives"` (per-drive live-processed counts), `"shared_drives_backfill"`
-    (per-drive backfill-processed counts), and `"revoked_drives"` to the result.
+    path (spec §A) through the SAME discover/work/embed split every other
+    source uses, rather than the old monolithic `sync_shared_drives`:
+    `discover_shared_drives` lists each pinned drive's changes into the SAME
+    `sync_queue` `discover_*`/`handle_*` sources use (as `"drive:<id>"`), a
+    per-drive `FleetStorage` is built once via `cache_storage_factory`, and a
+    `"drive"`-keyed handler dispatches each queued item to `handle_drive_item`
+    (My Drive, `source == "drive"`) or `handle_shared_drive_item` (a pinned
+    Shared Drive, `source == "drive:<id>"`) — added to the SAME `handlers` dict
+    and drained by the SAME single `work_queue` call as gmail/calendar/My-Drive.
+    A cache MISS records a durable `shared_drive_pending_publish` row (rather
+    than publishing inline, since publishing needs the chunk EMBEDDED first);
+    after `work_queue`+`_embed()` run, `publish_pending_shared_drive_artifacts`
+    publishes each drive's pending backlog (batch-GC'd per drive). One
+    progressive-backfill window per pinned drive then runs via
+    `_shared_drive_backfill_step` (so a newly-pinned drive's PRE-EXISTING
+    documents get ingested too, not just files touched after the pin) — its
+    misses are recorded into the SAME pending-publish table (not the old
+    inline `_publish_drive_misses` path), embedded, and published with a
+    SECOND `publish_pending_shared_drive_artifacts` call so they don't wait a
+    full extra cycle. Adds shared-drive entries to `"discovered"` (keyed
+    `"drive:<id>"`), `"shared_drives_published"` (`{drive_id: count}`,
+    accumulated across both publish calls), and `"shared_drives_backfill"`
+    (per-drive backfill-processed counts) to the result. Drive-presence
+    revocation (`"revoked_drives"`) and the `"shared_drive_cache"` hit/miss
+    summary are NOT reproduced by this discover/work split — see this
+    function's implementation comments for why.
 
     Strictly additive AND non-fatal: with `home=None` (every caller before this
-    feature) this block never runs and existing behaviour for gmail/calendar/
-    My-Drive sync is unchanged; and ANY exception raised anywhere inside the
-    whole shared-drive block (including `sync_shared_drives` itself, e.g. a
-    Drive-API outage in `list_shared_drives`) is caught, logged, and skipped for
-    this cycle — it can never abort the gmail/calendar/My-Drive sync that ran
-    before it, nor the backfill step/return that runs after it.
+    feature) shared-drive discovery/publish never run and existing behaviour
+    for gmail/calendar/My-Drive sync is unchanged. Because shared-drive
+    discovery must run BEFORE the single `work_queue` call (to register its
+    handler) while publish/backfill must run AFTER it (publish reads back
+    vectors that only exist once `_embed()` has run), the old single
+    try/except around one contiguous block is now TWO try/excepts — one
+    around discovery, one around publish+backfill — each independently
+    guaranteeing the same invariant the one block used to: a Drive-API outage
+    anywhere in the shared-drive path (including `list_shared_drives`) is
+    caught, logged, and skipped for this cycle, and can never abort the
+    gmail/calendar/My-Drive discovery/work/embed that already ran, nor the
+    steps that follow.
 
     Bounded: `budget` (a `Budget`, or None for unbounded) and `embed_max_items`
     are threaded into every `index_pending` call so embedding one cycle's slice
@@ -80,7 +107,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     `bulk_section` (Task 2 duty-cycle fix: a zero-arg context-manager factory,
     default `contextlib.nullcontext`) is threaded into `discover_calendar`
     (its window-hygiene eviction), each `handle_*_item` call (via the
-    `handlers` closures below), `sync_shared_drives`, and `index_pending`,
+    `handlers` closures below, including `handle_shared_drive_item`),
+    `_shared_drive_backfill_step`, and `index_pending`,
     each of which brackets its OWN small units of work (one message/event/
     file/embed-batch) with it, rather than this function holding one
     `_bulk_lock` for its entire body. A soak test showed the latter shape (one
@@ -135,6 +163,44 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             discovered["drive"] = discover_drive(drive_service, store, budget=disc_budget)
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
             log.warning("sync: Drive discovery failed (cycle continues, retries next cycle): %s", exc)
+    # Shared Drive discovery (spec §A) is folded into this SAME discovery
+    # phase, not run as its own later block, so its handler can be registered
+    # into the SAME `handlers` dict below and drained by the ONE `work_queue`
+    # call that follows -- there is exactly one work_queue invocation per
+    # cycle. Gated: needs a drive service, a home to read config from, the
+    # cache enabled, and a fleet pin present; without a pin this is a no-op
+    # and drive sync behaves exactly as before. Wrapped in its own try/except
+    # (see the module docstring for why this is now split from the
+    # publish/backfill try/except further below) so a Drive-API outage here
+    # (e.g. `list_shared_drives`) can never abort the gmail/calendar/My-Drive
+    # discovery above, or the work/embed/publish/backfill steps that follow.
+    pin = None
+    cr = False
+    drives_fs: dict[str, object] = {}
+    if drive_service is not None and home is not None:
+        try:
+            # Cheapest check first: ingest_cache_enabled is a single config-dict
+            # read; fleet_pin additionally constructs a FleetPin object, so it's
+            # only built once the cheaper check passes. is_pinned is checked last.
+            ingest_cache_on = config.ingest_cache_enabled(home)
+            pin = config.fleet_pin(home) if ingest_cache_on else None
+            if ingest_cache_on and pin.is_pinned:
+                # CR (Q6 contextual-retrieval prefix) materially changes the
+                # embedding vector and is a LOCAL flag not in pipeline_fingerprint,
+                # so it must be threaded to both the import guard and the publish
+                # stamp — otherwise a CR-on install could import a CR-off install's
+                # vectors (or vice-versa) as if interchangeable.
+                cr = config.contextual_retrieval_enabled(home)
+                discovered_sd = discover_shared_drives(
+                    drive_service, store, pin=pin, budget=disc_budget)
+                discovered.update(
+                    {f"drive:{did}": n for did, n in discovered_sd.items()})
+                from mcpbrain.fleet_storage import cache_storage_factory
+                storage_factory = cache_storage_factory(home, drive_service)
+                drives_fs = {did: storage_factory(did) for did in discovered_sd}
+        except Exception as exc:  # noqa: BLE001 — optional feature; must never
+            # abort gmail/calendar/My-Drive discovery above, or anything below.
+            log.warning("sync: shared-drive discovery failed (skipped this cycle): %s", exc)
     result["discovered"] = discovered
 
     # folder_cache and fetch_attachments are hoisted ONCE per cycle and closed
@@ -150,9 +216,28 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
 
     handlers = {}
     if drive_service is not None:
-        handlers["drive"] = lambda it: handle_drive_item(
-            drive_service, store, it, folder_cache=folder_cache,
-            bulk_section=bulk_section)
+        def _drive_handler(it):
+            """One handler slot serves BOTH My Drive and every pinned Shared
+            Drive: work_queue resolves handlers by
+            `source.split(":", 1)[0]`, so a My-Drive item (source=="drive")
+            and a Shared-Drive item (source=="drive:<id>") both resolve to
+            this SAME "drive" key -- registering a distinct
+            handlers["drive:<id>"] entry per drive (as a first draft of this
+            wiring did) would silently never be looked up. The item's OWN
+            source string is what actually carries which drive it belongs
+            to, so this dispatches on that instead of on the dict key.
+            """
+            src = it["source"]
+            if ":" in src:
+                drive_id = src.split(":", 1)[1]
+                return handle_shared_drive_item(
+                    drive_service, store, it, fleet_storage=drives_fs[drive_id],
+                    pin=pin, drive_id=drive_id, contextual_retrieval=cr,
+                    folder_cache=folder_cache, bulk_section=bulk_section)
+            return handle_drive_item(
+                drive_service, store, it, folder_cache=folder_cache,
+                bulk_section=bulk_section)
+        handlers["drive"] = _drive_handler
     if gmail_service is not None:
         handlers["gmail"] = lambda it: handle_gmail_item(
             gmail_service, store, it, fetch_attachments=fetch_attachments,
@@ -169,129 +254,117 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         result["budget_spent"] = True
         return result
 
-    # Shared Drive ingest cache (spec §A). Gated: needs a drive service, a home
-    # to read config from, the cache enabled, and a fleet pin present. Without a
-    # pin this is a no-op and drive sync behaves exactly as before. The WHOLE
-    # block is wrapped in try/except so this optional feature can NEVER abort
-    # the cycle — everything above (gmail/calendar/My-Drive) already ran, and
-    # the progressive-backfill step + return below still run regardless of
-    # whether this block succeeds, fails, or is skipped.
-    if drive_service is not None and home is not None:
+    # Shared Drive publish + backfill (spec §A continued) -- runs only when
+    # discovery above actually built at least one drive's storage (cache
+    # enabled + pinned). Split from the discovery try/except above (see the
+    # module docstring) because publish reads back vectors that only exist
+    # once `_embed()` has run. `budget`, not `disc_budget`, is threaded
+    # through both `publish_pending_shared_drive_artifacts` calls and
+    # `_shared_drive_backfill_step` below -- publish is a network write and
+    # backfill's own extraction is real work, the same expensive class of
+    # work `disc_budget` deliberately does NOT bound (see its own docstring).
+    # Wrapped in its own try/except so a failure here can never abort the
+    # progressive-backfill step/return that follows.
+    #
+    # Per-drive budget-check placement (deliberately NOT reproducing the old
+    # per-drive check that used to sit inside this loop): that check existed
+    # because the old `sync_shared_drives` did a whole drive's extraction AND
+    # publish inline, in one iteration, with no finer-grained budget check of
+    # its own -- a many-shared-drives fleet needed a check between drives or
+    # one slow drive could exhaust the whole cycle. That work is now split
+    # across three places that each already check `budget` at a FINER grain
+    # than per-drive: `work_queue` checks before every queued item (covers
+    # the extraction `handle_shared_drive_item` used to do inline),
+    # `publish_pending_shared_drive_artifacts` checks before every file
+    # across every drive (Task 4, unmodified here), and `discover_shared_drives`
+    # checks its own `disc_budget` per drive during listing (Task 2,
+    # unmodified here). Adding a fourth, coarser per-drive check here would be
+    # redundant with all three -- the phase-boundary checks below (matching
+    # the same pattern already used after every other phase in this function)
+    # are the only ones this step needs.
+    if drive_service is not None and home is not None and drives_fs:
         try:
-            from mcpbrain import config
-            # Cheapest check first: ingest_cache_enabled is a single config-dict
-            # read; fleet_pin additionally constructs a FleetPin object, so it's
-            # only built once the cheaper check passes. is_pinned is checked last.
-            ingest_cache_on = config.ingest_cache_enabled(home)
-            pin = config.fleet_pin(home) if ingest_cache_on else None
-            if ingest_cache_on and pin.is_pinned:
-                from mcpbrain.sync.drive import sync_shared_drives
-                from mcpbrain.fleet_storage import cache_storage_factory
-                from mcpbrain import ingest_cache
-                # CR (Q6 contextual-retrieval prefix) materially changes the
-                # embedding vector and is a LOCAL flag not in pipeline_fingerprint,
-                # so it must be threaded to both the import guard and the publish
-                # stamp — otherwise a CR-on install could import a CR-off install's
-                # vectors (or vice-versa) as if interchangeable.
-                cr = config.contextual_retrieval_enabled(home)
-                sd = sync_shared_drives(
-                    drive_service, store, pin=pin,
-                    storage_factory=cache_storage_factory(home, drive_service),
-                    absence_threshold=config.ingest_cache_revocation_threshold(home),
-                    contextual_retrieval=cr, budget=budget, bulk_section=bulk_section)
-                # Embed the misses, THEN publish them (publish reads vectors back).
+            from mcpbrain import ingest_cache
+            # config.owner_email can return "" when unconfigured. Rather than
+            # stamp published artifacts with an empty published_by, skip
+            # publishing this cycle — files are still synced/embedded locally
+            # either way, so nothing is lost, just not shared to the fleet yet.
+            # Logged once per cycle here, not once per file/drive.
+            published_by = config.owner_email(home)
+            if published_by:
+                result["shared_drives_published"] = publish_pending_shared_drive_artifacts(
+                    store, ingest_cache, drives_fs=drives_fs, pin=pin,
+                    published_by=published_by, contextual_retrieval=cr, budget=budget)
+            else:
+                log.warning(
+                    "sync: owner_email unconfigured; shared-drive artifacts "
+                    "will not be published to the fleet cache this cycle "
+                    "(files still synced and embedded locally)")
+            if budget is not None and budget.expired():
+                result["budget_spent"] = True
+                return result
+
+            # One progressive-backfill window per pinned drive so a newly-
+            # pinned drive's PRE-EXISTING documents (everything before the
+            # pin) eventually get ingested too, not just files touched after
+            # the pin (which the live delta discovery+work above already
+            # covers). Reuses this cycle's storage instances — no second
+            # storage_factory call.
+            bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
+                                                contextual_retrieval=cr, budget=budget,
+                                                bulk_section=bulk_section)
+            backfill_counts: dict[str, int] = {}
+            any_backfill_processed = False
+            any_backfill_miss = False
+            for drive_id, res in bf_sd.items():
+                backfill_counts[drive_id] = res["processed"]
+                if res["processed"]:
+                    any_backfill_processed = True
+                # Route backfill's misses through the SAME durable
+                # shared_drive_pending_publish table the live-delta path
+                # (handle_shared_drive_item, above) already records into,
+                # instead of the old inline `_publish_drive_misses` call --
+                # one mechanism, published by the one call site below, rather
+                # than two living side by side in the same function.
+                for file_id, content_hash in res["miss"]:
+                    store.record_pending_publish(drive_id, file_id, content_hash)
+                    any_backfill_miss = True
+            result["shared_drives_backfill"] = backfill_counts
+            if any_backfill_processed:
                 _embed()
-                # config.owner_email can return "" when unconfigured. Rather than
-                # stamp published artifacts with an empty published_by, skip
-                # publishing this cycle — files are still synced/embedded locally
-                # either way, so nothing is lost, just not shared to the fleet yet.
-                # Matches the codebase's existing precedent for a required-but-
-                # unconfigured identity field (config.is_configured gates
-                # enrichment entirely rather than substituting a placeholder).
-                # Logged once per cycle here, not once per file/drive.
-                published_by = config.owner_email(home)
-                if not published_by:
-                    log.warning(
-                        "sync: owner_email unconfigured; shared-drive artifacts "
-                        "will not be published to the fleet cache this cycle "
-                        "(files still synced and embedded locally)")
-                per_drive = {}
-                drives_fs: dict[str, object] = {}
-                total_files = 0
-                total_published = 0
-                total_miss = 0
-                for drive_id, info in sd.items():
-                    if drive_id == "_revoked":
-                        continue
-                    fs = info["storage"]
-                    drives_fs[drive_id] = fs
-                    if published_by:
-                        total_published += _publish_drive_misses(
-                            store, ingest_cache, fs, drive_id, info["miss"], pin, published_by,
-                            contextual_retrieval=cr)
-                    per_drive[drive_id] = info["processed"]
-                    total_files += info["processed"]
-                    total_miss += len(info["miss"])
-                    # Bound per-drive publish work the same way sources are bounded
-                    # between each other above: a live 1h44m SSL hang happened
-                    # INSIDE a single source's own work, not between sources, so a
-                    # many-shared-drives fleet needs the same check immediately
-                    # after each drive (this loop's "page") is processed, not only
-                    # once the whole shared-drives block finishes.
-                    if budget is not None and budget.expired():
-                        result["shared_drives"] = per_drive
-                        result["revoked_drives"] = sd.get("_revoked", [])
-                        result["budget_spent"] = True
-                        return result
-                result["shared_drives"] = per_drive
-                revoked = sd.get("_revoked", [])
-                result["revoked_drives"] = revoked
+            # A second publish pass, AFTER backfill's own embed, covers the
+            # pending rows backfill just recorded (they didn't exist yet
+            # during the first publish call above) so they go out THIS cycle
+            # instead of waiting a full extra one. Only run when backfill
+            # actually recorded something to publish -- an unconditional
+            # second call would otherwise hit every drive's (usually empty)
+            # pending table on every cycle, network round-trips included via
+            # `ingest_cache`, for no work. Folds into the same drives_fs/pin
+            # -- no second storage_factory call -- and merges into the counts
+            # the first call already produced.
+            if published_by and any_backfill_miss:
+                pub2 = publish_pending_shared_drive_artifacts(
+                    store, ingest_cache, drives_fs=drives_fs, pin=pin,
+                    published_by=published_by, contextual_retrieval=cr, budget=budget)
+                merged = dict(result.get("shared_drives_published", {}))
+                for did, n in pub2.items():
+                    merged[did] = merged.get(did, 0) + n
+                result["shared_drives_published"] = merged
 
-                # One progressive-backfill window per pinned drive so a newly-
-                # pinned drive's PRE-EXISTING documents (everything before the
-                # pin) eventually get ingested too, not just files touched after
-                # the pin (which the live delta sync above already covers).
-                # Reuses this cycle's storage instances — no second
-                # storage_factory call.
-                bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
-                                                    contextual_retrieval=cr, budget=budget,
-                                                    bulk_section=bulk_section)
-                if any(r["processed"] for r in bf_sd.values()):
-                    _embed()
-                backfill_counts: dict[str, int] = {}
-                for drive_id, res in bf_sd.items():
-                    fs = drives_fs[drive_id]
-                    backfill_counts[drive_id] = res["processed"]
-                    total_files += res["processed"]
-                    total_miss += len(res["miss"])
-                    if published_by:
-                        total_published += _publish_drive_misses(
-                            store, ingest_cache, fs, drive_id, res["miss"], pin, published_by,
-                            contextual_retrieval=cr)
-                    # Same per-page bound as the publish loop above, applied to
-                    # the backfill-window's own per-drive publish work.
-                    if budget is not None and budget.expired():
-                        result["shared_drives_backfill"] = backfill_counts
-                        result["budget_spent"] = True
-                        return result
-                result["shared_drives_backfill"] = backfill_counts
-                # Cache hit/miss over BOTH the live delta and the backfill window
-                # (computed after the backfill loop so backfilled files count too —
-                # a miss is a file extracted locally, a hit is one served from cache).
-                result["shared_drive_cache"] = {
-                    "hits": max(0, total_files - total_miss), "misses": total_miss}
-
-                # One line per pass, matching daemon.py's cadence-log convention
-                # (e.g. "feedback_aggregate: updated=%d skipped=%d"). Revocation
-                # is consequential — content left the cache because access was
-                # lost — so bump the level to warning when any drive was revoked.
-                level = log.warning if revoked else log.info
-                level("shared_drives: drives=%d files=%d published=%d revoked=%s",
-                      len(per_drive), total_files, total_published, revoked or "none")
+            # One line per pass, matching daemon.py's cadence-log convention
+            # (e.g. "feedback_aggregate: updated=%d skipped=%d"). Drive-
+            # presence revocation is no longer tracked by this discover/work
+            # split (see the module docstring), so unlike the old
+            # sync_shared_drives-based summary this carries no "revoked="
+            # field -- only what this step can actually observe: how many
+            # pinned drives it touched and how many artifacts it published
+            # this cycle (across both publish calls).
+            total_published = sum(result.get("shared_drives_published", {}).values())
+            log.info("shared_drives: drives=%d published=%d",
+                     len(drives_fs), total_published)
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
-            # abort the rest of the cycle (pre-existing sync + the subsequent
-            # backfill step must run whether or not this succeeds)
-            log.warning("sync: shared-drive block failed (skipped this cycle): %s", exc)
+            # abort the progressive-backfill step/return that follows.
+            log.warning("sync: shared-drive publish/backfill step failed (skipped): %s", exc)
         if budget is not None and budget.expired():
             result["budget_spent"] = True
             return result
