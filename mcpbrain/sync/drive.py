@@ -792,6 +792,56 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
         upsert_file_chunks(store, chunks, file_id=fid, partial=content.partial)
 
 
+def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
+                             drive_id: str, contextual_retrieval: bool = False,
+                             folder_cache: dict | None = None, report=None,
+                             bulk_section=None) -> None:
+    """Work one queued Shared Drive item. Raises on failure so the loop
+    backs it off.
+
+    The queue row (from discover_shared_drive) carries only ref_id/version/
+    event/modified_at, not the full file metadata _cache_first_extract_one
+    needs (mimeType, modifiedTime, version, owners, ...) to compute a
+    content-version hash and extract -- so an upsert event re-fetches
+    current metadata via files().get first, exactly as handle_drive_item
+    (My Drive's equivalent) already does.
+
+    On a cache MISS (the file's content wasn't already in the fleet cache
+    and was extracted locally), records a pending-publish row rather than
+    publishing inline -- publishing needs the chunk EMBEDDED first, and
+    embedding is a separate step index_pending runs later in the same
+    cycle. See this plan's design rationale for why that pending state must
+    be durable rather than an in-memory return value.
+    """
+    from mcpbrain import ingest_cache
+    bulk_section = bulk_section or nullcontext
+    fid = item["ref_id"]
+    if item["event"] == "remove":
+        with bulk_section():
+            doc_ids = store.doc_ids_for_file(fid)
+            if doc_ids:
+                store.invalidate_local_relations_for_docs(doc_ids)
+                store.delete_chunks(doc_ids)
+        try:
+            ingest_cache.remove_file_artifacts(fleet_storage, fid)
+        except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
+            log.info("drive: artifact GC skipped for removed file %s: %s", fid, exc)
+        return
+
+    fmeta = service.files().get(
+        fileId=fid, supportsAllDrives=True,
+        fields="id,name,mimeType,modifiedTime,version,parents,md5Checksum,size,owners"
+    ).execute(num_retries=_NUM_RETRIES)
+    processed, miss = _cache_first_extract_one(
+        service, store, fleet_storage, drive_id, fmeta, pin,
+        contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+        folder_cache=folder_cache if folder_cache is not None else {},
+        report=report)
+    if miss is not None:
+        file_id, content_hash = miss
+        store.record_pending_publish(drive_id, file_id, content_hash)
+
+
 def sync_shared_drive(service, store, drive_id, *, fleet_storage, pin,
                       contextual_retrieval: bool = False, budget=None,
                       bulk_section=None) -> dict:
