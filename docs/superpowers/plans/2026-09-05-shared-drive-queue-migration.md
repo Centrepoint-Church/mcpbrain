@@ -527,7 +527,9 @@ git commit -m "feat(sync): Shared Drive work handler, durable pending-publish on
 
 **Interfaces:**
 - Consumes: `Store.pending_publishes`/`clear_pending_publish` (Task 1), `_publish_drive_misses` (existing, unchanged — reused as-is to preserve its batched-GC-per-drive property).
-- Produces: `publish_pending_shared_drive_artifacts(store, ingest_cache, drives_fs: dict[str, object], pin, published_by: str, *, contextual_retrieval: bool = False) -> dict[str, int]` — for each `drive_id` in `drives_fs`, reads its pending publishes, calls `_publish_drive_misses` (existing) with that list, clears the rows for whichever `(file_id, content_hash)` pairs `ingest_cache.publish_file` (called inside `_publish_drive_misses`) actually returned `True` for. Returns `{drive_id: published_count}`.
+- Produces: `publish_pending_shared_drive_artifacts(store, ingest_cache, drives_fs: dict[str, object], pin, published_by: str, *, contextual_retrieval: bool = False, budget=None) -> dict[str, int]` — for each `drive_id` in `drives_fs`, reads its pending publishes, calls `_publish_drive_misses` (existing) with that list, clears the rows for whichever `(file_id, content_hash)` pairs `ingest_cache.publish_file` (called inside `_publish_drive_misses`) actually returned `True` for. Returns `{drive_id: published_count}`.
+
+**`budget` is required, not optional convenience** — `run_sync_cycle`'s own existing shared-drive block comment says why: *"a live 1h44m SSL hang happened INSIDE a single source's own work, not between sources, so a many-shared-drives fleet needs the [budget] check immediately after each drive is processed, not only once the whole shared-drives block finishes."* Publishing is itself a network call per file (`ingest_cache.publish_file` writes an artifact to Drive-backed fleet storage) — the exact shape of work that caused that hang. Check `budget.expired()` before each file's publish attempt (not just between drives), and stop cleanly (return whatever was published so far) the moment it's expired — an unpublished pending row simply stays pending and is retried next cycle, which is exactly the durability this table exists to provide.
 
 **Why re-clearing must be per-successfully-published-file, not "clear everything after the call":** `_publish_drive_misses` isolates per-file failures internally (a transient error on one file doesn't abort the batch) and returns only a total count, not which specific files succeeded. `ingest_cache.publish_file` is ALSO safe to call again on a not-yet-embedded chunk — it no-ops via `collect_chunks` filtering out any chunk with no vector yet (verified: `mcpbrain/ingest_cache.py:288-301`, `collect_chunks` skips `vec is None`; `publish_file` returns `False` when `collect_chunks` yields nothing). So the correct, safe behavior is: **only clear a pending-publish row if you can independently confirm ITS OWN publish succeeded** — which means this task needs a small per-file wrapper rather than reusing `_publish_drive_misses`'s aggregate-count return value blindly. Read `_publish_drive_misses`'s body (`mcpbrain/sync/__init__.py:330`) and either (a) extract its per-file loop into a shared helper both it and this new function call, tracking success per file, or (b) call `ingest_cache.publish_file` directly per pending file here (accepting the loss of `_publish_drive_misses`'s batched `gc_superseded_batch` optimisation for now would be wrong — don't do that; do (a)).
 
@@ -586,6 +588,27 @@ def test_empty_pending_set_is_a_no_op(tmp_path):
     out = publish_pending_shared_drive_artifacts(
         s, ic, drives_fs={"D1": object()}, pin=PIN, published_by="a@b.c")
     assert out == {"D1": 0}
+
+
+def test_budget_cutoff_leaves_the_rest_pending(tmp_path):
+    """A cutoff here must be free -- unpublished rows stay pending, retried
+    next cycle. Mirrors the same property work_queue itself guarantees."""
+    s = _store(tmp_path)
+    s.record_pending_publish("D1", "f1", "hash-ready-1")
+    s.record_pending_publish("D1", "f2", "hash-ready-2")
+    ic = _FakeIngestCache()
+
+    class _ExpireAfterOne:
+        def __init__(self): self._n = 0
+        def expired(self):
+            self._n += 1
+            return self._n > 1
+
+    out = publish_pending_shared_drive_artifacts(
+        s, ic, drives_fs={"D1": object()}, pin=PIN, published_by="a@b.c",
+        budget=_ExpireAfterOne())
+    assert out == {"D1": 1}
+    assert len(s.pending_publishes("D1")) == 1, "the un-reached file must stay pending"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -622,17 +645,28 @@ Then:
 ```python
 def publish_pending_shared_drive_artifacts(store, ingest_cache, *, drives_fs: dict,
                                            pin, published_by: str,
-                                           contextual_retrieval: bool = False) -> dict:
+                                           contextual_retrieval: bool = False,
+                                           budget=None) -> dict:
     """Publish every drive's durable pending-publish backlog, clearing only
     the files that actually succeeded THIS call. A file that no-ops (not yet
     embedded) stays pending and is retried next time this runs -- never
     silently dropped, matching this plan's retry-forever posture elsewhere.
+
+    `budget` is checked before EACH file's publish, not just between drives:
+    publish_file is itself a network write to fleet storage, the same shape
+    of work that caused a live 1h44m SSL hang in the code this replaces (see
+    run_sync_cycle's shared-drive block comment). A cutoff here is free --
+    whatever wasn't reached is still in shared_drive_pending_publish and is
+    retried next cycle.
     """
     out = {}
     for drive_id, fs in drives_fs.items():
         pending = store.pending_publishes(drive_id)
         count = 0
         for file_id, content_hash in pending:
+            if budget is not None and budget.expired():
+                out[drive_id] = count
+                return out
             if _publish_one_miss(store, ingest_cache, fs, drive_id, file_id,
                                  content_hash, pin, published_by,
                                  contextual_retrieval=contextual_retrieval,
@@ -764,7 +798,12 @@ Replace the `sync_shared_drives(...)` call and the per-drive miss/publish loop t
                 if published_by:
                     result["shared_drives_published"] = publish_pending_shared_drive_artifacts(
                         store, ingest_cache, drives_fs=drives_fs, pin=pin,
-                        published_by=published_by, contextual_retrieval=cr)
+                        published_by=published_by, contextual_retrieval=cr,
+                        budget=budget)  # the CYCLE's budget, not disc_budget --
+                                        # publish is expensive network work,
+                                        # the same class this plan's own
+                                        # discovery/work split already
+                                        # separates from the cheap listing pass
                 else:
                     log.warning(
                         "sync: owner_email unconfigured; shared-drive artifacts "
