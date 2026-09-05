@@ -327,6 +327,31 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     return result
 
 
+def _publish_one_miss(store, ingest_cache, fs, drive_id, file_id, content_hash,
+                      pin, published_by, *, contextual_retrieval: bool,
+                      skip_gc: bool, on_error=None) -> bool:
+    """Publish one (file_id, content_hash) miss. Returns whether it actually
+    published (False on a no-op -- e.g. not yet embedded -- or a caught
+    per-file failure, never raises).
+
+    `on_error`, if given, is called with the caught exception. This lets a
+    caller that needs to distinguish a genuine per-file failure from a clean,
+    benign no-op (both of which return False here) keep doing so -- e.g.
+    `_publish_drive_misses`'s "every publish in this drive failed" warning
+    must not fire just because a batch of chunks isn't embedded yet."""
+    try:
+        return bool(ingest_cache.publish_file(
+            store, fs, drive_id, file_id, content_hash, pin,
+            published_by=published_by, skip_gc=skip_gc,
+            contextual_retrieval=contextual_retrieval))
+    except Exception as exc:  # noqa: BLE001 — publish is best-effort
+        log.info("sync: publish_file skipped for drive %s file %s: %s",
+                 drive_id, file_id, exc)
+        if on_error is not None:
+            on_error(exc)
+        return False
+
+
 def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, published_by,
                           *, contextual_retrieval: bool = False) -> int:
     """Publish each (file_id, content_hash) miss for one drive to the shared
@@ -347,19 +372,18 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
     """
     published = 0
     failed = 0
+
+    def _count_failure(exc):
+        nonlocal failed
+        failed += 1
+
     keep_map: dict[str, str] = {}
     for file_id, content_hash in misses:
         keep_map[file_id] = content_hash
-        try:
-            if ingest_cache.publish_file(store, fs, drive_id, file_id, content_hash, pin,
-                                          published_by=published_by, skip_gc=True,
-                                          contextual_retrieval=contextual_retrieval):
-                published += 1
-        except Exception as exc:  # noqa: BLE001 — publish is best-effort;
-            # a transient failure on one file must not abort the rest of the cycle
-            failed += 1
-            log.info("sync: publish_file skipped for drive %s file %s: %s",
-                     drive_id, file_id, exc)
+        if _publish_one_miss(store, ingest_cache, fs, drive_id, file_id, content_hash,
+                             pin, published_by, contextual_retrieval=contextual_retrieval,
+                             skip_gc=True, on_error=_count_failure):
+            published += 1
     # A SYSTEMATIC failure (every attempted publish failed — e.g. a missing
     # drive.file write scope or an uncreatable cache folder) means the cache is
     # silently not populating for the whole fleet. Surface it at WARNING once per
@@ -374,6 +398,48 @@ def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, publis
         except Exception as exc:  # noqa: BLE001 — GC failure must not fail publish
             log.info("sync: batched GC skipped for drive %s: %s", drive_id, exc)
     return published
+
+
+def publish_pending_shared_drive_artifacts(store, ingest_cache, *, drives_fs: dict,
+                                           pin, published_by: str,
+                                           contextual_retrieval: bool = False,
+                                           budget=None) -> dict:
+    """Publish every drive's durable pending-publish backlog, clearing only
+    the files that actually succeeded THIS call. A file that no-ops (not yet
+    embedded) stays pending and is retried next time this runs -- never
+    silently dropped, matching this plan's retry-forever posture elsewhere.
+
+    `budget` is checked before EACH file's publish, not just between drives:
+    publish_file is itself a network write to fleet storage, the same shape
+    of work that caused a live 1h44m SSL hang in the code this replaces (see
+    run_sync_cycle's shared-drive block comment). A cutoff here is free --
+    whatever wasn't reached is still in shared_drive_pending_publish and is
+    retried next cycle.
+
+    `skip_gc=True` here for the same reason `_publish_drive_misses` uses it
+    -- a per-file `gc_superseded` listing would be redundant next to a
+    batched one. This function does not itself call `gc_superseded_batch`;
+    which call site owns that batch (this step vs. `_publish_drive_misses`,
+    once both exist in the same cycle) is a wiring decision left to the
+    caller that assembles the per-cycle flow (see the follow-up task that
+    wires this in).
+    """
+    out = {}
+    for drive_id, fs in drives_fs.items():
+        pending = store.pending_publishes(drive_id)
+        count = 0
+        for file_id, content_hash in pending:
+            if budget is not None and budget.expired():
+                out[drive_id] = count
+                return out
+            if _publish_one_miss(store, ingest_cache, fs, drive_id, file_id,
+                                 content_hash, pin, published_by,
+                                 contextual_retrieval=contextual_retrieval,
+                                 skip_gc=True):
+                store.clear_pending_publish(drive_id, file_id)
+                count += 1
+        out[drive_id] = count
+    return out
 
 
 def _floor_dt(store, key: str, default: datetime) -> datetime:
