@@ -1,4 +1,5 @@
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 # Module-level (not lazy-inside-the-function) so tests can monkeypatch these
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from mcpbrain.sync.calendar import discover_calendar, handle_calendar_item
 from mcpbrain.sync.drive import (
     discover_drive, discover_shared_drives, handle_drive_item, handle_shared_drive_item,
+    list_shared_drives,
 )
 from mcpbrain.sync.gmail import discover_gmail, handle_gmail_item
 
@@ -67,19 +69,30 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     A cache MISS records a durable `shared_drive_pending_publish` row (rather
     than publishing inline, since publishing needs the chunk EMBEDDED first);
     after `work_queue`+`_embed()` run, `publish_pending_shared_drive_artifacts`
-    publishes each drive's pending backlog (batch-GC'd per drive). One
+    publishes each drive's pending backlog, and `run_sync_cycle` itself
+    snapshots each drive's still-pending files into a `keep_map` BEFORE that
+    call and runs `ingest_cache.gc_superseded_batch` per drive AFTER it (Task
+    4 deliberately left this GC ownership to whichever step assembles the
+    full per-cycle flow). Once per cycle -- unconditional on whether any
+    drive had queued work -- `ingest_cache.note_drive_presence` also runs,
+    fed the FULL `list_shared_drives()` enumeration (never the partial,
+    `disc_budget`-bounded `discovered_sd`), purging a drive's cached
+    artifacts after `config.ingest_cache_revocation_threshold(home)`
+    consecutive absent cycles; its result populates `"revoked_drives"`. One
     progressive-backfill window per pinned drive then runs via
     `_shared_drive_backfill_step` (so a newly-pinned drive's PRE-EXISTING
     documents get ingested too, not just files touched after the pin) — its
     misses are recorded into the SAME pending-publish table (not the old
-    inline `_publish_drive_misses` path), embedded, and published with a
-    SECOND `publish_pending_shared_drive_artifacts` call so they don't wait a
-    full extra cycle. Adds shared-drive entries to `"discovered"` (keyed
+    inline `_publish_drive_misses` path), embedded, and published (with the
+    same snapshot-then-GC pattern) via a SECOND
+    `publish_pending_shared_drive_artifacts` call so they don't wait a full
+    extra cycle. Adds shared-drive entries to `"discovered"` (keyed
     `"drive:<id>"`), `"shared_drives_published"` (`{drive_id: count}`,
-    accumulated across both publish calls), and `"shared_drives_backfill"`
-    (per-drive backfill-processed counts) to the result. Drive-presence
-    revocation (`"revoked_drives"`) and the `"shared_drive_cache"` hit/miss
-    summary are NOT reproduced by this discover/work split — see this
+    accumulated across both publish calls), `"shared_drives_backfill"`
+    (per-drive backfill-processed counts), and `"revoked_drives"` to the
+    result. The `"shared_drive_cache"` hit/miss summary is NOT reproduced by
+    this discover/work split (that distinction is internal to
+    `handle_shared_drive_item`, not returned to this caller) — see this
     function's implementation comments for why.
 
     Strictly additive AND non-fatal: with `home=None` (every caller before this
@@ -198,6 +211,39 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 from mcpbrain.fleet_storage import cache_storage_factory
                 storage_factory = cache_storage_factory(home, drive_service)
                 drives_fs = {did: storage_factory(did) for did in discovered_sd}
+
+                # Revocation (spec §A3): note_drive_presence is the ONLY
+                # mechanism that ever purges a shared drive's cached fleet
+                # artifacts once it's unpinned/deleted/access-revoked, so it
+                # must run every cycle -- unconditional on whether any drive
+                # had queued work this cycle, since this is a presence check,
+                # not a work-item pass. `present` MUST come from the FULL
+                # `list_shared_drives()` enumeration, NOT `discovered_sd
+                # .keys()` -- `discovered_sd` can be a partial set (each
+                # drive's own `discover_shared_drive` is bounded by
+                # `disc_budget`), and a still-authorized drive simply not
+                # reached this cycle must never accrue toward the
+                # absence-purge threshold as if it were gone. This is a
+                # second `list_shared_drives` call this cycle (the first is
+                # inside `discover_shared_drives` above) -- the old
+                # `sync_shared_drives` this replaces made exactly the same
+                # enumeration call for exactly the same reason; folding it
+                # into `discover_shared_drives`'s own internal call would
+                # mean touching that already-approved function's return
+                # shape, which is out of scope here. Bracketed in
+                # `bulk_section` because `note_drive_presence` can call
+                # `purge_drive`, which mutates `chunks` -- the same table the
+                # gated maintenance passes touch (an earlier revision of this
+                # exact call ran unlocked and was flagged in adversarial
+                # review; mirrored here deliberately).
+                from mcpbrain import ingest_cache
+                present = [d.get("id") for d in list_shared_drives(drive_service)
+                          if d.get("id")]
+                with (bulk_section or nullcontext)():
+                    result["revoked_drives"] = ingest_cache.note_drive_presence(
+                        store, present,
+                        threshold=config.ingest_cache_revocation_threshold(home),
+                    )["purged"]
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
             # abort gmail/calendar/My-Drive discovery above, or anything below.
             log.warning("sync: shared-drive discovery failed (skipped this cycle): %s", exc)
@@ -292,9 +338,33 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             # Logged once per cycle here, not once per file/drive.
             published_by = config.owner_email(home)
             if published_by:
+                # Snapshot BEFORE publishing, per drive: publish_pending_
+                # shared_drive_artifacts clears a row from
+                # shared_drive_pending_publish the moment it successfully
+                # publishes that file, so reading pending_publishes AFTER the
+                # call would miss every file that just succeeded -- the
+                # opposite of what GC needs to keep. The old
+                # `_publish_drive_misses` built its `keep_map` unconditionally
+                # BEFORE attempting each file's publish for exactly this
+                # reason: GC's job is "never delete the current version's
+                # artifact even if we're not 100% sure it's already published
+                # this instant," so over-keeping is the safe default.
+                keep_maps = {did: dict(store.pending_publishes(did)) for did in drives_fs}
                 result["shared_drives_published"] = publish_pending_shared_drive_artifacts(
                     store, ingest_cache, drives_fs=drives_fs, pin=pin,
                     published_by=published_by, contextual_retrieval=cr, budget=budget)
+                # GC stale (superseded-version) cache artifacts per drive using
+                # the PRE-publish snapshot above. `publish_pending_shared_
+                # drive_artifacts` (Task 4, already approved) deliberately
+                # does not call this itself -- ownership was explicitly left
+                # to whichever step assembles the full per-cycle flow (this
+                # one). One `gc_superseded_batch` call per drive (not per
+                # file), mirroring `_publish_drive_misses`'s own batched-GC
+                # shape.
+                for did, keep_map in keep_maps.items():
+                    if keep_map:
+                        with (bulk_section or nullcontext)():
+                            ingest_cache.gc_superseded_batch(drives_fs[did], did, keep_map, pin)
             else:
                 log.warning(
                     "sync: owner_email unconfigured; shared-drive artifacts "
@@ -343,25 +413,35 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             # -- no second storage_factory call -- and merges into the counts
             # the first call already produced.
             if published_by and any_backfill_miss:
+                # Same pre-publish-snapshot-then-GC pattern as the first
+                # publish pass above, applied to backfill's newly-recorded
+                # pending rows.
+                keep_maps2 = {did: dict(store.pending_publishes(did)) for did in drives_fs}
                 pub2 = publish_pending_shared_drive_artifacts(
                     store, ingest_cache, drives_fs=drives_fs, pin=pin,
                     published_by=published_by, contextual_retrieval=cr, budget=budget)
+                for did, keep_map in keep_maps2.items():
+                    if keep_map:
+                        with (bulk_section or nullcontext)():
+                            ingest_cache.gc_superseded_batch(drives_fs[did], did, keep_map, pin)
                 merged = dict(result.get("shared_drives_published", {}))
                 for did, n in pub2.items():
                     merged[did] = merged.get(did, 0) + n
                 result["shared_drives_published"] = merged
 
             # One line per pass, matching daemon.py's cadence-log convention
-            # (e.g. "feedback_aggregate: updated=%d skipped=%d"). Drive-
-            # presence revocation is no longer tracked by this discover/work
-            # split (see the module docstring), so unlike the old
-            # sync_shared_drives-based summary this carries no "revoked="
-            # field -- only what this step can actually observe: how many
-            # pinned drives it touched and how many artifacts it published
-            # this cycle (across both publish calls).
+            # (e.g. "feedback_aggregate: updated=%d skipped=%d"). `revoked`
+            # comes from `result["revoked_drives"]`, populated by the
+            # discovery-phase try block above (note_drive_presence) -- absent
+            # here if that phase failed or didn't run, hence the `.get`.
+            # Revocation is consequential -- content left the cache because
+            # access was lost -- so bump the level to warning when any drive
+            # was revoked, matching the old sync_shared_drives-based summary.
             total_published = sum(result.get("shared_drives_published", {}).values())
-            log.info("shared_drives: drives=%d published=%d",
-                     len(drives_fs), total_published)
+            revoked = result.get("revoked_drives") or []
+            level = log.warning if revoked else log.info
+            level("shared_drives: drives=%d published=%d revoked=%s",
+                 len(drives_fs), total_published, revoked or "none")
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
             # abort the progressive-backfill step/return that follows.
             log.warning("sync: shared-drive publish/backfill step failed (skipped): %s", exc)
