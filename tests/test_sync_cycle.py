@@ -687,15 +687,21 @@ def test_run_sync_cycle_isolates_publish_file_failures(tmp_path, monkeypatch):
         )
 
 
-def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(tmp_path, emb):
-    """If sync_shared_drives ITSELF raises (e.g. list_shared_drives during a
-    Drive-API outage) — not just an individual publish_file — the whole
-    shared-drive block must be caught: gmail sync (which ran BEFORE the
-    shared-drive block) must have already completed and been embedded, and
-    run_sync_cycle must still return normally with its other expected keys
-    (not raise), rather than aborting the whole cycle including the
-    subsequent progressive-backfill step."""
-    from mcpbrain import config
+def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(
+        tmp_path, emb, monkeypatch):
+    """If shared-drive discovery ITSELF raises (e.g. list_shared_drives during
+    a Drive-API outage) — not just an individual publish_file — the whole
+    discovery-phase try/except must catch it: gmail sync (which ran BEFORE
+    the shared-drive discovery) must have already completed and been
+    embedded, and run_sync_cycle must still return normally with its other
+    expected keys (not raise), rather than aborting the whole cycle including
+    the subsequent progressive-backfill step.
+
+    Failure is injected via `discover_shared_drives` (not the old,
+    now-unreferenced `sync_shared_drives` — monkeypatching that is inert
+    since Task 5's rewiring, as this test discovered when it stopped
+    exercising the intended failure path)."""
+    from mcpbrain import config, sync as sync_mod
     from tests.test_drive_sync import FakeDriveService as RealDriveFakeService
 
     home = str(tmp_path / "home")
@@ -715,34 +721,29 @@ def test_run_sync_cycle_shared_drive_orchestrator_failure_does_not_abort_cycle(t
 
     # A Drive service whose OWN sync_drive bootstrap works fine (no cursor set
     # yet -> just stores a startPageToken and returns 0); the failure under
-    # test is entirely inside the shared-drive orchestrator, monkeypatched below.
+    # test is entirely inside shared-drive discovery, monkeypatched below.
     # (Uses the fuller fake from test_drive_sync, which implements changes()
     # .getStartPageToken() — the local module-level FakeDriveService in this
     # file is the simpler Gmail-focused fixture and doesn't.)
     fake_drive = RealDriveFakeService(pages=[{"changes": []}])
 
-    from mcpbrain.sync import drive as drivemod
-
     def _boom(*a, **kw):
         raise RuntimeError("simulated Drive-API outage in list_shared_drives")
 
-    orig = drivemod.sync_shared_drives
-    drivemod.sync_shared_drives = _boom
-    try:
-        res = run_sync_cycle(
-            store, emb, gmail_service=fake_gmail, drive_service=fake_drive, home=home)
-    finally:
-        drivemod.sync_shared_drives = orig
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", _boom)
+    res = run_sync_cycle(
+        store, emb, gmail_service=fake_gmail, drive_service=fake_drive, home=home)
 
     # The cycle returned normally — no exception propagated out of run_sync_cycle —
-    # and the work that ran before AND after the failed shared-drive block
+    # and the work that ran before AND after the failed shared-drive discovery
     # (gmail sync/embed, the My-Drive progressive-backfill step) completed.
     assert res["discovered"]["gmail"] == 1
     assert res["embedded"] >= 1
     assert "backfill" in res
-    # The shared-drive block's own keys were never populated (it failed before
-    # producing a result), but that failure itself never reached the caller.
-    assert "shared_drives" not in res
+    # discover_shared_drives raised BEFORE drives_fs was built or
+    # note_drive_presence ran, so none of the shared-drive result keys were
+    # ever populated — but that failure itself never reached the caller.
+    assert "shared_drives_published" not in res
     assert "revoked_drives" not in res
 
 
@@ -1051,3 +1052,109 @@ def test_cycle_discovers_and_publishes_shared_drive_items(tmp_path, monkeypatch)
     assert out["shared_drives_published"] == {"D1": 1}
     assert s.pending_publishes("D1") == []
     assert s.sync_queue_pending() == 0
+
+
+def test_run_sync_cycle_notes_drive_presence_every_cycle(tmp_path, monkeypatch):
+    """Fix-loop round 1: note_drive_presence (the ONLY mechanism that ever
+    purges a shared drive's cached fleet artifacts once it's unpinned/
+    deleted/access-revoked) must run every cycle, fed the FULL
+    list_shared_drives() enumeration — NOT the (potentially disc_budget-
+    partial) discover_shared_drives result — so a still-authorized drive
+    simply not reached this cycle never accrues toward the absence-purge
+    threshold as if it were gone."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import sync as sync_mod, ingest_cache
+    from tests.test_drive_sync import FakeDriveService
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    # Two shared drives exist (the FULL enumeration), but discovery only
+    # reaches one of them this cycle (simulating a disc_budget cutoff) --
+    # `present` must still be built from BOTH, not just the one discovery
+    # actually reached.
+    svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"},
+                                          {"id": "D2", "name": "Legal"}])
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", lambda *a, **k: {"D1": 0})
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+
+    captured = {}
+    def _spy_note_drive_presence(store_, present, *, threshold):
+        captured["present"] = sorted(present)
+        captured["threshold"] = threshold
+        return {"purged": [], "tracked": len(present)}
+    monkeypatch.setattr(ingest_cache, "note_drive_presence", _spy_note_drive_presence)
+
+    res = run_sync_cycle(store, embedder=None, drive_service=svc, home=home)
+
+    assert captured["present"] == ["D1", "D2"]
+    assert captured["threshold"] == config.ingest_cache_revocation_threshold(home)
+    assert res["revoked_drives"] == []
+
+
+def test_run_sync_cycle_gc_superseded_batch_runs_after_each_publish_pass(tmp_path, monkeypatch):
+    """Fix-loop round 1: publish_pending_shared_drive_artifacts (Task 4,
+    already approved) deliberately does not call gc_superseded_batch itself
+    — run_sync_cycle must snapshot each drive's still-pending files BEFORE
+    publishing (so a file that succeeds during that call is still in the
+    keep set, never GC'd out for "no longer pending") and GC with that
+    snapshot AFTER."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import sync as sync_mod, ingest_cache, fleet_storage as fsmod
+    from tests.test_drive_sync import FakeDriveService
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    store.record_pending_publish("D1", "FID1", "hash1")
+    store.record_pending_publish("D1", "FID2", "hash2")
+
+    svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", lambda *a, **k: {"D1": 0})
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+    monkeypatch.setattr(ingest_cache, "note_drive_presence",
+                        lambda *a, **k: {"purged": [], "tracked": 0})
+
+    fake_fs = object()
+    monkeypatch.setattr(fsmod, "cache_storage_factory",
+                        lambda home_, svc_: (lambda d: fake_fs))
+
+    def _fake_publish_pending(store_, ingest_cache_, *, drives_fs, pin, published_by,
+                              contextual_retrieval=False, budget=None):
+        # Simulate FID1 actually publishing (and being cleared) during this
+        # call -- the snapshot must have already been taken before this ran.
+        store_.clear_pending_publish("D1", "FID1")
+        return {"D1": 1}
+    monkeypatch.setattr(sync_mod, "publish_pending_shared_drive_artifacts",
+                        _fake_publish_pending)
+
+    gc_calls = []
+    def _spy_gc(fs, drive_id, keep_map, pin):
+        gc_calls.append((fs, drive_id, dict(keep_map)))
+        return 0
+    monkeypatch.setattr(ingest_cache, "gc_superseded_batch", _spy_gc)
+
+    res = run_sync_cycle(store, embedder=None, drive_service=svc, home=home)
+
+    assert len(gc_calls) == 1
+    fs, drive_id, keep_map = gc_calls[0]
+    assert fs is fake_fs
+    assert drive_id == "D1"
+    # keep_map must reflect the PRE-publish snapshot -- BOTH files, including
+    # FID1, which the fake publish call above already cleared by the time GC
+    # ran -- proving the snapshot was taken before, not after, publish.
+    assert keep_map == {"FID1": "hash1", "FID2": "hash2"}
+    assert res["shared_drives_published"] == {"D1": 1}
