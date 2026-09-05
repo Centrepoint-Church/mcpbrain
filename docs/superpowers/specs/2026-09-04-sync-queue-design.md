@@ -284,12 +284,16 @@ This was never the source of the live incident this design investigates — the 
 `drive` outage showed **zero** shared-drive sync activity throughout. Migrating
 `sync_shared_drive` to `discover_shared_drive`/`handle_shared_drive_item` is legitimate,
 real follow-up work: the same shape as Tasks 5-7, plus threading `fleet_storage`/`pin`
-(shared-drive-specific arguments `sync_drive` doesn't take) through `enqueue_and_advance`'s
-`items` or a `source`-keyed lookup at work time. Not started here.
+through to the work handler, and a new durable mechanism for the cache-miss -> embed ->
+publish pipeline (today an in-memory return value threaded through one synchronous call;
+the queue model needs it to survive across cycles). **Designed and planned**: see
+`docs/superpowers/plans/2026-09-05-shared-drive-queue-migration.md`.
 
 Task 9's cursor cleanup was corrected to an exact-match allowlist of the five keys that
 are actually dead, rather than the suffix-wildcard pattern this section originally implied
 — see `store.py`'s `init()` and `tests/test_sync_queue_cleanup.py::test_init_spares_shared_drive_resume_state`.
+This allowlist grows once the follow-up plan's own deletion task retires `sync_shared_drive`
+for real.
 
 ## Risks
 
