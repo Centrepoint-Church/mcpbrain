@@ -585,6 +585,21 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_due "
                        "ON sync_queue(next_attempt_at, modified_at DESC)")
 
+            # Durable seam for the shared-drive cache-miss -> embed -> publish
+            # pipeline. A row means "this file's chunks are extracted and
+            # written locally, but not yet shared to the fleet cache" -- it
+            # survives across cycles, unlike today's in-memory miss list,
+            # because publishing needs the chunk EMBEDDED first (a separate,
+            # later step in the same cycle or a subsequent one) and a crash
+            # or budget cut between extraction and publish must not lose the
+            # obligation to publish once the embedding exists.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS shared_drive_pending_publish(
+                drive_id      TEXT NOT NULL,
+                file_id       TEXT NOT NULL,
+                content_hash  TEXT NOT NULL,
+                discovered_at TEXT NOT NULL,
+                PRIMARY KEY (drive_id, file_id)){_S}""")
+
             # --- enrichment graph tables (Task 4.2) -----------------------
             db.execute(f"""CREATE TABLE IF NOT EXISTS entities(
                 id          TEXT PRIMARY KEY,
@@ -2880,6 +2895,33 @@ class Store:
                 "updated_at=excluded.updated_at",
                 (source, str(cursor), now))
         return len(items)
+
+    def record_pending_publish(self, drive_id: str, file_id: str,
+                               content_hash: str) -> None:
+        """A file was extracted locally and needs sharing to the fleet cache
+        once its chunks are embedded. UPSERT: a later call for the same file
+        replaces the hash -- only the latest version should ever publish."""
+        with self._connect(write=True) as db:
+            db.execute(
+                "INSERT INTO shared_drive_pending_publish"
+                "(drive_id, file_id, content_hash, discovered_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(drive_id, file_id) DO UPDATE SET "
+                "  content_hash=excluded.content_hash, "
+                "  discovered_at=excluded.discovered_at",
+                (drive_id, file_id, content_hash, datetime.now(timezone.utc).isoformat()))
+
+    def pending_publishes(self, drive_id: str) -> list[tuple[str, str]]:
+        """(file_id, content_hash) pairs awaiting publish for one drive --
+        the exact shape _publish_drive_misses's `misses` parameter expects."""
+        with self._connect() as db:
+            return [(r["file_id"], r["content_hash"]) for r in db.execute(
+                "SELECT file_id, content_hash FROM shared_drive_pending_publish "
+                "WHERE drive_id=?", (drive_id,)).fetchall()]
+
+    def clear_pending_publish(self, drive_id: str, file_id: str) -> None:
+        with self._connect(write=True) as db:
+            db.execute("DELETE FROM shared_drive_pending_publish "
+                       "WHERE drive_id=? AND file_id=?", (drive_id, file_id))
 
     def sync_queue_pending(self, source: str | None = None) -> int:
         """Rows still to be worked. Presence is pending, so this is a count."""
