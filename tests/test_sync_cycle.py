@@ -1120,6 +1120,88 @@ def test_cycle_discovers_and_publishes_shared_drive_items(tmp_path, monkeypatch)
     assert s.sync_queue_pending() == 0
 
 
+def test_run_sync_cycle_flushes_skip_report_for_my_drive(tmp_path, monkeypatch):
+    """Skip-report gap: handle_drive_item accepts a `report` dict (fetch_content's
+    per-round unsupported-mime/empty-extraction tally) and always has, but
+    run_sync_cycle never passed one -- so a My-Drive delta sync's skips stopped
+    reaching change_log the moment the queue redesign moved fetching from a
+    per-round sync_drive() call into this per-item handler. `folder_cache` was
+    already hoisted once per cycle for exactly this "own it across items" reason;
+    `report` needs the identical treatment."""
+    from mcpbrain import sync as sync_mod
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "c.sqlite3", dim=4)
+    s.init()
+
+    def fake_discover(service, store, source="drive", *, budget=None):
+        store.enqueue_and_advance(
+            [{"ref_id": "f1", "version": "1", "event": "upsert",
+              "modified_at": "2026-09-08T00:00:00"}], source="drive", cursor="2")
+        return 1
+
+    def fake_handle_drive_item(service, store, item, *, folder_cache=None,
+                               bulk_section=None, report=None):
+        assert report is not None, "handle_drive_item must receive a real report dict"
+        report[("unsupported_mime", "image/heic")] = 1
+
+    flushed = []
+    def fake_flush(store, report, *, source="drive"):
+        flushed.append((source, dict(report)))
+
+    monkeypatch.setattr(sync_mod, "discover_drive", fake_discover)
+    monkeypatch.setattr(sync_mod, "handle_drive_item", fake_handle_drive_item)
+    monkeypatch.setattr(sync_mod, "flush_skip_report", fake_flush)
+
+    sync_mod.run_sync_cycle(s, embedder=None, drive_service=object(), home=str(tmp_path))
+
+    assert flushed == [("drive", {("unsupported_mime", "image/heic"): 1})]
+
+
+def test_run_sync_cycle_flushes_skip_report_per_shared_drive(tmp_path, monkeypatch):
+    """Same gap, shared-drive side: each drive's skips must flush under its OWN
+    source ("drive:<id>"), not merged into My Drive's or another drive's tally --
+    accurate attribution is the entire point of flush_skip_report's `source` arg."""
+    from mcpbrain import sync as sync_mod
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "c.sqlite3", dim=4)
+    s.init()
+
+    def fake_discover_shared_drives(service, store, *, pin, budget=None):
+        store.enqueue_and_advance(
+            [{"ref_id": "f1", "version": "1", "event": "upsert",
+              "modified_at": "2026-09-08T00:00:00"}], source="drive:D1", cursor="2")
+        return {"D1": 1}
+
+    def fake_handle_shared(service, store, item, *, fleet_storage=None, pin=None,
+                           drive_id=None, contextual_retrieval=False,
+                           folder_cache=None, report=None, bulk_section=None):
+        assert report is not None, "handle_shared_drive_item must receive a real report dict"
+        report[("extraction_empty", "application/pdf")] = 2
+
+    flushed = []
+    def fake_flush(store, report, *, source="drive"):
+        flushed.append((source, dict(report)))
+
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", fake_discover_shared_drives)
+    monkeypatch.setattr(sync_mod, "handle_shared_drive_item", fake_handle_shared)
+    monkeypatch.setattr(sync_mod, "flush_skip_report", fake_flush)
+    monkeypatch.setattr(sync_mod, "list_shared_drives", lambda *a, **k: [{"id": "D1"}])
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+    monkeypatch.setattr(sync_mod, "publish_pending_shared_drive_artifacts",
+                        lambda *a, **k: {})
+    monkeypatch.setattr(config, "ingest_cache_enabled", lambda home: True)
+    monkeypatch.setattr(config, "fleet_pin", lambda home: __import__(
+        "mcpbrain.org_contracts", fromlist=["FleetPin"]).FleetPin(
+        embed_model="bge-small", dim=4, chunker_version="v1",
+        enrich_logic_floor=1, fleet_secret="s"))
+    monkeypatch.setattr(config, "owner_email", lambda home: "a@b.c")
+
+    sync_mod.run_sync_cycle(s, embedder=None, drive_service=object(), home=str(tmp_path))
+
+    assert flushed == [("drive:D1", {("extraction_empty", "application/pdf"): 2})]
+
+
 def test_run_sync_cycle_notes_drive_presence_every_cycle(tmp_path, monkeypatch):
     """Fix-loop round 1: note_drive_presence (the ONLY mechanism that ever
     purges a shared drive's cached fleet artifacts once it's unpinned/
@@ -1163,6 +1245,51 @@ def test_run_sync_cycle_notes_drive_presence_every_cycle(tmp_path, monkeypatch):
     assert captured["present"] == ["D1", "D2"]
     assert captured["threshold"] == config.ingest_cache_revocation_threshold(home)
     assert res["revoked_drives"] == []
+
+
+def test_run_sync_cycle_clears_sync_state_for_a_revoked_drive(tmp_path, monkeypatch):
+    """Final-review Finding 5: ingest_cache.purge_drive (deliberately
+    unchanged by this migration) has no idea sync_queue/sync_cursors/
+    shared_drive_pending_publish rows exist. When note_drive_presence purges
+    a drive, run_sync_cycle must ALSO clear that drive's own new per-drive
+    state, or its queued items KeyError forever and its cursor/pending rows
+    sit orphaned."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import sync as sync_mod, ingest_cache
+    from tests.test_drive_sync import FakeDriveService
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    # A drive that's about to be revoked, with real leftover state: a queued
+    # item, a cursor, a backfill floor cursor, and a pending publish.
+    store.set_cursor("drive:D1", "999")
+    store.set_cursor("drive:D1_backfill_until", "2026-01-01T00:00:00")
+    store.enqueue_and_advance(
+        [{"ref_id": "f1", "version": "1", "event": "upsert",
+          "modified_at": "2026-09-08T00:00:00"}], source="drive:D1", cursor="999")
+    store.record_pending_publish("D1", "f1", "hash1")
+
+    svc = FakeDriveService(shared_drives=[])  # D1 no longer enumerable: revoked
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", lambda *a, **k: {})
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+    monkeypatch.setattr(ingest_cache, "note_drive_presence",
+                        lambda *a, **k: {"purged": ["D1"], "tracked": 0})
+
+    res = run_sync_cycle(store, embedder=None, drive_service=svc, home=home)
+
+    assert res["revoked_drives"] == ["D1"]
+    assert store.get_cursor("drive:D1") is None
+    assert store.get_cursor("drive:D1_backfill_until") is None
+    assert store.sync_queue_pending("drive:D1") == 0
+    assert store.pending_publishes("D1") == []
 
 
 def test_run_sync_cycle_gc_superseded_batch_runs_after_each_publish_pass(tmp_path, monkeypatch):
