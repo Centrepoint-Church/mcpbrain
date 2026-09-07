@@ -22,24 +22,21 @@ def test_init_clears_obsolete_round_state(tmp_path):
         assert s.get_cursor(dead) is None, f"{dead} not cleaned up"
 
 
-def test_init_spares_shared_drive_resume_state(tmp_path):
-    """sync_shared_drive was NOT migrated to discover_*/handle_*_item and
-    still leans on its own per-round resume state, keyed
-    f"drive:{drive_id}:resume_ids" etc. -- a suffix match like
-    `source LIKE '%:resume_ids'` also catches these three-segment keys, which
-    would wipe an in-progress shared-drive round on every daemon restart and
-    reintroduce, for shared drives specifically, the livelock this whole
-    effort exists to fix. Only the bare two-segment drive/gmail/calendar keys
-    are actually dead.
-    """
+def test_init_now_also_clears_shared_drive_resume_state(tmp_path):
+    """sync_shared_drive is deleted (all shared-drive sync now goes through
+    discover_shared_drive/handle_shared_drive_item, which use sync_queue and
+    never write per-round resume state), so its per-drive resume keys, keyed
+    f"drive:{drive_id}:resume_ids" etc., are dead too -- the counterpart to
+    the now-removed test_init_spares_shared_drive_resume_state, which
+    asserted the opposite while sync_shared_drive was still live."""
     s = Store(tmp_path / "m.sqlite3", dim=4)
     s.init()
-    s.set_cursor("drive:SOMESHAREDDRIVEID", "999")
-    s.set_cursor("drive:SOMESHAREDDRIVEID:resume_ids", '["a"]')
-    s.set_cursor("drive:SOMESHAREDDRIVEID:resume_removed_ids", '["b"]')
-    s.set_cursor("drive:SOMESHAREDDRIVEID:page_token", "12345")
+    s.set_cursor("drive:D1", "999")
+    s.set_cursor("drive:D1:resume_ids", '["a"]')
+    s.set_cursor("drive:D1:resume_removed_ids", '["b"]')
+    s.set_cursor("drive:D1:page_token", "1000")
     s.init()
-    assert s.get_cursor("drive:SOMESHAREDDRIVEID") == "999"
-    assert s.get_cursor("drive:SOMESHAREDDRIVEID:resume_ids") == '["a"]'
-    assert s.get_cursor("drive:SOMESHAREDDRIVEID:resume_removed_ids") == '["b"]'
-    assert s.get_cursor("drive:SOMESHAREDDRIVEID:page_token") == "12345"
+    assert s.get_cursor("drive:D1") == "999", "the real per-drive cursor must survive"
+    for dead in ("drive:D1:resume_ids", "drive:D1:resume_removed_ids",
+                "drive:D1:page_token"):
+        assert s.get_cursor(dead) is None, f"{dead} not cleaned up"

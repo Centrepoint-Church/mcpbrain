@@ -2,16 +2,20 @@
 
 changes().list() rejects `corpora` (that kwarg is files.list-only) — passing it
 raises TypeError in the real Drive v3 client, which would abort every shared
-drive's sync. Test via the real public entry point (sync_shared_drive) with a
-minimal fake service that records the kwargs it was called with.
-"""
-from mcpbrain.sync.drive import sync_shared_drive
-from mcpbrain.org_contracts import FleetPin
-from mcpbrain.store import Store
-from tests.helpers.org_fleet import LocalDirFleetStorage
+drive's sync. Test via the real public entry point (discover_shared_drive,
+sync_shared_drive's replacement) with a minimal fake service that records the
+kwargs it was called with.
 
-PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
-               enrich_logic_floor=1, fleet_secret="s3cret")
+Note: test_shared_drive_discovery.py's own `_Changes.list` fake also asserts
+"corpora" not in kw inline (exercised by its discover_shared_drive/
+discover_shared_drives tests), so this exact property already has coverage
+there too -- this file is kept as a dedicated, clearly-named regression guard
+for a defect class ("a silently-rejected kwarg breaks every shared drive's
+sync") that is worth a standalone test rather than only an incidental
+assertion buried in another file's fixture.
+"""
+from mcpbrain.sync.drive import discover_shared_drive
+from mcpbrain.store import Store
 
 
 def _store(tmp_path, name="a.sqlite3"):
@@ -49,10 +53,10 @@ class _CapturingService:
 
 def test_changes_list_omits_corpora(tmp_path):
     """changes().list() must not be passed corpora (the real API rejects it)."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    s = _store(tmp_path)
     s.set_cursor("drive:D1", "100")  # skip bootstrap; go straight to the delta loop
     seen: dict = {}
     svc = _CapturingService(seen)
-    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    discover_shared_drive(svc, s, "D1", "drive:D1")
     assert "corpora" not in seen
     assert seen.get("driveId") == "D1"

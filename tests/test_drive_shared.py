@@ -6,7 +6,7 @@ from mcpbrain.org_contracts import DRIVE_ID_META_KEY
 from mcpbrain import ingest_cache
 from mcpbrain.org_contracts import FleetPin
 from mcpbrain.store import Store
-from mcpbrain.sync.drive import sync_shared_drive
+from mcpbrain.sync.drive import discover_shared_drive, handle_shared_drive_item
 from tests.helpers.org_fleet import LocalDirFleetStorage
 from tests.test_drive_sync import FakeDriveService, _gdoc_change
 
@@ -74,188 +74,59 @@ def test_file_content_hash_prefers_md5_then_stable_for_native():
     assert a == b and a != c and len(a) == 64        # deterministic sha256
 
 
-def test_sync_shared_drive_bootstrap_sets_cursor(tmp_path):
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+def test_discover_shared_drive_bootstrap_sets_cursor(tmp_path):
+    """First-ever call for a pinned Shared Drive: no cursor yet, so
+    discover_shared_drive must bootstrap via
+    changes().getStartPageToken(driveId=..., supportsAllDrives=True) --
+    a shared-drive-specific branch distinct from My Drive's driveId-less
+    getStartPageToken() and, before this port, only exercised through the
+    now-deleted sync_shared_drive (Task 2/3's own test file
+    test_shared_drive_discovery.py always pre-seeds a cursor and never hits
+    this branch)."""
+    s = _store(tmp_path)
     svc = FakeDriveService(start_token="500")
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 0
+    n = discover_shared_drive(svc, s, "D1", "drive:D1")
+    assert n == 0
     assert s.get_cursor("drive:D1") == "500"
 
 
-def test_sync_shared_drive_miss_extracts_and_records_for_publish(tmp_path):
+def test_handle_shared_drive_item_cache_hit_skips_extraction(tmp_path):
+    """Cache-hit behavior through handle_shared_drive_item's shared
+    _cache_first_extract_one call has no other coverage -- Task 3's own
+    test file (test_shared_drive_discovery.py) only exercises the miss
+    path. Ported from the deleted sync_shared_drive's equivalent test."""
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-        exports={"FID": b"the quick brown fox jumps"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 1
-    assert ("FID", out["miss"][0][1]) == out["miss"][0]      # (file_id, content_hash)
-    ch = s.get_chunk("gdrive-FID-0")
-    assert ch["metadata"]["drive_id"] == "D1"
-    assert s.get_cursor("drive:D1") == "101"
-
-
-def test_sync_shared_drive_cache_hit_skips_extraction(tmp_path):
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
     # pre-publish an artifact for FID's current version so try_import hits
     src = _store(tmp_path, "src.sqlite3")
     src.import_cached_chunk("gdrive-FID-0", "cached body", "c0",
                             {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}, [0.5]*4)
     fm = _gdoc_change("FID")["file"]
-    from mcpbrain.sync.drive import _file_content_hash
     ch = _file_content_hash(fm)
     ingest_cache.publish_file(src, fs, "D1", "FID", ch, PIN)
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-        exports={"FID": b"DIFFERENT - must NOT be extracted"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 1 and out["miss"] == []          # imported from cache
+    svc = FakeDriveService(files_by_id={"FID": fm},
+                           exports={"FID": b"DIFFERENT - must NOT be extracted"})
+    item = {"ref_id": "FID", "version": "", "event": "upsert",
+           "modified_at": "2026-05-01T10:00:00Z"}
+    handle_shared_drive_item(svc, s, item, fleet_storage=fs, pin=PIN, drive_id="D1")
     assert s.get_chunk("gdrive-FID-0")["text"] == "cached body"  # not the export bytes
+    assert s.pending_publishes("D1") == []          # nothing new to publish
 
 
-def test_sync_shared_drive_removal_purges_local_and_artifact(tmp_path):
+def test_handle_shared_drive_item_removal_purges_local_and_artifact(tmp_path):
+    """The removal branch's actual effect -- an EXISTING local chunk deleted
+    and its published artifact GC'd via remove_file_artifacts -- has no
+    other coverage: Task 3's own removal test
+    (test_handle_shared_drive_item_removal_deletes_chunks) only asserts the
+    call doesn't raise when there is nothing to delete. Ported from the
+    deleted sync_shared_drive's equivalent test."""
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     s.import_cached_chunk("gdrive-FID-0", "a", "c", {"file_id": "FID", "drive_id": "D1"}, [0.0]*4)
     ingest_cache.publish_file(s, fs, "D1", "FID", "vX", PIN)
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [{"fileId": "FID", "removed": True}], "newStartPageToken": "101"}])
-    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
+    item = {"ref_id": "FID", "version": "", "event": "remove",
+           "modified_at": "2026-05-01T10:00:00Z"}
+    handle_shared_drive_item(FakeDriveService(), s, item, fleet_storage=fs, pin=PIN, drive_id="D1")
     assert s.get_chunk("gdrive-FID-0") is None
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
-
-
-class _FakeBudget:
-    """expired() returns False for the first `expire_after_calls` calls, True
-    from then on — pins EXACTLY which iteration a real Budget's wall-clock
-    expiry would have landed on, deterministically."""
-
-    def __init__(self, expire_after_calls):
-        self.calls = 0
-        self.expire_after_calls = expire_after_calls
-
-    def expired(self) -> bool:
-        self.calls += 1
-        return self.calls > self.expire_after_calls
-
-
-def test_sync_shared_drive_budget_interrupted_across_many_cycles_eventually_completes(tmp_path):
-    """Critical-B reproduction, Shared-Drive variant (adversarial review, Task
-    2 round 3): a delta bigger than one budget's worth of files must not
-    livelock. Drives a 7-file delta through repeated budget-truncated calls
-    and asserts the cursor eventually reaches the true final
-    newStartPageToken and every file is durably upserted exactly once."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-
-    n = 7
-    changes = [_gdoc_change(f"f{i}", f"Doc {i}") for i in range(1, n + 1)]
-    exports = {f"f{i}": f"document body number {i}, long enough to matter".encode()
-              for i in range(1, n + 1)}
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": changes, "newStartPageToken": "200"}],
-        exports=exports)
-
-    per_call_capacity = 2
-    max_cycles = 20
-    for _cycle in range(max_cycles):
-        if s.get_cursor("drive:D1") != "100":
-            break
-        budget = _FakeBudget(expire_after_calls=1 + per_call_capacity)
-        sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=budget)
-    else:
-        raise AssertionError(
-            f"cursor never advanced past the original delta window after "
-            f"{max_cycles} cycles — this is the livelock the fix targets"
-        )
-
-    assert s.get_cursor("drive:D1") == "200"
-    assert s.get_cursor("drive:D1:resume_ids") == "[]"
-    assert s.get_cursor("drive:D1:resume_removed_ids") == "[]"
-    for i in range(1, n + 1):
-        doc_id = f"gdrive-f{i}-0"
-        assert s.get_chunk(doc_id) is not None, f"f{i} was never ingested"
-        with s._connect() as db:
-            count = db.execute(
-                "SELECT COUNT(*) FROM chunks WHERE doc_id=?", (doc_id,)
-            ).fetchone()[0]
-        assert count == 1, f"f{i} produced more than one chunk row"
-
-
-def test_sync_shared_drive_file_edited_mid_round_is_picked_up_not_skipped(tmp_path):
-    """New Critical found in adversarial review round 4, Shared-Drive variant:
-    once a file's id landed in the resume set (round 3's fix), it was
-    skipped for the REST OF THAT ROUND no matter what -- including if the
-    file changed in between. Reproduced directly before this fix: an edited
-    file's stored text stayed at its pre-edit content forever after the
-    round closed. Fixed by keying the resume set on id+version
-    (_file_resume_key), not bare id.
-    """
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-
-    f1 = _gdoc_change("f1", "Doc One")
-    f1["file"]["md5Checksum"] = "hash-v1"
-    f2 = _gdoc_change("f2", "Doc Two")
-    f2["file"]["md5Checksum"] = "hash-v1-f2"
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [f1, f2], "newStartPageToken": "200"}],
-        exports={"f1": b"ORIGINAL f1 body content, long enough to matter",
-                "f2": b"f2 body content, long enough to matter"})
-
-    # One fewer expired() call than before: the first item is now written
-    # unconditionally under the minimum-forward-progress guarantee, so the
-    # cut-off lands one call earlier while the outcome under test is
-    # unchanged (first item durable, second not, round still open).
-    budget = _FakeBudget(expire_after_calls=1)
-    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=budget)
-    assert s.get_cursor("drive:D1") == "100", "round must still be open"
-    assert s.get_chunk("gdrive-f1-0")["text"].startswith("ORIGINAL")
-
-    # f1 is edited in Drive (content AND version change) WHILE the round is
-    # still open.
-    svc._files._exports["f1"] = b"REVISED f1 body content, long enough to matter"
-    f1_edited = _gdoc_change("f1", "Doc One")
-    f1_edited["file"]["md5Checksum"] = "hash-v2"
-    svc._changes._pages[0] = {"changes": [f1_edited, f2], "newStartPageToken": "200"}
-
-    sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN, budget=None)
-
-    assert s.get_cursor("drive:D1") == "200", "round must close"
-    assert s.get_chunk("gdrive-f1-0")["text"].startswith("REVISED"), (
-        "f1's edit must land -- the resume set must not have permanently "
-        "skipped it just because its OLD id+version key was already "
-        "resumed from call 1"
-    )
-    assert s.get_cursor("drive:D1:resume_ids") == "[]"
-
-
-def test_sync_shared_drives_enumerates_and_returns_storages(tmp_path):
-    s = _store(tmp_path)
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        shared_drives=[{"id": "D1", "name": "Ops"}],
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-        exports={"FID": b"body text here"})
-    storages = {}
-
-    def factory(drive_id):
-        storages.setdefault(drive_id, LocalDirFleetStorage(tmp_path / drive_id))
-        return storages[drive_id]
-
-    out = sync_shared_drives(svc, s, pin=PIN, storage_factory=factory)
-    assert set(out) >= {"D1"}
-    assert out["D1"]["processed"] == 1
-    assert out["D1"]["storage"] is storages["D1"]
-    assert out["_revoked"] == []
 
 
 def test_file_content_hash_degenerate_metadata_forces_cache_miss(caplog):
@@ -277,105 +148,15 @@ def test_file_content_hash_degenerate_metadata_forces_cache_miss(caplog):
     assert any("NOVERSION" in rec.message for rec in caplog.records)
 
 
-def test_sync_shared_drive_isolates_per_file_extraction_failure(tmp_path, caplog):
-    """One poison file raising during fetch/extract must not abort the whole
-    drive's cycle: the good file still gets processed and the cursor still
-    advances (so the poison file isn't retried forever, blocking the drive)."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{
-            "changes": [_gdoc_change("BAD"), _gdoc_change("GOOD")],
-            "newStartPageToken": "101",
-        }],
-        exports={"GOOD": b"good file content here"},
-        export_raises={"BAD": RuntimeError("corrupt export")},
-    )
-    with caplog.at_level("WARNING"):
-        out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-
-    assert out["processed"] == 1
-    assert s.get_chunk("gdrive-GOOD-0") is not None
-    assert s.get_chunk("gdrive-BAD-0") is None
-    # Cursor still advances — the poison file must not block the drive forever.
-    assert s.get_cursor("drive:D1") == "101"
-    assert any("BAD" in rec.message for rec in caplog.records)
-    assert any(rec.levelname == "WARNING" for rec in caplog.records)
-
-
-def test_sync_shared_drive_dedups_repeated_fileid_in_one_delta(tmp_path):
-    """The same fileId appearing twice within one delta (edited then re-edited)
-    must be fetched/extracted/published exactly ONCE — not twice. The delta is
-    collapsed to one ordered, deduplicated view keyed by fileId before any
-    extraction happens."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID"), _gdoc_change("FID")],
-                "newStartPageToken": "101"}],
-        exports={"FID": b"the quick brown fox jumps"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 1
-    assert len(out["miss"]) == 1 and out["miss"][0][0] == "FID"
-    # export() invoked once despite the fileId appearing twice in the delta
-    assert svc._files.export_calls.get("FID") == 1
-    assert s.get_chunk("gdrive-FID-0") is not None
-
-
-def test_sync_shared_drive_change_then_removal_collapses_to_removal(tmp_path):
-    """A change followed by a removal of the SAME file within one delta resolves
-    to the file's final state at the cursor endpoint: REMOVED. Reasoning: Drive
-    emits changes chronologically, so the last event (removal) is the truth; the
-    file must NOT be extracted (no fetch, no chunk, no miss to publish) and any
-    prior local copy + artifact is purged."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    # seed a prior local chunk + artifact so we can prove the removal purges it
-    s.import_cached_chunk("gdrive-FID-0", "old body", "c",
-                          {"file_id": "FID", "drive_id": "D1"}, [0.0]*4)
-    ingest_cache.publish_file(s, fs, "D1", "FID", "vX", PIN)
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID"),
-                            {"fileId": "FID", "removed": True}],
-                "newStartPageToken": "101"}],
-        exports={"FID": b"MUST NOT be extracted"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 0 and out["miss"] == []
-    assert svc._files.export_calls.get("FID") is None      # never fetched
-    assert s.get_chunk("gdrive-FID-0") is None             # purged
-    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
-
-
-def test_sync_shared_drive_removal_then_change_collapses_to_change(tmp_path):
-    """Reverse ordering: a removal followed by a later change of the SAME file
-    (deleted then restored + edited) resolves to the final state: CHANGED. The
-    file is extracted normally and NOT purged."""
-    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [{"fileId": "FID", "removed": True},
-                            _gdoc_change("FID")],
-                "newStartPageToken": "101"}],
-        exports={"FID": b"the quick brown fox jumps"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 1
-    assert len(out["miss"]) == 1 and out["miss"][0][0] == "FID"
-    assert svc._files.export_calls.get("FID") == 1
-    assert s.get_chunk("gdrive-FID-0") is not None
-
-
-def test_sync_shared_drive_herd_race_recheck_import_hits(tmp_path, monkeypatch):
+def test_handle_shared_drive_item_herd_race_recheck_import_hits(tmp_path, monkeypatch):
     """Herd-race re-check branch: the FIRST try_import (before fetch) misses, but
     the SECOND (after fetch, right before extraction) HITS because a concurrent
     daemon published the artifact while we were fetching. The file must count as
-    a cache hit (processed, nothing new to publish) and NOT be extracted
-    locally."""
+    a cache hit (nothing new to publish) and NOT be extracted locally. Ported
+    from the deleted sync_shared_drive's equivalent test -- handle_shared_drive_item
+    calls the same shared _cache_first_extract_one, but nothing else exercises
+    this branch through the new path."""
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
-    s.set_cursor("drive:D1", "100")
     calls = {"n": 0}
 
     def fake_try_import(*_a, **_k):
@@ -383,29 +164,30 @@ def test_sync_shared_drive_herd_race_recheck_import_hits(tmp_path, monkeypatch):
         return calls["n"] >= 2          # first call miss, second (+) hit
 
     monkeypatch.setattr(ingest_cache, "try_import", fake_try_import)
-    svc = FakeDriveService(
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-        exports={"FID": b"the quick brown fox jumps"})
-    out = sync_shared_drive(svc, s, "D1", fleet_storage=fs, pin=PIN)
-    assert out["processed"] == 1
-    assert out["miss"] == []                      # re-check hit → nothing to publish
-    assert calls["n"] == 2                        # both try_import calls exercised
+    fm = _gdoc_change("FID")["file"]
+    svc = FakeDriveService(files_by_id={"FID": fm},
+                           exports={"FID": b"the quick brown fox jumps"})
+    item = {"ref_id": "FID", "version": "", "event": "upsert",
+           "modified_at": "2026-05-01T10:00:00Z"}
+    handle_shared_drive_item(svc, s, item, fleet_storage=fs, pin=PIN, drive_id="D1")
+    assert calls["n"] == 2                          # both try_import calls exercised
     assert svc._files.export_calls.get("FID") == 1  # fetch happened before the hit
-    assert s.get_chunk("gdrive-FID-0") is None    # no local extraction occurred
+    assert s.get_chunk("gdrive-FID-0") is None       # no local extraction occurred
+    assert s.pending_publishes("D1") == []           # re-check hit -> nothing to publish
 
 
-def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
-    """A per-cycle delta only ever contains the files that changed since the
-    last cursor — it is never a complete file listing. sync_shared_drives must
-    NOT sweep the cache off that partial set: an artifact for a file that was
-    NOT touched by this cycle's delta must survive."""
+def test_handle_shared_drive_item_does_not_sweep_unchanged_artifacts(tmp_path):
+    """A queued work item only ever concerns the ONE file it names -- handling
+    it must never sweep the ingest cache for the rest of the drive. Ported
+    from the deleted sync_shared_drives' equivalent test: that fleet-wide,
+    delta-based reasoning still applies here (handle_shared_drive_item, like
+    the deleted function, never calls sweep_drive), and this ports it to the
+    finer per-item grain the new architecture actually works at."""
     s = _store(tmp_path)
-    s.set_cursor("drive:D1", "100")
     fs = LocalDirFleetStorage(tmp_path / "D1")
 
-    # Pre-seed a cache artifact for UNTOUCHED, a file that will NOT appear
-    # in this cycle's delta at all.
+    # Pre-seed a cache artifact for UNTOUCHED, a file this item does NOT
+    # mention at all.
     src = _store(tmp_path, "src.sqlite3")
     src.import_cached_chunk("gdrive-UNTOUCHED-0", "untouched body", "cU",
                             {"source_type": "gdrive", "file_id": "UNTOUCHED",
@@ -413,120 +195,15 @@ def test_sync_shared_drives_does_not_sweep_unchanged_artifacts(tmp_path):
     ingest_cache.publish_file(src, fs, "D1", "UNTOUCHED", "vU", PIN)
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") != []
 
-    # This cycle's delta only mentions a different file, FID.
-    svc = FakeDriveService(
-        shared_drives=[{"id": "D1", "name": "Ops"}],
-        initial_cursor="100",
-        pages=[{"changes": [_gdoc_change("FID")], "newStartPageToken": "101"}],
-        exports={"FID": b"body text here"})
+    fm = _gdoc_change("FID")["file"]
+    svc = FakeDriveService(files_by_id={"FID": fm}, exports={"FID": b"body text here"})
+    item = {"ref_id": "FID", "version": "", "event": "upsert",
+           "modified_at": "2026-05-01T10:00:00Z"}
+    handle_shared_drive_item(svc, s, item, fleet_storage=fs, pin=PIN, drive_id="D1")
 
-    sync_shared_drives(svc, s, pin=PIN, storage_factory=lambda d: fs)
-
-    # UNTOUCHED's artifact must still be present — it was never in this
-    # cycle's (necessarily partial) live_file_ids set.
+    # UNTOUCHED's artifact must still be present — it was never named by
+    # this item.
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") != []
-
-
-def test_sync_shared_drives_revokes_vanished_drive(tmp_path):
-    from mcpbrain import ingest_cache
-    s = _store(tmp_path)
-    s.import_cached_chunk("gdrive-F1-0", "a", "c", {"file_id": "F1", "drive_id": "GONE"}, [0.0]*4)
-    # A persistent drive keeps the enumeration non-empty, so GONE vanishing is a
-    # genuine single-drive revocation — not a blanket-empty glitch (which the
-    # data-safety guard treats as transient and never purges).
-    ingest_cache.note_drive_presence(s, ["GONE", "KEEP"], threshold=2)  # counter=0
-    ingest_cache.note_drive_presence(s, ["KEEP"], threshold=2)          # GONE absent, counter=1
-    svc = FakeDriveService(shared_drives=[{"id": "KEEP", "name": "Keep"}])  # GONE no longer listed
-    out = sync_shared_drives(svc, s, pin=PIN,
-                             storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
-                             absence_threshold=2)
-    assert out["_revoked"] == ["GONE"]
-    assert s.doc_ids_for_drive("GONE") == []
-
-
-class _FakeBudget:
-    """expired() returns False for the first `expire_after_calls` calls, True
-    from then on — lets a test pin exactly when a real Budget's wall-clock
-    expiry would have landed, deterministically."""
-
-    def __init__(self, expire_after_calls):
-        self.calls = 0
-        self.expire_after_calls = expire_after_calls
-
-    def expired(self) -> bool:
-        self.calls += 1
-        return self.calls > self.expire_after_calls
-
-
-def test_budget_break_does_not_purge_drives_merely_not_yet_reached(tmp_path):
-    """Critical-A reproduction (adversarial review, Task 2 round 3).
-
-    `sync_shared_drives` used to build `present` by appending each drive id
-    AS IT WAS VISITED in the per-drive loop, so a `budget` break partway
-    through left every not-yet-reached drive missing from `present` even
-    though `list_shared_drives` (a complete enumeration, paginated fully
-    up front) had already confirmed it's still authorized. Those unreached-
-    but-authorized drives then accumulated toward `note_drive_presence`'s
-    consecutive-absence purge counter exactly like a genuinely revoked
-    drive would -- reproduced live by the reviewer with threshold=2: after
-    two budget-truncated cycles, a drive that was simply never reached in
-    time got `purge_drive`'d (chunks deleted, relations invalidated).
-
-    This drives THREE shared drives through `threshold` consecutive cycles,
-    each with a budget that expires after only the first drive is actually
-    processed (so the other two are enumerated but never reached), and
-    asserts no drive is ever purged -- and that a pre-existing chunk in one
-    of the never-reached drives survives all `threshold` cycles.
-
-    All three drives must already be `known` to `note_drive_presence` before
-    the budget-truncated cycles start (a fleet that's been running fine and
-    then hits a busy backlog, not a fleet meeting these drives for the first
-    time) -- `known` only grows from drives that actually appear in
-    `present`, so a drive never once fully visited never enters the
-    absence-tracking system at all and this test would otherwise pass
-    trivially even with the bug present (verified: an earlier draft of this
-    test without the seeding step below passed against BOTH the buggy and
-    the fixed code, i.e. it was not actually discriminating).
-    """
-    s = _store(tmp_path)
-    # D2 has real cached content; if the bug purged it, this would be gone.
-    s.import_cached_chunk("gdrive-F2-0", "d2 doc body", "h2",
-                          {"file_id": "F2", "drive_id": "D2"}, [0.0] * 4)
-    svc = FakeDriveService(shared_drives=[
-        {"id": "D1", "name": "Ops"},
-        {"id": "D2", "name": "Finance"},
-        {"id": "D3", "name": "Legal"},
-    ])
-
-    threshold = 2
-    # Seed: one full, unbounded cycle so all three drives become `known` with
-    # a reset (0) absence counter, matching a fleet that's been healthy.
-    seed_out = sync_shared_drives(svc, s, pin=PIN,
-                                  storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
-                                  absence_threshold=threshold)
-    assert seed_out["_revoked"] == []
-
-    for cycle in range(threshold):
-        # Expires on the very first budget.expired() call this invocation
-        # makes -- i.e. right after whichever drive is the first to actually
-        # complete (or fail-and-be-skipped) its sync_shared_drive call, so at
-        # most one drive is ever fully processed per cycle and the other two
-        # are enumerated but never reached.
-        budget = _FakeBudget(expire_after_calls=0)
-        out = sync_shared_drives(svc, s, pin=PIN,
-                                 storage_factory=lambda d: LocalDirFleetStorage(tmp_path / d),
-                                 absence_threshold=threshold, budget=budget)
-        assert out["_revoked"] == [], (
-            f"cycle {cycle}: a drive was purged for merely not being reached "
-            f"in time, despite still being present in the full enumeration"
-        )
-
-    # D2's chunk must still be there — it was never actually revoked from
-    # the fleet, only unlucky about when the budget ran out.
-    assert s.get_chunk("gdrive-F2-0") is not None
-
-
-from mcpbrain.sync.drive import sync_shared_drives   # noqa: E402  (import after helpers)
 
 
 def test_backfill_shared_drive_cache_first(tmp_path):
