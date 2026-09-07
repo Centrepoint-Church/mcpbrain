@@ -1533,10 +1533,18 @@ def test_status_includes_is_configured(tmp_path, monkeypatch):
 
 
 def test_status_includes_org_block(tmp_path, monkeypatch):
-    """status() surfaces cache hit/miss counts + curator queue depth (spec
-    Task 5, observability) so /api/status exposes them without needing direct
-    store access. Must degrade gracefully but here we seed real data and
-    expect real counts."""
+    """status() surfaces curator queue depth (spec Task 5, observability) so
+    /api/status exposes them without needing direct store access. Must
+    degrade gracefully but here we seed real data and expect real counts.
+
+    Note (final-review fix): the org block used to also carry
+    `cache_hits`/`cache_misses` (shared-drive ingest-cache counts), but
+    run_sync_cycle stopped producing the `"shared_drive_cache"` result key
+    once this plan's Task 5 landed -- that hit/miss distinction is now
+    internal to handle_shared_drive_item, not surfaced back to the caller --
+    so those two fields were left silently pinned at 0 forever (worse than
+    absent: it read as "the cache is healthy"). They were removed from
+    status() entirely; do not resurrect an assertion on them here."""
     from mcpbrain import org_curate
 
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -1554,37 +1562,7 @@ def test_status_includes_org_block(tmp_path, monkeypatch):
     assert st["org"]["curator_version"] == 3
     assert st["org"]["contrib_staged"] == 1
     assert st["org"]["merge_suppressed"] == 1
-    assert "cache_hits" in st["org"] and "cache_misses" in st["org"]
-
-
-def test_status_cache_counts_reset_when_shared_drive_block_absent(tmp_path, monkeypatch):
-    """A cycle whose result has no "shared_drive_cache" key (fleet unpinned,
-    a Drive-API outage caught by the block's own try/except, or
-    drive_service/home not both present) must reset the counters to 0/0, not
-    leave the previous cycle's numbers stale in status() -- stale non-zero
-    counts would mask an ongoing shared-drive sync failure as healthy."""
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _make_store(tmp_path)
-    emb = FakeEmbedder()
-    daemon = Daemon(store, emb, enrich_mode="off",
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-
-    # First cycle: shared-drive cache block ran and reported activity.
-    monkeypatch.setattr(
-        daemon_module, "run_cycle",
-        lambda *a, **k: {"shared_drive_cache": {"hits": 7, "misses": 3}})
-    daemon.run_one()
-    st = daemon.status()
-    assert st["org"]["cache_hits"] == 7
-    assert st["org"]["cache_misses"] == 3
-
-    # Second cycle: shared-drive cache block did not run this time (key
-    # absent). status() must report 0/0, not the stale 7/3 from before.
-    monkeypatch.setattr(daemon_module, "run_cycle", lambda *a, **k: {})
-    daemon.run_one()
-    st = daemon.status()
-    assert st["org"]["cache_hits"] == 0
-    assert st["org"]["cache_misses"] == 0
+    assert "cache_hits" not in st["org"] and "cache_misses" not in st["org"]
 
 
 def test_maybe_resolve_does_not_exist():

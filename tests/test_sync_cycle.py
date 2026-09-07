@@ -913,21 +913,27 @@ def test_run_sync_cycle_shared_drive_logs_one_line_summary(tmp_path, caplog, mon
     assert "published=1" in msg
 
 
-def test_publish_drive_misses_lists_cache_folder_once_not_once_per_file(tmp_path):
-    """_publish_drive_misses (mcpbrain/sync/__init__.py) publishes each miss via
-    publish_file, then runs ONE batched gc_superseded_batch over the whole
-    drive's keep_map. Before skip_gc was threaded through publish_file's
-    internal gc_superseded call, that per-file GC still ran on every publish
-    (each doing its own full cache-folder listing) IN ADDITION to the new
-    batched call — net result MORE listings per cycle (N+1), not fewer, even
-    though gc_superseded_batch itself is O(1). This test proves the actual
-    fix: with skip_gc=True wired through the publish loop, publishing many
-    misses for one drive followed by the batched GC now issues exactly ONE
-    cache-folder listing overall, not one per file."""
+def test_publish_pending_shared_drive_artifacts_lists_cache_folder_once_not_once_per_file(
+        tmp_path):
+    """publish_pending_shared_drive_artifacts (mcpbrain/sync/__init__.py) --
+    the PRODUCTION call site since Tasks 5-6 folded shared-drive publish into
+    the discover/work/publish split (the old `_publish_drive_misses` this
+    ports from is no longer called in production at all) -- publishes each
+    pending miss via publish_file with skip_gc=True, exactly like
+    run_sync_cycle's own snapshot-then-batched-GC pattern. Before skip_gc was
+    threaded through publish_file's internal gc_superseded call, a per-file
+    GC still ran on every publish (each doing its own full cache-folder
+    listing) IN ADDITION to a batched call — net result MORE listings per
+    cycle (N+1), not fewer, even though gc_superseded_batch itself is O(1).
+    This test proves the fix still holds through the real production path:
+    publishing many pending misses for one drive followed by ONE batched GC
+    call (mirroring run_sync_cycle's own snapshot-before-publish-then-GC
+    shape) issues exactly ONE cache-folder listing overall, not one per
+    file."""
     from mcpbrain import ingest_cache
     from mcpbrain.org_contracts import FleetPin
     from mcpbrain.store import Store
-    from mcpbrain.sync import _publish_drive_misses
+    from mcpbrain.sync import publish_pending_shared_drive_artifacts
     from tests.helpers.org_fleet import LocalDirFleetStorage
 
     class _ListPathsSpyFleetStorage:
@@ -958,22 +964,76 @@ def test_publish_drive_misses_lists_cache_folder_once_not_once_per_file(tmp_path
             f"gdrive-{fid}-0", "text", "c0",
             {"source_type": "gdrive", "file_id": fid, "chunk_index": 0},
             [0.0, 1.0, 2.0, 3.0])
+        # Seed via the real Task-1 durable pending-publish record, not a
+        # `misses` list passed directly -- publish_pending_shared_drive_
+        # artifacts reads its work from the store, unlike the deleted
+        # function this ports from.
+        store.record_pending_publish("D1", fid, f"vhash-{fid}")
 
     real_fs = LocalDirFleetStorage(tmp_path / "drv")
     fs = _ListPathsSpyFleetStorage(real_fs)
-    misses = [(fid, f"vhash-{fid}") for fid in file_ids]
 
-    published = _publish_drive_misses(store, ingest_cache, fs, "D1", misses, pin, "me@x.org")
+    # Mirror run_sync_cycle's own snapshot-before-publish-then-batched-GC
+    # shape exactly (publish_pending_shared_drive_artifacts deliberately does
+    # not call gc_superseded_batch itself -- see its docstring).
+    keep_map = dict(store.pending_publishes("D1"))
+    out = publish_pending_shared_drive_artifacts(
+        store, ingest_cache, drives_fs={"D1": fs}, pin=pin, published_by="me@x.org")
+    ingest_cache.gc_superseded_batch(fs, "D1", keep_map, pin)
 
-    assert published == len(file_ids)
+    assert out == {"D1": len(file_ids)}
+    assert store.pending_publishes("D1") == []
     # The whole pass — 5 publishes + 1 batched GC — must list the cache
-    # folder exactly ONCE. Before the fix this was 1 (batch) + 5 (per-file
-    # gc_superseded, still unconditionally called inside publish) == 6.
+    # folder exactly ONCE. Before the underlying fix this was 1 (batch) + 5
+    # (per-file gc_superseded, still unconditionally called inside publish)
+    # == 6.
     assert fs.list_paths_calls == 1
 
     names = {p.rsplit("/", 1)[-1] for p in real_fs.list_paths(ingest_cache.CACHE_DIR + "/")}
     for fid in file_ids:
         assert any(n.startswith(f"{fid}.") for n in names), f"missing artifact for {fid}"
+
+
+def test_publish_pending_shared_drive_artifacts_warns_on_systematic_failure(
+        tmp_path, caplog, monkeypatch):
+    """Final-review fix: publish_pending_shared_drive_artifacts is the ONLY
+    production call site for shared-drive publishing now (the old
+    `_publish_drive_misses`, which had this warning, has zero production
+    callers left) -- so the ONE mechanism that ever surfaces a
+    systematically-broken fleet cache (missing drive.file scope, an
+    uncreatable cache folder, ...) must live here instead, or it has no
+    production path at all. Mock every publish attempt to fail for a drive
+    with pending files and assert the WARNING fires."""
+    import logging
+    from mcpbrain import ingest_cache
+    from mcpbrain.org_contracts import FleetPin
+    from mcpbrain.store import Store
+    from mcpbrain.sync import publish_pending_shared_drive_artifacts
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+
+    pin = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
+                   enrich_logic_floor=1, fleet_secret="s3cret")
+    store = Store(tmp_path / "s.sqlite3", dim=4)
+    store.init()
+    for i in range(3):
+        store.record_pending_publish("D1", f"FID{i}", f"vhash-{i}")
+
+    fs = LocalDirFleetStorage(tmp_path / "drv")
+
+    def _boom(*a, **k):
+        raise RuntimeError("simulated: missing drive.file scope")
+    monkeypatch.setattr(ingest_cache, "publish_file", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="mcpbrain.sync"):
+        out = publish_pending_shared_drive_artifacts(
+            store, ingest_cache, drives_fs={"D1": fs}, pin=pin, published_by="me@x.org")
+
+    assert out == {"D1": 0}
+    # Nothing published -> nothing cleared, everything stays pending for retry.
+    assert len(store.pending_publishes("D1")) == 3
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("ALL 3 shared-cache publishes failed for drive D1" in r.getMessage()
+              for r in warnings), [r.getMessage() for r in warnings]
 
 
 def test_cycle_discovers_then_works(tmp_path, monkeypatch):
@@ -1035,6 +1095,12 @@ def test_cycle_discovers_and_publishes_shared_drive_items(tmp_path, monkeypatch)
     monkeypatch.setattr(sync_mod, "handle_shared_drive_item", fake_handle_shared)
     monkeypatch.setattr(sync_mod, "publish_pending_shared_drive_artifacts",
                         fake_publish_pending)
+    # list_shared_drives is now called directly by run_sync_cycle (once, to
+    # build drives_fs/present from the full enumeration -- see the final-
+    # review fix), not just internally by the mocked discover_shared_drives
+    # above -- so it needs its own stub against the bare `object()`
+    # drive_service below, which doesn't implement the real Drive API.
+    monkeypatch.setattr(sync_mod, "list_shared_drives", lambda *a, **k: [{"id": "D1"}])
     # _shared_drive_backfill_step does real Drive-API-shaped work against a
     # bare `object()` drive_service below; it isn't under test here (Task 5
     # explicitly leaves its internals untouched), so make it a clean no-op.
@@ -1158,3 +1224,75 @@ def test_run_sync_cycle_gc_superseded_batch_runs_after_each_publish_pass(tmp_pat
     # ran -- proving the snapshot was taken before, not after, publish.
     assert keep_map == {"FID1": "hash1", "FID2": "hash2"}
     assert res["shared_drives_published"] == {"D1": 1}
+
+
+def test_run_sync_cycle_drives_fs_covers_queue_item_missing_from_this_cycles_discovery(
+        tmp_path, monkeypatch):
+    """Final-review fix: `drives_fs` must be built from the FULL
+    `list_shared_drives()` enumeration, not this cycle's own (possibly
+    `disc_budget`-partial) `discovered_sd` -- `sync_queue` is durable across
+    cycles, so a `drive:D1` item queued in an EARLIER cycle can still be due
+    for work even when D1 isn't in THIS cycle's `discovered_sd` (a budget
+    cutoff or a transient per-drive discovery failure). Before this fix,
+    `_drive_handler` did a bare `drives_fs[drive_id]` lookup that raised
+    KeyError in exactly this situation -- surfacing as an opaque
+    `last_error` and backing the item off, permanently if the drive was
+    ever actually revoked (it would never reappear in `discovered_sd`
+    again). Simulated here by pre-seeding a `drive:D1` sync_queue row
+    directly (as if queued by an earlier cycle) and mocking
+    `discover_shared_drives` to find nothing THIS cycle, while
+    `list_shared_drives` (the full enumeration) still reports D1 as
+    genuinely present/pinned."""
+    from mcpbrain import config
+    from mcpbrain.store import Store
+    from mcpbrain.sync import run_sync_cycle
+    from mcpbrain import sync as sync_mod, fleet_storage as fsmod
+    from tests.test_drive_sync import FakeDriveService, _gdoc_change
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+
+    class _Emb:
+        dim = 4
+        def embed_passages(self, texts):
+            return [[float(len(t) % 7), 1.0, 2.0, 3.0] for t in texts]
+        def embed_query(self, text):
+            return [0.0, 0.0, 0.0, 0.0]
+
+    home = str(tmp_path / "home")
+    config.write_config(home, {"org_config": {"org_pin": {
+        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
+        "owner_email": "me@x.org"})
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+
+    # A durable queue row from an EARLIER cycle, still due for work this
+    # cycle -- exactly `discover_shared_drive`'s own enqueue shape.
+    store.enqueue_and_advance(
+        [{"ref_id": "FID", "version": "1", "event": "upsert",
+          "modified_at": "2026-09-04T00:00:00"}], source="drive:D1", cursor="99")
+
+    # THIS cycle's discovery reaches zero drives (a disc_budget cutoff, or a
+    # transient per-drive failure) -- but D1 is still genuinely present per
+    # the full, independent list_shared_drives() enumeration.
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", lambda *a, **k: {})
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+
+    fsmap = {}
+    monkeypatch.setattr(
+        fsmod, "cache_storage_factory",
+        lambda home_, svc_: (lambda d: fsmap.setdefault(d, LocalDirFleetStorage(tmp_path / d))))
+
+    fm = _gdoc_change("FID")["file"]
+    svc = FakeDriveService(
+        shared_drives=[{"id": "D1", "name": "Ops"}],
+        files_by_id={"FID": fm},
+        exports={"FID": b"shared drive body content"})
+
+    res = run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
+
+    # The item was actually WORKED (drives_fs correctly included D1 from the
+    # full enumeration) -- not lost to a bare KeyError. Before the fix this
+    # raised inside _drive_handler and work_queue counted it as failed.
+    assert res["worked"]["failed"] == 0
+    assert res["worked"]["processed"] == 1
+    assert store.sync_queue_stats()["failing"] == []
