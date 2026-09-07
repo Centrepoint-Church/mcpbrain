@@ -118,15 +118,24 @@ def test_handle_shared_drive_item_removal_purges_local_and_artifact(tmp_path):
     other coverage: Task 3's own removal test
     (test_handle_shared_drive_item_removal_deletes_chunks) only asserts the
     call doesn't raise when there is nothing to delete. Ported from the
-    deleted sync_shared_drive's equivalent test."""
+    deleted sync_shared_drive's equivalent test.
+
+    Also covers the final-review fix: a durable
+    shared_drive_pending_publish row for the SAME file (seeded via the real
+    store.record_pending_publish, as if an earlier cycle extracted this file
+    with a cache miss but never got to publish it) must be cleared too --
+    otherwise publish_file would retry it forever with nothing left to
+    collect (its chunks are gone)."""
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     s.import_cached_chunk("gdrive-FID-0", "a", "c", {"file_id": "FID", "drive_id": "D1"}, [0.0]*4)
     ingest_cache.publish_file(s, fs, "D1", "FID", "vX", PIN)
+    s.record_pending_publish("D1", "FID", "vX")
     item = {"ref_id": "FID", "version": "", "event": "remove",
            "modified_at": "2026-05-01T10:00:00Z"}
     handle_shared_drive_item(FakeDriveService(), s, item, fleet_storage=fs, pin=PIN, drive_id="D1")
     assert s.get_chunk("gdrive-FID-0") is None
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
+    assert s.pending_publishes("D1") == []
 
 
 def test_file_content_hash_degenerate_metadata_forces_cache_miss(caplog):

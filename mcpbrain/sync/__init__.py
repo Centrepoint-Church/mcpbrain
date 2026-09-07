@@ -204,13 +204,40 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # stamp — otherwise a CR-on install could import a CR-off install's
                 # vectors (or vice-versa) as if interchangeable.
                 cr = config.contextual_retrieval_enabled(home)
+                # Fetch the FULL shared-drive enumeration exactly ONCE this
+                # cycle, BEFORE discover_shared_drives runs, and use it for
+                # BOTH `drives_fs` (below) and `present` (further down, for
+                # note_drive_presence) -- see the long comment at `present`'s
+                # assignment for why `discovered_sd` (this cycle's own,
+                # possibly disc_budget-partial, discovery result) must never
+                # be the source for either. This also removes the double
+                # `list_shared_drives` call an earlier revision made (once
+                # here, once again down at `present`) -- `discover_shared_drives`
+                # itself makes exactly this same enumeration call internally
+                # as its own first step, so a real Drive-API outage here fails
+                # identically to how it already fails inside that call.
+                all_drive_ids = [d.get("id") for d in list_shared_drives(drive_service)
+                                if d.get("id")]
                 discovered_sd = discover_shared_drives(
                     drive_service, store, pin=pin, budget=disc_budget)
                 discovered.update(
                     {f"drive:{did}": n for did, n in discovered_sd.items()})
                 from mcpbrain.fleet_storage import cache_storage_factory
                 storage_factory = cache_storage_factory(home, drive_service)
-                drives_fs = {did: storage_factory(did) for did in discovered_sd}
+                # MUST be all_drive_ids, NOT discovered_sd.keys() -- discovered_sd
+                # can be a partial set (each drive's own `discover_shared_drive`
+                # is bounded by `disc_budget`), but `sync_queue` is durable
+                # across cycles: a `drive:<id>` item queued in an EARLIER cycle
+                # can still be due for work THIS cycle even when that drive
+                # isn't in this cycle's `discovered_sd`. Building `drives_fs`
+                # from `discovered_sd` made `_drive_handler`'s
+                # `drives_fs[drive_id]` lookup raise a bare KeyError for that
+                # item -- surfacing as an opaque `last_error` and backing off
+                # to the cap, permanently if the drive was actually revoked
+                # (it would never reappear in `discovered_sd` again). Fixed by
+                # keying `drives_fs` off the same full enumeration `present`
+                # already (correctly) uses below.
+                drives_fs = {did: storage_factory(did) for did in all_drive_ids}
 
                 # Revocation (spec §A3): note_drive_presence is the ONLY
                 # mechanism that ever purges a shared drive's cached fleet
@@ -223,22 +250,18 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # drive's own `discover_shared_drive` is bounded by
                 # `disc_budget`), and a still-authorized drive simply not
                 # reached this cycle must never accrue toward the
-                # absence-purge threshold as if it were gone. This is a
-                # second `list_shared_drives` call this cycle (the first is
-                # inside `discover_shared_drives` above) -- the old
-                # `sync_shared_drives` this replaces made exactly the same
-                # enumeration call for exactly the same reason; folding it
-                # into `discover_shared_drives`'s own internal call would
-                # mean touching that already-approved function's return
-                # shape, which is out of scope here. Bracketed in
+                # absence-purge threshold as if it were gone. Reuses
+                # `all_drive_ids` (fetched once, above) rather than making a
+                # second `list_shared_drives` call, as an earlier revision of
+                # this comment noted the old `sync_shared_drives` this
+                # replaces used to do. Bracketed in
                 # `bulk_section` because `note_drive_presence` can call
                 # `purge_drive`, which mutates `chunks` -- the same table the
                 # gated maintenance passes touch (an earlier revision of this
                 # exact call ran unlocked and was flagged in adversarial
                 # review; mirrored here deliberately).
                 from mcpbrain import ingest_cache
-                present = [d.get("id") for d in list_shared_drives(drive_service)
-                          if d.get("id")]
+                present = all_drive_ids
                 with (bulk_section or nullcontext)():
                     result["revoked_drives"] = ingest_cache.note_drive_presence(
                         store, present,
@@ -276,8 +299,21 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             src = it["source"]
             if ":" in src:
                 drive_id = src.split(":", 1)[1]
+                # Guarded, not a bare drives_fs[drive_id]: a durable
+                # sync_queue row from an EARLIER cycle can still be due when
+                # this drive genuinely isn't active THIS cycle (unpinned,
+                # cache disabled, or this cycle's enumeration failed) --
+                # raise a LEGIBLE error so it backs off and retries, rather
+                # than an opaque bare KeyError (surfaced verbatim as
+                # sync_queue_stats()'s last_error).
+                fs = drives_fs.get(drive_id)
+                if fs is None or pin is None:
+                    raise RuntimeError(
+                        f"shared drive {drive_id!r} not active this cycle "
+                        "(not pinned, cache disabled, or drive-list enumeration failed) — "
+                        "will retry")
                 return handle_shared_drive_item(
-                    drive_service, store, it, fleet_storage=drives_fs[drive_id],
+                    drive_service, store, it, fleet_storage=fs,
                     pin=pin, drive_id=drive_id, contextual_retrieval=cr,
                     folder_cache=folder_cache, bulk_section=bulk_section)
             return handle_drive_item(
@@ -490,8 +526,9 @@ def _publish_one_miss(store, ingest_cache, fs, drive_id, file_id, content_hash,
     `on_error`, if given, is called with the caught exception. This lets a
     caller that needs to distinguish a genuine per-file failure from a clean,
     benign no-op (both of which return False here) keep doing so -- e.g.
-    `_publish_drive_misses`'s "every publish in this drive failed" warning
-    must not fire just because a batch of chunks isn't embedded yet."""
+    `publish_pending_shared_drive_artifacts`'s "every publish in this drive
+    failed" warning must not fire just because a batch of chunks isn't
+    embedded yet."""
     try:
         return bool(ingest_cache.publish_file(
             store, fs, drive_id, file_id, content_hash, pin,
@@ -503,54 +540,6 @@ def _publish_one_miss(store, ingest_cache, fs, drive_id, file_id, content_hash,
         if on_error is not None:
             on_error(exc)
         return False
-
-
-def _publish_drive_misses(store, ingest_cache, fs, drive_id, misses, pin, published_by,
-                          *, contextual_retrieval: bool = False) -> int:
-    """Publish each (file_id, content_hash) miss for one drive to the shared
-    cache, isolating per-file failures — a transient error on one file must
-    not abort the rest of that drive's misses or any other drive's — then
-    batch-GC superseded same-pipeline artifacts for the WHOLE miss set in ONE
-    cache-folder listing (`ingest_cache.gc_superseded_batch`) instead of the
-    O(n) per-file listing `publish_file`'s own internal `gc_superseded` call
-    would otherwise do for each file individually.
-
-    `publish_file`/`publish` take `skip_gc=True` here so their internal
-    per-file `gc_superseded` call is skipped entirely for every file in this
-    loop — the batched call below already covers exactly the same keep set
-    (same delete rule, one listing for the whole drive instead of one per
-    file), so the per-file GC would otherwise be pure redundant O(n) work on
-    top of the O(1) batch. Returns the count of misses successfully
-    published.
-    """
-    published = 0
-    failed = 0
-
-    def _count_failure(exc):
-        nonlocal failed
-        failed += 1
-
-    keep_map: dict[str, str] = {}
-    for file_id, content_hash in misses:
-        keep_map[file_id] = content_hash
-        if _publish_one_miss(store, ingest_cache, fs, drive_id, file_id, content_hash,
-                             pin, published_by, contextual_retrieval=contextual_retrieval,
-                             skip_gc=True, on_error=_count_failure):
-            published += 1
-    # A SYSTEMATIC failure (every attempted publish failed — e.g. a missing
-    # drive.file write scope or an uncreatable cache folder) means the cache is
-    # silently not populating for the whole fleet. Surface it at WARNING once per
-    # drive, not buried in per-file info noise.
-    if failed and published == 0 and failed == len(misses):
-        log.warning("sync: ALL %d shared-cache publishes failed for drive %s — "
-                    "cache is not populating (check drive.file scope / cache folder access)",
-                    failed, drive_id)
-    if keep_map:
-        try:
-            ingest_cache.gc_superseded_batch(fs, drive_id, keep_map, pin)
-        except Exception as exc:  # noqa: BLE001 — GC failure must not fail publish
-            log.info("sync: batched GC skipped for drive %s: %s", drive_id, exc)
-    return published
 
 
 def publish_pending_shared_drive_artifacts(store, ingest_cache, *, drives_fs: dict,
@@ -569,18 +558,28 @@ def publish_pending_shared_drive_artifacts(store, ingest_cache, *, drives_fs: di
     whatever wasn't reached is still in shared_drive_pending_publish and is
     retried next cycle.
 
-    `skip_gc=True` here for the same reason `_publish_drive_misses` uses it
-    -- a per-file `gc_superseded` listing would be redundant next to a
-    batched one. This function does not itself call `gc_superseded_batch`;
-    which call site owns that batch (this step vs. `_publish_drive_misses`,
-    once both exist in the same cycle) is a wiring decision left to the
-    caller that assembles the per-cycle flow (see the follow-up task that
-    wires this in).
+    `skip_gc=True` here for the same reason the (now-deleted) `_publish_drive_
+    misses` used it -- a per-file `gc_superseded` listing would be redundant
+    next to a batched one; `run_sync_cycle` (the sole caller) runs the batched
+    `gc_superseded_batch` itself, once per drive, after this returns.
+
+    Also ports that deleted function's systematic-failure WARNING: if every
+    publish attempted for a drive this call failed (a missing `drive.file`
+    write scope, an uncreatable cache folder, ...), that's the only signal
+    that the fleet cache has stopped populating for that drive, and it must
+    not be lost now that this function -- not `_publish_drive_misses` -- is
+    the actual production call site.
     """
     out = {}
     for drive_id, fs in drives_fs.items():
         pending = store.pending_publishes(drive_id)
         count = 0
+        failed = 0
+
+        def _count_failure(exc):
+            nonlocal failed
+            failed += 1
+
         for file_id, content_hash in pending:
             if budget is not None and budget.expired():
                 out[drive_id] = count
@@ -588,9 +587,17 @@ def publish_pending_shared_drive_artifacts(store, ingest_cache, *, drives_fs: di
             if _publish_one_miss(store, ingest_cache, fs, drive_id, file_id,
                                  content_hash, pin, published_by,
                                  contextual_retrieval=contextual_retrieval,
-                                 skip_gc=True):
+                                 skip_gc=True, on_error=_count_failure):
                 store.clear_pending_publish(drive_id, file_id)
                 count += 1
+        # A SYSTEMATIC failure (every attempted publish failed — e.g. a missing
+        # drive.file write scope or an uncreatable cache folder) means the cache is
+        # silently not populating for the whole fleet. Surface it at WARNING once per
+        # drive, not buried in per-file info noise.
+        if pending and failed and count == 0 and failed == len(pending):
+            log.warning("sync: ALL %d shared-cache publishes failed for drive %s — "
+                        "cache is not populating (check drive.file scope / cache folder access)",
+                        failed, drive_id)
         out[drive_id] = count
     return out
 

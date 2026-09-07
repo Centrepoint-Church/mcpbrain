@@ -1165,11 +1165,6 @@ class Daemon:
         # ingest caches once, before the first sync. In-process latch; the on-disk
         # marker (onboarding.run_bootstrap) makes it idempotent across restarts.
         self._baseline_bootstrap_done = False
-        # Shared-drive ingest-cache hit/miss counts from the most recent cycle
-        # (spec Task 5, observability). Stashed in run_one from run_cycle's
-        # "shared_drive_cache" result key; surfaced via status()'s "org" block.
-        self._last_cache_hits = 0
-        self._last_cache_misses = 0
         # Tuning knobs (Task 7): default to the module constants so a Daemon
         # built without going through main() (every direct test construction)
         # behaves exactly as before. main() overrides these from the `tuning`
@@ -1329,14 +1324,23 @@ class Daemon:
         connections = probes.all_connections(str(app_dir()), self._store)
         from mcpbrain.sync import backfill_progress
         backfill = backfill_progress(self._store)
-        # Org-baseline observability (spec Task 5): shared-drive ingest-cache
-        # hit/miss counts from the most recent cycle, plus curator queue depth
+        # Org-baseline observability (spec Task 5): curator queue depth
         # (pending contributions + suppressed-merge pairs). Best-effort — a
         # missing table/meta key degrades to zeros rather than failing the
         # status poll.
+        #
+        # `cache_hits`/`cache_misses` (shared-drive ingest-cache hit/miss
+        # counts) were REMOVED here (final-review fix): run_sync_cycle's
+        # discover/work/publish split (this plan's Task 5) stopped producing
+        # a `"shared_drive_cache"` summary key -- that hit/miss distinction
+        # is now internal to handle_shared_drive_item/_cache_first_extract_one,
+        # not surfaced back to the caller -- so these two fields had been
+        # silently pinned at 0 forever, which reads as "the cache is
+        # healthy" rather than "this metric no longer exists." Re-deriving
+        # real counts would need threading a new counter through
+        # work_queue's generic per-item processing for one source's benefit,
+        # which is out of scope here.
         org = {
-            "cache_hits": self._last_cache_hits,
-            "cache_misses": self._last_cache_misses,
             "curator_version": 0,
             "contrib_staged": 0,
             "merge_suppressed": 0,
@@ -2159,14 +2163,6 @@ class Daemon:
                            bulk_section=self._cycle_bulk_section,
                            embed_max_items=getattr(self, "_embed_max_items", EMBED_MAX_ITEMS),
                            **services)
-        # Absent key (fleet unpinned, Drive-API outage caught by the cache
-        # block's own try/except, or drive_service/home not both present)
-        # must reset to 0/0, not leave the prior cycle's counts stale --
-        # status() would otherwise keep reporting a healthy-looking cache
-        # even while shared-drive sync is silently failing.
-        cache_counts = (result or {}).get("shared_drive_cache") or {"hits": 0, "misses": 0}
-        self._last_cache_hits = cache_counts.get("hits", 0)
-        self._last_cache_misses = cache_counts.get("misses", 0)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
         self._stash_clear_drained(drained, taken)
         self._note_progress("cycle")

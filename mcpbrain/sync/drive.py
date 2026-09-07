@@ -821,6 +821,15 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
             if doc_ids:
                 store.invalidate_local_relations_for_docs(doc_ids)
                 store.delete_chunks(doc_ids)
+        # Clear any durable pending-publish row for this file too (final-
+        # review fix): a file can be extracted-with-a-miss in one cycle
+        # (recording a shared_drive_pending_publish row) and then deleted
+        # before its publish ever ran. Without this, publish_file returns
+        # False forever for that stale row (its chunks are already gone, so
+        # there's nothing to collect) -- it would retry every cycle,
+        # permanently, for no benefit, and keep a dead content_hash in
+        # future gc_superseded_batch keep-sets.
+        store.clear_pending_publish(drive_id, fid)
         try:
             ingest_cache.remove_file_artifacts(fleet_storage, fid)
         except Exception as exc:  # noqa: BLE001 — artifact GC is best-effort
