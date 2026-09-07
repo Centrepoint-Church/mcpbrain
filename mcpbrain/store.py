@@ -2867,6 +2867,35 @@ class Store:
                 "ON CONFLICT(source) DO UPDATE SET cursor=excluded.cursor, updated_at=datetime('now')",
                 (source, cursor))
 
+    def purge_drive_sync_state(self, drive_id: str) -> dict:
+        """Clear a Shared Drive's queue/cursor/pending-publish state on revocation.
+
+        `ingest_cache.purge_drive` (unchanged by the sync-queue migration --
+        it predates it and stays scoped to chunks/relations) has no idea
+        `sync_queue`, `sync_cursors`, or `shared_drive_pending_publish` rows
+        exist for a drive. Without this, a revoked/unpinned drive's queued
+        items KeyError forever (fixed separately in the work-loop handler)
+        and its cursor/pending-publish rows sit orphaned, never cleaned up.
+        Called from run_sync_cycle for each id `note_drive_presence` purges.
+
+        Exact-match on `drive:<id>` and its two backfill-floor cursor keys --
+        never a substring/prefix match, which could otherwise collide with
+        `drive` (My Drive) or another source. Returns counts for logging.
+        """
+        source = f"drive:{drive_id}"
+        with self._connect(write=True) as db:
+            queue_rows = db.execute(
+                "DELETE FROM sync_queue WHERE source=?", (source,)).rowcount
+            cursors = db.execute(
+                "DELETE FROM sync_cursors WHERE source IN (?,?,?)",
+                (source, f"{source}_backfill_until", f"{source}_backfill_empty"),
+            ).rowcount
+            pending_publishes = db.execute(
+                "DELETE FROM shared_drive_pending_publish WHERE drive_id=?",
+                (drive_id,)).rowcount
+        return {"queue_rows": queue_rows, "cursors": cursors,
+                "pending_publishes": pending_publishes}
+
     def enqueue_and_advance(self, items, *, source: str, cursor: str) -> int:
         """UPSERT queue rows and advance this source's cursor in ONE transaction.
 

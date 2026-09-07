@@ -35,8 +35,22 @@ def test_init_now_also_clears_shared_drive_resume_state(tmp_path):
     s.set_cursor("drive:D1:resume_ids", '["a"]')
     s.set_cursor("drive:D1:resume_removed_ids", '["b"]')
     s.set_cursor("drive:D1:page_token", "1000")
+    # The shared-drive progressive-backfill floor cursors (_shared_drive_backfill_step)
+    # are real, live, unrelated state -- separated from the drive id by an
+    # underscore, never a second colon, so they cannot match the widened LIKE
+    # patterns above ('drive:%:resume_ids' etc.) by construction. Asserted
+    # explicitly here (final-review Finding 8) because the whole point of this
+    # test file is guarding against an over-broad match wiping live state --
+    # a test that only checks the ONE key format the fix targets doesn't prove
+    # the fix stayed narrow.
+    s.set_cursor("drive:D1_backfill_until", "2026-01-01T00:00:00")
+    s.set_cursor("drive:D1_backfill_empty", "2")
     s.init()
     assert s.get_cursor("drive:D1") == "999", "the real per-drive cursor must survive"
+    assert s.get_cursor("drive:D1_backfill_until") == "2026-01-01T00:00:00", \
+        "the backfill floor cursor must survive"
+    assert s.get_cursor("drive:D1_backfill_empty") == "2", \
+        "the backfill empty-window counter must survive"
     for dead in ("drive:D1:resume_ids", "drive:D1:resume_removed_ids",
                 "drive:D1:page_token"):
         assert s.get_cursor(dead) is None, f"{dead} not cleaned up"

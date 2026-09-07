@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 # unpatched original from mcpbrain.sync.drive every call.
 from mcpbrain.sync.calendar import discover_calendar, handle_calendar_item
 from mcpbrain.sync.drive import (
-    discover_drive, discover_shared_drives, handle_drive_item, handle_shared_drive_item,
-    list_shared_drives,
+    discover_drive, discover_shared_drives, flush_skip_report, handle_drive_item,
+    handle_shared_drive_item, list_shared_drives,
 )
 from mcpbrain.sync.gmail import discover_gmail, handle_gmail_item
 
@@ -263,10 +263,30 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 from mcpbrain import ingest_cache
                 present = all_drive_ids
                 with (bulk_section or nullcontext)():
-                    result["revoked_drives"] = ingest_cache.note_drive_presence(
+                    revoked_now = ingest_cache.note_drive_presence(
                         store, present,
                         threshold=config.ingest_cache_revocation_threshold(home),
                     )["purged"]
+                result["revoked_drives"] = revoked_now
+                # A revoked drive's sync_queue/sync_cursors/
+                # shared_drive_pending_publish rows are new state THIS plan
+                # introduced -- ingest_cache.purge_drive (deliberately
+                # unchanged; it predates this migration) has no idea any of
+                # them exist. Without this, a revoked drive's queued items
+                # would KeyError forever (fixed separately in _drive_handler)
+                # and its cursor/pending-publish rows would sit orphaned
+                # indefinitely. Placed HERE (not in the publish/backfill block
+                # below, which is gated on `drives_fs` being non-empty) because
+                # a fully-revoked fleet makes `drives_fs` EMPTY precisely
+                # because of the revocation this cleanup exists to react to --
+                # gating it on the same condition it needs to run despite would
+                # skip it in exactly the case that matters most.
+                for did in revoked_now:
+                    try:
+                        store.purge_drive_sync_state(did)
+                    except Exception as exc:  # noqa: BLE001 — best-effort, never fatal
+                        log.info("sync: sync-state cleanup skipped for revoked "
+                                "drive %s: %s", did, exc)
         except Exception as exc:  # noqa: BLE001 — optional feature; must never
             # abort gmail/calendar/My-Drive discovery above, or anything below.
             log.warning("sync: shared-drive discovery failed (skipped this cycle): %s", exc)
@@ -282,6 +302,20 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # call.
     folder_cache: dict = {}
     fetch_attachments = config.gmail_attachments(home) if home else False
+
+    # Per-SOURCE skip tallies ("drive" for My Drive, "drive:<id>" per Shared
+    # Drive), hoisted the same way folder_cache is -- fetch_content's
+    # unsupported-mime/empty-extraction skips used to reach change_log via one
+    # sync_drive()/sync_shared_drive() call's own local dict, flushed at the
+    # end of that call's round. The queue redesign moved fetching into
+    # per-item handlers with no natural "end of round" hook, so nothing ever
+    # flushed these once handle_drive_item/handle_shared_drive_item stopped
+    # being called from inside a round -- this dict plus the flush loop after
+    # work_queue below is that hook. Keyed by SOURCE, not shared across
+    # drives, because flush_skip_report's whole purpose is per-round
+    # attribution (`source` becomes the change_log row's ref_id) -- merging
+    # every drive's skips into one dict would make them untraceable again.
+    skip_reports: dict[str, dict] = {}
 
     handlers = {}
     if drive_service is not None:
@@ -315,10 +349,12 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 return handle_shared_drive_item(
                     drive_service, store, it, fleet_storage=fs,
                     pin=pin, drive_id=drive_id, contextual_retrieval=cr,
-                    folder_cache=folder_cache, bulk_section=bulk_section)
+                    folder_cache=folder_cache, bulk_section=bulk_section,
+                    report=skip_reports.setdefault(src, {}))
             return handle_drive_item(
                 drive_service, store, it, folder_cache=folder_cache,
-                bulk_section=bulk_section)
+                bulk_section=bulk_section,
+                report=skip_reports.setdefault(src, {}))
         handlers["drive"] = _drive_handler
     if gmail_service is not None:
         handlers["gmail"] = lambda it: handle_gmail_item(
@@ -331,6 +367,15 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         store, handlers=handlers,
         limit=config.sync_work_limit(home) if home else 50,
         budget=budget)
+    # Flush each source's accumulated skip tally now that work_queue has
+    # drained everything it will this cycle -- a source with nothing skipped
+    # never populated its dict (`setdefault` above only creates an entry once
+    # a handler actually calls it), so this loop is a no-op on the common
+    # cycle. flush_skip_report is itself a no-op on an empty dict, but
+    # skipping the call entirely avoids a pointless change_log write attempt.
+    for src, rpt in skip_reports.items():
+        if rpt:
+            flush_skip_report(store, rpt, source=src)
     _embed()
     if budget is not None and budget.expired():
         result["budget_spent"] = True
