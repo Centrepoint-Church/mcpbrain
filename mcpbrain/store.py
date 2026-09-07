@@ -1380,26 +1380,32 @@ class Store:
             db.execute("ANALYZE")
 
             # One-shot: drop per-round state the queue replaces, for the
-            # sources that actually got migrated (drive/gmail/calendar's bare
-            # discover_*/handle_*_item split). resume_ids tracked which files
-            # a ROUND had written; rounds no longer exist for these sources.
+            # sources that got migrated (drive/gmail/calendar's bare
+            # discover_*/handle_*_item split, and -- now that
+            # `sync_shared_drive` is deleted -- every pinned Shared Drive's
+            # per-drive equivalent too). resume_ids tracked which files a
+            # ROUND had written; rounds no longer exist for these sources.
             # page_token (0.7.123) existed because the cursor could not
             # advance per page; it now does. The real cursors are untouched.
             #
-            # Deliberately an exact-match list, NOT `source LIKE '%:resume_ids'`
-            # etc.: `sync_shared_drive` (mcpbrain/sync/drive.py) was NOT
-            # migrated by this plan and still depends on its own per-round
-            # state, keyed `f"drive:{drive_id}:resume_ids"` etc. -- a suffix
-            # wildcard also matches those three-segment shared-drive keys, so
-            # it would wipe a shared drive's in-progress resume state on every
-            # daemon restart (verified live) and reintroduce, for shared
-            # drives specifically, the exact multi-week livelock this whole
-            # effort exists to fix. Only the bare two-segment keys below are
-            # actually dead.
+            # The bare two-segment keys (drive/gmail/calendar) are an exact-
+            # match list since there is exactly one of each. Shared-drive
+            # keys are per-drive (`drive:<driveId>:resume_ids` etc.), so they
+            # can't be enumerated by exact match -- a suffix LIKE scoped to
+            # the `drive:` prefix is now safe to use for them specifically,
+            # because no live function writes `drive:<id>:resume_ids`-shaped
+            # state any more (sync_shared_drive, the only writer, is gone).
+            # Do NOT widen this to a bare `source LIKE '%:resume_ids'` etc.:
+            # that would also match any unrelated future source that happens
+            # to end in one of these suffixes, not just the drive:-prefixed
+            # state this task actually retires.
             db.execute(
                 "DELETE FROM sync_cursors WHERE source IN "
                 "('drive:resume_ids', 'drive:resume_removed_ids', "
-                "'drive:page_token', 'gmail:resume_ids', 'calendar:resume_ids')")
+                "'drive:page_token', 'gmail:resume_ids', 'calendar:resume_ids') "
+                "OR (source LIKE 'drive:%:resume_ids' "
+                "    OR source LIKE 'drive:%:resume_removed_ids' "
+                "    OR source LIKE 'drive:%:page_token')")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 

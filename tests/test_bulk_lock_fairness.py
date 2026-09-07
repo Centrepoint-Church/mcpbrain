@@ -490,8 +490,7 @@ def test_bulk_section_threaded_to_shared_drive_sync(tmp_path, monkeypatch):
     assert all(seen_locked), (
         "shared-drive sync wrote a chunk WITHOUT holding bulk_section's lock -- "
         "the bulk_section threading from run_cycle into run_sync_cycle/"
-        "sync_shared_drives/sync_shared_drive/_cache_first_extract_one is "
-        "missing or broken"
+        "handle_shared_drive_item/_cache_first_extract_one is missing or broken"
     )
 
 
