@@ -132,6 +132,10 @@ def main(argv: list) -> int:
         print("mcpbrain: no wheel index configured (no tenant profile, no "
               "MCPBRAIN_INDEX_URL, no update_index_url) — skipping update.")
         return 0
+    if "CHANGE-ME" in index_url:
+        print("Update channel not configured (index URL is the placeholder). "
+              "See docs/DISTRIBUTION.md.", file=sys.stderr)
+        return 1
     installed = _installed_version()
     latest = _latest_version(index_url)
     if not _should_update(installed, latest):

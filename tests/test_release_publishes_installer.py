@@ -65,10 +65,19 @@ def test_main_exits_nonzero_when_installer_is_missing(tmp_path, monkeypatch):
 
 
 def test_main_exits_zero_when_installer_is_published(tmp_path, monkeypatch):
+    """This test is about installer publishing, not tenant/wheel validation
+    (tests/test_release_gate.py covers the tenant gate separately) -- so the
+    tenant pre-build gate and the wheel-content verification are bypassed
+    here rather than constructing a fully valid synthetic tenant profile and
+    a real wheel."""
+    import mcpbrain
+
     repo, dist = tmp_path / "repo", tmp_path / "dist"
     (repo / "plugin" / "scripts").mkdir(parents=True)
     (repo / "plugin" / "scripts" / "install.ps1").write_text("# installer\n")
     dist.mkdir()
+    (repo / "dist").mkdir(parents=True)
+    (repo / "dist" / f"mcpbrain-{mcpbrain.__version__}-py3-none-any.whl").touch()
 
     class _FakeCompleted:
         returncode = 0
@@ -76,6 +85,8 @@ def test_main_exits_zero_when_installer_is_published(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: _FakeCompleted())
+    monkeypatch.setattr("mcpbrain.tenant.check_offline", lambda repo: [])
+    monkeypatch.setattr(release, "verify_wheel", lambda wheel, repo: [])
 
     rc = release.main(["--dist", str(dist), "--repo", str(repo)])
 
