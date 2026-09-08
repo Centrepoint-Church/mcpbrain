@@ -86,6 +86,8 @@ def _repo_with(tmp_path, profile=None, client=None) -> Path:
     (r / "mcpbrain" / "tenant.json").write_text(json.dumps(prof))
     if client is not None:
         (r / "mcpbrain" / "google_oauth_client.json").write_text(json.dumps(client))
+    (r / "pyproject.toml").write_text('[project]\nversion = "0.0.0"\n')
+    (r / "mcpbrain" / "__init__.py").write_text('__version__ = "0.0.0"\n')
     (r / "plugin" / ".claude-plugin" / "marketplace.json").write_text(
         json.dumps({"name": prof["marketplace_name"], "plugins": [{"version": "0.0.0"}]}))
     (r / "plugin" / ".claude-plugin" / "plugin.json").write_text(

@@ -253,30 +253,21 @@ def _check_versions(repo: Path) -> list[str]:
     CLAUDE.md calls the plugin manifests the easiest step to forget: bumping only
     pyproject/__init__ ships a wrong marketplace version. This is cheap to check and
     it is checked here so `bin/release.py` gets it for free.
-
-    Each file is only checked if present: a real repo always ships all four, but a
-    fork validating a partial tree (or this module's own tests) should not get a
-    spurious "could not be read" for a file that legitimately isn't there yet.
     """
     import re
     import tomllib
     found: dict[str, str] = {}
     try:
-        pp = repo / "pyproject.toml"
-        if pp.is_file():
-            found["pyproject.toml"] = tomllib.loads(pp.read_text())["project"]["version"]
-        init_path = repo / "mcpbrain" / "__init__.py"
-        if init_path.is_file():
-            match = re.search(
-                r'__version__\s*=\s*[\'"]([^\'"]+)', init_path.read_text())
-            if match:
-                found["mcpbrain/__init__.py"] = match.group(1)
-        pj = repo / "plugin" / ".claude-plugin" / "plugin.json"
-        if pj.is_file():
-            found["plugin.json"] = json.loads(pj.read_text())["version"]
-        mk = repo / "plugin" / ".claude-plugin" / "marketplace.json"
-        if mk.is_file():
-            found["marketplace.json"] = json.loads(mk.read_text())["plugins"][0]["version"]
+        found["pyproject.toml"] = tomllib.loads(
+            (repo / "pyproject.toml").read_text())["project"]["version"]
+        init = (repo / "mcpbrain" / "__init__.py").read_text()
+        found["mcpbrain/__init__.py"] = re.search(
+            r'__version__\s*=\s*[\'"]([^\'"]+)', init).group(1)
+        found["plugin.json"] = json.loads(
+            (repo / "plugin" / ".claude-plugin" / "plugin.json").read_text())["version"]
+        found["marketplace.json"] = json.loads(
+            (repo / "plugin" / ".claude-plugin" / "marketplace.json").read_text()
+        )["plugins"][0]["version"]
     except (OSError, KeyError, AttributeError, ValueError) as exc:
         return [f"version files: could not be read ({exc})"]
     distinct = set(found.values())
