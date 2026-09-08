@@ -107,3 +107,56 @@ def test_the_bundled_centrepoint_profile_is_valid():
     assert p is not None
     assert p.tenant_id == "centrepoint"
     assert p.marketplace_slug == "Centrepoint-Church/mcpbrain-plugin"
+
+
+def _no_tenant(monkeypatch, tmp_path):
+    """Simulate a build carrying no profile — i.e. a fork that has not filled one in."""
+    monkeypatch.delenv("MCPBRAIN_TENANT", raising=False)
+    monkeypatch.setattr(tenant, "_bundled_path", lambda: tmp_path / "absent.json")
+    tenant._clear_cache()
+
+
+def test_unconfigured_build_never_yields_a_centrepoint_value(tmp_path, monkeypatch):
+    """THE load-bearing test of this whole change. Every call site that used to fall
+    back to org_defaults must now return nothing at all. A fork that forgets to
+    re-point must not write beacons or backups into someone else's Drive."""
+    from mcpbrain import config, fleet_storage, onboarding, restore
+    _no_tenant(monkeypatch, tmp_path)
+    home = str(tmp_path)
+    (tmp_path / "config.json").write_text("{}")
+
+    assert config.fleet_defaults({}) == {"folder_id": "", "escrow_folder_id": ""}
+    assert fleet_storage.fleet_folder_id(home) is None
+    assert onboarding._fleet_folder_id(home) is None
+    assert restore._escrow_folder(home) is None
+
+
+def test_configured_build_still_yields_the_profile_values(tmp_path, monkeypatch):
+    from mcpbrain import config, fleet_storage, onboarding, restore
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(_write(tmp_path)))
+    tenant._clear_cache()
+    home = str(tmp_path)
+    (tmp_path / "config.json").write_text("{}")
+
+    assert config.fleet_defaults({})["folder_id"] == "FLEET1"
+    assert fleet_storage.fleet_folder_id(home) == "FLEET1"
+    assert onboarding._fleet_folder_id(home) == "FLEET1"
+    assert restore._escrow_folder(home) == "ESCROW1"
+
+
+def test_local_config_still_overrides_the_profile(tmp_path, monkeypatch):
+    from mcpbrain import fleet_storage
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(_write(tmp_path)))
+    tenant._clear_cache()
+    (tmp_path / "config.json").write_text(json.dumps({"fleet": {"folder_id": "MINE"}}))
+    assert fleet_storage.fleet_folder_id(str(tmp_path)) == "MINE"
+
+
+def test_org_pin_chunker_version_is_the_code_constant(tmp_path):
+    """The pin fed pipeline_fingerprint and had to equal chunking.CHUNKER_VERSION,
+    kept honest by a drift test. Reading the constant directly makes drift
+    impossible, so the test it replaces is deleted rather than ported."""
+    from mcpbrain import config
+    from mcpbrain.chunking import CHUNKER_VERSION
+    (tmp_path / "config.json").write_text("{}")
+    assert config.fleet_pin(str(tmp_path)).chunker_version == str(CHUNKER_VERSION)

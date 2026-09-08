@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mcpbrain import config, org_defaults, restore
+from mcpbrain import config, restore, tenant
 
 
 def _cfg(tmp_path, **extra):
@@ -77,7 +77,7 @@ def test_detect_falls_back_to_org_default_escrow_folder(tmp_path, monkeypatch):
     monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder",
                         lambda svc, folder, user: "SNAP")
     out = restore.detect_restorable(str(tmp_path), drive_service=object())
-    assert seen["folder"] == org_defaults.ESCROW_FOLDER_ID
+    assert seen["folder"] == tenant.profile().escrow_folder_id
     assert out["available"] is True
 
 

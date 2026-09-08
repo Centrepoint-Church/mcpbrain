@@ -210,11 +210,11 @@ def test_default_enumerate_drives_maps_ids(monkeypatch):
 
 
 def test_default_make_drive_storage_central_by_default(tmp_path):
-    from mcpbrain import fleet_storage, org_defaults
+    from mcpbrain import tenant
     factory = onboarding._default_make_drive_storage(str(tmp_path), object())
     fs = factory("D7")
     # central: rooted at the fleet folder, namespaced by source drive id
-    assert fs._root == org_defaults.FLEET_FOLDER_ID
+    assert fs._root == tenant.profile().fleet_folder_id
     assert fs._base_parts == ["ingest-cache", "D7"]
 
 
@@ -247,5 +247,5 @@ def test_bootstrap_uses_per_drive_storage_not_fleet_folder(tmp_path):
 
 
 def test_fleet_folder_id_falls_back_to_org_default(tmp_path):
-    from mcpbrain import org_defaults
-    assert onboarding._fleet_folder_id(str(tmp_path)) == org_defaults.FLEET_FOLDER_ID
+    from mcpbrain import tenant
+    assert onboarding._fleet_folder_id(str(tmp_path)) == tenant.profile().fleet_folder_id

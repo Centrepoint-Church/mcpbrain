@@ -102,19 +102,21 @@ def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) 
         tmp_path.unlink(missing_ok=True)
 
 
-def _escrow_folder(home: str) -> str:
+def _escrow_folder(home: str) -> str | None:
     """The escrow FOLDER id for the auto-restore convention.
 
-    Prefers fleet.escrow_folder_id, else the baked-in org default (so detection
+    Prefers fleet.escrow_folder_id, else this build's tenant profile (so detection
     works on a fresh machine before the wizard writes config). Deliberately does
     NOT read backup.shared_drive_id — in legacy configs that is the Shared Drive
     ROOT (the daemon's drive-root upload target), not the nested escrow folder.
+    None when neither resolves.
     """
-    from mcpbrain import config as _cfg, org_defaults
+    from mcpbrain import config as _cfg, tenant
     cfg = _cfg.read_config(home)
+    prof = tenant.profile()
     return (
         (cfg.get("fleet") or {}).get("escrow_folder_id")
-        or org_defaults.ESCROW_FOLDER_ID
+        or (prof.escrow_folder_id if prof else None)
     )
 
 
@@ -199,6 +201,8 @@ def detect_restorable(home: str, drive_service) -> dict:
     if not user_email:
         return {"available": False, "reason": "no account signed in yet"}
     folder = _escrow_folder(home)
+    if not folder:
+        return {"available": False, "reason": "no escrow folder configured"}
     key = _download_escrow_key(drive_service, folder, user_email)
     snapshot_id = None
     try:

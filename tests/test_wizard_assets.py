@@ -3,7 +3,7 @@ and a step numbering that matches the number of things the user actually does.""
 import re
 from pathlib import Path
 
-from mcpbrain import org_defaults
+from mcpbrain import tenant
 
 _HTML = (Path(__file__).parent.parent / "mcpbrain" / "wizard" / "index.html").read_text()
 
@@ -17,8 +17,10 @@ def test_no_duplicate_function_definitions():
 
 
 def test_no_hardcoded_org_folder_ids():
-    assert org_defaults.FLEET_FOLDER_ID not in _HTML
-    assert org_defaults.ESCROW_FOLDER_ID not in _HTML
+    prof = tenant.profile()
+    assert prof is not None
+    assert prof.fleet_folder_id not in _HTML
+    assert prof.escrow_folder_id not in _HTML
 
 
 def test_exactly_three_numbered_steps():

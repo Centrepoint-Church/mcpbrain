@@ -353,11 +353,13 @@ class DriveFleetStorage:
 
 def fleet_folder_id(home) -> str | None:
     """The fleet folder id used to root fleet-folder + centralized-cache storage:
-    config fleet.folder_id, else the baked-in org default. None only if neither
-    resolves (in practice the org default is always set)."""
-    from mcpbrain import config, org_defaults
+    config fleet.folder_id, else this build's tenant profile. None when neither
+    resolves — a build with no tenant profile has no fleet, which is correct: the
+    alternative was silently using Centrepoint's."""
+    from mcpbrain import config, tenant
     fleet = config.read_config(home).get("fleet") or {}
-    return fleet.get("folder_id") or org_defaults.FLEET_FOLDER_ID or None
+    prof = tenant.profile()
+    return fleet.get("folder_id") or (prof.fleet_folder_id if prof else None) or None
 
 
 def fleet_folder_storage(home, drive_service=None):
