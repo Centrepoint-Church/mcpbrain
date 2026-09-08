@@ -214,7 +214,7 @@ def run_consent_flow(
             raise RuntimeError(
                 "No OAuth client available. Ship a bundled client "
                 "(mcpbrain/google_oauth_client.json or $MCPBRAIN_GOOGLE_CLIENT) "
-                f"or place a client_secret.json at {cs}. See docs/INSTALL.md."
+                f"or place a client_secret.json at {cs}. See docs/FORKING.md."
             )
         flow = InstalledAppFlow.from_client_secrets_file(str(cs), scopes)
 

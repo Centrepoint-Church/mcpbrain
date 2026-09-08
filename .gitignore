@@ -12,14 +12,16 @@ dist/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+# mcpbrain/google_oauth_client.json is the tenant's OAuth desktop client. It is
+# NOT committed: this repo is PUBLIC (it was described here as private, which had
+# stopped being true), and the client is the one genuinely private part of a
+# tenant profile. It lives in the private mcpbrain-tenant repo and is copied in by
+# `python bin/tenant.py use ../mcpbrain-tenant`, which bin/release.py requires
+# before it will build. mcpbrain/tenant.json holds no secrets and IS committed.
+mcpbrain/google_oauth_client.json
 google_token.json
 google_account
 client_secret.json
-# mcpbrain/google_oauth_client.json is the SHARED desktop OAuth client. It is
-# committed and bundled (private repo; a desktop client secret is non-confidential
-# under Google's PKCE flow) so every install carries it. The per-user token
-# (google_token.json), the lazily-cached connected-account email
-# (google_account), and the user-supplied client_secret.json stay ignored.
 
 # Per-user local state from the Claude Code "remember" skill — session
 # transcripts, log lines, scratch files. Not part of the shipped repo.
