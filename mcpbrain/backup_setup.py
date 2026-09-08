@@ -54,10 +54,11 @@ def _resolve_shared_drive(drive_service, *, home: str) -> str:
     instead of the org Shared Drive.
 
     Resolves via the single source of truth ``restore._escrow_folder``:
-    ``fleet.escrow_folder_id`` if set, else the baked-in org default. The org
-    default matters during the wizard's automatic backup-enable, which runs
-    *before* the wizard writes the fleet folder IDs to config — without the
-    fallback, enable_backup raised and first-run backup always failed.
+    ``fleet.escrow_folder_id`` if set, else the tenant profile's
+    escrow_folder_id. The profile fallback matters during the wizard's
+    automatic backup-enable, which runs *before* the wizard writes the fleet
+    folder IDs to config — without the fallback, enable_backup raised and
+    first-run backup always failed.
     """
     from mcpbrain.restore import _escrow_folder
     folder_id = _escrow_folder(home)

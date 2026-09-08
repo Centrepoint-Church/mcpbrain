@@ -10,6 +10,8 @@ this pairs with it as a cheap, fast guard.
 
 from pathlib import Path
 
+import pytest
+
 import mcpbrain
 
 
@@ -28,11 +30,19 @@ def test_oauth_client_example_present():
 
 
 def test_shared_oauth_client_present():
-    # The shared desktop client is committed and bundled so every install can
-    # run consent with no per-user file. If this is missing the wizard's
-    # "Connect Google" step has no client to use.
+    # The shared desktop client is no longer committed to source (it is
+    # tenant-specific and gitignored) — it lands in the tree only after
+    # `python bin/tenant.py use <tenant-dir>` stages it ahead of a build, and
+    # bin/release.py::verify_wheel enforces its presence in the built wheel.
+    # A fresh clone/fork has no client file yet, so skip rather than fail.
     client = _pkg_dir() / "google_oauth_client.json"
-    assert client.is_file(), f"shared OAuth client missing at {client}"
+    if not client.is_file():
+        pytest.skip(
+            "OAuth client is no longer committed; run "
+            "`python bin/tenant.py use <tenant-dir>` before a build. "
+            "Wheel presence is enforced by bin/release.py::verify_wheel."
+        )
+    assert client.is_file()
 
 
 def test_enrich_prompt_doc_present():

@@ -2583,8 +2583,10 @@ class Daemon:
         try:
             from mcpbrain import update as upd
             idx = upd._index_url()
-            if "CHANGE-ME" in idx:
-                log.warning("auto-update skipped: update channel not configured (index URL is the placeholder)")
+            if idx is None:
+                log.warning(
+                    "auto-update skipped: no update channel configured "
+                    "(no tenant profile, no MCPBRAIN_INDEX_URL, no update_index_url)")
                 return None
             latest = upd._latest_version(idx)
             if upd._should_update(upd._installed_version(), latest):
