@@ -48,6 +48,57 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
+- **Current state (2026-09-08): the tenant-profile plan (Tasks 1-10) is IMPLEMENTED
+  and COMMITTED to `main`, NOT released** — version files unchanged, per the plan's
+  own Global Constraints. `docs/superpowers/plans/2026-09-02-tenant-profile.md` /
+  `docs/superpowers/specs/2026-09-02-tenant-profile-design.md`. `mcpbrain/tenant.py`
+  replaces `org_defaults.py`; every fleet/escrow/index call site now degrades to
+  `None`/disabled rather than falling back to Centrepoint's infrastructure when
+  unconfigured; the OAuth client is out of git (`git rm --cached`, still on disk,
+  gitignored); `bin/tenant.py use`/`check`/`check --online` and a `bin/release.py`
+  pre/post-build gate exist; the wizard names its tenant from `/api/config` instead
+  of hardcoding "Centrepoint"; every shipped prompt/routine/source-comment example
+  naming a real Centrepoint/ACC person now uses the neutral fictional cast (Dana
+  Okafor, Marcus Reyes, Priya Anand, Rina T; Northgate Trust, Southbank Community
+  Trust, The Lantern Co, Harbourview Arena, NCF/NCFI).
+  **Task 11's A/B gate (attended, 2026-09-08) is DONE — result: PASS, no
+  regression.** 3 real units claimed from the live queue (one heavily exercising
+  the exact "Ps Joel Chelliah"/honorific-stripping case the old prompt's example
+  was built around, one a genuine `waiting_on` scenario, one mostly generic/
+  low-signal content), each extracted twice — once following the rules the live
+  daemon actually served (pre-rewrite, confirmed unmodified by this session's
+  working-tree changes) and once following the current committed
+  `enrich_prompt.md` (post-rewrite) — and diffed with `bin/enrich_ab.py`'s own
+  `score_pair`/`score` functions. **`entities_lost: []`, `org_lost: []`,
+  `role_lost: []` across all 3 units — zero losses.** The two rule texts were
+  diffed line-by-line first and confirmed to differ in EXACTLY the four
+  illustrative-example substitutions Task 10 made (the `waiting_on` example, two
+  naming-stripping examples, the `org_move` example) and nothing else, so this
+  gate is a clean test of whether a fictional example generalizes as well as one
+  built from a real name that happens to appear in the data — it does. All 3
+  units' post-rewrite extractions were pushed for real via `brain_enrich_push`,
+  genuinely advancing the backlog (601 → 598 pending) rather than being a
+  throwaway test. **Note on `bin/enrich_ab.py`'s CLI (`prep`/`score`):** its
+  `prep()` function does NOT vary the prompt at all — it was built for the
+  unrelated, already-completed 0.7.120 packing-budget experiment (full vs.
+  per-unit-scoped `known_people` context) and requires a `--full-context`
+  snapshot file that was never committed and no longer exists. It was not usable
+  for this gate as originally assumed by the plan; `score()`/`score_pair()` were
+  reused directly against hand-constructed extraction pairs instead. A future
+  session wanting to re-run a prompt-content A/B should do the same, not assume
+  `prep` fits.
+  **Task 12 (tenant-literal guard) has a known pre-existing condition to handle
+  when dispatched:** `mcpbrain/tenant.py` and `mcpbrain/fleet_storage.py:358`
+  carry real "Centrepoint" mentions in docstrings describing the actual
+  historical `org_defaults` bug this plan fixed — correctly outside Task 10's
+  scope, but not on Task 12's `_ALLOWED` exemption list either, so its guard test
+  will fail on them until those two docstrings are rewritten to drop the literal.
+  **Parked, not fixed:** `tenant check --online`'s marketplace-reachability check
+  will report a "problem" (and cause a hard `--online` failure) for every
+  correctly-configured tenant, since the plan's own design recommends the plugin
+  mirror repo be private — this is baked into the plan's own verbatim spec, not
+  a Task 6 defect. Needs a caveat in Task 13's `docs/FORKING.md`, and possibly a
+  design fix at some point (not scheduled).
 - **Current state (2026-09-08): the five version files are at `0.7.124`, RELEASED** —
   source `ec4b6fd`, dist `486cf47`, plugin `9bda998`; the index serves only
   `mcpbrain-0.7.124-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3601
