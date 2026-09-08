@@ -1,11 +1,11 @@
 """The deployment's tenant profile — who this build belongs to.
 
-Replaces the old `org_defaults` module, which baked Centrepoint's Shared Drive
+Replaces the old `org_defaults` module, which baked the tenant's own Shared Drive
 folder ids into the wheel as a SILENT FALLBACK: every consumer read
 `config fleet.folder_id or org_defaults.FLEET_FOLDER_ID`, so an install that never
 set the value (the common case — the wizard leaves it blank) depended entirely on
 the compiled-in default, and a FORK that forgot to re-point wrote its health
-beacons and encrypted backup snapshots into Centrepoint's Drive with nothing
+beacons and encrypted backup snapshots into the upstream org's Drive with nothing
 anywhere saying so.
 
 This module keeps the same convenience for a configured build and removes the
