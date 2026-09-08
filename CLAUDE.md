@@ -12,6 +12,7 @@ running `uv tool install` only affects *this* machine.
 | **mcpbrain** (this repo) | Python package (`mcpbrain/`), plugin source assets (`plugin/`), routines (`mcpbrain/routines/`), tests | source of truth; not installed directly |
 | **mcpbrain-dist** (`../mcpbrain-dist`) | PEP 503 wheel index on GitHub Pages (`centrepoint-church.github.io/mcpbrain-dist/simple/`) | `uv tool install --index` pulls the wheel; installed daemons **auto-update daily** from here (`update.py`) |
 | **mcpbrain-plugin** (`../mcpbrain-plugin`) | Public Claude Code plugin (agents/skills/hooks/commands + `.claude-plugin/` + `mcpb/`), mirrored from this repo's `plugin/` | org **plugin marketplace** (Claude Team/Enterprise settings) |
+| **mcpbrain-tenant** (`../mcpbrain-tenant`) | Private tenant repo: `google_oauth_client.json` (the OAuth client secret, never committed here) + a reference copy of `tenant.json` | `bin/tenant.py use ../mcpbrain-tenant` copies the OAuth client into a fresh checkout before a build |
 
 ## CRITICAL: local work ≠ shipped to users
 
@@ -99,6 +100,17 @@ wrong and MUST be right:
   mirror repo be private — this is baked into the plan's own verbatim spec, not
   a Task 6 defect. Needs a caveat in Task 13's `docs/FORKING.md`, and possibly a
   design fix at some point (not scheduled).
+  **Tasks 12-13 complete (2026-09-08):** Task 12 shipped the permanent tenant-literal
+  guard test (`tests/test_no_tenant_literals.py`, `b880910`), including rewriting the
+  two pre-existing `mcpbrain/tenant.py` / `mcpbrain/fleet_storage.py:358` docstrings
+  flagged above so they no longer trip it. Task 13 shipped `docs/FORKING.md` (the
+  one-time fork setup runbook, including the `tenant check --online` marketplace-
+  reachability caveat parked above), corrected `docs/DISTRIBUTION.md`'s stale
+  `DEFAULT_INDEX_URL`/`CHANGE-ME.github.io` step to point at the tenant profile,
+  added the tenant-check gate to `docs/RELEASE-RUNBOOK.md` §1, pointed `README.md`
+  at the fork path, and added the `mcpbrain-tenant` repo row above. The tenant-profile
+  plan (Tasks 1-13) is now fully implemented and committed to `main`, still **NOT
+  released** per the plan's Global Constraints.
 - **Current state (2026-09-08): the five version files are at `0.7.124`, RELEASED** —
   source `ec4b6fd`, dist `486cf47`, plugin `9bda998`; the index serves only
   `mcpbrain-0.7.124-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3601

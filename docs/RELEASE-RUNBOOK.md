@@ -63,6 +63,13 @@ machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
 
 From the source repo (`~/GitHub/mcpbrain`), on `main`, with a clean tree:
 
+- **Verify the tenant profile.** `python bin/tenant.py check` must pass.
+  `bin/release.py` runs the offline half itself and refuses to build on failure, and
+  asserts the built wheel carries `tenant.json` and `google_oauth_client.json` —
+  replacing the by-hand wheel-content check this runbook used to require. A fresh
+  checkout has no OAuth client until you run
+  `python bin/tenant.py use ../mcpbrain-tenant`.
+
 ### 1a. Bump the version in all FOUR sources of truth (keep them equal)
 
 - `pyproject.toml` → `[project] version`

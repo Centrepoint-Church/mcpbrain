@@ -28,20 +28,18 @@ checks the same index daily to self-update.
        mcpbrain-<ver>-py3-none-any.whl
    ```
 
-4. **Set the index URL.** The compile-time default lives in one place:
-   `mcpbrain/update.py` → `DEFAULT_INDEX_URL` (replace the placeholder
-   `https://CHANGE-ME.github.io/mcpbrain-dist/simple/`). The `plugin/INSTALL.md`
-   prompt passes the same URL to `uv tool install --index`.
+4. **Set the index URL.** It lives in your tenant profile:
+   `mcpbrain/tenant.json` → `index_url`. See `docs/FORKING.md`.
 
    **Or** set the environment variable `MCPBRAIN_INDEX_URL` / config key
-   `update_index_url` to override without editing the source.
+   `update_index_url` to override without touching the profile.
 
 ### URL resolution order (from `update.py:_index_url()`)
 
 ```
 1. env var   MCPBRAIN_INDEX_URL        (highest priority)
 2. config    update_index_url          (in mcpbrain config.json)
-3. code      DEFAULT_INDEX_URL         (fallback / compile-time default)
+3. tenant    tenant.json index_url     (this build's profile; absent → no auto-update)
 ```
 
 ---
@@ -123,8 +121,10 @@ pin is required (the package needs ≥3.12; uv provisions it when pinned).
 `Daemon.maybe_auto_update()` in `mcpbrain/daemon.py` runs on a ~daily cadence
 (86 400 s, once the install is configured).  Each time it is due it:
 
-1. Resolves the index URL via `update._index_url()` (env → config → default).
-2. Checks the `CHANGE-ME` guard (see next section).
+1. Resolves the index URL via `update._index_url()` (env → config → tenant profile).
+2. If nothing resolves — no override set and no tenant profile in this build — logs
+   a warning and does nothing (see next section). It never falls back to another
+   organisation's index.
 3. Fetches the package index page and parses wheel filenames to find the latest
    published version.
 4. If a newer version is available, sets `self._pending_update` and returns
@@ -145,23 +145,14 @@ pin is required (the package needs ≥3.12; uv provisions it when pinned).
 
 ---
 
-## The CHANGE-ME guard
+## No update channel configured
 
-Until the index URL is updated from its placeholder, `maybe_auto_update` logs a
-warning and does nothing:
-
-```python
-if "CHANGE-ME" in idx:
-    log.warning("auto-update skipped: update channel not configured (index URL is the placeholder)")
-    return None
-```
-
-This means a deployment where the maintainer forgets to set the URL:
-- Does **not** attempt a fetch to a non-existent host.
-- Does **not** silently stay on the old version without explanation.
-- Emits a clear warning in the daemon log on every daily check.
-
-The guard is in `mcpbrain/daemon.py` inside `maybe_auto_update`, checking
-the resolved URL (after env/config override) so setting `MCPBRAIN_INDEX_URL`
-correctly disables the warning even if `DEFAULT_INDEX_URL` in `update.py` is
-still the placeholder.
+There is no compile-time placeholder URL to forget to edit any more — the index
+URL comes from the tenant profile (`docs/FORKING.md`), and `bin/tenant.py check`
+rejects a `tenant.json` that still carries a placeholder value before a build ever
+ships. A build with **no** tenant profile at all resolves no index URL, and
+`maybe_auto_update` (`mcpbrain/daemon.py`) responds the same way a forgotten URL
+used to: it does not attempt a fetch to a non-existent host, does not silently
+stay on the old version without explanation, and logs a warning in the daemon log
+on every daily check instead. Setting `MCPBRAIN_INDEX_URL` (or the `update_index_url`
+config key) always overrides this, tenant profile or not.
