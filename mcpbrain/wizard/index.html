@@ -111,7 +111,7 @@
     <h2><span class="num">2</span>About you <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
     <p class="desc">Your name, email, and role drive action attribution and the extraction prompts. The organisations you work across (work, study, church, personal&hellip;) become the org tags everything is classified against; email domains are optional and help classify senders. Leave blank to keep the defaults.</p>
     <div class="row">
-      <input id="owner_name" type="text" placeholder="Your full name (e.g. Josh Kemp)" autocomplete="off" spellcheck="false">
+      <input id="owner_name" type="text" placeholder="Your full name (e.g. Dana Okafor)" autocomplete="off" spellcheck="false">
     </div>
     <div class="row" style="margin-top:8px">
       <input id="owner_email" type="text" placeholder="Your email address" autocomplete="off" spellcheck="false">
@@ -160,8 +160,8 @@
       <span id="backup-status" class="badge idle">Waiting for Google sign-in…</span>
     </div>
     <details class="sub">
-      <summary>Fleet setup (Centrepoint org)</summary>
-      <p class="desc">This is the Centrepoint mcpbrain-fleet folder, used automatically. Change it only if a different fleet folder was set up for you.</p>
+      <summary>Fleet setup (<span id="fleet-tenant-name">your organisation</span>)</summary>
+      <p class="desc">This is your organisation's <span id="fleet-tenant-name-2">mcpbrain</span> fleet folder, used automatically. Change it only if a different fleet folder was set up for you.</p>
       <label>Fleet folder ID
         <input id="fleet_folder_id" type="text" placeholder="Loading…">
       </label>
@@ -494,6 +494,11 @@ async function prefillFromConfig(){
       row.querySelector(".org-domains").value = (o.domains || []).join(", ");
       if(i > 0) rows.appendChild(row);
     });
+  }
+  const t = c.tenant;
+  if(t && t.display_name){
+    $("fleet-tenant-name").textContent = t.display_name;
+    $("fleet-tenant-name-2").textContent = t.display_name + " mcpbrain";
   }
   const fleet = c.fleet || {};
   if(fleet.folder_id) $("fleet_folder_id").value = fleet.folder_id;
