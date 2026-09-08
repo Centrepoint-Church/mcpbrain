@@ -70,6 +70,23 @@ class TenantProfile:
         return f"https://github.com/{self.marketplace_slug}"
 
 
+def load_dict(raw: dict, source: str = "<dict>") -> TenantProfile:
+    """Validate an already-parsed profile mapping. `load` is this plus file IO."""
+    kwargs: dict[str, str | None] = {}
+    for field in REQUIRED_FIELDS:
+        value = raw.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"tenant profile {source}: {field!r} is required and must be non-empty")
+        kwargs[field] = value.strip()
+    for field in _OPTIONAL_FIELDS:
+        value = raw.get(field)
+        # "" is UNSET, not an empty value: the wizard clears a field to opt out of
+        # the org fleet, and config.fleet_defaults has always read it that way.
+        kwargs[field] = value.strip() if isinstance(value, str) and value.strip() else None
+    return TenantProfile(**kwargs)  # type: ignore[arg-type]
+
+
 def load(path: Path) -> TenantProfile:
     """Parse and validate a profile JSON. Raises ValueError naming the bad field."""
     try:
@@ -78,20 +95,7 @@ def load(path: Path) -> TenantProfile:
         raise ValueError(f"Invalid tenant profile at {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"Invalid tenant profile at {path}: expected a JSON object")
-    kwargs: dict[str, str | None] = {}
-    for field in REQUIRED_FIELDS:
-        value = raw.get(field)
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(
-                f"tenant profile {path}: {field!r} is required and must be non-empty"
-            )
-        kwargs[field] = value.strip()
-    for field in _OPTIONAL_FIELDS:
-        value = raw.get(field)
-        # "" is UNSET, not an empty value: the wizard clears a field to opt out of
-        # the org fleet, and config.fleet_defaults has always read it that way.
-        kwargs[field] = value.strip() if isinstance(value, str) and value.strip() else None
-    return TenantProfile(**kwargs)  # type: ignore[arg-type]
+    return load_dict(raw, str(path))
 
 
 def _bundled_path() -> Path:
@@ -299,3 +303,64 @@ def cli_main(argv=None) -> int:
     print(f"  wheel index  : {prof.index_url or '(auto-update disabled)'}")
     print(f"  marketplace  : {prof.marketplace_slug}")
     return 0
+
+
+def _default_fetch(url: str) -> str:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def check_online(prof: TenantProfile, *, drive=None, fetch=None) -> list[str]:
+    """Network checks: Drive folders resolve and are writable, the index serves
+    mcpbrain, the marketplace repo exists.
+
+    `drive` is a googleapiclient Drive v3 resource and `fetch` a url->text callable;
+    both are injected so this is testable without a network or credentials. A blank
+    optional field is SKIPPED, not failed — a tenant running without fleet or backup
+    is a valid tenant.
+    """
+    problems: list[str] = []
+    fetch = fetch or _default_fetch
+
+    for field in ("fleet_folder_id", "escrow_folder_id"):
+        folder_id = getattr(prof, field)
+        if not folder_id:
+            continue
+        if drive is None:
+            problems.append(f"{field}: skipped (no Drive credentials)")
+            continue
+        try:
+            meta = drive.files().get(
+                fileId=folder_id,
+                fields="mimeType,driveId,capabilities/canAddChildren",
+                supportsAllDrives=True).execute()
+        except Exception as exc:  # noqa: BLE001 — any Drive failure is a problem to report
+            problems.append(f"{field}: {folder_id!r} could not be read ({exc})")
+            continue
+        if meta.get("mimeType") != "application/vnd.google-apps.folder":
+            problems.append(f"{field}: {folder_id!r} is not a folder "
+                            f"(mimeType {meta.get('mimeType')!r})")
+            continue
+        if not meta.get("driveId"):
+            problems.append(f"{field}: {folder_id!r} is on My Drive, not a Shared "
+                            f"Drive. The drive.file scope cannot write there.")
+        if not (meta.get("capabilities") or {}).get("canAddChildren"):
+            problems.append(f"{field}: {folder_id!r} is not writable by this account")
+
+    if prof.index_url:
+        url = prof.index_url.rstrip("/") + "/mcpbrain/"
+        try:
+            body = fetch(url)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"index_url: {url} could not be fetched ({exc})")
+        else:
+            if "mcpbrain" not in body:
+                problems.append(f"index_url: {url} does not list any mcpbrain wheel")
+
+    try:
+        fetch(prof.plugin_homepage)
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"marketplace: {prof.plugin_homepage} unreachable ({exc}). "
+                        f"Expected for a private repo — confirm by hand.")
+    return problems

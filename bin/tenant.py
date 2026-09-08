@@ -53,7 +53,10 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_use = sub.add_parser("use", help="copy a private tenant directory into the tree")
     p_use.add_argument("dir", help="path to the mcpbrain-tenant checkout")
-    sub.add_parser("check", help="validate the installed tenant profile")
+    p_check = sub.add_parser("check", help="validate the installed tenant profile")
+    p_check.add_argument("--online", action="store_true",
+                          help="also check Drive folders, the wheel index and the "
+                               "marketplace repo")
     ns = ap.parse_args(argv)
     if ns.cmd == "use":
         for p in use_profile(Path(ns.dir)):
@@ -68,6 +71,20 @@ def main(argv=None) -> int:
         return 1
     prof = _tenant.load(_REPO / "mcpbrain" / "tenant.json")
     print(f"✓ tenant check passed — {prof.display_name} ({prof.tenant_id})")
+
+    if getattr(ns, "online", False):
+        from mcpbrain import auth
+        try:
+            creds = auth.load_credentials()
+            drive = auth.build_service("drive", "v3", creds)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (Drive checks skipped: {exc})")
+            drive = None
+        online = _tenant.check_online(prof, drive=drive)
+        if online:
+            for p in online:
+                print(f"  ✗ {p}", file=sys.stderr)
+            return 1
     return 0
 
 
