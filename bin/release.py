@@ -7,10 +7,42 @@ and regenerates the two index.html files. The maintainer then commits + pushes t
 dist repo (GitHub Pages serves it). Bump mcpbrain.__version__ + pyproject before running.
 """
 import argparse
+import json
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# What every shipped wheel MUST carry. tenant.json names the deployment; the OAuth
+# client is what lets it authenticate at all. A wheel missing either is a silent
+# fleet-wide outage on the next daily auto-update, so this is checked against the
+# wheel actually produced by THIS run, not whatever dist/ happens to contain.
+_REQUIRED_IN_WHEEL = ("mcpbrain/tenant.json", "mcpbrain/google_oauth_client.json")
+
+
+def verify_wheel(wheel: Path, repo: Path) -> list[str]:
+    """Assert a built wheel carries this tenant's profile and OAuth client."""
+    problems: list[str] = []
+    with zipfile.ZipFile(wheel) as z:
+        names = set(z.namelist())
+        for required in _REQUIRED_IN_WHEEL:
+            if required not in names:
+                problems.append(f"{wheel.name}: missing {required}")
+        if "mcpbrain/google_oauth_client.json" in names:
+            packed = json.loads(z.read("mcpbrain/google_oauth_client.json"))
+            source = json.loads((Path(repo) / "mcpbrain" /
+                                 "google_oauth_client.json").read_text())
+            if packed.get("installed", {}).get("client_id") != \
+                    source.get("installed", {}).get("client_id"):
+                problems.append(
+                    f"{wheel.name}: client_id does not match the source tree — this "
+                    f"is a STALE wheel from a previous build, not this one")
+    return problems
 
 
 def render_package_index(wheel_names: list[str]) -> str:
@@ -51,6 +83,15 @@ def main(argv=None) -> int:
     # a removed module rode along in a release build). Clean build/ + *.egg-info so
     # the wheel reflects exactly the current source tree.
     repo = Path(ns.repo)
+    from mcpbrain import tenant
+    problems = tenant.check_offline(repo)
+    if problems:
+        print("release aborted — tenant profile invalid:", file=sys.stderr)
+        for p in problems:
+            print(f"  ✗ {p}", file=sys.stderr)
+        print("Run `python bin/tenant.py use <tenant-dir>` and fix the above.",
+              file=sys.stderr)
+        return 2
     shutil.rmtree(repo / "build", ignore_errors=True)
     for egg in repo.glob("*.egg-info"):
         shutil.rmtree(egg, ignore_errors=True)
@@ -58,6 +99,18 @@ def main(argv=None) -> int:
                          capture_output=True, text=True)
     if out.returncode != 0:
         print(out.stdout + out.stderr, file=sys.stderr); return out.returncode
+    from mcpbrain import __version__ as _ver
+    built = Path(f"{ns.repo}/dist") / f"mcpbrain-{_ver}-py3-none-any.whl"
+    if not built.is_file():
+        print(f"release aborted — expected {built.name} in dist/ after build",
+              file=sys.stderr)
+        return 2
+    wheel_problems = verify_wheel(built, repo)
+    if wheel_problems:
+        print("release aborted — built wheel is incomplete:", file=sys.stderr)
+        for p in wheel_problems:
+            print(f"  ✗ {p}", file=sys.stderr)
+        return 2
     pkg_dir = Path(ns.dist) / "simple" / "mcpbrain"
     pkg_dir.mkdir(parents=True, exist_ok=True)
     for whl in Path(f"{ns.repo}/dist").glob("mcpbrain-*.whl"):
