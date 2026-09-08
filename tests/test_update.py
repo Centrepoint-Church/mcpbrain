@@ -1,7 +1,17 @@
 """update.py tests — index-based update path (git-pull model retired)."""
 import json
 
+import pytest
+
 import mcpbrain.update as upd
+from mcpbrain import tenant
+
+
+@pytest.fixture(autouse=True)
+def _clear():
+    tenant._clear_cache()
+    yield
+    tenant._clear_cache()
 
 
 def test_resolve_uv_prefers_path_then_local_bin(monkeypatch, tmp_path):
