@@ -21,6 +21,15 @@ parallel by default), ruff, `uv build`, Google Drive API v3 (`google-api-python-
 
 **Spec:** `docs/superpowers/specs/2026-09-02-tenant-profile-design.md`
 
+**Rebased 2026-09-08** onto 33 commits of sync-queue / shared-drive work (releases
+0.7.123 and 0.7.124). None of it conflicts with this design — the new sync code
+reaches the fleet folder through `fleet_storage.fleet_folder_id`, which already
+returns `str | None` and whose callers already check. What changed for this plan:
+line numbers drifted, `tests/test_sync_cycle.py` became a 13th test file depending on
+`org_defaults`, and Task 10's file list grew. All folded in below. **Every line
+number in this plan was recomputed on 2026-09-08; treat them as hints and locate by
+symbol name, not by line.**
+
 ## Global Constraints
 
 - **Never push, never release.** Committing is expected; `git push`, `bin/release.py`
@@ -68,10 +77,12 @@ parallel by default), ruff, `uv build`, Google Drive API v3 (`google-api-python-
 - `mcpbrain/google_oauth_client.json` — from git only. The working-tree file stays
   (gitignored) so local builds keep working.
 
-**Modified** — `config.py` (`fleet_defaults`, `fleet_pin`), `fleet.py:284-293`,
-`onboarding.py:49-54`, `fleet_storage.py:352-359`, `restore.py:105-117`,
-`update.py:19,24-34`, `auth.py:216` (error text), `daemon.py:1410-1426`
-(`config_profile`), `doctor.py`, `cli.py:33-35`, `bin/release.py`, `pyproject.toml`
+**Modified** — `config.py` (`fleet_defaults` :40, `fleet_pin` :1132),
+`fleet.py:284-293`, `onboarding.py:49-54`, `fleet_storage.py:354-360`,
+`restore.py:105-117` **and its `detect_restorable` caller at :201**,
+`update.py:19,24-35`, `auth.py:217` (error text), `daemon.py:1460-1476`
+(`config_profile`), `doctor.py` (`arch_line` :572, its append :401),
+`cli.py:33-36`, `bin/release.py`, `pyproject.toml`
 (package-data), `.gitignore`, `mcpbrain/wizard/index.html`, `mcpbrain/enrich_prompt.md`,
 `plugin/agents/enrich-batch.md` (generated), `mcpbrain/cowork/enrichment.md`,
 `mcpbrain/routines/meeting-packs.md`, `plugin/skills/mcpbrain-bootstrap/SKILL.md`,
@@ -453,10 +464,9 @@ Non-secret infrastructure ids only. No call site reads it yet."
 
 **Files:**
 - Delete: `mcpbrain/org_defaults.py`
-- Modify: `mcpbrain/config.py:50-55,1122,1135`, `mcpbrain/fleet.py:284-293`,
-  `mcpbrain/onboarding.py:49-54`, `mcpbrain/fleet_storage.py:352-359`,
-  `mcpbrain/restore.py:105-117`, `tests/test_org_contracts.py:42-50`,
-  `tests/test_org_config_flags.py:9`
+- Modify: `mcpbrain/config.py:50-55,1136,1149`, `mcpbrain/fleet.py:284-293`,
+  `mcpbrain/onboarding.py:49-54`, `mcpbrain/fleet_storage.py:354-360`,
+  `mcpbrain/restore.py:105-117,201`, and **13 test files** (Step 6)
 - Test: `tests/test_tenant.py` (append)
 
 **Interfaces:**
@@ -531,7 +541,7 @@ Expected: FAIL — the call sites still import `org_defaults` and return its val
 
 - [ ] **Step 3: Migrate `config.py`**
 
-Replace `fleet_defaults` (`mcpbrain/config.py:39-56`) body:
+Replace `fleet_defaults` (`mcpbrain/config.py:40-57`) body:
 
 ```python
 def fleet_defaults(cfg: dict) -> dict:
@@ -555,7 +565,8 @@ def fleet_defaults(cfg: dict) -> dict:
     }
 ```
 
-In `fleet_pin` (line ~1122), replace the `org_defaults` import and its use:
+In `fleet_pin` (line ~1132; the `org_defaults` lines are 1136 and 1149), replace
+the import and its use:
 
 ```python
     from mcpbrain.chunking import CHUNKER_VERSION
@@ -594,8 +605,10 @@ def _fleet_folder_id(home) -> str | None:
     return fleet.get("folder_id") or (prof.fleet_folder_id if prof else None)
 ```
 
-`mcpbrain/fleet_storage.py:352-359` — the docstring's *"in practice the org default
-is always set"* becomes false and must go:
+`mcpbrain/fleet_storage.py:354-360` — the docstring's *"in practice the org default
+is always set"* becomes false and must go. Its two callers (`fleet_folder_storage`
+:373 and the cache factory :405) **already** guard with `if not folder_id`, so
+nothing downstream needs changing:
 
 ```python
 def fleet_folder_id(home) -> str | None:
@@ -630,35 +643,122 @@ def _escrow_folder(home: str) -> str | None:
     )
 ```
 
-- [ ] **Step 5: Delete `org_defaults.py` and fix its two test consumers**
+- [ ] **Step 5: Close the one caller that does not yet handle `None`**
+
+`restore.detect_restorable` (`mcpbrain/restore.py:201`) does
+`folder = _escrow_folder(home)` and passes the result straight into
+`_download_escrow_key`, which interpolates it into a Drive query string. With `None`
+it would send Drive a literal `'None' in parents` query — a valid query that matches
+nothing, so the failure is silent rather than loud. Its own docstring promises
+"Never raises — degrades to available=False", so make that true explicitly. After the
+`user_email` guard, add:
+
+```python
+    folder = _escrow_folder(home)
+    if not folder:
+        return {"available": False, "reason": "no escrow folder configured"}
+```
+
+and delete the now-duplicated `folder = _escrow_folder(home)` line below it.
+
+`backup_setup.py:63` already handles this correctly — it raises a clear
+`RuntimeError` whose message literally anticipates "and no org default" — and
+`fleet_storage`'s two callers already guard with `if not folder_id`. Those three need
+no change; this is the only gap.
+
+- [ ] **Step 6: Delete `org_defaults.py` and migrate THIRTEEN test files**
 
 ```bash
 git rm mcpbrain/org_defaults.py
 ```
 
-In `tests/test_org_contracts.py`, delete `test_the_org_pin_chunker_version_matches_the_code`
-(lines 42-50) entirely — Task 2's `test_org_pin_chunker_version_is_the_code_constant`
-replaces it and the drift it guarded is now structurally impossible.
+The plan originally said two test consumers. It is **thirteen** — the module is
+referenced across the fleet, backup, restore, onboarding and wizard suites, and
+`tests/test_sync_cycle.py` joined them in the 0.7.123 sync-queue work:
 
-In `tests/test_org_config_flags.py:9`, replace:
-
-```python
-from mcpbrain.chunking import CHUNKER_VERSION
-_UNPINNED = FleetPin(chunker_version=str(CHUNKER_VERSION))
+```
+tests/test_backup_setup.py            tests/test_onboarding_bootstrap.py
+tests/test_control_api_backup_enable.py  tests/test_org_config_flags.py
+tests/test_daemon_org_config.py       tests/test_org_contracts.py
+tests/test_fleet.py                   tests/test_restore_auto.py
+tests/test_fleet_defaults.py          tests/test_sync_cycle.py
+tests/test_fleet_pin.py               tests/test_wizard_assets.py
+tests/test_fleet_storage_drive.py
 ```
 
-- [ ] **Step 6: Confirm nothing still imports the deleted module**
+Three of them need real thought; the rest are a mechanical swap.
+
+**(a) Delete outright.** In `tests/test_org_contracts.py`, remove
+`test_the_org_pin_chunker_version_matches_the_code` (lines ~42-50) — Task 2's
+`test_org_pin_chunker_version_is_the_code_constant` replaces it, and the drift it
+guarded is now structurally impossible.
+
+**(b) `tests/test_fleet_defaults.py` is about the fallback itself.** Its
+`test_empty_config_falls_back_to_org_defaults` asserts precisely the behaviour this
+plan changes. Rename it to `test_empty_config_falls_back_to_the_tenant_profile` and
+assert against `tenant.profile()`, then **add** the case that did not exist and is
+the whole point of the change:
+
+```python
+def test_no_tenant_profile_yields_empty_not_someone_elses_folders(monkeypatch, tmp_path):
+    from mcpbrain import config, tenant
+    monkeypatch.delenv("MCPBRAIN_TENANT", raising=False)
+    monkeypatch.setattr(tenant, "_bundled_path", lambda: tmp_path / "absent.json")
+    tenant._clear_cache()
+    assert config.fleet_defaults({}) == {"folder_id": "", "escrow_folder_id": ""}
+```
+
+**(c) `tests/test_fleet.py:293` monkeypatches the constant to `""`**
+(`monkeypatch.setattr(org_defaults, "FLEET_FOLDER_ID", "")`) to simulate "no default".
+A frozen dataclass cannot be patched that way. Point `MCPBRAIN_TENANT` at a profile
+with a blank `fleet_folder_id` instead, and call `tenant._clear_cache()`:
+
+```python
+    prof = tmp_path / "t.json"
+    prof.write_text(json.dumps({"tenant_id": "t", "display_name": "T",
+                                "oauth_project_id": "p", "marketplace_owner": "o",
+                                "marketplace_repo": "r", "marketplace_name": "n",
+                                "fleet_folder_id": ""}))
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(prof))
+    tenant._clear_cache()
+```
+
+`tests/test_daemon_org_config.py:33` patches `FLEET_FOLDER_ID` to `"BAKED_IN"` for the
+same reason and takes the same treatment with a non-blank value.
+
+**(d) The remaining nine** replace `org_defaults.FLEET_FOLDER_ID` /
+`ESCROW_FOLDER_ID` / `ORG_PIN_CHUNKER_VERSION` with `tenant.profile().fleet_folder_id`
+/ `.escrow_folder_id` / `str(chunking.CHUNKER_VERSION)`. They assert *agreement with
+the configured default*, which stays true.
+
+Because a shared `tenant.profile()` cache now backs these, add the autouse
+`_clear_cache` fixture from `tests/test_tenant.py` to any file that manipulates the
+profile — a leaked cache across xdist workers is a confusing intermittent failure.
+
+- [ ] **Step 7: Confirm nothing still imports the deleted module**
 
 Run: `grep -rn "org_defaults" mcpbrain/ bin/ tests/ plugin/`
 Expected: no output.
 
-- [ ] **Step 7: Run the tests**
+- [ ] **Step 8: Run the tests**
 
 Run: `pytest tests/test_tenant.py tests/test_org_contracts.py tests/test_org_config_flags.py tests/test_fleet.py tests/test_fleet_storage.py tests/test_onboarding.py tests/test_restore.py tests/test_config.py -q && ruff check .`
-Expected: PASS. If any of those test files does not exist, drop it from the command
-rather than inventing one.
 
-- [ ] **Step 8: Commit**
+Then run every file from Step 6 — that list is exact, so none of it needs guessing:
+
+```bash
+pytest tests/test_backup_setup.py tests/test_control_api_backup_enable.py \
+  tests/test_daemon_org_config.py tests/test_fleet.py tests/test_fleet_defaults.py \
+  tests/test_fleet_pin.py tests/test_fleet_storage_drive.py \
+  tests/test_onboarding_bootstrap.py tests/test_org_config_flags.py \
+  tests/test_org_contracts.py tests/test_restore_auto.py tests/test_sync_cycle.py \
+  tests/test_wizard_assets.py -q
+```
+
+Expected: PASS. If a file in the first command does not exist, drop it rather than
+inventing one; the Step 6 list is verified and every file in it exists.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add -A
@@ -977,7 +1077,7 @@ client_secret.json
 
 - [ ] **Step 5: Fix the stale doc reference in `auth.py`**
 
-`mcpbrain/auth.py:216` cites `docs/INSTALL.md`, which does not exist. Change that
+`mcpbrain/auth.py:217` cites `docs/INSTALL.md`, which does not exist. Change that
 line to read `See docs/FORKING.md.` (Task 11 creates it).
 
 - [ ] **Step 6: Run the tests**
@@ -1307,7 +1407,7 @@ def cli_main(argv=None) -> int:
 
 - [ ] **Step 6: Add the doctor line**
 
-In `mcpbrain/doctor.py`, add a standalone function beside `arch_line` (line 553),
+In `mcpbrain/doctor.py`, add a standalone function beside `arch_line` (line 572),
 following its exact shape — a function returning one formatted string:
 
 ```python
@@ -1755,7 +1855,7 @@ carries tenant.json and the OAuth client, replacing a hand-check in the runbook.
 ### Task 8: Derive the install-docs test from `tenant.json`
 
 **Files:**
-- Modify: `tests/test_install_docs_single_source.py:38-48`
+- Modify: `tests/test_install_docs_single_source.py:39-49`
 
 **Interfaces:**
 - Consumes: `tenant.profile()`.
@@ -1812,8 +1912,8 @@ Same protection, but it travels to a fork instead of failing there by constructi
 ### Task 9: Wizard — render the tenant name, neutralise the placeholder
 
 **Files:**
-- Modify: `mcpbrain/daemon.py:1410-1426` (`config_profile`),
-  `mcpbrain/wizard/index.html:114,163-164` and its `/api/config` handler block
+- Modify: `mcpbrain/daemon.py:1460-1476` (`config_profile`),
+  `mcpbrain/wizard/index.html:114,163-164` and its `/api/config` handler block (:498)
 - Test: `tests/test_wizard_assets.py`, `tests/test_daemon_config_profile.py`
 
 **Interfaces:**
@@ -1953,10 +2053,11 @@ the UI on every install, not cosmetics."
 ### Task 10: Neutral examples across prompts, routines and source comments
 
 **Files:**
-- Modify: `mcpbrain/enrich_prompt.md`, `mcpbrain/cowork/enrichment.md`,
-  `mcpbrain/routines/meeting-packs.md`, `plugin/skills/mcpbrain-bootstrap/SKILL.md`,
-  `mcpbrain/chunking.py:130`, `mcpbrain/orgs.py:90-93`, `mcpbrain/graph_write.py:13`,
-  `mcpbrain/query_router.py:100`, `mcpbrain/maintenance/graph_cleanup.py:10`
+- Modify: **sixteen files** — see the `FILES` list in Step 1. The plan originally
+  named nine; the spec's corrected inventory (2026-09-08) adds `config.py`,
+  `graph_view.py`, `prepare.py`, `resolve.py`, `store.py`, and more hits inside
+  `chunking.py`, `graph_write.py`, `query_router.py` and `graph_cleanup.py` than the
+  original single-line references covered.
 - Generated: `plugin/agents/enrich-batch.md` (via `bin/sync_agents.py`)
 - Test: existing `tests/test_enrich_prompt_doc.py` (must stay green)
 
@@ -1966,6 +2067,14 @@ the UI on every install, not cosmetics."
 teaches something. The ordering in the script below matters — `"Pastor Joel
 Chelliah"` must be rewritten before the bare `"Joel Chelliah"`, or the honorific
 example silently loses its honorific.
+
+**Comments only, never behaviour.** `mcpbrain/chunking.py` holds a real list of
+honorifics the code strips (`"ps"`, `"pastor"`, …). That list is *functional* — it
+must not change. Only the comment above it, which happens to use a real person as its
+example, is in scope. After running the script, `git diff mcpbrain/chunking.py
+mcpbrain/resolve.py mcpbrain/config.py mcpbrain/store.py` and confirm every hunk is
+inside a comment or docstring. If any lands on an executable line, revert it and
+narrow the substitution.
 
 - [ ] **Step 1: Apply the substitutions**
 
@@ -2004,6 +2113,29 @@ SUBS = [
     ('"ACC" never collides with "ACCI"', '"NCF" never collides with "NCFI"'),
     ('"ACC (National)" -> "acc-national"', '"NCF (National)" -> "ncf-national"'),
     ('"OrgName", "ACC"', '"OrgName", "NCF"'),
+    # --- added 2026-09-08 from the spec's corrected inventory ---
+    # chunking.py's honorific COMMENT. The honorific LIST itself ("ps", "pastor")
+    # is functional code — do NOT touch it, only the comment's example.
+    # NOTE both anchors below are ORDER-INDEPENDENT on purpose: "Joel Chelliah" ->
+    # "Marcus Reyes" runs earlier in this list, so an anchor containing the full
+    # name would already have been rewritten by the time these run and would match
+    # nothing, silently leaving "Ps Joel" in place. Anchor on the part that does
+    # not change.
+    ('"Ps Joel" / "Pastor', '"Dr Priya" / "Principal'),
+    ("extracted from 'Ps Joel'", "extracted from 'Dr Marcus'"),
+    ("'Ps Joel' and 'Joel' share a key", "'Dr Marcus' and 'Marcus' share a key"),
+    ('"Joel" vs "J. Chelliah"', '"Marcus" vs "M. Reyes"'),
+    ("'Joel' vs 'J. Chelliah'", "'Marcus' vs 'M. Reyes'"),
+    ("'joel-chelliah'", "'marcus-reyes'"),
+    ('"Joel budget"', '"Marcus budget"'),
+    ("'Josh Kemp' to 'J.K.'", "'Dana Okafor' to 'D.O.'"),
+    # prepare.py names Taryn HANSEN — a different surname, so a second real person.
+    ("'Taryn Hansen|Taryn'", "'Dana Okafor|Dana'"),
+    # store.py's slugify reference, same example as chunking.py's docstring.
+    ('handles "Taryn Hamilton" -> "taryn-hamilton"',
+     'handles "Dana Okafor" -> "dana-okafor"'),
+    # resolve.py's diacritic-folding example needs A diacritic name, not none.
+    ("'Chané' and 'Chane' share a key", "'Renée' and 'Renee' share a key"),
     # org-name fold examples in orgs.py / graph_cleanup.py
     ('"Centrepoint Church Inc."', '"Northgate Trust Inc."'),
     ('"Centrepoint Church"', '"Northgate Trust"'),
@@ -2023,6 +2155,12 @@ FILES = [
     "mcpbrain/graph_write.py",
     "mcpbrain/query_router.py",
     "mcpbrain/maintenance/graph_cleanup.py",
+    # added 2026-09-08 — the spec's corrected inventory
+    "mcpbrain/config.py",
+    "mcpbrain/graph_view.py",
+    "mcpbrain/prepare.py",
+    "mcpbrain/resolve.py",
+    "mcpbrain/store.py",
 ]
 
 for rel in FILES:
@@ -2066,13 +2204,31 @@ verify with the tests in Step 4 rather than by eye.
 pytest tests/test_enrich_prompt_doc.py tests/test_chunking.py tests/test_resolve.py \
        tests/test_graph_cleanup.py tests/test_orgs.py -q
 ruff check .
-grep -rEn "\bACCI?\b|Taryn|Chelliah|Donna K|Optus|Church Co|Centrepoint|Courageous" \
-     mcpbrain/ plugin/
+grep -rEni "taryn|chelliah|donna k|optus|the church co|thechurchco|centrepoint|courageous|franz|\bcapes\b|josh kemp|ps joel|hamilton" \
+     mcpbrain/ plugin/ --include="*.py" --include="*.md" --include="*.json" \
+     --include="*.html" --include="*.ps1" | grep -v __pycache__
+grep -rEn "\bACCI?\b" mcpbrain/ plugin/ --include="*.py" --include="*.md" \
+     --include="*.json" --include="*.html" --include="*.ps1" | grep -v __pycache__
 ```
 
-Expected: tests PASS, ruff clean, and the grep returns **only**
-`mcpbrain/tenant.json` (which legitimately holds `centrepoint`) — nothing else.
-Anything else the grep finds was missed; add it to `SUBS` and re-run Step 1.
+Two things about these greps, both learned the hard way:
+
+- **Case-insensitive, or it misses five files.** The lowercase slugs
+  `taryn-hamilton` and `joel-chelliah` appear in `cowork/enrichment.md`,
+  `enrich_prompt.md`, `query_router.py`, `resolve.py` and `store.py`. Every
+  case-sensitive survey of this work undercounted for exactly that reason.
+- **`\bcapes\b` must keep its word boundaries.** An unbounded `capes` matches the
+  word **escapes** in `mcpbrain/agents.py`, `mcpbrain/wizard/graph.html` and
+  `mcpbrain/wizard/index.html` — three phantom hits in files unrelated to this work.
+  The ACC grep stays case-SENSITIVE and word-bounded for the mirror-image reason: a
+  lowercase `acc` is an ordinary accumulator variable.
+
+Expected: tests PASS, ruff clean, and the greps return **only**
+`mcpbrain/tenant.json` (which legitimately holds `centrepoint`) plus the exempt
+install surface — `plugin/INSTALL.md`, `plugin/commands/install.md`,
+`plugin/scripts/install.ps1` and the two `plugin/.claude-plugin/*.json` manifests,
+which must name the marketplace and are covered by `check_offline`'s agreement check
+instead. Anything else was missed; add it to `SUBS` and re-run Step 1.
 
 `tests/test_graph_cleanup.py` and `tests/test_resolve.py` assert the real
 "Centrepoint"/"ACC"/"ACCI" behaviour and are **deliberately left alone** — tests are
