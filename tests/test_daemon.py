@@ -905,6 +905,109 @@ def test_configured_first_call_snapshots_and_uploads(tmp_path):
     assert head != SQLITE_MAGIC, "artifact looks like plaintext sqlite — mail in clear"
 
 
+def test_mac_user_is_active_parses_pmset_assertions(monkeypatch):
+    """_mac_user_is_active reads the 'UserIsActive' line from pmset -g
+    assertions' system-wide summary block -- 1 during a genuine wake, 0
+    during a dark-wake maintenance cycle. This is the Apple-Silicon-compatible
+    signal: IODisplayWrangler (the older technique) does not exist on this
+    hardware's IORegistry at all."""
+    import subprocess
+
+    class _Result:
+        def __init__(self, stdout): self.returncode = 0; self.stdout = stdout
+
+    active_output = (
+        "2026-09-08 11:05:48 +0800 \n"
+        "Assertion status system-wide:\n"
+        "   BackgroundTask                 0\n"
+        "   UserIsActive                   1\n"
+        "   PreventUserIdleSystemSleep     1\n"
+        "Listed by owning process:\n")
+    dark_output = active_output.replace("UserIsActive                   1",
+                                        "UserIsActive                   0")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result(active_output))
+    assert daemon_module._mac_user_is_active() is True
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result(dark_output))
+    assert daemon_module._mac_user_is_active() is False
+
+
+def test_mac_user_is_active_fails_open_on_error(monkeypatch):
+    """A broken check must never PERMANENTLY block backups -- fail open
+    (report active) on any subprocess error, missing pmset, or unparseable
+    output, rather than fail closed (which could mean silently never backing
+    up again on some future macOS whose pmset output shape changed)."""
+    import subprocess
+
+    def _raise(*a, **k):
+        raise FileNotFoundError("no such file: pmset")
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert daemon_module._mac_user_is_active() is True
+
+    class _BadResult:
+        returncode = 0
+        stdout = "nothing resembling the expected format\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _BadResult())
+    assert daemon_module._mac_user_is_active() is True
+
+
+def test_maybe_backup_defers_without_consuming_cadence_when_dark_waking(
+        tmp_path, monkeypatch):
+    """The actual fix: a DUE backup on a dark-waking Mac must defer rather
+    than attempt (attempting is what produced the live Errno 49 failures --
+    the network interface hasn't finished re-establishing yet). Deferring
+    must NOT stamp _last_backup, so the very next check (not the next full
+    interval) retries -- picking the backup up within about a maintenance
+    tick of the user actually opening the lid, not on the next scheduled
+    24h slot that might land in the same overnight window again."""
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    clock = _Clock()
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=100.0, clock=clock)
+
+    monkeypatch.setattr(daemon_module.sys, "platform", "darwin")
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
+
+    result = daemon.maybe_backup()
+
+    assert result is not None and result.get("backed_up") is False
+    assert result.get("deferred") is True
+    file_creates = [c for c in files.create_calls
+                   if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME]
+    assert file_creates == [], "a dark-waking Mac must never attempt the upload"
+
+    # The cadence clock must be UNTOUCHED: without advancing it at all, the
+    # backup is still due (this is what makes the retry near-immediate once
+    # the Mac wakes for real, rather than waiting out the full interval).
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    woken = daemon.maybe_backup()
+    assert woken is not None and woken["backed_up"] is True
+    file_creates = [c for c in files.create_calls
+                   if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME]
+    assert len(file_creates) == 1
+
+
+def test_maybe_backup_ignores_the_check_on_non_mac(tmp_path, monkeypatch):
+    """The fix is scoped to a diagnosed macOS dark-wake pattern -- on any
+    other platform, behavior is unchanged from before this fix."""
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=3600.0, clock=_Clock())
+
+    monkeypatch.setattr(daemon_module.sys, "platform", "win32")
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
+
+    result = daemon.maybe_backup()
+    assert result is not None and result["backed_up"] is True
+
+
 def test_not_due_skips_second_backup_then_due_backs_up_again(tmp_path):
     store = _store_with_chunk(tmp_path)
     files = FakeFiles(list_response={"files": []})

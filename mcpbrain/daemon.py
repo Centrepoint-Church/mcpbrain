@@ -719,6 +719,45 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
     return result
 
 
+def _mac_user_is_active() -> bool:
+    """True iff macOS reports a genuine, user-active wake right now — false
+    during a brief DarkWake maintenance cycle (lid closed, network stack only
+    partially re-established).
+
+    Live incident (2026-09-05/06): two consecutive periodic-backup failures,
+    both `[Errno 49] Can't assign requested address`, both landing at
+    ~23:00-23:15 — cross-referenced against `pmset -g log`, that window is a
+    repeating cycle of brief DarkWake/Sleep "Maintenance Sleep" wakes on this
+    machine. EADDRNOTAVAIL from a long-lived HTTP client is the classic
+    signature of attempting a connection in exactly that window, before the
+    interface has finished coming back up. The eventual success landed ~25
+    minutes after a genuine lid-open wake.
+
+    `UserIsActive` (from `pmset -g assertions`' system-wide summary block) is
+    the signal used, not the older `IODisplayWrangler` IORegistry technique:
+    verified directly on this (Apple Silicon) hardware that `IODisplayWrangler`
+    does not exist in the IORegistry at all — that check is Intel-era and
+    would silently never detect anything on current Macs.
+
+    Fails OPEN (returns True) on any error, non-mac platform, or unparseable
+    output — a broken check must never PERMANENTLY block backups. The cost of
+    failing open is at worst a repeat of the occasional Errno 49 this exists
+    to reduce; failing closed could mean silently never backing up again if a
+    future macOS changes `pmset`'s output shape.
+    """
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(["pmset", "-g", "assertions"],
+                             capture_output=True, text=True, timeout=2)
+        if out.returncode != 0:
+            return True
+        m = re.search(r"^\s*UserIsActive\s+(\d+)", out.stdout, re.MULTILINE)
+        return True if m is None else m.group(1) == "1"
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 class Daemon:
     """Owns the store-writing loop: sync -> embed on an interval, with
     pause/resume and a single-writer lock.
@@ -2196,9 +2235,18 @@ class Daemon:
         (self._last_backup is None) or once backup_interval_s has elapsed since
         the last backup. Not due -> returns None and does nothing.
 
-        When due: reuses backup.py's primitives — make_encrypted_snapshot
-        produces the encrypted artifact (the only artifact; no cleartext leaves
-        the machine) and upload_snapshot ships it to the per-user Shared Drive
+        When due, on macOS: first checks `_mac_user_is_active()` — if the
+        system is merely dark-waking (not genuinely awake), DEFERS instead of
+        attempting (returns {"backed_up": False, "deferred": True} and does
+        NOT advance the cadence clock, so the very next check retries rather
+        than waiting out the full interval). See that function's docstring
+        for the live Errno 49 incident this closes. Non-mac platforms skip
+        this check entirely.
+
+        When due and (not on macOS, or the system is genuinely awake): reuses
+        backup.py's primitives — make_encrypted_snapshot produces the
+        encrypted artifact (the only artifact; no cleartext leaves the
+        machine) and upload_snapshot ships it to the per-user Shared Drive
         folder. Returns a summary dict.
 
         A backup failure (e.g. a Drive error) is logged and swallowed so the
@@ -2236,6 +2284,18 @@ class Daemon:
             elapsed = self._clock() - self._last_backup
             if elapsed < interval:
                 return None
+
+        # A backup IS due. Before touching the cadence clock or doing any
+        # work: on macOS, defer rather than attempt if the system is merely
+        # dark-waking (see _mac_user_is_active's docstring for the live
+        # incident this closes). Deliberately does NOT stamp _last_backup —
+        # the whole point is that the NEXT check (the next maintenance tick,
+        # ~60s away) re-evaluates, rather than waiting out the full interval
+        # and risking landing in the same overnight window again.
+        if sys.platform == "darwin" and not _mac_user_is_active():
+            log.info("periodic backup due, but system is dark-waking "
+                     "(not user-active) — deferring to next check")
+            return {"backed_up": False, "deferred": True}
 
         cfg = backup
         # Stamp the cadence clock on ATTEMPT, before the work, not on success
