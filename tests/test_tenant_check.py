@@ -155,3 +155,73 @@ def test_index_url_drift_in_install_ps1_is_reported(tmp_path):
     (repo / "plugin" / "scripts" / "install.ps1").write_text(
         '$INDEX = "mcpbrain=https://stale.example/simple/"\n')
     assert any("install.ps1" in p for p in tenant.check_offline(repo))
+
+
+class _FakeFiles:
+    def __init__(self, table): self._t = table
+    def get(self, *, fileId, fields, supportsAllDrives):
+        class _Req:
+            def __init__(self, val): self._v = val
+            def execute(self):
+                if isinstance(self._v, Exception):
+                    raise self._v
+                return self._v
+        return _Req(self._t.get(fileId, KeyError(fileId)))
+
+
+class _FakeDrive:
+    def __init__(self, table): self._f = _FakeFiles(table)
+    def files(self): return self._f
+
+
+_FOLDER = {"mimeType": "application/vnd.google-apps.folder",
+           "driveId": "0ABC", "capabilities": {"canAddChildren": True}}
+
+
+def test_online_passes_when_folders_and_index_are_good(tmp_path):
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
+    def fetch(url):
+        return '<a href="mcpbrain-0.1.0-py3-none-any.whl">x</a>' if "mcpbrain" in url else "<a href=\"mcpbrain/\">mcpbrain</a>"
+    assert tenant.check_online(prof, drive=drive, fetch=fetch) == []
+
+
+def test_a_folder_id_that_is_not_a_folder_is_reported(tmp_path):
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": {"mimeType": "application/pdf", "driveId": "0ABC",
+                                   "capabilities": {"canAddChildren": False}},
+                        "ESCROW1": _FOLDER})
+    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain")
+    assert any("fleet_folder_id" in p and "folder" in p for p in problems)
+
+
+def test_a_folder_on_my_drive_not_a_shared_drive_is_reported(tmp_path):
+    """drive.file cannot write to My Drive, so this fails backups silently later."""
+    prof = tenant.load_dict(_profile())
+    mydrive = {"mimeType": "application/vnd.google-apps.folder",
+               "capabilities": {"canAddChildren": True}}      # no driveId
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": mydrive})
+    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain")
+    assert any("escrow_folder_id" in p and "Shared Drive" in p for p in problems)
+
+
+def test_an_index_that_does_not_list_mcpbrain_is_reported(tmp_path):
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
+    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "<html></html>")
+    assert any("index_url" in p for p in problems)
+
+
+def test_blank_optional_fields_are_skipped_not_failed(tmp_path):
+    """A tenant that runs without fleet or backup is a valid tenant.
+
+    fetch is a no-op stub, not None: marketplace_owner/marketplace_repo are
+    REQUIRED fields (never blank), so check_online's marketplace-reachability
+    check always runs regardless of the optional fields under test here — passing
+    fetch=None would fall back to _default_fetch and hit the real network for
+    Acme-Org/mcpbrain-plugin (a fictional repo, reliably 404), which is exactly
+    what an injectable fetch exists to avoid in a test.
+    """
+    prof = tenant.load_dict(_profile(fleet_folder_id="", escrow_folder_id="",
+                                     index_url=""))
+    assert tenant.check_online(prof, drive=None, fetch=lambda u: "ok") == []
