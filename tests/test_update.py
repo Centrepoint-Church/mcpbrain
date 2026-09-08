@@ -1,4 +1,6 @@
 """update.py tests — index-based update path (git-pull model retired)."""
+import json
+
 import mcpbrain.update as upd
 
 
@@ -40,3 +42,31 @@ def test_update_main_triggers_when_behind(monkeypatch):
     assert calls["restart"] == 1
     uv_cmd = calls["run"][0]
     assert any("uv" in str(tok) for tok in uv_cmd) and "--upgrade" in uv_cmd
+
+
+def test_index_url_precedence_env_then_config_then_tenant(tmp_path, monkeypatch):
+    from mcpbrain import tenant, update
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(tmp_path / "t.json"))
+    (tmp_path / "t.json").write_text(json.dumps({
+        "tenant_id": "acme", "display_name": "Acme", "oauth_project_id": "p",
+        "marketplace_owner": "A", "marketplace_repo": "r", "marketplace_name": "a",
+        "index_url": "https://tenant.example/simple/"}))
+    tenant._clear_cache()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))   # empty config dir
+
+    monkeypatch.setenv("MCPBRAIN_INDEX_URL", "https://env.example/simple/")
+    assert update._index_url() == "https://env.example/simple/"
+
+    monkeypatch.delenv("MCPBRAIN_INDEX_URL")
+    assert update._index_url() == "https://tenant.example/simple/"
+
+
+def test_no_tenant_means_no_index_url(tmp_path, monkeypatch):
+    """A build with no profile must not auto-update from someone else's index."""
+    from mcpbrain import tenant, update
+    monkeypatch.delenv("MCPBRAIN_INDEX_URL", raising=False)
+    monkeypatch.delenv("MCPBRAIN_TENANT", raising=False)
+    monkeypatch.setattr(tenant, "_bundled_path", lambda: tmp_path / "absent.json")
+    tenant._clear_cache()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))   # empty config dir
+    assert update._index_url() is None

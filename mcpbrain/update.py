@@ -15,13 +15,15 @@ from pathlib import Path
 
 from packaging.version import Version, InvalidVersion
 
-# Maintainer sets this to the published Pages index (the dist repo's /simple/).
-DEFAULT_INDEX_URL = "https://centrepoint-church.github.io/mcpbrain-dist/simple/"
-
 _WHEEL_RE = re.compile(r"mcpbrain-([^-]+)-py3")
 
 
-def _index_url() -> str:
+def _index_url() -> str | None:
+    """The wheel index to update from: env, else config, else the tenant profile.
+
+    None when none resolves — a build carrying no tenant profile does not
+    auto-update. It must never fall back to another organisation's index.
+    """
     env = os.environ.get("MCPBRAIN_INDEX_URL")
     if env:
         return env
@@ -32,7 +34,9 @@ def _index_url() -> str:
             return cfg["update_index_url"]
     except Exception:  # noqa: BLE001 — config read must never break update
         pass
-    return DEFAULT_INDEX_URL
+    from mcpbrain import tenant
+    prof = tenant.profile()
+    return prof.index_url if prof else None
 
 
 def _fetch(url: str) -> str:
@@ -124,6 +128,10 @@ def update_from_index(index_url: str) -> int:
 
 def main(argv: list) -> int:
     index_url = _index_url()
+    if not index_url:
+        print("mcpbrain: no wheel index configured (no tenant profile, no "
+              "MCPBRAIN_INDEX_URL, no update_index_url) — skipping update.")
+        return 0
     if "CHANGE-ME" in index_url:
         print("Update channel not configured (index URL is the placeholder). "
               "See docs/DISTRIBUTION.md.", file=sys.stderr)
