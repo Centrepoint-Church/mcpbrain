@@ -30,6 +30,8 @@ expect at each step, and the manual fallback for the recurring tasks — is in
 once, in [`plugin/commands/install.md`](plugin/commands/install.md), and every
 other doc points at it rather than repeating it.
 
+Setting mcpbrain up for a different organisation? See [docs/FORKING.md](docs/FORKING.md).
+
 ### What the install does
 
 1. Installs `uv` if it isn't already on the machine.
