@@ -46,12 +46,14 @@ def _default_bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
     return _real(store, fleet_storage, drive_id, pin)
 
 
-def _fleet_folder_id(home) -> str:
-    """The fleet folder id: local config's fleet.folder_id, else the baked-in
-    org default (org_defaults.FLEET_FOLDER_ID)."""
-    from mcpbrain import config, org_defaults
+def _fleet_folder_id(home) -> str | None:
+    """The fleet folder id: local config's fleet.folder_id, else this build's tenant
+    profile. None when neither resolves — the org-graph snapshot then degrades to
+    off rather than reading another organisation's fleet folder."""
+    from mcpbrain import config, tenant
     fleet = config.read_config(home).get("fleet") or {}
-    return fleet.get("folder_id") or org_defaults.FLEET_FOLDER_ID
+    prof = tenant.profile()
+    return fleet.get("folder_id") or (prof.fleet_folder_id if prof else None)
 
 
 def _default_make_fleet_storage(home, drive_service):

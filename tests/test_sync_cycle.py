@@ -463,7 +463,7 @@ def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
     new discover/work/publish split builds `drives_fs` internally to
     run_sync_cycle rather than passing a storage_factory into a single
     orchestrator call the test can intercept."""
-    from mcpbrain import config, org_defaults
+    from mcpbrain import config, tenant
     from mcpbrain.store import Store
     from mcpbrain.sync import run_sync_cycle
     import mcpbrain.sync as syncmod
@@ -508,7 +508,7 @@ def test_run_sync_cycle_uses_central_cache_storage(tmp_path, monkeypatch):
     svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
     run_sync_cycle(store, _Emb(), drive_service=svc, home=home)
 
-    assert captured["D1"]._root == org_defaults.FLEET_FOLDER_ID
+    assert captured["D1"]._root == tenant.profile().fleet_folder_id
     assert captured["D1"]._base_parts == ["ingest-cache", "D1"]
 
 

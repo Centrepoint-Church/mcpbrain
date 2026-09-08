@@ -281,16 +281,17 @@ def merge_org_config(home, drive_service) -> dict:
     dropped. Consumers (e.g. the daemon's ``_cadences_from_config``) overlay
     ``config["org_config"]`` at read time. Returns the staged overlay dict.
     """
-    from mcpbrain import config, org_defaults
+    from mcpbrain import config, tenant
     current = (config.read_config(home).get(_OVERLAY_KEY) or {})
-    # Fall back to the baked-in org fleet folder when the install hasn't set
+    # Fall back to this build's tenant profile when the install hasn't set
     # fleet.folder_id explicitly — matching fleet_storage.fleet_folder_storage and
     # onboarding._fleet_folder_id, which both fall back. Without this, an install
     # without fleet.folder_id (the common case — it isn't set at setup) would never
     # read org-config.json, so a fleet-wide cadence change OR the org-baseline
     # org_pin would silently reach nobody.
+    prof = tenant.profile()
     folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id") \
-        or org_defaults.FLEET_FOLDER_ID
+        or (prof.fleet_folder_id if prof else None)
     if not folder_id:
         return current
     org = read_org_config(folder_id, drive_service)

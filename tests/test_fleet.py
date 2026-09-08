@@ -2,7 +2,16 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from mcpbrain import fleet
+import pytest
+
+from mcpbrain import fleet, tenant
+
+
+@pytest.fixture(autouse=True)
+def _clear_tenant_cache():
+    tenant._clear_cache()
+    yield
+    tenant._clear_cache()
 
 
 def _beacon(email, *, ver="0.6.0", reported_at=None, daemon_heartbeat=None, probes=None):
@@ -284,13 +293,19 @@ def test_merge_org_config_keeps_prior_overlay_on_fetch_failure(tmp_path, monkeyp
 
 def test_merge_org_config_noop_when_no_folder_resolves(tmp_path, monkeypatch):
     # merge_org_config owns folder resolution end-to-end (the daemon no longer
-    # pre-derives it): when neither fleet.folder_id nor the baked-in org
-    # default resolves (e.g. a fork with no org folder), it must not touch
+    # pre-derives it): when neither fleet.folder_id nor this build's tenant
+    # profile resolves (e.g. a fork with no org folder), it must not touch
     # Drive or the staged overlay.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    from mcpbrain import config, org_defaults
+    from mcpbrain import config, tenant
     config.write_config(str(tmp_path), {"org_config": {"cadences": {"lint": 900}}})
-    monkeypatch.setattr(org_defaults, "FLEET_FOLDER_ID", "")
+    prof = tmp_path / "t.json"
+    prof.write_text(json.dumps({"tenant_id": "t", "display_name": "T",
+                                "oauth_project_id": "p", "marketplace_owner": "o",
+                                "marketplace_repo": "r", "marketplace_name": "n",
+                                "fleet_folder_id": ""}))
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(prof))
+    tenant._clear_cache()
 
     class _Boom:
         def files(self):

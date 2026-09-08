@@ -38,21 +38,23 @@ def app_dir() -> Path:
 
 
 def fleet_defaults(cfg: dict) -> dict:
-    """The fleet folder ids to show in the wizard: saved config, else org default.
+    """The fleet folder ids to show in the wizard: saved config, else the tenant
+    profile, else empty.
 
-    These ids used to be hardcoded in the wizard HTML — a silent duplicate of
-    org_defaults with no way to correct it centrally — while `config_profile()`
-    returned no `fleet` key at all, so the wizard's own prefill branch could never
-    fire. An empty string counts as unset: the wizard clears a field to opt out of
-    the org fleet, and treating that as a saved value would mean the default could
-    never come back.
+    These ids used to be hardcoded in the wizard HTML — a silent duplicate with no
+    way to correct it centrally. An empty string counts as unset: the wizard clears
+    a field to opt out of the org fleet, and treating that as a saved value would
+    mean the default could never come back. A build with NO tenant profile yields
+    empty strings, which disables fleet features rather than borrowing another
+    organisation's folders.
     """
-    from mcpbrain import org_defaults
+    from mcpbrain import tenant
     saved = cfg.get("fleet") or {}
+    prof = tenant.profile()
     return {
-        "folder_id": saved.get("folder_id") or org_defaults.FLEET_FOLDER_ID,
+        "folder_id": saved.get("folder_id") or (prof.fleet_folder_id if prof else None) or "",
         "escrow_folder_id": (saved.get("escrow_folder_id")
-                             or org_defaults.ESCROW_FOLDER_ID),
+                             or (prof.escrow_folder_id if prof else None) or ""),
     }
 
 
@@ -1133,7 +1135,7 @@ def fleet_pin(home):
     """Typed view of the fleet-wide pin staged under config['org_config']['org_pin']
     by fleet.merge_org_config. Absent or malformed fields (a hand-edited config.json
     with the wrong shape) fall back to FleetPin defaults rather than raising."""
-    from mcpbrain import org_defaults
+    from mcpbrain.chunking import CHUNKER_VERSION
     from mcpbrain.org_contracts import FleetPin
     org_config = read_config(home).get("org_config")
     raw = org_config.get("org_pin") if isinstance(org_config, dict) else None
@@ -1146,7 +1148,7 @@ def fleet_pin(home):
         # whose org-config.json hasn't caught up yet still reads the CURRENT
         # chunker as its baseline rather than a value that never matches any
         # published cache artifact's fingerprint.
-        chunker_version=raw.get("chunker_version", org_defaults.ORG_PIN_CHUNKER_VERSION),
+        chunker_version=raw.get("chunker_version", str(CHUNKER_VERSION)),
         enrich_logic_floor=int(raw.get("enrich_logic_floor", 0) or 0),
         fleet_secret=raw.get("fleet_secret", ""),
     )

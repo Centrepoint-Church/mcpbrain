@@ -1,5 +1,16 @@
 """daemon.main merges org-config on startup when a Google token is present."""
-from mcpbrain import daemon
+import json
+
+import pytest
+
+from mcpbrain import daemon, tenant
+
+
+@pytest.fixture(autouse=True)
+def _clear_tenant_cache():
+    tenant._clear_cache()
+    yield
+    tenant._clear_cache()
 
 
 def _write_token(tmp_path):
@@ -24,13 +35,19 @@ def test_maybe_merge_org_config_calls_fleet_when_configured(tmp_path, monkeypatc
 
 def test_maybe_merge_org_config_uses_fallback_when_folder_id_unset(tmp_path, monkeypatch):
     # The common case: fleet.folder_id is NOT set at setup. merge_org_config falls
-    # back to org_defaults.FLEET_FOLDER_ID internally (it owns folder resolution),
+    # back to this build's tenant profile internally (it owns folder resolution),
     # so the daemon must still call it whenever a token is present.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain import config
     config.write_config(str(tmp_path), {})  # no fleet.folder_id
     _write_token(tmp_path)
-    monkeypatch.setattr("mcpbrain.org_defaults.FLEET_FOLDER_ID", "BAKED_IN")
+    prof = tmp_path / "t.json"
+    prof.write_text(json.dumps({"tenant_id": "t", "display_name": "T",
+                                "oauth_project_id": "p", "marketplace_owner": "o",
+                                "marketplace_repo": "r", "marketplace_name": "n",
+                                "fleet_folder_id": "BAKED_IN"}))
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(prof))
+    tenant._clear_cache()
     calls = {"n": 0}
     monkeypatch.setattr(daemon, "_build_drive_service", lambda: "SVC")
     monkeypatch.setattr("mcpbrain.fleet.merge_org_config",

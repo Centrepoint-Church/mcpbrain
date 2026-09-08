@@ -37,10 +37,10 @@ def test_resolve_shared_drive_falls_back_to_org_default(tmp_path, monkeypatch):
     # fleet folder IDs. Without a fallback, _resolve_shared_drive raised and
     # first-run backup always failed. It must fall back to the org default.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    from mcpbrain import config, org_defaults
+    from mcpbrain import config, tenant
     config.write_config(str(tmp_path), {"owner_email": "j@x.com"})  # no fleet block
     assert backup_setup._resolve_shared_drive(object(), home=str(tmp_path)) \
-        == org_defaults.ESCROW_FOLDER_ID
+        == tenant.profile().escrow_folder_id
 
 
 def test_enable_backup_escrows_to_configured_shared_drive(tmp_path, monkeypatch):

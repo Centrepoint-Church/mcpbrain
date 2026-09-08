@@ -184,9 +184,9 @@ def test_fleet_folder_storage_uses_config_folder_id(tmp_path):
 
 
 def test_fleet_folder_storage_falls_back_to_org_default(tmp_path):
-    from mcpbrain import fleet_storage, org_defaults
+    from mcpbrain import fleet_storage, tenant
     fs = fleet_storage.fleet_folder_storage(str(tmp_path), drive_service=FakeDrive())
-    assert fs is not None and fs._root == org_defaults.FLEET_FOLDER_ID
+    assert fs is not None and fs._root == tenant.profile().fleet_folder_id
 
 
 def test_fleet_folder_storage_none_without_service(tmp_path):
@@ -715,8 +715,8 @@ def test_ingest_cache_central_defaults_true(tmp_path):
 
 
 def test_fleet_folder_id_prefers_config_then_default(tmp_path):
-    from mcpbrain import config, fleet_storage, org_defaults
-    assert fleet_storage.fleet_folder_id(str(tmp_path)) == org_defaults.FLEET_FOLDER_ID
+    from mcpbrain import config, fleet_storage, tenant
+    assert fleet_storage.fleet_folder_id(str(tmp_path)) == tenant.profile().fleet_folder_id
     config.write_config(str(tmp_path), {"fleet": {"folder_id": "FF"}})
     assert fleet_storage.fleet_folder_id(str(tmp_path)) == "FF"
 

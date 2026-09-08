@@ -1,4 +1,5 @@
-from mcpbrain import config, org_defaults
+from mcpbrain import config
+from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import FleetPin, DEFAULT_RELATION_ALLOWLIST
 
 # What config.fleet_pin returns for a malformed/absent org_pin block: every
@@ -6,7 +7,7 @@ from mcpbrain.org_contracts import FleetPin, DEFAULT_RELATION_ALLOWLIST
 # code's own version (spec 3) rather than "" — an install whose org-config.json
 # has not caught up must still read the CURRENT chunker as its baseline instead
 # of a value that matches no published cache artifact's fingerprint.
-_UNPINNED = FleetPin(chunker_version=org_defaults.ORG_PIN_CHUNKER_VERSION)
+_UNPINNED = FleetPin(chunker_version=str(CHUNKER_VERSION))
 
 
 def test_role_defaults_to_member(tmp_path):
