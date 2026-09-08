@@ -70,3 +70,86 @@ def test_use_refuses_a_directory_with_no_oauth_client(tmp_path, fake_repo):
     empty.mkdir()
     with pytest.raises(FileNotFoundError, match="google_oauth_client.json"):
         cli.use_profile(empty, fake_repo)
+
+
+from mcpbrain import tenant
+
+
+def _repo_with(tmp_path, profile=None, client=None) -> Path:
+    """A fake source tree carrying just what check_offline reads."""
+    r = tmp_path / "repo"
+    (r / "mcpbrain").mkdir(parents=True)
+    (r / "plugin" / ".claude-plugin").mkdir(parents=True)
+    (r / "plugin" / "scripts").mkdir(parents=True)
+    (r / "plugin" / "commands").mkdir(parents=True)
+    prof = _profile() if profile is None else profile
+    (r / "mcpbrain" / "tenant.json").write_text(json.dumps(prof))
+    if client is not None:
+        (r / "mcpbrain" / "google_oauth_client.json").write_text(json.dumps(client))
+    (r / "plugin" / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps({"name": prof["marketplace_name"], "plugins": [{"version": "0.0.0"}]}))
+    (r / "plugin" / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": "0.0.0",
+                    "homepage": f"https://github.com/{prof['marketplace_owner']}"
+                                f"/{prof['marketplace_repo']}"}))
+    (r / "plugin" / "scripts" / "install.ps1").write_text(
+        f'$INDEX = "mcpbrain={prof["index_url"]}"\n')
+    (r / "plugin" / "commands" / "install.md").write_text(
+        f'uv tool install --python 3.12 --index "mcpbrain={prof["index_url"]}" '
+        f'"mcpbrain[daemon]" --force\n')
+    return r
+
+
+def test_a_complete_profile_passes(tmp_path):
+    assert tenant.check_offline(_repo_with(tmp_path, client=_client())) == []
+
+
+def test_missing_oauth_client_is_reported(tmp_path):
+    problems = tenant.check_offline(_repo_with(tmp_path))
+    assert any("google_oauth_client.json" in p for p in problems)
+
+
+def test_placeholder_values_are_rejected(tmp_path):
+    """The example template's own values must fail, so a fork that copies it and
+    forgets to edit fails loudly instead of half-working."""
+    repo = _repo_with(tmp_path, profile=_profile(tenant_id="your-org",
+                                                 oauth_project_id="REPLACE-gcp-project-id"),
+                      client=_client())
+    problems = tenant.check_offline(repo)
+    assert any("your-org" in p for p in problems)
+    assert any("REPLACE" in p for p in problems)
+
+
+def test_a_web_oauth_client_is_rejected(tmp_path):
+    """A `web` client fails later with an opaque redirect_uri_mismatch."""
+    repo = _repo_with(tmp_path, client=_client(kind="web"))
+    assert any("Desktop" in p or "installed" in p for p in tenant.check_offline(repo))
+
+
+def test_reusing_the_upstream_oauth_client_is_rejected(tmp_path):
+    """The likeliest fork mistake. Expressed as an agreement between tenant.json's
+    oauth_project_id and the client's own project_id, so no upstream identifier is
+    hardcoded and the check survives a fork of a fork."""
+    repo = _repo_with(tmp_path, client=_client(project_id="someone-elses-project"))
+    problems = tenant.check_offline(repo)
+    assert any("project_id" in p for p in problems)
+
+
+def test_a_client_id_of_the_wrong_shape_is_rejected(tmp_path):
+    bad = _client()
+    bad["installed"]["client_id"] = "not-a-google-client"
+    assert any("client_id" in p for p in tenant.check_offline(_repo_with(tmp_path, client=bad)))
+
+
+def test_marketplace_name_drift_is_reported(tmp_path):
+    repo = _repo_with(tmp_path, client=_client())
+    mk = repo / "plugin" / ".claude-plugin" / "marketplace.json"
+    mk.write_text(json.dumps({"name": "stale-name", "plugins": [{"version": "0.0.0"}]}))
+    assert any("marketplace.json" in p for p in tenant.check_offline(repo))
+
+
+def test_index_url_drift_in_install_ps1_is_reported(tmp_path):
+    repo = _repo_with(tmp_path, client=_client())
+    (repo / "plugin" / "scripts" / "install.ps1").write_text(
+        '$INDEX = "mcpbrain=https://stale.example/simple/"\n')
+    assert any("install.ps1" in p for p in tenant.check_offline(repo))
