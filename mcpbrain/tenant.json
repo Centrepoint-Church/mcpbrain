@@ -1,0 +1,11 @@
+{
+  "tenant_id": "centrepoint",
+  "display_name": "Centrepoint Church",
+  "oauth_project_id": "mcpbrain-498206",
+  "fleet_folder_id": "1CI_oP_Ux6WxdHrIqTZkQKCPAgijZl19o",
+  "escrow_folder_id": "1lSu2k70_0z6qDvKH2b_6Xi2CU3MI2sCi",
+  "index_url": "https://centrepoint-church.github.io/mcpbrain-dist/simple/",
+  "marketplace_owner": "Centrepoint-Church",
+  "marketplace_repo": "mcpbrain-plugin",
+  "marketplace_name": "centrepoint-church"
+}

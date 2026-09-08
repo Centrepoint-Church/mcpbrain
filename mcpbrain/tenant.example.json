@@ -1,0 +1,11 @@
+{
+  "tenant_id": "your-org",
+  "display_name": "Your Organisation",
+  "oauth_project_id": "REPLACE-gcp-project-id",
+  "fleet_folder_id": "REPLACE-or-leave-blank-to-disable-fleet",
+  "escrow_folder_id": "REPLACE-or-leave-blank-to-disable-backup-upload",
+  "index_url": "https://CHANGE-ME.github.io/mcpbrain-dist/simple/",
+  "marketplace_owner": "Your-GitHub-Org",
+  "marketplace_repo": "mcpbrain-plugin",
+  "marketplace_name": "your-github-org"
+}

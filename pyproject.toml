@@ -104,6 +104,8 @@ exclude = ["mcpbrain.maintenance*"]
 "mcpbrain" = [
     "*.json.example",
     "google_oauth_client.json",
+    "tenant.json",
+    "tenant.example.json",
     "enrich_prompt.md",
     "routines/*.md",
     "prompts/*.md",
