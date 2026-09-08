@@ -383,7 +383,7 @@ def _is_proper_name(name: str) -> int:
 def _best_name(winner: dict, loser: dict) -> str:
     """Pick the better display name across the two entities, independent of which
     id survives: prefer a 'proper' full name (has a space), then the longer one,
-    tie to the winner's. So merging never downgrades 'Josh Kemp' to 'J.K.'."""
+    tie to the winner's. So merging never downgrades 'Dana Okafor' to 'D.O.'."""
     wn, ln = (winner.get("name") or "").strip(), (loser.get("name") or "").strip()
     if not wn:
         return ln
