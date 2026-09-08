@@ -39,11 +39,15 @@ def test_readme_describes_update_as_a_wheel_reinstall():
 def test_readme_marketplace_commands_match_install_md():
     # README's cold-start block duplicates plugin/INSTALL.md's "Cold start" section
     # rather than linking to it. They agree today; nothing else would notice when
-    # they stop, so pin the exact commands in both places.
+    # they stop, so pin the exact commands in both places. The commands are DERIVED
+    # from the tenant profile rather than hardcoded, so this keeps working in a fork
+    # instead of failing purely because the fork is not Centrepoint.
+    from mcpbrain import tenant
+    prof = tenant.require()
     readme = (_ROOT / "README.md").read_text()
     install_md = (_ROOT / "plugin" / "INSTALL.md").read_text()
-    for cmd in ("claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin",
-                "claude plugin install mcpbrain@centrepoint-church"):
+    for cmd in (f"claude plugin marketplace add {prof.marketplace_slug}",
+                f"claude plugin install mcpbrain@{prof.marketplace_name}"):
         assert cmd in readme, f"README missing {cmd!r}"
         assert cmd in install_md, f"plugin/INSTALL.md missing {cmd!r}"
 
