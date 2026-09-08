@@ -67,7 +67,7 @@ def _classify_intent(query: str, store) -> tuple[str, str | None]:
 
     # Entity scan: tokenise query into consecutive token windows and look each
     # up in the graph. Short names (≤5 tokens) are tried.
-    # Strip possessives and trailing punctuation so "Joel's" matches "Joel".
+    # Strip possessives and trailing punctuation so "Marcus's" matches "Marcus".
     raw_tokens = q.split()
     tokens = [re.sub(r"['’]s$|[^\w\s-]", "", t).strip() for t in raw_tokens]
     tokens = [t for t in tokens if t]  # drop empty after stripping
@@ -98,7 +98,7 @@ def _graph_seed_query(store, entity_id: str, query: str, max_neighbors: int = 5)
 
     Example: "Marcus budget" + entity 'marcus-reyes' neighbours → append
     "Dana Okafor Northgate Maddington" so the expanded query surfaces
-    chunks that mention Joel's teammates.
+    chunks that mention Marcus's teammates.
     """
     try:
         relations = store.relations_for(entity_id)
