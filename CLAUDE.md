@@ -48,6 +48,52 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
+- **Current state (2026-09-08): the five version files are at `0.7.124`, RELEASED** —
+  source `ec4b6fd`, dist `486cf47`, plugin `9bda998`; the index serves only
+  `mcpbrain-0.7.124-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3601
+  passed**, ruff clean.
+  **0.7.124 is two follow-up fixes to the shared-drive queue migration's final review**,
+  both left deliberately open at that release and closed here on request: (1)
+  `Store.purge_drive_sync_state(drive_id)` — `ingest_cache.purge_drive` (deliberately
+  unchanged by the migration; it predates it) had no idea `sync_queue`/`sync_cursors`/
+  `shared_drive_pending_publish` rows exist per drive, so a revoked/unpinned drive's
+  queued items KeyError'd forever and its cursor/pending-publish rows sat orphaned.
+  Wired into `run_sync_cycle` in the discovery-phase try block (unconditional), **not**
+  the publish/backfill block (gated on `drives_fs` being non-empty) — a fully-revoked
+  fleet makes `drives_fs` empty *because of* the revocation this cleanup reacts to, so
+  the first wiring attempt (in the gated block) silently never ran; caught by writing
+  the end-to-end test before trusting it, not by inspection. (2) Skip-report
+  accounting (`fetch_content`'s unsupported-mime/empty-extraction tally) stopped
+  reaching `change_log` for Drive sync when the queue redesign moved fetching into
+  per-item handlers with no per-round flush hook — `handle_drive_item`/
+  `handle_shared_drive_item` both already accepted a `report` parameter, `run_sync_cycle`
+  never passed one. Fixed for both My Drive and every Shared Drive via a per-source
+  hoisted dict (`folder_cache`'s existing pattern), flushed after `work_queue` drains.
+  Gmail/Calendar were never in scope — `handle_gmail_item` has no `report` parameter at
+  all, confirmed before assuming symmetry. Also closes a test-coverage gap the final
+  review flagged: the widened cursor-cleanup test now asserts the shared-drive backfill
+  floor cursors (`drive:<id>_backfill_until`/`_backfill_empty`) survive, not just the one
+  cursor shape the cleanup targets.
+  **Fleet-resolution gate caught something real before this shipped**: `mcp` resolved to
+  **2.2.0** against the published index (up from `2.1.1` at 0.7.123's release), while the
+  local dev `uv.lock` still pins `2.0.0` — meaning the full local test run had NOT
+  exercised the version the fleet would actually get. Given this repo's own 0.7.112/
+  0.7.113 history (an unconstrained `mcp` bump broke the MCP server fleet-wide because
+  `update.py` only pins `mcpbrain=`, leaving `mcp` to float), this was treated as a real
+  gap, not noise: ran the full suite AND the MCP-specific suite under an ephemeral
+  `uv run --with "mcp==2.2.0"` overlay (3601 passed both times, no lock/venv drift), plus
+  a live stdio handshake (`initialize`, `tools/list` → 26 tools, a real `brain_search`
+  call) — all clean. `mcp<3,>=2.0` pin unchanged; 2.2.0 confirmed compatible, not just
+  assumed compatible because it's within range.
+  Local machine fully reinstalled from the **published** index (`uv tool install
+  --force ".[daemon]"`-equivalent, `__pycache__` cleared, daemon+tray restarted) and
+  confirmed against the **running process**: control API reports `0.7.124`, and the
+  real installed environment pulled `mcp==2.2.0` exactly as validated (not a different
+  version than what was tested). `doctor`: `Sync queue 0 pending` (the shared-drive
+  migration draining cleanly in production). One **unrelated, pre-existing** doctor
+  finding surfaced during verification, not caused by this release and not
+  investigated here: backup upload failing, last success 4 days prior to this release,
+  2 failed attempts — flagged to the user, not silently fixed.
 - **Current state (2026-09-03): the five version files are at `0.7.123`, RELEASED** —
   source `7ebf1a0`, dist `3bd3b69`, plugin `2710e04`; the index serves only
   `mcpbrain-0.7.123-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3576
