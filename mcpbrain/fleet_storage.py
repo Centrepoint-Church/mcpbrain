@@ -368,8 +368,8 @@ def fleet_folder_storage(home, drive_service=None):
     This is the instance B's org cadences (contrib upload, curate, snapshot
     publish) and C's snapshot-import call — distinct from the per-shared-drive
     cache storages. Root is the configured fleet folder id (via fleet_folder_id),
-    falling back to the bundled org default. Returns None when there is no
-    drive_service or no folder id resolves (caller then runs fully local)."""
+    falling back to the tenant profile's fleet_folder_id. Returns None when there
+    is no drive_service or no folder id resolves (caller then runs fully local)."""
     if drive_service is None:
         return None
     folder_id = fleet_folder_id(home)

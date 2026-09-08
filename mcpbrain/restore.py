@@ -188,8 +188,8 @@ def account_email(home: str) -> str:
 def detect_restorable(home: str, drive_service) -> dict:
     """Report whether an existing backup can be restored for this account.
 
-    Resolves the escrow folder (config → org default) and the user's email, then
-    checks the escrow folder for both the user's escrow key and a snapshot.
+    Resolves the escrow folder (config → tenant profile) and the user's email,
+    then checks the escrow folder for both the user's escrow key and a snapshot.
     Returns {available, snapshot_id, has_key, user_email, escrow_folder_id}.
     Never raises — degrades to available=False.
     """

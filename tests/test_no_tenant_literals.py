@@ -22,9 +22,16 @@ _PATTERNS = [
     re.compile(r"centrepoint", re.IGNORECASE),
     re.compile(r"courageous", re.IGNORECASE),
     re.compile(r"\bACCI?\b"),
-    re.compile(re.escape(_PROFILE["fleet_folder_id"])),
-    re.compile(re.escape(_PROFILE["escrow_folder_id"])),
 ]
+# fleet_folder_id/escrow_folder_id are OPTIONAL — tenant.example.json and
+# docs/FORKING.md both tell a fork it may leave them blank to disable
+# fleet/backup. re.escape("") compiles to an empty pattern, and an empty
+# regex's .search() matches every string at every position, so only add
+# these patterns when the tenant profile actually has a value to guard.
+for _field in ("fleet_folder_id", "escrow_folder_id"):
+    _value = _PROFILE.get(_field)
+    if _value:
+        _PATTERNS.append(re.compile(re.escape(_value)))
 
 # tenant.json is the ONE place a tenant may be named FREELY.
 #
@@ -80,3 +87,18 @@ def test_the_example_template_holds_no_real_values():
         assert not pat.search(text), (
             "tenant.example.json carries a real tenant value; it must ship only "
             "placeholders a fork is forced to replace")
+
+
+def test_blank_optional_fields_do_not_produce_an_always_matching_pattern():
+    # A fork with fleet/backup disabled leaves fleet_folder_id/escrow_folder_id
+    # blank (a documented, supported configuration — see tenant.example.json and
+    # docs/FORKING.md). Guard that this never regresses into re.compile(re.escape(""))
+    # being added to _PATTERNS, since an empty pattern's .search() matches every
+    # line of every shipped file.
+    blank_profile = {"fleet_folder_id": "", "escrow_folder_id": ""}
+    patterns = []
+    for field in ("fleet_folder_id", "escrow_folder_id"):
+        value = blank_profile.get(field)
+        if value:
+            patterns.append(re.compile(re.escape(value)))
+    assert patterns == []
