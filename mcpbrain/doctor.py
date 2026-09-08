@@ -399,6 +399,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             lines.append(f"✅ {'Watchdog':<16} no stall restarts")
 
     lines.append(arch_line())
+    lines.append(tenant_line())
 
     # Connector registration: not probe-driven through _DISPOSITIONS (same as
     # embedder/baseline above), so it gets its own explicit repair dispatch.
@@ -567,6 +568,16 @@ def _is_rosetta_translated() -> bool:
 
 
 _ARCH_NORM = {"arm64": "ARM64", "aarch64": "ARM64", "amd64": "X64", "x64": "X64", "x86_64": "X64"}
+
+
+def tenant_line() -> str:
+    """One line naming the tenant this build belongs to, or flagging that it has none."""
+    from mcpbrain import tenant
+    prof = tenant.profile()
+    if prof is None:
+        return (f"⚠️  {'Tenant':<16} NOT CONFIGURED — fleet, backup upload and "
+                f"auto-update are disabled (docs/FORKING.md)")
+    return f"✅ {'Tenant':<16} {prof.display_name} ({prof.tenant_id})"
 
 
 def arch_line(os_arch: str | None = None) -> str:

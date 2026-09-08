@@ -59,7 +59,16 @@ def main(argv=None) -> int:
         for p in use_profile(Path(ns.dir)):
             print(f"installed {p.relative_to(_REPO)}")
         return 0
-    raise SystemExit("check is implemented in Task 5")
+    from mcpbrain import tenant as _tenant
+    problems = _tenant.check_offline(_REPO)
+    if problems:
+        print("tenant check FAILED:", file=sys.stderr)
+        for p in problems:
+            print(f"  ✗ {p}", file=sys.stderr)
+        return 1
+    prof = _tenant.load(_REPO / "mcpbrain" / "tenant.json")
+    print(f"✓ tenant check passed — {prof.display_name} ({prof.tenant_id})")
+    return 0
 
 
 if __name__ == "__main__":
