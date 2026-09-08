@@ -5,7 +5,8 @@ from pathlib import Path
 
 from mcpbrain import tenant
 
-_HTML = (Path(__file__).parent.parent / "mcpbrain" / "wizard" / "index.html").read_text()
+_ROOT = Path(__file__).parent.parent
+_HTML = (_ROOT / "mcpbrain" / "wizard" / "index.html").read_text()
 
 
 def test_no_duplicate_function_definitions():
@@ -69,3 +70,12 @@ def test_fleet_copy_does_not_claim_a_broken_opt_out():
     # restore.py/backup_setup.py's identical fallback) treat an empty string
     # as unset and silently re-serve the org default on the next load.
     assert "clear it if you're not part of the org fleet" not in _HTML
+
+
+def test_wizard_does_not_hardcode_a_tenant_name():
+    """The fleet section names the tenant; it must come from /api/config, not the
+    HTML, or a fork ships a wizard describing someone else's Drive."""
+    html = (_ROOT / "mcpbrain" / "wizard" / "index.html").read_text()
+    assert "Centrepoint" not in html
+    assert "Josh Kemp" not in html
+    assert "fleet-tenant-name" in html   # the element the JS fills in

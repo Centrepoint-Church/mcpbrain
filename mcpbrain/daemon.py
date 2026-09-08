@@ -1473,6 +1473,7 @@ class Daemon:
             "records_dir": config.records_dir(str(app_dir())),
             "project_instructions": config.render_project_instructions(cfg),
             "fleet": config.fleet_defaults(cfg),
+            "tenant": _tenant_block(),
         }
 
     def _routed_tool_handlers(self) -> dict:
@@ -4168,6 +4169,14 @@ class Daemon:
                 upd.update_from_index(upd._index_url())  # uv install + restart, lock released
             except Exception as exc:  # noqa: BLE001
                 log.error("auto-update install failed: %s", exc)
+
+
+def _tenant_block() -> dict | None:
+    """The tenant identity the wizard renders in its fleet section, or None."""
+    from mcpbrain import tenant
+    prof = tenant.profile()
+    return None if prof is None else {"tenant_id": prof.tenant_id,
+                                      "display_name": prof.display_name}
 
 
 def last_backup_attempt_epoch(home) -> float | None:
