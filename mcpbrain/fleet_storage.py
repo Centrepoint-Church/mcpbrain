@@ -355,7 +355,7 @@ def fleet_folder_id(home) -> str | None:
     """The fleet folder id used to root fleet-folder + centralized-cache storage:
     config fleet.folder_id, else this build's tenant profile. None when neither
     resolves — a build with no tenant profile has no fleet, which is correct: the
-    alternative was silently using Centrepoint's."""
+    alternative was silently using another organisation's."""
     from mcpbrain import config, tenant
     fleet = config.read_config(home).get("fleet") or {}
     prof = tenant.profile()
