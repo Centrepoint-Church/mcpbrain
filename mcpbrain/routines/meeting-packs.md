@@ -44,7 +44,7 @@ parts with `|`, in this exact order:
 5. the top `brain_search` hit doc-ids for the title + attendees (Step 5) — the
    ordered list of returned `doc_id`s above the 0.35 score floor, joined by `,`.
 
-Example: `College planning|09:00|10:00|Joel Chelliah,Sam Admin|Hall B|doc-12,doc-7`.
+Example: `College planning|09:00|10:00|Marcus Reyes,Sam Admin|Hall B|doc-12,doc-7`.
 
 This string **is** the `context_hash`. It is compared by exact equality — you do
 not need to hash it.

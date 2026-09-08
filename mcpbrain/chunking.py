@@ -43,7 +43,7 @@ CHUNKER_VERSION = 3
 PRIOR_CHUNKER_VERSION = 2
 
 
-# Leading honorifics stripped from a name so "Ps Joel" / "Pastor Joel Chelliah"
+# Leading honorifics stripped from a name so "Dr Priya" / "Principal Marcus Reyes"
 # canonicalise to the bare name. Matched case-insensitively with any trailing
 # full-stop removed.
 _HONORIFICS = {"pastor", "ps", "pr", "rev", "reverend", "dr", "mr", "mrs", "ms", "miss",
@@ -127,7 +127,7 @@ def action_fingerprint(text: str) -> str:
 def slugify(name: str) -> str:
     """Lower-case, collapse runs of non-alphanumerics into single hyphens, truncate to 80 chars.
 
-    "Taryn Hamilton" -> "taryn-hamilton"; "ACC (National)" -> "acc-national".
+    "Dana Okafor" -> "dana-okafor"; "NCF (National)" -> "ncf-national".
     Empty or all-non-alphanumeric input returns "" (callers skip empty slugs).
     None / non-str input also returns "" (a present-but-null JSON name yields
     Python None, which would otherwise crash on .lower()).

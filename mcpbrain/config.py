@@ -289,7 +289,7 @@ def schema_grounding_enabled(home) -> bool:
     in the source text — neither the full name as a substring NOR any distinctive
     token (alphabetic, length >= 4). A relation is dropped unless both endpoint
     names are grounded. The token path keeps correctly-NORMALISED names (e.g.
-    'Joel Chelliah' extracted from 'Ps Joel') while rejecting names invented out
+    'Marcus Reyes' extracted from 'Dr Marcus') while rejecting names invented out
     of nowhere. Deterministic — no LLM call (a per-triple LLM check would be
     stronger but is deferred; see #9). Relation TYPES are constrained by
     RELATION_TYPES in contract.py regardless of this flag.

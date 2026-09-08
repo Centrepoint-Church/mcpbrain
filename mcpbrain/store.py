@@ -3785,7 +3785,7 @@ class Store:
         """Resolve an entity by id, then by slug of a display name, then by name.
 
         Tries the literal query as an id first, then slugify(query) as an id
-        (handles "Taryn Hamilton" -> "taryn-hamilton"), then a case-insensitive
+        (handles "Dana Okafor" -> "dana-okafor"), then a case-insensitive
         name match. Returns the entity dict or None.
         """
         hit = self.get_entity(query)

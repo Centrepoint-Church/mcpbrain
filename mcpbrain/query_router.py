@@ -96,8 +96,8 @@ def _classify_intent(query: str, store) -> tuple[str, str | None]:
 def _graph_seed_query(store, entity_id: str, query: str, max_neighbors: int = 5) -> str:
     """Expand query with 1-hop neighbour names to improve recall for entity queries.
 
-    Example: "Joel budget" + entity 'joel-chelliah' neighbours → append
-    "Taryn Hamilton Centrepoint Maddington" so the expanded query surfaces
+    Example: "Marcus budget" + entity 'marcus-reyes' neighbours → append
+    "Dana Okafor Northgate Maddington" so the expanded query surfaces
     chunks that mention Joel's teammates.
     """
     try:

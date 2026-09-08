@@ -118,8 +118,8 @@ Field notes:
   with each mention as a dated occurrence, instead of a new node per mention.
   Omit both for a genuine one-off meeting.
 - `waiting_on` (on an action): optional. Set it to the name of the person the
-  action is awaiting a reply or input from (the action is blocked until "Taryn"
-  confirms -> `"waiting_on": "Taryn Hamilton"`). Use the person's bare name,
+  action is awaiting a reply or input from (the action is blocked until "Dana"
+  confirms -> `"waiting_on": "Dana Okafor"`). Use the person's bare name,
   matching an entity you listed. Omit it for actions that are not blocked on
   someone's reply.
 
@@ -148,17 +148,17 @@ Entities and relations are the part most worth getting right.
   named in the BODY that are not message senders — the sender-people are handled
   for you. Re-listing a sender is harmless (it dedups) but wastes effort.
 - **Naming.** An entity `name` is the bare proper name, nothing else. Strip
-  role descriptors, employer phrases, and articles: "Franz from The Church Co"
-  becomes `Franz` (with `org` set to The Church Co), "the Optus Stadium team"
-  becomes `Optus Stadium`, "Pastor Joel Chelliah" becomes `Joel Chelliah`.
+  role descriptors, employer phrases, and articles: "Priya from The Lantern Co"
+  becomes `Priya` (with `org` set to The Lantern Co), "the Harbourview Arena team"
+  becomes `Harbourview Arena`, "Principal Marcus Reyes" becomes `Marcus Reyes`.
   Affiliation belongs in `org` and title in `role`, never in the name.
   Consistent bare names let the same person or org collapse to one entity
   instead of several near-duplicates. When the entity is a message sender, take
   the name from the sender's display-name, but a sender display-name is often
   decorated and must be reduced to the bare personal name: strip any trailing
   "from <org>", "at <org>", or role phrasing, if present. The sender
-  "Franz from The Church Co <franz@thechurchco.com>" yields the name `Franz`,
-  not "Franz from The Church Co".
+  "Priya from The Lantern Co <priya@thelanternco.com>" yields the name `Priya`,
+  not "Priya from The Lantern Co".
 - **Type.** Four valid types — `person`, `org`, `project`, `meeting`. Do not
   invent others. `person` is a named individual. `org` is any company, church,
   store, venue, team, school, or agency. `project` is a named initiative
@@ -218,7 +218,7 @@ Entities and relations are the part most worth getting right.
       January 2026" → `{"entity_name": "...", "attribute": "title",
       "value": "COO", "date": "2026-01-01"}`).
     - `org_move` — a person's affiliation changing from one org to another,
-      dated (e.g. "moved from Centrepoint Church to Capes Community Church
+      dated (e.g. "moved from Northgate Trust to Southbank Community Trust
       last March").
     - `project_membership` — a person joining or leaving a named project,
       dated.
@@ -275,13 +275,13 @@ so, give the single best canonical name. Emit one answer per pair into
 `merge_answers`:
 
 ```json
-{"pair_id": "a-id|b-id", "same": true, "canonical": "Joel Chelliah"}
+{"pair_id": "a-id|b-id", "same": true, "canonical": "Marcus Reyes"}
 ```
 
 Use the pair's `pair_id` verbatim. When `same` is false, `canonical` is an empty
 string. Guidance:
 
-- Initials and short forms can match a full name ("Joel" = "Joel Chelliah").
+- Initials and short forms can match a full name ("Marcus" = "Marcus Reyes").
 - Different surnames or different initials are different people ("Daniel P" is
   not "Daniel F").
 - When unsure, answer `false`.
@@ -356,14 +356,14 @@ the source spans and doesn't appear verbatim in `taxonomy`.
 
 **Anti-pattern: document category is not personal affiliation.** A
 category/classification tag on the document or chunk itself — a bracketed
-label like `[ACC]` at the top of an email, a folder or project tag — describes
+label like `[NCF]` at the top of an email, a folder or project tag — describes
 what the DOCUMENT is about, not who the PERSON works for. Do not treat a
 document-level tag as evidence of the entity's own affiliation. Likewise,
 being named as an author, sender, or participant in a document that is
 *about* org X (an agreement, MOU, or contract between org X and org Y) does
 not by itself mean the person belongs to org X — they could belong to X, Y,
 neither, or be a facilitator/third party. `assign` requires the source spans
-to state or clearly imply the person's OWN affiliation (e.g. "Donna K, ACC
+to state or clearly imply the person's OWN affiliation (e.g. "Rina T, NCF
 finance lead," an email signature, a stated job title, an email domain that
 maps to the org) — not just co-occurrence with an org name in a document's
 subject matter or category tag. When the only signal is a document-level
@@ -430,7 +430,7 @@ verdict per item into `review_org`:
   canonicalize is low-risk (nothing is merged or deleted, and it only
   touches the `org` field), still apply real judgment rather than
   rubber-stamping every fuzzy match: a short, acronym-like variant (e.g.
-  "ACC" vs "ACCI") is much more likely to name a genuinely DIFFERENT
+  "NCF" vs "NCFI") is much more likely to name a genuinely DIFFERENT
   organisation than a clear typo/casing/full-name variant (e.g. "Acme Corp"
   vs "Acme Corporation"). When the variant could plausibly be a distinct
   real org rather than a misspelling, prefer `skip` — mislabeling an org tag
@@ -475,7 +475,7 @@ how they relate to the owner's work. Factual, grounded in the given fields and
 thread context only — no speculation. Emit one answer per item:
 
 ```json
-{"entity_id": "taryn-hamilton", "profile": "Executive Pastor at..."}
+{"entity_id": "dana-okafor", "profile": "Operations Director at..."}
 ```
 
 When the block is absent, omit `profile_synthesis` from the output.
@@ -517,7 +517,7 @@ evidence (their own signature, their own statement). Never infer a role from
 the owner's writing about them. Empty `corrections` means the record is fine:
 
 ```json
-{"entity_id": "taryn-hamilton",
+{"entity_id": "dana-okafor",
  "corrections": [{"field": "role|org", "new_value": "...",
                   "evidence": "their signature in m-12"}]}
 ```

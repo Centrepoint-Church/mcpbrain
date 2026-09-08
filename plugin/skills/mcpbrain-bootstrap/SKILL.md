@@ -22,7 +22,7 @@ Ask the user the following questions one section at a time. Wait for their answe
 
 ### Section 1 — Orgs and structure
 
-- What organisations do you work across? For each, give a short name (e.g. "Centrepoint"), its type (church / company / school / other), and 1–2 sentences on what it does and your relationship to it.
+- What organisations do you work across? For each, give a short name (e.g. "Northgate"), its type (church / company / school / other), and 1–2 sentences on what it does and your relationship to it.
 - Who are the key people you interact with regularly? For each, give their name, title, and org.
 
 ### Section 2 — Projects and initiatives

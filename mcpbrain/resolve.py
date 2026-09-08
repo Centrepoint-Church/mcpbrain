@@ -24,7 +24,7 @@ method="email" so they're distinguishable from the name-based tiers in
 entity_merge_log.
 
 Note: embedding-based semantic blocking (cosine similarity on entity vectors)
-would give better recall for non-overlapping names (e.g. "Joel" vs "J. Chelliah")
+would give better recall for non-overlapping names (e.g. "Marcus" vs "M. Reyes")
 but requires entity-specific vector indices that don't yet exist. The token-
 similarity cascade handles the common fragmentation patterns. Deferred.
 
@@ -68,7 +68,7 @@ def is_role_address(email: str) -> bool:
 def canonical_key(name: str) -> str:
     """Normalised dedup key: honorific-stripped + accent-folded + slugified.
 
-    'Ps Joel' and 'Joel' share a key; 'Chané' and 'Chane' share a key.
+    'Dr Marcus' and 'Marcus' share a key; 'Renée' and 'Renee' share a key.
     """
     return slugify(_canonical_name(name))
 
@@ -257,7 +257,7 @@ _CANDIDATE_GATE = 0.3
 def _tokens(name) -> set:
     """Lowercased, accent-folded, honorific-stripped alphanumeric tokens; drop
     stopwords and 1-char tokens."""
-    key = canonical_key(name)            # 'joel-chelliah'
+    key = canonical_key(name)            # 'marcus-reyes'
     toks = {t for t in key.split("-") if len(t) > 1 and t not in _STOPWORDS}
     return toks
 
@@ -369,7 +369,7 @@ def write_time_dedup_check(name: str, entity_type: str,
     The ambiguous band [_CANDIDATE_GATE, threshold) is NOT acted on here; those
     pairs go to the spool merge_review mechanism in prepare. Embedding-based
     blocking (cosine on entity vectors) would additionally catch non-overlapping
-    aliases ('Joel' vs 'J. Chelliah') but needs entity vectors that don't exist
+    aliases ('Marcus' vs 'M. Reyes') but needs entity vectors that don't exist
     yet — deferred (tracked on #10).
     """
     if not name or not index:

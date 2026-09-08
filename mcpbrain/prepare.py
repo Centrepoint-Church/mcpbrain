@@ -259,7 +259,7 @@ def _parse_aliases(raw) -> list[str]:
     """Flatten entities.aliases into alias strings.
 
     The column is a JSON list whose ELEMENTS may themselves be pipe-delimited
-    ('Pete|Peter', 'Taryn Hansen|Taryn'), so both levels must be split. Coverage
+    ('Pete|Peter', 'Dana Okafor|Dana'), so both levels must be split. Coverage
     is 2.9% today (175 of 5,992 people, and zero of the 405 that were in the old
     shared context), so this earns nothing yet — it grows on its own through
     merge_entities' loser-alias carry. It must NOT be treated as justifying a

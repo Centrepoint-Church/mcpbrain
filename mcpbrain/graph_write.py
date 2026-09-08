@@ -10,7 +10,7 @@ The table DDL is owned by store.py.
 
 Casing seam: the Nexus `_DOMAIN_ORG` map and KNOWN_ORGS use lowercase canonical
 org tags ("orgname", "acc"). The mcpbrain contract and `enrich._VALID_ORGS`
-use DISPLAY forms ("OrgName", "ACC"). This module adopts display-case as
+use DISPLAY forms ("OrgName", "NCF"). This module adopts display-case as
 canonical so org tags match the extraction contract and email_context rows.
 """
 
@@ -146,7 +146,7 @@ _ORG_TAGS = orgs.DEFAULT_TAXONOMY.org_tags
 
 
 # ` from <X>` / ` at <X>` affiliation suffix on a PERSON name. The head group
-# is required non-empty (so "from The Church Co" is left alone). Surrounding
+# is required non-empty (so "from The Lantern Co" is left alone). Surrounding
 # spaces and the trailing-word anchor keep "Atherton" / "Bank of Melbourne"
 # safe — only the standalone words "from"/"at" trigger.
 _AFFILIATION_SUFFIX_RE = re.compile(
@@ -156,7 +156,7 @@ _AFFILIATION_SUFFIX_RE = re.compile(
 def strip_affiliation(name: str) -> str:
     """Drop a trailing ` from <X>` / ` at <X>` affiliation from a PERSON name.
 
-    "Franz from The Church Co" -> "Franz"; "Tim at TechCorp" -> "Tim". Returns
+    "Priya from The Lantern Co" -> "Priya"; "Tim at TechCorp" -> "Tim". Returns
     the name unchanged when there is no such suffix, when the head would be
     empty, or for ` of `/` with ` (not stripped — org-shaped names use those).
     Only call this on PERSON names; org/project names legitimately carry
@@ -1446,7 +1446,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             """Try the original name first; fall back to the affiliation-stripped
             form only when they differ.  This preserves org names that legitimately
             contain ' at ' or ' from ' (e.g. 'Church at the Bay') while still
-            resolving person-affiliation suffixes like 'Franz from The Church Co'."""
+            resolving person-affiliation suffixes like 'Priya from The Lantern Co'."""
             # Primary attempt: resolve the name as given.
             eid = name_to_id.get(name)
             if not eid:

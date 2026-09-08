@@ -7,8 +7,8 @@ and org tags already in the store from before the guards landed (0.7.34):
   2. type-invalid person-centric edges — e.g. "topic works_at org", "meeting
      works_at" — the LLM over-applied works_at/reports_to/manages to non-person
      entities (see graph_write._RELATION_ENDPOINT_TYPES)
-  3. org-tag drift — fold "Centrepoint" / "centrepoint" → the canonical
-     "Centrepoint Church" via the configured taxonomy
+  3. org-tag drift — fold "Northgate" / "northgate" → the canonical
+     "Northgate Trust" via the configured taxonomy
 
 Idempotent: running it twice is a no-op the second time. Returns a counts dict.
 """

@@ -151,7 +151,7 @@ merge_answers:
 Use the pair's pair_id verbatim. When same is false, canonical is an empty
 string. Guidance:
 
-Initials and short forms can match a full name ("Joel" = "Joel Chelliah").
+Initials and short forms can match a full name ("Marcus" = "Marcus Reyes").
 Different surnames or different initials are different people ("Daniel P" is
 not "Daniel F").
 When unsure, answer false.
@@ -184,7 +184,7 @@ For each, write a 2-4 sentence profile: who they are, their role and org,
 how they relate to the owner's work. Factual, grounded in the given fields and
 thread context only — no speculation. Emit one answer per item:
 
-{"entity_id": "taryn-hamilton", "profile": "Executive Pastor at..."}
+{"entity_id": "dana-okafor", "profile": "Operations Director at..."}
 
 When the block is absent, omit profile_synthesis from the output.
 
@@ -220,6 +220,6 @@ batch actually show. Emit corrections ONLY where the batch contains clear
 evidence (their own signature, their own statement). Never infer a role from
 the owner's writing about them. Empty corrections means the record is fine:
 
-{"entity_id": "taryn-hamilton",
+{"entity_id": "dana-okafor",
  "corrections": [{"field": "role|org", "new_value": "...",
                   "evidence": "their signature in m-12"}]}
