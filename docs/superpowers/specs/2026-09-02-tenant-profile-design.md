@@ -344,30 +344,59 @@ it sits in a public repository. Full inventory:
 
 | File | Occurrences |
 |---|---|
-| `mcpbrain/enrich_prompt.md` | 13 lines: Taryn Hamilton, Joel Chelliah, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `taryn-hamilton` |
-| `plugin/agents/enrich-batch.md` | the same 13 — **generated**, kept byte-identical by `bin/sync_agents.py` |
-| `mcpbrain/cowork/enrichment.md` | 3: "Joel" = "Joel Chelliah", `taryn-hamilton` ×2 |
-| `mcpbrain/routines/meeting-packs.md` | 1: attendee list `Joel Chelliah,Sam Admin` |
-| `plugin/skills/mcpbrain-bootstrap/SKILL.md` | 1: `(e.g. "Centrepoint")` |
+| `mcpbrain/enrich_prompt.md` | 15 — Taryn Hamilton, Joel Chelliah, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `taryn-hamilton` |
+| `plugin/agents/enrich-batch.md` | the same 15 — **generated**, kept byte-identical by `bin/sync_agents.py` |
+| `mcpbrain/cowork/enrichment.md` | 3 |
+| `mcpbrain/routines/meeting-packs.md` | 1 — attendee list |
+| `plugin/skills/mcpbrain-bootstrap/SKILL.md` | 1 — `(e.g. "Centrepoint")` |
 | `mcpbrain/wizard/index.html` | 3 — see below |
-| `mcpbrain/chunking.py:130` | `slugify` docstring: `"Taryn Hamilton"`, `"ACC (National)"` |
-| `mcpbrain/orgs.py:90-93` | fold-logic comments: `"Centrepoint"`, `"Centrepoint Church"`, `"ACC"` vs `"ACCI"` |
-| `mcpbrain/graph_write.py:13` | display-form example `"ACC"` |
-| `mcpbrain/query_router.py:100` | expansion example `"Taryn Hamilton Centrepoint Maddington"` |
-| `mcpbrain/maintenance/graph_cleanup.py:10` | org-tag drift example `"Centrepoint"` |
+| `mcpbrain/orgs.py` | 4 — fold-logic comments, incl. `"ACC"` vs `"ACCI"` |
+| `mcpbrain/graph_write.py` | 4 — display-form `"ACC"`; `"Franz from The Church Co"` ×3 |
+| `mcpbrain/resolve.py` | 4 — `"Joel"` / `"J. Chelliah"`, `'Ps Joel'`, the slug `'joel-chelliah'` |
+| `mcpbrain/chunking.py` | 2 — honorific comment `"Ps Joel"` / `"Pastor Joel Chelliah"`; `slugify` docstring |
+| `mcpbrain/query_router.py` | 2 — `'joel-chelliah'`, `"Taryn Hamilton Centrepoint Maddington"` |
+| `mcpbrain/maintenance/graph_cleanup.py` | 2 — org-tag drift example |
+| `mcpbrain/config.py` | 1 — `'Joel Chelliah' extracted from 'Ps Joel'` |
+| `mcpbrain/graph_view.py` | 1 — `merging never downgrades 'Josh Kemp' to 'J.K.'` |
+| `mcpbrain/prepare.py` | 1 — `('Pete\|Peter', 'Taryn Hansen\|Taryn')` |
+| `mcpbrain/store.py` | 1 — `(handles "Taryn Hamilton" -> "taryn-hamilton")` |
 
 `mcpbrain/records_templates/` and `mcpbrain/prompts/draft-reply.md` are already
-neutral and need no change.
+neutral and need no change. `mcpbrain/update.py`'s Centrepoint URL is §1's work, not
+this section's.
 
-The last five are **Python docstrings and comments, not shipped prompt text** — found
-by running the §5 guard regex rather than by reading the prompt directories, which is
-why an earlier pass of this section undercounted at six files. They are in scope for
-the same two reasons as the rest: they name a real person in a public repository, and
-they would fail the guard. `orgs.py`'s comments are load-bearing in the same way the
-prompt examples are — they explain why `"ACC"` must not fold into `"ACCI"` — so they
-take the same NCF/NCFI substitution. `tests/test_graph_cleanup.py` and
-`tests/test_resolve.py` assert that behaviour with the real strings and are left
+**Corrected 2026-09-08.** An earlier pass of this section listed six files, then
+eleven. The real figure is **sixteen**, and the reason the count kept moving is worth
+recording because it is the same mistake each time: every survey used a *narrower*
+pattern than the last. The prompt-directory sweep never looked at `.py` files; the
+follow-up sweep looked at `.py` files but searched only for org identifiers
+(`centrepoint`, `ACC`), not people; and neither was case-insensitive, so the
+lowercase slugs `taryn-hamilton` and `joel-chelliah` — which appear in five files —
+matched nothing. **The inventory above was produced by one case-insensitive pass over
+every shipped `.py`/`.md`/`.json`/`.html`/`.ps1` file with the full pattern set, and
+that pass is the one to re-run, not any of the narrower greps.**
+
+The last ten are **Python docstrings and comments, not shipped prompt text**. They
+are in scope for the same two reasons as the rest: they name real people in a public
+repository, and they would fail the guard. `orgs.py`'s comments are load-bearing in
+the same way the prompt examples are — they explain why `"ACC"` must not fold into
+`"ACCI"` — so they take the same NCF/NCFI substitution. `tests/test_graph_cleanup.py`
+and `tests/test_resolve.py` assert that behaviour with the real strings and are left
 alone: tests are fixtures and history, per §5's exclusion.
+
+**A false-positive trap in the verification grep.** An unbounded `capes` pattern
+matches the word **escapes**, which appears in `mcpbrain/agents.py`,
+`mcpbrain/wizard/graph.html` and `mcpbrain/wizard/index.html`. Any grep used to
+confirm this section is complete must use `\bCapes\b`. Three phantom hits in files
+that have nothing to do with this work is exactly the kind of noise that gets a
+verification step waved through.
+
+Two judgement calls left to the implementer, both flagged rather than decided:
+`resolve.py:71` uses `'Chané'` / `'Chane'` to illustrate diacritic folding — the
+example needs *a* diacritic name, so substitute one (`'Renée'` / `'Renee'`) rather
+than dropping it; and `prepare.py:262` says "Taryn **Hansen**", a different surname
+from the Taryn Hamilton used elsewhere, so it is likely a second real person and
+takes the same replacement.
 
 **The wizard splits into two different jobs.** Lines 163-164 are not cosmetic —
 `<summary>Fleet setup (Centrepoint org)</summary>` and *"This is the Centrepoint
