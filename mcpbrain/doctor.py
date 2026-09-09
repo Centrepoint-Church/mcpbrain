@@ -631,6 +631,14 @@ def version_drift_line(home, installed: str | None = None) -> str | None:
     drift problem — doctor's other checks already cover connectivity) and
     when every live server matches `installed`. `installed` defaults to the
     installed package version.
+
+    The remedy names EVERY client kind, not just Desktop. A server belongs to
+    whichever client spawned it, and Claude Code CLI sessions routinely outlive
+    a Desktop restart by days — on 2026-09-09 two of five stale servers here
+    were `claude` sessions from 7 and 6 days earlier, so restarting Desktop and
+    re-running doctor left the warning standing with nothing explaining why.
+    Kept platform-neutral ("quit completely", not Cmd-Q) because the same line
+    ships to Windows.
     """
     if installed is None:
         import importlib.metadata
@@ -643,8 +651,10 @@ def version_drift_line(home, installed: str | None = None) -> str | None:
         return None
     stale_count = sum(1 for r in recs if r.get("version") != installed)
     return (f"⚠️  {'MCP version':<16} {stale_count} live server(s) on "
-            f"{', '.join(stale_versions)}, installed is {installed} — "
-            f"restart Claude Desktop to pick up {installed}")
+            f"{', '.join(stale_versions)}, installed is {installed} — each keeps "
+            f"its start-time code until ITS OWN client restarts: quit Claude "
+            f"Desktop completely (not just the window) and exit any long-running "
+            f"Claude Code session")
 
 
 def _agent_installed(home, platform) -> bool:
