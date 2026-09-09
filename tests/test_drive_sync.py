@@ -1130,6 +1130,8 @@ def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_
     built = []
     lock = threading.Lock()
 
+    users = {}          # id(service) -> set of thread idents that used it
+
     class _Service:
         def __init__(self):
             with lock:
@@ -1140,6 +1142,8 @@ def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_
 
         def get(self, fileId=None, **kw):
             self._fid = fileId
+            with lock:
+                users.setdefault(id(self), set()).add(threading.get_ident())
             return self
 
         def execute(self, num_retries=0):
@@ -1156,12 +1160,19 @@ def test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread(tmp_
     assert summary["files"] == 8
     for fid in file_ids:
         assert f"content for {fid}" in store.get_chunk(f"gdrive-{fid}-0")["text"]
-    # At most one service per worker (never one per file), and definitely more
-    # than one overall -- proof no single instance was shared across threads.
-    assert 1 < len(built) <= 3, (
-        f"expected 2-3 distinct service instances (one per worker, reused "
-        f"across that worker's files), got {len(built)}"
+    # At most one service per worker, never one per file.
+    assert len(built) <= 3, (
+        f"expected at most one service per worker (3), reused across that "
+        f"worker's files, got {len(built)}"
     )
+    # The actual invariant: no single service instance was ever touched by two
+    # threads. Asserting a LOWER bound on len(built) instead was flaky —
+    # ThreadPoolExecutor reuses an idle thread rather than spawning a new one
+    # (_adjust_thread_count checks _idle_semaphore first), so on a loaded box
+    # all 8 trivial tasks can legitimately run on one thread and build one
+    # service. That is not evidence of sharing; it is evidence of no overlap.
+    shared = {sid: tids for sid, tids in users.items() if len(tids) > 1}
+    assert not shared, f"service instance(s) used by multiple threads: {shared}"
 
 
 def test_reingest_files_with_workers_isolates_a_per_file_failure(tmp_path, monkeypatch):
