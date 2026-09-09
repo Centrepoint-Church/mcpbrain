@@ -285,3 +285,46 @@ def test_no_online_test_falls_through_to_the_real_gh(monkeypatch):
         prof, drive=_FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER}),
         fetch=lambda u: "mcpbrain", repo_probe=lambda o, r: True)
     assert problems == [] and notes == []
+
+
+# --- the gold eval set is tenant data, not product ---
+
+def test_use_copies_the_gold_set_into_tests_eval(tenant_repo, fake_repo):
+    """tests/eval/golden_retrieval_set*.yaml held REAL Centrepoint content in a
+    PUBLIC repo — named staff tied to employment agreements, an EOY review, and
+    WWCC/Safer-Churches training status. The literal guard could never catch it:
+    the spec deliberately excludes tests/ as "fixtures and history", which is
+    right for a slugify assertion and wrong for a curated corpus.
+
+    A gold set is tenant data by definition — its chunk ids point at one
+    organisation's own store, so a fork cannot use another's anyway. It now
+    travels the same path as the OAuth client: private source, copied in, ignored.
+    """
+    (tenant_repo / "eval").mkdir()
+    (tenant_repo / "eval" / "golden_retrieval_set.yaml").write_text("- id: x\n")
+    cli = _load_cli()
+    cli.use_profile(tenant_repo, fake_repo)
+    dest = fake_repo / "tests" / "eval" / "golden_retrieval_set.yaml"
+    assert dest.exists(), "gold set must land where load_gold_cases() looks"
+    assert dest.read_text() == "- id: x\n"
+
+
+def test_use_creates_missing_destination_directories(tenant_repo, fake_repo):
+    """fake_repo has no tests/eval/; a fresh clone has no tests/eval/gold either.
+    copy2 into a missing parent raises, so `use` must create the tree."""
+    (tenant_repo / "eval").mkdir()
+    (tenant_repo / "eval" / "golden_retrieval_set_mcpbrain_candidate.yaml").write_text("- id: y\n")
+    cli = _load_cli()
+    cli.use_profile(tenant_repo, fake_repo)
+    assert (fake_repo / "tests" / "eval" /
+            "golden_retrieval_set_mcpbrain_candidate.yaml").exists()
+
+
+def test_use_succeeds_when_the_tenant_repo_has_no_gold_set(tenant_repo, fake_repo):
+    """The gold set is OPTIONAL — a fork with no curated cases still gets a
+    working build, and load_gold_cases() already returns [] so the floor test
+    skips honestly rather than failing."""
+    cli = _load_cli()
+    written = cli.use_profile(tenant_repo, fake_repo)
+    assert (fake_repo / "mcpbrain" / "google_oauth_client.json").exists()
+    assert not any("golden_retrieval_set" in str(p) for p in written)
