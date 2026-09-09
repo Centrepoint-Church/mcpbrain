@@ -51,7 +51,7 @@ wrong and MUST be right:
 ## Shipping caveats
 
 - **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.126`,
-  RELEASED** — source `d9e2faf`, dist `1c9795e`, plugin `0e4ff5d`; the published index
+  RELEASED** — source `585fe07`, dist `1c9795e`, plugin `0e4ff5d`; the published index
   serves only `mcpbrain-0.7.126-py3-none-any.whl` and `install.ps1` is live (200). Full
   suite **3662 passed**, ruff clean. Fleet resolution verified against the published
   index: `mcpbrain==0.7.126`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS asserted:
@@ -118,7 +118,7 @@ wrong and MUST be right:
   rather than trusting the tests (`doctor`'s Desktop-only remedy; `tenant check --online`
   failing permanently on the correct configuration), the gold-set removal, the ruff pin,
   and the consent-screen confirmation.
-  **Superseded: 0.7.125 was the tenant profile itself** — source `73c51e2`, dist
+  **Superseded: 0.7.125 was the tenant profile itself** — source `d1cbe10`, dist
   `e716a0b`, plugin `77867d2`. Full
   suite **3654 passed**, ruff clean. Fleet resolution verified against the published
   index: `mcpbrain==0.7.125`, `mcp==2.2.0` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
@@ -155,7 +155,35 @@ wrong and MUST be right:
   `check_offline` — but only after hand-editing **five install-surface files** step 4 never
   mentioned (`marketplace.json`, `plugin.json`, `install.ps1`, `commands/install.md`,
   `INSTALL.md`). The checker caught each one, but the doc now names them up front.
-  **The BIGGER public-repo exposure was not the secret — it was the gold eval set
+  **HISTORY REWRITTEN 2026-09-09 — the OAuth client is gone from every commit, so a
+  fork no longer carries it forward.** `git filter-repo --invert-paths --path
+  mcpbrain/google_oauth_client.json`, force-pushed to `main`. Verified on a FRESH
+  CLONE (which is what a fork gets): 0 blobs of the real client file, the only
+  surviving `GOCSPX-` string in all 1,410 commits is the `GOCSPX-fake` test fixture,
+  and the old adding commit does not exist. **`gh-pages` was byte-identical and
+  untouched** (orphan branch, never held the file), so the published wheel index and
+  every install were unaffected — only `main` was force-pushed. Conditions were
+  ideal and will not be again: 0 forks, 0 stars, 0 watchers, 1 install.
+  **A history rewrite invalidates every commit SHA cited as evidence.** This file
+  cites 18; `filter-repo`'s `commit-map` was used to remap all 17 that moved (the
+  18th, `317ea4d`, predates the client file and is unchanged), and each was
+  spot-checked to still name the same commit — e.g. the 0.7.126 release SHA still
+  resolves to "chore(release): bump to 0.7.126". **Any future rewrite must do the
+  same remap, or this file's entire evidence trail silently dangles.**
+  **What this does NOT do, and the decision behind it:** the secret was public for
+  ~3 months, and **GitHub still serves it at the old commit SHA** — verified
+  immediately after the push: `contents/...?ref=2714ae1` still returns the file, and
+  that commit still resolves through the API. Unreferenced objects stay reachable
+  until GitHub GCs them; ask GitHub Support to purge the cached views to close that.
+  A rewrite stops PROPAGATION; it cannot un-publish. **Josh decided (2026-09-09) to
+  keep the current secret rather than rotate**, on the basis that nobody else has it
+  yet — a judgement, not a verified fact. It is defensible because the consent screen
+  is **Internal**: a stranger holding the secret still cannot obtain a token for any
+  account outside the Centrepoint Workspace, so the live exposure is quota and
+  branding, not data. **Rotation remains the only thing that makes the old copy
+  worthless, and it now costs ONE re-consent (a single install), not a fleet event —
+  the reason it kept being deferred no longer applies.**
+    **The BIGGER public-repo exposure was not the secret — it was the gold eval set
   (found and removed 2026-09-09).** `tests/eval/golden_retrieval_set.yaml` (30 cases)
   and `..._mcpbrain_candidate.yaml` (20) carried real Centrepoint content in a PUBLIC
   repo since 2026-06-16: `notes:` fields naming staff tied to **employment
@@ -262,7 +290,7 @@ wrong and MUST be right:
   a Task 6 defect. Needs a caveat in Task 13's `docs/FORKING.md`, and possibly a
   design fix at some point (not scheduled).
   **Tasks 12-13 complete (2026-09-08):** Task 12 shipped the permanent tenant-literal
-  guard test (`tests/test_no_tenant_literals.py`, `b880910`), including rewriting the
+  guard test (`tests/test_no_tenant_literals.py`, `b7f882e`), including rewriting the
   two pre-existing `mcpbrain/tenant.py` / `mcpbrain/fleet_storage.py:358` docstrings
   flagged above so they no longer trip it. Task 13 shipped `docs/FORKING.md` (the
   one-time fork setup runbook, including the `tenant check --online` marketplace-
@@ -273,7 +301,7 @@ wrong and MUST be right:
   plan (Tasks 1-13) is now fully implemented and committed to `main`, still **NOT
   released** per the plan's Global Constraints.
 - **Current state (2026-09-08): the five version files are at `0.7.124`, RELEASED** —
-  source `ec4b6fd`, dist `486cf47`, plugin `9bda998`; the index serves only
+  source `8270360`, dist `486cf47`, plugin `9bda998`; the index serves only
   `mcpbrain-0.7.124-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3601
   passed**, ruff clean.
   **0.7.124 is two follow-up fixes to the shared-drive queue migration's final review**,
@@ -319,7 +347,7 @@ wrong and MUST be right:
   investigated here: backup upload failing, last success 4 days prior to this release,
   2 failed attempts — flagged to the user, not silently fixed.
 - **Current state (2026-09-03): the five version files are at `0.7.123`, RELEASED** —
-  source `7ebf1a0`, dist `3bd3b69`, plugin `2710e04`; the index serves only
+  source `d24c70b`, dist `3bd3b69`, plugin `2710e04`; the index serves only
   `mcpbrain-0.7.123-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3576
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.123`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -388,7 +416,7 @@ wrong and MUST be right:
   68,007-item `bin/repair.py` re-chunk backlog were both seen and NOT addressed** — neither
   is implicated in either fix.
 - **Current state (2026-09-02): the five version files are at `0.7.122`, RELEASED** —
-  source `e070c31`, dist `dbe7b11`, plugin `ec89092`; the index serves only
+  source `5fa276a`, dist `dbe7b11`, plugin `ec89092`; the index serves only
   `mcpbrain-0.7.122-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3565
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.122`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -416,7 +444,7 @@ wrong and MUST be right:
   `config.py` — releasing the wheel does NOT activate them; they need config + real-data validation.
 - The **Q1 salience gate (`salience_gate`) is the exception: validated on the live store
   (~40% of the corpus gated as tabular/low-signal with no recall impact) and flipped default
-  **ON** in 0.7.65** (commit `cfe0338`). It ships active for all users. Source-aware
+  **ON** in 0.7.65** (commit `f732c29`). It ships active for all users. Source-aware
   `should_enrich()` in `prepare.py` cold-marks promotional email + tabular/short Drive docs
   before extraction; cold-marking is reversible (chunks stay embedded/searchable). The aggressive
   `salience_require_drive_mention` sub-flag remains opt-in OFF.
@@ -447,7 +475,7 @@ wrong and MUST be right:
   **416** `entity_relations.invalidated_by_relation_id` dangling pointers
   nullified. **Correction to an earlier claim here:** it was recorded that
   `merge_entities`/`decay_relations` would keep producing these. They do
-  **not** — `d312b26` gave the column
+  **not** — `324d42d` gave the column
   `REFERENCES entity_relations(id) ON DELETE SET NULL`, and a reproduction
   against current code (2026-08-25) shows a pointer to a nonexistent row is
   rejected with `FOREIGN KEY constraint failed` and a parent delete NULLs its
@@ -496,9 +524,9 @@ wrong and MUST be right:
   direction and the same explained cause.) `contextual_prefix()`'s
   `folder_path` clause has existed since the initial commit (317ea4d,
   2026-06-02); `FTS_CONTEXT_VERSION` was introduced seven weeks later
-  (731a620, 2026-07-22, Phase C), so the clause cannot be what escaped that
+  (6003bce, 2026-07-22, Phase C), so the clause cannot be what escaped that
   version. `folder_path` metadata itself only started being STAMPED onto
-  Drive chunks on 2026-07-28 (`b7bf024`, "C5"). The real gap:
+  Drive chunks on 2026-07-28 (`3a784e1`, "C5"). The real gap:
   `Store.patch_chunk_metadata` (`mcpbrain/store.py`) writes
   `UPDATE chunks SET metadata=?` and returns — it never touches the
   `fts_chunks` mirror and never resets `fts_context_version`.
@@ -594,7 +622,7 @@ wrong and MUST be right:
   hide behind) — now excludes them; the gold floor recorded in the plan/spec/
   runbook was stale (see above); the latency table above is the
   re-measurement that finding asked for. PR #25 merged to `main` 2026-08-25
-  (`ff77176`) before this rebuild ran.
+  (`dd62c08`) before this rebuild ran.
 - **Current state (2026-08-31): the enrichment pipeline efficiency plan (Tasks 1-17,
   workstreams W3→W2→W1→W0→live validation) is IMPLEMENTED, REVIEWED, AND LIVE-VALIDATED
   on the author's real store — not yet version-bumped or released** (source only; local
@@ -705,7 +733,7 @@ wrong and MUST be right:
   `bin/rechunk_notes.py` remain attended-only, dry-run default, `--yes`-gated, and are
   called from no daemon cadence (grepped both the pre- and post-fix trees to confirm).
   **Post-merge review (2026-08-31) found two real defects in the merged work; both fixed.**
-  (1) **The claim-time backstop was inert for 78% of units** (`cb428c0`).
+  (1) **The claim-time backstop was inert for 78% of units** (`ff6a2bc`).
   `tools._bump_unit_attempts` collected ids from `part_doc_ids` only and returned when
   empty — but a unit that could NOT be seam-split carries no `part_doc_ids`, and that is
   exactly the class the backstop exists to bound (the unsplittable oversize unit no drainer
@@ -715,7 +743,7 @@ wrong and MUST be right:
   `reassemble_thread` already stamps on every message split or not — 457/457 covered.
   Note this is the SECOND time this one function shipped inert (the first was the
   `Store(str(home))` signature bug); both times its tests passed against fakes.
-  (2) **The model-echoed `part` was trusted outright** (`8f4a3ca`). `part_doc_ids` is looked
+  (2) **The model-echoed `part` was trusted outright** (`164c7f5`). `part_doc_ids` is looked
   up by `(thread_id, part)` and decides which chunks get marked enriched, but `part` comes
   back from the model. If part 1's extraction claims part 2's number, part 2's chunks are
   marked enriched while only part 1's text was extracted — **silent content loss, and those
@@ -732,7 +760,7 @@ wrong and MUST be right:
   85.2% reduction** — essentially the plan's 87% projection.
   **Shipped in 0.7.120** (see the entry above).
 - **Current state (2026-09-01): the five version files are at `0.7.121`, RELEASED** —
-  source `3646dbc`, dist `a62f9b6`, plugin `a346a90`; the index serves only
+  source `41f38b7`, dist `a62f9b6`, plugin `a346a90`; the index serves only
   `mcpbrain-0.7.121-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3566
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.121`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -849,7 +877,7 @@ wrong and MUST be right:
   `tests/test_sweep_merge_residue.py` seeds via a raw `sqlite3` connection — which is also
   how the real residue got written.
 - **Current state (2026-08-31): the five version files are at `0.7.120`, RELEASED** — source
-  `189bb9a`, dist `5293c6f`, plugin `f93683e`; the index serves only
+  `c433501`, dist `5293c6f`, plugin `f93683e`; the index serves only
   `mcpbrain-0.7.120-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3555
   passed**. Fleet resolution verified end-to-end (`uv pip compile` against the published
   index): `mcpbrain==0.7.120`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
@@ -897,7 +925,7 @@ wrong and MUST be right:
   **The Windows HARDWARE QA GATE remains OPEN** — unchanged by this release; do not onboard
   Windows users.
 - **Earlier: the four version files (+ `uv.lock`) were at `0.7.119`,
-  RELEASED** — source `8734fa2`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
+  RELEASED** — source `c188d6f`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
   `mcpbrain-0.7.119-py3-none-any.whl` and `install.ps1` is live (200). Full suite 3464 passed.
   **0.7.119 is the three-stage install simplification (#28/#29/#30) plus a flag audit.**
   Install goes from ~20 manual actions to ~6: `/mcpbrain:install` now CREATES the four Local
@@ -925,7 +953,7 @@ wrong and MUST be right:
   **The Windows HARDWARE QA GATE remains OPEN** — 0.7.119 changes `install.ps1` and adds MSIX
   detection derived from bug reports, neither validated on real hardware. Do not onboard
   Windows users. Earlier: the **five** version files were at `0.7.113`,
-  **released** — source `51e665f`, dist `546ef40`, plugin `2feedd8`; the index serves only
+  **released** — source `eb542a7`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
   and it was URGENT:** the published 0.7.112 wheel was built with an unbounded `"mcp>=1.2"`, and
   `update.py` scopes its index override to `mcpbrain=` only — so every machine's daily
