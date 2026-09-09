@@ -125,22 +125,23 @@ wrong and MUST be right:
   because it probed the deliberately-private `mcpbrain-plugin` anonymously and a
   private repo 404s exactly as a nonexistent one does — it now asks `gh` first, so
   a definitively-missing repo still fails while "cannot tell" degrades to a note.
-    **OPEN, and it needs the GCP console — nobody has ever recorded whether the consent
-  screen is Internal.** `RELEASE-RUNBOOK.md` §3 *asks* the reader to confirm it and lists
-  "Testing mode (≤100 users)" as a fallback; the 2026-06-15 plan's "Confirm it's the
-  Centrepoint project with an Internal consent screen" checkbox is still unticked. It
-  matters because **the client secret remains in the PUBLIC repo's git history** —
+    **RESOLVED 2026-09-09 — the OAuth consent screen IS Internal** (confirmed by Josh in
+  the GCP console; it had never been recorded anywhere before, only *asked for* by
+  `RELEASE-RUNBOOK.md` §3 and left as an unticked checkbox in the 2026-06-15 plan).
+  **What that settles:** the client secret is still in this PUBLIC repo's git history —
   `git rm --cached` removed it from HEAD only, and `git show <old>:mcpbrain/google_oauth_client.json`
-  still returns it. If the screen is **Internal**, a stranger holding it cannot get a token
-  for their own account (only Workspace members can consent) and this is a quota/branding
-  nuisance. If **External**, it is a phishing primitive. Circumstantial evidence favours
-  Internal — the project is `mcpbrain-498206` (not the old personal `itsjoshuakemp` client),
-  and `gmail.readonly` is a RESTRICTED scope whose External use would have forced a
-  verification review or a 100-user cap that nothing here records hitting — but that is
-  inference, not verification. **Check it once and record the answer here.** Rotating the
-  secret remains the separate, deliberate decision it always was: on Google, regenerating an
-  installed-app secret invalidates existing refresh tokens, i.e. a fleet-wide re-consent
-  event for every user.
+  still returns it — but with an Internal screen **only `@centrepoint.church` Workspace
+  accounts can complete consent**, so a stranger holding the secret cannot obtain a token
+  for their own account. The residual exposure is quota consumption and the app name on a
+  consent screen, not data access and not a phishing primitive. **This is why the repo can
+  stay PUBLIC**, which the fork model requires anyway — an earlier follow-up here suggested
+  "consider making the source repo private"; that was the wrong instinct and is withdrawn.
+  **Rotating the secret is therefore OPTIONAL, and deliberately NOT done** (Josh's call,
+  2026-09-09). It stays available as the clean remedy if the screen is ever switched to
+  External or the client is otherwise abused; the cost is unchanged — on Google,
+  regenerating an installed-app secret invalidates existing refresh tokens, i.e. a
+  fleet-wide re-consent event for every user. **If anyone ever flips this project to
+  External, rotate FIRST.**
 - **Superseded (kept for the detail): the tenant-profile plan as of 2026-09-08 was
   IMPLEMENTED and COMMITTED to `main`, NOT released** — version files unchanged, per the plan's
   own Global Constraints. `docs/superpowers/plans/2026-09-02-tenant-profile.md` /

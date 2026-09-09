@@ -238,10 +238,11 @@ running their current pinned version until they re-pull).
 The bundled OAuth client belongs to the **Centrepoint** Google Cloud project
 (`mcpbrain/google_oauth_client.json`). Behaviour depends on its consent screen:
 
-- **Internal consent screen (recommended, per the 0.0.6 OAuth gate):** any
+- **Internal consent screen — CONFIRMED 2026-09-09, this is the live setting.** Any
   `@centrepoint.church` Workspace account can authorise with **no per-user step**,
-  and there is no "unverified app" warning. Confirm the consent screen is set to
-  *Internal* for the Centrepoint Workspace.
+  and there is no "unverified app" warning. It also means only Workspace accounts can
+  consent at all, which is what keeps the historical client secret in the public repo
+  inert. Do not switch this to External without rotating the client secret first.
 - **Testing mode (fallback, ≤100 users):** add each colleague's
   `@centrepoint.church` address under **APIs & Services → OAuth consent screen →
   Audience → Test users**. They will see "Google hasn't verified this app →
