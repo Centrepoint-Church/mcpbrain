@@ -49,9 +49,21 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
-- **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.125`,
-  RELEASED** — source `73c51e2`, dist `e716a0b`, plugin `77867d2`; the published index
-  serves only `mcpbrain-0.7.125-py3-none-any.whl` and `install.ps1` is live (200). Full
+- **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.126`,
+  RELEASED** — source `d9e2faf`, dist `1c9795e`, plugin `0e4ff5d`; the published index
+  serves only `mcpbrain-0.7.126-py3-none-any.whl` and `install.ps1` is live (200). Full
+  suite **3662 passed**, ruff clean. Fleet resolution verified against the published
+  index: `mcpbrain==0.7.126`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS asserted:
+  tenant files present, `doctor` carrying the multi-client remedy, `tenant.py` carrying
+  `_gh_repo_probe`, and **no gold set**. This machine updated and verified against the
+  RUNNING process — `/api/status` reports `0.7.126` (use `launchctl kickstart -k`, never
+  stop/start: see the KeepAlive race below).
+  **0.7.126 is the post-0.7.125 fix set** — the two defects found by running the commands
+  rather than trusting the tests (`doctor`'s Desktop-only remedy; `tenant check --online`
+  failing permanently on the correct configuration), the gold-set removal, the ruff pin,
+  and the consent-screen confirmation.
+  **Superseded: 0.7.125 was the tenant profile itself** — source `73c51e2`, dist
+  `e716a0b`, plugin `77867d2`. Full
   suite **3654 passed**, ruff clean. Fleet resolution verified against the published
   index: `mcpbrain==0.7.125`, `mcp==2.2.0` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
   Wheel CONTENTS asserted, not just the build: `tenant.py`/`tenant.json`/
