@@ -3,14 +3,14 @@
 ## This is a distributed PLUGIN, not just a local app
 
 mcpbrain ships to other users as a **Claude Code plugin + a pip-installable package**.
-There are **four repos** (all under the `Centrepoint-Church` org; `mcpbrain-tenant` is private and carries the OAuth client), and a change only
+There are **three repos** (all under the `Centrepoint-Church` org; `mcpbrain-tenant` is private and carries the OAuth client, and the wheel index is a branch of this repo rather than a fourth repo), and a change only
 reaches users when the relevant ones are **pushed/released** — committing here and
 running `uv tool install` only affects *this* machine.
 
 | Repo | What it is | How users get it |
 |---|---|---|
 | **mcpbrain** (this repo) | Python package (`mcpbrain/`), plugin source assets (`plugin/`), routines (`mcpbrain/routines/`), tests | source of truth; not installed directly |
-| **mcpbrain-dist** (`../mcpbrain-dist`) | PEP 503 wheel index on GitHub Pages (`centrepoint-church.github.io/mcpbrain-dist/simple/`) | `uv tool install --index` pulls the wheel; installed daemons **auto-update daily** from here (`update.py`) |
+| **mcpbrain `gh-pages`** (worktree at `../mcpbrain-pages`) | PEP 503 wheel index on GitHub Pages (`centrepoint-church.github.io/mcpbrain/simple/`) — an **orphan branch of THIS repo**, not a separate repo (moved 2026-09-09; `mcpbrain-dist` is archived) | `uv tool install --index` pulls the wheel; installed daemons **auto-update daily** from here (`update.py`) |
 | **mcpbrain-plugin** (`../mcpbrain-plugin`) | Public Claude Code plugin (agents/skills/hooks/commands + `.claude-plugin/` + `mcpb/`), mirrored from this repo's `plugin/` | org **plugin marketplace** (Claude Team/Enterprise settings) |
 | **mcpbrain-tenant** (`../mcpbrain-tenant`) | Private tenant repo: `google_oauth_client.json` (the OAuth client secret, never committed here) + a reference copy of `tenant.json` | `bin/tenant.py use ../mcpbrain-tenant` copies the OAuth client into a fresh checkout before a build |
 
@@ -40,10 +40,11 @@ wrong and MUST be right:
   not on PyPI). `mcpbrain setup` is the ONLY supported connector registration; the plugin
   deliberately bundles no server. Guarded by `tests/test_plugin_manifest.py`
   (`test_no_mcpb_extension_dir`, `test_mcp_json_bundles_no_server`).
-- Release = push `mcpbrain` source → `python bin/release.py --dist ../mcpbrain-dist` then
-  commit+push `mcpbrain-dist` (mind the stale-wheel gotcha in the runbook) → sync `plugin/`
-  into `mcpbrain-plugin` via `git archive HEAD:plugin` + push. All three repos end at the
-  same version.
+- Release = push `mcpbrain` source → `python bin/release.py --dist ../mcpbrain-pages`
+  (a **git worktree of the `gh-pages` branch**; create once with `git worktree add
+  ../mcpbrain-pages gh-pages`) then commit+push that worktree to `gh-pages` (mind the
+  stale-wheel gotcha in the runbook) → sync `plugin/` into `mcpbrain-plugin` via
+  `git archive HEAD:plugin` + push. Source, index branch and plugin end at the same version.
 - If extraction rules changed, run `python bin/sync_agents.py` first (keeps
   `plugin/agents/enrich-batch.md` byte-identical to `mcpbrain/enrich_prompt.md`).
 
@@ -58,7 +59,27 @@ wrong and MUST be right:
   `_gh_repo_probe`, and **no gold set**. This machine updated and verified against the
   RUNNING process — `/api/status` reports `0.7.126` (use `launchctl kickstart -k`, never
   stop/start: see the KeepAlive race below).
-  **RESEARCHED 2026-09-09 — the four-repo topology, settled against the actual docs
+  **DONE 2026-09-09 — `mcpbrain-dist` is retired; the wheel index is now the
+  `gh-pages` orphan branch of THIS repo**, served at
+  `https://centrepoint-church.github.io/mcpbrain/simple/`. Orphan, so wheels never
+  enter `main`'s history or a source checkout. Publishing goes through a worktree
+  (`git worktree add ~/GitHub/mcpbrain-pages gh-pages`), which leaves
+  `bin/release.py --dist <dir>` unchanged — it only ever wrote to a directory. The
+  old repo is **archived, not deleted** (read-only, and its Pages site still
+  answers), so there is a fallback if something was missed.
+  **This was safe ONLY because there was exactly one install.** An install
+  auto-updates from the URL baked into ITS OWN installed wheel, so moving a live
+  `index_url` means publishing the new URL via the OLD index and keeping that alive
+  until every machine reports the new version — anything missing the window stops
+  updating silently and says nothing. **If a second machine ever exists, do not move
+  this URL casually.** Warning written into both `RELEASE-RUNBOOK.md` §1b and
+  `DISTRIBUTION.md`.
+  Verified end to end, not just published: new index serves `0.7.127` only,
+  `install.ps1` 200, `uv pip compile` against it resolves `mcpbrain==0.7.127` /
+  `mcp==2.2.0` / `fastembed==0.8.0`, this machine reinstalled FROM the new index
+  reports `0.7.127` on `/api/status`, and `mcpbrain update` resolves against the new
+  URL ("Already up to date").
+    **RESEARCHED 2026-09-09 — the four-repo topology, settled against the actual docs
   rather than assumption.** `mcpbrain-plugin` **must stay a separate PRIVATE repo**:
   claude.ai organization-settings distribution *requires* the marketplace repository
   to be private or internal (org sync reads it via the Claude GitHub App and packages
