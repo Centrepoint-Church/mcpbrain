@@ -62,7 +62,12 @@ def test_install_doc_points_at_command():
     assert not (_PLUGIN / "skills" / "mcpbrain-install").exists()  # never a skill
     b = _read("INSTALL.md")
     assert "/mcpbrain:install" in b                         # primary path = the command
-    assert "claude plugin install" in b                     # cold-start fallback
+    # Cold start is the app's org plugin catalogue, NOT `claude plugin install`.
+    # The plugin ships through claude.ai organization settings, which requires a
+    # PRIVATE marketplace repo — so no user can add it by hand without repo
+    # credentials, and org sync packages it for them instead. The docs told people
+    # to run `claude plugin marketplace add` for months; they cannot.
+    assert "Browse plugins" in b                            # cold-start = catalogue
     assert "Local" in b and "Cloud routine" in b            # the Local-not-cloud guidance
     # The cowork-setup skill is gone; setup no longer hands off to a Cowork skill.
     assert "mcpbrain-cowork-setup" not in b

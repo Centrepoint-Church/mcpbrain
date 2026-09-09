@@ -328,3 +328,37 @@ def test_use_succeeds_when_the_tenant_repo_has_no_gold_set(tenant_repo, fake_rep
     written = cli.use_profile(tenant_repo, fake_repo)
     assert (fake_repo / "mcpbrain" / "google_oauth_client.json").exists()
     assert not any("golden_retrieval_set" in str(p) for p in written)
+
+
+# --- a minimal fork should need ONE repo, not four ---
+
+def test_marketplace_fields_are_optional(tmp_path):
+    """A fork that distributes nothing needs no marketplace repo.
+
+    index_url was already optional (blank => no auto-update). Requiring the three
+    marketplace_* fields forced an org that wants none of it to invent values and
+    create a repo, when `mcpbrain setup` registers the MCP connector — the actual
+    brain — with no marketplace involved. Minimum viable fork: their own source
+    fork plus a private home for the OAuth client.
+    """
+    prof = tenant.load_dict(_profile(marketplace_owner="", marketplace_repo="",
+                                     marketplace_name=""))
+    assert prof.marketplace_owner is None
+    assert prof.marketplace_slug is None
+    assert prof.plugin_homepage is None
+
+
+def test_install_surface_is_not_checked_when_no_marketplace_is_configured(tmp_path):
+    """With no marketplace there is nothing for the install docs to agree WITH,
+    so the consistency check must skip rather than invent a failure."""
+    prof = _profile(marketplace_owner="", marketplace_repo="", marketplace_name="")
+    repo = _repo_with(tmp_path, profile=prof, client=_client())
+    assert tenant.check_offline(repo) == []
+
+
+def test_a_partially_configured_marketplace_is_still_an_error(tmp_path):
+    """All three or none. An owner with no repo is a typo, not a choice."""
+    repo = _repo_with(tmp_path, profile=_profile(marketplace_repo=""),
+                      client=_client())
+    problems = tenant.check_offline(repo)
+    assert any("marketplace" in p.lower() for p in problems), problems

@@ -5,7 +5,7 @@
   "fleet_folder_id": "REPLACE-or-leave-blank-to-disable-fleet",
   "escrow_folder_id": "REPLACE-or-leave-blank-to-disable-backup-upload",
   "index_url": "https://CHANGE-ME.github.io/mcpbrain-dist/simple/",
-  "marketplace_owner": "Your-GitHub-Org",
-  "marketplace_repo": "mcpbrain-plugin",
-  "marketplace_name": "your-github-org"
+  "marketplace_owner": "OPTIONAL-leave-blank-if-no-plugin-marketplace",
+  "marketplace_repo": "OPTIONAL-leave-blank-if-no-plugin-marketplace",
+  "marketplace_name": "OPTIONAL-leave-blank-if-no-plugin-marketplace"
 }

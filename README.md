@@ -17,14 +17,24 @@ mcpbrain installs as a Claude Code plugin. In a Claude Code session, run:
 and follow it — it installs the daemon, connects it to Claude, opens the sign-in
 wizard, and creates the recurring background tasks for you.
 
-On a machine that does not have the plugin yet:
+On a machine that does not have the plugin yet, install it from the organisation
+plugin catalogue in the Claude app:
 
-```bash
-claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin
-claude plugin install mcpbrain@centrepoint-church
-```
+1. Open **Customize** in the left sidebar.
+2. Open the **Plugins** tab.
+3. Click **Browse plugins**.
+4. Filter by **Centrepoint Church**.
+5. Click **Install** on the mcpbrain plugin.
 
-then run `/mcpbrain:install`. The full walkthrough — the Windows path, what to
+then run `/mcpbrain:install`.
+
+The plugin is distributed through claude.ai **organization settings**, which is why
+`Centrepoint-Church/mcpbrain-plugin` is a private repo — org sync requires the
+marketplace repository to be private or internal, and it packages the plugin for
+each user, so nobody needs access to that repo. Updates arrive through org sync.
+`claude plugin marketplace add` is NOT the supported path here: it would need each
+person to hold git credentials for a private repo, and background refreshes disable
+credential helpers, which silently pins them to whatever they first cloned. The full walkthrough — the Windows path, what to
 expect at each step, and the manual fallback for the recurring tasks — is in
 [`plugin/INSTALL.md`](plugin/INSTALL.md); the actual install command is written
 once, in [`plugin/commands/install.md`](plugin/commands/install.md), and every
