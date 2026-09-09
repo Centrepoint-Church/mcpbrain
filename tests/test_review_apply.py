@@ -64,7 +64,7 @@ def test_duplicate_applier_skips_self_pair(tmp_path):
 
 def test_suppress_verdict_suppresses_entity_and_resolves_finding(tmp_path):
     s = _seed(tmp_path)
-    fid = s.record_finding("lint:orphan_entity", "e1", summary="orphan")
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan")
     finding = s.open_findings("lint:orphan_entity")[0]
 
     result = apply_orphan_verdicts(
@@ -83,7 +83,7 @@ def test_suppress_verdict_suppresses_entity_and_resolves_finding(tmp_path):
 
 def test_unsuppress_entity_makes_suppression_recoverable(tmp_path):
     s = _seed(tmp_path)
-    finding_id = s.record_finding("lint:orphan_entity", "e1", summary="orphan")
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan")
     finding = s.open_findings("lint:orphan_entity")[0]
 
     apply_orphan_verdicts(
@@ -132,8 +132,8 @@ def test_unrecognised_verdict_treated_as_skip(tmp_path):
 
 def test_cap_stops_applying_suppressions(tmp_path):
     s = _seed(tmp_path)
-    fid1 = s.record_finding("lint:orphan_entity", "e1", summary="orphan 1")
-    fid2 = s.record_finding("lint:orphan_entity", "e3", summary="orphan 2")
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan 1")
+    s.record_finding("lint:orphan_entity", "e3", summary="orphan 2")
     findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:orphan_entity")}
 
     verdicts = [
@@ -158,7 +158,7 @@ def test_suppress_verdict_with_missing_entity_leaves_finding_open(tmp_path):
     suppression, must NOT resolve the finding, and must NOT write a row to
     entity_suppressions. It's tallied under "missing" instead."""
     s = _seed(tmp_path)
-    fid = s.record_finding("lint:orphan_entity", "e_ghost", summary="orphan")
+    s.record_finding("lint:orphan_entity", "e_ghost", summary="orphan")
     finding = s.open_findings("lint:orphan_entity")[0]
 
     result = apply_orphan_verdicts(
@@ -192,7 +192,7 @@ def _seed_missing_org(tmp_path):
 def test_assign_with_valid_taxonomy_org_sets_org_and_resolves(tmp_path):
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid = s.record_finding("lint:missing_org", "e1", summary="no org")
+    s.record_finding("lint:missing_org", "e1", summary="no org")
     finding = s.open_findings("lint:missing_org")[0]
 
     result = apply_missing_org_verdicts(
@@ -212,7 +212,7 @@ def test_assign_with_valid_taxonomy_org_sets_org_and_resolves(tmp_path):
 def test_assign_with_org_not_in_taxonomy_does_not_apply(tmp_path):
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid = s.record_finding("lint:missing_org", "e2", summary="no org")
+    s.record_finding("lint:missing_org", "e2", summary="no org")
     finding = s.open_findings("lint:missing_org")[0]
 
     result = apply_missing_org_verdicts(
@@ -232,8 +232,8 @@ def test_assign_with_org_not_in_taxonomy_does_not_apply(tmp_path):
 def test_external_and_skip_resolve_without_org_change(tmp_path):
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid_a = s.record_finding("lint:missing_org", "e2", summary="no org")
-    fid_b = s.record_finding("lint:missing_org", "e3", summary="no org")
+    s.record_finding("lint:missing_org", "e2", summary="no org")
+    s.record_finding("lint:missing_org", "e3", summary="no org")
     findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:missing_org")}
 
     result = apply_missing_org_verdicts(
@@ -256,7 +256,7 @@ def test_external_and_skip_resolve_without_org_change(tmp_path):
 def test_unrecognised_verdict_treated_as_skip_missing_org(tmp_path):
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid = s.record_finding("lint:missing_org", "e2", summary="no org")
+    s.record_finding("lint:missing_org", "e2", summary="no org")
     finding = s.open_findings("lint:missing_org")[0]
 
     result = apply_missing_org_verdicts(
@@ -273,8 +273,8 @@ def test_unrecognised_verdict_treated_as_skip_missing_org(tmp_path):
 def test_cap_stops_applying_assign_verdicts(tmp_path):
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid1 = s.record_finding("lint:missing_org", "e1", summary="no org")
-    fid2 = s.record_finding("lint:missing_org", "e4", summary="no org")
+    s.record_finding("lint:missing_org", "e1", summary="no org")
+    s.record_finding("lint:missing_org", "e4", summary="no org")
     findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:missing_org")}
 
     verdicts = [
@@ -300,7 +300,7 @@ def test_assign_verdict_with_missing_entity_leaves_finding_open(tmp_path):
     or touch any entity row. It's tallied under "missing" instead."""
     home = _write_config(tmp_path, ACME_CFG)
     s = _seed_missing_org(tmp_path)
-    fid = s.record_finding("lint:missing_org", "e_ghost", summary="no org")
+    s.record_finding("lint:missing_org", "e_ghost", summary="no org")
     finding = s.open_findings("lint:missing_org")[0]
 
     result = apply_missing_org_verdicts(
@@ -337,7 +337,7 @@ def _seed_ownerless(tmp_path):
 
 def test_owner_verdict_with_valid_action_sets_owner_and_resolves(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
     finding = s.open_findings("lint:ownerless_action")[0]
 
     result = apply_ownerless_verdicts(
@@ -357,7 +357,7 @@ def test_owner_verdict_with_valid_action_sets_owner_and_resolves(tmp_path):
 
 def test_owner_verdict_with_stale_action_leaves_finding_open(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid = s.record_finding("lint:ownerless_action", "9999", summary="ownerless")
+    s.record_finding("lint:ownerless_action", "9999", summary="ownerless")
     finding = s.open_findings("lint:ownerless_action")[0]
 
     result = apply_ownerless_verdicts(
@@ -373,8 +373,8 @@ def test_owner_verdict_with_stale_action_leaves_finding_open(tmp_path):
 
 def test_waiting_on_unowned_skip_resolve_without_owner_change(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid_a = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
-    fid_b = s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
     findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:ownerless_action")}
 
     result = apply_ownerless_verdicts(
@@ -395,7 +395,7 @@ def test_waiting_on_unowned_skip_resolve_without_owner_change(tmp_path):
 
 def test_unrecognised_verdict_treated_as_skip_ownerless(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
     finding = s.open_findings("lint:ownerless_action")[0]
 
     result = apply_ownerless_verdicts(
@@ -413,7 +413,7 @@ def test_unrecognised_verdict_treated_as_skip_ownerless(tmp_path):
 
 def test_owner_verdict_missing_owner_field_treated_as_skip(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
     finding = s.open_findings("lint:ownerless_action")[0]
 
     result = apply_ownerless_verdicts(
@@ -431,8 +431,8 @@ def test_owner_verdict_missing_owner_field_treated_as_skip(tmp_path):
 
 def test_cap_stops_applying_owner_verdicts(tmp_path):
     s, action_ids = _seed_ownerless(tmp_path)
-    fid1 = s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
-    fid2 = s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a1"]), summary="ownerless")
+    s.record_finding("lint:ownerless_action", str(action_ids["a2"]), summary="ownerless")
     findings = {f["ref_id"]: f["id"] for f in s.open_findings("lint:ownerless_action")}
 
     verdicts = [

@@ -5,9 +5,7 @@ drain skips it without calling mark_enriched → unit stays re-queueable.
 """
 
 import json
-from pathlib import Path
 
-import pytest
 
 from mcpbrain.contract import validate_extraction
 

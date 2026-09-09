@@ -1,7 +1,4 @@
 """Tests for B3 importance scoring + three-axis recall."""
-import math
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -156,7 +153,6 @@ def test_calendar_start_iso_with_offset_parses():
 
 def test_run_salience_pass_scores_chunks(store):
     """run_salience_pass scores unscored embedded chunks."""
-    import json
     from mcpbrain.importance import run_salience_pass
 
     # Seed two embedded chunks with salience=0
@@ -225,8 +221,6 @@ def _make_store_with_embedder(tmp_path):
 def test_importance_weight_reorders(tmp_path):
     """A high-salience chunk should rank above a low-salience one when
     importance_weight > 0, even if RRF scores are identical."""
-    import sqlite_vec
-    from mcpbrain.store import Store
     from mcpbrain.retrieval import hybrid_search
 
     store, emb = _make_store_with_embedder(tmp_path)

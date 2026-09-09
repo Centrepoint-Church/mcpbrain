@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from mcpbrain.query_router import (
     _classify_intent,
@@ -161,7 +160,6 @@ def test_community_augment_skips_irrelevant_community():
     ]
     store = _make_store(communities=communities)
     augmented = _community_augment(store, "car park resurfacing cost", results, 10)
-    community_hits = [r for r in augmented if r.get("provenance") == "community_summary"]
     # Overlap between "car park resurfacing" and "roster worship team" is low; may or may not add
     assert len(augmented) >= 1
 
@@ -281,7 +279,7 @@ def test_route_crag_skips_on_high_score(tmp_path):
 
     with patch("mcpbrain.query_router.hybrid_search", return_value=primary):
         with patch("mcpbrain.query_router._crag_rewrite") as mock_rewrite:
-            result = route(store, embedder, "precise query", 5, home=home)
+            route(store, embedder, "precise query", 5, home=home)
 
     mock_rewrite.assert_not_called()  # CRAG should not fire
 

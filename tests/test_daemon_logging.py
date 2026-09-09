@@ -1,7 +1,7 @@
 """Daemon logging: rotating file on Windows; stdout-only on macOS."""
 import logging
 
-from mcpbrain import daemon, config
+from mcpbrain import daemon
 
 
 def test_windows_logging_attaches_file_handler(tmp_path, monkeypatch):

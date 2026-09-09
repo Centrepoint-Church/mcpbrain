@@ -57,7 +57,7 @@ def test_cluster_chunks_groups_similar():
 
 def test_cluster_chunks_min_size():
     """Clusters smaller than _MIN_CLUSTER_SIZE are dropped."""
-    from mcpbrain.consolidation import _cluster_chunks, _MIN_CLUSTER_SIZE
+    from mcpbrain.consolidation import _cluster_chunks
 
     # Two identical chunks → one cluster of size 2 (< 3 default minimum)
     chunks = [
@@ -305,7 +305,6 @@ def test_graduate_note_calls_write_memory_above_threshold(home_consolidation, mo
     """_graduate_note calls write_memory when source count and salience are above thresholds."""
     from mcpbrain.consolidation import _graduate_note
     from mcpbrain.store import Store
-    import tempfile
 
     store = Store(Path(home_consolidation) / "test.sqlite3", dim=4)
     store.init()
@@ -394,7 +393,6 @@ def test_consolidate_triggers_graduation(store, home_consolidation, monkeypatch)
     from mcpbrain import consolidation
 
     graduated = []
-    original_graduate = consolidation._graduate_note
 
     def _tracking_graduate(store, home, cluster, summary):
         graduated.append({"n": len(cluster), "summary": summary})

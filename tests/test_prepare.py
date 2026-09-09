@@ -1037,7 +1037,7 @@ def test_merge_review_block_caps_pairs(monkeypatch):
 def test_unit_pull_cap_default():
     # config.unit_pull_cap() must return 60_000 when unconfigured.
     from mcpbrain import config
-    import tempfile, os
+    import tempfile
     with tempfile.TemporaryDirectory() as td:
         assert config.unit_pull_cap(td) == 60_000
 
@@ -1066,7 +1066,6 @@ def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
     # With a higher pull_cap, write_units fits more threads into each unit file,
     # yielding fewer unit files for the same input.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    import json as _json
     from mcpbrain import prepare
 
     # Build threads each ~4KB serialized — three should pack into one unit at
@@ -1080,13 +1079,11 @@ def test_write_units_packs_more_threads_with_higher_cap(tmp_path, monkeypatch):
     data = {"threads": threads, "context": {}}
 
     # Small cap — threads must split into multiple units.
-    units_dir_small = tmp_path / "small" / "enrich_queue" / "units"
     summary_small = prepare.write_units(
         data, home=str(tmp_path / "small"), pull_cap=12_000
     )
 
     # Large cap — all threads fit in fewer units.
-    units_dir_big = tmp_path / "big" / "enrich_queue" / "units"
     summary_big = prepare.write_units(
         data, home=str(tmp_path / "big"), pull_cap=60_000
     )

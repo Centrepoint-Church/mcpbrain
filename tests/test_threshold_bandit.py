@@ -9,10 +9,8 @@ Acceptance criteria (#20):
 from __future__ import annotations
 
 import json
-import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 from mcpbrain.threshold_bandit import (
     ARMS,
@@ -40,7 +38,7 @@ def _make_store(feedback_rows=None):
     _arms = {}
 
     def _connect(*, write=False):
-        import sqlite3, tempfile
+        import sqlite3
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         return conn

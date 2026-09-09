@@ -88,8 +88,8 @@ def make_query(subject, text):
         if proc.returncode != 0:
             return None
         # Take the first substantive line that isn't meta/preamble.
-        for l in (proc.stdout or "").splitlines():
-            cand = l.strip().strip('"').strip()
+        for line in (proc.stdout or "").splitlines():
+            cand = line.strip().strip('"').strip()
             if len(cand) >= 8 and len(cand.split()) >= 3 and not _JUNK_RE.search(cand):
                 return cand
         return None
@@ -156,7 +156,7 @@ lines = [
 for c in cases:
     lines.append(f"- id: {c['id']}")
     lines.append(f"  query: {q(c['query'])}")
-    lines.append(f"  expected_chunk_ids:")
+    lines.append("  expected_chunk_ids:")
     for cid in c["expected_chunk_ids"]:
         lines.append(f"    - {q(cid)}")
     lines.append(f"  notes: {q('machine-seeded ' + c['source_type'] + ' sal=' + str(c['salience']) + ' subj=' + c['subject'])}")

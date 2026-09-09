@@ -1,6 +1,4 @@
 """Tests for S2 recall-acceptance feedback (feedback.py + store feedback methods)."""
-import tempfile
-from pathlib import Path
 
 import pytest
 
