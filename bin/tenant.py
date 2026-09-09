@@ -23,26 +23,42 @@ _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-# The OAuth client is REQUIRED (it is the only genuinely private file); tenant.json
-# is optional here because it is committed in the source repo — a tenant repo may
-# keep a reference copy, and if it does, it wins.
-_REQUIRED = ("google_oauth_client.json",)
-_OPTIONAL = ("tenant.json",)
+# (source path in the tenant repo, destination path in the source tree).
+#
+# The OAuth client is REQUIRED — it is the only file a build cannot be made without.
+# tenant.json is optional because it is committed in the source repo; a tenant repo
+# may keep a reference copy, and if it does, it wins.
+#
+# The gold eval sets are optional and are TENANT DATA, not product: their chunk ids
+# point into one organisation's own store, so a fork cannot use another's. They used
+# to be committed under tests/, where the tenant-literal guard deliberately does not
+# look ("fixtures and history") — which is right for a slugify assertion and wrong
+# for a curated corpus describing real people. A fork with no curated cases simply
+# has none: load_gold_cases() returns [] and the gold floor test skips honestly.
+_REQUIRED = (("google_oauth_client.json", "mcpbrain/google_oauth_client.json"),)
+_OPTIONAL = (
+    ("tenant.json", "mcpbrain/tenant.json"),
+    ("eval/golden_retrieval_set.yaml", "tests/eval/golden_retrieval_set.yaml"),
+    ("eval/golden_retrieval_set_mcpbrain_candidate.yaml",
+     "tests/eval/golden_retrieval_set_mcpbrain_candidate.yaml"),
+)
 
 
 def use_profile(src: Path, repo: Path = _REPO) -> list[Path]:
     """Copy a tenant directory's files into <repo>/mcpbrain/. Returns what it wrote."""
     src, repo = Path(src), Path(repo)
     written: list[Path] = []
-    for name in _REQUIRED:
-        origin = src / name
-        if not origin.is_file():
+    for name, _dest in _REQUIRED:
+        if not (src / name).is_file():
             raise FileNotFoundError(f"{src} has no {name} — is this a tenant repo?")
-    for name in (*_REQUIRED, *_OPTIONAL):
+    for name, rel_dest in (*_REQUIRED, *_OPTIONAL):
         origin = src / name
         if not origin.is_file():
             continue
-        dest = repo / "mcpbrain" / name
+        dest = repo / rel_dest
+        # A fresh clone has no tests/eval/ until pytest creates it, and copy2 into
+        # a missing parent raises.
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(origin, dest)
         written.append(dest)
     return written

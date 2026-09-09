@@ -73,6 +73,15 @@ Leave `"mcpbrain[daemon]"` in every `uv tool install` command exactly as it is. 
 is the one spelling that resolves against both old and new wheels, and dropping it
 ships a brain with no embedder that the daily auto-update cannot repair.
 
+## 4b. Gold eval set (optional)
+
+`bin/tenant.py use` also copies `eval/golden_retrieval_set*.yaml` from your tenant
+repo into `tests/eval/`, if you have any. These are hand-curated query→chunk cases
+used by the retrieval quality gate, and they are **tenant data** — the chunk ids
+point into your own store, so ours are useless to you and yours should not be
+committed here. Without them the gate skips honestly rather than failing; build
+your own once you have a corpus worth measuring.
+
 ## 5. Install and verify
 
 ```bash

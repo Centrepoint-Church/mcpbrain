@@ -19,6 +19,18 @@ dist/
 # `python bin/tenant.py use ../mcpbrain-tenant`, which bin/release.py requires
 # before it will build. mcpbrain/tenant.json holds no secrets and IS committed.
 mcpbrain/google_oauth_client.json
+
+# The curated gold eval sets are TENANT DATA, not product. They held real
+# Centrepoint content in this PUBLIC repo — named staff tied to employment
+# agreements, an EOY review, WWCC/Safer-Churches training status — and the
+# tenant-literal guard could never catch it, because the spec deliberately
+# excludes tests/ as "fixtures and history". Their chunk ids point into one
+# organisation's own store, so a fork cannot use another's anyway. They live in
+# the private mcpbrain-tenant repo and are copied in by
+# `python bin/tenant.py use ../mcpbrain-tenant`. Absent, load_gold_cases()
+# returns [] and the gold floor test skips honestly.
+tests/eval/golden_retrieval_set.yaml
+tests/eval/golden_retrieval_set_mcpbrain_candidate.yaml
 google_token.json
 google_account
 client_secret.json

@@ -428,6 +428,10 @@ snapshot succeeded.
    a scratch `MCPBRAIN_HOME` (never against the live `MCPBRAIN_HOME` — that
    would silently exercise the live store, not the rebuild):
    ```bash
+   # The gold sets are NOT committed — they are tenant data (real curated queries
+   # about real people). `python bin/tenant.py use ../mcpbrain-tenant` copies them
+   # into tests/eval/. Without them --gold reports 0 cases and gates nothing, so
+   # confirm they are present before trusting a green run.
    cp <store>.new /tmp/gold-check/brain.sqlite3
    MCPBRAIN_HOME=/tmp/gold-check uv run python tests/eval/run_eval.py --gold --k 10
    ```

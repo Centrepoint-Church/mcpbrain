@@ -8,10 +8,18 @@ Two eval modes:
    regressions in fusion/scoring logic. Not a quality signal.
 
 2. **Gold set** (optional / skips when real store unavailable): loads
-   golden_retrieval_set.yaml (30+ hand-curated query→chunk cases from Josh's
-   real brain), runs hybrid_search against the live brain.sqlite3, and reports
-   recall@k and MRR. The quality signal — measures real retrieval performance.
-   Skips cleanly when the real store is empty or absent (e.g., in CI).
+   golden_retrieval_set*.yaml — hand-curated query→chunk cases against this
+   install's own corpus — runs hybrid_search against the live brain.sqlite3, and
+   reports recall@k and MRR. The quality signal — measures real retrieval
+   performance. Skips cleanly when the real store is empty or absent (e.g. CI).
+
+   **The gold sets are NOT in this repo.** They are tenant data: their chunk ids
+   point into one organisation's own store, so a fork cannot use another's, and
+   the curated queries and notes describe that organisation's real people and
+   documents — which is why they were removed from this PUBLIC repo on
+   2026-09-09. They live in the private tenant repo and are copied here by
+   `python bin/tenant.py use ../mcpbrain-tenant`. With none present,
+   load_gold_cases() returns [] and every gold-gated test skips honestly.
 
 Runnable as a script to sweep fusion params:
 

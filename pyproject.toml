@@ -67,7 +67,7 @@ dependencies = [
 mcpbrain = "mcpbrain.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.8", "pyyaml>=6"]
+dev = ["pytest>=8", "ruff>=0.15,<0.16", "pyyaml>=6"]  # ruff pinned: see [dependency-groups]
 # Kept, permanently, as an empty no-op alias. Every already-deployed install runs
 # `uv tool install ... "mcpbrain[daemon]" --upgrade` from a command line baked
 # into its own update.py; uv is silent about a DECLARED extra and warns about an
@@ -131,7 +131,13 @@ markers = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
-    "ruff>=0.8",
+    # Ruff is PINNED to a minor range on purpose. It was `>=0.8`, which by
+    # 2026-09 resolved to 0.15.16 — and each release adds rules to the default
+    # set, so a lint gate recorded as "ruff clean" at one release silently
+    # accumulated 86 errors by the next, with nothing to say when it happened.
+    # An unpinned linter is a gate that redefines itself. Bump this deliberately
+    # and fix the new findings in that commit.
+    "ruff>=0.15,<0.16",
     "pyyaml>=6",
     "pytest-xdist>=3.8.0",
 ]
