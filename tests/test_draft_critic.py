@@ -10,9 +10,8 @@ Acceptance criteria (#21):
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 from mcpbrain.draft_critic import (
     critique,
@@ -21,7 +20,6 @@ from mcpbrain.draft_critic import (
     _parse_report,
     _fmt_rules,
     _INLINE_VOICE_RULES,
-    _EMPTY_REPORT,
 )
 
 

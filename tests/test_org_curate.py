@@ -440,7 +440,7 @@ def test_mentioned_with_two_sources_materialises(tmp_path):
     rel = {"kind": "relation", "entity_a": "joel", "relation": "mentioned_with", "entity_b": "mary"}
     _stage(s, ents + [_rec(rel, sref="r1", email="a@x.org"),
                       _rec(rel, sref="r2", email="b@x.org")])
-    res = org_curate._materialise(s)
+    org_curate._materialise(s)
     with s._connect() as db:
         assert db.execute("SELECT COUNT(*) c FROM entity_relations "
                           "WHERE relation='mentioned_with'").fetchone()["c"] == 1

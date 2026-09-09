@@ -15,7 +15,6 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from mcpbrain.lessons import (
     init_lessons_table,

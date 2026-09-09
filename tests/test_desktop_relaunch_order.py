@@ -1,7 +1,7 @@
 # tests/test_desktop_relaunch_order.py
 """Claude Desktop rewrites its config on quit, so the connector write must land
 AFTER the app has exited and BEFORE it is relaunched."""
-from mcpbrain import control_api, desktop
+from mcpbrain import desktop
 
 
 def test_relaunch_runs_the_callback_between_quit_and_launch(monkeypatch):

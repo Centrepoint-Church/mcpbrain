@@ -13,10 +13,7 @@ Covers:
 """
 
 import json
-import tempfile
-from pathlib import Path
 
-import pytest
 
 from mcpbrain.contract import (
     ENTITY_TYPES,
@@ -225,7 +222,6 @@ def test_drain_grounding_flag_off_does_not_filter(tmp_path):
     """With schema_grounding: false, fabricated entities pass through to apply."""
     from mcpbrain.store import Store
     from mcpbrain.drain import drain as drain_fn
-    from mcpbrain.graph_write import apply as gw_apply
 
     db_path = tmp_path / "brain.sqlite3"
     store = Store(db_path, dim=4); store.init()

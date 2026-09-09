@@ -4,7 +4,6 @@
 (~/.local/share/uv/tools/mcpbrain/bin/mcpbrain). That is uv's internal layout, not
 a supported entry point; the shim is.
 """
-from pathlib import Path
 
 from mcpbrain import setup
 

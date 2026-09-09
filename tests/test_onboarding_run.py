@@ -1,7 +1,6 @@
 import json
 
 from mcpbrain import onboarding
-from mcpbrain.org_contracts import FleetPin
 from tests.helpers.org_fleet import make_install
 
 

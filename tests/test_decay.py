@@ -17,7 +17,7 @@ def store(tmp_path):
 @pytest.fixture
 def home_decay(tmp_path):
     """Home dir with decay enabled."""
-    import json, os
+    import json
     h = tmp_path / "home-decay"
     h.mkdir()
     (h / "config.json").write_text(json.dumps({"decay": True}))

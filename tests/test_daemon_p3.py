@@ -1197,7 +1197,7 @@ def test_run_resolve_entities_runs_again_after_interval(tmp_path):
         tmp_path, resolve_entities_interval_s=100.0, clock=clock)
     fake = {"mode": "deterministic", "auto_merges": 0, "llm_merges": 0,
             "llm_calls": 0, "kept_distinct": 0}
-    with patch("mcpbrain.resolve.resolve_entities", return_value=fake) as mock_resolve:
+    with patch("mcpbrain.resolve.resolve_entities", return_value=fake):
         first = daemon._run_resolve_entities()
     assert first is not None
 

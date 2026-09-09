@@ -7,7 +7,6 @@ from mcpbrain import onboarding, org_curate, ingest_cache
 from mcpbrain.chunking import CHUNKER_VERSION
 from mcpbrain.org_contracts import (FleetPin, CacheArtifact, CacheChunk,
                                     artifact_filename)
-from mcpbrain.store import Store
 from tests.helpers.org_fleet import make_fleet, LocalDirFleetStorage
 
 PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version=str(CHUNKER_VERSION),

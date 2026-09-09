@@ -12,16 +12,13 @@ Covers:
 """
 
 import json
-import sqlite3
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from mcpbrain.resolve import (
     build_entity_index,
     write_time_dedup_check,
-    _WRITE_TIME_MERGE_THRESHOLD,
 )
 
 
@@ -178,7 +175,7 @@ def test_apply_dedup_redirects_near_duplicate_entity(tmp_path):
     extraction = _make_extraction([
         {"name": "Ps Joel Chelliah", "type": "person", "org": "Centrepoint"},
     ])
-    result = apply(store, extraction, doc_ids=[], home=str(tmp_path))
+    apply(store, extraction, doc_ids=[], home=str(tmp_path))
 
     # The near-dup should have been redirected, so no new entity created
     with store._connect() as conn:

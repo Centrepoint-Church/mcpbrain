@@ -13,7 +13,6 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from mcpbrain.drift_monitor import (
     init_drift_table,
@@ -118,7 +117,7 @@ def test_no_alert_on_stable_recall():
     # Current run at 0.68 — tiny fluctuation, well within noise
     current_recall = 0.68
     baseline = _get_30day_baseline(store, _past_date(0))
-    noise = _noise_floor(store, _past_date(0))
+    _noise_floor(store, _past_date(0))
     drop = (baseline - current_recall) / baseline
     # Should not exceed the noise floor (0.68 vs 0.70 is only 2.8%)
     # noise_floor with all same values = 0.0 stddev → ALERT_THRESHOLD = 0.05
