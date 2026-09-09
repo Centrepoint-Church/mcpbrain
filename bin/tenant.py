@@ -70,21 +70,29 @@ def main(argv=None) -> int:
             print(f"  ✗ {p}", file=sys.stderr)
         return 1
     prof = _tenant.load(_REPO / "mcpbrain" / "tenant.json")
-    print(f"✓ tenant check passed — {prof.display_name} ({prof.tenant_id})")
 
+    # The pass line is printed LAST, after every requested check. Printing it
+    # straight after the offline half meant `check --online` could report
+    # "✓ passed" on stdout, "✗" on stderr and exit 1 — three different answers
+    # to one question.
     if getattr(ns, "online", False):
         from mcpbrain import auth
         try:
             creds = auth.load_credentials()
             drive = auth.build_service("drive", "v3", creds)
         except Exception as exc:  # noqa: BLE001
-            print(f"  (Drive checks skipped: {exc})")
+            print(f"  ➖ Drive checks skipped: {exc}")
             drive = None
-        online = _tenant.check_online(prof, drive=drive)
+        online, notes = _tenant.check_online(prof, drive=drive)
+        for n in notes:
+            print(f"  ➖ {n}")
         if online:
+            print("tenant check FAILED:", file=sys.stderr)
             for p in online:
                 print(f"  ✗ {p}", file=sys.stderr)
             return 1
+
+    print(f"✓ tenant check passed — {prof.display_name} ({prof.tenant_id})")
     return 0
 
 
