@@ -56,6 +56,23 @@ Copy `mcpbrain/tenant.example.json` to `mcpbrain/tenant.json` and replace every
 value. The template's placeholders are rejected by the checker, so a half-filled
 profile fails loudly rather than half-working.
 
+**Then re-point the five install surfaces to match.** These carry runnable
+commands, so they name your marketplace and index directly rather than reading the
+profile at runtime — but `bin/tenant.py check` requires them to *agree* with
+`tenant.json`, and will tell you exactly which one is out of step:
+
+| File | What to change |
+|---|---|
+| `plugin/.claude-plugin/marketplace.json` | `name` → your `marketplace_name` |
+| `plugin/.claude-plugin/plugin.json` | `homepage` → `https://github.com/<owner>/<repo>` |
+| `plugin/scripts/install.ps1` | `$INDEX` → your `index_url` |
+| `plugin/commands/install.md` | the `--index` URL → your `index_url` |
+| `plugin/INSTALL.md` | both `claude plugin …` commands → your owner/repo and name |
+
+Leave `"mcpbrain[daemon]"` in every `uv tool install` command exactly as it is. It
+is the one spelling that resolves against both old and new wheels, and dropping it
+ships a brain with no embedder that the daily auto-update cannot repair.
+
 ## 5. Install and verify
 
 ```bash

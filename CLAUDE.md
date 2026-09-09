@@ -49,8 +49,62 @@ wrong and MUST be right:
 
 ## Shipping caveats
 
-- **Current state (2026-09-08): the tenant-profile plan (Tasks 1-10) is IMPLEMENTED
-  and COMMITTED to `main`, NOT released** — version files unchanged, per the plan's
+- **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.125`,
+  RELEASED** — source `73c51e2`, dist `e716a0b`, plugin `77867d2`; the published index
+  serves only `mcpbrain-0.7.125-py3-none-any.whl` and `install.ps1` is live (200). Full
+  suite **3654 passed**, ruff clean. Fleet resolution verified against the published
+  index: `mcpbrain==0.7.125`, `mcp==2.2.0` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
+  Wheel CONTENTS asserted, not just the build: `tenant.py`/`tenant.json`/
+  `google_oauth_client.json` present, `org_defaults.py` absent, `enrich_prompt.md` carrying
+  the neutral cast and no real names, `update.py` carrying no hardcoded index URL.
+  **0.7.125 is the tenant profile** — all 13 plan tasks, plus four things done on top:
+  **(1) `Centrepoint-Church/mcpbrain-tenant` now EXISTS** (private, commit `695b46f`). Until
+  2026-09-09 it was only the plan's local stand-in — a plain folder, no git, no remote — so
+  the OAuth client lived in two untracked places on one machine. It now holds
+  `google_oauth_client.json` + a reference `tenant.json` + a README covering the
+  rotation cost. **A fresh checkout has no OAuth client until
+  `python bin/tenant.py use ../mcpbrain-tenant`; `bin/release.py` refuses to build without it.**
+  **(2) The ruff backlog is cleared, 86 → 0.** It was PRE-EXISTING, not from the tenant
+  work (86 at the pre-tenant commit; none in a file that plan touched) and had accumulated
+  silently despite past releases recording "ruff clean" — most likely ruff version drift,
+  since `pyproject.toml` pins only `ruff>=0.8` and the toolchain now resolves **0.15.16**.
+  `E401` joined the ignore list (`import gzip, json` in a test helper is the same
+  compaction instinct as the already-ignored `E701`/`E702`); `F401`/`F541` auto-fixed;
+  the 30 `F841` fixed by hand-classified rule and **NOT** `--unsafe-fixes`, which can drop
+  the whole statement — where the RHS is a call the test needs for its side effect
+  (`s.record_finding(...)`, 19 of them in `test_review_apply.py`) only the binding was
+  removed. **Pin `ruff` if "ruff clean" is meant to stay a meaningful release gate.**
+  **(3) A flaky test de-flaked**, found by this release's own full-suite run.
+  `test_drive_sync.py::test_reingest_files_with_workers_uses_a_fresh_service_per_worker_thread`
+  asserted `1 < len(built)` — that `ThreadPoolExecutor(max_workers=3)` spawns more than one
+  thread for 8 trivial tasks. **CPython does not promise that**: `_adjust_thread_count`
+  checks `_idle_semaphore` and reuses an idle thread rather than spawning, so under xdist
+  load all 8 can legitimately run on one thread. A single-threaded run is evidence of no
+  overlap, not of a shared service. Now asserts the real invariant — no service instance
+  touched by two threads — which is deterministic. Passed 5/5 isolated, 3/3 under xdist.
+  **(4) `docs/FORKING.md` gained the step it was missing.** A full fork dry-run (whole tree
+  archived out, synthetic Northgate Trust profile, own OAuth client) reached a green
+  `check_offline` — but only after hand-editing **five install-surface files** step 4 never
+  mentioned (`marketplace.json`, `plugin.json`, `install.ps1`, `commands/install.md`,
+  `INSTALL.md`). The checker caught each one, but the doc now names them up front.
+  **OPEN, and it needs the GCP console — nobody has ever recorded whether the consent
+  screen is Internal.** `RELEASE-RUNBOOK.md` §3 *asks* the reader to confirm it and lists
+  "Testing mode (≤100 users)" as a fallback; the 2026-06-15 plan's "Confirm it's the
+  Centrepoint project with an Internal consent screen" checkbox is still unticked. It
+  matters because **the client secret remains in the PUBLIC repo's git history** —
+  `git rm --cached` removed it from HEAD only, and `git show <old>:mcpbrain/google_oauth_client.json`
+  still returns it. If the screen is **Internal**, a stranger holding it cannot get a token
+  for their own account (only Workspace members can consent) and this is a quota/branding
+  nuisance. If **External**, it is a phishing primitive. Circumstantial evidence favours
+  Internal — the project is `mcpbrain-498206` (not the old personal `itsjoshuakemp` client),
+  and `gmail.readonly` is a RESTRICTED scope whose External use would have forced a
+  verification review or a 100-user cap that nothing here records hitting — but that is
+  inference, not verification. **Check it once and record the answer here.** Rotating the
+  secret remains the separate, deliberate decision it always was: on Google, regenerating an
+  installed-app secret invalidates existing refresh tokens, i.e. a fleet-wide re-consent
+  event for every user.
+- **Superseded (kept for the detail): the tenant-profile plan as of 2026-09-08 was
+  IMPLEMENTED and COMMITTED to `main`, NOT released** — version files unchanged, per the plan's
   own Global Constraints. `docs/superpowers/plans/2026-09-02-tenant-profile.md` /
   `docs/superpowers/specs/2026-09-02-tenant-profile-design.md`. `mcpbrain/tenant.py`
   replaces `org_defaults.py`; every fleet/escrow/index call site now degrades to
