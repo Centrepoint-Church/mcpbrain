@@ -311,17 +311,47 @@ def _default_fetch(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
-def check_online(prof: TenantProfile, *, drive=None, fetch=None) -> list[str]:
+def _gh_repo_probe(owner: str, repo: str) -> bool | None:
+    """True/False if `gh` can definitively say whether the repo exists, else None.
+
+    A private repo 404s to an UNAUTHENTICATED fetch exactly as a nonexistent one
+    does, so an anonymous GET cannot tell "correctly private" from "you typo'd the
+    owner". `gh` is already this project's GitHub tool and carries the user's auth,
+    so ask it first and fall back to "cannot tell" rather than guessing.
+    """
+    import shutil
+    import subprocess
+    if not shutil.which("gh"):
+        return None
+    try:
+        r = subprocess.run(["gh", "api", f"repos/{owner}/{repo}", "--jq", ".name"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 0:
+        return True
+    # Distinguish "authenticated and it is really not there" from "not logged in".
+    if "Could not resolve to a Repository" in r.stderr or "HTTP 404" in r.stderr:
+        return False
+    return None
+
+
+def check_online(prof: TenantProfile, *, drive=None, fetch=None,
+                 repo_probe=None) -> tuple[list[str], list[str]]:
     """Network checks: Drive folders resolve and are writable, the index serves
     mcpbrain, the marketplace repo exists.
 
-    `drive` is a googleapiclient Drive v3 resource and `fetch` a url->text callable;
-    both are injected so this is testable without a network or credentials. A blank
+    Returns (problems, notes). A problem fails the check; a note is reported and
+    does not. `drive` is a googleapiclient Drive v3 resource, `fetch` a url->text
+    callable and `repo_probe` an (owner, repo) -> bool | None callable; all three
+    are injected so this is testable without a network or credentials. A blank
     optional field is SKIPPED, not failed — a tenant running without fleet or backup
     is a valid tenant.
     """
     problems: list[str] = []
+    notes: list[str] = []
     fetch = fetch or _default_fetch
+    repo_probe = repo_probe or _gh_repo_probe
 
     for field in ("fleet_folder_id", "escrow_folder_id"):
         folder_id = getattr(prof, field)
@@ -358,9 +388,21 @@ def check_online(prof: TenantProfile, *, drive=None, fetch=None) -> list[str]:
             if "mcpbrain" not in body:
                 problems.append(f"index_url: {url} does not list any mcpbrain wheel")
 
-    try:
-        fetch(prof.plugin_homepage)
-    except Exception as exc:  # noqa: BLE001
-        problems.append(f"marketplace: {prof.plugin_homepage} unreachable ({exc}). "
-                        f"Expected for a private repo — confirm by hand.")
-    return problems
+    # The plugin repo is normally PRIVATE (mcpbrain-plugin is), and a private repo
+    # 404s anonymously exactly as a nonexistent one does. Failing on that made this
+    # check exit non-zero for the correct configuration — a permanently red check
+    # is one people stop reading. So: only a DEFINITIVE "not there" is a problem.
+    exists = repo_probe(prof.marketplace_owner, prof.marketplace_repo)
+    if exists is False:
+        problems.append(
+            f"marketplace: {prof.plugin_homepage} does not exist — check "
+            f"tenant.json's marketplace_owner/marketplace_repo")
+    elif exists is None:
+        try:
+            fetch(prof.plugin_homepage)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(
+                f"marketplace: could not verify {prof.plugin_homepage} ({exc}). "
+                f"Expected when the repo is private and `gh` is unavailable or "
+                f"logged out — confirm by hand.")
+    return problems, notes

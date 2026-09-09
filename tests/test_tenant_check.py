@@ -183,7 +183,8 @@ def test_online_passes_when_folders_and_index_are_good(tmp_path):
     drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
     def fetch(url):
         return '<a href="mcpbrain-0.1.0-py3-none-any.whl">x</a>' if "mcpbrain" in url else "<a href=\"mcpbrain/\">mcpbrain</a>"
-    assert tenant.check_online(prof, drive=drive, fetch=fetch) == []
+    assert tenant.check_online(prof, drive=drive, fetch=fetch,
+                               repo_probe=lambda o, r: True)[0] == []
 
 
 def test_a_folder_id_that_is_not_a_folder_is_reported(tmp_path):
@@ -191,7 +192,8 @@ def test_a_folder_id_that_is_not_a_folder_is_reported(tmp_path):
     drive = _FakeDrive({"FLEET1": {"mimeType": "application/pdf", "driveId": "0ABC",
                                    "capabilities": {"canAddChildren": False}},
                         "ESCROW1": _FOLDER})
-    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain")
+    problems, _ = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain",
+                                      repo_probe=lambda o, r: True)
     assert any("fleet_folder_id" in p and "folder" in p for p in problems)
 
 
@@ -201,14 +203,16 @@ def test_a_folder_on_my_drive_not_a_shared_drive_is_reported(tmp_path):
     mydrive = {"mimeType": "application/vnd.google-apps.folder",
                "capabilities": {"canAddChildren": True}}      # no driveId
     drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": mydrive})
-    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain")
+    problems, _ = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain",
+                                      repo_probe=lambda o, r: True)
     assert any("escrow_folder_id" in p and "Shared Drive" in p for p in problems)
 
 
 def test_an_index_that_does_not_list_mcpbrain_is_reported(tmp_path):
     prof = tenant.load_dict(_profile())
     drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
-    problems = tenant.check_online(prof, drive=drive, fetch=lambda u: "<html></html>")
+    problems, _ = tenant.check_online(prof, drive=drive, fetch=lambda u: "<html></html>",
+                                      repo_probe=lambda o, r: True)
     assert any("index_url" in p for p in problems)
 
 
@@ -224,4 +228,60 @@ def test_blank_optional_fields_are_skipped_not_failed(tmp_path):
     """
     prof = tenant.load_dict(_profile(fleet_folder_id="", escrow_folder_id="",
                                      index_url=""))
-    assert tenant.check_online(prof, drive=None, fetch=lambda u: "ok") == []
+    assert tenant.check_online(prof, drive=None, fetch=lambda u: "ok",
+                               repo_probe=lambda o, r: True)[0] == []
+
+
+# --- marketplace reachability: a private repo must not be a permanent failure ---
+
+def test_an_unreachable_marketplace_is_a_note_not_a_failure():
+    """mcpbrain-plugin is PRIVATE by design, so an unauthenticated fetch always
+    404s. Treating that as a failure made `check --online` exit 1 for the normal,
+    correct configuration — and a check that is always red is one people learn to
+    ignore. Found live on 2026-09-09 against the real Centrepoint profile.
+    """
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
+
+    def fetch(url):
+        if "github.com" in url:
+            raise Exception("HTTP Error 404: Not Found")
+        return "mcpbrain"
+
+    problems, notes = tenant.check_online(prof, drive=drive, fetch=fetch,
+                                          repo_probe=lambda o, r: None)
+    assert problems == [], f"a private-repo 404 must not fail the check: {problems}"
+    assert any("marketplace" in n for n in notes), "but it must still be reported"
+
+
+def test_a_marketplace_repo_that_definitively_does_not_exist_is_a_failure():
+    """When an authenticated probe can tell the difference, a missing repo is a
+    real problem — a fork that typo'd marketplace_owner should hear about it."""
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
+    problems, _ = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain",
+                                      repo_probe=lambda o, r: False)
+    assert any("marketplace" in p for p in problems)
+
+
+def test_a_confirmed_marketplace_repo_is_silent():
+    prof = tenant.load_dict(_profile())
+    drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
+    problems, notes = tenant.check_online(prof, drive=drive, fetch=lambda u: "mcpbrain",
+                                          repo_probe=lambda o, r: True)
+    assert problems == [] and notes == []
+
+
+def test_no_online_test_falls_through_to_the_real_gh(monkeypatch):
+    """repo_probe defaults to shelling out to `gh`. Every test above injects it;
+    this pins that, because a default that reaches the network turns a unit suite
+    into a flaky integration suite (two tests here did exactly that before the
+    injection was added)."""
+    def _explode(*a, **k):
+        raise AssertionError("a test reached the real gh probe")
+    monkeypatch.setattr(tenant, "_gh_repo_probe", _explode)
+    prof = tenant.load_dict(_profile())
+    problems, notes = tenant.check_online(
+        prof, drive=_FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER}),
+        fetch=lambda u: "mcpbrain", repo_probe=lambda o, r: True)
+    assert problems == [] and notes == []
