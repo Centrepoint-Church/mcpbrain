@@ -416,9 +416,11 @@ wrong and MUST be right:
   keyword-search rank into the gold set's top 10 (a specific, direct token
   match, not a diffuse corpus-wide BM25 stat shift). Vector search and the
   `recall_max_distance` injection gate were spot-checked identical pre/post
-  on real queries (unaffected — vectors are copied byte-exact). **Follow-up,
-  not fixed here (out of this docs-only task's scope):**
-  `patch_chunk_metadata` (and any other metadata-only writer) needs to
+  on real queries (unaffected — vectors are copied byte-exact). **~~Follow-up, not fixed here~~ — DONE.**
+  `patch_chunk_metadata` now writes
+  `UPDATE chunks SET metadata=?, fts_context_version=0` (`store.py:2660`) so
+  `reindex_fts_batch`'s `< FTS_CONTEXT_VERSION` selector picks the row back up;
+  pinned by `tests/test_chunk_metadata.py`. It was recorded here as needing to
   refresh the `fts_chunks` mirror, or at least reset `fts_context_version` to
   0, whenever it touches a metadata field `_fts_text`/`contextual_prefix`
   reads — otherwise the exact same drift resumes on the very next Drive sync
@@ -564,8 +566,11 @@ wrong and MUST be right:
   the binding constraint: measured against all 930 still-unchunked oversize notes,
   `overlap=0` rescues **zero** of them. So the rule is "any note containing at least one
   paragraph longer than ~1,600 chars", and **it cannot be fixed by tuning `chunk_text`.**
-  **OPEN FOLLOW-UP, not done:** 930 notes still hold **16,022,678 chars of tail that no
-  vector covers** — the sweep fixed 250 notes / 3.27M chars, i.e. ~17% of the problem. The
+  **~~OPEN FOLLOW-UP~~ — CLOSED in 0.7.120 by `chunking.split_lossless`; re-verified
+  live 2026-09-09 (zero note chunks over the 4,000-char embed window). The paragraph
+  below is kept because the DIAGNOSIS is still the useful part — do not re-derive it,
+  and do not read it as open work.** At the time: 930 notes held **16,022,678 chars of
+  tail that no vector covered** — the sweep fixed 250 notes / 3.27M chars, i.e. ~17% of the problem. The
   W2 capture-path and sweep are both correct and safe; the recall hole they were meant to
   close is still mostly open. Closing it needs a DIFFERENT mechanism than re-chunking in
   place — most likely keeping the canonical full-text row and writing ADDITIONAL

@@ -21,6 +21,16 @@ parallel by default), ruff, `uv build`, Google Drive API v3 (`google-api-python-
 
 **Spec:** `docs/superpowers/specs/2026-09-02-tenant-profile-design.md`
 
+> **STATUS: EXECUTED AND RELEASED in 0.7.125 (2026-09-09).** All 13 tasks are
+> done and verified against the running system, not just the diff — see CLAUDE.md's
+> current-state entry. The `- [ ]` boxes below were never ticked during execution;
+> they are left as written so the plan still reads as the instruction it was. Do not
+> re-run it. Two defects in this plan's own output were found afterwards by running
+> the commands rather than the tests, and are fixed on `main` for the next release:
+> `doctor`'s version-drift remedy named only Claude Desktop, and `tenant check
+> --online` failed permanently because it probed the deliberately-private plugin
+> repo anonymously.
+
 **Rebased 2026-09-08** onto 33 commits of sync-queue / shared-drive work (releases
 0.7.123 and 0.7.124). None of it conflicts with this design — the new sync code
 reaches the fleet folder through `fleet_storage.fleet_folder_id`, which already
