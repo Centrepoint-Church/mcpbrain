@@ -84,8 +84,9 @@ re-running the `brain-enrich-hourly` task on demand.
 Three repos under the **Centrepoint-Church** org:
 
 - **`mcpbrain`** — source of truth (this repo).
-- **`mcpbrain-dist`** — public PEP 503 wheel index on GitHub Pages
-  (`…/mcpbrain-dist/simple/`). `update.py`'s `DEFAULT_INDEX_URL` points here, so a
+- **`mcpbrain` branch `gh-pages`** — public PEP 503 wheel index on GitHub Pages
+  (`…/mcpbrain/simple/`), an orphan branch of this repo rather than a separate
+  `mcpbrain-dist` repo (moved 2026-09-09). `tenant.json`'s `index_url` points here, so a
   published bump auto-updates installed daemons within ~a day.
 - **`mcpbrain-plugin`** — public plugin assets, distributed to staff via the org
   plugin marketplace.

@@ -9,11 +9,15 @@ whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goe
 
 - **`Centrepoint-Church/mcpbrain`** — private source repo (this repo). The daemon
   source of truth.
-- **`Centrepoint-Church/mcpbrain-dist`** — public PEP 503 wheel index served via
-  GitHub Pages at `https://centrepoint-church.github.io/mcpbrain-dist/simple/`.
-  Contains only `simple/` (the index + the current wheel). This is the URL the
-  shipped `update.py` `DEFAULT_INDEX_URL` pulls from, so a published bump
-  auto-updates installed daemons within ~a day.
+- **`Centrepoint-Church/mcpbrain` branch `gh-pages`** — the public PEP 503 wheel
+  index, served by GitHub Pages at `https://centrepoint-church.github.io/mcpbrain/simple/`.
+  An **orphan branch** in this same repo (it shares no history with `main`, so
+  wheels never enter `main`'s history or a source checkout). This is the URL
+  `tenant.json`'s `index_url` points at, so a published bump auto-updates installed
+  daemons within ~a day.
+  *Was a separate `mcpbrain-dist` repo until 2026-09-09.* GitHub Pages publishes
+  from any branch, so the fourth repo was never needed. Moving it was safe only
+  because there was exactly one install — see the migration warning in §1b.
 - **`Centrepoint-Church/mcpbrain-plugin`** — public plugin assets (skills, hooks,
   commands, `.claude-plugin/{plugin,marketplace}.json`). Distributed to staff
   through the org **plugin marketplace**. Note: the plugin's `.mcp.json` bundles
@@ -24,9 +28,9 @@ whatever `mcpbrain/__init__.py` says — do not hard-code it in this doc (it goe
   `bin/mcpbrain-{mcp,monitor}` shims and the `monitors/` health monitor were
   removed in 0.7.96; `mcpbrain doctor` covers health on demand.
 
-Local clones used for publishing live at `~/GitHub/mcpbrain-dist` and
-`~/GitHub/mcpbrain-plugin`, both with `origin` = the Centrepoint-Church
-repos. **Always confirm the remote is the org** before pushing
+Publishing uses a **git worktree** of `gh-pages` at `~/GitHub/mcpbrain-pages`
+(create once per machine: `git worktree add ~/GitHub/mcpbrain-pages gh-pages`) plus
+a clone of `mcpbrain-plugin` at `~/GitHub/mcpbrain-plugin`. **Always confirm the remote is the org** before pushing
 (`git -C <clone> remote get-url origin`) — older runbooks referenced a personal
 `itsjoshuakemp` org that is no longer used.
 
@@ -40,7 +44,7 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    settings (see step 2 below) — ideally **required/default** so it auto-installs.
 2. The colleague pastes the `plugin/INSTALL.md` prompt into a **Claude Code
    (Desktop)** session. It installs uv if missing, then:
-   `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" "mcpbrain[daemon]" --force`,
+   `uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/" "mcpbrain[daemon]" --force`,
    and runs `mcpbrain setup`.
 3. `mcpbrain setup` registers the login agent (launchd/schtasks), **connects the
    brain to Claude Desktop** by writing `mcpbrain` into the Desktop MCP config
@@ -84,12 +88,15 @@ uv run ruff check mcpbrain/                                            # clean
 git add -A && git commit -m "chore(release): bump to <version>" && git push origin main
 ```
 
-### 1b. Build + publish the wheel to `mcpbrain-dist`
+### 1b. Build + publish the wheel to the `gh-pages` branch
+
+The index lives on an orphan branch of this repo. Use a worktree so you never have
+to switch `main` out from under yourself:
 
 ```bash
-git -C ~/GitHub/mcpbrain-dist remote get-url origin   # MUST be Centrepoint-Church/mcpbrain-dist
-git -C ~/GitHub/mcpbrain-dist pull --ff-only
-uv run python bin/release.py --dist ~/GitHub/mcpbrain-dist
+git worktree add ~/GitHub/mcpbrain-pages gh-pages     # ONCE per machine; skip if it exists
+git -C ~/GitHub/mcpbrain-pages pull --ff-only
+uv run python bin/release.py --dist ~/GitHub/mcpbrain-pages
 ```
 
 **⚠️ Stale-wheel gotcha:** `bin/release.py` copies every `mcpbrain-*.whl` it finds in
@@ -98,12 +105,20 @@ old version reappears unless you purge it from **both** places, then regenerate:
 
 ```bash
 rm -f dist/mcpbrain-<OLD>-py3-none-any.whl                                  # source build dir
-rm -f ~/GitHub/mcpbrain-dist/simple/mcpbrain/mcpbrain-<OLD>-py3-none-any.whl
-uv run python bin/release.py --dist ~/GitHub/mcpbrain-dist        # regenerate index
-ls ~/GitHub/mcpbrain-dist/simple/mcpbrain/                        # expect ONLY the new wheel
-cd ~/GitHub/mcpbrain-dist && git add -A \
-  && git commit -m "release: mcpbrain <version>" && git push origin main
+rm -f ~/GitHub/mcpbrain-pages/simple/mcpbrain/mcpbrain-<OLD>-py3-none-any.whl
+uv run python bin/release.py --dist ~/GitHub/mcpbrain-pages       # regenerate index
+ls ~/GitHub/mcpbrain-pages/simple/mcpbrain/                       # expect ONLY the new wheel
+cd ~/GitHub/mcpbrain-pages && git add -A \
+  && git commit -m "release: mcpbrain <version>" && git push origin gh-pages
 ```
+
+**⚠️ Never change `index_url` while more than one machine is installed.** An install
+auto-updates from the URL baked into **its own installed wheel**, so a machine that
+does not pick up a wheel carrying the new URL stops updating forever and says
+nothing. If it ever has to move again: publish to the OLD index a wheel carrying
+the NEW url, keep the old index alive until every machine reports the new version,
+then retire it. The 2026-09-09 move skipped all of that because there was exactly
+one install.
 
 `update.py` picks the highest PEP 440 version, so multiple wheels are *functionally*
 fine — but keep the index to the current wheel for clarity.
@@ -149,9 +164,9 @@ in a `.DS_Store`, `git rm --cached` it before pushing.
 ### 1d. Verify the release is live
 
 ```bash
-curl -fsS https://centrepoint-church.github.io/mcpbrain-dist/simple/mcpbrain/ \
+curl -fsS https://centrepoint-church.github.io/mcpbrain/simple/mcpbrain/ \
   | grep -o 'mcpbrain-[0-9.]*-py3-none-any.whl' | sort -u    # expect the new version only
-curl -fsSI https://centrepoint-church.github.io/mcpbrain-dist/install.ps1   | head -1   # 200
+curl -fsSI https://centrepoint-church.github.io/mcpbrain/install.ps1   | head -1   # 200
 ```
 
 GitHub Pages can lag ~1 min. Installed daemons auto-update on their next ~daily check.
@@ -178,7 +193,7 @@ what a machine's auto-update actually gets, dependencies included. It is how you
 ```bash
 printf 'mcpbrain[daemon]\n' > /tmp/fleet-req.in
 uv pip compile /tmp/fleet-req.in \
-  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" \
+  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/" \
   --quiet -o /tmp/fleet-resolved.txt
 grep -iE '^(mcpbrain|mcp|mcp-types|fastembed)==' /tmp/fleet-resolved.txt
 ```
@@ -192,7 +207,7 @@ get is the only one that counts:
 ```bash
 launchctl bootout gui/$(id -u)/com.mcpbrain
 uv tool install --python 3.12 \
-  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" \
+  --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/" \
   "mcpbrain[daemon]" --upgrade --reinstall-package mcpbrain
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
 mcpbrain doctor
@@ -272,10 +287,10 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
 **Architecture note:** Windows uses **x64 Python under emulation on ARM64** machines. Native ARM64 wheels are not available for sqlite-vec, cryptography, pymupdf, and leidenalg, so the installer probes the machine, detects ARM64, and provisions the x64 Python runtime + VC++ runtime. The daemon runs with emulation overhead but no translation via Rosetta. Confirm `mcpbrain doctor` reports the correct architecture (`ARM64` vs. `X64`).
 
 - [ ] **ARM64 box — x64-under-emulation (clean install)**
-  - Download `install.ps1` from `https://centrepoint-church.github.io/mcpbrain-dist/install.ps1`
+  - Download `install.ps1` from `https://centrepoint-church.github.io/mcpbrain/install.ps1`
   - Run it from a clean Windows install (no mcpbrain present):
     ```powershell
-    irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
+    irm https://centrepoint-church.github.io/mcpbrain/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
     & "$env:TEMP\mcpbrain-install.ps1"
     ```
   - Confirm `install.ps1` (via uv) installs an **x64** Python + the **x64** VC++ redist — not native ARM64 (native-ARM64 isn't viable: several dependencies ship no ARM64 Windows wheels)
@@ -314,7 +329,7 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 - [ ] **1. Install plugin → paste `plugin/INSTALL.md` prompt** on a clean Windows
   machine.
 - [ ] **2. uv + wheel install; PATH correct** — the prompt runs the
-  `uv tool install … --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" …`
+  `uv tool install … --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/" …`
   step; `mcpbrain --version` resolves in a fresh shell (validates uv shim + PATH).
 - [ ] **3. `mcpbrain setup` registers daemon + tray via schtasks** — confirm both:
   `schtasks /query /tn mcpbrain` and `schtasks /query /tn mcpbrain-tray` (or

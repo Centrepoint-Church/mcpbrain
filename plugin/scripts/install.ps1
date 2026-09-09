@@ -1,6 +1,6 @@
 param([switch]$DotSourceOnly)
 
-$INDEX = "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/"
+$INDEX = "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/"
 # Force an x64 CPython so uv pulls the x64 wheels (all deps ship x64; several ship
 # NO win_arm64). x64 runs natively on x64 and under Prism emulation on ARM64.
 $PY_REQUEST = "cpython-3.12-windows-x86_64"

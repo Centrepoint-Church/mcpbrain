@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build a wheel and refresh the PEP 503 index in the dist repo.
 
-Usage: python bin/release.py --dist /path/to/mcpbrain-dist
+Usage: python bin/release.py --dist /path/to/gh-pages-worktree
 Builds mcpbrain (`uv build --wheel`), copies the wheel into <dist>/simple/mcpbrain/,
-and regenerates the two index.html files. The maintainer then commits + pushes the
-dist repo (GitHub Pages serves it). Bump mcpbrain.__version__ + pyproject before running.
+and regenerates the two index.html files. The maintainer then commits + pushes that
+worktree (GitHub Pages serves the repo's gh-pages branch). Bump mcpbrain.__version__ + pyproject before running.
 """
 import argparse
 import json
@@ -60,7 +60,7 @@ def copy_installer(repo: Path, dist: Path) -> Path | None:
     """Publish plugin/scripts/install.ps1 to the dist repo root.
 
     Windows installs fetch this from GitHub Pages
-    (…/mcpbrain-dist/install.ps1), but the source of truth is this repo. It used
+    (…/mcpbrain/install.ps1), but the source of truth is this repo. It used
     to be hand-copied at release time with nothing verifying it, so a fixed
     installer could sit unpublished for releases at a time. Returns the written
     path, or None if the source is missing.
@@ -75,7 +75,8 @@ def copy_installer(repo: Path, dist: Path) -> Path | None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dist", required=True, help="path to the public dist repo checkout")
+    ap.add_argument("--dist", required=True,
+                    help="path to the gh-pages worktree (see docs/RELEASE-RUNBOOK.md 1b)")
     ap.add_argument("--repo", default=".", help="path to the mcpbrain source repo")
     ns = ap.parse_args(argv)
     # Wipe stale build intermediates first. setuptools reuses build/lib, so a file

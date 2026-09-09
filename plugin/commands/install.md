@@ -10,13 +10,13 @@ Install and set up mcpbrain. Run this in **Claude Code** (it needs to run shell 
 ```bash
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain-dist/simple/" "mcpbrain[daemon]" --force
+uv tool install --python 3.12 --index "mcpbrain=https://centrepoint-church.github.io/mcpbrain/simple/" "mcpbrain[daemon]" --force
 mcpbrain setup
 ```
 
 *Windows (PowerShell):*
 ```powershell
-irm https://centrepoint-church.github.io/mcpbrain-dist/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
+irm https://centrepoint-church.github.io/mcpbrain/install.ps1 -OutFile "$env:TEMP\mcpbrain-install.ps1"
 & "$env:TEMP\mcpbrain-install.ps1"
 mcpbrain doctor
 ```
