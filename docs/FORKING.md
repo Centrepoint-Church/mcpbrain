@@ -70,8 +70,12 @@ leave the corresponding profile fields blank.
 ## 3. GitHub
 
 - Fork or copy `mcpbrain` — your source repo.
-- Create `<your-org>/mcpbrain-dist`, **public**, with GitHub Pages enabled on
-  `main` / root. This serves your wheel index.
+- **Optional (auto-updates):** serve a wheel index. You do **not** need a second
+  repo — GitHub Pages publishes from any branch, so an orphan `gh-pages` branch on
+  your own fork works, which is what Centrepoint does:
+  `git checkout --orphan gh-pages`, add a `.nojekyll`, push, and enable Pages on
+  that branch at root. Skip entirely to install from a checkout instead, and leave
+  `index_url` blank.
 - Create `<your-org>/mcpbrain-plugin`, private, for the plugin mirror.
 - Create `<your-org>/mcpbrain-tenant`, **private**, holding
   `google_oauth_client.json` (the client you downloaded in step 1) and a reference

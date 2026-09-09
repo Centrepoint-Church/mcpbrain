@@ -6,33 +6,42 @@ checks the same index daily to self-update.
 
 ---
 
-## One-time setup: create the distribution repo
+## One-time setup: publish a wheel index
 
-1. Create a **public** GitHub repository named `mcpbrain-dist` (or any name you
-   like) under the account/org that will own the distribution.
+The index is served by **GitHub Pages from an orphan `gh-pages` branch of the source
+repo itself.** A separate repo works too, but is not needed — Pages publishes from
+any branch, and an orphan branch keeps wheels out of `main`'s history and out of
+every source checkout. Centrepoint used a separate `mcpbrain-dist` repo until
+2026-09-09 and folded it back in.
 
-2. Enable **GitHub Pages** on the repo:
-   - Settings → Pages → Source: Deploy from branch → `main` / `(root)`.
-   - The Pages URL will be `https://<your-org>.github.io/mcpbrain-dist/`.
-   - The wheel index lives at `.../simple/`, so the full index URL is
-     `https://<your-org>.github.io/mcpbrain-dist/simple/`.
+1. Create the branch and enable Pages:
 
-3. Initialise the repo with a `simple/` directory.  After your first
-   `bin/release.py` run it will contain:
-
-   ```
-   simple/
-     index.html              # root PEP 503 index
-     mcpbrain/
-       index.html            # package index
-       mcpbrain-<ver>-py3-none-any.whl
+   ```bash
+   git checkout --orphan gh-pages
+   git rm -rf .                      # orphan starts with main's tree staged
+   touch .nojekyll                   # REQUIRED: Jekyll skips _-prefixed paths
+   git add -A && git commit -m "wheel index" && git push -u origin gh-pages
    ```
 
-4. **Set the index URL.** It lives in your tenant profile:
-   `mcpbrain/tenant.json` → `index_url`. See `docs/FORKING.md`.
+   Then Settings → Pages → Source: Deploy from branch → `gh-pages` / `(root)`.
+   The index URL is `https://<your-org>.github.io/<repo>/simple/`.
 
-   **Or** set the environment variable `MCPBRAIN_INDEX_URL` / config key
-   `update_index_url` to override without touching the profile.
+2. Work through a **worktree**, so you never switch `main` out from under yourself:
+
+   ```bash
+   git worktree add ../mcpbrain-pages gh-pages
+   ```
+
+3. **Set the index URL** in your tenant profile: `mcpbrain/tenant.json` →
+   `index_url`. Leave it blank to run without auto-updates. See `docs/FORKING.md`.
+
+   **Or** set `MCPBRAIN_INDEX_URL` / config key `update_index_url` to override
+   without touching the profile.
+
+**Never move a live `index_url`** once more than one machine is installed: an
+install auto-updates from the URL baked into its own installed wheel, so any
+machine that misses the changeover stops updating silently. Publish the new URL via
+the old index first and retire the old one only when every machine reports in.
 
 ### URL resolution order (from `update.py:_index_url()`)
 
@@ -58,12 +67,13 @@ checks the same index daily to self-update.
    - `plugin/.claude-plugin/plugin.json` (`version`)
    - `plugin/.claude-plugin/marketplace.json` (`plugins[0].version`)
 
-2. Check out (or clone) your `mcpbrain-dist` repo alongside the source repo.
+2. Make sure the `gh-pages` worktree exists alongside the source repo
+   (`git worktree add ../mcpbrain-pages gh-pages`).
 
 3. Run:
 
    ```bash
-   python bin/release.py --dist /path/to/mcpbrain-dist
+   python bin/release.py --dist ../mcpbrain-pages
    ```
 
    The script (`bin/release.py`) does the following:
@@ -79,10 +89,10 @@ checks the same index daily to self-update.
 4. Commit and push the dist repo:
 
    ```bash
-   cd /path/to/mcpbrain-dist
+   cd ../mcpbrain-pages
    git add .
    git commit -m "release mcpbrain vX.Y.Z"
-   git push
+   git push origin gh-pages
    ```
 
    GitHub Pages publishes the updated index within ~1 minute.

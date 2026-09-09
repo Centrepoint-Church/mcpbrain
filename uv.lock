@@ -797,7 +797,7 @@ wheels = [
 
 [[package]]
 name = "mcpbrain"
-version = "0.7.126"
+version = "0.7.127"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
