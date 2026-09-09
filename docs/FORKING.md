@@ -76,10 +76,21 @@ leave the corresponding profile fields blank.
   `git checkout --orphan gh-pages`, add a `.nojekyll`, push, and enable Pages on
   that branch at root. Skip entirely to install from a checkout instead, and leave
   `index_url` blank.
-- Create `<your-org>/mcpbrain-plugin`, private, for the plugin mirror.
-- Create `<your-org>/mcpbrain-tenant`, **private**, holding
-  `google_oauth_client.json` (the client you downloaded in step 1) and a reference
-  copy of your `tenant.json`.
+- **Optional (plugin distribution):** create `<your-org>/mcpbrain-plugin`. It
+  **must be private or internal** — claude.ai organization-settings distribution
+  requires that, reads it through the Claude GitHub App, and packages the plugin
+  for each user, so nobody needs access to it. Skip this and leave the three
+  `marketplace_*` fields blank if you are not distributing a plugin;
+  `mcpbrain setup` registers the MCP connector either way.
+- **Required:** a **private** home for your OAuth client. A repo
+  (`<your-org>/mcpbrain-tenant`) is the tidy option, since `bin/tenant.py use`
+  takes a directory and a repo gives it history and lets you grant a colleague
+  access — but any private directory works. It holds:
+  - `google_oauth_client.json` — the client you downloaded in step 1 (**required**)
+  - `tenant.json` — a reference copy (optional; the committed one in your fork wins
+    unless this is present)
+  - `eval/golden_retrieval_set*.yaml` — your curated retrieval gold cases, once you
+    have any (optional; see §4b)
 
 ## 4. Fill in the profile
 
