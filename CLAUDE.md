@@ -87,7 +87,45 @@ wrong and MUST be right:
   `check_offline` — but only after hand-editing **five install-surface files** step 4 never
   mentioned (`marketplace.json`, `plugin.json`, `install.ps1`, `commands/install.md`,
   `INSTALL.md`). The checker caught each one, but the doc now names them up front.
-  **OPEN, and it needs the GCP console — nobody has ever recorded whether the consent
+  **The BIGGER public-repo exposure was not the secret — it was the gold eval set
+  (found and removed 2026-09-09).** `tests/eval/golden_retrieval_set.yaml` (30 cases)
+  and `..._mcpbrain_candidate.yaml` (20) carried real Centrepoint content in a PUBLIC
+  repo since 2026-06-16: `notes:` fields naming staff tied to **employment
+  agreements**, a **2018 EOY performance review**, and **WWCC / Safer-Churches
+  training status**, plus queries mapping campuses, Miracle Offering, Singleton
+  tithes, Byford Lotterywest scenarios, the ACC grievance procedure and a Safer
+  Church audit. The documents themselves were never reachable (chunk ids are opaque
+  pointers into one Google account) — the descriptions were.
+  **The tenant-literal guard could not have caught this, by design:** the spec
+  excludes `tests/` as "fixtures and history", which is correct for a `slugify`
+  assertion and wrong for a curated corpus about real people. **If anything else
+  real ever lands under `tests/`, nothing will flag it — the exclusion is a
+  deliberate blind spot, so treat `tests/eval/` as data, not fixtures.**
+  Fixed by treating a gold set as what it is: **tenant data.** Its chunk ids point
+  into one organisation's own store, so a fork cannot use another's. Both files now
+  live in `mcpbrain-tenant/eval/` and take exactly the OAuth client's path — copied
+  in by `bin/tenant.py use`, gitignored here. `use_profile` gained
+  (source → destination) mapping and creates missing parents. Verified both
+  directions: present → the gold gate runs (8 passed against the live store);
+  absent → it skips honestly (`no gold cases file found`), which is what a fork gets.
+  **Same history caveat as the secret: removal is from HEAD only.** Unlike the
+  secret there is no rotation equivalent — the content is the content. It has been
+  public ~3 months and any clone or fork already has it.
+  **`ruff` is now PINNED `>=0.15,<0.16`.** It was `>=0.8`, which resolved to 0.15.16,
+  and each release adds rules to the default set — that is how a gate recorded as
+  "ruff clean" at one release silently reached 86 errors by the next with nothing to
+  say when it happened. An unpinned linter is a gate that redefines itself. Bump it
+  deliberately and fix the new findings in that same commit.
+  **Two defects in 0.7.125's own output, found by RUNNING the commands rather than
+  trusting the tests, fixed on `main` for the next release:** `doctor`'s
+  version-drift remedy said only "restart Claude Desktop", but a live MCP server
+  belongs to whichever client spawned it and two of five stale servers here were
+  `claude` CLI sessions 6-7 days old that no Desktop restart can touch; and
+  `tenant check --online` exited 1 permanently on the CORRECT configuration,
+  because it probed the deliberately-private `mcpbrain-plugin` anonymously and a
+  private repo 404s exactly as a nonexistent one does — it now asks `gh` first, so
+  a definitively-missing repo still fails while "cannot tell" degrades to a note.
+    **OPEN, and it needs the GCP console — nobody has ever recorded whether the consent
   screen is Internal.** `RELEASE-RUNBOOK.md` §3 *asks* the reader to confirm it and lists
   "Testing mode (≤100 users)" as a fallback; the 2026-06-15 plan's "Confirm it's the
   Centrepoint project with an Internal consent screen" checkbox is still unticked. It
