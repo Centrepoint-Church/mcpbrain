@@ -37,12 +37,20 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "tenant_id",
     "display_name",
     "oauth_project_id",
-    "marketplace_owner",
-    "marketplace_repo",
-    "marketplace_name",
 )
 
-_OPTIONAL_FIELDS: tuple[str, ...] = ("fleet_folder_id", "escrow_folder_id", "index_url")
+# Blank means the tenant runs without that feature — it must never mean "borrow
+# someone else's". A minimal fork needs ONE repo (their own source) plus a private
+# home for the OAuth client: no wheel index (install from the checkout) and no
+# marketplace at all, since `mcpbrain setup` registers the MCP connector — the
+# actual brain — with no plugin distribution involved.
+_OPTIONAL_FIELDS: tuple[str, ...] = (
+    "fleet_folder_id", "escrow_folder_id", "index_url",
+    "marketplace_owner", "marketplace_repo", "marketplace_name",
+)
+
+# All three or none: an owner with no repo is a typo, not a deliberate opt-out.
+_MARKETPLACE_FIELDS = ("marketplace_owner", "marketplace_repo", "marketplace_name")
 
 
 class TenantNotConfigured(RuntimeError):
@@ -54,20 +62,28 @@ class TenantProfile:
     tenant_id: str
     display_name: str
     oauth_project_id: str
-    marketplace_owner: str
-    marketplace_repo: str
-    marketplace_name: str
     fleet_folder_id: str | None = None
     escrow_folder_id: str | None = None
     index_url: str | None = None
+    marketplace_owner: str | None = None
+    marketplace_repo: str | None = None
+    marketplace_name: str | None = None
 
     @property
-    def marketplace_slug(self) -> str:
+    def has_marketplace(self) -> bool:
+        return bool(self.marketplace_owner and self.marketplace_repo
+                    and self.marketplace_name)
+
+    @property
+    def marketplace_slug(self) -> str | None:
+        if not self.has_marketplace:
+            return None
         return f"{self.marketplace_owner}/{self.marketplace_repo}"
 
     @property
-    def plugin_homepage(self) -> str:
-        return f"https://github.com/{self.marketplace_slug}"
+    def plugin_homepage(self) -> str | None:
+        slug = self.marketplace_slug
+        return None if slug is None else f"https://github.com/{slug}"
 
 
 def load_dict(raw: dict, source: str = "<dict>") -> TenantProfile:
@@ -84,6 +100,13 @@ def load_dict(raw: dict, source: str = "<dict>") -> TenantProfile:
         # "" is UNSET, not an empty value: the wizard clears a field to opt out of
         # the org fleet, and config.fleet_defaults has always read it that way.
         kwargs[field] = value.strip() if isinstance(value, str) and value.strip() else None
+    filled = [f for f in _MARKETPLACE_FIELDS if kwargs.get(f)]
+    if filled and len(filled) != len(_MARKETPLACE_FIELDS):
+        missing = [f for f in _MARKETPLACE_FIELDS if not kwargs.get(f)]
+        raise ValueError(
+            f"tenant profile {source}: marketplace is partially configured — "
+            f"{', '.join(missing)} missing. Set all of "
+            f"{', '.join(_MARKETPLACE_FIELDS)} or leave all blank.")
     return TenantProfile(**kwargs)  # type: ignore[arg-type]
 
 
@@ -223,30 +246,37 @@ def _check_client(repo: Path, prof: TenantProfile) -> list[str]:
 def _check_install_surface(repo: Path, prof: TenantProfile) -> list[str]:
     """Every shipped install surface must agree with tenant.json."""
     out: list[str] = []
-    mk = repo / "plugin" / ".claude-plugin" / "marketplace.json"
-    if mk.is_file():
-        name = json.loads(mk.read_text()).get("name")
-        if name != prof.marketplace_name:
-            out.append(f"{mk}: name {name!r} != tenant.json marketplace_name "
-                       f"{prof.marketplace_name!r}")
-    pj = repo / "plugin" / ".claude-plugin" / "plugin.json"
-    if pj.is_file():
-        home = json.loads(pj.read_text()).get("homepage")
-        if home != prof.plugin_homepage:
-            out.append(f"{pj}: homepage {home!r} != {prof.plugin_homepage!r}")
+    # A tenant with no marketplace ships no plugin, so there is nothing for these
+    # files to agree WITH — skip rather than invent a failure.
+    if prof.has_marketplace:
+        mk = repo / "plugin" / ".claude-plugin" / "marketplace.json"
+        if mk.is_file():
+            name = json.loads(mk.read_text()).get("name")
+            if name != prof.marketplace_name:
+                out.append(f"{mk}: name {name!r} != tenant.json marketplace_name "
+                           f"{prof.marketplace_name!r}")
+        pj = repo / "plugin" / ".claude-plugin" / "plugin.json"
+        if pj.is_file():
+            home = json.loads(pj.read_text()).get("homepage")
+            if home != prof.plugin_homepage:
+                out.append(f"{pj}: homepage {home!r} != {prof.plugin_homepage!r}")
     if prof.index_url:
         for rel in ("plugin/scripts/install.ps1", "plugin/commands/install.md"):
             p = repo / rel
             if p.is_file() and prof.index_url not in p.read_text():
                 out.append(f"{p}: does not carry tenant.json's index_url "
                            f"{prof.index_url!r}")
+    # The install docs must name the ORGANISATION, not a marketplace-add command.
+    # The plugin ships through claude.ai organization settings, so users install it
+    # from the app catalogue (Customize -> Plugins -> Browse plugins) and filter by
+    # the org name — that name is the thing a fork has to change, and the thing that
+    # is wrong if they do not. `claude plugin marketplace add` was checked for here
+    # and was the wrong path entirely: org-settings distribution requires a PRIVATE
+    # marketplace repo, so no user can add it by hand without repo credentials.
     inst = repo / "plugin" / "INSTALL.md"
-    if inst.is_file():
-        text = inst.read_text()
-        for cmd in (f"claude plugin marketplace add {prof.marketplace_slug}",
-                    f"claude plugin install mcpbrain@{prof.marketplace_name}"):
-            if cmd not in text:
-                out.append(f"{inst}: missing {cmd!r}")
+    if inst.is_file() and prof.display_name not in inst.read_text():
+        out.append(f"{inst}: does not name {prof.display_name!r} — users filter the "
+                   f"plugin catalogue by the organisation name")
     out.extend(_check_versions(repo))
     return out
 

@@ -58,6 +58,41 @@ wrong and MUST be right:
   `_gh_repo_probe`, and **no gold set**. This machine updated and verified against the
   RUNNING process — `/api/status` reports `0.7.126` (use `launchctl kickstart -k`, never
   stop/start: see the KeepAlive race below).
+  **RESEARCHED 2026-09-09 — the four-repo topology, settled against the actual docs
+  rather than assumption.** `mcpbrain-plugin` **must stay a separate PRIVATE repo**:
+  claude.ai organization-settings distribution *requires* the marketplace repository
+  to be private or internal (org sync reads it via the Claude GitHub App and packages
+  the plugin per user, so nobody needs access to it). Folding it into the public
+  source repo would break distribution — an earlier suggestion here to do exactly
+  that was WRONG. The current shape, plugin files inside the marketplace repo
+  referenced as `"source": "./"`, is what the docs recommend. The old fear about a
+  top-level `bin/` was also unfounded: a repo-root `bin/` "is not touched by Claude
+  Code", only a *plugin's* own `bin/` is restricted — moot now, but do not
+  re-litigate it. `mcpbrain-dist` genuinely IS eliminable (Pages publishes from any
+  branch, root or `/docs`, so a `gh-pages` orphan branch here would serve the index;
+  limits are irrelevant at 912 KB against a 1 GB ceiling) — **not done**, because
+  installs auto-update from the URL baked into their OWN installed wheel, so moving
+  it means shipping the new URL via the old index and keeping the old index alive
+  until the fleet rolls over, with a silent failure mode for anything that misses
+  the window. `mcpbrain-tenant` stays: secrets, public source. **Do not merge tenant
+  into plugin** — org sync gives an external GitHub App read access to that repo.
+  **Users install the plugin from the app catalogue** (Customize → Plugins → Browse
+  plugins → filter by org → Install), NOT via `claude plugin marketplace add`. The
+  docs said the latter for months and it cannot work for a private marketplace:
+  each person would need git credentials (GitHub shorthand clones over SSH by
+  default), and background refreshes disable credential helpers, silently pinning
+  them to whatever they first cloned. Three separate checks pinned the wrong command
+  (`test_install_docs_single_source`, `test_plugin_assets`, and `tenant._check_install_surface`);
+  all three now assert the ORG NAME appears instead — that is what a user filters
+  the catalogue by, and what a fork must change — plus a guard that fails if anyone
+  reintroduces the command as an instruction.
+  **A minimal fork is now ONE repo plus a private home for the OAuth client.** The
+  three `marketplace_*` fields were REQUIRED, which forced an org wanting no plugin
+  distribution to invent values and create a repo; they are optional now
+  (all-three-or-none — a partially filled marketplace is a typo and is rejected),
+  and `_check_install_surface` skips when none is configured. Verified end-to-end:
+  a fork tree with blank fleet/escrow/index/marketplace passes `check_offline`.
+  `docs/FORKING.md` §0 now maps what you need against what you want.
   **0.7.126 is the post-0.7.125 fix set** — the two defects found by running the commands
   rather than trusting the tests (`doctor`'s Desktop-only remedy; `tenant check --online`
   failing permanently on the correct configuration), the gold-set removal, the ruff pin,

@@ -36,20 +36,47 @@ def test_readme_describes_update_as_a_wheel_reinstall():
     assert "fast-forward" not in text, "update.py reinstalls from the wheel index, not git"
 
 
-def test_readme_marketplace_commands_match_install_md():
-    # README's cold-start block duplicates plugin/INSTALL.md's "Cold start" section
-    # rather than linking to it. They agree today; nothing else would notice when
-    # they stop, so pin the exact commands in both places. The commands are DERIVED
-    # from the tenant profile rather than hardcoded, so this keeps working in a fork
-    # instead of failing purely because the fork is not Centrepoint.
+def test_install_docs_name_the_tenant_organisation():
+    # README's cold-start block duplicates plugin/INSTALL.md's rather than linking
+    # to it. They agree today; nothing else would notice when they stop. The thing
+    # to pin is the ORG NAME, because that is what a user filters the app's plugin
+    # catalogue by — and it is what a fork must change. Derived from tenant.json so
+    # this keeps working in a fork instead of failing there by construction.
     from mcpbrain import tenant
     prof = tenant.require()
-    readme = (_ROOT / "README.md").read_text()
-    install_md = (_ROOT / "plugin" / "INSTALL.md").read_text()
-    for cmd in (f"claude plugin marketplace add {prof.marketplace_slug}",
-                f"claude plugin install mcpbrain@{prof.marketplace_name}"):
-        assert cmd in readme, f"README missing {cmd!r}"
-        assert cmd in install_md, f"plugin/INSTALL.md missing {cmd!r}"
+    for rel in ("README.md", "plugin/INSTALL.md"):
+        text = (_ROOT / rel).read_text()
+        assert prof.display_name in text, (
+            f"{rel} must name {prof.display_name!r} — it is what users filter the "
+            f"plugin catalogue by")
+        assert "Browse plugins" in text, f"{rel} must describe the catalogue flow"
+
+
+def test_install_docs_do_not_recommend_adding_the_marketplace_by_hand():
+    """`claude plugin marketplace add <owner>/<repo>` is the WRONG path for this
+    plugin and the docs told people to use it for months.
+
+    The plugin ships through claude.ai organization settings, which REQUIRES the
+    marketplace repository to be private or internal — org sync reads it via the
+    Claude GitHub App and packages the plugin per user, so nobody needs repo
+    access. Adding a private marketplace by hand instead needs every person to
+    hold git credentials (GitHub shorthand clones over SSH by default), and
+    background refreshes disable credential helpers, so the clone silently stops
+    updating and pins them to whatever they first cloned.
+
+    Users install from Customize -> Plugins -> Browse plugins -> filter by org.
+    """
+    for rel in ("README.md", "plugin/INSTALL.md"):
+        for n, line in enumerate((_ROOT / rel).read_text().splitlines(), 1):
+            stripped = line.strip()
+            # Allowed inside prose that explains why NOT to use it; banned as an
+            # instruction, i.e. at the start of a line or in a fenced command.
+            if stripped.startswith("claude plugin marketplace add") or \
+                    stripped.startswith("claude plugin install mcpbrain@"):
+                raise AssertionError(
+                    f"{rel}:{n} instructs `{stripped}` — org-settings distribution "
+                    f"requires a private marketplace repo, so this path does not "
+                    f"work for users. Point them at the app's plugin catalogue.")
 
 
 def test_canonical_install_command_keeps_the_daemon_alias():

@@ -14,6 +14,33 @@ encrypted backups into someone else's Shared Drive.
 `docs/RELEASE-RUNBOOK.md` is the release procedure. This document is the one-time
 setup that comes before both.
 
+## 0. Decide how much you need
+
+**The minimum is ONE repo plus a private home for your OAuth client.** Everything
+else is distribution machinery you add when you are ready to hand this to staff.
+
+| You want | Repos | Profile fields |
+|---|---|---|
+| **Just run it** (yourself, or a couple of people installing from a checkout) | your `mcpbrain` fork + a private place for `google_oauth_client.json` | `tenant_id`, `display_name`, `oauth_project_id` |
+| **+ automatic updates** for installed daemons | add a public dist repo with GitHub Pages | `index_url` |
+| **+ shared org graph and encrypted backups** | none — Shared Drive folders, not repos | `fleet_folder_id`, `escrow_folder_id` |
+| **+ plugin distribution** through the Claude app's org catalogue | add a **private** marketplace repo | `marketplace_owner`, `marketplace_repo`, `marketplace_name` |
+
+Blank fields disable their feature cleanly — a build with no `index_url` does not
+auto-update rather than updating from someone else's index, and one with no
+marketplace ships no plugin. **The marketplace three are all-or-nothing**: an owner
+with no repo is a typo, and `bin/tenant.py check` says so.
+
+`mcpbrain setup` registers the MCP connector — the actual brain — with no
+marketplace involved, so section 3 below is genuinely optional. **If you only want
+the minimum, do sections 1, 4 and 5 and skip the rest.**
+
+Note on the marketplace repo, if you add one: it **must be private or internal**.
+claude.ai organization-settings distribution requires that, reads it through the
+Claude GitHub App, and packages the plugin for each user — so nobody needs access
+to it, and users install from the app catalogue rather than by running
+`claude plugin marketplace add`.
+
 ## 1. Google Cloud
 
 1. Create a Google Cloud project.

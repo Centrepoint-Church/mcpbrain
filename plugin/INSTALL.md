@@ -46,14 +46,25 @@ prompts, so unattended runs don't stall.
 ## Cold start (no plugin yet)
 
 `/mcpbrain:install` only exists once the plugin is installed. On a brand-new machine
-without it, add the marketplace and install the plugin first, then run the command:
+without it, install the plugin from the organisation catalogue in the Claude app
+first, then run the command:
 
-```bash
-claude plugin marketplace add Centrepoint-Church/mcpbrain-plugin
-claude plugin install mcpbrain@centrepoint-church
-# then, in a Claude Code session:
-# /mcpbrain:install
-```
+1. Open **Customize** in the left sidebar.
+2. Open the **Plugins** tab.
+3. Click **Browse plugins**.
+4. Filter by **Centrepoint Church**.
+5. Click **Install** on the mcpbrain plugin.
+
+Then, in a Claude Code session: `/mcpbrain:install`.
+
+**Why not `claude plugin marketplace add`?** The plugin is distributed through
+claude.ai organization settings, which *requires* the marketplace repository to be
+private or internal — org sync reads it through the Claude GitHub App and packages
+the plugin per user, so no one needs repo access. Adding a private marketplace by
+hand would instead need each person to hold git credentials (GitHub shorthand clones
+over SSH by default), and background refreshes disable credential helpers, so the
+clone silently stops updating. Install from the catalogue and let org sync handle
+updates.
 
 ---
 
