@@ -3,7 +3,7 @@
 ## This is a distributed PLUGIN, not just a local app
 
 mcpbrain ships to other users as a **Claude Code plugin + a pip-installable package**.
-There are **three repos** (all under the `Centrepoint-Church` org), and a change only
+There are **four repos** (all under the `Centrepoint-Church` org; `mcpbrain-tenant` is private and carries the OAuth client), and a change only
 reaches users when the relevant ones are **pushed/released** — committing here and
 running `uv tool install` only affects *this* machine.
 
@@ -633,6 +633,15 @@ wrong and MUST be right:
   gotcha, both restarted. **Verified against the RUNNING process, not the files:** the
   control API reports `version: 0.7.121`, and the community cadence — dead for three days
   — has logged **zero** FK errors since the restart (last one 06:26, restart 07:13).
+  **A second restart trap, hit live on 2026-09-09:** `launchctl stop com.mcpbrain`
+  followed by `uv tool install --force` and then `launchctl start` leaves the OLD
+  code running. launchd's KeepAlive re-launches the daemon within seconds of the
+  stop — *during* the reinstall — so the later `start` is a no-op on an
+  already-running stale process. It reported `version: 0.7.124` while
+  site-packages held 0.7.125. Use **`launchctl kickstart -k gui/$(id -u)/com.mcpbrain`**
+  after the install instead, and always confirm against `/api/status` (which needs
+  `Authorization: Bearer $(cat "$MCPBRAIN_HOME/control_token")` — an unauthenticated
+  probe returns a bare 401 that is easy to misread as "daemon down").
   **A verification trap worth remembering:** running
   `<uv-tool-python> -c "import mcpbrain; ..."` from inside the repo imports the WORKING
   TREE, not site-packages (cwd is `sys.path[0]`), so it proves nothing about what is
