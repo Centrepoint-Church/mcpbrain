@@ -83,6 +83,27 @@ def test_action_create_and_dedupe(tmp_path, monkeypatch):
     assert acts[0]["source"] == "capture"
 
 
+def test_action_create_canonicalizes_owner_alias(tmp_path, monkeypatch):
+    # A caller (MCP tool caller, another agent) may pass an alias variant of
+    # the configured owner ("Josh Kemp" for owner_name="Joshua") instead of
+    # leaving owner empty. The written row must carry the canonical owner
+    # string, or it becomes invisible to brain_actions(owner="") (which
+    # matches config.owner_name() exactly).
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({
+        "owner_name": "Joshua", "owner_full_name": "Joshua Kemp",
+    }))
+    s = _store(tmp_path)
+    env = {"kind": "action_create", "captured_at": "x", "source": "desktop",
+           "text": "File the BAS", "owner": "joshua kemp", "deadline": "",
+           "org": "", "project_id": "", "area_id": ""}
+    _spool(tmp_path, "cap-1.json", env)
+    drain.drain_captures(s, home=tmp_path)
+    acts = s.unified_actions(status="open")
+    assert len(acts) == 1
+    assert acts[0]["owner"] == "Joshua"
+
+
 def test_action_update_closes_open_action(tmp_path):
     s = _store(tmp_path)
     aid = s.add_unified_action(text="Old task")

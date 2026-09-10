@@ -758,6 +758,23 @@ def test_owner_normalised(tmp_path):
         assert rows[0]["owner_entity_id"] == "sam-chen"
 
 
+def test_owner_canonicalised_when_resolved_via_entity_not_alias(tmp_path):
+    # "Sammy" is not in _OWNER_IDENTITY.aliases, so it can't canonicalize via
+    # the exact-alias check -- but the owner's own entity node happens to
+    # carry that display name (e.g. a signature variant), so find_entity()
+    # resolves it to the owner's entity id. The written owner string must
+    # still be the canonical name, not the raw "Sammy" variant, or this row
+    # becomes invisible to brain_actions(owner="") / config.owner_name().
+    s = _store(tmp_path)
+    s.upsert_entity(_OWNER_IDENTITY.entity_id, "Sammy", "person")
+    ext = _thread(actions=[_action("Confirm the booking", owner_name="Sammy")])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
+    rows = s.list_unified_actions()
+    assert len(rows) == 1
+    assert rows[0]["owner"] == "Sam"
+    assert rows[0]["owner_entity_id"] == "sam-chen"
+
+
 def test_deadline_inferred_from_body(tmp_path):
     s = _store(tmp_path)
     # No due_date on the action, but the body carries an ISO date. Owner is the
@@ -811,6 +828,26 @@ def test_owner_action_routed(tmp_path):
     rows = s.list_unified_actions()
     assert len(rows) == 1
     assert rows[0]["owner"] == "Sam"
+
+
+def test_near_dup_guard_widened_window_catches_20_day_gap(tmp_path):
+    """Same real-world case the fix targets: a commitment repeated in emails
+    spread across weeks used to write separate rows because the old 7-day
+    window had long since closed by the time the second email arrived. 20
+    days is inside the new 30-day window and outside the old 7-day one."""
+    s = _store(tmp_path)
+    ext = _thread(actions=[_action("Sort out the complaints process",
+                                   owner_name="Taryn Hamilton")],
+                  lead_sender="Taryn Hamilton <taryn@example.org>")
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    day20 = datetime(2026, 6, 21, tzinfo=timezone.utc)
+    gw.apply(s, ext, doc_ids=["d1"], clock=lambda: day0)
+    gw.apply(s, ext, doc_ids=["d2"], clock=lambda: day20)
+    assert len(s.list_unified_actions()) == 1  # caught as a duplicate, not a 2nd row
+
+
+def test_near_dup_guard_default_window_is_30_days():
+    assert gw._find_near_duplicate_action.__kwdefaults__["window_days"] == 30
 
 
 def test_near_dup_guard_skips(tmp_path):
