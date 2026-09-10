@@ -84,13 +84,22 @@ def action_is_stale(store, action: dict) -> bool:
 
     # Establish the anchor date from the source chunk's metadata.
     anchor_dt = None
+    source_chunk = None
     if source_doc_id:
         source_chunk = store.get_chunk(source_doc_id)
         if source_chunk:
             anchor_dt = _parse_date(source_chunk["metadata"].get("date", ""))
 
+    # The source message itself can carry both the ask and its own
+    # resolution in one email/note ("please review... update: already done,
+    # ignore this"). The newer-than-source gate below doesn't apply here --
+    # a message can't postdate itself -- so check it directly, through the
+    # same exclusion-guarded signal used for every other message.
+    if source_chunk and _text_signals_resolution(source_chunk["text"].lower()):
+        return True
+
     for chunk in store.thread_chunks(thread_id):
-        # Skip the source message itself.
+        # Already checked above.
         if chunk["doc_id"] == source_doc_id:
             continue
 

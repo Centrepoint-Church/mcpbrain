@@ -112,13 +112,50 @@ def test_action_is_fresh_when_thread_has_no_resolution(tmp_path):
 
 
 def test_action_is_fresh_when_resolution_only_in_source_message(tmp_path):
-    """Source contains 'done' but no other message resolves it — source is skipped."""
+    """Source contains 'done' but it's an excluded forward-looking phrase
+    ("get this done"), not a genuine resolution signal, and no other message
+    resolves it either."""
     s = _freshness_store(tmp_path)
     s.upsert_chunk("gmail-t3-a", "We need to get this done please.", "h1",
                    {"thread_id": "t3", "message_id": "msg-a",
                     "date": _DATE_EARLY, "source_type": "gmail"})
     s.add_unified_action(text="Get this done", owner="Sam",
                          source_doc_id="gmail-t3-a", thread_id="t3")
+    action = s.list_unified_actions()[0]
+
+    assert action_is_stale(s, action) is False
+
+
+def test_action_is_stale_when_resolution_in_same_message_as_request(tmp_path):
+    """The source message itself both asks for something and reports it's
+    already done, in one paragraph -- e.g. an email that opens with a request
+    then closes with "already sorted, ignore this". No other message in the
+    thread carries a resolution phrase, so the OLD skip-the-source-message
+    behaviour would report this as fresh forever."""
+    s = _freshness_store(tmp_path)
+    s.upsert_chunk(
+        "gmail-t9-a",
+        "Can you send the campus budget? Update: already sorted, sent it "
+        "through myself this morning.",
+        "h1", {"thread_id": "t9", "message_id": "msg-a",
+               "date": _DATE_EARLY, "source_type": "gmail"})
+    s.add_unified_action(text="Send the campus budget", owner="Sam",
+                         source_doc_id="gmail-t9-a", thread_id="t9")
+    action = s.list_unified_actions()[0]
+
+    assert action_is_stale(s, action) is True
+
+
+def test_action_is_fresh_when_source_message_has_excluded_phrase_only(tmp_path):
+    """The source message's own resolution-looking text is excluded
+    ("still need") -- must not false-positive via the new anchor check."""
+    s = _freshness_store(tmp_path)
+    s.upsert_chunk(
+        "gmail-t10-a", "Can you send the campus budget? We still need this.",
+        "h1", {"thread_id": "t10", "message_id": "msg-a",
+               "date": _DATE_EARLY, "source_type": "gmail"})
+    s.add_unified_action(text="Send the campus budget", owner="Sam",
+                         source_doc_id="gmail-t10-a", thread_id="t10")
     action = s.list_unified_actions()[0]
 
     assert action_is_stale(s, action) is False
