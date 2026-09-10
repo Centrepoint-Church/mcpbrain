@@ -2169,8 +2169,15 @@ class Store:
                 # event_id, each of which already has an expression index
                 # keyed on _meta_extract's exact fragment.
                 id_expr = _meta_extract(f"$.{id_field}")
+                # Alias is owner_id, NOT `oid`: SQLite treats `oid` as a
+                # built-in alias for the table's rowid, so `GROUP BY oid`
+                # resolved to rowid and grouped NOTHING — every chunk became its
+                # own entry. bin/repair.py fetches one item per entry, so a
+                # 16-chunk spreadsheet was re-fetched 16 times (49,526 entries
+                # for 3,019 real Drive files on the live store), and doctor's
+                # "Items awaiting re-chunk" was inflated by the same factor.
                 rows = db.execute(
-                    f"SELECT {id_expr} AS oid, "
+                    f"SELECT {id_expr} AS owner_id, "
                     f"MIN(rowid) AS r FROM chunks "
                     f"WHERE {_meta_extract('$.source_type')}=? "
                     f"  AND {id_expr} IS NOT NULL "
@@ -2181,10 +2188,11 @@ class Store:
                     f"    (COALESCE({_meta_extract('$.content_subtype')},'')<>'table' "
                     f"     AND COALESCE({_meta_extract('$.chunker_version')},0) < ?)"
                     f"  ) "
-                    f"GROUP BY oid ORDER BY r LIMIT ?",
+                    f"GROUP BY owner_id ORDER BY r LIMIT ?",
                     (source_type, table_version, other_version, limit - len(out)),
                 ).fetchall()
-                out.extend({"source_type": source_type, "id": r["oid"]} for r in rows)
+                out.extend({"source_type": source_type, "id": r["owner_id"]}
+                           for r in rows)
                 if len(out) >= limit:
                     break
         return out
