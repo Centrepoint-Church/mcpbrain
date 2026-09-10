@@ -15,7 +15,14 @@ from mcpbrain.retrieval import action_is_stale
 
 log = logging.getLogger(__name__)
 
-STALE_REEXTRACT_MAX = 20
+# Runs once/day (stale_reextract_interval_s default 86400s), so this cap is a
+# daily throughput budget, not a one-off limit. Measured against the live
+# store on 2026-09-10 (after the action_is_stale source-message fix): 1,171
+# threads pending. 20/day would take ~59 days to clear that backlog before
+# whatever accrues in the meantime; 175/day clears it in ~a week while still
+# bounding the LLM re-extraction cost per day (each triggered thread re-pays
+# one normal enrichment pass, not a bulk operation).
+STALE_REEXTRACT_MAX = 175
 
 
 def sweep(store, *, now: str, cap: int = STALE_REEXTRACT_MAX) -> dict:
