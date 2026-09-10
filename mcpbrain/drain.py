@@ -848,7 +848,20 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                     if store.find_open_action_by_fingerprint(fp) is not None:
                         log.info("capture: duplicate action skipped: %r", env["text"][:60])
                     else:
-                        owner = env.get("owner") or config.owner_name(str(home_dir))
+                        raw_owner = (env.get("owner") or "").strip()
+                        canonical_owner = config.owner_name(str(home_dir))
+                        # A caller (MCP tool caller, another agent) may name
+                        # the install owner via an alias variant ("Dana",
+                        # "Dana Okafor") instead of leaving owner empty or
+                        # typing the exact configured name. Canonicalize so
+                        # every self-owned action lands under one string --
+                        # brain_actions(owner="") matches owner exactly.
+                        if not raw_owner:
+                            owner = canonical_owner
+                        elif raw_owner.lower() in config.owner_aliases(str(home_dir)):
+                            owner = canonical_owner
+                        else:
+                            owner = raw_owner
                         aid = store.add_unified_action(
                             text=env["text"], owner=owner, deadline=env.get("deadline", ""),
                             org=env.get("org", ""), project_id=env.get("project_id", ""),

@@ -910,7 +910,7 @@ def _is_self_message(msg: dict, identity: str) -> bool:
     return all(a == identity.lower() for a in recipient_addrs)
 
 
-def _find_near_duplicate_action(conn, text, owner, *, window_days=7,
+def _find_near_duplicate_action(conn, text, owner, *, window_days=30,
                                 threshold=0.85, today=None) -> int | None:
     """Return the id of an existing OPEN actions row that's a near-duplicate of
     (text, owner) within the last window_days, or None.
@@ -1086,6 +1086,24 @@ def apply(store, extraction, *, doc_ids, identity=None,
     sender_header = lead.get("sender", "") or ""
     sender_email = _extract_email_addr(sender_header)
     sender_name = strip_affiliation(_extract_name(sender_header))
+
+    # Deterministic personal-content backstop: the model can emit "personal"
+    # directly (a reserved tag, see orgs.RESERVED_TAGS), but when it instead
+    # comes back "unknown" -- the same value a genuine extraction failure
+    # gets -- check the thread's own text for a personal-life signal before
+    # accepting "unknown". Distinguishes "never going to have a church org"
+    # from "the model couldn't classify this", which used to be
+    # indistinguishable in the data. Not silent: logged like any other
+    # automatic reclassification.
+    if org == "unknown" and orgs.signals_personal(
+            " ".join([summary, contextual_summary, lead.get("subject", ""),
+                      lead.get("body", "")])):
+        store.record_change(
+            "org_reclassified", ref_id=thread_id,
+            summary=f"thread {thread_id}: org unknown -> personal "
+                    "(deterministic keyword backstop)",
+            source="personal_org_classifier")
+        org = "personal"
 
     # Sender org precedence:
     #   known org by domain        -> use it;
@@ -1667,6 +1685,15 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                     resolved_owner_eid = hit["id"]
                 elif owner_name in name_to_id:
                     resolved_owner_eid = name_to_id[owner_name]
+                # find_entity/name_to_id resolve by the graph's own entity
+                # identity (id, slug, or stored display name), which can
+                # independently land on the owner's own entity for a spelling
+                # the alias check above doesn't cover ("Dana Okafor" when the
+                # owner's node itself carries that display name). When that
+                # happens this IS the install owner, so canonicalize now
+                # rather than carrying the raw variant through to the write.
+                if resolved_owner_eid == owner.entity_id:
+                    resolved_owner_name = owner.name
         elif owner_fallback == "sender" and sender_id and sender_id != owner.entity_id:
             resolved_owner_eid = sender_id
             resolved_owner_name = sender_name
@@ -1716,12 +1743,18 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             owner_eid_out = ""
             confidence_out = 0.5
         else:
-            owner_out = resolved_owner_name or ""
-            owner_eid_out = resolved_owner_eid
+            # resolved_owner_name matched an owner alias (is_not_owner is
+            # False) -- write the CANONICAL name, not whatever alias variant
+            # the LLM/sender happened to use ("Dana Okafor", "Dana", ...), or
+            # every write-path's spelling fragments the owner filter every
+            # consumer (brain_actions(owner="") -> config.owner_name()) relies
+            # on for an exact match.
+            owner_out = owner.name
+            owner_eid_out = owner.entity_id
             confidence_out = deadline_confidence
 
         # Near-duplicate guard: skip insert when an open near-identical row
-        # already exists within the 7-day window (windowed on the injected clock).
+        # already exists within the 30-day window (windowed on the injected clock).
         with store._connect() as conn:
             if _find_near_duplicate_action(
                     conn, description, owner_out, today=today_iso) is not None:
