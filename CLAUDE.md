@@ -884,6 +884,21 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   after the install instead, and always confirm against `/api/status` (which needs
   `Authorization: Bearer $(cat "$MCPBRAIN_HOME/control_token")` — an unauthenticated
   probe returns a bare 401 that is easy to misread as "daemon down").
+  **A THIRD install trap, hit 2026-09-10: `uv tool install --force` silently
+  reuses a CACHED WHEEL when the version string has not changed.** After editing
+  `doctor.py` without bumping the version, `--force` reported "Installed 1
+  executable" while the installed `doctor.py` kept its mtime from the previous
+  install and none of the new code. Use **`uv tool install --reinstall --force
+  ".[daemon]"`** for any same-version local reinstall, and verify by grepping the
+  installed file for a symbol you just added — not by trusting the install output.
+  Note `uv cache clean` can block on a lock held by another uv process; `--reinstall`
+  alone was sufficient here.
+  **All three traps have the same shape and the same fix: check the ARTIFACT, not
+  the command's exit.** (1) `launchctl stop` + install + `start` leaves the old code
+  running because KeepAlive relaunched mid-install — use `bootout`/`bootstrap`.
+  (2) `__pycache__` under the uv tool's site-packages survives a reinstall — clear it.
+  (3) this one. Each was found by comparing the RUNNING/INSTALLED thing against the
+  source, never by reading the install log.
   **A verification trap worth remembering:** running
   `<uv-tool-python> -c "import mcpbrain; ..."` from inside the repo imports the WORKING
   TREE, not site-packages (cwd is `sys.path[0]`), so it proves nothing about what is
