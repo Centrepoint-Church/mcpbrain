@@ -87,9 +87,30 @@ def reconcile(
             if _matches(chunk, action.get("waiting_on"), action.get("waiting_on_entity_id")):
                 store.clear_waiting(action["id"], chunk["doc_id"], now)
                 cleared += 1
+                _trigger_reextract(store, action.get("thread_id"), now)
                 break  # only clear once per action
 
     return cleared
+
+
+def _trigger_reextract(store, thread_id: str | None, now: str) -> None:
+    """A reply arrived from the person an action was waiting_on -- that is
+    NOT the same as the ask being resolved ("I'll look at it next week" is a
+    reply, not a resolution). So this never closes the action itself; it only
+    puts the thread back in front of the LLM extractor (same mechanism as
+    stale_reextract.sweep) with the reply now in context, so a genuine close
+    goes through the normal resolved_action_ids path.
+    """
+    if not thread_id:
+        return
+    if store.thread_has_unenriched(thread_id):
+        return  # the normal enrichment path already owns this thread
+    sig = store.thread_signature(thread_id)
+    prev = store.get_stale_reextract(thread_id)
+    if prev and prev.get("signature") == sig:
+        return  # already re-triggered at this content-state
+    store.mark_thread_unenriched(thread_id)
+    store.set_stale_reextract(thread_id, sig, now)
 
 
 def run(store, *, now: str | None = None, identity: str | None = None) -> dict:
