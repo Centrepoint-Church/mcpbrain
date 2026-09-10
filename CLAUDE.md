@@ -105,7 +105,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
 ## Shipping caveats
 
 - **Current state (2026-09-10): the four version files (+ `uv.lock`) are at `0.7.128`,
-  RELEASED** — source `77f3163`, gh-pages `bfa2d20`, plugin `1c40ff7`; the published index
+  RELEASED** — source `77f3163`, gh-pages `0cdedcb`, plugin `ee26349`; the published index
   serves only `mcpbrain-0.7.128-py3-none-any.whl` and `install.ps1` is live (200). Full
   suite **3692 passed**, ruff clean, tenant check passed. Fleet resolution verified against
   the published index: `mcpbrain==0.7.128`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS
