@@ -747,3 +747,81 @@ def test_cache_storage_factory_in_drive_when_flag_off(tmp_path):
     factory = fleet_storage.cache_storage_factory(str(tmp_path), FakeDrive())
     fs = factory("D1")
     assert fs._root == "D1" and fs._root_is_drive is True and fs._base_parts == []
+
+
+# --- permanent write refusals must not be retried forever -------------------
+
+class _Forbidden(Exception):
+    """Stands in for googleapiclient.errors.HttpError with a 403 body."""
+    def __init__(self, msg):
+        super().__init__(msg)
+        self.resp = type("R", (), {"status": 403})()
+        self.content = msg.encode()
+
+
+def test_permanent_write_refusal_is_recognised_not_treated_as_transient():
+    """The token carries BOTH drive.readonly and drive.file. _find_child lists
+    with readonly reach, so it discovers artifacts the app did NOT create; the
+    update then fails under drive.file, permanently. On the live store that was
+    78 files retried every sync cycle — 98,964 logged tracebacks and 658 MB of
+    disk — because nothing distinguished "cannot ever write this" from "try
+    again later".
+    """
+    from mcpbrain import fleet_storage as fs
+    msg = ("The user has not granted the app 611747560976 write access to the "
+           "file 1KXH35_9EU51HIStECqxqjGiPSfOpbx6i9natv6U7WDs.")
+    assert fs.is_permanent_write_refusal(_Forbidden(msg)) is True
+
+
+def test_a_transient_failure_is_not_mistaken_for_a_permanent_one():
+    from mcpbrain import fleet_storage as fs
+    rate = _Forbidden("User Rate Limit Exceeded")
+    rate.resp.status = 403
+    assert fs.is_permanent_write_refusal(rate) is False
+    boom = _Forbidden("Backend Error")
+    boom.resp.status = 500
+    assert fs.is_permanent_write_refusal(boom) is False
+
+
+def test_non_http_errors_are_not_swallowed_as_permanent():
+    from mcpbrain import fleet_storage as fs
+    assert fs.is_permanent_write_refusal(ValueError("nope")) is False
+
+
+def test_put_bytes_reports_a_permanent_refusal_once_and_does_not_raise(caplog):
+    """A cache artifact is an OPTIMISATION: failing to publish one must not take
+    down the sync cycle. But it must not be silent either — one clear line per
+    file, naming the remedy, instead of a traceback every cycle forever."""
+    from mcpbrain import fleet_storage as fs
+    fs._forget_permanent_refusals()
+    st = fs.DriveFleetStorage.__new__(fs.DriveFleetStorage)
+    st._resolve_file = lambda path, create_parents=True: ("PARENT", "leaf.mbc.gz")
+    msg = "The user has not granted the app 611747560976 write access to the file X."
+
+    def _boom(parent, leaf, data):
+        raise _Forbidden(msg)
+    st._put_bytes_at = _boom
+
+    with caplog.at_level("WARNING"):
+        st.put_bytes("a/leaf.mbc.gz", b"data")       # must NOT raise
+        st.put_bytes("a/leaf.mbc.gz", b"data")       # second time: silent
+    hits = [r for r in caplog.records if "leaf.mbc.gz" in r.getMessage()]
+    assert len(hits) == 1, f"expected exactly one warning, got {len(hits)}"
+
+
+def test_put_bytes_still_raises_on_a_transient_failure():
+    """Only permanent refusals are absorbed — a 500 must still surface so the
+    existing retry/backoff and the caller's error handling keep working."""
+    from mcpbrain import fleet_storage as fs
+    fs._forget_permanent_refusals()
+    st = fs.DriveFleetStorage.__new__(fs.DriveFleetStorage)
+    st._resolve_file = lambda path, create_parents=True: ("PARENT", "leaf")
+    st._evict_folder_cache_by_id = lambda parent: False
+    boom = _Forbidden("Backend Error"); boom.resp.status = 500
+
+    def _raise(parent, leaf, data):
+        raise boom
+    st._put_bytes_at = _raise
+    import pytest as _pt
+    with _pt.raises(Exception):
+        st.put_bytes("a/leaf", b"data")

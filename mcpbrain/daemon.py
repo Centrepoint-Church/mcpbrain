@@ -330,6 +330,10 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # once-ever.
     CadencePass("ocr_setup", "_ocr_setup_interval_s", "_last_ocr_setup",
                 "_run_ocr_setup", needs_configured=False, needs_backfill_clear=False),
+    # needs_configured=False: an unconfigured install still writes stderr, and it
+    # is the one least likely to have anyone watching the disk.
+    CadencePass("log_cap", "_log_cap_interval_s", "_last_log_cap",
+                "_run_log_cap", needs_configured=False, needs_backfill_clear=False),
     CadencePass("communities", "_communities_interval_s", "_last_communities",
                 "_run_communities"),
     CadencePass("lint", "_lint_interval_s", "_last_lint", "_run_lint"),
@@ -1091,6 +1095,12 @@ class Daemon:
         # this timestamp) is what makes it once-ever.
         self._ocr_setup_interval_s: float | None = None
         self._last_ocr_setup = None
+        # Bound the launchd logs. Defaulted ON (not None) rather than waiting for
+        # a cadences config entry: launchd rotates nothing, so a build with no
+        # cadence config is exactly the build that fills its own disk. Hourly is
+        # cheap — a stat() per file unless one is actually over the cap.
+        self._log_cap_interval_s: float | None = 3600.0
+        self._last_log_cap = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -2603,6 +2613,23 @@ class Daemon:
         return self._run_auto_update()
 
     # -- verify connections cadence -------------------------------------------
+
+    def _run_log_cap(self) -> dict | None:
+        """Truncate any launchd log that has grown past the cap.
+
+        Never raises: this exists to prevent a disk-full outage, and taking the
+        cycle down to do it would be the worse failure.
+        """
+        if not self._is_due("_log_cap_interval_s", "_last_log_cap"):
+            return None
+        self._last_log_cap = self._clock()
+        try:
+            from mcpbrain.log_cap import cap_agent_logs
+            freed = cap_agent_logs(str(app_dir()))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("log_cap pass failed: %s", exc)
+            return None
+        return {"freed_bytes": freed} if freed else None
 
     def _run_verify(self) -> dict | None:
         """Cadence-gated connection verification. Called by the dispatch table
