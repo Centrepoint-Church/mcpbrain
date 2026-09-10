@@ -509,6 +509,11 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Invalidators':<16} skipped ({exc})")
 
+    # Store integrity. Costs ~19s on a 1.9 GB store and is worth every second:
+    # foreign_key_check above is structurally blind to a damaged b-tree, which is
+    # how the 2026-09-10 sync_cursors corruption stayed invisible for hours.
+    lines.append(integrity_line(home))
+
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
     enr_already_counted = enr in _FAIL_STATES  # already counted in the loop above
@@ -615,6 +620,63 @@ def arch_line(os_arch: str | None = None) -> str:
     else:
         glyph, state = "⚠️", "MISMATCH (emulated interpreter?)"
     return f"{glyph} {'Architecture':<16} OS={os_arch} interpreter={interp} → {state}"
+
+
+# How many integrity problems doctor prints before summarising the rest. A badly
+# corrupted store can report thousands; the goal is a legible signal plus enough
+# detail to name the broken table.
+_INTEGRITY_SHOWN = 5
+
+
+def _run_integrity_check(home) -> list[str]:
+    """`PRAGMA integrity_check` over the store, as a list of problems ([] == ok).
+
+    FULL integrity_check, never `quick_check`. quick_check is roughly twice as
+    fast (9s vs 19s on a 1.9 GB store) and would have missed the 2026-09-10
+    corruption completely: per SQLite's docs it "does not verify UNIQUE
+    constraints and does not verify that index content matches table content",
+    which is exactly the two classes that fired there ("wrong # of entries in
+    index sqlite_autoindex_sync_cursors_1", "NULL value in sync_cursors.source").
+    Ten seconds in an on-demand diagnostic is not worth a blind spot.
+
+    Opened read-only through sqlite3 directly rather than through Store: this must
+    work on a store too damaged for Store's own init/migrations to run, which is
+    precisely when it matters.
+    """
+    import sqlite3
+    path = Path(home) / "brain.sqlite3"
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = con.execute("PRAGMA integrity_check").fetchall()
+    finally:
+        con.close()
+    problems = [r[0] for r in rows if r and r[0] and r[0] != "ok"]
+    return problems
+
+
+def integrity_line(home, *, check=None) -> str:
+    """One doctor line for store integrity.
+
+    Nothing else in the system ran this. On 2026-09-10 `sync_cursors` was
+    physically corrupted and the only symptom was the daemon raising "database
+    disk image is malformed" whenever something read a cursor — hours later.
+    doctor reported `foreign_key_check` but never `integrity_check`, so a store
+    with a broken b-tree looked healthy.
+    """
+    check = check or _run_integrity_check
+    try:
+        problems = check(home)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never be fatal
+        return f"➖ {'Integrity':<16} skipped ({exc})"
+    if not problems:
+        return f"✅ {'Integrity':<16} integrity_check ok"
+    shown = "; ".join(problems[:_INTEGRITY_SHOWN])
+    more = ""
+    if len(problems) > _INTEGRITY_SHOWN:
+        more = f" (+{len(problems) - _INTEGRITY_SHOWN} more of {len(problems)})"
+    return (f"❌ {'Integrity':<16} {len(problems)} problem(s): {shown}{more} — "
+            f"content may still be intact; check per-table counts before restoring, "
+            f"and see CLAUDE.md's store-corruption section")
 
 
 def version_drift_line(home, installed: str | None = None) -> str | None:
