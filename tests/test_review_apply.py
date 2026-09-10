@@ -24,7 +24,7 @@ def _write_config(tmp_path, data: dict) -> str:
     return str(tmp_path)
 
 
-ACME_CFG = {"orgs": [{"name": "Acme", "domains": ["acme.com"]}, {"name": "Personal"}]}
+ACME_CFG = {"orgs": [{"name": "Acme", "domains": ["acme.com"]}]}
 
 
 def test_orphan_applier_targets_finding_ref_not_verdict_ref(tmp_path):
@@ -279,7 +279,7 @@ def test_cap_stops_applying_assign_verdicts(tmp_path):
 
     verdicts = [
         {"finding_id": findings["e1"], "ref_id": "e1", "verdict": "assign", "org": "Acme"},
-        {"finding_id": findings["e4"], "ref_id": "e4", "verdict": "assign", "org": "Personal"},
+        {"finding_id": findings["e4"], "ref_id": "e4", "verdict": "assign", "org": "personal"},
     ]
     result = apply_missing_org_verdicts(s, verdicts, cap=1, home=home)
 

@@ -27,13 +27,12 @@ def _write_config(tmp_path, data: dict) -> str:
 ACME_CFG = {"orgs": [
     {"name": "Acme", "domains": ["acme.com"], "aliases": ["Acme Pty Ltd"]},
     {"name": "Study", "domains": ["uni.edu.au"]},
-    {"name": "Personal"},
 ]}
 
 
 def _acme_taxonomy():
     return orgs.OrgTaxonomy(
-        names=("Acme", "Study", "Personal"),
+        names=("Acme", "Study"),
         domain_map={"acme.com": "Acme", "uni.edu.au": "Study"},
         aliases={"acme pty ltd": "Acme"},
     )
@@ -47,7 +46,7 @@ class TestOrgTaxonomy:
     def test_valid_orgs_includes_reserved_tags(self):
         t = _acme_taxonomy()
         assert t.valid_orgs == frozenset(
-            {"Acme", "Study", "Personal", "external", "unknown"})
+            {"Acme", "Study", "external", "unknown", "personal"})
 
     def test_org_tags_lowercase(self):
         assert "acme" in _acme_taxonomy().org_tags
@@ -70,6 +69,32 @@ class TestOrgTaxonomy:
     def test_domain_lines_sorted(self):
         assert _acme_taxonomy().domain_lines == [
             "acme.com -> Acme", "uni.edu.au -> Study"]
+
+    def test_canonical_personal_case_insensitive(self):
+        t = _acme_taxonomy()
+        assert t.canonical("personal") == "personal"
+        assert t.canonical("Personal") == "personal"
+        assert t.canonical("PERSONAL") == "personal"
+
+
+class TestSignalsPersonal:
+    def test_single_word_marker(self):
+        assert orgs.signals_personal("Need to pick up groceries tonight")
+        assert orgs.signals_personal("It's Sam's birthday next week")
+
+    def test_phrase_marker(self):
+        assert orgs.signals_personal("Sort the christmas present for mum")
+        assert orgs.signals_personal("Book the dentist appointment please")
+
+    def test_no_signal_for_ordinary_work_text(self):
+        assert not orgs.signals_personal("Please send the campus budget report")
+
+    def test_empty_and_none_are_false(self):
+        assert not orgs.signals_personal("")
+        assert not orgs.signals_personal(None)
+
+    def test_case_insensitive(self):
+        assert orgs.signals_personal("GROCERIES for the week")
 
 
 class TestDefaultTaxonomy:
@@ -100,14 +125,14 @@ class TestTaxonomyFromConfig:
     def test_configured(self, tmp_path):
         home = _write_config(tmp_path, ACME_CFG)
         t = orgs.taxonomy_from_config(home)
-        assert t.names == ("Acme", "Study", "Personal")
+        assert t.names == ("Acme", "Study")
         assert t.from_email("a@acme.com") == "Acme"
         assert t.canonical("acme pty ltd") == "Acme"
 
     def test_reserved_and_malformed_entries_skipped(self, tmp_path):
         home = _write_config(tmp_path, {"orgs": [
             {"name": "external"}, "not-an-object", {"name": ""},
-            {"name": "Real Org"}]})
+            {"name": "Personal"}, {"name": "Real Org"}]})
         t = orgs.taxonomy_from_config(home)
         assert t.names == ("Real Org",)
 
@@ -160,10 +185,17 @@ class TestContractOrg:
         assert ext["org"] == "Acme"
 
     def test_normalise_org_reserved_tags_valid(self):
-        for tag in ("external", "unknown"):
+        for tag in ("external", "unknown", "personal"):
             ext = self._envelope(tag)
             assert contract.normalise_org(ext, _acme_taxonomy()) is None
             assert ext["org"] == tag
+
+    def test_normalise_org_personal_case_insensitive(self):
+        # The model may emit different casing; the reserved tag must still
+        # resolve rather than silently falling through to "unknown".
+        ext = self._envelope("Personal")
+        assert contract.normalise_org(ext, _acme_taxonomy()) is None
+        assert ext["org"] == "personal"
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +314,80 @@ class TestExtractorSurfaces:
         monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
         _write_config(tmp_path, ACME_CFG)
         assert prepare._valid_org_tags() == [
-            "Acme", "Study", "Personal", "external", "unknown"]
+            "Acme", "Study", "external", "unknown", "personal"]
         assert prepare._org_domain_lines() == [
             "acme.com -> Acme", "uni.edu.au -> Study"]
+
+
+# ---------------------------------------------------------------------------
+# apply(): deterministic personal-content backstop
+# ---------------------------------------------------------------------------
+
+def _personal_owner():
+    return gw.OwnerIdentity(name="Sam", entity_id="sam", aliases=frozenset({"sam"}))
+
+
+def _org_extraction(thread_id, doc_id, *, org, summary, description):
+    return {
+        "thread_id": thread_id, "org": org, "content_type": "request",
+        "summary": summary, "contextual_summary": "",
+        "entities": [], "topics": [],
+        "actions": [{"description": description, "owner_name": "",
+                     "owner_fallback": "", "due_date": ""}],
+        "relations": [], "reply_needed": False, "reply_reason": "",
+        "resolved_action_ids": [], "updated_actions": [],
+        "messages": [{"message_id": f"m-{doc_id}", "sender": "A B <a@example.com>",
+                     "date": "2026-06-01", "labels": "INBOX", "subject": "x"}],
+    }
+
+
+class TestApplyPersonalBackstop:
+    def test_unknown_org_with_personal_signal_reclassifies(self, tmp_path):
+        store = Store(tmp_path / "b.sqlite3", dim=4)
+        store.init()
+        ext = _org_extraction(
+            "t-personal", "d-personal", org="unknown",
+            summary="Pick up groceries and the birthday cake before the party.",
+            description="Pick up groceries for the weekend")
+        gw.apply(store, ext, doc_ids=["d-personal"], home=str(tmp_path),
+                owner=_personal_owner())
+        rows = store.list_unified_actions()
+        assert len(rows) == 1
+        assert rows[0]["org"] == "personal"
+        changes = [c for c in store.recent_changes(10)
+                  if c["change_type"] == "org_reclassified"]
+        assert len(changes) == 1
+        assert changes[0]["ref_id"] == "t-personal"
+
+    def test_unknown_org_without_personal_signal_stays_unknown(self, tmp_path):
+        store = Store(tmp_path / "b.sqlite3", dim=4)
+        store.init()
+        ext = _org_extraction(
+            "t-generic", "d-generic", org="unknown",
+            summary="Please review the attached proposal.",
+            description="Review the proposal")
+        gw.apply(store, ext, doc_ids=["d-generic"], home=str(tmp_path),
+                owner=_personal_owner())
+        rows = store.list_unified_actions()
+        assert len(rows) == 1
+        assert rows[0]["org"] == "unknown"
+        assert not [c for c in store.recent_changes(10)
+                   if c["change_type"] == "org_reclassified"]
+
+    def test_model_assigned_personal_passes_through_untouched(self, tmp_path):
+        # The model's own explicit "personal" choice needs no backstop and no
+        # reclassification log entry -- it was never "unknown".
+        store = Store(tmp_path / "b.sqlite3", dim=4)
+        store.init()
+        ext = _org_extraction(
+            "t-explicit", "d-explicit", org="personal",
+            summary="Book the family holiday flights.",
+            description="Book flights for the family holiday")
+        gw.apply(store, ext, doc_ids=["d-explicit"], home=str(tmp_path),
+                owner=_personal_owner())
+        rows = store.list_unified_actions()
+        assert len(rows) == 1
+        assert rows[0]["org"] == "personal"
+        assert not [c for c in store.recent_changes(10)
+                   if c["change_type"] == "org_reclassified"]
 

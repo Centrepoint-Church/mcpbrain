@@ -14,12 +14,13 @@ the original install's four orgs. This module makes the taxonomy a value:
 
         "orgs": [
           {"name": "Company 1", "domains": ["company1.com"],
-           "aliases": ["Company One Pty Ltd"]},
-          {"name": "Personal", "domains": []}
+           "aliases": ["Company One Pty Ltd"]}
         ]
 
-`external` and `unknown` are reserved classification tags, always present and
-never configurable as org names.
+`external`, `unknown`, and `personal` are reserved classification tags, always
+present and never configurable as org names — content that was never going to
+have a configured org (a personal errand, a family appointment) classifies as
+`personal` directly, without an install needing to invent and configure one.
 
 Dependency rule: this module imports only config (and stdlib), so graph_write,
 enrich, contract, prepare, and lint_graph can all import it without cycles.
@@ -38,7 +39,49 @@ from mcpbrain import config
 log = logging.getLogger(__name__)
 
 # Reserved classification tags: part of the org enum, never real orgs.
-RESERVED_TAGS = ("external", "unknown")
+# "personal" is deliberately separate from "unknown": an extraction the model
+# actively recognises as personal-life content (groceries, a birthday, a
+# family appointment) that will never have a configured org is a different
+# population from a genuine classification failure, and conflating the two
+# made it impossible to tell them apart in the data (both landed as
+# "unknown"). The model can emit "personal" directly; see also
+# signals_personal() for the deterministic backstop.
+RESERVED_TAGS = ("external", "unknown", "personal")
+
+# Deterministic backstop for personal-life content the model doesn't tag as
+# "personal" itself. Same style as retrieval._text_signals_resolution:
+# single-word markers matched at word boundaries, phrase markers matched as
+# substrings. Short and intentionally non-exhaustive -- a backstop, not the
+# primary classification path.
+_PERSONAL_SINGLE_WORD_MARKERS = (
+    "groceries", "grocery", "birthday", "anniversary", "dentist",
+    "haircut", "babysitter", "babysitting",
+)
+_PERSONAL_PHRASE_MARKERS = (
+    "christmas present", "christmas gift", "birthday present", "birthday gift",
+    "family holiday", "our holiday", "school pickup", "school pick up",
+    "doctor's appointment", "doctors appointment", "dental appointment",
+    "gp appointment", "book flights for", "passport renewal",
+)
+_PERSONAL_SINGLE_WORD_RE = re.compile(
+    r"\b(" + "|".join(_PERSONAL_SINGLE_WORD_MARKERS) + r")\b"
+)
+
+
+def signals_personal(text: str) -> bool:
+    """True if the (already lowercased-by-caller-agnostic) text carries a
+    deterministic personal-life signal.
+
+    Backstop only: called when the model's own org classification came back
+    "unknown", to distinguish personal-life content from a genuine
+    extraction failure before it's coerced to the "unknown" tag.
+    """
+    text_lower = (text or "").lower()
+    if not text_lower:
+        return False
+    if _PERSONAL_SINGLE_WORD_RE.search(text_lower):
+        return True
+    return any(phrase in text_lower for phrase in _PERSONAL_PHRASE_MARKERS)
 
 # No baked-in taxonomy: an unconfigured install classifies against nothing.
 # Orgs come from config.json's `orgs` key via taxonomy_from_config; the daemon's
@@ -82,6 +125,12 @@ class OrgTaxonomy:
         if not raw:
             return raw
         lowered = raw.strip().lower()
+        # Reserved tags are always lowercase by convention (the model is
+        # instructed to emit them that way, same as "unknown"/"external") --
+        # fold case here so "Personal"/"PERSONAL" resolve exactly like
+        # "personal" instead of silently falling through to "unknown" below.
+        if lowered in RESERVED_TAGS:
+            return lowered
         if lowered in self.aliases:
             return self.aliases[lowered]
         for known in self.names:

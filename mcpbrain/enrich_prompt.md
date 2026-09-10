@@ -82,9 +82,13 @@ Field notes:
 
 - `thread_id`: copy the thread's `thread_id` exactly.
 - `org`: one of the tags in the context block's `valid_orgs` list (the
-  configured org names plus `external` and `unknown`). Use `org_domain_map` to
-  map sender domains to an org. Use `unknown` only when nothing supports a
-  choice.
+  configured org names plus `external`, `unknown`, and `personal`). Use
+  `org_domain_map` to map sender domains to an org. Use `personal` for
+  content that was never going to have a configured org in the first
+  place — groceries, gifts, a family appointment, personal travel — it is
+  an explicit choice, not a fallback. Use `unknown` only when the thread
+  genuinely can't be classified (a real ambiguity), not as a catch-all for
+  personal content.
 - `content_type`: one of `request`, `update`, `decision`, `fyi`,
   `notification`.
 - `summary`: one plain sentence. `contextual_summary` is optional; leave it as
@@ -121,8 +125,8 @@ The `context` block is given so you don't re-derive what is already known.
   not re-derive a person's org or role, and do not contradict these entries.
   Trust them even when the sender's email domain is absent from `org_domain_map`.
 - `valid_orgs`: the org tags this install classifies against — the configured
-  org names plus `external` and `unknown`. The thread-level `org` and any org
-  tag you assign must come from this list.
+  org names plus `external`, `unknown`, and `personal`. The thread-level `org`
+  and any org tag you assign must come from this list.
 - `org_domain_map`: maps email domains to orgs. Use it to set `org` and to
   decide whether a sender is internal or `external`.
 
