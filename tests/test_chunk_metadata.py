@@ -246,3 +246,43 @@ def test_stale_chunker_ids_respects_its_limit_across_source_types(tmp_path):
     # The limit is hit within the gdrive batch (5 candidates, limit 3) before
     # gmail's single candidate is even considered -- sequential by source type.
     assert all(d["source_type"] == "gdrive" for d in got)
+
+
+def test_stale_chunker_ids_returns_one_entry_per_file_not_per_chunk(tmp_path):
+    """`GROUP BY oid` did not group: `oid` is a BUILT-IN SQLite alias for rowid,
+    so SQLite resolved it to the table's rowid rather than the output alias, and
+    every row formed its own group.
+
+    Silent and expensive. bin/repair.py reingest-stale fetches one item per
+    returned entry, so a 16-chunk spreadsheet was re-fetched 16 times — measured
+    on the live store, 49,526 entries for 3,019 distinct Drive files. doctor's
+    "Items awaiting re-chunk" was inflated by the same factor, which is how a
+    3,019-file job looked like a 60,767-item one.
+    """
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(5):
+        s.upsert_chunk(f"gdrive-F1-{i}", f"row {i}", f"h{i}",
+                       {"source_type": "gdrive", "file_id": "F1",
+                        "content_subtype": "table", "chunker_version": 2})
+    s.upsert_chunk("gdrive-F2-0", "other", "h9",
+                   {"source_type": "gdrive", "file_id": "F2",
+                    "content_subtype": "table", "chunker_version": 2})
+
+    ids = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+    assert [i["id"] for i in ids] == ["F1", "F2"], (
+        f"expected one entry per FILE, got {len(ids)}: {ids}")
+
+
+def test_stale_chunker_ids_groups_gmail_threads_too(tmp_path):
+    """Same collision, same fix, for the thread_id branch."""
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(4):
+        s.upsert_chunk(f"gmail-T1-{i}", f"part {i}", f"g{i}",
+                       {"source_type": "gmail", "thread_id": "T1",
+                        "chunker_version": 0})
+    ids = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
+    assert [i["id"] for i in ids] == ["T1"]
