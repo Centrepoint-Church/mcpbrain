@@ -32,6 +32,49 @@ def _q_escape(name: str) -> str:
     return name.replace("\\", "\\\\").replace("'", "\\'")
 
 
+# A 403 that will NEVER succeed on retry, as opposed to a rate-limit 403.
+#
+# The token carries BOTH drive.readonly and drive.file. `_find_child` lists with
+# readonly reach, so it discovers artifacts this app did not create; the follow-up
+# `files().update` is then refused under drive.file, permanently — the code
+# assumed "if I can see it, I can write it". googleapiclient does not retry a
+# permission 403 (only rateLimitExceeded/userRateLimitExceeded), so each cycle
+# re-attempted the same doomed write and logged a full traceback: 78 files,
+# 98,964 tracebacks and 658 MB of log on the author's machine before anyone
+# noticed. Recognising it lets the caller record the file once and move on.
+_PERMANENT_403_MARKERS = (
+    "has not granted the app",          # drive.file cannot touch a foreign file
+    "insufficientFilePermissions",
+)
+
+
+# Paths already reported as permanently un-writable. Process-lifetime only: a
+# restart re-reports once, which is the right cadence for "your Drive folder
+# needs a manual clean-up".
+_PERMANENT_REFUSALS: set[str] = set()
+
+
+def _forget_permanent_refusals() -> None:
+    """Test hook — the suppression set is module state."""
+    _PERMANENT_REFUSALS.clear()
+
+
+def is_permanent_write_refusal(exc: BaseException) -> bool:
+    """True when `exc` is a 403 that retrying can never fix.
+
+    Deliberately narrow: a rate-limit 403 IS transient and must keep its
+    backoff, so only the permission markers count.
+    """
+    resp = getattr(exc, "resp", None)
+    if getattr(resp, "status", None) != 403:
+        return False
+    body = getattr(exc, "content", b"") or b""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    text = f"{body} {exc}"
+    return any(m in text for m in _PERMANENT_403_MARKERS)
+
+
 class DriveFleetStorage:
     """A FleetStorage backed by a Google Drive folder subtree."""
 
@@ -224,7 +267,23 @@ class DriveFleetStorage:
         parent, leaf = self._resolve_file(path, create_parents=True)
         try:
             self._put_bytes_at(parent, leaf, data)
-        except HttpError:
+        except Exception as exc:  # noqa: BLE001 — re-dispatched below, never swallowed
+            # Checked BEFORE the stale-folder retry: a permanent refusal is not a
+            # stale cache entry, and re-resolving the folder would just fail the
+            # same way a second time.
+            if is_permanent_write_refusal(exc):
+                if path not in _PERMANENT_REFUSALS:
+                    _PERMANENT_REFUSALS.add(path)
+                    log.warning(
+                        "fleet_storage: cannot write %r — this app did not create "
+                        "it, so the drive.file scope refuses the update (it was "
+                        "found via drive.readonly, which sees more than "
+                        "drive.file can write). The cache artifact will not be "
+                        "refreshed; delete the file in Drive to let mcpbrain "
+                        "re-create one it owns. Suppressing further reports.", path)
+                return
+            if not isinstance(exc, HttpError):
+                raise
             # A cached folder id can go stale if it's deleted out-of-band:
             # the write against it fails (e.g. "parent not found"). Evict
             # the stale (parent_id, name) cache entry and retry folder
