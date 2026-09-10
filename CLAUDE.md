@@ -104,7 +104,28 @@ the cursor is a watermark and every write is checkpointed by id+hash.
 
 ## Shipping caveats
 
-- **Chunker repair COMPLETE (2026-09-10), source-only, NOT released.** The 60,767-item
+- **Current state (2026-09-10): the four version files (+ `uv.lock`) are at `0.7.128`,
+  RELEASED** — source `77f3163`, gh-pages `bfa2d20`, plugin `1c40ff7`; the published index
+  serves only `mcpbrain-0.7.128-py3-none-any.whl` and `install.ps1` is live (200). Full
+  suite **3692 passed**, ruff clean, tenant check passed. Fleet resolution verified against
+  the published index: `mcpbrain==0.7.128`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS
+  asserted: `log_cap.py` present, `doctor` carrying `integrity_line` AND
+  `PRAGMA integrity_check` AND no `PRAGMA quick_check`, `store` carrying
+  `GROUP BY owner_id`, `fleet_storage` carrying `is_permanent_write_refusal`, tenant files
+  present, no gold set. **Verified against the RUNNING process:** `/api/status` reports
+  `0.7.128`, `stalled: None`, 0 watchdog exits, and `doctor` shows
+  `✅ Integrity integrity_check ok`. Installed from the PUBLISHED index (not the working
+  tree) using **`bootout` → `uv tool install --reinstall --force` → clear `__pycache__` →
+  `bootstrap`** — all three install traps below apply and every one of them bit during this
+  session's work.
+  **0.7.128 ships the chunker repair's fixes plus the two silent-failure gaps it exposed**
+  — the `oid`/`rowid` grouping bug (a 17x Drive over-fetch), `--limit 0` crashing, the
+  permanent-403 retry loop, the total absence of launchd log rotation,
+  `doctor`'s missing `integrity_check`, and `bin/stamp_audited_prose.py`. Detail below.
+  **Two things it does NOT fix, both open:** the MRR drift (0.601 on 2026-08-31 → 0.546
+  now, pre-existing and unexplained — see the repair entry), and the Windows hardware QA
+  gate.
+- **Chunker repair COMPLETE (2026-09-10), RELEASED in 0.7.128.** The 60,767-item
   "Items awaiting re-chunk" backlog is down to **7** (files deleted upstream that can
   never be re-fetched), and oversize chunks from **3,617 → 564**.
   **The backlog was never 60,767 items — that number was a BUG.** `stale_chunker_ids` did
