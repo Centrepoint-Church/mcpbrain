@@ -2123,7 +2123,7 @@ class Store:
     )
 
     def stale_chunker_ids(self, *, table_version: int, other_version: int,
-                          limit: int) -> list[dict]:
+                          limit: int | None) -> list[dict]:
         """File/thread/event ids with at least one chunk written by an older
         chunker, across every source type.
 
@@ -2189,11 +2189,15 @@ class Store:
                     f"     AND COALESCE({_meta_extract('$.chunker_version')},0) < ?)"
                     f"  ) "
                     f"GROUP BY owner_id ORDER BY r LIMIT ?",
-                    (source_type, table_version, other_version, limit - len(out)),
+                    # limit=None means unbounded (bin/repair.py's `--limit 0`).
+                    # SQLite reads a negative LIMIT as "no limit", which keeps
+                    # one code path instead of branching the SQL.
+                    (source_type, table_version, other_version,
+                     -1 if limit is None else limit - len(out)),
                 ).fetchall()
                 out.extend({"source_type": source_type, "id": r["owner_id"]}
                            for r in rows)
-                if len(out) >= limit:
+                if limit is not None and len(out) >= limit:
                     break
         return out
 

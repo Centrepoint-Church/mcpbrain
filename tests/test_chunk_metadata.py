@@ -286,3 +286,31 @@ def test_stale_chunker_ids_groups_gmail_threads_too(tmp_path):
                         "chunker_version": 0})
     ids = s.stale_chunker_ids(table_version=3, other_version=2, limit=100)
     assert [i["id"] for i in ids] == ["T1"]
+
+
+def test_stale_chunker_ids_accepts_limit_none_meaning_unbounded(tmp_path):
+    """bin/repair.py documents `--limit 0` as "no limit for any phase" and turns
+    it into limit=None. stale_chunker_ids then did `limit - len(out)` and raised
+    TypeError, so the one flag that exists to sweep a whole backlog crashed the
+    only phase with a backlog worth sweeping.
+    """
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(3):
+        s.upsert_chunk(f"gdrive-F{i}-0", "t", f"h{i}",
+                       {"source_type": "gdrive", "file_id": f"F{i}",
+                        "content_subtype": "table", "chunker_version": 2})
+    ids = s.stale_chunker_ids(table_version=3, other_version=2, limit=None)
+    assert sorted(i["id"] for i in ids) == ["F0", "F1", "F2"]
+
+
+def test_stale_chunker_ids_still_honours_a_real_limit(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(5):
+        s.upsert_chunk(f"gdrive-F{i}-0", "t", f"h{i}",
+                       {"source_type": "gdrive", "file_id": f"F{i}",
+                        "content_subtype": "table", "chunker_version": 2})
+    assert len(s.stale_chunker_ids(table_version=3, other_version=2, limit=2)) == 2
