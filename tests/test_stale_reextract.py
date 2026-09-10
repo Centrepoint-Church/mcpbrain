@@ -71,6 +71,22 @@ def test_sweep_rearms_after_content_change(tmp_path):
     assert out["triggered"] == 1             # re-armed by the content change
 
 
+def test_default_cap_clears_a_realistic_backlog():
+    """Regression: STALE_REEXTRACT_MAX=20 took ~59 days to clear a ~1,171
+    thread backlog (one sweep/day). The default must stay well above a
+    trivial cap or the backlog effectively never drains."""
+    assert stale_reextract.STALE_REEXTRACT_MAX >= 100
+
+
+def test_sweep_uses_module_default_cap_when_unset(tmp_path):
+    s = _store(tmp_path)
+    for i in range(3):
+        _stale_thread(s, f"D{i}", enriched=1)
+    out = stale_reextract.sweep(s, now="2026-06-09T00:00:00Z")
+    assert out["triggered"] == 3   # well under the real default cap
+    assert out["deferred"] == 0
+
+
 def test_sweep_respects_cap_and_reports_deferred(tmp_path):
     s = _store(tmp_path)
     for i in range(3):
