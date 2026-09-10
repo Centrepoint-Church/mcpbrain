@@ -48,8 +48,110 @@ wrong and MUST be right:
 - If extraction rules changed, run `python bin/sync_agents.py` first (keeps
   `plugin/agents/enrich-batch.md` byte-identical to `mcpbrain/enrich_prompt.md`).
 
+## STORE CORRUPTION INCIDENT — 2026-09-10, recovered
+
+**`sync_cursors` was physically corrupted during the chunker repair, and the cause was
+almost certainly TWO CONCURRENT WRITERS. Read this before running any `bin/repair.py`
+phase.**
+
+**What broke.** `PRAGMA integrity_check` reported 17 problems, ALL confined to
+`sync_cursors`: `wrong # of entries in index sqlite_autoindex_sync_cursors_1` and
+`NULL value in sync_cursors.source`. A NULL in a `TEXT PRIMARY KEY` on a **STRICT**
+table is not reachable by any normal write — and the surviving `cursor` values were
+chunk doc-ids (`enriched-note-<hash>`), i.e. pages belonging to another table had been
+linked into this b-tree. Physical corruption, not a logic bug. The daemon then raised
+`sqlite3.DatabaseError: database disk image is malformed` on every `/api/status`
+(`backfill_progress` → `get_cursor`), which is what surfaced it.
+
+**Dated to a ~93-second window** by comparing three snapshots — this is why taking them
+mattered: `bak-1789004577` (09:42) integrity **ok**, 61 healthy cursors;
+`bak-1789009913` (11:11) integrity **ok**, 61 healthy; `bak-1789010006` (11:13)
+**already corrupt** but rows still readable; live store, later, down to 8 garbage rows.
+
+**Probable cause — two writers.** In that window `bin/repair.py reingest-stale` was
+started, crashed mid-run on the `limit=None` TypeError, and was relaunched, while the
+daemon had been **restarted behind us by launchd's KeepAlive** after a `launchctl stop`.
+`repair.py` pauses the daemon via the control API, but it correctly skipped pausing
+because the daemon was down when it started — so nothing held that guarantee once
+KeepAlive brought it back. SQLite here is single-writer by design; the repair docstring
+says pausing "is cheaper and more honest than racing it and relying on busy_timeout".
+Disk pressure is a contributing suspect (the volume hit ~99% full during this work; ENOSPC
+mid-write is a classic corruption source) but is not established.
+
+**Recovery, and why it was cheap.** The corruption was confined to sync watermarks, NOT
+content — 248,673 chunks / 31,912 entities / 81,566 relations / 184,186 email_entities all
+verified intact, `foreign_key_check` 0. So the fix was targeted, not a full restore:
+`ATTACH` the last clean snapshot, `DROP`/`CREATE` `sync_cursors`, re-`INSERT` its 61 rows
+in one `BEGIN IMMEDIATE`. Afterwards `integrity_check` **ok**, and the gold gate was
+unchanged at 0.850/0.546 before and after, proving the repair touched nothing else.
+Cost of restoring 11:11 cursors: a re-walk of a few hours of changes (the sync queue went
+to 17,489 pending and drains on its own). **Losing sync_cursors is never data loss** —
+the cursor is a watermark and every write is checkpointed by id+hash.
+
+**RULES FOR NEXT TIME.**
+1. **`launchctl stop` is NOT sufficient — KeepAlive re-launches within seconds.** Use
+   **`launchctl bootout gui/$(id -u)/com.mcpbrain`** before any attended store operation,
+   and **`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`**
+   afterwards. `bootout` also unregisters the login agent, so forgetting the bootstrap
+   leaves the daemon gone across reboots.
+2. **Confirm no daemon process exists before starting a repair phase**, not just that you
+   asked it to stop — and re-confirm partway through a long phase.
+3. **Run `PRAGMA integrity_check` after any attended store operation.** This went
+   undetected for hours because nothing checks it; `doctor` reports `foreign_key_check`
+   but not `integrity_check`.
+4. **Keep the snapshots.** Three snapshots at different times are what made the cause
+   datable and the fix targeted rather than a wholesale restore.
+
 ## Shipping caveats
 
+- **Chunker repair COMPLETE (2026-09-10), source-only, NOT released.** The 60,767-item
+  "Items awaiting re-chunk" backlog is down to **7** (files deleted upstream that can
+  never be re-fetched), and oversize chunks from **3,617 → 564**.
+  **The backlog was never 60,767 items — that number was a BUG.** `stale_chunker_ids` did
+  `SELECT ... AS oid ... GROUP BY oid`, and **`oid` is a built-in SQLite alias for
+  `rowid`**, resolved BEFORE the output alias — so the GROUP BY was inert and every chunk
+  formed its own group. Verified: `GROUP BY oid` → 49,526 rows, any other alias → 3,019,
+  `SELECT oid=rowid` → true. Since `repair.py` fetches one item per entry, **a 16-chunk
+  spreadsheet was re-fetched 16 times**: a 17x over-fetch of the Google APIs. The real
+  scope was **3,180 items**. Fixed (alias → `owner_id`) with regression tests on the
+  file_id and thread_id branches. `--limit 0` ("no limit for any phase") also crashed with
+  a TypeError, so the one flag meant for sweeping a whole backlog never worked.
+  **What was actually stale, and what was deliberately NOT touched.** v2→v3 changed table
+  rendering ONLY (schema-enriched row sentences replacing the fixed-width markdown grid);
+  `chunk_text` is unchanged, so **v2 PROSE is byte-identical at v3** and re-fetching it
+  would burn quota for nothing — `stale_chunker_ids`' two version floors already avoid
+  that. Of 117,022 stale chunks: 55,638 v2 tables (categorically old rendering, **zero of
+  them enriched** — the salience gate cold-marks tabular content, so re-fetching cost no
+  extraction work), 519 oversize v0 prose (provable content loss), and 60,865 v0 prose with
+  **no detectable defect** — all three v1→v2 criteria inapplicable (0 content-free, not
+  oversize, not tabular). Re-fetching that last group would have discarded enrichment on
+  ~60,500 chunks to re-derive text that is not broken, so it was **stamped, not re-fetched**
+  (`bin/stamp_audited_prose.py`, 60,920 chunks). The stamp records
+  `chunker_upgraded_from` + `chunker_audited` alongside `chunker_version`, so the set stays
+  findable: a bare version stamp would have asserted these came from the current chunker and
+  made a future prose fix skip them forever. **A detector I invented for "character-split
+  tables" was WRONG and its conclusion discarded** — validated against known-good v3 tables
+  it false-positived 93%, because the redesign made row *sentences* correct and I had
+  assumed grid-shaped meant correct. The numbers above come from categorical facts
+  (version + subtype), not a proxy.
+  **Gold gate: recall@10 0.850 held; MRR 0.517 → 0.546 (+0.029).** Measured on the same
+  harness against the pre-repair snapshot, so this is a true before/after, not a guess.
+  **MRR 0.546 is 0.004 UNDER the documented 0.550 floor — and that shortfall is
+  PRE-EXISTING, not caused by this work**: the store measured 0.525 before any of today's
+  changes and 0.517 immediately pre-reingest. It was last recorded at 0.601 on 2026-08-31,
+  so **MRR has drifted ~0.06-0.08 over ten days independently of this repair** — that is a
+  separate open question, and the repair moved the number UP toward the floor, not away.
+  An interim gold run mid-repair read 0.517 and looked like a regression; it was measuring
+  a half-migrated store (45,901 re-chunked chunks with no vectors yet). **The repair is
+  two-phase — `reingest-stale` then `embed-pending` — and a gold number taken between them
+  is meaningless.**
+  **Also fixed in this pass** (both source-only, unreleased): the `fleet_storage`
+  permanent-403 loop (78 Drive files, 98,964 tracebacks, 658 MB log — a scope mismatch where
+  `_find_child` lists with `drive.readonly` reach and discovers artifacts `drive.file` can
+  never update; now absorbed and reported once per path) and the **complete absence of
+  launchd log rotation** (`mcpbrain/log_cap.py`, hourly, truncates in place keeping the tail
+  — never rename, launchd holds the file open with O_APPEND). Verified live: 0 tracebacks in
+  90 s where the same window had produced ~2 MB.
 - **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.126`,
   RELEASED** — source `585fe07`, dist `1c9795e`, plugin `0e4ff5d`; the published index
   serves only `mcpbrain-0.7.126-py3-none-any.whl` and `install.ps1` is live (200). Full
