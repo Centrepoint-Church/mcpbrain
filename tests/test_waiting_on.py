@@ -25,18 +25,31 @@ def store(tmp_path):
 
 
 def _add_action(store, waiting_on="Taryn Hamilton", waiting_on_entity_id="",
-                waiting_on_set_at=None, status="open"):
+                waiting_on_set_at=None, status="open", thread_id=""):
     """Insert an action with waiting_on set. Returns the new action id."""
     set_at = waiting_on_set_at or (
         datetime.now(timezone.utc) - timedelta(days=1)
     ).isoformat()
     with store._connect() as db:
         db.execute(
-            "INSERT INTO actions(text, status, waiting_on, waiting_on_entity_id, waiting_on_set_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("Test action", status, waiting_on, waiting_on_entity_id, set_at),
+            "INSERT INTO actions(text, status, waiting_on, waiting_on_entity_id, "
+            "waiting_on_set_at, thread_id) VALUES (?, ?, ?, ?, ?, ?)",
+            ("Test action", status, waiting_on, waiting_on_entity_id, set_at, thread_id),
         )
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _insert_thread_chunk(store, doc_id, thread_id, *, date="2026-06-01",
+                         sender="Taryn Hamilton", labels=None, enriched=1):
+    """Insert a chunk carrying thread_id metadata, for re-extraction tests."""
+    meta = json.dumps({"sender": sender, "date": date, "labels": labels or [],
+                       "thread_id": thread_id})
+    with store._connect() as db:
+        db.execute(
+            "INSERT INTO chunks(doc_id, text, content_hash, metadata, enriched) "
+            "VALUES(?,?,?,?,?)",
+            (doc_id, "test text", f"hash-{doc_id}", meta, enriched),
+        )
 
 
 def _make_chunk(doc_id="chunk-1", sender_name="Taryn Hamilton", sender_entity_id="",
@@ -114,6 +127,47 @@ def test_reconcile_clears_waiting(store):
     assert row["waiting_on"] is None
     assert row["reply_received"] == 1
     assert row["waiting_on_cleared_by_doc_id"] == "chunk-taryn-1"
+
+
+def test_reconcile_triggers_reextract_not_close(store):
+    """A reply from the waited-on person must NOT auto-close the action --
+    only put the thread back in front of the LLM extractor (same mechanism
+    as stale_reextract.sweep), so a genuine close still goes through
+    resolved_action_ids. Regression for the reconciler that detected a reply
+    but never did anything with it (waiting_on_cleared_at set, action left
+    open forever)."""
+    _insert_thread_chunk(store, "chunk-orig", "t-wait", sender="Sam Chen",
+                         enriched=1)
+    action_id = _add_action(store, waiting_on="Taryn Hamilton", thread_id="t-wait")
+    reply_chunk = _make_chunk(doc_id="chunk-reply", sender_name="Taryn Hamilton")
+    reply_chunk["metadata"]["thread_id"] = "t-wait"
+    now = datetime.now(timezone.utc).isoformat()
+
+    cleared = reconcile(store, [reply_chunk], now=now)
+
+    assert cleared == 1
+    with store._connect() as db:
+        row = db.execute("SELECT status FROM actions WHERE id=?", (action_id,)).fetchone()
+    assert row["status"] == "open"  # never auto-closed by a mere reply
+
+    # The thread's existing (already-enriched) chunk is reset so the normal
+    # enrichment cycle reconsiders it with the reply in context.
+    with store._connect() as db:
+        orig = db.execute("SELECT enriched FROM chunks WHERE doc_id='chunk-orig'").fetchone()
+    assert orig["enriched"] == 0
+    assert store.get_stale_reextract("t-wait") is not None
+
+
+def test_reconcile_no_thread_id_no_reextract_crash(store):
+    """An action with no thread_id (e.g. a capture-sourced action) must not
+    raise when the reconciler tries to trigger re-extraction."""
+    _add_action(store, waiting_on="Taryn Hamilton", thread_id="")
+    chunk = _make_chunk(sender_name="Taryn Hamilton")
+    now = datetime.now(timezone.utc).isoformat()
+
+    cleared = reconcile(store, [chunk], now=now)
+
+    assert cleared == 1
 
 
 def test_reconcile_respects_window(store):
