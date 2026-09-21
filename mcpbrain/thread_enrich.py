@@ -53,7 +53,8 @@ _ATTACHMENT_INDEX = re.compile(r"-att-(\d+)-\d+$")
 
 def _chunk_key(meta: dict, doc_id: str) -> str:
     """Message-identity key shared by _group_key and reassemble_thread: file_id,
-    else ``cal-<event_id>``, else message_id, else doc_id.
+    else ``cal-<event_id>``, else ``anarlog-<session_id>``, else message_id, else
+    doc_id.
 
     This is the value reassemble_thread emits as a message's `message_id`, so
     every branch must be resolvable by store.doc_ids_for_messages — drain
@@ -79,6 +80,23 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     and its actions no longer closeable. Prefixing solves I6's real problem — the
     `cal-<eid>-0..N` chunks of one split event grouping together instead of
     fragmenting into singletons — with no namespace change at all.
+
+    The anarlog branch is the same fix for a third source: sync/anarlog.py
+    writes a meeting's hot chunks as `anarlog-<session_id>-<summary|note>-<i>`
+    (transcripts are cold and never reach this function — unenriched_chunks
+    excludes cold chunks, so this branch is only exercised by summary/note),
+    never the bare `anarlog-<session_id>`. Without it a multi-chunk summary
+    fragments into N singleton "messages", each extracted without the others'
+    context — the same defect class as the pre-0.7.98 Drive bug and pre-I6
+    Calendar bug, just for a third source. Every anarlog chunk carries
+    `session_id` (sync/anarlog.py's `base` dict), so this checks that field
+    directly rather than a doc_id prefix. store._doc_ids_query has a matching
+    session_id arm (Task 3) with its own expression index, so the emitted key
+    resolves. Placed after event_id: a native (calendar-linked) anarlog
+    session's chunks carry a real `event_id` too and correctly resolve via the
+    cal- branch above instead, so this session's raw meeting-note chunks group
+    under the SAME key as any calendar-sourced chunks of the same event —
+    imported (CSV) sessions have no event_id and fall through to here.
 
     This is the portion of the precedence chain that genuinely means the same
     thing at both call sites — "which message/document does this chunk belong
@@ -112,6 +130,8 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
         return meta["file_id"]
     if meta.get("event_id"):
         return f"cal-{meta['event_id']}"
+    if meta.get("session_id"):
+        return f"anarlog-{meta['session_id']}"
     return meta.get("message_id") or doc_id
 
 

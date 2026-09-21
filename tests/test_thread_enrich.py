@@ -521,6 +521,117 @@ def test_a_single_chunk_calendar_event_keeps_its_doc_id_as_its_identity(tmp_path
     assert store.doc_ids_for_messages(["cal-solo"]) == ["cal-solo"]
 
 
+def test_a_multi_chunk_anarlog_summary_reassembles_into_one_message():
+    """Task 8b: an anarlog chunk has no file_id, no event_id (imported/CSV
+    sessions never carry one) and no message_id, so before this fix
+    _chunk_key fell through to each chunk's own doc_id — a 6-chunk summary
+    became 6 singleton "messages", each extracted without the others'
+    context. session_id is now in the chain, mirroring Drive's file_id and
+    Calendar's event_id."""
+    from mcpbrain.thread_enrich import reassemble_thread
+
+    chunks = [
+        {"doc_id": f"anarlog-sess9-summary-{i}", "text": f"summary part {i}",
+         "metadata": {"source_type": "anarlog", "session_id": "sess9",
+                      "content_subtype": "summary", "event_id": "",
+                      "chunk_index": i, "chunk_total": 3}}
+        for i in range(3)
+    ]
+
+    messages = reassemble_thread(chunks)
+
+    assert len(messages) == 1, "a split anarlog summary is ONE document"
+    assert messages[0]["text"] == (
+        "summary part 0\n\nsummary part 1\n\nsummary part 2")
+    assert "[…]" not in messages[0]["text"], (
+        "the full chunk set is present — a gap marker here is a lie the "
+        "model cannot check"
+    )
+    assert messages[0]["message_id"] == "anarlog-sess9", (
+        "must stay in the anarlog- namespace store._doc_ids_query's "
+        "session_id arm expects"
+    )
+
+
+def test_anarlog_summary_and_note_chunks_group_into_one_batch(tmp_path):
+    """The other half: _group_key also delegates to _chunk_key, so a
+    session's summary + note chunks (no thread_id) must form ONE batch."""
+    store = _store(tmp_path)
+    store.upsert_chunk("anarlog-sess9-summary-0", "summary text", "h0",
+                       {"source_type": "anarlog", "session_id": "sess9",
+                        "content_subtype": "summary", "event_id": "",
+                        "chunk_index": 0, "chunk_total": 1})
+    store.upsert_chunk("anarlog-sess9-note-0", "note text", "h1",
+                       {"source_type": "anarlog", "session_id": "sess9",
+                        "content_subtype": "note", "event_id": "",
+                        "chunk_index": 0, "chunk_total": 1})
+
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+
+    assert len(batches) == 1
+    assert batches[0].thread_id == "anarlog-sess9", (
+        "same namespace as the emitted message_id — see the reassembly test")
+    assert set(batches[0].doc_ids) == {
+        "anarlog-sess9-summary-0", "anarlog-sess9-note-0"}
+
+
+def test_an_anarlog_session_id_resolves_back_to_every_chunk_of_the_meeting(
+        tmp_path):
+    """The message_id reassemble_thread emits for a split anarlog meeting
+    (`anarlog-<session_id>`) MUST resolve in store.doc_ids_for_messages, or
+    drain discards the extraction and the chunks re-queue forever — the
+    0.7.98 Drive defect, again. Hence store._doc_ids_query's session_id arm
+    (Task 3), bound with the `anarlog-` prefix stripped."""
+    store = _store(tmp_path)
+    for i in range(3):
+        store.upsert_chunk(f"anarlog-sess9-summary-{i}", f"part {i}", f"h{i}",
+                           {"source_type": "anarlog", "session_id": "sess9",
+                            "content_subtype": "summary", "event_id": "",
+                            "chunk_index": i, "chunk_total": 3})
+
+    assert store.doc_ids_for_messages(["anarlog-sess9"]) == [
+        "anarlog-sess9-summary-0", "anarlog-sess9-summary-1",
+        "anarlog-sess9-summary-2"]
+
+
+def test_the_emitted_anarlog_id_is_exactly_what_resolves_back(tmp_path):
+    """End-to-end round trip, the property drain actually depends on:
+    whatever _chunk_key emits for an anarlog chunk set must resolve to that
+    same chunk set."""
+    store = _store(tmp_path)
+    for i in range(2):
+        store.upsert_chunk(f"anarlog-sessRT-note-{i}", f"note {i}", f"hrt{i}",
+                           {"source_type": "anarlog", "session_id": "sessRT",
+                            "content_subtype": "note", "event_id": "",
+                            "chunk_index": i, "chunk_total": 2})
+    chunks = list(store.unenriched_chunks())
+
+    emitted = thread_enrich.reassemble_thread(chunks)[0]["message_id"]
+
+    assert emitted.startswith("anarlog-"), (
+        "store._doc_ids_query keys its session_id arm off the anarlog- prefix")
+    assert store.doc_ids_for_messages([emitted]) == [
+        "anarlog-sessRT-note-0", "anarlog-sessRT-note-1"]
+
+
+def test_a_native_anarlog_session_groups_under_its_calendar_event_key(
+        tmp_path):
+    """A native (calendar-linked) anarlog session's chunks carry a real
+    event_id (sync/anarlog.py stamps session.get("event_id")), so they must
+    resolve via the existing cal- branch, not the new session_id branch —
+    the session_id branch exists specifically for imported/CSV sessions,
+    which have no event_id."""
+    store = _store(tmp_path)
+    store.upsert_chunk("anarlog-sessNative-summary-0", "summary", "hn",
+                       {"source_type": "anarlog", "session_id": "sessNative",
+                        "content_subtype": "summary", "event_id": "evtLinked",
+                        "chunk_index": 0, "chunk_total": 1})
+
+    messages = thread_enrich.reassemble_thread(list(store.unenriched_chunks()))
+
+    assert messages[0]["message_id"] == "cal-evtLinked"
+
+
 def test_reassemble_thread_carries_chunk_doc_ids_in_order():
     """A message body IS a join of chunks. Splitting it back at those seams is
     what lets a part be marked against exactly the chunks it covered."""
