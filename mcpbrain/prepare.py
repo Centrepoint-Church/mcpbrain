@@ -452,7 +452,12 @@ def should_enrich(chunk: dict) -> bool:
     # chunks to the extractor uncapped. A 'table' chunk is tabular data, not
     # prose worth entity extraction, whoever produced it; any future tabular
     # source is honoured without re-listing mimes anywhere.
-    if str(meta.get("content_subtype") or "").lower() == "table":
+    # A transcript joins 'table' here for the same reason the comment above
+    # gives: verbatim speech is not prose worth entity extraction, whoever
+    # produced it. Source-agnostic on purpose — any future transcript source is
+    # honoured without editing this gate again. Transcripts stay embedded and
+    # searchable (embedded=1); only graph extraction skips them.
+    if str(meta.get("content_subtype") or "").lower() in ("table", "transcript"):
         return False
 
     if source == "gmail" or meta.get("thread_id"):
