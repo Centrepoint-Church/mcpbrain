@@ -115,7 +115,8 @@ def _source_kind(store, doc_id: str) -> str:
     # Honest labelling: an unrecognised/absent source_type becomes "unknown", not
     # a silent mislabel as "email" (which would misattribute provenance for any
     # new source type). source_kind is a coarse provenance label only, never gated.
-    return {"gmail": "email", "drive": "drive", "calendar": "calendar"}.get(st, "unknown")
+    return {"gmail": "email", "drive": "drive", "calendar": "calendar",
+            "anarlog": "meeting"}.get(st, "unknown")
 
 
 def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str) -> int:
@@ -148,6 +149,14 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
         doc_id = rel.get("source_doc_id") or ""
         if not doc_id or _is_cold(store, doc_id):
             continue                               # no/cold provenance — fail closed
+        if _source_kind(store, doc_id) == "meeting":
+            continue                               # meetings never contribute:
+            # meeting content is personnel-adjacent by nature (staff meetings,
+            # performance, grievance), so no meeting-derived claim leaves this
+            # machine regardless of relation type. Transcripts were already
+            # excluded by the cold check above; this covers the hot summary and
+            # note. Deliberate policy, not an oversight — see the 2026-09-21
+            # anarlog design doc §10.
         a = entities.get(rel.get("entity_a"))
         b = entities.get(rel.get("entity_b"))
         if not a or not b:
