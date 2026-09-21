@@ -103,9 +103,24 @@ if anarlog_db is not None:
 ```
 
 Unlike its siblings it takes no `service` — the "connection" is a resolved path.
-Default location on macOS:
-`~/Library/Application Support/anarlog/app.db`, overridable by config
-(`anarlog.db_path`) and disabled when absent.
+
+**Ingestion is EXPLICIT OPT-IN**, via `anarlog.enabled` in `<home>/config.json`.
+With the flag absent or false, `config.anarlog_db_path(home)` returns `None`
+without reading `Path.home()` at all, and the cycle is untouched — no
+`discovered` key, no handler, no log line. Once enabled, it resolves
+`anarlog.db_path` if set, else the macOS default
+`~/Library/Application Support/anarlog/app.db`, returning `None` if that file
+does not exist.
+
+Opt-in rather than auto-detect, for two reasons found during implementation.
+**Correctness:** an accessor that reads the OS home on every call is not a
+function of `home`, so merely having anarlog installed made 13 pre-existing
+sync-cycle tests fail — the suite became dependent on what the dev machine had
+installed. **Consent:** mcpbrain ships to other people. Meeting transcripts
+contain third parties' recorded speech, and whether to ingest them is the
+user's decision, not a consequence of an app being present on disk. This also
+matches the repo's standing precedent that a new capability ships OFF pending
+config plus real-data validation.
 
 **`sync_queue` is retained even though the read is free.** The read costing
 nothing does not make the *work* free: chunking and embedding 124k characters of
