@@ -91,3 +91,19 @@ def test_multi_piece_lineage_tracks_total_and_resets_per_kind():
         assert c.metadata["chunk_total"] == len(summary_chunks)
     for c in note_chunks:
         assert c.metadata["chunk_total"] == len(note_chunks)
+
+
+def test_metadata_records_the_external_provider():
+    """M3: external_provider is stamped so a "" event_id on a session that
+    plainly HAS an external event is explainable from the chunk alone."""
+    c = normalise_session(_session(external_provider="granola"))[0]
+    assert c.metadata["external_provider"] == "granola"
+
+
+def test_series_id_is_carried_but_is_not_wired_recurrence():
+    """`sessions.series_id` is '' on every live row — anarlog keeps recurrence
+    in `events.recurrence_series_id`, which this source does not read, and
+    nothing in mcpbrain reads series_id off chunk metadata. Pinned so a future
+    reader does not mistake the key for a working linkage."""
+    c = normalise_session(_session(series_id=""))[0]
+    assert c.metadata["series_id"] == ""

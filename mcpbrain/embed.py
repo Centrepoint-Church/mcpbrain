@@ -76,6 +76,22 @@ def contextual_prefix(metadata: dict) -> str:
         if location:
             parts.append(f"at {location}")
 
+    elif source == "anarlog":
+        # A mid-meeting chunk carries none of its own provenance: a transcript
+        # slice or the third page of a summary names neither the meeting nor
+        # the date, which is exactly the headline query shape ("what did we
+        # decide at the ACC staff meeting"). Stamped at write time into both
+        # the vector and the FTS text, same as every other source here.
+        title = metadata.get("meeting_title", "")
+        started = str(metadata.get("started_at") or "")[:10]
+        subtype = metadata.get("content_subtype", "")
+        if title:
+            parts.append(f"Meeting: {title}")
+        if started:
+            parts.append(f"on {started}")
+        if subtype:
+            parts.append(f"({subtype})")
+
     # gmail_enriched, notion, session_notes, local_file branches are not
     # emitted by this product's sync layer and are intentionally omitted.
     # Add them here if new source_types are introduced.

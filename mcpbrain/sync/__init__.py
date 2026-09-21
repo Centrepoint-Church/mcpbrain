@@ -161,7 +161,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # discovery of new changes. Drive discovery keeps the SAME try/except
     # protection sync_drive used to have here — a live Drive/TLS SSL failure
     # observed in production must not abort the work loop below or the
-    # shared-drive/backfill steps that follow; gmail/calendar discovery are
+    # shared-drive/backfill steps that follow; anarlog discovery is wrapped
+    # the same way (see its own block below). gmail/calendar discovery are
     # deliberately NOT wrapped, matching that same pre-existing precedent
     # (only Drive ever needed it).
     discovered = {}
@@ -184,9 +185,26 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # absent service arg for every other source here.
     anarlog_db = config.anarlog_db_path(home) if home is not None else None
     if anarlog_db:
-        discovered["anarlog"] = discover_anarlog(
-            store, db_path=anarlog_db, budget=disc_budget,
-            bulk_section=bulk_section)
+        # Wrapped exactly as Drive discovery is, and for a STRONGER reason.
+        # discover_anarlog raises DETERMINISTICALLY by design — on schema
+        # drift that drops a column it reads, and on the tied-timestamp
+        # watermark guard. anarlog is a third-party app that auto-updates and
+        # "ships migrations constantly" (that module's own docstring), so the
+        # raise is a matter of when, not if. Unwrapped it propagates past
+        # Gmail, Drive, Calendar, the shared drives, work_queue, index_pending,
+        # drain_captures and drain to the daemon's catch-all, which retries the
+        # same deterministic raise next interval: ONE third-party schema change
+        # stops the user's whole brain from ingesting anything, forever, with
+        # only a log line to say so. The design says "the SOURCE stops" —
+        # degrading loudly is preserved here (error level, with the exception),
+        # the blast radius is corrected to the source.
+        try:
+            discovered["anarlog"] = discover_anarlog(
+                store, db_path=anarlog_db, budget=disc_budget,
+                bulk_section=bulk_section)
+        except Exception as exc:  # noqa: BLE001 — one source stops, not the cycle
+            log.error("sync: anarlog discovery failed, that source is stopped "
+                      "this cycle (other sources continue): %s", exc)
     # Shared Drive discovery (spec §A) is folded into this SAME discovery
     # phase, not run as its own later block, so its handler can be registered
     # into the SAME `handlers` dict below and drained by the ONE `work_queue`

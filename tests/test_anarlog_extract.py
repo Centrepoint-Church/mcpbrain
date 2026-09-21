@@ -80,3 +80,95 @@ def test_prosemirror_nested_content_not_list():
         {"type": "paragraph", "content": {"a": 1}}
     ]})
     assert prosemirror_to_markdown(body) == ""
+
+
+# --- I4: nested lists must not glue words together -------------------------
+
+def _nested_body():
+    """The dominant shape in anarlog's real AI notes: a listItem holding a
+    paragraph AND a nested bulletList (live DB: 246 listItem/paragraph and 44
+    listItem/bulletList children across the two meetings)."""
+    return json.dumps({"type": "doc", "content": [
+        {"type": "bulletList", "content": [
+            {"type": "listItem", "content": [
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "Two new state managers introduced:"}]},
+                {"type": "bulletList", "content": [
+                    {"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": "Nate Phor: Western Australia"}]}]},
+                    {"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": "Chad Irons: Victoria"}]}]},
+                ]},
+            ]},
+        ]},
+    ]})
+
+
+def test_nested_bullet_list_items_become_their_own_lines():
+    out = prosemirror_to_markdown(_nested_body())
+    assert out == (
+        "- Two new state managers introduced:\n"
+        "  - Nate Phor: Western Australia\n"
+        "  - Chad Irons: Victoria")
+
+
+def test_nested_bullet_list_glues_no_words_together():
+    """The defect: _inline_text flattened a listItem's whole subtree with NO
+    separator, so the live notes read
+    'introduced:Nate Phor: Western AustraliaChad Irons: Victoria' — person
+    names fused to the preceding word, in the content chosen for enrichment."""
+    out = prosemirror_to_markdown(_nested_body())
+    for glued in ("introduced:Nate", "AustraliaChad"):
+        assert glued not in out
+    # no two words anywhere fused across a line boundary
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    assert lines == ["- Two new state managers introduced:",
+                     "- Nate Phor: Western Australia",
+                     "- Chad Irons: Victoria"]
+
+
+def test_ordered_nested_list_numbers_its_own_items():
+    body = json.dumps({"type": "doc", "content": [
+        {"type": "bulletList", "content": [
+            {"type": "listItem", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Top"}]},
+                {"type": "orderedList", "content": [
+                    {"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": "One"}]}]},
+                    {"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": "Two"}]}]},
+                ]},
+            ]},
+        ]},
+    ]})
+    assert prosemirror_to_markdown(body) == "- Top\n  1. One\n  2. Two"
+
+
+def test_a_list_item_with_two_paragraphs_keeps_them_on_separate_lines():
+    body = json.dumps({"type": "doc", "content": [
+        {"type": "bulletList", "content": [
+            {"type": "listItem", "content": [
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "require ACCI sign-off"}]},
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "Policy: no sponsors"}]},
+            ]},
+        ]},
+    ]})
+    out = prosemirror_to_markdown(body)
+    assert "sign-offPolicy" not in out
+    assert out == "- require ACCI sign-off\n  Policy: no sponsors"
+
+
+def test_blockquote_with_nested_paragraphs_does_not_glue():
+    body = json.dumps({"type": "doc", "content": [
+        {"type": "blockquote", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "First para"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Second para"}]},
+        ]},
+    ]})
+    assert prosemirror_to_markdown(body) == "First para\n\nSecond para"

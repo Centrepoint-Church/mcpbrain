@@ -28,8 +28,16 @@ _PINNED_SCHEMA_VERSION = "20260909160300"
 # Exactly the columns this module reads. Kept explicit so drift detection
 # checks what we actually depend on, not the whole schema.
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
+    # `external_event_id` is the GOOGLE calendar event id and is what chunk
+    # metadata's `event_id` carries; `event_id` here is anarlog's OWN foreign
+    # key into its `events` table (a UUID) and is read only so drift over it is
+    # still caught while read_session keeps selecting it. `external_provider`
+    # is read too — it says WHOSE id external_event_id is (google | granola |
+    # …), and stamping a granola import's id as a Google event id would be a
+    # lie every downstream consumer of `event_id` believes.
     "sessions": {"id", "title", "updated_at", "deleted_at", "started_at",
-                 "created_at", "event_id", "series_id", "external_provider"},
+                 "created_at", "event_id", "external_event_id", "series_id",
+                 "external_provider"},
     # deleted_at on the child tables matters: read_session filters on it, so a
     # schema that dropped it would raise mid-ingest rather than being caught
     # here. Every column this module names in SQL must appear in this map.
@@ -94,14 +102,35 @@ def changed_sessions(db, cursor: str, limit: int) -> list[dict]:
 
 _BLOCK_TYPES = {"paragraph", "heading", "listItem", "blockquote",
                 "codeBlock"}
+_LIST_TYPES = {"bulletList", "orderedList"}
+# A node of one of these types is its own line/block. _inline_text must never
+# flatten one into a sibling's text: doing so fuses the last word of one block
+# to the first word of the next ("...sign-offPolicy: no sponsors"), which is
+# exactly what the nested bulletLists anarlog's AI notes are built from used to
+# produce. Measured on the live database before this fix: 126 block texts
+# concatenated with no separator across the two meetings' four hot documents,
+# 82 of them fusing two real words into one token. After: 0 of each.
+_INLINE_STOP = _BLOCK_TYPES | _LIST_TYPES
+
+# Two spaces per nesting level. anarlog's notes nest a full level deep
+# (`listItem -> [paragraph, bulletList]` is the dominant shape in the live
+# data), and that nesting is semantic — a sub-point belongs to the point above
+# it. Indenting keeps that relationship legible to both the embedding model and
+# the extraction prompt; flattening every item to a bare `- ` line would render
+# the same words while losing which point each sub-point hangs off.
+_NEST_INDENT = "  "
 
 
 def _inline_text(node: dict) -> str:
-    """Concatenate the text of a node's inline descendants.
+    """Concatenate the text of a node's INLINE descendants.
 
     Marks (strong/em/link) are dropped, not rendered: the consumer is an
     embedding model and an extraction prompt, neither of which benefits from
     emphasis, and keeping them would put markdown noise into the vector.
+
+    Nested BLOCK and LIST children are skipped, not flattened — see
+    _INLINE_STOP. Callers that need those render them as their own lines
+    (_render_list / walk); nothing may glue two blocks into one word.
     """
     if not isinstance(node, dict):
         return ""
@@ -110,7 +139,49 @@ def _inline_text(node: dict) -> str:
     content = node.get("content")
     if not isinstance(content, list):
         return ""
-    return "".join(_inline_text(c) for c in content if isinstance(c, dict))
+    return "".join(_inline_text(c) for c in content
+                   if isinstance(c, dict) and c.get("type") not in _INLINE_STOP)
+
+
+def _has_block_children(node: dict) -> bool:
+    """True when this node contains nested block/list children of its own."""
+    content = node.get("content")
+    return isinstance(content, list) and any(
+        isinstance(c, dict) and c.get("type") in _INLINE_STOP for c in content)
+
+
+def _render_item(item: dict, depth: int, marker: str,
+                 lines: list[str]) -> None:
+    """Render one listItem, recursing into nested lists as their own lines."""
+    indent = _NEST_INDENT * depth
+    first = True
+    for child in item.get("content") or []:
+        if not isinstance(child, dict):
+            continue
+        if child.get("type") in _LIST_TYPES:
+            _render_list(child, depth + 1, lines)
+            continue
+        text = _inline_text(child).strip()
+        if not text:
+            continue
+        if first:
+            lines.append(f"{indent}{marker}{text}")
+            first = False
+        else:
+            # a listItem's second and later paragraphs are continuation lines,
+            # aligned under the marker rather than given a marker of their own
+            lines.append(f"{indent}{' ' * len(marker)}{text}")
+
+
+def _render_list(node: dict, depth: int, lines: list[str]) -> None:
+    """Render a bulletList/orderedList into `lines`, one line per item."""
+    ordered = node.get("type") == "orderedList"
+    n = 0
+    for item in node.get("content") or []:
+        if not isinstance(item, dict) or item.get("type") != "listItem":
+            continue
+        n += 1
+        _render_item(item, depth, f"{n}. " if ordered else "- ", lines)
 
 
 def prosemirror_to_markdown(body: str) -> str:
@@ -135,17 +206,17 @@ def prosemirror_to_markdown(body: str) -> str:
         if not isinstance(node, dict):
             return
         ntype = node.get("type")
-        if ntype in ("bulletList", "orderedList"):
-            content = node.get("content")
-            if isinstance(content, list):
-                items: list[str] = []
-                for item in content:
-                    if isinstance(item, dict):
-                        text = _inline_text(item).strip()
-                        if text:
-                            items.append(f"- {text}")
-                if items:
-                    blocks.append("\n".join(items))
+        if ntype in _LIST_TYPES:
+            lines: list[str] = []
+            _render_list(node, 0, lines)
+            if lines:
+                blocks.append("\n".join(lines))
+            return
+        if ntype == "listItem":          # orphan item outside a list
+            lines = []
+            _render_item(node, 0, "- ", lines)
+            if lines:
+                blocks.append("\n".join(lines))
             return
         if ntype == "heading":
             text = _inline_text(node).strip()
@@ -153,16 +224,19 @@ def prosemirror_to_markdown(body: str) -> str:
                 level = int((node.get("attrs") or {}).get("level") or 1)
                 blocks.append(f"{'#' * level} {text}")
             return
-        if ntype in _BLOCK_TYPES:
-            text = _inline_text(node).strip()
-            if text:
-                blocks.append(text)
-            return
-        content = node.get("content")
-        if isinstance(content, list):
-            for child in content:
+        # Anything else: a node holding nested blocks (blockquote, or an
+        # unknown container anarlog adds later) is RECURSED into so each block
+        # becomes its own line; a leaf block is emitted as one block. The old
+        # code flattened every descendant of a _BLOCK_TYPES node with no
+        # separator, which is what glued words together.
+        if _has_block_children(node):
+            for child in node.get("content") or []:
                 if isinstance(child, dict):
                     walk(child)
+            return
+        text = _inline_text(node).strip()
+        if text:
+            blocks.append(text)
 
     for child in doc.get("content") or []:
         walk(child)
@@ -193,10 +267,34 @@ def transcript_to_text(words_json: str) -> str:
 _DOC_KINDS = ("summary", "note")
 
 
+def _google_event_id(row) -> str:
+    """The GOOGLE calendar event id for a session row, or "".
+
+    Chunk metadata's `event_id` means "the Google calendar event id" — it is
+    what `cal-<event_id>`, `meeting_packs` and store's event_id arm are keyed
+    on. anarlog keeps that value in `external_event_id`, and says whose id it
+    is in `external_provider`: a session imported from Granola carries a
+    GRANOLA uuid there (both live imported meetings do), which matches no
+    calendar row anywhere and would make every consumer of that field believe
+    a Google linkage that does not exist.
+
+    An EMPTY provider still carries the id through rather than dropping it:
+    "unlabelled" must not become a silent loss of a real linkage, and
+    `external_provider` rides along in the metadata so a reader can always see
+    on what basis the id was accepted.
+    """
+    eid = (row["external_event_id"] or "").strip()
+    if not eid:
+        return ""
+    provider = (row["external_provider"] or "").strip().lower()
+    return eid if (not provider or provider.startswith("google")) else ""
+
+
 def read_session(db, session_id: str) -> dict | None:
     """Assemble one session's row, its documents and its transcript."""
     row = db.execute(
-        "SELECT id, title, started_at, created_at, event_id, series_id FROM sessions "
+        "SELECT id, title, started_at, created_at, event_id, external_event_id, "
+        "external_provider, series_id FROM sessions "
         "WHERE id = ? AND deleted_at IS NULL", (session_id,)).fetchone()
     if row is None:
         return None
@@ -214,7 +312,16 @@ def read_session(db, session_id: str) -> dict | None:
         "id": row["id"],
         "title": row["title"] or "",
         "started_at": row["started_at"] or row["created_at"] or "",
-        "event_id": row["event_id"] or "",
+        # `event_id` here is the GOOGLE calendar event id — the key behind
+        # mcpbrain's `cal-<event_id>` and meeting_packs — which anarlog stores
+        # in `external_event_id`. `sessions.event_id` is anarlog's OWN foreign
+        # key into its `events` table (verified on the live DB: UUIDs that join
+        # `events.id`) and means nothing to any consumer here; it is carried as
+        # `anarlog_event_id` so the distinction stays visible rather than
+        # looking like an omission.
+        "event_id": _google_event_id(row),
+        "anarlog_event_id": row["event_id"] or "",
+        "external_provider": row["external_provider"] or "",
         "series_id": row["series_id"] or "",
         "documents": docs,
         "transcript": transcript_to_text(tr["words_json"]) if tr else "",
@@ -234,7 +341,17 @@ def normalise_session(session: dict) -> list[Chunk]:
         "session_id": sid,
         "meeting_title": session.get("title") or "",
         "started_at": session.get("started_at") or "",
+        # The GOOGLE calendar event id (anarlog's external_event_id), which is
+        # what every consumer of this key expects — see _google_event_id.
         "event_id": session.get("event_id") or "",
+        # Whose id that is. Stamped so a "" event_id on a session that plainly
+        # HAS an external event is explainable from the chunk alone.
+        "external_provider": session.get("external_provider") or "",
+        # PRESENTLY ALWAYS "": `sessions.series_id` is empty on every live row
+        # and anarlog keeps recurrence in `events.recurrence_series_id`, which
+        # this source does not read. Nothing in mcpbrain reads `series_id` off
+        # chunk metadata either, so this is a placeholder carried for the
+        # spec's §4 shape — do not mistake it for wired-up recurrence linkage.
         "series_id": session.get("series_id") or "",
         "chunker_version": CHUNKER_VERSION,
     }

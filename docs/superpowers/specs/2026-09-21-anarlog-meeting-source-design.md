@@ -69,7 +69,9 @@ Verified against the live anarlog database on 2026-09-17/21:
 | `_anlg_schema_compat` is useless for drift | single row, `min_supported_version = 0` |
 | Note/summary bodies | `body_format = 'prosemirror_json'`, `{"type":"doc","content":[...]}` |
 | Transcript body | `transcripts.words_json`, ordered array of `{id, text, ...}` |
-| Calendar linkage exists | `sessions.event_id`, `external_event_id`, `series_id` |
+| Calendar linkage exists | `sessions.external_event_id` (+ `external_provider`) |
+| `sessions.event_id` is NOT the calendar id | it is anarlog's own FK into `events` (UUIDs joining `events.id`); the Google id is `external_event_id` — corrected 2026-09-21 after the whole-branch review (C1) |
+| `sessions.series_id` is always `''` | recurrence lives in `events.recurrence_series_id`, which this source does not read |
 | Cold chunks already blocked from org contribution | `org_contrib.collect_from_drain` — "no/cold provenance — fail closed" |
 
 The CLI was evaluated and rejected as the read path: with no watermark it forces
@@ -92,6 +94,15 @@ handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None
 `source="anarlog"`. `handle_anarlog_item` works one session and raises on
 failure so `work_queue` backs it off — a malformed prosemirror body must not
 take down the cycle.
+
+`discover_anarlog` raises too — deterministically, by design (§3 schema drift,
+§7 tied-timestamp guard). `run_sync_cycle` wraps its discovery block in
+try/except and logs at **error** level, exactly as the Drive block is wrapped.
+"Degrade loudly" is about the SOURCE stopping; unwrapped, one third-party
+schema change propagated past Gmail, Drive, Calendar, `work_queue`,
+`index_pending` and `drain` to the daemon's catch-all, which retries the same
+deterministic raise next interval — the whole brain stops ingesting, forever,
+with only a log line to say so.
 
 Registered in `run_sync_cycle`'s `handlers` dict as `handlers["anarlog"]` and
 discovered alongside the other sources, gated on the database existing:
@@ -142,7 +153,7 @@ The risk accepted by reading a private schema is handled explicitly.
 it against `_PINNED_SCHEMA_VERSION` (currently `20260909160300`). On a mismatch
 it validates the columns actually used:
 
-- `sessions`: `id, title, updated_at, deleted_at, started_at, event_id, series_id, external_provider`
+- `sessions`: `id, title, updated_at, deleted_at, started_at, created_at, event_id, external_event_id, series_id, external_provider`
 - `session_documents`: `session_id, kind, body, body_format, deleted_at`
 - `transcripts`: `session_id, words_json, deleted_at`
 
@@ -178,10 +189,18 @@ Metadata written on every chunk:
   "content_subtype": "summary" | "note" | "transcript",
   "meeting_title": <title>,
   "started_at": <iso>,
-  "event_id": <google event id or "">,
-  "series_id": <recurrence series id or "">,
+  "event_id": <google event id or "">,      # from sessions.external_event_id
+  "external_provider": <"google" | "granola" | "">,
+  "series_id": "",                          # always empty — see below
 }
 ```
+
+`event_id` is read from `sessions.external_event_id`, **not** `sessions.event_id`
+(that column is anarlog's own FK into its `events` table). It is only accepted
+when `external_provider` is Google-labelled or unlabelled: a Granola-imported
+session carries a *Granola* uuid there, and stamping it as `event_id` would
+assert a calendar linkage that does not exist. `series_id` is presently always
+`""` and nothing reads it — it is carried for shape, not linkage.
 
 `content_subtype` is load-bearing — see §6.
 
@@ -192,6 +211,16 @@ recursive walk collects `text` nodes; `heading` nodes emit `#` prefixes by
 `attrs.level`; `paragraph`, `bulletList`/`orderedList` and `listItem` emit
 blank-line and `- ` structure. Structure is preserved because the summary's
 headings are what make it readable in recall.
+
+**Nesting is recursed, never flattened.** anarlog's AI notes are dominated by
+`listItem -> [paragraph, bulletList]` (live data: 246 listItem/paragraph and 44
+listItem/bulletList children). Flattening a listItem's whole subtree into one
+inline string concatenates block texts with NO separator and fuses words
+across the seam — `"…introduced:Nate Phor: Western AustraliaChad Irons:
+Victoria"`, 126 such joins (82 of them real word fusions) measured on the two
+live meetings. Nested list items are therefore rendered as their own lines,
+indented two spaces per level, and `_inline_text` stops at any nested
+block/list node so no future container can re-introduce the glue.
 
 **transcript.** `words_json` is an ordered array of `{id, text, ...}`; text is
 the `text` fields joined in order. This works for both imported transcripts
@@ -268,11 +297,25 @@ the 0.7.105 full-scan outage. A matching expression index on
 
 ### 9. Calendar and meeting-series linkage
 
-`sessions.event_id` holds the Google Calendar event id, which is exactly the key
-behind `cal-<event_id>`. Carrying it in chunk metadata makes a meeting's content
+`sessions.external_event_id` holds the Google Calendar event id, which is exactly
+the key behind `cal-<event_id>` (`sessions.event_id` is anarlog's own FK into its
+`events` table and means nothing here). Carrying it in chunk metadata makes a meeting's content
 and its calendar entry mutually resolvable, lets `meeting_packs` (keyed on
-`event_id`) pick up real notes instead of calendar stubs, and feeds `series_id`
-into the meeting-series entities added in 0.7.87.
+`event_id`) pick up real notes instead of calendar stubs.
+
+The `series_id` half of this did NOT land and is not a follow-up that can be
+picked up as written: `sessions.series_id` is `''` on every live row, recurrence
+actually lives in `events.recurrence_series_id`, and no mcpbrain consumer reads
+`series_id` off chunk metadata anyway. The meeting-series entities added in
+0.7.87 are not fed by this source.
+
+Linkage here means *mutually resolvable metadata*, never a shared grouping key.
+`thread_enrich._chunk_key` matches an anarlog chunk on `session_id` BEFORE
+`event_id` precisely so a calendar-linked meeting's chunks never group with the
+calendar event's own chunk — if they did, `graph_write`'s
+`prov_doc_id = doc_ids[0]` would hand the older calendar chunk's `source_doc_id`
+to every meeting-derived relation, `org_contrib._source_kind` would answer
+"calendar", and §10's guard would not fire.
 
 This linkage is the reason to build a real source rather than push notes through
 the capture spool.
@@ -335,6 +378,14 @@ Coverage:
    plan uses the index rather than scanning (mirroring
    `test_metadata_jsonb.py`'s re-init test, which catches DDL/query drift on an
    already-initialised store)
+9. a calendar-linked anarlog session never groups with the calendar event's
+   own chunk (the §10 privacy boundary, enforced by `_chunk_key` ordering)
+10. a session's summary and note reassemble as SEPARATE documents with
+    monotonic `chunk_indexes` and no false `[…]` markers
+11. a raising `discover_anarlog` does not prevent Gmail/Drive/Calendar/
+    `work_queue`/`index_pending` from running
+12. nested `listItem -> [paragraph, bulletList]` renders with no glued words
+13. `contextual_prefix` emits the meeting title and date for an anarlog chunk
 
 ## Follow-ups (recorded, not in scope)
 

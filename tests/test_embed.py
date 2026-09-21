@@ -281,3 +281,33 @@ def test_a_within_window_passage_logs_nothing(caplog, tmp_path, monkeypatch):
         index_pending(store, _Embedder())
 
     assert not any("window" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# I5: anarlog meeting provenance
+# ---------------------------------------------------------------------------
+
+def test_prefix_anarlog_carries_meeting_title_and_date():
+    """Without this branch an anarlog chunk got NO prefix at all while every
+    other source did — a mid-transcript slice or page three of a summary
+    names neither the meeting nor the date, which is exactly the headline
+    query shape ("what did we decide at the ACC staff meeting")."""
+    meta = {
+        "source_type": "anarlog",
+        "meeting_title": "ACC Staff Meeting",
+        "started_at": "2026-09-17T02:00:00.000Z",
+        "content_subtype": "transcript",
+    }
+    result = contextual_prefix(meta)
+    assert result == ("[Context: Meeting: ACC Staff Meeting, on 2026-09-17, "
+                      "(transcript)] ")
+
+
+def test_prefix_anarlog_without_a_title_still_dates_the_chunk():
+    result = contextual_prefix({"source_type": "anarlog",
+                                "started_at": "2026-09-17T02:00:00.000Z"})
+    assert result == "[Context: on 2026-09-17] "
+
+
+def test_prefix_anarlog_with_no_usable_parts_is_empty():
+    assert contextual_prefix({"source_type": "anarlog"}) == ""

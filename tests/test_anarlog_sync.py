@@ -17,18 +17,20 @@ def _anarlog_db(path, sessions, *, version="20260909160300"):
     # transcripts.updated_at, which read_session's SQL selects/orders by.
     db.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT, "
                "updated_at TEXT, deleted_at TEXT, started_at TEXT, "
-               "created_at TEXT, event_id TEXT, series_id TEXT, "
-               "external_provider TEXT)")
+               "created_at TEXT, event_id TEXT, external_event_id TEXT, "
+               "series_id TEXT, external_provider TEXT)")
     db.execute("CREATE TABLE session_documents(session_id TEXT, kind TEXT, "
                "body TEXT, body_format TEXT, deleted_at TEXT, updated_at TEXT)")
     db.execute("CREATE TABLE transcripts(session_id TEXT, words_json TEXT, "
                "deleted_at TEXT, updated_at TEXT)")
     for s in sessions:
         db.execute("INSERT INTO sessions(id,title,updated_at,deleted_at,"
-                   "started_at,event_id,series_id) VALUES(?,?,?,?,?,?,?)",
+                   "started_at,event_id,external_event_id,series_id,"
+                   "external_provider) VALUES(?,?,?,?,?,?,?,?,?)",
                    (s["id"], s.get("title", ""), s["updated_at"],
                     s.get("deleted_at"), s.get("started_at", ""),
-                    s.get("event_id", ""), s.get("series_id", "")))
+                    s.get("event_id", ""), s.get("external_event_id", ""),
+                    s.get("series_id", ""), s.get("external_provider", "")))
         if s.get("summary"):
             db.execute("INSERT INTO session_documents VALUES(?,?,?,?,NULL,NULL)",
                        (s["id"], "summary", json.dumps({"type": "doc", "content": [

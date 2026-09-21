@@ -614,22 +614,107 @@ def test_the_emitted_anarlog_id_is_exactly_what_resolves_back(tmp_path):
         "anarlog-sessRT-note-0", "anarlog-sessRT-note-1"]
 
 
-def test_a_native_anarlog_session_groups_under_its_calendar_event_key(
+def test_a_native_anarlog_session_never_groups_with_its_calendar_event(
         tmp_path):
-    """A native (calendar-linked) anarlog session's chunks carry a real
-    event_id (sync/anarlog.py stamps session.get("event_id")), so they must
-    resolve via the existing cal- branch, not the new session_id branch —
-    the session_id branch exists specifically for imported/CSV sessions,
-    which have no event_id."""
+    """C1b — a PRIVACY boundary, not a preference.
+
+    A native (calendar-linked) anarlog session's chunks carry a real Google
+    event_id. If _chunk_key's event_id branch ran first they would group under
+    `cal-<event_id>` together with the calendar event's own chunk; graph_write
+    takes prov_doc_id = doc_ids[0] in rowid order, so the OLDER calendar chunk
+    would win, every meeting-derived relation would be stamped
+    source_doc_id = cal-<event_id>, org_contrib._source_kind would answer
+    "calendar", the meeting guard would not fire — and meeting-derived claims
+    would reach the SHARED ORG GRAPH. The session_id branch therefore comes
+    first, and an anarlog chunk must never share a grouping key with a
+    calendar chunk."""
     store = _store(tmp_path)
+    store.upsert_chunk("cal-evtLinked", "the calendar stub", "hc",
+                       {"source_type": "calendar", "event_id": "evtLinked",
+                        "summary": "ACC Staff Meeting",
+                        "chunk_index": 0, "chunk_total": 1})
     store.upsert_chunk("anarlog-sessNative-summary-0", "summary", "hn",
                        {"source_type": "anarlog", "session_id": "sessNative",
                         "content_subtype": "summary", "event_id": "evtLinked",
                         "chunk_index": 0, "chunk_total": 1})
 
-    messages = thread_enrich.reassemble_thread(list(store.unenriched_chunks()))
+    chunks = list(store.unenriched_chunks())
+    messages = thread_enrich.reassemble_thread(chunks)
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
 
-    assert messages[0]["message_id"] == "cal-evtLinked"
+    by_id = {m["message_id"]: m for m in messages}
+    assert set(by_id) == {"cal-evtLinked", "anarlog-sessNative"}, (
+        "the meeting and the calendar event must be two separate documents")
+    # and the grouping the enrichment batch is built from is separate too, so
+    # no batch mixes the two sources' doc_ids
+    keys = {b.thread_id: set(b.doc_ids) for b in batches}
+    assert keys == {"cal-evtLinked": {"cal-evtLinked"},
+                    "anarlog-sessNative": {"anarlog-sessNative-summary-0"}}
+
+
+def test_anarlog_summary_and_note_do_not_interleave_into_one_body(tmp_path):
+    """I1 — a session's summary and note are two independent lineages both
+    numbered from chunk_index 0. Grouped together for reassembly their
+    indexes interleave (0,0,1,1,2,2) and _join_with_gaps inserts a `[…]` at
+    every repeat: a body that restarts mid-document carrying gap markers that
+    are FALSE. Reproduced on the real ACC Staff Meeting before the fix:
+    chunk_indexes [0,0,1,1,2,2,3,3,4,4,5,5], chunk_has_gap True, 3 markers."""
+    chunks = []
+    for kind in ("summary", "note"):
+        for i in range(3):
+            chunks.append({
+                "doc_id": f"anarlog-sessI1-{kind}-{i}",
+                "text": f"{kind} part {i}",
+                "metadata": {"source_type": "anarlog", "session_id": "sessI1",
+                             "content_subtype": kind, "event_id": "",
+                             "chunk_index": i, "chunk_total": 3}})
+    # interleave them the way rowid order actually delivers them
+    chunks = [c for pair in zip(chunks[:3], chunks[3:]) for c in pair]
+
+    messages = thread_enrich.reassemble_thread(chunks)
+
+    assert len(messages) == 2, "summary and note are two documents"
+    for m in messages:
+        assert m["chunk_indexes"] == [0, 1, 2], "monotonic, never interleaved"
+        assert m["chunk_has_gap"] is False
+        assert "[…]" not in m["text"]
+        # the EMITTED id stays the resolvable one — finer grouping is
+        # reassembly-only, exactly as the attachment precedent (C2) does it
+        assert m["message_id"] == "anarlog-sessI1"
+    assert {m["text"] for m in messages} == {
+        "summary part 0\n\nsummary part 1\n\nsummary part 2",
+        "note part 0\n\nnote part 1\n\nnote part 2"}
+
+
+def test_an_anarlog_message_carries_its_meeting_title_and_date(tmp_path):
+    """I2 — reassemble_thread read subject/file_name and date/start/modified,
+    none of which anarlog writes, so the model got an undated untitled
+    meeting and graph_write's date_iso/valid_from (taken from the lead
+    message's `date`) left every relation temporally unanchored."""
+    chunks = [{
+        "doc_id": "anarlog-sessI2-summary-0", "text": "We agreed on X.",
+        "metadata": {"source_type": "anarlog", "session_id": "sessI2",
+                     "content_subtype": "summary", "event_id": "",
+                     "meeting_title": "ACC Staff Meeting",
+                     "started_at": "2026-09-17T02:00:00.000Z",
+                     "chunk_index": 0, "chunk_total": 1}}]
+
+    m = thread_enrich.reassemble_thread(chunks)[0]
+
+    assert m["subject"] == "ACC Staff Meeting"
+    assert m["date"] == "2026-09-17T02:00:00.000Z"
+
+
+def test_the_anarlog_date_never_overrides_a_sources_own_date(tmp_path):
+    """The fallback is a FALLBACK: a chunk that carries a real gmail/calendar/
+    drive date keeps it."""
+    m = thread_enrich.reassemble_thread([{
+        "doc_id": "x", "text": "t",
+        "metadata": {"date": "2020-01-01", "started_at": "2026-09-17",
+                     "subject": "Real subject", "meeting_title": "Meeting",
+                     "chunk_index": 0}}])[0]
+    assert m["date"] == "2020-01-01"
+    assert m["subject"] == "Real subject"
 
 
 def test_reassemble_thread_carries_chunk_doc_ids_in_order():

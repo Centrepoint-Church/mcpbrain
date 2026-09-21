@@ -1423,3 +1423,56 @@ def test_run_sync_cycle_drives_fs_covers_queue_item_missing_from_this_cycles_dis
     assert res["worked"]["failed"] == 0
     assert res["worked"]["processed"] == 1
     assert store.sync_queue_stats()["failing"] == []
+
+
+def test_anarlog_discovery_failure_does_not_abort_cycle(monkeypatch, tmp_path, emb):
+    """I3 — anarlog raises DETERMINISTICALLY by design (schema drift that drops
+    a column it reads, and the tied-timestamp watermark guard), and anarlog is
+    a third-party app that auto-updates. Unwrapped, that raise propagated past
+    Gmail, Drive, Calendar, work_queue, index_pending and drain to the daemon's
+    catch-all, which retries the same deterministic raise next interval: ONE
+    third-party schema change stops the whole brain ingesting, forever. The
+    design says the SOURCE stops — so the other sources must still run."""
+    from mcpbrain import sync
+
+    store = Store(tmp_path / "anarlog-fail.sqlite3", dim=emb.dim)
+    store.init()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    called: list[str] = []
+
+    def boom(*a, **k):
+        raise RuntimeError(
+            "anarlog schema at version '20270101000000' is missing columns "
+            "this source reads: sessions.external_event_id")
+
+    def _rec(name, n=0):
+        def f(*a, **k):
+            called.append(name)
+            return n
+        return f
+
+    monkeypatch.setattr(sync, "discover_anarlog", boom)
+    monkeypatch.setattr(sync, "discover_gmail", _rec("gmail"))
+    monkeypatch.setattr(sync, "discover_calendar", _rec("calendar"))
+    monkeypatch.setattr(sync, "discover_drive", _rec("drive"))
+    # work_queue/index_pending are imported lazily INSIDE run_sync_cycle, so
+    # they are patched on their own modules, not on mcpbrain.sync.
+    import mcpbrain.index as index_mod
+    import mcpbrain.sync.queue as queue_mod
+    monkeypatch.setattr(queue_mod, "work_queue", _rec("work_queue"))
+    monkeypatch.setattr(index_mod, "index_pending", _rec("index_pending"))
+    import mcpbrain.config as config_mod
+    monkeypatch.setattr(config_mod, "anarlog_db_path",
+                        lambda h: str(tmp_path / "app.db"))
+
+    result = sync.run_sync_cycle(
+        store, emb, gmail_service=object(), calendar_service=object(),
+        drive_service=object(), home=str(home))
+
+    assert "anarlog" not in result["discovered"], "the SOURCE stopped"
+    # ...and nothing else did
+    assert {"gmail", "calendar", "drive"} <= set(result["discovered"])
+    for name in ("gmail", "calendar", "drive", "work_queue", "index_pending"):
+        assert name in called, f"{name} never ran — the cycle was aborted"

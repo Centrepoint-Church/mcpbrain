@@ -53,7 +53,7 @@ _ATTACHMENT_INDEX = re.compile(r"-att-(\d+)-\d+$")
 
 def _chunk_key(meta: dict, doc_id: str) -> str:
     """Message-identity key shared by _group_key and reassemble_thread: file_id,
-    else ``cal-<event_id>``, else ``anarlog-<session_id>``, else message_id, else
+    else ``anarlog-<session_id>``, else ``cal-<event_id>``, else message_id, else
     doc_id.
 
     This is the value reassemble_thread emits as a message's `message_id`, so
@@ -92,11 +92,24 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     `session_id` (sync/anarlog.py's `base` dict), so this checks that field
     directly rather than a doc_id prefix. store._doc_ids_query has a matching
     session_id arm (Task 3) with its own expression index, so the emitted key
-    resolves. Placed after event_id: a native (calendar-linked) anarlog
-    session's chunks carry a real `event_id` too and correctly resolve via the
-    cal- branch above instead, so this session's raw meeting-note chunks group
-    under the SAME key as any calendar-sourced chunks of the same event —
-    imported (CSV) sessions have no event_id and fall through to here.
+    resolves.
+
+    **The session_id branch is placed BEFORE event_id, and that ordering is a
+    PRIVACY BOUNDARY, not a preference — do not "tidy" it back.** A native
+    (calendar-linked) anarlog session's chunks carry a real Google `event_id`
+    too. With the event_id branch first, those meeting chunks group under
+    `cal-<event_id>` TOGETHER WITH the calendar event's own chunk; graph_write
+    then takes `prov_doc_id = doc_ids[0]` in rowid order, the older calendar
+    chunk wins, every relation extracted from the meeting is stamped
+    `source_doc_id = cal-<event_id>`, org_contrib._source_kind reads that
+    chunk's metadata and answers "calendar", and the meeting guard
+    (org_contrib.collect_from_drain, design §10) never fires. Meeting-derived
+    claims would then contribute to the SHARED ORG GRAPH — silently, and
+    exactly for the calendar-linked meetings (ACC Staff, State Secretaries)
+    that are most personnel-adjacent. An anarlog chunk must therefore never
+    share a grouping key with a calendar chunk. The cost of the ordering is
+    only that a native session's notes are extracted as their own document
+    rather than alongside the calendar stub, which is what we want anyway.
 
     This is the portion of the precedence chain that genuinely means the same
     thing at both call sites — "which message/document does this chunk belong
@@ -128,16 +141,34 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
         return doc_id
     if meta.get("file_id"):
         return meta["file_id"]
-    if meta.get("event_id"):
-        return f"cal-{meta['event_id']}"
+    # BEFORE event_id, deliberately — see the docstring. This is the privacy
+    # boundary that keeps meeting chunks out of the calendar grouping key.
     if meta.get("session_id"):
         return f"anarlog-{meta['session_id']}"
+    if meta.get("event_id"):
+        return f"cal-{meta['event_id']}"
     return meta.get("message_id") or doc_id
 
 
 def _reassembly_key(meta: dict, doc_id: str) -> str:
     """Grouping key for reassemble_thread: _chunk_key, except that an email
-    ATTACHMENT gets one group PER ATTACHMENT (C2).
+    ATTACHMENT gets one group PER ATTACHMENT (C2) and an anarlog meeting gets
+    one group PER CONTENT SUBTYPE (I1).
+
+    An anarlog session's summary and its note are two INDEPENDENT lineages —
+    `anarlog-<sid>-summary-0..N` and `anarlog-<sid>-note-0..M`, each numbered
+    from chunk_index 0 — that _chunk_key correctly collapses to one resolvable
+    id. Grouped together for reassembly, though, their indexes interleave
+    (0,0,1,1,2,2,…): _join_with_gaps sees a non-monotonic sequence, inserts a
+    `[…]` marker at every repeat, and hands the model a body that restarts
+    mid-document carrying gap markers that are simply FALSE. Measured on the
+    real ACC Staff Meeting: chunk_indexes [0,0,1,1,2,2,3,3,4,4,5,5],
+    chunk_has_gap True, 3 spurious markers.
+
+    This is precisely the attachment case below, for a different source, so it
+    takes the same shape: group finer here, emit the resolvable id from
+    _chunk_key. `content_subtype` is the discriminator anarlog already stamps
+    on every chunk.
 
     Attachment chunks deliberately carry their parent message's `message_id`
     (sync/attachments.py: it is what joins them to their thread for enrichment,
@@ -159,6 +190,9 @@ def _reassembly_key(meta: dict, doc_id: str) -> str:
     if meta.get("content_type") == "email_attachment":
         m = _ATTACHMENT_INDEX.search(doc_id)
         return f"{key}#att-{m.group(1)}" if m else f"{key}#{doc_id}"
+    if meta.get("source_type") == "anarlog":
+        subtype = meta.get("content_subtype") or ""
+        return f"{key}#{subtype}" if subtype else key
     return key
 
 
@@ -288,6 +322,11 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
     - Email messages: grouped by ``message_id``.
     - Email attachments: one group each, keyed finer than message identity —
       see _reassembly_key (C2).
+    - anarlog meetings (chunks with ``session_id``): grouped by
+      ``anarlog-<session_id>`` and then split PER ``content_subtype``, so a
+      session's summary and its note — two lineages both numbered from
+      chunk_index 0 — do not interleave into one body full of false ``[…]``
+      markers (I1). See _reassembly_key.
     - Fallback: ``doc_id`` for chunks with neither.
 
     Within each group, body chunks are sorted by chunk_index and joined with
@@ -350,14 +389,30 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
             # "sender". Fall through both so the assembled message always has
             # the best available attribution.
             "sender": meta.get("sender") or meta.get("owner", ""),
-            # Four date sources: gmail → "date", calendar → "start",
-            # drive → "modified", fallback → "".
+            # Five date sources: gmail → "date", calendar → "start",
+            # drive → "modified", anarlog → "started_at", fallback → "".
+            #
+            # anarlog is added to the CHAIN rather than being made to stamp a
+            # conventional "date"/"subject" key at write time, for two
+            # reasons. (1) Precedent: every source here keeps its own native
+            # vocabulary and this function is the one place they are
+            # reconciled — Drive is not made to write "date" either. (2)
+            # Chunk metadata is stamped ONCE at ingest: renaming the key at
+            # write time would leave every already-written meeting chunk
+            # undated until a re-ingest, while a read-side fallback fixes the
+            # existing corpus the moment it ships. graph_write takes
+            # date_iso/valid_from from this field, so an undated message means
+            # every relation, observation and action a meeting produces is
+            # temporally unanchored.
             "date": (
-                meta.get("date") or meta.get("start") or meta.get("modified") or ""
+                meta.get("date") or meta.get("start") or meta.get("modified")
+                or meta.get("started_at") or ""
             ),
             "labels": meta.get("labels", ""),
-            # Drive docs use "file_name" as the subject equivalent.
-            "subject": meta.get("subject") or meta.get("file_name", ""),
+            # Drive docs use "file_name" as the subject equivalent; anarlog
+            # meetings use "meeting_title" (same reasoning as "date" above).
+            "subject": (meta.get("subject") or meta.get("file_name")
+                        or meta.get("meeting_title") or ""),
             "text": text,
             "chunk_doc_ids": chunk_doc_ids,
             "chunk_pieces": chunk_pieces,
