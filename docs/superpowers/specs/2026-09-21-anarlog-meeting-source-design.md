@@ -127,9 +127,14 @@ The risk accepted by reading a private schema is handled explicitly.
 it against `_PINNED_SCHEMA_VERSION` (currently `20260909160300`). On a mismatch
 it validates the columns actually used:
 
-- `sessions`: `id, title, updated_at, deleted_at, event_id, series_id, external_provider`
-- `session_documents`: `session_id, kind, body, body_format`
-- `transcripts`: `session_id, words_json`
+- `sessions`: `id, title, updated_at, deleted_at, started_at, event_id, series_id, external_provider`
+- `session_documents`: `session_id, kind, body, body_format, deleted_at`
+- `transcripts`: `session_id, words_json, deleted_at`
+
+Every column the module names in SQL appears in this map — including
+`deleted_at` on the child tables, which `read_session` filters on. A column
+read but not declared would break at ingest time instead of being caught by
+the guard.
 
 If every column is present, the source proceeds and logs the new version **once**
 (not per cycle). If any column is missing, the source **stops and reports the
