@@ -1013,7 +1013,6 @@ def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
     it writes wrong content silently and the watermark then skips past it.
     """
     global _drift_logged
-    bulk_section = bulk_section or nullcontext
     cursor = store.get_cursor(_SOURCE) or ""
     with connect_ro(db_path) as db:
         ok, version, missing = schema_status(db)
@@ -1031,15 +1030,22 @@ def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
 
     if not rows:
         return 0
-    with bulk_section():
-        for r in rows:
-            store.enqueue(_SOURCE, r["id"],
-                          "remove" if r["deleted"] else "upsert")
-        # Advance only after every row is durably enqueued — an interrupted
-        # discovery costs a re-list next cycle, never lost work
-        # (discover_calendar's contract).
-        store.set_cursor(_SOURCE, rows[-1]["updated_at"])
-    return len(rows)
+    # enqueue_and_advance upserts the queue rows AND advances the cursor in ONE
+    # transaction — "the cursor can never be ahead of what is recorded". Do not
+    # split this into enqueue + set_cursor, and do not wrap it in bulk_section:
+    # it is already a single transaction.
+    #
+    # `version` is the session's updated_at: a differing version resets that
+    # row's attempts/backoff, which is exactly right here — an edited meeting
+    # is new work, not a continuation of a failing item.
+    items = [{"ref_id": r["id"],
+              "event": "remove" if r["deleted"] else "upsert",
+              "modified_at": r["updated_at"],
+              "version": r["updated_at"]}
+             for r in rows]
+    store.enqueue_and_advance(items, source=_SOURCE,
+                              cursor=rows[-1]["updated_at"])
+    return len(items)
 
 
 def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
@@ -1112,7 +1118,7 @@ Create `tests/test_anarlog_no_contribution.py`:
 ```python
 from mcpbrain.store import Store
 from mcpbrain import org_contrib
-from mcpbrain.fleet import FleetPin
+from mcpbrain.org_contracts import FleetPin   # NOT mcpbrain.fleet
 
 
 def _store(tmp_path):
@@ -1120,8 +1126,9 @@ def _store(tmp_path):
 
 
 def _pin():
+    # relation_allowlist is a tuple on FleetPin (org_contracts.py:142).
     return FleetPin(fleet_secret="s" * 32,
-                    relation_allowlist=["works_at", "member_of"])
+                    relation_allowlist=("works_at", "member_of"))
 
 
 def test_source_kind_maps_anarlog_to_meeting(tmp_path):
@@ -1166,8 +1173,9 @@ def test_non_meeting_relation_still_contributes(tmp_path):
     assert org_contrib.collect_from_drain(s, delta, _pin(), "me@example.com") > 0
 ```
 
-If `FleetPin`'s constructor signature differs, confirm it with
-`grep -n "class FleetPin" -A 12 mcpbrain/fleet.py` and match it — do not guess.
+`FleetPin` is a dataclass in `mcpbrain/org_contracts.py:136` with fields
+`embed_model, dim, chunker_version, enrich_logic_floor, relation_allowlist,
+fleet_secret`, and `is_pinned` is a property returning `bool(fleet_secret)`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1244,16 +1252,30 @@ from mcpbrain import config
 
 
 def test_db_path_defaults_to_the_anarlog_location(tmp_path, monkeypatch):
-    home = tmp_path / "Library" / "Application Support" / "anarlog"
-    home.mkdir(parents=True)
-    (home / "app.db").write_text("")
+    anar = tmp_path / "Library" / "Application Support" / "anarlog"
+    anar.mkdir(parents=True)
+    (anar / "app.db").write_text("")
+    mcphome = tmp_path / "mcpbrain-home"
+    mcphome.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    assert config.anarlog_db_path() == str(home / "app.db")
+    assert config.anarlog_db_path(str(mcphome)) == str(anar / "app.db")
 
 
 def test_db_path_is_none_when_absent(tmp_path, monkeypatch):
+    mcphome = tmp_path / "mcpbrain-home"
+    mcphome.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    assert config.anarlog_db_path() is None
+    assert config.anarlog_db_path(str(mcphome)) is None
+
+
+def test_explicit_config_override_wins(tmp_path):
+    mcphome = tmp_path / "mcpbrain-home"
+    mcphome.mkdir()
+    db = tmp_path / "elsewhere.db"
+    db.write_text("")
+    (mcphome / "config.json").write_text(
+        '{"anarlog": {"db_path": "%s"}}' % db)
+    assert config.anarlog_db_path(str(mcphome)) == str(db)
 
 
 def test_sync_module_exposes_the_source():
@@ -1272,14 +1294,18 @@ Expected: FAIL — `AttributeError: module 'mcpbrain.config' has no attribute 'a
 **3a.** In `mcpbrain/config.py`:
 
 ```python
-def anarlog_db_path() -> str | None:
+def anarlog_db_path(home) -> str | None:
     """Path to anarlog's app.db, or None when anarlog is not installed.
+
+    Takes `home` and reads through `read_config(home)`, matching every other
+    accessor in this module (salience_gate_enabled, enrich_mode, ...). There is
+    no `load_config()`.
 
     Config key `anarlog.db_path` overrides the default. Returning None
     disables the source silently — most installs will not have anarlog, and a
     warning per cycle for a tool the user never installed is noise.
     """
-    cfg = (load_config().get("anarlog") or {})
+    cfg = (read_config(home).get("anarlog") or {})
     explicit = (cfg.get("db_path") or "").strip()
     if explicit:
         return explicit if Path(explicit).exists() else None
@@ -1288,9 +1314,9 @@ def anarlog_db_path() -> str | None:
     return str(default) if default.exists() else None
 ```
 
-Match the module's existing config-reading helper — confirm with
-`grep -n "def load_config\|def _cfg" mcpbrain/config.py` and use whatever the
-neighbouring accessors use rather than introducing a new pattern.
+`read_config(home)` is the module's config reader (config.py:78) and every
+sibling accessor takes `home` as its first positional argument. Do not
+introduce a no-argument variant.
 
 **3b.** In `mcpbrain/sync/__init__.py`, add to the top-level imports (module-level, matching the file's comment about monkeypatchability):
 
@@ -1301,7 +1327,9 @@ from mcpbrain.sync.anarlog import discover_anarlog, handle_anarlog_item
 **3c.** In `run_sync_cycle`, beside the other sources:
 
 ```python
-    anarlog_db = config.anarlog_db_path()
+    # Gated on `home` exactly as the shared-drive block is: config accessors
+    # need a home, and callers predating it pass none.
+    anarlog_db = config.anarlog_db_path(home) if home is not None else None
     if anarlog_db:
         discovered["anarlog"] = discover_anarlog(
             store, db_path=anarlog_db, budget=disc_budget,
@@ -1444,8 +1472,10 @@ because nothing checked it.
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
-curl -s -H "Authorization: Bearer $(cat "$MCPBRAIN_HOME/control_token")" \
-  http://127.0.0.1:8765/api/status | head -c 400
+H=$(python3 -c "from mcpbrain import config; print(config.app_dir())")
+PORT=$(cat "$H/control_port")
+curl -s -H "Authorization: Bearer $(cat "$H/control_token")" \
+  "http://127.0.0.1:$PORT/api/status" | head -c 400
 ```
 
 `bootout` unregisters the login agent, so skipping the `bootstrap` leaves the
