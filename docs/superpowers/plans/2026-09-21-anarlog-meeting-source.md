@@ -1382,6 +1382,146 @@ Claude-Session: https://claude.ai/code/session_01LvzZKvhmShfY3FHbUF2Gx8"
 
 ---
 
+### Task 8b: Group a meeting's chunks for enrichment (`thread_enrich`)
+
+**Files:**
+- Modify: `mcpbrain/thread_enrich.py` (`_chunk_key`, ~lines 109-115)
+- Test: `tests/test_anarlog_grouping.py`
+
+**Interfaces:**
+- Consumes: chunk metadata `session_id` + `source_type="anarlog"` (Task 5); the `anarlog-<session_id>` arm of `doc_ids_for_messages` (Task 3)
+- Produces: `_chunk_key` returns `anarlog-<session_id>` for an anarlog chunk, so all of one meeting's hot chunks group as ONE unit of extraction.
+
+**Why this task exists (found during Task 5's review, not in the original plan):**
+`_chunk_key` resolves `file_id` -> `cal-<event_id>` -> `message_id` -> `doc_id`.
+An anarlog chunk has none of the first three, so it falls through to its own
+`doc_id` and every chunk becomes its own group. Measured on real data: a 6-chunk
+summary would be extracted as 6 isolated fragments, so a decision spanning two
+chunks is simply lost. This is the same defect already fixed twice in this
+codebase — Drive 0.7.98 (added the `file_id` branch) and Calendar I6 (added the
+`event_id` branch) — and it fails silently, as degraded extraction quality
+rather than an error.
+
+Two facts make the fix safe, both verified rather than assumed:
+- `unenriched_chunks` EXCLUDES cold chunks, so transcripts never enter the
+  backlog and the key only ever groups hot summary/note chunks.
+- `_doc_ids_query` already has the matching `anarlog-<session_id>` arm (Task 3),
+  so the key this branch emits is resolvable — which `_chunk_key`'s own
+  docstring requires of every branch ("every branch must be resolvable by
+  store.doc_ids_for_messages").
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_anarlog_grouping.py`:
+
+```python
+from mcpbrain.thread_enrich import _chunk_key
+
+
+def _meta(**over):
+    m = {"source_type": "anarlog", "session_id": "sess-1",
+         "content_subtype": "summary"}
+    m.update(over)
+    return m
+
+
+def test_anarlog_chunks_of_one_meeting_share_a_key():
+    a = _chunk_key(_meta(), "anarlog-sess-1-summary-0")
+    b = _chunk_key(_meta(), "anarlog-sess-1-summary-1")
+    c = _chunk_key(_meta(content_subtype="note"), "anarlog-sess-1-note-0")
+    assert a == b == c == "anarlog-sess-1"
+
+
+def test_different_meetings_do_not_share_a_key():
+    a = _chunk_key(_meta(), "anarlog-sess-1-summary-0")
+    b = _chunk_key(_meta(session_id="sess-2"), "anarlog-sess-2-summary-0")
+    assert a != b
+
+
+def test_key_is_resolvable_by_doc_ids_for_messages(tmp_path):
+    """_chunk_key's docstring requires every branch it emits to be resolvable
+    by store.doc_ids_for_messages — that is what lets drain mark exactly the
+    chunks an extraction covered."""
+    from mcpbrain.store import Store
+    s = Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    s.init()
+    s.upsert_chunk("anarlog-sess-1-summary-0", "a", "h1", _meta())
+    s.upsert_chunk("anarlog-sess-1-note-0", "b", "h2",
+                   _meta(content_subtype="note"))
+    key = _chunk_key(_meta(), "anarlog-sess-1-summary-0")
+    assert sorted(s.doc_ids_for_messages([key])) == [
+        "anarlog-sess-1-note-0", "anarlog-sess-1-summary-0"]
+
+
+def test_non_anarlog_chunks_are_unaffected():
+    assert _chunk_key({"file_id": "F1"}, "gdrive-F1-0") == "F1"
+    assert _chunk_key({"event_id": "E1"}, "cal-E1-0") == "cal-E1"
+    assert _chunk_key({"message_id": "M1"}, "gmail-x") == "M1"
+    assert _chunk_key({}, "plain-doc") == "plain-doc"
+    assert _chunk_key({"session_id": "S"}, "enriched-T1") == "enriched-T1"
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `uv run pytest tests/test_anarlog_grouping.py -v`
+Expected: the first three FAIL — `_chunk_key` returns the doc_id
+(`anarlog-sess-1-summary-0`) instead of `anarlog-sess-1`.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+In `mcpbrain/thread_enrich.py`, add the branch to `_chunk_key` AFTER the
+`event_id` branch and BEFORE the `message_id`/doc_id fallback:
+
+```python
+    if meta.get("session_id"):
+        # anarlog meetings, same shape as the file_id and event_id branches
+        # above: a meeting's hot chunks (summary + note) must extract as ONE
+        # unit, or a 6-chunk summary becomes 6 isolated fragments and any
+        # decision spanning two chunks is lost. The PREFIXED form is emitted
+        # because that is the key store._doc_ids_query's session arm binds
+        # (it strips _ANARLOG_PREFIX), exactly as the calendar branch emits
+        # `cal-<event_id>`. Transcripts never reach here: they are cold, and
+        # unenriched_chunks excludes cold chunks from the backlog.
+        return f"anarlog-{meta['session_id']}"
+```
+
+Note the ordering constraint: it must come after `enriched-` and `file_id`,
+because a semantic digest chunk and a Drive chunk keep their own identity.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `uv run pytest tests/test_anarlog_grouping.py -v`
+Expected: PASS (4 tests)
+
+- [ ] **Step 5: Run the grouping regression suites**
+
+Run: `uv run pytest tests/test_thread_enrich.py tests/test_anarlog_doc_ids.py -q`
+Expected: PASS — `_chunk_key` is shared by `_group_key`, `_reassembly_key` and
+`reassemble_thread`, so every grouping test is the regression net here.
+
+- [ ] **Step 6: Update the `_chunk_key` docstring**
+
+Its first line currently reads "file_id, else ``cal-<event_id>``, else
+message_id, else doc_id." Add the anarlog branch to that sentence and to the
+body, in the same style the file_id and event_id branches are documented.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add mcpbrain/thread_enrich.py tests/test_anarlog_grouping.py
+git commit -m "fix(enrich): group a meeting's chunks as one extraction unit
+
+_chunk_key had no anarlog branch, so each chunk fell through to its own
+doc_id and a 6-chunk summary extracted as 6 isolated fragments. Same defect
+as Drive 0.7.98 (file_id) and Calendar I6 (event_id). The store side already
+has the matching anarlog-<session_id> arm.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LvzZKvhmShfY3FHbUF2Gx8"
+```
+
+---
+
 ### Task 9: Verify against the real anarlog database and the real store
 
 **Files:**
