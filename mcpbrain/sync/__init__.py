@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 # module's own __dict__ at call time. A lazy `from mcpbrain.sync.drive import
 # discover_drive` inside the function body would instead re-fetch the
 # unpatched original from mcpbrain.sync.drive every call.
+from mcpbrain.sync.anarlog import discover_anarlog, handle_anarlog_item
 from mcpbrain.sync.calendar import discover_calendar, handle_calendar_item
 from mcpbrain.sync.drive import (
     discover_drive, discover_shared_drives, flush_skip_report, handle_drive_item,
@@ -176,6 +177,16 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             discovered["drive"] = discover_drive(drive_service, store, budget=disc_budget)
         except Exception as exc:  # noqa: BLE001 — a Drive/TLS blip must not abort the cycle
             log.warning("sync: Drive discovery failed (cycle continues, retries next cycle): %s", exc)
+    # Gated on `home` exactly as the shared-drive block below is: config
+    # accessors need a home, and callers predating it pass none. Returning
+    # None from anarlog_db_path (the common case -- most installs never have
+    # anarlog) disables the source silently, same as an absent service arg
+    # for every other source here.
+    anarlog_db = config.anarlog_db_path(home) if home is not None else None
+    if anarlog_db:
+        discovered["anarlog"] = discover_anarlog(
+            store, db_path=anarlog_db, budget=disc_budget,
+            bulk_section=bulk_section)
     # Shared Drive discovery (spec §A) is folded into this SAME discovery
     # phase, not run as its own later block, so its handler can be registered
     # into the SAME `handlers` dict below and drained by the ONE `work_queue`
@@ -363,6 +374,9 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     if calendar_service is not None:
         handlers["calendar"] = lambda it: handle_calendar_item(
             calendar_service, store, it, bulk_section=bulk_section)
+    if anarlog_db:
+        handlers["anarlog"] = lambda it: handle_anarlog_item(
+            store, it, db_path=anarlog_db, bulk_section=bulk_section)
     result["worked"] = work_queue(
         store, handlers=handlers,
         limit=config.sync_work_limit(home) if home else 50,

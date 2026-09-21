@@ -114,6 +114,26 @@ def reextract_enabled(home) -> bool:
     return bool(read_config(home).get("reextract", True))
 
 
+def anarlog_db_path(home) -> str | None:
+    """Path to anarlog's app.db, or None when anarlog is not installed.
+
+    Takes `home` and reads through `read_config(home)`, matching every other
+    accessor in this module (salience_gate_enabled, enrich_mode, ...). There is
+    no `load_config()`.
+
+    Config key `anarlog.db_path` overrides the default. Returning None
+    disables the source silently — most installs will not have anarlog, and a
+    warning per cycle for a tool the user never installed is noise.
+    """
+    cfg = (read_config(home).get("anarlog") or {})
+    explicit = (cfg.get("db_path") or "").strip()
+    if explicit:
+        return explicit if Path(explicit).exists() else None
+    default = (Path.home() / "Library" / "Application Support"
+               / "anarlog" / "app.db")
+    return str(default) if default.exists() else None
+
+
 def salience_gate_enabled(home) -> bool:
     """Whether the source-aware salience gate runs before graph-extraction (Q1).
 
