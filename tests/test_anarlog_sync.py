@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import pytest
 from mcpbrain.store import Store
@@ -111,3 +112,44 @@ def test_reprocessing_the_boundary_row_is_idempotent(tmp_path):
     anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"},
                                 db_path=str(p))
     assert sorted(s.doc_ids_for_messages(["anarlog-a"])) == first
+
+
+def test_discover_raises_on_a_full_page_sharing_one_timestamp(tmp_path):
+    # A full _DISCOVER_LIMIT page all sharing one updated_at would otherwise
+    # advance the cursor to that exact timestamp, then the next cycle would
+    # re-query `>= T LIMIT _DISCOVER_LIMIT` and get the SAME rows back --
+    # silently starving any row beyond them sharing T, forever. This must
+    # raise loudly instead (same failure class as the Drive paging livelock).
+    p = tmp_path / "app.db"
+    ts = "2026-09-17T01:00:00.000Z"
+    sessions = [{"id": f"s{i}", "updated_at": ts, "summary": "x"}
+                for i in range(anarlog._DISCOVER_LIMIT)]
+    _anarlog_db(p, sessions)
+    s = _store(tmp_path)
+    with pytest.raises(RuntimeError) as exc:
+        anarlog.discover_anarlog(s, db_path=str(p))
+    assert ts in str(exc.value)
+
+
+def test_discover_logs_schema_drift_once_across_two_calls(tmp_path, caplog):
+    # _drift_logged is a module-level global with no reset, so a test that
+    # exercises it must reset it itself (before AND after) or it becomes
+    # order-dependent on whatever ran earlier/later in the suite.
+    anarlog._drift_logged = False
+    try:
+        p = tmp_path / "app.db"
+        _anarlog_db(p, [{"id": "a", "updated_at": "2026-09-17T01:00:00Z",
+                         "summary": "hi"}], version="20270101000000")
+        s = _store(tmp_path)
+        with caplog.at_level(logging.INFO, logger="mcpbrain.sync.anarlog"):
+            n1 = anarlog.discover_anarlog(s, db_path=str(p))
+            # Drift alone must never stop the source -- only a missing
+            # column does. Re-reading the same boundary row on the second
+            # call is expected (the `>=` boundary), and drift must still log
+            # only once across both calls.
+            n2 = anarlog.discover_anarlog(s, db_path=str(p))
+        assert n1 == 1
+        assert n2 == 1
+        assert caplog.text.count("differs from pinned") == 1
+    finally:
+        anarlog._drift_logged = False

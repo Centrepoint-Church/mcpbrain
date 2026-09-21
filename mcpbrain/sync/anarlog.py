@@ -293,6 +293,27 @@ def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
 
     if not rows:
         return 0
+    # A full page that shares ONE exact updated_at is fatal to this watermark:
+    # the cursor would advance to that timestamp, the next cycle would
+    # re-query `>= T LIMIT _DISCOVER_LIMIT`, get the SAME rows back, and any
+    # row beyond them sharing T would never be discovered -- silently and
+    # forever (the same failure class as the five-week Drive paging livelock:
+    # waiting longer never fixes it). The fix would be a composite
+    # (updated_at, id) cursor, but that is not implemented here: anarlog's
+    # updated_at is millisecond-precision and every value observed on the
+    # live DB is distinct (largest tie group is 1 row), so this is
+    # implausible in practice. What matters is that a stall must be LOUD, not
+    # silent -- this module's stated principle -- so we raise rather than
+    # let it degrade unnoticed.
+    if (len(rows) == _DISCOVER_LIMIT
+            and rows[0]["updated_at"] == rows[-1]["updated_at"]):
+        raise RuntimeError(
+            f"anarlog discovery got a full page of {len(rows)} sessions all "
+            f"sharing updated_at={rows[0]['updated_at']!r} -- the watermark "
+            f"cannot advance past this timestamp by time alone, so the next "
+            f"cycle would re-read this same page forever and never reach any "
+            f"row beyond it. Remedy: switch to a composite (updated_at, id) "
+            f"cursor.")
     # enqueue_and_advance upserts the queue rows AND advances the cursor in ONE
     # transaction — "the cursor can never be ahead of what is recorded". Do not
     # split this into enqueue + set_cursor, and do not wrap it in bulk_section:
@@ -311,6 +332,13 @@ def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
     return len(items)
 
 
+def _delete_session_chunks(store, sid: str) -> None:
+    """Delete every chunk resolvable by this session id, if any exist."""
+    doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
+    if doc_ids:
+        store.delete_chunks(doc_ids)
+
+
 def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
     """Work one queued session. Raises on failure so the loop backs it off."""
     bulk_section = bulk_section or nullcontext
@@ -318,9 +346,7 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
 
     if item["event"] == "remove":
         with bulk_section():
-            doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
-            if doc_ids:
-                store.delete_chunks(doc_ids)
+            _delete_session_chunks(store, sid)
         return
 
     with connect_ro(db_path) as db:
@@ -329,9 +355,7 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
         # Deleted between discovery and handling: treat as a removal rather
         # than leaving orphaned chunks behind.
         with bulk_section():
-            doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
-            if doc_ids:
-                store.delete_chunks(doc_ids)
+            _delete_session_chunks(store, sid)
         return
 
     chunks = normalise_session(session)
@@ -339,7 +363,8 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
         # Drop chunks that no longer exist (a note that shrank from 3 chunks to
         # 1 would otherwise leave two stale rows resolvable by session_id).
         live = {c.doc_id for c in chunks}
-        for stale in set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live:
-            store.delete_chunks([stale])
+        stale = set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live
+        if stale:
+            store.delete_chunks(list(stale))
         for ch in chunks:
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
