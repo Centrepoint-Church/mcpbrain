@@ -3986,6 +3986,13 @@ class Store:
         additionally resolvable through the doc_id fallback arm, since for it the
         key and the doc_id coincide.
 
+        anarlog meetings are the fifth: a meeting's chunks are
+        anarlog-<session_id>-<kind>-<i> across three subtypes (summary, note,
+        transcript) and never the bare `anarlog-<session_id>`, so the arm is
+        bound with _ANARLOG_PREFIX STRIPPED and matches the raw session_id the
+        chunks carry. One key therefore resolves the whole meeting, which is
+        what deletion needs.
+
         Returns doc_ids ordered by the chunk rowid for stable output.
         """
         ids = [m for m in (message_ids or []) if m]
@@ -3997,31 +4004,42 @@ class Store:
         # matching an event_id, and `x IN (NULL)` never does.
         event_ids = [m[len(_CAL_PREFIX):] if m.startswith(_CAL_PREFIX) else None
                      for m in ids]
+        # Same rule as event_ids: the anarlog identity is always prefixed, so an
+        # unprefixed id binds as NULL and cannot match a session_id.
+        session_ids = [m[len(_ANARLOG_PREFIX):] if m.startswith(_ANARLOG_PREFIX)
+                       else None for m in ids]
         with self._connect() as db:
             rows = db.execute(self._doc_ids_query(len(ids)),
-                              ids + ids + event_ids + ids).fetchall()
+                              ids + ids + event_ids + session_ids + ids).fetchall()
         return [r["doc_id"] for r in rows]
 
     @staticmethod
     def _doc_ids_query(n: int) -> str:
         """SQL for doc_ids_for_messages resolving ``n`` ids per path.
 
-        A UNION of four single-path SELECTs, NOT one SELECT with an OR: SQLite
+        A UNION of five single-path SELECTs, NOT one SELECT with an OR: SQLite
         will not union expression-indexes (idx_chunks_msgid/idx_chunks_fileid/
-        idx_chunks_eventid) across an OR, so the OR form plans as a full
-        `SCAN chunks` — ~1.4s per call on the ~108k-chunk live store. Each UNION
-        arm filters on a single indexed path so it plans as an index SEARCH.
-        Params bind per arm (message_id, file_id, event_id, then the doc_id
-        fallback) — the event_id arm gets the `cal-`-stripped ids, see the caller.
-        Ordered by rowid for the stable output drain relies on; UNION also dedups
-        a chunk that matches two arms.
+        idx_chunks_eventid/idx_chunks_sessionid) across an OR, so the OR form
+        plans as a full `SCAN chunks` — ~1.4s per call on the ~108k-chunk live
+        store. Each UNION arm filters on a single indexed path so it plans as an
+        index SEARCH. Params bind per arm (message_id, file_id, event_id,
+        session_id, then the doc_id fallback) — the event_id and session_id arms
+        get their prefix-stripped ids, see the caller. Ordered by rowid for the
+        stable output drain relies on; UNION also dedups a chunk that matches
+        two arms.
 
         The event_id arm exists for the same reason as the file_id one (I6):
         thread_enrich._chunk_key groups a split calendar event's chunks under
         `cal-<event_id>`, so that is the `message_id` the extraction carries, and
         for a SPLIT event it is never any chunk's doc_id (those are
         cal-<event_id>-<idx>). Calendar event ids don't collide with Gmail
-        message/thread ids."""
+        message/thread ids.
+
+        The session_id arm is the anarlog analogue: a meeting's chunks are
+        anarlog-<session_id>-<kind>-<i>, never the bare `anarlog-<session_id>`,
+        so this arm is what makes one key resolve every chunk of the meeting.
+        It must stay AFTER the event_id arm and BEFORE the doc_id fallback arm,
+        since the caller's bind list is positional per arm."""
         ph = ",".join("?" * n)
         return (
             f"SELECT doc_id, rowid FROM chunks "
@@ -4032,6 +4050,9 @@ class Store:
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE {_meta_extract('$.event_id')} IN ({ph}) "
+            f"UNION "
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE {_meta_extract('$.session_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE {_meta_extract('$.message_id')} IS NULL "
