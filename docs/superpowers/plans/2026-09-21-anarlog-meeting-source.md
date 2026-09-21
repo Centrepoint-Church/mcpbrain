@@ -466,7 +466,11 @@ from mcpbrain.store import Store
 
 
 def _store(tmp_path):
-    return Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    # Store(...) does NOT create its schema; .init() does. Without it the very
+    # first query fails with "no such table".
+    s = Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    s.init()
+    return s
 
 
 def test_resolves_all_subtypes_of_one_session(tmp_path):
@@ -503,8 +507,9 @@ def test_session_arm_uses_the_index_on_an_existing_store(tmp_path):
     query expression had drifted apart.
     """
     path = str(tmp_path / "brain.sqlite3")
-    Store(path, dim=8)          # first init creates the index
-    s = Store(path, dim=8)      # re-init on an existing store
+    Store(path, dim=8).init()   # first init creates the index
+    s = Store(path, dim=8)
+    s.init()                    # re-init on an ALREADY-initialised store
     sql = s._doc_ids_query(1)
     with s._connect() as db:
         plan = "\n".join(
@@ -917,7 +922,11 @@ def _anarlog_db(path, sessions, *, version="20260909160300"):
 
 
 def _store(tmp_path):
-    return Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    # Store(...) does NOT create its schema; .init() does. Without it the very
+    # first query fails with "no such table".
+    s = Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    s.init()
+    return s
 
 
 def test_discover_enqueues_and_advances_cursor(tmp_path):
@@ -1122,7 +1131,11 @@ from mcpbrain.org_contracts import FleetPin   # NOT mcpbrain.fleet
 
 
 def _store(tmp_path):
-    return Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    # Store(...) does NOT create its schema; .init() does. Without it the very
+    # first query fails with "no such table".
+    s = Store(str(tmp_path / "brain.sqlite3"), dim=8)
+    s.init()
+    return s
 
 
 def _pin():
