@@ -1235,12 +1235,12 @@ Claude-Session: https://claude.ai/code/session_01LvzZKvhmShfY3FHbUF2Gx8"
 
 **Files:**
 - Modify: `mcpbrain/sync/__init__.py` (imports at ~line 12-17; `discovered`/`handlers` block ~lines 165-180)
-- Modify: `mcpbrain/config.py` (add `anarlog_db_path()`)
+- Modify: `mcpbrain/config.py` (add `anarlog_db_path(home)`)
 - Test: `tests/test_anarlog_wiring.py`
 
 **Interfaces:**
 - Consumes: `discover_anarlog`, `handle_anarlog_item` (Task 6)
-- Produces: `config.anarlog_db_path() -> str | None`; source active in `run_sync_cycle` when the DB exists.
+- Produces: `config.anarlog_db_path(home) -> str | None`; source active in `run_sync_cycle` when the DB exists.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1385,7 +1385,7 @@ attended: do not run it unsupervised.
 python3 -c "
 from mcpbrain.sync import anarlog
 from mcpbrain import config
-p = config.anarlog_db_path()
+p = config.anarlog_db_path(str(config.app_dir()))
 print('db_path:', p)
 with anarlog.connect_ro(p) as db:
     print('schema_status:', anarlog.schema_status(db))
@@ -1404,7 +1404,7 @@ ingested.
 python3 -c "
 from mcpbrain.sync import anarlog
 from mcpbrain import config
-p = config.anarlog_db_path()
+p = config.anarlog_db_path(str(config.app_dir()))
 with anarlog.connect_ro(p) as db:
     for row in anarlog.changed_sessions(db, '', 200):
         if row['deleted']:
