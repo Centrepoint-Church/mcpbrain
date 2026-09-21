@@ -126,8 +126,12 @@ def test_handle_remove_invalidates_local_relations_sourced_from_the_session(tmp_
                                 db_path=str(p))
     with s._connect() as db:
         r = db.execute(
-            "SELECT invalidated_at FROM entity_relations WHERE entity_a='x'").fetchone()
+            "SELECT invalidated_at, superseded_reason FROM entity_relations "
+            "WHERE entity_a='x'").fetchone()
     assert r["invalidated_at"] is not None
+    # Fix-round-2: reason must be truthful, not the borrowed drive.py default
+    # ("drive_revoked" on a meeting deletion would be a lie in an audit column).
+    assert r["superseded_reason"] == "anarlog_session_removed"
 
 
 def test_stale_chunk_sweep_invalidates_local_relations_too(tmp_path):
@@ -168,8 +172,66 @@ def test_stale_chunk_sweep_invalidates_local_relations_too(tmp_path):
     assert stale_doc_id not in s.doc_ids_for_messages(["anarlog-a"])
     with s._connect() as db:
         r = db.execute(
-            "SELECT invalidated_at FROM entity_relations WHERE entity_a='x'").fetchone()
+            "SELECT invalidated_at, superseded_reason FROM entity_relations "
+            "WHERE entity_a='x'").fetchone()
     assert r["invalidated_at"] is not None
+    # Fix-round-2: distinct from the session-removal reason -- the meeting
+    # still exists here, only its content shrank.
+    assert r["superseded_reason"] == "anarlog_note_shrank"
+
+
+def test_session_removal_and_stale_sweep_record_different_reasons(tmp_path):
+    """The two anarlog delete paths are genuinely different events (the
+    meeting went away vs. the meeting shrank) and must stay distinguishable
+    to anyone auditing entity_relations.superseded_reason later -- not just
+    individually truthful, but truthful AND distinct from each other."""
+    p1 = tmp_path / "removed.db"
+    _anarlog_db(p1, [{"id": "r", "updated_at": "2026-09-17T01:00:00Z",
+                      "summary": "We agreed."}])
+    s = _store(tmp_path)
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "r"},
+                                db_path=str(p1))
+    removed_doc_id = s.doc_ids_for_messages(["anarlog-r"])[0]
+
+    p2 = tmp_path / "shrank.db"
+    _anarlog_db(p2, [{"id": "k", "updated_at": "2026-09-17T01:00:00Z",
+                      "summary": "We agreed.", "transcript": "Spoken words."}])
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "k"},
+                                db_path=str(p2))
+    shrank_doc_id = "anarlog-k-transcript-0"
+    assert shrank_doc_id in s.doc_ids_for_messages(["anarlog-k"])
+
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('x','X','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('y','Y','org','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('x','works_at','y',?,'local')", (removed_doc_id,))
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('x','member_of','y',?,'local')", (shrank_doc_id,))
+
+    # Session r is removed entirely.
+    anarlog.handle_anarlog_item(s, {"event": "remove", "ref_id": "r"},
+                                db_path=str(p1))
+    # Session k's transcript is soft-deleted in place; re-handling shrinks it.
+    raw = sqlite3.connect(str(p2))
+    raw.execute("UPDATE transcripts SET deleted_at=? WHERE session_id='k'",
+               ("2026-09-17T02:00:00Z",))
+    raw.execute("UPDATE sessions SET updated_at=? WHERE id='k'",
+               ("2026-09-17T02:00:00Z",))
+    raw.commit(); raw.close()
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "k"},
+                                db_path=str(p2))
+
+    with s._connect() as db:
+        removed_reason = db.execute(
+            "SELECT superseded_reason FROM entity_relations WHERE entity_a='x' "
+            "AND relation='works_at'").fetchone()["superseded_reason"]
+        shrank_reason = db.execute(
+            "SELECT superseded_reason FROM entity_relations WHERE entity_a='x' "
+            "AND relation='member_of'").fetchone()["superseded_reason"]
+    assert removed_reason == "anarlog_session_removed"
+    assert shrank_reason == "anarlog_note_shrank"
+    assert removed_reason != shrank_reason
 
 
 def test_reprocessing_the_boundary_row_is_idempotent(tmp_path):

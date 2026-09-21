@@ -344,7 +344,8 @@ def _delete_session_chunks(store, sid: str) -> None:
     """
     doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
     if doc_ids:
-        store.invalidate_local_relations_for_docs(doc_ids)
+        store.invalidate_local_relations_for_docs(
+            doc_ids, reason="anarlog_session_removed")
         store.delete_chunks(doc_ids)
 
 
@@ -375,7 +376,8 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
         stale = set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live
         if stale:
             stale_ids = list(stale)
-            store.invalidate_local_relations_for_docs(stale_ids)
+            store.invalidate_local_relations_for_docs(
+                stale_ids, reason="anarlog_note_shrank")
             store.delete_chunks(stale_ids)
         for ch in chunks:
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
