@@ -17,7 +17,7 @@ import json
 import logging
 import sqlite3
 
-from mcpbrain.chunking import chunk_text, content_hash
+from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
 
 log = logging.getLogger(__name__)
@@ -28,13 +28,13 @@ _PINNED_SCHEMA_VERSION = "20260909160300"
 # checks what we actually depend on, not the whole schema.
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
     "sessions": {"id", "title", "updated_at", "deleted_at", "started_at",
-                 "event_id", "series_id", "external_provider"},
+                 "created_at", "event_id", "series_id", "external_provider"},
     # deleted_at on the child tables matters: read_session filters on it, so a
     # schema that dropped it would raise mid-ingest rather than being caught
     # here. Every column this module names in SQL must appear in this map.
     "session_documents": {"session_id", "kind", "body", "body_format",
-                          "deleted_at"},
-    "transcripts": {"session_id", "words_json", "deleted_at"},
+                          "deleted_at", "updated_at"},
+    "transcripts": {"session_id", "words_json", "deleted_at", "updated_at"},
 }
 
 
@@ -195,23 +195,24 @@ _DOC_KINDS = ("summary", "note")
 def read_session(db, session_id: str) -> dict | None:
     """Assemble one session's row, its documents and its transcript."""
     row = db.execute(
-        "SELECT id, title, started_at, event_id, series_id FROM sessions "
+        "SELECT id, title, started_at, created_at, event_id, series_id FROM sessions "
         "WHERE id = ? AND deleted_at IS NULL", (session_id,)).fetchone()
     if row is None:
         return None
     docs = {}
     for d in db.execute(
             "SELECT kind, body FROM session_documents "
-            "WHERE session_id = ? AND deleted_at IS NULL", (session_id,)).fetchall():
+            "WHERE session_id = ? AND deleted_at IS NULL "
+            "ORDER BY updated_at", (session_id,)).fetchall():
         if d["kind"] in _DOC_KINDS and d["body"]:
             docs[d["kind"]] = d["body"]
     tr = db.execute(
         "SELECT words_json FROM transcripts WHERE session_id = ? "
-        "AND deleted_at IS NULL LIMIT 1", (session_id,)).fetchone()
+        "AND deleted_at IS NULL ORDER BY updated_at LIMIT 1", (session_id,)).fetchone()
     return {
         "id": row["id"],
         "title": row["title"] or "",
-        "started_at": row["started_at"] or "",
+        "started_at": row["started_at"] or row["created_at"] or "",
         "event_id": row["event_id"] or "",
         "series_id": row["series_id"] or "",
         "documents": docs,
@@ -234,6 +235,7 @@ def normalise_session(session: dict) -> list[Chunk]:
         "started_at": session.get("started_at") or "",
         "event_id": session.get("event_id") or "",
         "series_id": session.get("series_id") or "",
+        "chunker_version": CHUNKER_VERSION,
     }
     out: list[Chunk] = []
     bodies = [(k, prosemirror_to_markdown(session["documents"][k]))
@@ -242,12 +244,15 @@ def normalise_session(session: dict) -> list[Chunk]:
     for kind, text in bodies:
         if not text.strip():
             continue
-        for i, piece in enumerate(chunk_text(text)):
+        pieces = chunk_text(text)
+        if not pieces:
+            continue
+        for i, piece in enumerate(pieces):
             out.append(Chunk(
                 doc_id=f"anarlog-{sid}-{kind}-{i}",
                 text=piece,
                 content_hash=content_hash(piece),
                 metadata={**base, "content_subtype": kind,
-                          "chunk_index": i},
+                          "chunk_index": i, "chunk_total": len(pieces)},
             ))
     return out

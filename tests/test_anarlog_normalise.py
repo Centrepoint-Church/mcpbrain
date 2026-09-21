@@ -60,3 +60,34 @@ def test_content_hash_is_stable_across_calls():
     a = normalise_session(_session())
     b = normalise_session(_session())
     assert [c.content_hash for c in a] == [c.content_hash for c in b]
+
+
+def test_multi_piece_lineage_tracks_total_and_resets_per_kind():
+    # Create a transcript long enough to force multiple pieces
+    long_text = " ".join(["word"] * 500)  # ~2500 chars, will split into multiple pieces
+    chunks = normalise_session(_session(transcript=long_text))
+
+    # Filter to transcript chunks only
+    transcript_chunks = [c for c in chunks if c.metadata["content_subtype"] == "transcript"]
+    assert len(transcript_chunks) >= 2, "Expected at least 2 transcript pieces"
+
+    # Check doc_id suffixes increment
+    for i, c in enumerate(transcript_chunks):
+        assert c.doc_id == f"anarlog-sess-1-transcript-{i}"
+
+    # Check chunk_index increments
+    for i, c in enumerate(transcript_chunks):
+        assert c.metadata["chunk_index"] == i
+
+    # Check chunk_total equals piece count
+    for c in transcript_chunks:
+        assert c.metadata["chunk_total"] == len(transcript_chunks)
+
+    # Check that summary/note chunks have their own chunk_total (should be 1 each)
+    summary_chunks = [c for c in chunks if c.metadata["content_subtype"] == "summary"]
+    note_chunks = [c for c in chunks if c.metadata["content_subtype"] == "note"]
+
+    for c in summary_chunks:
+        assert c.metadata["chunk_total"] == len(summary_chunks)
+    for c in note_chunks:
+        assert c.metadata["chunk_total"] == len(note_chunks)

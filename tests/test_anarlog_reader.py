@@ -9,14 +9,14 @@ def _make_db(path, *, version="20260909160300", drop_cols=()):
     db.execute("CREATE TABLE _sqlx_migrations(version TEXT, description TEXT)")
     db.execute("INSERT INTO _sqlx_migrations VALUES(?, 'x')", (version,))
     sess_cols = ["id TEXT PRIMARY KEY", "title TEXT", "updated_at TEXT",
-                 "deleted_at TEXT", "started_at TEXT", "event_id TEXT",
-                 "series_id TEXT", "external_provider TEXT"]
+                 "deleted_at TEXT", "started_at TEXT", "created_at TEXT",
+                 "event_id TEXT", "series_id TEXT", "external_provider TEXT"]
     sess_cols = [c for c in sess_cols if c.split()[0] not in drop_cols]
     db.execute(f"CREATE TABLE sessions({','.join(sess_cols)})")
     db.execute("CREATE TABLE session_documents(session_id TEXT, kind TEXT, "
-               "body TEXT, body_format TEXT, deleted_at TEXT)")
+               "body TEXT, body_format TEXT, deleted_at TEXT, updated_at TEXT)")
     db.execute("CREATE TABLE transcripts(session_id TEXT, words_json TEXT, "
-               "deleted_at TEXT)")
+               "deleted_at TEXT, updated_at TEXT)")
     db.commit()
     return db
 
