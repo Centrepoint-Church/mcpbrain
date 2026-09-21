@@ -249,6 +249,10 @@ _CAL_INSTANCE_SUFFIX = re.compile(r"_\d{8}T\d{6}Z$")
 # (cal-<event_id>[-<chunk_idx>]), email_entities.message_id, evidence /
 # source_doc_id, and the enrichment identity thread_enrich._chunk_key emits.
 _CAL_PREFIX = "cal-"
+# Namespace prefix every anarlog meeting-derived chunk doc_id carries:
+# anarlog-<session_id>-<summary|note|transcript>-<i>. doc_ids_for_messages
+# resolves the bare `anarlog-<session_id>` key to every chunk of that meeting.
+_ANARLOG_PREFIX = "anarlog-"
 
 
 def _base_cal_event_id(value: str) -> str:
@@ -530,6 +534,11 @@ class Store:
                 # (~4.3s on the live store) without this index; a
                 # single-equality predicate, so the index alone fixes it.
                 ("idx_chunks_threadid", "$.thread_id"),
+                # anarlog meeting sessions: doc_ids_for_messages resolves an
+                # `anarlog-<session_id>` key to every chunk of that meeting
+                # (summary, note, transcript), so the arm needs the same
+                # expression index as file_id/event_id.
+                ("idx_chunks_sessionid", "$.session_id"),
             ):
                 db.execute(f"CREATE INDEX IF NOT EXISTS {_idx_name} "
                            f"ON chunks({_meta_extract(_idx_path)})")

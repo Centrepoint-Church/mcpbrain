@@ -1392,10 +1392,15 @@ This task exists because this repo's recorded failures were all found by
 checking the RUNNING system, never by reading a diff or a green test run. It is
 attended: do not run it unsupervised.
 
+**Every command below uses `uv run python`, not bare `python3`.** The system
+interpreter in this environment lacks the project's dependencies (`nameparser`
+and others), so `python3 -c "from mcpbrain..."` fails at import — verified
+during execution, not assumed.
+
 - [ ] **Step 1: Confirm the real anarlog DB is readable and its schema matches**
 
 ```bash
-python3 -c "
+uv run python -c "
 from mcpbrain.sync import anarlog
 from mcpbrain import config
 p = config.anarlog_db_path(str(config.app_dir()))
@@ -1414,7 +1419,7 @@ ingested.
 - [ ] **Step 2: Dry-run normalisation against the two real meetings**
 
 ```bash
-python3 -c "
+uv run python -c "
 from mcpbrain.sync import anarlog
 from mcpbrain import config
 p = config.anarlog_db_path(str(config.app_dir()))
@@ -1439,7 +1444,7 @@ counts, transcripts producing many chunks. Confirm titles are the real ones
 - [ ] **Step 3: Confirm the salience gate would cold-mark the transcripts**
 
 ```bash
-python3 -c "
+uv run python -c "
 from mcpbrain.prepare import should_enrich
 for st in ('summary','note','transcript'):
     print(st, should_enrich({'metadata':
@@ -1485,7 +1490,7 @@ because nothing checked it.
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
-H=$(python3 -c "from mcpbrain import config; print(config.app_dir())")
+H=$(uv run python -c "from mcpbrain import config; print(config.app_dir())")
 PORT=$(cat "$H/control_port")
 curl -s -H "Authorization: Bearer $(cat "$H/control_token")" \
   "http://127.0.0.1:$PORT/api/status" | head -c 400
