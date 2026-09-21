@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import nullcontext
 
 from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
@@ -256,3 +257,89 @@ def normalise_session(session: dict) -> list[Chunk]:
                           "chunk_index": i, "chunk_total": len(pieces)},
             ))
     return out
+
+
+_DISCOVER_LIMIT = 200
+_SOURCE = "anarlog"
+
+# Logged once per process when anarlog's schema version moves but every column
+# we read is still present. Module-level so a 5-minute cadence does not emit
+# the same line all day.
+_drift_logged = False
+
+
+def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
+    """Enqueue anarlog sessions changed at or after the cursor. Returns count.
+
+    Raises RuntimeError when anarlog's schema no longer carries a column we
+    read: partial ingestion of a changed schema is worse than stopping, because
+    it writes wrong content silently and the watermark then skips past it.
+    """
+    global _drift_logged
+    cursor = store.get_cursor(_SOURCE) or ""
+    with connect_ro(db_path) as db:
+        ok, version, missing = schema_status(db)
+        if not ok:
+            raise RuntimeError(
+                f"anarlog schema at version {version!r} is missing columns "
+                f"this source reads: {', '.join(missing)} — refusing to ingest "
+                f"partial content (pinned {_PINNED_SCHEMA_VERSION})")
+        if version != _PINNED_SCHEMA_VERSION and not _drift_logged:
+            log.info("anarlog schema version %s differs from pinned %s; all "
+                     "required columns present, continuing", version,
+                     _PINNED_SCHEMA_VERSION)
+            _drift_logged = True
+        rows = changed_sessions(db, cursor, _DISCOVER_LIMIT)
+
+    if not rows:
+        return 0
+    # enqueue_and_advance upserts the queue rows AND advances the cursor in ONE
+    # transaction — "the cursor can never be ahead of what is recorded". Do not
+    # split this into enqueue + set_cursor, and do not wrap it in bulk_section:
+    # it is already a single transaction.
+    #
+    # `version` is the session's updated_at: a differing version resets that
+    # row's attempts/backoff, which is exactly right here — an edited meeting
+    # is new work, not a continuation of a failing item.
+    items = [{"ref_id": r["id"],
+              "event": "remove" if r["deleted"] else "upsert",
+              "modified_at": r["updated_at"],
+              "version": r["updated_at"]}
+             for r in rows]
+    store.enqueue_and_advance(items, source=_SOURCE,
+                              cursor=rows[-1]["updated_at"])
+    return len(items)
+
+
+def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
+    """Work one queued session. Raises on failure so the loop backs it off."""
+    bulk_section = bulk_section or nullcontext
+    sid = item["ref_id"]
+
+    if item["event"] == "remove":
+        with bulk_section():
+            doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
+            if doc_ids:
+                store.delete_chunks(doc_ids)
+        return
+
+    with connect_ro(db_path) as db:
+        session = read_session(db, sid)
+    if session is None:
+        # Deleted between discovery and handling: treat as a removal rather
+        # than leaving orphaned chunks behind.
+        with bulk_section():
+            doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
+            if doc_ids:
+                store.delete_chunks(doc_ids)
+        return
+
+    chunks = normalise_session(session)
+    with bulk_section():
+        # Drop chunks that no longer exist (a note that shrank from 3 chunks to
+        # 1 would otherwise leave two stale rows resolvable by session_id).
+        live = {c.doc_id for c in chunks}
+        for stale in set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live:
+            store.delete_chunks([stale])
+        for ch in chunks:
+            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
