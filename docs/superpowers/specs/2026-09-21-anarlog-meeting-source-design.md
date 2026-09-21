@@ -268,8 +268,20 @@ personnel-adjacent by nature.
 `org_contrib.collect_from_drain` gains one check, placed with its existing
 fail-closed guards:
 
+`_source_kind` currently maps `{"gmail": "email", "drive": "drive",
+"calendar": "calendar"}` and returns `"unknown"` for anything else — so a check
+against `"anarlog"` would never fire. It gains the new source first, honouring
+its own "honest labelling" contract:
+
 ```python
-if _source_kind(store, doc_id) == "anarlog":
+return {"gmail": "email", "drive": "drive", "calendar": "calendar",
+        "anarlog": "meeting"}.get(st, "unknown")
+```
+
+and the guard then blocks on the mapped kind:
+
+```python
+if _source_kind(store, doc_id) == "meeting":
     continue   # meetings never contribute — personnel-adjacent by nature
 ```
 
