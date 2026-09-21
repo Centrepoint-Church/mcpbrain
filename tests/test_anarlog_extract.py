@@ -63,3 +63,20 @@ def test_transcript_handles_word_level_entries():
 def test_transcript_malformed_returns_empty_string():
     assert transcript_to_text("") == ""
     assert transcript_to_text("not json") == ""
+
+
+def test_prosemirror_content_not_list():
+    body = json.dumps({"type": "doc", "content": "oops"})
+    assert prosemirror_to_markdown(body) == ""
+
+
+def test_prosemirror_content_with_non_dict_entries():
+    body = json.dumps({"type": "doc", "content": [None, 5, "x"]})
+    assert prosemirror_to_markdown(body) == ""
+
+
+def test_prosemirror_nested_content_not_list():
+    body = json.dumps({"type": "doc", "content": [
+        {"type": "paragraph", "content": {"a": 1}}
+    ]})
+    assert prosemirror_to_markdown(body) == ""

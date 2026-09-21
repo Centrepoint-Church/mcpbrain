@@ -99,9 +99,14 @@ def _inline_text(node: dict) -> str:
     embedding model and an extraction prompt, neither of which benefits from
     emphasis, and keeping them would put markdown noise into the vector.
     """
+    if not isinstance(node, dict):
+        return ""
     if node.get("type") == "text":
         return node.get("text") or ""
-    return "".join(_inline_text(c) for c in (node.get("content") or []))
+    content = node.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "".join(_inline_text(c) for c in content if isinstance(c, dict))
 
 
 def prosemirror_to_markdown(body: str) -> str:
@@ -123,15 +128,20 @@ def prosemirror_to_markdown(body: str) -> str:
     blocks: list[str] = []
 
     def walk(node: dict) -> None:
+        if not isinstance(node, dict):
+            return
         ntype = node.get("type")
         if ntype in ("bulletList", "orderedList"):
-            items: list[str] = []
-            for item in node.get("content") or []:
-                text = _inline_text(item).strip()
-                if text:
-                    items.append(f"- {text}")
-            if items:
-                blocks.append("\n".join(items))
+            content = node.get("content")
+            if isinstance(content, list):
+                items: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text = _inline_text(item).strip()
+                        if text:
+                            items.append(f"- {text}")
+                if items:
+                    blocks.append("\n".join(items))
             return
         if ntype == "heading":
             text = _inline_text(node).strip()
@@ -144,8 +154,11 @@ def prosemirror_to_markdown(body: str) -> str:
             if text:
                 blocks.append(text)
             return
-        for child in node.get("content") or []:
-            walk(child)
+        content = node.get("content")
+        if isinstance(content, list):
+            for child in content:
+                if isinstance(child, dict):
+                    walk(child)
 
     for child in doc.get("content") or []:
         walk(child)
