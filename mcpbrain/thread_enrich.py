@@ -105,7 +105,7 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
     chunk's metadata and answers "calendar", and the meeting guard
     (org_contrib.collect_from_drain, design §10) never fires. Meeting-derived
     claims would then contribute to the SHARED ORG GRAPH — silently, and
-    exactly for the calendar-linked meetings (ACC Staff, State Secretaries)
+    exactly for the calendar-linked meetings (staff meetings, regional leadership)
     that are most personnel-adjacent. An anarlog chunk must therefore never
     share a grouping key with a calendar chunk. The cost of the ordering is
     only that a native session's notes are extracted as their own document
@@ -161,8 +161,8 @@ def _reassembly_key(meta: dict, doc_id: str) -> str:
     id. Grouped together for reassembly, though, their indexes interleave
     (0,0,1,1,2,2,…): _join_with_gaps sees a non-monotonic sequence, inserts a
     `[…]` marker at every repeat, and hands the model a body that restarts
-    mid-document carrying gap markers that are simply FALSE. Measured on the
-    real ACC Staff Meeting: chunk_indexes [0,0,1,1,2,2,3,3,4,4,5,5],
+    mid-document carrying gap markers that are simply FALSE. Measured on
+    a real two-lineage meeting: chunk_indexes [0,0,1,1,2,2,3,3,4,4,5,5],
     chunk_has_gap True, 3 spurious markers.
 
     This is precisely the attachment case below, for a different source, so it

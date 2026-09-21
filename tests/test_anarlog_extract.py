@@ -5,13 +5,13 @@ from mcpbrain.sync.anarlog import prosemirror_to_markdown, transcript_to_text
 def test_headings_become_markdown():
     body = json.dumps({"type": "doc", "content": [
         {"type": "heading", "attrs": {"level": 1},
-         "content": [{"type": "text", "text": "ACC Staff Meeting"}]},
+         "content": [{"type": "text", "text": "Northgate Trust Staff Meeting"}]},
         {"type": "heading", "attrs": {"level": 2},
          "content": [{"type": "text", "text": "Summary"}]},
         {"type": "paragraph", "content": [{"type": "text", "text": "We met."}]},
     ]})
     assert prosemirror_to_markdown(body) == (
-        "# ACC Staff Meeting\n\n## Summary\n\nWe met.")
+        "# Northgate Trust Staff Meeting\n\n## Summary\n\nWe met.")
 
 
 def test_bullet_list_becomes_dashes():
@@ -92,14 +92,14 @@ def _nested_body():
         {"type": "bulletList", "content": [
             {"type": "listItem", "content": [
                 {"type": "paragraph", "content": [
-                    {"type": "text", "text": "Two new state managers introduced:"}]},
+                    {"type": "text", "text": "Two new regional managers introduced:"}]},
                 {"type": "bulletList", "content": [
                     {"type": "listItem", "content": [
                         {"type": "paragraph", "content": [
-                            {"type": "text", "text": "Nate Phor: Western Australia"}]}]},
+                            {"type": "text", "text": "Marcus Reyes: the northern region"}]}]},
                     {"type": "listItem", "content": [
                         {"type": "paragraph", "content": [
-                            {"type": "text", "text": "Chad Irons: Victoria"}]}]},
+                            {"type": "text", "text": "Priya Anand: the southern region"}]}]},
                 ]},
             ]},
         ]},
@@ -109,24 +109,24 @@ def _nested_body():
 def test_nested_bullet_list_items_become_their_own_lines():
     out = prosemirror_to_markdown(_nested_body())
     assert out == (
-        "- Two new state managers introduced:\n"
-        "  - Nate Phor: Western Australia\n"
-        "  - Chad Irons: Victoria")
+        "- Two new regional managers introduced:\n"
+        "  - Marcus Reyes: the northern region\n"
+        "  - Priya Anand: the southern region")
 
 
 def test_nested_bullet_list_glues_no_words_together():
     """The defect: _inline_text flattened a listItem's whole subtree with NO
     separator, so the live notes read
-    'introduced:Nate Phor: Western AustraliaChad Irons: Victoria' — person
+    'introduced:Marcus Reyes: the northern regionPriya Anand: the southern region' — person
     names fused to the preceding word, in the content chosen for enrichment."""
     out = prosemirror_to_markdown(_nested_body())
-    for glued in ("introduced:Nate", "AustraliaChad"):
+    for glued in ("introduced:Marcus", "regionPriya"):
         assert glued not in out
     # no two words anywhere fused across a line boundary
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    assert lines == ["- Two new state managers introduced:",
-                     "- Nate Phor: Western Australia",
-                     "- Chad Irons: Victoria"]
+    assert lines == ["- Two new regional managers introduced:",
+                     "- Marcus Reyes: the northern region",
+                     "- Priya Anand: the southern region"]
 
 
 def test_ordered_nested_list_numbers_its_own_items():
@@ -153,7 +153,7 @@ def test_a_list_item_with_two_paragraphs_keeps_them_on_separate_lines():
         {"type": "bulletList", "content": [
             {"type": "listItem", "content": [
                 {"type": "paragraph", "content": [
-                    {"type": "text", "text": "require ACCI sign-off"}]},
+                    {"type": "text", "text": "require NCFI sign-off"}]},
                 {"type": "paragraph", "content": [
                     {"type": "text", "text": "Policy: no sponsors"}]},
             ]},
@@ -161,7 +161,7 @@ def test_a_list_item_with_two_paragraphs_keeps_them_on_separate_lines():
     ]})
     out = prosemirror_to_markdown(body)
     assert "sign-offPolicy" not in out
-    assert out == "- require ACCI sign-off\n  Policy: no sponsors"
+    assert out == "- require NCFI sign-off\n  Policy: no sponsors"
 
 
 def test_blockquote_with_nested_paragraphs_does_not_glue():

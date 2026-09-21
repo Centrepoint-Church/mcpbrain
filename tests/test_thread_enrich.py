@@ -631,7 +631,7 @@ def test_a_native_anarlog_session_never_groups_with_its_calendar_event(
     store = _store(tmp_path)
     store.upsert_chunk("cal-evtLinked", "the calendar stub", "hc",
                        {"source_type": "calendar", "event_id": "evtLinked",
-                        "summary": "ACC Staff Meeting",
+                        "summary": "Northgate Trust Staff Meeting",
                         "chunk_index": 0, "chunk_total": 1})
     store.upsert_chunk("anarlog-sessNative-summary-0", "summary", "hn",
                        {"source_type": "anarlog", "session_id": "sessNative",
@@ -657,7 +657,7 @@ def test_anarlog_summary_and_note_do_not_interleave_into_one_body(tmp_path):
     numbered from chunk_index 0. Grouped together for reassembly their
     indexes interleave (0,0,1,1,2,2) and _join_with_gaps inserts a `[…]` at
     every repeat: a body that restarts mid-document carrying gap markers that
-    are FALSE. Reproduced on the real ACC Staff Meeting before the fix:
+    are FALSE. Reproduced on a real two-lineage meeting before the fix:
     chunk_indexes [0,0,1,1,2,2,3,3,4,4,5,5], chunk_has_gap True, 3 markers."""
     chunks = []
     for kind in ("summary", "note"):
@@ -695,13 +695,13 @@ def test_an_anarlog_message_carries_its_meeting_title_and_date(tmp_path):
         "doc_id": "anarlog-sessI2-summary-0", "text": "We agreed on X.",
         "metadata": {"source_type": "anarlog", "session_id": "sessI2",
                      "content_subtype": "summary", "event_id": "",
-                     "meeting_title": "ACC Staff Meeting",
+                     "meeting_title": "Northgate Trust Staff Meeting",
                      "started_at": "2026-09-17T02:00:00.000Z",
                      "chunk_index": 0, "chunk_total": 1}}]
 
     m = thread_enrich.reassemble_thread(chunks)[0]
 
-    assert m["subject"] == "ACC Staff Meeting"
+    assert m["subject"] == "Northgate Trust Staff Meeting"
     assert m["date"] == "2026-09-17T02:00:00.000Z"
 
 

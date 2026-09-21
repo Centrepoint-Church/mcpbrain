@@ -5,7 +5,7 @@ from mcpbrain.sync.anarlog import normalise_session
 def _session(**over):
     base = {
         "id": "sess-1",
-        "title": "ACC Staff Meeting",
+        "title": "Northgate Trust Staff Meeting",
         "started_at": "2026-09-17T02:00:00Z",
         "event_id": "evt-9",
         "series_id": "ser-3",
@@ -43,7 +43,7 @@ def test_metadata_carries_linkage_fields():
     assert c.metadata["session_id"] == "sess-1"
     assert c.metadata["event_id"] == "evt-9"
     assert c.metadata["series_id"] == "ser-3"
-    assert c.metadata["meeting_title"] == "ACC Staff Meeting"
+    assert c.metadata["meeting_title"] == "Northgate Trust Staff Meeting"
     assert c.metadata["started_at"] == "2026-09-17T02:00:00Z"
 
 

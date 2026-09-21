@@ -80,7 +80,7 @@ def contextual_prefix(metadata: dict) -> str:
         # A mid-meeting chunk carries none of its own provenance: a transcript
         # slice or the third page of a summary names neither the meeting nor
         # the date, which is exactly the headline query shape ("what did we
-        # decide at the ACC staff meeting"). Stamped at write time into both
+        # decide at the Northgate Trust staff meeting"). Stamped at write time into both
         # the vector and the FTS text, same as every other source here.
         title = metadata.get("meeting_title", "")
         started = str(metadata.get("started_at") or "")[:10]

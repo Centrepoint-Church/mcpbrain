@@ -291,15 +291,15 @@ def test_prefix_anarlog_carries_meeting_title_and_date():
     """Without this branch an anarlog chunk got NO prefix at all while every
     other source did — a mid-transcript slice or page three of a summary
     names neither the meeting nor the date, which is exactly the headline
-    query shape ("what did we decide at the ACC staff meeting")."""
+    query shape ("what did we decide at the Northgate Trust staff meeting")."""
     meta = {
         "source_type": "anarlog",
-        "meeting_title": "ACC Staff Meeting",
+        "meeting_title": "Northgate Trust Staff Meeting",
         "started_at": "2026-09-17T02:00:00.000Z",
         "content_subtype": "transcript",
     }
     result = contextual_prefix(meta)
-    assert result == ("[Context: Meeting: ACC Staff Meeting, on 2026-09-17, "
+    assert result == ("[Context: Meeting: Northgate Trust Staff Meeting, on 2026-09-17, "
                       "(transcript)] ")
 
 

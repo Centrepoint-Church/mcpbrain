@@ -99,7 +99,7 @@ def test_read_session_takes_the_google_event_id_from_external_event_id(tmp_path)
     external_event_id 747cpncv0d4f9mfqkaossch7rr."""
     p = tmp_path / "app.db"
     db = _make_db(p)
-    _session_row(db, id="s1", title="Jess - Leave",
+    _session_row(db, id="s1", title="Dana Okafor - Leave",
                  started_at="2026-09-07T00:00:00+00:00",
                  event_id="45871b62-9dc5-4dc5-9abf-a740f9be2703",
                  external_event_id="747cpncv0d4f9mfqkaossch7rr",
@@ -117,7 +117,7 @@ def test_read_session_refuses_a_non_google_external_event_id(tmp_path):
     `event_id` would assert a Google calendar linkage that does not exist."""
     p = tmp_path / "app.db"
     db = _make_db(p)
-    _session_row(db, id="s2", title="ACC Staff Meeting",
+    _session_row(db, id="s2", title="Northgate Trust Staff Meeting",
                  event_id="", external_event_id="176a93ab-08d9-489e-887d-a2b96b07147b",
                  external_provider="granola", series_id="")
     db.close()
