@@ -13,6 +13,7 @@ stops the source loudly instead of ingesting partial content.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 
@@ -85,3 +86,88 @@ def changed_sessions(db, cursor: str, limit: int) -> list[dict]:
         (cursor or "", limit)).fetchall()
     return [{"id": r["id"], "updated_at": r["updated_at"],
              "deleted": r["deleted_at"] is not None} for r in rows]
+
+
+_BLOCK_TYPES = {"paragraph", "heading", "listItem", "blockquote",
+                "codeBlock"}
+
+
+def _inline_text(node: dict) -> str:
+    """Concatenate the text of a node's inline descendants.
+
+    Marks (strong/em/link) are dropped, not rendered: the consumer is an
+    embedding model and an extraction prompt, neither of which benefits from
+    emphasis, and keeping them would put markdown noise into the vector.
+    """
+    if node.get("type") == "text":
+        return node.get("text") or ""
+    return "".join(_inline_text(c) for c in (node.get("content") or []))
+
+
+def prosemirror_to_markdown(body: str) -> str:
+    """Render an anarlog prosemirror_json document as plain markdown.
+
+    Headings are preserved because the summary's structure is what makes it
+    readable when recall surfaces it. Returns "" for empty or malformed input
+    rather than raising — a single unparseable note must not fail the item.
+    """
+    if not body:
+        return ""
+    try:
+        doc = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(doc, dict):
+        return ""
+
+    blocks: list[str] = []
+
+    def walk(node: dict) -> None:
+        ntype = node.get("type")
+        if ntype in ("bulletList", "orderedList"):
+            items: list[str] = []
+            for item in node.get("content") or []:
+                text = _inline_text(item).strip()
+                if text:
+                    items.append(f"- {text}")
+            if items:
+                blocks.append("\n".join(items))
+            return
+        if ntype == "heading":
+            text = _inline_text(node).strip()
+            if text:
+                level = int((node.get("attrs") or {}).get("level") or 1)
+                blocks.append(f"{'#' * level} {text}")
+            return
+        if ntype in _BLOCK_TYPES:
+            text = _inline_text(node).strip()
+            if text:
+                blocks.append(text)
+            return
+        for child in node.get("content") or []:
+            walk(child)
+
+    for child in doc.get("content") or []:
+        walk(child)
+    return "\n\n".join(blocks)
+
+
+def transcript_to_text(words_json: str) -> str:
+    """Join a transcript's `text` fields in order.
+
+    Handles both shapes without branching: imported transcripts carry coarse
+    blocks (ids like `meeting-import:<hash>:word:0`) and live recordings carry
+    true word-level entries with timings. Both are ordered arrays of objects
+    with a `text` field, so an ordered join is correct for each.
+    """
+    if not words_json:
+        return ""
+    try:
+        words = json.loads(words_json)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(words, list):
+        return ""
+    parts = [str(w.get("text") or "").strip()
+             for w in words if isinstance(w, dict)]
+    return " ".join(p for p in parts if p)
