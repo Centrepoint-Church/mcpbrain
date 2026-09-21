@@ -1,0 +1,62 @@
+import json
+from mcpbrain.sync.anarlog import normalise_session
+
+
+def _session(**over):
+    base = {
+        "id": "sess-1",
+        "title": "ACC Staff Meeting",
+        "started_at": "2026-09-17T02:00:00Z",
+        "event_id": "evt-9",
+        "series_id": "ser-3",
+        "documents": {
+            "summary": json.dumps({"type": "doc", "content": [
+                {"type": "paragraph",
+                 "content": [{"type": "text", "text": "We agreed on X."}]}]}),
+            "note": json.dumps({"type": "doc", "content": [
+                {"type": "paragraph",
+                 "content": [{"type": "text", "text": "My rough note."}]}]}),
+        },
+        "transcript": "Someone said a thing.",
+    }
+    base.update(over)
+    return base
+
+
+def test_produces_all_three_subtypes():
+    chunks = normalise_session(_session())
+    subtypes = {c.metadata["content_subtype"] for c in chunks}
+    assert subtypes == {"summary", "note", "transcript"}
+
+
+def test_doc_ids_follow_the_namespace():
+    chunks = normalise_session(_session())
+    for c in chunks:
+        assert c.doc_id.startswith("anarlog-sess-1-")
+        kind = c.metadata["content_subtype"]
+        assert c.doc_id.startswith(f"anarlog-sess-1-{kind}-")
+
+
+def test_metadata_carries_linkage_fields():
+    c = normalise_session(_session())[0]
+    assert c.metadata["source_type"] == "anarlog"
+    assert c.metadata["session_id"] == "sess-1"
+    assert c.metadata["event_id"] == "evt-9"
+    assert c.metadata["series_id"] == "ser-3"
+    assert c.metadata["meeting_title"] == "ACC Staff Meeting"
+    assert c.metadata["started_at"] == "2026-09-17T02:00:00Z"
+
+
+def test_missing_transcript_yields_no_transcript_chunk():
+    chunks = normalise_session(_session(transcript=""))
+    assert all(c.metadata["content_subtype"] != "transcript" for c in chunks)
+
+
+def test_empty_session_yields_no_chunks():
+    assert normalise_session(_session(documents={}, transcript="")) == []
+
+
+def test_content_hash_is_stable_across_calls():
+    a = normalise_session(_session())
+    b = normalise_session(_session())
+    assert [c.content_hash for c in a] == [c.content_hash for c in b]

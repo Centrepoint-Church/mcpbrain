@@ -17,6 +17,9 @@ import json
 import logging
 import sqlite3
 
+from mcpbrain.chunking import chunk_text, content_hash
+from mcpbrain.sync.normalise import Chunk
+
 log = logging.getLogger(__name__)
 
 _PINNED_SCHEMA_VERSION = "20260909160300"
@@ -184,3 +187,67 @@ def transcript_to_text(words_json: str) -> str:
     parts = [str(w.get("text") or "").strip()
              for w in words if isinstance(w, dict)]
     return " ".join(p for p in parts if p)
+
+
+_DOC_KINDS = ("summary", "note")
+
+
+def read_session(db, session_id: str) -> dict | None:
+    """Assemble one session's row, its documents and its transcript."""
+    row = db.execute(
+        "SELECT id, title, started_at, event_id, series_id FROM sessions "
+        "WHERE id = ? AND deleted_at IS NULL", (session_id,)).fetchone()
+    if row is None:
+        return None
+    docs = {}
+    for d in db.execute(
+            "SELECT kind, body FROM session_documents "
+            "WHERE session_id = ? AND deleted_at IS NULL", (session_id,)).fetchall():
+        if d["kind"] in _DOC_KINDS and d["body"]:
+            docs[d["kind"]] = d["body"]
+    tr = db.execute(
+        "SELECT words_json FROM transcripts WHERE session_id = ? "
+        "AND deleted_at IS NULL LIMIT 1", (session_id,)).fetchone()
+    return {
+        "id": row["id"],
+        "title": row["title"] or "",
+        "started_at": row["started_at"] or "",
+        "event_id": row["event_id"] or "",
+        "series_id": row["series_id"] or "",
+        "documents": docs,
+        "transcript": transcript_to_text(tr["words_json"]) if tr else "",
+    }
+
+
+def normalise_session(session: dict) -> list[Chunk]:
+    """One session -> chunks, one lineage per content subtype.
+
+    `content_subtype` is load-bearing: prepare.should_enrich() cold-marks
+    'transcript' chunks, so tagging them here is the whole of the
+    hot-summary/cold-transcript policy. The handler does no cold-marking.
+    """
+    sid = session["id"]
+    base = {
+        "source_type": "anarlog",
+        "session_id": sid,
+        "meeting_title": session.get("title") or "",
+        "started_at": session.get("started_at") or "",
+        "event_id": session.get("event_id") or "",
+        "series_id": session.get("series_id") or "",
+    }
+    out: list[Chunk] = []
+    bodies = [(k, prosemirror_to_markdown(session["documents"][k]))
+              for k in _DOC_KINDS if session.get("documents", {}).get(k)]
+    bodies.append(("transcript", session.get("transcript") or ""))
+    for kind, text in bodies:
+        if not text.strip():
+            continue
+        for i, piece in enumerate(chunk_text(text)):
+            out.append(Chunk(
+                doc_id=f"anarlog-{sid}-{kind}-{i}",
+                text=piece,
+                content_hash=content_hash(piece),
+                metadata={**base, "content_subtype": kind,
+                          "chunk_index": i},
+            ))
+    return out
