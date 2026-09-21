@@ -333,9 +333,18 @@ def discover_anarlog(store, *, db_path, budget=None, bulk_section=None) -> int:
 
 
 def _delete_session_chunks(store, sid: str) -> None:
-    """Delete every chunk resolvable by this session id, if any exist."""
+    """Delete every chunk resolvable by this session id, if any exist.
+
+    Invalidates any local relations sourced from those doc_ids FIRST, same
+    pattern as drive.py's remove-event handlers and ingest_cache.purge_drive
+    -- otherwise a relation extracted before this session was deleted/edited
+    keeps pointing at a source_doc_id whose chunk row no longer exists, which
+    org_contrib.collect_from_drain can no longer distinguish from "fine"
+    provenance by querying alone (see _chunk_provenance in org_contrib.py).
+    """
     doc_ids = store.doc_ids_for_messages([f"anarlog-{sid}"])
     if doc_ids:
+        store.invalidate_local_relations_for_docs(doc_ids)
         store.delete_chunks(doc_ids)
 
 
@@ -365,6 +374,8 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
         live = {c.doc_id for c in chunks}
         stale = set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live
         if stale:
-            store.delete_chunks(list(stale))
+            stale_ids = list(stale)
+            store.invalidate_local_relations_for_docs(stale_ids)
+            store.delete_chunks(stale_ids)
         for ch in chunks:
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)

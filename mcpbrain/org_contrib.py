@@ -87,36 +87,53 @@ def _safe_entity_claim(e: dict) -> dict | None:
             "aliases": _safe_aliases(e.get("aliases", "") or "")}
 
 
-def _is_cold(store, doc_id: str) -> bool:
-    """True if the provenance doc is a cold (salience-gated) chunk. Cold chunks
-    skip graph-extraction, so this is belt-and-suspenders — but the edge filter
-    must fail closed on them regardless of how a row got written."""
+def _chunk_provenance(store, doc_id: str) -> tuple[bool, str]:
+    """One lookup for a relation's source doc: whether it has usable
+    provenance (a chunk row exists and isn't cold) and its source_kind.
+
+    A MISSING row is refused exactly like a cold one — "no provenance" is the
+    same failure as "cold provenance", not a lesser one. Before this, a
+    relation whose source chunk was deleted AFTER extraction (an anarlog
+    session edited or removed post-enrichment, the stale-chunk sweep
+    shrinking a note, Drive retention GC, or any future source's delete
+    path) sailed straight through: a SELECT against an absent doc_id looks
+    identical to "row present, enrich_state != 'cold'" to a query that only
+    checks for a cold row, and identical to "row present, unrecognised
+    source_type" to a query that only reads metadata — so neither the old
+    cold check nor the meeting-source guard could see it, and the record
+    contributed mislabelled source_kind="unknown". This is the single query
+    the relation loop performs per candidate relation (source_kind used to
+    be fetched a second time later in the loop; that reuses this result).
+    """
     if not doc_id:
-        return True
+        return False, "unknown"
     with store._connect() as db:
         r = db.execute(
-            "SELECT 1 FROM chunks WHERE doc_id=? AND enrich_state='cold' LIMIT 1",
+            "SELECT metadata, enrich_state FROM chunks WHERE doc_id=? LIMIT 1",
             (doc_id,)).fetchone()
-    return r is not None
-
-
-def _source_kind(store, doc_id: str) -> str:
-    """Map a doc's chunk metadata source_type to a contribution source_kind
-    (email|drive|calendar). Never reveals the doc id itself."""
-    with store._connect() as db:
-        r = db.execute("SELECT metadata FROM chunks WHERE doc_id=? LIMIT 1",
-                       (doc_id,)).fetchone()
+    if r is None:
+        return False, "unknown"                    # no provenance — fail closed
     st = ""
-    if r and r["metadata"]:
+    if r["metadata"]:
         try:
             st = (json.loads(r["metadata"]) or {}).get("source_type", "") or ""
         except (ValueError, TypeError):
             st = ""
     # Honest labelling: an unrecognised/absent source_type becomes "unknown", not
     # a silent mislabel as "email" (which would misattribute provenance for any
-    # new source type). source_kind is a coarse provenance label only, never gated.
-    return {"gmail": "email", "drive": "drive", "calendar": "calendar",
-            "anarlog": "meeting"}.get(st, "unknown")
+    # new source type). source_kind now GATES too (the meeting-source check in
+    # collect_from_drain), not just labels — a new source added to this mapping
+    # must be reviewed for whether it should ever be allowed to contribute.
+    skind = {"gmail": "email", "drive": "drive", "calendar": "calendar",
+             "anarlog": "meeting"}.get(st, "unknown")
+    usable = r["enrich_state"] != "cold"
+    return usable, skind
+
+
+def _source_kind(store, doc_id: str) -> str:
+    """Map a doc's chunk metadata source_type to a contribution source_kind
+    (email|drive|calendar|meeting). Never reveals the doc id itself."""
+    return _chunk_provenance(store, doc_id)[1]
 
 
 def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str) -> int:
@@ -147,9 +164,10 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
         if relation not in allow:
             continue                               # allowlist — fail closed
         doc_id = rel.get("source_doc_id") or ""
-        if not doc_id or _is_cold(store, doc_id):
+        usable, skind = _chunk_provenance(store, doc_id)
+        if not usable:
             continue                               # no/cold provenance — fail closed
-        if _source_kind(store, doc_id) == "meeting":
+        if skind == "meeting":
             continue                               # meetings never contribute:
             # meeting content is personnel-adjacent by nature (staff meetings,
             # performance, grievance), so no meeting-derived claim leaves this
@@ -175,7 +193,7 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
         if claim_a is None or claim_b is None:
             continue
         sref = source_ref(pin.fleet_secret, doc_id)
-        skind = _source_kind(store, doc_id)
+        # skind already computed by _chunk_provenance above — no second lookup.
         vfrom = rel.get("valid_from") or ""
         raw_conf = rel.get("confidence")
         confidence = 1.0 if raw_conf is None else float(raw_conf)

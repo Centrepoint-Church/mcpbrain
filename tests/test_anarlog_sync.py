@@ -101,6 +101,77 @@ def test_handle_remove_deletes_every_chunk_of_the_session(tmp_path):
     assert s.doc_ids_for_messages(["anarlog-a"]) == []
 
 
+def test_handle_remove_invalidates_local_relations_sourced_from_the_session(tmp_path):
+    """Fix-round-1 root-cause fix: deleting a session must invalidate any
+    local relation whose source_doc_id points at one of that session's
+    chunks, same pattern drive.py's remove-event handlers already use
+    (store.invalidate_local_relations_for_docs before store.delete_chunks).
+    Without this, a relation extracted before deletion keeps pointing at a
+    doc_id whose chunk row no longer exists -- provenance org_contrib can no
+    longer verify, which the org_contrib-side fix now refuses, but the
+    relation should never have been left live in the first place."""
+    p = tmp_path / "app.db"
+    _anarlog_db(p, [{"id": "a", "updated_at": "2026-09-17T01:00:00Z",
+                     "summary": "We agreed."}])
+    s = _store(tmp_path)
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"},
+                                db_path=str(p))
+    doc_id = s.doc_ids_for_messages(["anarlog-a"])[0]
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('x','X','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('y','Y','org','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('x','works_at','y',?,'local')", (doc_id,))
+    anarlog.handle_anarlog_item(s, {"event": "remove", "ref_id": "a"},
+                                db_path=str(p))
+    with s._connect() as db:
+        r = db.execute(
+            "SELECT invalidated_at FROM entity_relations WHERE entity_a='x'").fetchone()
+    assert r["invalidated_at"] is not None
+
+
+def test_stale_chunk_sweep_invalidates_local_relations_too(tmp_path):
+    """The same fix, on the OTHER delete path: a note that shrinks from 2
+    chunks to 1 drops the extra chunk via the stale-chunk sweep inside
+    handle_anarlog_item's upsert branch, not via a remove event. A relation
+    sourced from the dropped chunk must be invalidated there too.
+
+    Re-syncs the SAME anarlog db (updated in place, not recreated --
+    _anarlog_db creates _sqlx_migrations fresh each call and would collide
+    with itself on the same path) with the transcript soft-deleted, which is
+    exactly how anarlog itself marks a document gone (see
+    _REQUIRED_COLUMNS/read_session's deleted_at filtering)."""
+    p = tmp_path / "app.db"
+    _anarlog_db(p, [{"id": "a", "updated_at": "2026-09-17T01:00:00Z",
+                     "summary": "We agreed.", "transcript": "Spoken words."}])
+    s = _store(tmp_path)
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"},
+                                db_path=str(p))
+    stale_doc_id = "anarlog-a-transcript-0"
+    assert stale_doc_id in s.doc_ids_for_messages(["anarlog-a"])
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('x','X','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('y','Y','org','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
+                   "VALUES('x','works_at','y',?,'local')", (stale_doc_id,))
+    # Soft-delete the transcript in place and bump the session's updated_at
+    # (mirrors a real edit) so re-handling shrinks the chunk set and the
+    # sweep drops the transcript chunk as stale.
+    raw = sqlite3.connect(str(p))
+    raw.execute("UPDATE transcripts SET deleted_at=? WHERE session_id='a'",
+               ("2026-09-17T02:00:00Z",))
+    raw.execute("UPDATE sessions SET updated_at=? WHERE id='a'",
+               ("2026-09-17T02:00:00Z",))
+    raw.commit(); raw.close()
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"},
+                                db_path=str(p))
+    assert stale_doc_id not in s.doc_ids_for_messages(["anarlog-a"])
+    with s._connect() as db:
+        r = db.execute(
+            "SELECT invalidated_at FROM entity_relations WHERE entity_a='x'").fetchone()
+    assert r["invalidated_at"] is not None
+
+
 def test_reprocessing_the_boundary_row_is_idempotent(tmp_path):
     p = tmp_path / "app.db"
     _anarlog_db(p, [{"id": "a", "updated_at": "2026-09-17T01:00:00Z",

@@ -8,6 +8,16 @@ from mcpbrain.store import Store
 def _store(tmp_path):
     s = Store(tmp_path / "brain.sqlite3", dim=4)
     s.init()
+    # Fix-round-1: _chunk_provenance now fails closed on a MISSING chunk row,
+    # not just a cold one (an absent doc_id used to be silently treated as
+    # "fine" provenance). _delta()'s default source_doc_id="msg-1" must
+    # therefore resolve a real, non-cold, non-meeting chunk row for every
+    # test that doesn't deliberately test a missing/cold/mislabelled doc
+    # (those override source_doc_id and insert their own row) -- otherwise
+    # every default-fixture test here would fail closed for an unintended
+    # reason (or silently pass for the wrong one), not exercise the
+    # behaviour it names.
+    s.upsert_chunk("msg-1", "t", "h", {"source_type": "gmail"})
     return s
 
 
