@@ -179,9 +179,9 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             log.warning("sync: Drive discovery failed (cycle continues, retries next cycle): %s", exc)
     # Gated on `home` exactly as the shared-drive block below is: config
     # accessors need a home, and callers predating it pass none. Returning
-    # None from anarlog_db_path (the common case -- most installs never have
-    # anarlog) disables the source silently, same as an absent service arg
-    # for every other source here.
+    # None from anarlog_db_path (the common case -- opt-in only, see that
+    # function's docstring for why) disables the source silently, same as an
+    # absent service arg for every other source here.
     anarlog_db = config.anarlog_db_path(home) if home is not None else None
     if anarlog_db:
         discovered["anarlog"] = discover_anarlog(

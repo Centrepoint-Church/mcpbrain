@@ -115,17 +115,39 @@ def reextract_enabled(home) -> bool:
 
 
 def anarlog_db_path(home) -> str | None:
-    """Path to anarlog's app.db, or None when anarlog is not installed.
+    """Path to anarlog's app.db, or None when the source is not opted in.
+
+    Ingesting anarlog's meeting content is OPT-IN BY DESIGN, not merely
+    "on if the app happens to be installed." anarlog's database holds meeting
+    transcripts — recorded speech from third parties who never chose to have
+    their words ingested into someone else's memory store. Whether to enable
+    that is the user's decision to make explicitly, not something the mere
+    presence of another app on disk should decide for them; this repo's own
+    precedent is that new sources/features default OFF pending explicit
+    config (see salience_gate_enabled, embed_skip_tabular, etc.).
+
+    Set `"anarlog": {"enabled": true}` in `<home>/config.json` to opt in. With
+    `anarlog.enabled` absent or false, this returns None WITHOUT touching
+    `Path.home()` at all — no filesystem probe outside `home` happens, which
+    is what keeps this function hermetic for every caller that hasn't opted
+    in (including every test that doesn't set the flag, regardless of
+    whether anarlog is actually installed on the machine running them).
+
+    Once enabled, resolution order:
+      1. `anarlog.db_path` if set — use it (None if that path doesn't exist).
+      2. Otherwise the default `~/Library/Application Support/anarlog/app.db`
+         — returned if it exists, else None.
 
     Takes `home` and reads through `read_config(home)`, matching every other
-    accessor in this module (salience_gate_enabled, enrich_mode, ...). There is
-    no `load_config()`.
+    accessor in this module (salience_gate_enabled, enrich_mode, ...). There
+    is no `load_config()`.
 
-    Config key `anarlog.db_path` overrides the default. Returning None
-    disables the source silently — most installs will not have anarlog, and a
-    warning per cycle for a tool the user never installed is noise.
+    Returning None disables the source silently — no log line, since a
+    per-cycle warning for a source the user hasn't opted into is noise.
     """
     cfg = (read_config(home).get("anarlog") or {})
+    if not cfg.get("enabled"):
+        return None
     explicit = (cfg.get("db_path") or "").strip()
     if explicit:
         return explicit if Path(explicit).exists() else None
