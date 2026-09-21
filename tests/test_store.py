@@ -123,9 +123,11 @@ def test_doc_ids_for_messages_query_is_index_backed(tmp_path):
                        "VALUES(?,?,?,?)",
                        (f"gdrive-F{i}-0", "x", f"hd{i}",
                         f'{{"source_type":"gdrive","file_id":"F{i}"}}'))
-        # I6 added a fourth (event_id) arm for split calendar events, so the
-        # binding count below is ids*4 rather than ids*3 and the event index has
-        # to be exercised too — same contract, one more indexed path.
+        # I6 added a fourth (event_id) arm for split calendar events, and the
+        # anarlog meeting-session work added a fifth (session_id) arm, so the
+        # binding count below is ids*5 rather than ids*3 and both the event and
+        # session indexes have to be exercised too — same contract, two more
+        # indexed paths.
         for i in range(2000):
             db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
                        "VALUES(?,?,?,?)",
@@ -134,16 +136,23 @@ def test_doc_ids_for_messages_query_is_index_backed(tmp_path):
         for i in range(2000):
             db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
                        "VALUES(?,?,?,?)",
+                       (f"anarlog-S{i}-summary-0", "x", f"ha{i}",
+                        f'{{"source_type":"anarlog","session_id":"S{i}"}}'))
+        for i in range(2000):
+            db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                       "VALUES(?,?,?,?)",
                        (f"note-{i}", "x", f"hn{i}", '{"source_type":"note"}'))
         db.execute("ANALYZE")
         plan = " ".join(
             tuple(r)[-1] for r in
             db.execute("EXPLAIN QUERY PLAN " + s._doc_ids_query(1),
-                       ["x"] * 4).fetchall())
+                       ["x"] * 5).fetchall())
     assert "SCAN chunks" not in plan, f"full scan not eliminated: {plan}"
     assert "idx_chunks_msgid" in plan and "idx_chunks_fileid" in plan, \
         f"metadata indexes not used: {plan}"
     assert "idx_chunks_eventid" in plan, f"event_id arm not index-backed: {plan}"
+    assert "idx_chunks_sessionid" in plan, \
+        f"session_id arm not index-backed: {plan}"
 
 
 def test_doc_ids_for_messages_strips_the_cal_prefix_for_the_event_arm(tmp_path):
