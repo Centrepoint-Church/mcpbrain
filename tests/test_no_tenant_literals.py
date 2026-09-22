@@ -8,8 +8,11 @@ This guard originally scanned only mcpbrain/ and plugin/ and only checked ORG
 identifiers, on the theory that tests/ was "fixtures and history" and a permanent
 test enumerating real people's surnames in a public repo, in order to assert their
 absence, would just reintroduce the problem it exists to solve. Both halves of that
-theory turned out to be wrong: a real staff surname ("Okafor") sat in tests/ for
-months, in 10+ files and this repo's own CLAUDE.md, uncaught by either half.
+theory turned out to be wrong: a real staff surname sat in tests/ for months, in
+10+ files and this repo's own CLAUDE.md, uncaught by either half (see CLAUDE.md
+for the incident — this file does not name the person, for the same reason the
+person-name check below reads its forbidden list from tenant data rather than
+enumerating it here).
 
 - `tests/` is now a scanned root (see `_ROOTS` below) for the same org-identifier
   patterns as mcpbrain/ and plugin/.

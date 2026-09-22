@@ -33,8 +33,8 @@ tests/eval/golden_retrieval_set.yaml
 tests/eval/golden_retrieval_set_mcpbrain_candidate.yaml
 
 # tenant_people.json is a PERSON-name analogue of the gold-set problem above: a
-# real staff surname ("Okafor") sat in this PUBLIC repo's tests/ for months
-# because the tenant-literal guard only ever checked org/infrastructure
+# real staff surname sat in this PUBLIC repo's tests/ for months (see CLAUDE.md
+# for the incident) because the tenant-literal guard only ever checked org/infrastructure
 # identifiers, never staff names, and tests/ wasn't even scanned. A guard file
 # that enumerates real names to check for their own absence would just
 # reintroduce the leak it exists to prevent, so the forbidden-names list itself
