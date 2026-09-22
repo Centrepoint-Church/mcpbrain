@@ -91,7 +91,7 @@ def test_matches_by_normalised_name():
 
 def test_no_match_different_sender():
     """Different person -> no match."""
-    chunk = _make_chunk(sender_name="Marcus Reyes", sender_entity_id="ent-dana-001")
+    chunk = _make_chunk(sender_name="Marcus Reyes", sender_entity_id="ent-marcus-001")
     assert not _matches(chunk, waiting_on="Dana Okafor", entity_id="ent-dana-001")
 
 
