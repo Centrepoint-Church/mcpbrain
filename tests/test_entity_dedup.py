@@ -31,15 +31,15 @@ def _ent(eid, name, typ="person"):
 
 
 def test_build_entity_index_contains_all_entities():
-    entities = [_ent("e1", "Dana Okafor"), _ent("e2", "Sarah Jones")]
+    entities = [_ent("e1", "Marcus Reyes"), _ent("e2", "Sarah Jones")]
     idx = build_entity_index(entities)
     assert set(idx["ids"].keys()) == {"e1", "e2"}
-    assert idx["ids"]["e1"]["name"] == "Dana Okafor"
+    assert idx["ids"]["e1"]["name"] == "Marcus Reyes"
     assert idx["ids"]["e1"]["type"] == "person"
     assert isinstance(idx["ids"]["e1"]["toks"], set)
     # blocking maps are populated
-    assert ("person", "dana") in idx["by_tok"]
-    assert "e1" in idx["by_tok"][("person", "dana")]
+    assert ("person", "marcus") in idx["by_tok"]
+    assert "e1" in idx["by_tok"][("person", "marcus")]
 
 
 def test_build_entity_index_empty():
@@ -49,26 +49,26 @@ def test_build_entity_index_empty():
 def test_add_to_index_enables_intra_batch_dedup():
     from mcpbrain.resolve import add_to_index, write_time_dedup_check
     idx = build_entity_index([])
-    assert write_time_dedup_check("Dana Okafor", "person", idx) is None
-    add_to_index(idx, "new1", "Dana Okafor", "person")
+    assert write_time_dedup_check("Marcus Reyes", "person", idx) is None
+    add_to_index(idx, "new1", "Marcus Reyes", "person")
     # a second near-dup in the same batch now resolves to the just-added entity
-    assert write_time_dedup_check("Ps Dana Okafor", "person", idx) == "new1"
+    assert write_time_dedup_check("Ps Marcus Reyes", "person", idx) == "new1"
 
 
 def test_write_time_dedup_exact_canonical_key_match():
     """Honorific-stripped form matches existing entity with different display name."""
-    idx = build_entity_index([_ent("e1", "Dana Okafor")])
-    # "Ps Dana Okafor" strips to "Dana Okafor" → same canonical key
-    result = write_time_dedup_check("Ps Dana Okafor", "person", idx)
+    idx = build_entity_index([_ent("e1", "Marcus Reyes")])
+    # "Ps Marcus Reyes" strips to "Marcus Reyes" → same canonical key
+    result = write_time_dedup_check("Ps Marcus Reyes", "person", idx)
     assert result == "e1"
 
 
 def test_write_time_dedup_token_similarity_above_threshold():
     """High-overlap token sets (≥ 0.8) merge."""
-    # "Dana Okafor" tokens: {"dana", "okafor"}
-    # "Dana L. Okafor" tokens: {"dana", "okafor"} (L. is dropped as 1-char)
-    idx = build_entity_index([_ent("e1", "Dana Okafor")])
-    result = write_time_dedup_check("Dana L Okafor", "person", idx)
+    # "Marcus Reyes" tokens: {"marcus", "reyes"}
+    # "Marcus L. Reyes" tokens: {"marcus", "reyes"} (L. is dropped as 1-char)
+    idx = build_entity_index([_ent("e1", "Marcus Reyes")])
+    result = write_time_dedup_check("Marcus L Reyes", "person", idx)
     assert result == "e1", "token overlap should trigger dedup"
 
 
@@ -82,18 +82,18 @@ def test_write_time_dedup_below_threshold_creates_new():
 
 def test_write_time_dedup_no_cross_type_merge():
     """A person and an org with the same name must NOT merge."""
-    idx = build_entity_index([_ent("e1", "Centrepoint", "org")])
-    result = write_time_dedup_check("Centrepoint", "person", idx)
+    idx = build_entity_index([_ent("e1", "Northgate Trust", "org")])
+    result = write_time_dedup_check("Northgate Trust", "person", idx)
     assert result is None
 
 
 def test_write_time_dedup_empty_name_returns_none():
-    idx = build_entity_index([_ent("e1", "Dana Okafor")])
+    idx = build_entity_index([_ent("e1", "Marcus Reyes")])
     assert write_time_dedup_check("", "person", idx) is None
 
 
 def test_write_time_dedup_empty_index_returns_none():
-    assert write_time_dedup_check("Dana Okafor", "person", {}) is None
+    assert write_time_dedup_check("Marcus Reyes", "person", {}) is None
 
 
 def test_write_time_dedup_exact_name_match():
@@ -120,7 +120,7 @@ def _make_store_and_home():
         "write_time_dedup": True,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
     return store, tmpdir
 
@@ -128,7 +128,7 @@ def _make_store_and_home():
 def _make_extraction(entities, thread_id="t1"):
     return {
         "thread_id": thread_id,
-        "org": "Centrepoint",
+        "org": "Northgate Trust",
         "content_type": "email",
         "summary": "Test extraction",
         "contextual_summary": "",
@@ -161,29 +161,29 @@ def test_apply_dedup_redirects_near_duplicate_entity(tmp_path):
         "write_time_dedup": True,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     # Pre-insert a canonical entity
     import mcpbrain.orgs as orgs_mod
     taxonomy = orgs_mod.taxonomy_from_config()
-    existing_id = upsert_entity(store, name="Dana Okafor", entity_type="person",
+    existing_id = upsert_entity(store, name="Marcus Reyes", entity_type="person",
                                 taxonomy=taxonomy)
     assert existing_id, "pre-insert must succeed"
 
-    # Now apply an extraction with a near-duplicate name ("Ps Dana Okafor")
+    # Now apply an extraction with a near-duplicate name ("Ps Marcus Reyes")
     extraction = _make_extraction([
-        {"name": "Ps Dana Okafor", "type": "person", "org": "Centrepoint"},
+        {"name": "Ps Marcus Reyes", "type": "person", "org": "Northgate Trust"},
     ])
     apply(store, extraction, doc_ids=[], home=str(tmp_path))
 
     # The near-dup should have been redirected, so no new entity created
     with store._connect() as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE type='person' AND id LIKE '%dana%'"
+            "SELECT COUNT(*) FROM entities WHERE type='person' AND id LIKE '%marcus%'"
         ).fetchone()[0]
-    # Exactly one Dana entity should exist (the pre-inserted one, not a new dup)
-    assert count == 1, f"expected 1 Dana entity, got {count}"
+    # Exactly one Marcus entity should exist (the pre-inserted one, not a new dup)
+    assert count == 1, f"expected 1 Marcus entity, got {count}"
 
 
 def test_apply_dedup_off_creates_new_entity(tmp_path):
@@ -199,28 +199,28 @@ def test_apply_dedup_off_creates_new_entity(tmp_path):
         "write_time_dedup": False,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     import mcpbrain.orgs as orgs_mod
     taxonomy = orgs_mod.taxonomy_from_config()
-    upsert_entity(store, name="Dana Okafor", entity_type="person", taxonomy=taxonomy)
+    upsert_entity(store, name="Marcus Reyes", entity_type="person", taxonomy=taxonomy)
 
-    # With flag off, "Ps Dana Okafor" → strip → "Dana Okafor" → upsert_entity
+    # With flag off, "Ps Marcus Reyes" → strip → "Marcus Reyes" → upsert_entity
     # uses slugify-based dedup internally, so it still merges on exact slug.
     # Use a slightly different name that would only merge via token similarity.
-    # "Dana L Okafor" → slug "dana-l-okafor" ≠ "dana-okafor" → NEW entity
+    # "Marcus L Reyes" → slug "marcus-l-reyes" ≠ "marcus-reyes" → NEW entity
     extraction = _make_extraction([
-        {"name": "Dana L Okafor", "type": "person", "org": ""},
+        {"name": "Marcus L Reyes", "type": "person", "org": ""},
     ])
     apply(store, extraction, doc_ids=[], home=str(tmp_path))
 
     with store._connect() as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE type='person' AND name LIKE '%Dana%'"
+            "SELECT COUNT(*) FROM entities WHERE type='person' AND name LIKE '%Marcus%'"
         ).fetchone()[0]
     # With dedup off, the near-dup creates a new entity
-    assert count == 2, f"expected 2 Dana entities with dedup off, got {count}"
+    assert count == 2, f"expected 2 Marcus entities with dedup off, got {count}"
 
 
 def test_apply_dedup_redirected_entity_linked_to_message(tmp_path):
@@ -236,16 +236,16 @@ def test_apply_dedup_redirected_entity_linked_to_message(tmp_path):
         "write_time_dedup": True,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     import mcpbrain.orgs as orgs_mod
     taxonomy = orgs_mod.taxonomy_from_config()
-    existing_id = upsert_entity(store, name="Dana Okafor", entity_type="person",
+    existing_id = upsert_entity(store, name="Marcus Reyes", entity_type="person",
                                 taxonomy=taxonomy)
 
     extraction = _make_extraction([
-        {"name": "Ps Dana Okafor", "type": "person", "org": ""},
+        {"name": "Ps Marcus Reyes", "type": "person", "org": ""},
     ])
     apply(store, extraction, doc_ids=[], home=str(tmp_path))
 
@@ -264,8 +264,8 @@ def test_update_entity_org_if_empty(tmp_path):
     from mcpbrain.graph_write import upsert_entity
     import mcpbrain.orgs as orgs_mod
     s = Store(tmp_path / "e.sqlite3", dim=4); s.init()
-    eid = upsert_entity(s, name="Dana Okafor", entity_type="person", org="",
+    eid = upsert_entity(s, name="Marcus Reyes", entity_type="person", org="",
                         taxonomy=orgs_mod.taxonomy_from_config())
     assert eid
-    assert s.update_entity_org_if_empty(eid, "Centrepoint") is True
+    assert s.update_entity_org_if_empty(eid, "Northgate Trust") is True
     assert s.update_entity_org_if_empty(eid, "Other") is False  # already set, not clobbered

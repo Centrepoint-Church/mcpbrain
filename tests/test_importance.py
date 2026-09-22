@@ -125,18 +125,18 @@ def test_owner_authored_derived_from_sender_and_label():
     label even when metadata has no explicit sender_is_owner flag (live case)."""
     from mcpbrain.importance import score_structural
     base = score_structural({"sender": "someone.else@example.com"})
-    by_addr = score_structural({"sender": "Joshua Kemp <josh.k@centrepoint.church>"},
-                               owner_email="josh.k@centrepoint.church")
+    by_addr = score_structural({"sender": "Joshua Kemp <josh.k@northgatetrust.org>"},
+                               owner_email="josh.k@northgatetrust.org")
     by_label = score_structural({"sender": "x@y.com", "labels": "SENT,INBOX"},
-                                owner_email="josh.k@centrepoint.church")
+                                owner_email="josh.k@northgatetrust.org")
     assert by_addr >= base + 1.5
     assert by_label >= base + 1.5
     # owner-authored + recent crosses the core/decay-exempt band (>=7)
     from datetime import datetime, timezone
     recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     hot = score_structural(
-        {"sender": "josh.k@centrepoint.church", "date_iso": recent,
-         "labels": "IMPORTANT"}, owner_email="josh.k@centrepoint.church")
+        {"sender": "josh.k@northgatetrust.org", "date_iso": recent,
+         "labels": "IMPORTANT"}, owner_email="josh.k@northgatetrust.org")
     assert hot >= 7.0
 
 

@@ -64,7 +64,7 @@ def test_delete_legacy_removes_the_folder(monkeypatch):
 def test_scan_and_delete_handle_duplicate_folders(monkeypatch):
     # Drive allows two same-named folders under one parent (a resolved
     # _ensure_folder race). The cleanup must find and delete BOTH in one pass,
-    # and sum their children — the Centrepoint Care case that survived the
+    # and sum their children — a real duplicate-folder-name case that survived the
     # first-match-only version.
     drive = FakeDrive()
 

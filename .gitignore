@@ -31,6 +31,18 @@ mcpbrain/google_oauth_client.json
 # returns [] and the gold floor test skips honestly.
 tests/eval/golden_retrieval_set.yaml
 tests/eval/golden_retrieval_set_mcpbrain_candidate.yaml
+
+# tenant_people.json is a PERSON-name analogue of the gold-set problem above: a
+# real staff surname ("Okafor") sat in this PUBLIC repo's tests/ for months
+# because the tenant-literal guard only ever checked org/infrastructure
+# identifiers, never staff names, and tests/ wasn't even scanned. A guard file
+# that enumerates real names to check for their own absence would just
+# reintroduce the leak it exists to prevent, so the forbidden-names list itself
+# is tenant data: a JSON list of surnames/full names, kept in the private
+# mcpbrain-tenant repo and copied in by `python bin/tenant.py use
+# ../mcpbrain-tenant`. Absent, the person-name check in
+# test_no_tenant_literals.py skips honestly.
+mcpbrain/tenant_people.json
 google_token.json
 google_account
 client_secret.json

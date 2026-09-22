@@ -736,23 +736,23 @@ def _seed_dupes(tmp_path):
 
 def test_duplicate_verdict_merges_mergeable_type_with_normal_emails(tmp_path):
     s = _seed_dupes(tmp_path)
-    s.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-01")
-    s.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-02")  # mentions=2
-    s.upsert_entity("j-okafor", "J Okafor", "person", "Acme", "2026-04-01")  # mentions=1
-    _set_email(s, "dana-okafor", "dana.okafor@acme.com")
-    _set_email(s, "j-okafor", "j.okafor@acme.com")
+    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", "Acme", "2026-04-01")
+    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", "Acme", "2026-04-02")  # mentions=2
+    s.upsert_entity("m-reyes", "M Reyes", "person", "Acme", "2026-04-01")  # mentions=1
+    _set_email(s, "marcus-reyes", "dana.reyes@acme.com")
+    _set_email(s, "m-reyes", "j.reyes@acme.com")
 
-    ans = {"pair_id": _pair_id("dana-okafor", "j-okafor"),
-           "same": True, "canonical": "Dana Okafor"}
+    ans = {"pair_id": _pair_id("marcus-reyes", "m-reyes"),
+           "same": True, "canonical": "Marcus Reyes"}
     result = apply_duplicate_verdicts(s, [ans], cap=50)
 
     assert result == {"merged": 1, "guarded": 0, "capped": 0, "skipped": 0}
-    assert s.get_entity("j-okafor") is None
-    assert s.get_entity("dana-okafor") is not None
+    assert s.get_entity("m-reyes") is None
+    assert s.get_entity("marcus-reyes") is not None
     merges = s.list_entity_merges()
     assert len(merges) == 1
-    assert merges[0]["winner_id"] == "dana-okafor"
-    assert merges[0]["loser_id"] == "j-okafor"
+    assert merges[0]["winner_id"] == "marcus-reyes"
+    assert merges[0]["loser_id"] == "m-reyes"
     assert merges[0]["method"] == "llm"
 
 
@@ -774,7 +774,7 @@ def test_duplicate_verdict_with_role_address_is_guarded(tmp_path):
     s = _seed_dupes(tmp_path)
     s.upsert_entity("staffer-a", "Alex Staffer", "person", "Acme", "2026-04-01")
     s.upsert_entity("staffer-b", "Sam Staffer", "person", "Acme", "2026-04-01")
-    _set_email(s, "staffer-a", "office@centrepoint.church")
+    _set_email(s, "staffer-a", "office@northgatetrust.org")
     _set_email(s, "staffer-b", "sam.staffer@acme.com")
 
     ans = {"pair_id": _pair_id("staffer-a", "staffer-b"), "same": True, "canonical": "Staffer"}

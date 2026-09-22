@@ -33,7 +33,7 @@ def _extraction_for_thread(thread: dict) -> dict:
         "summary": "Dana asks Sam to confirm Hall B availability.",
         "contextual_summary": "College term-one room booking thread.",
         "entities": [
-            {"name": "Dana Okafor", "type": "person",
+            {"name": "Marcus Reyes", "type": "person",
              "org": "Acme", "role": "Senior Pastor"},
             {"name": "Acme Corp", "type": "org",
              "org": "Acme", "role": ""},
@@ -41,7 +41,7 @@ def _extraction_for_thread(thread: dict) -> dict:
         "topics": ["facilities", "college"],
         "actions": [],
         "relations": [
-            {"source_name": "Dana Okafor", "type": "works_at",
+            {"source_name": "Marcus Reyes", "type": "works_at",
              "target_name": "Acme Corp"},
         ],
         "reply_needed": True,

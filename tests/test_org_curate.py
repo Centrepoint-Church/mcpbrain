@@ -161,7 +161,7 @@ def _stage(store, recs):
 def test_materialise_writes_org_rows(tmp_path):
     s = _store(tmp_path)
     _stage(s, [
-        _rec({"kind": "entity", "id": "dana", "name": "Dana Okafor", "type": "person",
+        _rec({"kind": "entity", "id": "dana", "name": "Marcus Reyes", "type": "person",
               "org": "Acme", "email_addr": "dana@acme.org", "aliases": ""}),
         _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
               "org": "", "email_addr": "", "aliases": ""}),
@@ -286,18 +286,18 @@ def test_rematerialise_never_reverts_name_canonicalisation(tmp_path):
     honorific), and a later re-materialise updating email must not revert
     that canonicalisation back to the raw claim string."""
     s = _store(tmp_path)
-    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Dana Okafor",
+    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Marcus Reyes",
                      "type": "person", "org": "", "email_addr": "", "aliases": ""})])
     org_curate._materialise(s)
-    dana = _by_name(s, "Dana Okafor")               # title stripped by upsert_entity
+    dana = _by_name(s, "Marcus Reyes")               # title stripped by upsert_entity
     assert dana is not None and dana["origin"] == "org"
-    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Dana Okafor",
+    _stage(s, [_rec({"kind": "entity", "id": "dana", "name": "Dr. Marcus Reyes",
                      "type": "person", "org": "Acme", "email_addr": "dana@acme.org",
                      "aliases": ""}, sref="ref2")])
     org_curate._materialise(s)
-    dana = _by_name(s, "Dana Okafor")                # still stripped, not reverted
+    dana = _by_name(s, "Marcus Reyes")                # still stripped, not reverted
     assert dana is not None
-    assert _by_name(s, "Dr. Dana Okafor") is None    # never reverted to the raw claim string
+    assert _by_name(s, "Dr. Marcus Reyes") is None    # never reverted to the raw claim string
     assert dana["email_addr"] == "dana@acme.org"       # org/email still updated
 
 
@@ -452,12 +452,12 @@ def test_apply_org_merge_answers_merges_on_same_true(tmp_path):
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                    "VALUES('dana','Dana','person','org',1)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('dana-okafor','Dana Okafor','person','org',5)")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','org',5)")
     res = org_curate.apply_org_merge_answers(
-        s, [{"pair_id": "dana|dana-okafor", "same": True, "canonical": "Dana Okafor"}],
+        s, [{"pair_id": "dana|marcus-reyes", "same": True, "canonical": "Marcus Reyes"}],
         cap=10)
     assert res["merged"] == 1
-    survivors = [e for e in (s.get_entity("dana"), s.get_entity("dana-okafor")) if e]
+    survivors = [e for e in (s.get_entity("dana"), s.get_entity("marcus-reyes")) if e]
     assert len(survivors) == 1
 
 
@@ -497,11 +497,11 @@ def test_apply_org_merge_answers_respects_cap(tmp_path):
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                    "VALUES('dana','Dana','person','org',1)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('dana-okafor','Dana Okafor','person','org',5)")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','org',5)")
     res = org_curate.apply_org_merge_answers(
-        s, [{"pair_id": "dana|dana-okafor", "same": True}], cap=0)
+        s, [{"pair_id": "dana|marcus-reyes", "same": True}], cap=0)
     assert res["capped"] == 1 and res["merged"] == 0
-    assert s.get_entity("dana") is not None and s.get_entity("dana-okafor") is not None
+    assert s.get_entity("dana") is not None and s.get_entity("marcus-reyes") is not None
 
 
 def test_run_returns_adjudication_units_for_the_daemon_to_stash(tmp_path):
@@ -510,12 +510,12 @@ def test_run_returns_adjudication_units_for_the_daemon_to_stash(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('dana','Dana','person','org',1)")
+                   "VALUES('dana','Marcus','person','org',1)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('dana-okafor','Dana Okafor','person','org',5)")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','org',5)")
     summary = org_curate.run(s, fs, str(tmp_path))
     pids = {u["pair_id"] for u in summary["adjudication_units"]}
-    assert "dana|dana-okafor" in pids
+    assert "dana|marcus-reyes" in pids
     # units are structural-only: no content-shaped fields
     u = summary["adjudication_units"][0]
     assert set(u["a"]) <= {"id", "name", "type", "email_addr", "aliases"}
@@ -524,14 +524,14 @@ def test_run_returns_adjudication_units_for_the_daemon_to_stash(tmp_path):
 def test_apply_merge_verdict_merges_only_on_merge(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        for eid, name in (("dana-c", "Dana C"), ("dana-okafor", "Dana Okafor")):
+        for eid, name in (("marcus-r", "Marcus R"), ("marcus-reyes", "Marcus Reyes")):
             db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                        "VALUES(?,?,'person','org',1)", (eid, name))
     res = org_curate._apply_merge_verdicts(
-        s, [{"pair_id": "dana-c|dana-okafor", "verdict": "merge", "canonical": "Dana Okafor"}],
+        s, [{"pair_id": "marcus-r|marcus-reyes", "verdict": "merge", "canonical": "Marcus Reyes"}],
         cap=10)
     assert res["merged"] == 1
-    assert s.get_entity("dana-c") is None or s.get_entity("dana-okafor") is None
+    assert s.get_entity("marcus-r") is None or s.get_entity("marcus-reyes") is None
 
 
 def test_apply_merge_verdict_pending_is_noop(tmp_path):
@@ -563,7 +563,7 @@ def test_run_end_to_end_publishes_snapshot(tmp_path, monkeypatch):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
     _write_batch(fs, "contrib/alice@x.org/1.jsonl", [
-        _rec({"kind": "entity", "id": "dana", "name": "Dana Okafor", "type": "person",
+        _rec({"kind": "entity", "id": "dana", "name": "Marcus Reyes", "type": "person",
               "org": "Acme", "email_addr": "dana@acme.org", "aliases": ""}),
         _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
               "org": "", "email_addr": "", "aliases": ""}),
@@ -606,9 +606,9 @@ def test_drain_org_merge_review_applies_via_registry(tmp_path):
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                    "VALUES('dana','Dana','person','org',1)")
         db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
-                   "VALUES('dana-okafor','Dana Okafor','person','org',5)")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','org',5)")
     res = drain.BLOCK_DRAINERS["org_merge_review"](
-        s, {"org_merge_review": [{"pair_id": "dana|dana-okafor", "same": True}]})
+        s, {"org_merge_review": [{"pair_id": "dana|marcus-reyes", "same": True}]})
     assert res["merged"] == 1
-    survivors = [e for e in (s.get_entity("dana"), s.get_entity("dana-okafor")) if e]
+    survivors = [e for e in (s.get_entity("dana"), s.get_entity("marcus-reyes")) if e]
     assert len(survivors) == 1

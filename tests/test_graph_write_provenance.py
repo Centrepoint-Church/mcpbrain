@@ -63,14 +63,14 @@ def test_header_person_gets_email(tmp_path):
     s = _store(tmp_path)
     extraction = {
         "thread_id": "t3", "org": "unknown", "content_type": "email", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"}],
+        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"}],
         "entities": [{"name": "Sam Lee", "type": "person"}],
         "relations": [], "actions": [], "topics": ["x"],
     }
     graph_write.apply(s, extraction, doc_ids=["doc-7"])
     with s._connect() as db:
         email = db.execute("SELECT email_addr FROM entities WHERE name='Sam Lee'").fetchone()[0]
-    assert email == "sam.lee@centrepoint.church"
+    assert email == "sam.lee@northgatetrust.org"
 
 
 def test_non_lead_message_sender_gets_email(tmp_path):
@@ -83,8 +83,8 @@ def test_non_lead_message_sender_gets_email(tmp_path):
     extraction = {
         "thread_id": "t4", "org": "unknown", "content_type": "email", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [
             {"name": "Sam Lee", "type": "person"},
@@ -96,8 +96,8 @@ def test_non_lead_message_sender_gets_email(tmp_path):
     with s._connect() as db:
         sam_email = db.execute("SELECT email_addr FROM entities WHERE name='Sam Lee'").fetchone()[0]
         pat_email = db.execute("SELECT email_addr FROM entities WHERE name='Pat Nguyen'").fetchone()[0]
-    assert sam_email == "sam.lee@centrepoint.church"
-    assert pat_email == "pat.nguyen@centrepoint.church", (
+    assert sam_email == "sam.lee@northgatetrust.org"
+    assert pat_email == "pat.nguyen@northgatetrust.org", (
         "non-lead message sender who also appears in entities[] must get email_addr"
     )
 
@@ -120,7 +120,7 @@ def test_dedup_redirect_backfills_email_from_header(tmp_path):
         "write_time_dedup": True,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     taxonomy = orgs_mod.taxonomy_from_config()
@@ -131,10 +131,10 @@ def test_dedup_redirect_backfills_email_from_header(tmp_path):
     assert pre_email == ""
 
     extraction = {
-        "thread_id": "t5", "org": "Centrepoint", "content_type": "email", "summary": "s",
+        "thread_id": "t5", "org": "Northgate Trust", "content_type": "email", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [
             {"name": "Sam Lee", "type": "person"},
@@ -150,7 +150,7 @@ def test_dedup_redirect_backfills_email_from_header(tmp_path):
         ).fetchone()[0]
         email = db.execute("SELECT email_addr FROM entities WHERE id=?", (existing_id,)).fetchone()[0]
     assert count == 1, f"expected exactly 1 Pat Nguyen entity (redirected, not duplicated), got {count}"
-    assert email == "pat.nguyen@centrepoint.church", (
+    assert email == "pat.nguyen@northgatetrust.org", (
         "redirected entity must have email backfilled from the header via update_entity_email_if_empty"
     )
 
@@ -171,19 +171,19 @@ def test_apply_uses_org_hint_when_model_org_unknown(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
     }))
     extraction = {
-        "thread_id": "t6", "org": "unknown", "org_hint": "Centrepoint",
+        "thread_id": "t6", "org": "unknown", "org_hint": "Northgate Trust",
         "content_type": "email", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>",
+        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>",
                       "date": "2026-02-01"}],
         "entities": [], "relations": [], "actions": [], "topics": [],
     }
     graph_write.apply(s, extraction, doc_ids=["doc-10"], home=str(tmp_path))
     with s._connect() as db:
         org = db.execute("SELECT org FROM email_context WHERE message_id='m1'").fetchone()[0]
-    assert org == "Centrepoint", f"expected org_hint fallback 'Centrepoint', got {org!r}"
+    assert org == "Northgate Trust", f"expected org_hint fallback 'Northgate Trust', got {org!r}"
 
 
 def test_structural_works_at_has_provenance(tmp_path):
@@ -197,13 +197,13 @@ def test_structural_works_at_has_provenance(tmp_path):
     s = _store(tmp_path)
     extraction = {
         "thread_id": "t8", "org": "unknown", "content_type": "email", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Sam <sam@centrepoint.church>", "date": "2026-02-01"}],
+        "messages": [{"message_id": "m1", "sender": "Sam <sam@northgatetrust.org>", "date": "2026-02-01"}],
         "entities": [{"name": "Sam", "type": "person"}],
         "relations": [],          # model returned NO relations
         "actions": [], "topics": ["x"],
     }
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
     }))
     graph_write.apply(s, extraction, doc_ids=["doc-1"], home=str(tmp_path))
     with s._connect() as db:
@@ -226,8 +226,8 @@ def test_structural_mentioned_with_both_directions(tmp_path):
     extraction = {
         "thread_id": "t9", "org": "unknown", "content_type": "email", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [
             {"name": "Sam Lee", "type": "person"},
@@ -236,7 +236,7 @@ def test_structural_mentioned_with_both_directions(tmp_path):
         "relations": [], "actions": [], "topics": ["x"],
     }
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
     }))
     graph_write.apply(s, extraction, doc_ids=["doc-2"], home=str(tmp_path))
     with s._connect() as db:
@@ -262,8 +262,8 @@ def test_deterministic_pass_coexists_with_model_relations(tmp_path):
     extraction = {
         "thread_id": "t10", "org": "unknown", "content_type": "email", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [
             {"name": "Sam Lee", "type": "person"},
@@ -275,7 +275,7 @@ def test_deterministic_pass_coexists_with_model_relations(tmp_path):
         "actions": [], "topics": ["x"],
     }
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
     }))
     graph_write.apply(s, extraction, doc_ids=["doc-3"], home=str(tmp_path))
     with s._connect() as db:
@@ -340,8 +340,8 @@ def test_structural_relations_kill_switch_suppresses_deterministic_writes(tmp_pa
     extraction = {
         "thread_id": "t11", "org": "unknown", "content_type": "email", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "Pat Nguyen <pat.nguyen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [
             {"name": "Sam Lee", "type": "person"},
@@ -350,7 +350,7 @@ def test_structural_relations_kill_switch_suppresses_deterministic_writes(tmp_pa
         "relations": [], "actions": [], "topics": ["x"],
     }
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
         "enrich_structural_relations_enabled": False,
     }))
     graph_write.apply(s, extraction, doc_ids=["doc-4"], home=str(tmp_path))
@@ -556,7 +556,7 @@ def test_observations_kill_switch_suppresses_wiring(tmp_path):
     the new attributes."""
     s = _store(tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
-        "orgs": [{"name": "Centrepoint", "domains": ["centrepoint.church"]}],
+        "orgs": [{"name": "Northgate Trust", "domains": ["northgatetrust.org"]}],
         "enrich_rich_observations_enabled": False,
     }))
     extraction = {
@@ -607,13 +607,13 @@ def test_apply_model_org_wins_over_org_hint(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({
         "orgs": [
             {"name": "Acme", "domains": ["example.org"]},
-            {"name": "Centrepoint", "domains": ["centrepoint.church"]},
+            {"name": "Northgate Trust", "domains": ["northgatetrust.org"]},
         ],
     }))
     extraction = {
-        "thread_id": "t7", "org": "Acme", "org_hint": "Centrepoint",
+        "thread_id": "t7", "org": "Acme", "org_hint": "Northgate Trust",
         "content_type": "email", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@centrepoint.church>",
+        "messages": [{"message_id": "m1", "sender": "Sam Lee <sam.lee@northgatetrust.org>",
                       "date": "2026-02-01"}],
         "entities": [], "relations": [], "actions": [], "topics": [],
     }
@@ -631,7 +631,7 @@ def test_sender_role_address_not_email_keyed(tmp_path, monkeypatch):
     s = _store(tmp_path)
     extraction = {
         "thread_id": "t-role", "org": "unknown", "content_type": "update", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Dana Ng <office@centrepoint.church>", "date": "2026-02-01"}],
+        "messages": [{"message_id": "m1", "sender": "Dana Ng <office@northgatetrust.org>", "date": "2026-02-01"}],
         "entities": [], "relations": [], "actions": [], "topics": ["x"],
     }
     graph_write.apply(s, extraction, doc_ids=["doc-1"])
@@ -646,7 +646,7 @@ def test_sender_entity_created_without_model(tmp_path, monkeypatch):
     s = _store(tmp_path)
     extraction = {
         "thread_id": "t9", "org": "unknown", "content_type": "update", "summary": "s",
-        "messages": [{"message_id": "m1", "sender": "Dana Lee <dana@centrepoint.church>", "date": "2026-02-01"}],
+        "messages": [{"message_id": "m1", "sender": "Dana Lee <dana@northgatetrust.org>", "date": "2026-02-01"}],
         "entities": [],   # model surfaced NO entities
         "relations": [], "actions": [], "topics": ["x"],
     }
@@ -654,7 +654,7 @@ def test_sender_entity_created_without_model(tmp_path, monkeypatch):
     with s._connect() as db:
         row = db.execute("SELECT type, email_addr FROM entities WHERE name='Dana Lee'").fetchone()
     assert row is not None, "sender must be created as an entity even when the model omits it"
-    assert row[0] == "person" and row[1] == "dana@centrepoint.church"
+    assert row[0] == "person" and row[1] == "dana@northgatetrust.org"
 
 
 def test_sender_entity_not_created_for_owner_by_identity(tmp_path, monkeypatch):
@@ -678,15 +678,15 @@ def test_sender_entity_not_created_for_owner_by_identity(tmp_path, monkeypatch):
     extraction = {
         "thread_id": "t10", "org": "unknown", "content_type": "update", "summary": "s",
         "messages": [
-            {"message_id": "m1", "sender": "Dana Lee <dana@centrepoint.church>", "date": "2026-02-01"},
-            {"message_id": "m2", "sender": "S. Chen <sam.chen@centrepoint.church>", "date": "2026-02-02"},
+            {"message_id": "m1", "sender": "Dana Lee <dana@northgatetrust.org>", "date": "2026-02-01"},
+            {"message_id": "m2", "sender": "S. Chen <sam.chen@northgatetrust.org>", "date": "2026-02-02"},
         ],
         "entities": [],  # model surfaced NO entities
         "relations": [], "actions": [], "topics": ["x"],
     }
     graph_write.apply(
         s, extraction, doc_ids=["doc-2"],
-        owner=owner, identity="sam.chen@centrepoint.church",
+        owner=owner, identity="sam.chen@northgatetrust.org",
     )
     with s._connect() as db:
         row = db.execute("SELECT id FROM entities WHERE name='S. Chen'").fetchone()

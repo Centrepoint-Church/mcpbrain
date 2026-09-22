@@ -12,7 +12,7 @@ from mcpbrain.store import Store
 # --- R5: canonical_key ----------------------------------------------------
 
 def test_canonical_key_strips_honorific():
-    assert canonical_key("Ps Dana") == canonical_key("Dana")
+    assert canonical_key("Ps Marcus") == canonical_key("Marcus")
 
 
 def test_canonical_key_folds_accents():
@@ -20,7 +20,7 @@ def test_canonical_key_folds_accents():
 
 
 def test_canonical_key_slugifies_punctuation():
-    assert canonical_key("ACC (National)") == canonical_key("acc national")
+    assert canonical_key("NCF (National)") == canonical_key("ncf national")
 
 
 def test_canonical_key_empty_is_empty():
@@ -34,10 +34,10 @@ def test_deterministic_merges_same_type_only(tmp_path):
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
     # "dana" bumped twice so it's the highest-mentions survivor.
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
     # honorific variant, same type -> same canonical key as "dana".
-    store.upsert_entity("ps-dana", "Ps Dana", "person", seen="2026-05-30")
+    store.upsert_entity("ps-dana", "Ps Marcus", "person", seen="2026-05-30")
     # same key "prayer" but DIFFERENT types -> must NOT merge.
     store.upsert_entity("prayer", "Prayer", "topic", seen="2026-05-30")
     store.upsert_entity("prayer-person", "Prayer", "person", seen="2026-05-30")
@@ -60,11 +60,11 @@ def test_deterministic_merges_same_type_only(tmp_path):
 
 def test_is_role_address():
     from mcpbrain.resolve import is_role_address
-    assert is_role_address("office@centrepoint.church") is True
+    assert is_role_address("office@northgatetrust.org") is True
     assert is_role_address("info@x.org") is True
     assert is_role_address("no-reply@x.org") is True
     assert is_role_address("hello+tag@x.org") is True          # +tag stripped
-    assert is_role_address("john.smith@centrepoint.church") is False
+    assert is_role_address("john.smith@northgatetrust.org") is False
     assert is_role_address("") is False
     assert is_role_address("notanemail") is False
 
@@ -80,7 +80,7 @@ def test_email_equality_skips_role_addresses(tmp_path):
     store.upsert_entity("d1", "Sam Lee", "person", seen="2026-05-30")
     store.upsert_entity("d2", "Samuel Lee", "person", seen="2026-05-30")
     with store._connect() as db:
-        db.execute("UPDATE entities SET email_addr='office@centrepoint.church' WHERE id IN ('p1','p2')")
+        db.execute("UPDATE entities SET email_addr='office@northgatetrust.org' WHERE id IN ('p1','p2')")
         db.execute("UPDATE entities SET email_addr='sam.lee@x.org' WHERE id IN ('d1','d2')")
 
     merged = _email_equality_merges(store, home=str(tmp_path))
@@ -142,10 +142,10 @@ def test_deterministic_merges_excludes_structural_types(tmp_path):
 def test_deterministic_survivor_is_highest_mentions(tmp_path):
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("ps-dana", "Ps Dana", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("ps-dana", "Ps Marcus", "person", seen="2026-05-30")
 
     resolve_entities(store, client=None)
     survivor = next(e for e in store.list_entities() if e["id"] == "dana")
@@ -155,15 +155,15 @@ def test_deterministic_survivor_is_highest_mentions(tmp_path):
 
 
 def test_deterministic_survivor_tiebreak_is_id_deterministic(tmp_path):
-    # Two distinct ids, SAME name "Dana" -> same canonical key + same type, so
+    # Two distinct ids, SAME name "Marcus" -> same canonical key + same type, so
     # they group. Equal mentions (1 each) and equal name length, so the only
     # discriminator is id. With ORDER BY id in the query and id as the final
     # max() tiebreaker, the survivor must be the same id every run.
     def run_once():
         store = Store(tmp_path / "tiebreak.sqlite3", dim=4)
         store.init()
-        store.upsert_entity("dana-1", "Dana", "person", seen="2026-05-30")
-        store.upsert_entity("dana-2", "Dana", "person", seen="2026-05-30")
+        store.upsert_entity("dana-1", "Marcus", "person", seen="2026-05-30")
+        store.upsert_entity("dana-2", "Marcus", "person", seen="2026-05-30")
         resolve_entities(store, client=None)
         ids = {e["id"] for e in store.list_entities()}
         return ids
@@ -197,18 +197,18 @@ def _pair_keys(pairs):
 
 def test_candidate_pairs_blocking_and_scoring():
     entities = [
-        {"id": "dana", "name": "Dana", "type": "person"},
-        {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"},
+        {"id": "dana", "name": "Marcus", "type": "person"},
+        {"id": "marcus-reyes", "name": "Marcus Reyes", "type": "person"},
         {"id": "daniel-p", "name": "Daniel P", "type": "person"},
         {"id": "daniel-f", "name": "Daniel F", "type": "person"},
         {"id": "5pm-prayer", "name": "5pm Prayer", "type": "meeting"},
         {"id": "5pm-prayer-meeting", "name": "5pm Prayer Meeting", "type": "meeting"},
         # cross-type org sharing a token must never pair with a person/meeting.
-        {"id": "acc", "name": "ACC", "type": "org"},
+        {"id": "acc", "name": "NCF", "type": "org"},
     ]
     keys = _pair_keys(_candidate_pairs(entities))
 
-    assert ("dana", "dana-okafor") in keys
+    assert ("dana", "marcus-reyes") in keys
     assert ("daniel-f", "daniel-p") in keys
     # meetings are a STRUCTURAL type (identified by id/time, not title) — excluded
     # from candidate generation (#4), so they never pair even when titles overlap.
@@ -218,11 +218,11 @@ def test_candidate_pairs_blocking_and_scoring():
 
 
 def test_candidate_pairs_excludes_key_identical():
-    # "Dana" and "Ps Dana" share a canonical key -> deterministic handles them,
+    # "Marcus" and "Ps Marcus" share a canonical key -> deterministic handles them,
     # so they must NOT surface as a fuzzy candidate.
     entities = [
-        {"id": "dana", "name": "Dana", "type": "person"},
-        {"id": "ps-dana", "name": "Ps Dana", "type": "person"},
+        {"id": "dana", "name": "Marcus", "type": "person"},
+        {"id": "ps-dana", "name": "Ps Marcus", "type": "person"},
     ]
     assert _candidate_pairs(entities) == []
 
@@ -242,8 +242,8 @@ def test_resolve_tiered_no_client_leaves_fuzzy_untouched(tmp_path):
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
     # Fuzzy pair the adjudicator WOULD have merged (now left intact).
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", seen="2026-05-30")
     # Fuzzy pair that must stay distinct (different initials).
     store.upsert_entity("daniel-p", "Daniel P", "person", seen="2026-05-30")
     store.upsert_entity("daniel-f", "Daniel F", "person", seen="2026-05-30")
@@ -254,14 +254,14 @@ def test_resolve_tiered_no_client_leaves_fuzzy_untouched(tmp_path):
     assert out["llm_calls"] == 0
     ids = {e["id"] for e in store.list_entities()}
     # No fuzzy merges — deterministic-only.
-    assert {"dana", "dana-okafor", "daniel-p", "daniel-f"} <= ids
+    assert {"dana", "marcus-reyes", "daniel-p", "daniel-f"} <= ids
 
 
 def test_resolve_idempotent_second_run(tmp_path):
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", seen="2026-05-30")
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", seen="2026-05-30")
     store.upsert_entity("daniel-p", "Daniel P", "person", seen="2026-05-30")
     store.upsert_entity("daniel-f", "Daniel F", "person", seen="2026-05-30")
 
@@ -370,9 +370,9 @@ def test_resolve_entities_combines_deterministic_and_email_merges(tmp_path):
     canonical-key merges and email-equality merges when both apply."""
     store = Store(tmp_path / "resolve.sqlite3", dim=4)
     store.init()
-    # canonical-key pair: "Dana" / "Ps Dana" (name-based, same as existing coverage).
-    store.upsert_entity("dana", "Dana", "person", seen="2026-05-30")
-    store.upsert_entity("ps-dana", "Ps Dana", "person", seen="2026-05-30")
+    # canonical-key pair: "Marcus" / "Ps Marcus" (name-based, same as existing coverage).
+    store.upsert_entity("dana", "Marcus", "person", seen="2026-05-30")
+    store.upsert_entity("ps-dana", "Ps Marcus", "person", seen="2026-05-30")
     # email-equality pair: distinct names, distinct canonical keys, shared email.
     store.upsert_entity("sam-1", "Sam Lee", "person", seen="2026-05-30")
     store.upsert_entity("sam-2", "Samuel Lee", "person", seen="2026-05-30")
@@ -384,7 +384,7 @@ def test_resolve_entities_combines_deterministic_and_email_merges(tmp_path):
 
     assert out["auto_merges"] == 2
     ids = {e["id"] for e in store.list_entities()}
-    # "Dana" / "Ps Dana" merge into one survivor (tiebreak: mentions, then
-    # longer name, then id -> "Ps Dana" wins on name length here).
+    # "Marcus" / "Ps Marcus" merge into one survivor (tiebreak: mentions, then
+    # longer name, then id -> "Ps Marcus" wins on name length here).
     assert len(ids & {"dana", "ps-dana"}) == 1
     assert len(ids & {"sam-1", "sam-2"}) == 1

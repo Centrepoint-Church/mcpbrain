@@ -262,14 +262,14 @@ def test_check_duplicate_orgs_flags(tmp_path, monkeypatch):
 def test_check_duplicate_orgs_canonical_not_flagged(tmp_path):
     """Canonical org values are never flagged."""
     s = _store(tmp_path)
-    for org in ("Acme", "ACC", "Courageous Church", "external"):
+    for org in ("Acme", "NCF", "Southbank Community Trust", "external"):
         _add_entity(s, f"e-{org.lower().replace(' ', '-')}", "Person", org=org, email_count=1)
 
     with s._connect() as db:
         flagged = check_duplicate_orgs(db)
 
     variants = [r["variant_org"] for r in flagged]
-    for org in ("Acme", "ACC", "Courageous Church", "external"):
+    for org in ("Acme", "NCF", "Southbank Community Trust", "external"):
         assert org not in variants, f"{org} should not be flagged as a variant"
 
 
@@ -432,7 +432,7 @@ def test_lint_run_leaves_live_finding_types_alone(tmp_path):
     s.record_finding("memory_promotion", "note-1",
                      summary="Memory note flagged for promotion", severity="info")
     s.record_finding("org_unrecognised", "acci",
-                     summary="Unrecognised org 'ACCI'", severity="info")
+                     summary="Unrecognised org 'NCFI'", severity="info")
 
     run(s, now="2026-07-25T00:00:00Z", log_dir=tmp_path / "logs")
 

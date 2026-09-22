@@ -494,23 +494,23 @@ def _pair_id(a_id, b_id):
 
 def test_drain_applies_merge_answers(store, home):
     # winner is the higher-mentions entity; loser folds into it.
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-01")
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "Acme", "2026-04-02")  # mentions=2
-    store.upsert_entity("j-okafor", "J Okafor", "person", "Acme", "2026-04-01")  # mentions=1
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", "Acme", "2026-04-01")
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", "Acme", "2026-04-02")  # mentions=2
+    store.upsert_entity("m-reyes", "M Reyes", "person", "Acme", "2026-04-01")  # mentions=1
 
-    ans = {"pair_id": _pair_id("dana-okafor", "j-okafor"),
-           "same": True, "canonical": "Dana Okafor"}
+    ans = {"pair_id": _pair_id("marcus-reyes", "m-reyes"),
+           "same": True, "canonical": "Marcus Reyes"}
     _write_inbox(home, "batch.json", _batch("batch-1", [], merge_answers=[ans]))
 
     summary = drain.drain(store, home=home, apply=RecordingApply())
 
-    # loser j-okafor is gone; winner dana-okafor survives
-    assert store.get_entity("j-okafor") is None
-    assert store.get_entity("dana-okafor") is not None
+    # loser m-reyes is gone; winner marcus-reyes survives
+    assert store.get_entity("m-reyes") is None
+    assert store.get_entity("marcus-reyes") is not None
     merges = store.list_entity_merges()
     assert len(merges) == 1
-    assert merges[0]["winner_id"] == "dana-okafor"
-    assert merges[0]["loser_id"] == "j-okafor"
+    assert merges[0]["winner_id"] == "marcus-reyes"
+    assert merges[0]["loser_id"] == "m-reyes"
     assert merges[0]["method"] == "llm"
     assert summary["merges"] == 1
 

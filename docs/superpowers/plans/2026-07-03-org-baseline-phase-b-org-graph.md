@@ -91,7 +91,7 @@ def _delta(relation="works_at", *, a_type="person", b_type="org",
                        "confidence": 0.9, "origin": origin,
                        "source_doc_id": source_doc_id}],
         "entities": {
-            "dana": {"id": "dana", "name": "Dana Okafor", "type": a_type,
+            "dana": {"id": "dana", "name": "Marcus Reyes", "type": a_type,
                      "org": "Acme", "email_addr": a_email, "aliases": "",
                      "origin": origin},
             "acme": {"id": "acme", "name": "Acme", "type": b_type, "org": "",
@@ -665,7 +665,7 @@ def _stage(store, recs):
 def test_materialise_writes_org_rows(tmp_path):
     s = _store(tmp_path)
     _stage(s, [
-        _rec({"kind": "entity", "id": "dana", "name": "Dana Okafor", "type": "person",
+        _rec({"kind": "entity", "id": "dana", "name": "Marcus Reyes", "type": "person",
               "org": "Acme", "email_addr": "dana@acme.org", "aliases": ""}),
         _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
               "org": "", "email_addr": "", "aliases": ""}),
@@ -854,14 +854,14 @@ def test_adjudicate_default_is_all_pending(tmp_path):
 def test_apply_merge_verdict_merges_only_on_merge(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        for eid, name in (("dana-c", "Dana C"), ("dana-okafor", "Dana Okafor")):
+        for eid, name in (("marcus-r", "Marcus R"), ("marcus-reyes", "Marcus Reyes")):
             db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
                        "VALUES(?,?,'person','org',1)", (eid, name))
     res = org_curate._apply_merge_verdicts(
-        s, [{"pair_id": "dana-c|dana-okafor", "verdict": "merge", "canonical": "Dana Okafor"}],
+        s, [{"pair_id": "marcus-r|marcus-reyes", "verdict": "merge", "canonical": "Marcus Reyes"}],
         cap=10)
     assert res["merged"] == 1
-    assert s.get_entity("dana-c") is None or s.get_entity("dana-okafor") is None
+    assert s.get_entity("marcus-r") is None or s.get_entity("marcus-reyes") is None
 
 
 def test_apply_merge_verdict_pending_is_noop(tmp_path):
@@ -1003,7 +1003,7 @@ def test_run_end_to_end_publishes_snapshot(tmp_path, monkeypatch):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
     _write_batch(fs, "contrib/alice@x.org/1.jsonl", [
-        _rec({"kind": "entity", "id": "dana", "name": "Dana Okafor", "type": "person",
+        _rec({"kind": "entity", "id": "dana", "name": "Marcus Reyes", "type": "person",
               "org": "Acme", "email_addr": "dana@acme.org", "aliases": ""}),
         _rec({"kind": "entity", "id": "acme", "name": "Acme", "type": "org",
               "org": "", "email_addr": "", "aliases": ""}),
@@ -1259,19 +1259,19 @@ def test_tombstone_repoints_local_references(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
-    _publish(fs, [_ent("dup", "Dup"), _ent("dana-okafor", "Dana Okafor")], [], version=1)
+    _publish(fs, [_ent("dup", "Dup"), _ent("marcus-reyes", "Marcus Reyes")], [], version=1)
     org_import.import_snapshot(s, fs)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('doc','Doc','document','local')")
         db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin) "
                    "VALUES('doc','mentioned_with','dup','local')")
-    _publish(fs, [_ent("dana-okafor", "Dana Okafor")], [], version=2,
-             tombstones=[Tombstone(entity_id="dup", merged_into="dana-okafor")])
+    _publish(fs, [_ent("marcus-reyes", "Marcus Reyes")], [], version=2,
+             tombstones=[Tombstone(entity_id="dup", merged_into="marcus-reyes")])
     org_import.import_snapshot(s, fs)
     assert s.get_entity("dup") is None
     with s._connect() as db:
         row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
-    assert row["entity_b"] == "dana-okafor"       # local ref re-pointed to the survivor
+    assert row["entity_b"] == "marcus-reyes"       # local ref re-pointed to the survivor
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1465,20 +1465,20 @@ def test_slug_drift_email_equality_merges_local_into_org(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:                        # local variant with a private observation
         db.execute("INSERT INTO entities(id,name,type,email_addr,origin,mentions) "
-                   "VALUES('dana-c','Dana C','person','dana@acme.org','local',3)")
+                   "VALUES('marcus-r','Marcus R','person','marcus@acme.org','local',3)")
         db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
-                   "VALUES('dana-c','note','private','local','2026-01-01')")
-    _publish(fs, [_ent("dana-okafor", "Dana Okafor", email_addr="dana@acme.org")],
+                   "VALUES('marcus-r','note','private','local','2026-01-01')")
+    _publish(fs, [_ent("marcus-reyes", "Marcus Reyes", email_addr="marcus@acme.org")],
              [], version=1)
     org_import.import_snapshot(s, fs)
-    assert s.get_entity("dana-c") is None            # local merged away
-    surv = s.get_entity("dana-okafor")
+    assert s.get_entity("marcus-r") is None            # local merged away
+    surv = s.get_entity("marcus-reyes")
     assert surv is not None and surv["origin"] == "org"   # org node survives
     with s._connect() as db:
         obs = db.execute("SELECT entity_id FROM entity_observations WHERE attribute='note'").fetchone()
         rep = db.execute("SELECT from_entity_id,to_entity_id FROM org_repoint_log").fetchone()
-    assert obs["entity_id"] == "dana-okafor"       # private flesh re-attached
-    assert (rep["from_entity_id"], rep["to_entity_id"]) == ("dana-c", "dana-okafor")
+    assert obs["entity_id"] == "marcus-reyes"       # private flesh re-attached
+    assert (rep["from_entity_id"], rep["to_entity_id"]) == ("marcus-r", "marcus-reyes")
 
 
 def test_role_address_pair_never_auto_merges(tmp_path):
@@ -1509,7 +1509,7 @@ def test_ambiguous_name_only_pair_left_for_fuzzy_queue(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_org_import.py -k "slug_drift or role_address_pair or ambiguous" -v`
-Expected: FAIL — no reconciliation yet (local `dana-c` survives, observation not re-attached).
+Expected: FAIL — no reconciliation yet (local `marcus-r` survives, observation not re-attached).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1894,8 +1894,8 @@ def test_upsert_never_overwrites_org_skeleton(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,org,email_addr,origin) "
-                   "VALUES('dana','Dana Okafor','person','Acme','dana@acme.org','org')")
-    graph_write.upsert_entity(s, name="Dana Okafor", entity_type="person",
+                   "VALUES('dana','Marcus Reyes','person','Acme','dana@acme.org','org')")
+    graph_write.upsert_entity(s, name="Marcus Reyes", entity_type="person",
                               org="Beta", email_addr="dana@beta.org", notes="local note")
     e = s.get_entity("dana")
     assert e["org"] == "Acme" and e["email_addr"] == "dana@acme.org"   # skeleton unchanged
@@ -2093,7 +2093,7 @@ def test_member_curator_consumer_round_trip(tmp_path, monkeypatch):
     a = alice.store
     with a._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
-                   "VALUES('dana','Dana Okafor','person','dana@acme.org','local')")
+                   "VALUES('dana','Marcus Reyes','person','dana@acme.org','local')")
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('acme','Acme','org','local')")
     from mcpbrain import graph_write
     graph_write.upsert_relation(a, "dana", "works_at", "acme", valid_from="2026-01-01",

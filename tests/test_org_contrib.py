@@ -34,7 +34,7 @@ def _delta(relation="works_at", *, a_type="person", b_type="org",
                        "confidence": 0.9, "origin": origin,
                        "source_doc_id": source_doc_id}],
         "entities": {
-            "dana": {"id": "dana", "name": "Dana Okafor", "type": a_type,
+            "dana": {"id": "dana", "name": "Marcus Reyes", "type": a_type,
                      "org": "Acme", "email_addr": a_email, "aliases": "",
                      "origin": origin},
             "acme": {"id": "acme", "name": "Acme", "type": b_type, "org": "",
@@ -76,12 +76,12 @@ def test_unknown_source_type_labelled_unknown_not_email(tmp_path):
 def test_private_annotation_in_name_is_cleaned_before_contribution(tmp_path):
     s = _store(tmp_path)
     d = _delta()
-    d["entities"]["dana"]["name"] = "Dana Okafor (my divorce lawyer)"
+    d["entities"]["dana"]["name"] = "Marcus Reyes (my divorce lawyer)"
     d["entities"]["dana"]["aliases"] = "JC,Dana (do not trust),ping me at dana@x"
     org_contrib.collect_from_drain(s, d, _pin(), "alice@x.org")
     ent = [r for r in _outbox(s) if r["claim"]["kind"] == "entity"
            and r["claim"]["id"] == "dana"][0]["claim"]
-    assert ent["name"] == "Dana Okafor"                 # annotation stripped
+    assert ent["name"] == "Marcus Reyes"                 # annotation stripped
     # only clean name-like alias tokens survive; free-text / email-ish dropped
     aliases = ent["aliases"].split(",") if ent["aliases"] else []
     assert "JC" in aliases
@@ -372,7 +372,7 @@ def test_freetext_alias_note_is_dropped(tmp_path):
     from mcpbrain import org_contrib
     assert org_contrib._is_name_like("my private note") is False
     assert org_contrib._is_name_like("JC") is True
-    assert org_contrib._is_name_like("Dana Okafor") is True
+    assert org_contrib._is_name_like("Marcus Reyes") is True
     assert org_contrib._safe_aliases("JC, my private note") == "JC"
 
 
@@ -389,5 +389,5 @@ def test_person_name_freetext_without_separator_is_dropped(tmp_path):
 
 def test_real_person_name_and_org_name_still_contribute(tmp_path):
     s = _store(tmp_path)
-    # default delta: person "Dana Okafor" + org "Acme" — both must survive.
+    # default delta: person "Marcus Reyes" + org "Acme" — both must survive.
     assert org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org") == 3

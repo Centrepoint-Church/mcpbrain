@@ -5,7 +5,7 @@
   "summary": "Dana asks Sam to confirm Hall B availability for the Wednesday-night session.",
   "contextual_summary": "Follow-up on the college term-one room booking thread; Hall B is the preferred space.",
   "entities": [
-    {"name": "Dana Okafor", "type": "person", "org": "Acme", "role": "Senior Pastor"},
+    {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": "Senior Pastor"},
     {"name": "Acme Corp", "type": "org", "org": "Acme", "role": ""}
   ],
   "topics": ["facilities", "college"],
@@ -19,10 +19,10 @@
   "resolved_action_ids": [],
   "updated_actions": [],
   "relations": [
-    {"source_name": "Dana Okafor", "type": "works_at", "target_name": "Acme Corp"}
+    {"source_name": "Marcus Reyes", "type": "works_at", "target_name": "Acme Corp"}
   ],
   "messages": [
-    {"message_id": "m-1", "sender": "Dana Okafor <dana@example.org>",
+    {"message_id": "m-1", "sender": "Marcus Reyes <dana@example.org>",
      "date": "2026-04-18", "labels": "INBOX", "subject": "Hall B for Wednesday college"}
   ]
 }

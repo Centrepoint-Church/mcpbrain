@@ -82,18 +82,18 @@ def test_daemon_bodies_round_trip_contrib_curate_import(tmp_path, monkeypatch):
     # (1) alice's local graph learns dana works_at acme; her daemon body
     # collects the delta and uploads it — the real happy path, not a skip.
     # Entity id must match what graph_write.upsert_entity would itself derive
-    # (slugify("Dana Okafor") == "dana-okafor") — the curator's own
+    # (slugify("Marcus Reyes") == "marcus-reyes") — the curator's own
     # _materialise re-derives ids via upsert_entity rather than trusting a
     # claim's arbitrary local id, so a mismatched id here would silently
     # publish under a different id than this test expects (the same lesson
     # test_org_phase_b_gate.py's own fixture already learned).
     with alice.store._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
-                   "VALUES('dana-okafor','Dana Okafor','person','dana@acme.org','local')")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','dana@acme.org','local')")
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('acme','Acme','org','local')")
         db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata,enrich_state) "
                    "VALUES('msg-1','t','h','{\"source_type\":\"gmail\"}','')")
-    graph_write.upsert_relation(alice.store, "dana-okafor", "works_at", "acme", valid_from="2026-01-01",
+    graph_write.upsert_relation(alice.store, "marcus-reyes", "works_at", "acme", valid_from="2026-01-01",
                                 source_doc_id="msg-1")
     monkeypatch.setattr(config, "app_dir", lambda: alice.home)
     dm_alice = _daemon()
@@ -117,10 +117,10 @@ def test_daemon_bodies_round_trip_contrib_curate_import(tmp_path, monkeypatch):
     res = dm_bob._run_org_import()
     assert "skipped" not in res
     assert res.get("status") == "imported"
-    dana = bob.store.get_entity("dana-okafor")
+    dana = bob.store.get_entity("marcus-reyes")
     assert dana is not None and dana["origin"] == "org"
     with bob.store._connect() as db:
-        rel = db.execute("SELECT origin FROM entity_relations WHERE entity_a='dana-okafor' "
+        rel = db.execute("SELECT origin FROM entity_relations WHERE entity_a='marcus-reyes' "
                          "AND relation='works_at'").fetchone()
     assert rel is not None and rel["origin"] == "org"
     # Every wrapper advanced its own cadence timer despite doing real work,

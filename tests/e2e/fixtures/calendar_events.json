@@ -8,7 +8,7 @@
     "end": {"dateTime": "2026-06-10T10:00:00+08:00"},
     "attendees": [
       {"email": "sam@acme.org", "displayName": "Sam Admin"},
-      {"email": "dana@acme.org", "displayName": "Dana Okafor"},
+      {"email": "dana@acme.org", "displayName": "Marcus Reyes"},
       {"email": "room-hallb@acme.org", "displayName": "Hall B", "resource": true}
     ]
   }

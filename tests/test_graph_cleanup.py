@@ -7,18 +7,18 @@ from mcpbrain.store import Store
 
 
 def _tax():
-    return orgs.OrgTaxonomy(names=("Centrepoint Church", "Courageous Church", "ACC", "ACCI"),
+    return orgs.OrgTaxonomy(names=("Northgate Trust", "Southbank Community Trust", "NCF", "NCFI"),
                             domain_map=MappingProxyType({}), aliases=MappingProxyType({}))
 
 
 def test_canonical_unambiguous_prefix_fold():
     t = _tax()
-    assert t.canonical("Centrepoint") == "Centrepoint Church"      # bare short form folds
-    assert t.canonical("centrepoint") == "Centrepoint Church"      # case-insensitive
-    assert t.canonical("Centrepoint Church Inc.") == "Centrepoint Church"  # over-long folds back
-    assert t.canonical("Courageous") == "Courageous Church"
-    assert t.canonical("ACC") == "ACC"          # NOT folded into ACCI (shared prefix, ambiguous-safe)
-    assert t.canonical("ACCI") == "ACCI"
+    assert t.canonical("Northgate") == "Northgate Trust"      # bare short form folds
+    assert t.canonical("northgate") == "Northgate Trust"      # case-insensitive
+    assert t.canonical("Northgate Trust Inc.") == "Northgate Trust"  # over-long folds back
+    assert t.canonical("Southbank") == "Southbank Community Trust"
+    assert t.canonical("NCF") == "NCF"          # NOT folded into NCFI (shared prefix, ambiguous-safe)
+    assert t.canonical("NCFI") == "NCFI"
     assert t.canonical("Random Co") == "Random Co"                 # unknown passes through
 
 
@@ -40,7 +40,7 @@ def _rel(db, a, rel, b):
 def test_cleanup_removes_self_loops_type_invalid_and_folds_orgs(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        _ent(db, "p1", "Ann", "person", "Centrepoint")     # org to be folded
+        _ent(db, "p1", "Ann", "person", "Northgate")     # org to be folded
         _ent(db, "o1", "Acme", "org", "external")
         _ent(db, "t1", "Budget", "topic")
         _rel(db, "p1", "works_at", "o1")                   # valid: person -> org (keep)
@@ -56,7 +56,7 @@ def test_cleanup_removes_self_loops_type_invalid_and_folds_orgs(tmp_path):
                 db.execute("SELECT entity_a,relation,entity_b FROM entity_relations").fetchall()}
         org = db.execute("SELECT org FROM entities WHERE id='p1'").fetchone()[0]
     assert rels == {("p1", "works_at", "o1"), ("p1", "mentioned_with", "t1")}
-    assert org == "Centrepoint Church"
+    assert org == "Northgate Trust"
 
     # idempotent — a second pass changes nothing
     assert cleanup_graph(s, taxonomy=_tax()) == {"self_loops": 0, "type_invalid": 0, "orgs_folded": 0}

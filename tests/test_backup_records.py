@@ -22,7 +22,7 @@ def _store(tmp_path):
     s = Store(tmp_path / "brain.sqlite3", dim=4)
     s.init()
     s.upsert_chunk("d1", "annual budget review", "h1", {})
-    s.upsert_entity("dana", "Dana Okafor", "person", org="Acme")
+    s.upsert_entity("dana", "Marcus Reyes", "person", org="Acme")
     return s
 
 

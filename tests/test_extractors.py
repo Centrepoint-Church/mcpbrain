@@ -179,7 +179,7 @@ def test_ocr_roundtrip_with_real_tesseract():
         font = ImageFont.truetype("DejaVuSans.ttf", 96)
     except Exception:
         font = ImageFont.load_default()
-    draw.text((30, 60), "CENTREPOINT", fill="black", font=font)
+    draw.text((30, 60), "NORTHGATE", fill="black", font=font)
     pbuf = io.BytesIO(); img.save(pbuf, format="PNG")
 
     doc = fitz.open(); page = doc.new_page(width=900, height=240)
@@ -200,7 +200,7 @@ def test_ocr_roundtrip_with_real_tesseract():
     # returns the page's words — so it asserts a high similarity, which an empty
     # result or garbage still fails. rapidfuzz is already a dependency.
     from rapidfuzz import fuzz
-    score = fuzz.partial_ratio("centrepoint", out.lower())
+    score = fuzz.partial_ratio("northgate", out.lower())
     assert score >= 80, f"OCR returned {out!r} (similarity {score})"
 
 
@@ -338,7 +338,7 @@ def test_eml_is_extracted_as_prose_with_its_headers():
     from mcpbrain.sync.extractors import extract_text_from_eml
 
     raw = (b"From: sam@example.com\r\n"
-           b"To: josh@centrepoint.church\r\n"
+           b"To: josh@northgatetrust.org\r\n"
            b"Subject: Hall B booking\r\n"
            b"Date: Tue, 02 Jun 2026 16:30:01 +0800\r\n"
            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"

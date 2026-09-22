@@ -16,20 +16,20 @@ _ACME_ORGS = [
     {"name": "Acme", "domains": ["example.org", "example.com.au"],
      "aliases": ["Acme Corp", "Acme Corp Incorporated",
                  "Acme Baptist"]},
-    {"name": "ACC", "domains": ["acc.org.au", "acci.org.au", "accwa.org.au",
-                                 "acc.net.au", "acc.church"]},
-    {"name": "Courageous Church", "domains": ["courageouschurch.org.au"]},
+    {"name": "NCF", "domains": ["ncf.org.au", "ncfi.org.au", "ncfwa.org.au",
+                                 "ncf.net.au", "ncf.church"]},
+    {"name": "Southbank Community Trust", "domains": ["southbankcommunitytrust.org.au"]},
     {"name": "Curtin", "domains": ["curtin.edu.au"]},
 ]
 
 
 _CP_TAXONOMY = orgs.OrgTaxonomy(
-    names=("Acme", "ACC", "Courageous Church", "Curtin"),
+    names=("Acme", "NCF", "Southbank Community Trust", "Curtin"),
     domain_map={
         "example.org": "Acme", "example.com.au": "Acme",
-        "acc.org.au": "ACC", "acci.org.au": "ACC", "accwa.org.au": "ACC",
-        "acc.net.au": "ACC", "acc.church": "ACC",
-        "courageouschurch.org.au": "Courageous Church",
+        "ncf.org.au": "NCF", "ncfi.org.au": "NCF", "ncfwa.org.au": "NCF",
+        "ncf.net.au": "NCF", "ncf.church": "NCF",
+        "southbankcommunitytrust.org.au": "Southbank Community Trust",
         "curtin.edu.au": "Curtin",
     },
     aliases={
@@ -72,7 +72,7 @@ def test_org_from_email_known_domains():
 
 
 def test_org_casing_is_display_form():
-    assert gw.org_from_email("a@acc.org.au", _CP_TAXONOMY) == "ACC"
+    assert gw.org_from_email("a@ncf.org.au", _CP_TAXONOMY) == "NCF"
 
 
 def test_domain_org_lines_present_and_shaped():
@@ -89,7 +89,7 @@ def test_domain_org_lines_present_and_shaped():
 
 def test_entity_slug():
     assert slugify("Marcus Reyes") == "marcus-reyes"
-    assert slugify("ACC (National)") == "acc-national"
+    assert slugify("NCF (National)") == "ncf-national"
     assert slugify("") == ""
 
 
@@ -99,28 +99,28 @@ def test_is_junk_entity():
     # An org name with a year is fine.
     assert gw.is_junk_entity("Acme 2026", "org") is False
     # A normal person name is fine.
-    assert gw.is_junk_entity("Dana Okafor", "person") is False
+    assert gw.is_junk_entity("Marcus Reyes", "person") is False
 
 
 # --- 2.2 entity upsert with email->alias->suppressed dedup ----------------
 
 def test_upsert_entity_new_returns_slug(tmp_path):
     s = _store(tmp_path)
-    eid = gw.upsert_entity(s, name="Dana Okafor", entity_type="person",
+    eid = gw.upsert_entity(s, name="Marcus Reyes", entity_type="person",
                            org="Acme")
-    assert eid == "dana-okafor"
+    assert eid == "marcus-reyes"
     ent = s.get_entity(eid)
-    assert ent["name"] == "Dana Okafor"
+    assert ent["name"] == "Marcus Reyes"
     assert ent["type"] == "person"
     assert ent["org"] == "Acme"
 
 
 def test_upsert_entity_email_dedup(tmp_path):
     s = _store(tmp_path)
-    first = gw.upsert_entity(s, name="Dana Okafor", entity_type="person",
+    first = gw.upsert_entity(s, name="Marcus Reyes", entity_type="person",
                              org="Acme", email_addr="dana@example.org")
     # Same email, different display name → merges into the existing entity.
-    second = gw.upsert_entity(s, name="J. Okafor", entity_type="person",
+    second = gw.upsert_entity(s, name="M. Reyes", entity_type="person",
                               email_addr="dana@example.org")
     assert second == first
     # One person entity (the org is auto-created via works_at, so count persons).
@@ -139,10 +139,10 @@ def test_upsert_entity_alias_merge(tmp_path):
     with s._connect() as db:
         db.execute(
             "INSERT INTO entities(id,name,type,aliases) VALUES(?,?,?,?)",
-            ("dana-okafor", "Dana Okafor", "person", "Pastor Dana"))
+            ("marcus-reyes", "Marcus Reyes", "person", "Pastor Dana"))
     # A new upsert whose name matches the alias merges, no new row.
     eid = gw.upsert_entity(s, name="Pastor Dana", entity_type="person")
-    assert eid == "dana-okafor"
+    assert eid == "marcus-reyes"
     assert len(s.list_entities()) == 1
 
 
@@ -156,9 +156,9 @@ def test_upsert_entity_alias_match_self_heals_works_at_even_when_org_unchanged(t
     with s._connect() as db:
         db.execute(
             "INSERT INTO entities(id,name,type,org,aliases,origin) VALUES(?,?,?,?,?,?)",
-            ("dana-legacy", "Dana C", "person", "Acme", "dana okafor", "local"))
+            ("dana-legacy", "Marcus R", "person", "Acme", "marcus reyes", "local"))
     assert not s.list_relations()   # no works_at edge exists yet
-    eid = gw.upsert_entity(s, name="Dana Okafor", entity_type="person", org="Acme")
+    eid = gw.upsert_entity(s, name="Marcus Reyes", entity_type="person", org="Acme")
     assert eid == "dana-legacy"
     rels = {(r["entity_a"], r["relation"], r["entity_b"]) for r in s.list_relations()}
     assert ("dana-legacy", "works_at", "acme") in rels
@@ -173,7 +173,7 @@ def _role_rows(s, entity_id):
             "WHERE entity_id=? AND attribute='role' ORDER BY id", (entity_id,)).fetchall()]
 
 
-def _seed_person(s, eid="dana-okafor", name="Dana Okafor"):
+def _seed_person(s, eid="marcus-reyes", name="Marcus Reyes"):
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type) VALUES(?,?,'person')", (eid, name))
     return eid
@@ -378,7 +378,7 @@ def test_apply_writes_entities_and_email_context(tmp_path):
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
     # Dana entity exists (sender, from dana@example.org).
-    dana = s.find_entity("Dana Okafor")
+    dana = s.find_entity("Marcus Reyes")
     assert dana is not None
     # email_context row written for the thread lead (m-1).
     with s._connect() as db:
@@ -413,7 +413,7 @@ def test_apply_relations_resolved_via_name_map(tmp_path, monkeypatch):
     s = _store(tmp_path)
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
-    dana = s.find_entity("Dana Okafor")
+    dana = s.find_entity("Marcus Reyes")
     # "Acme Corp" canonicalises to the single 'acme' org node.
     org = s.find_entity("Acme")
     assert dana and org
@@ -433,10 +433,10 @@ def test_apply_email_count_stable_on_reapply(tmp_path):
     s = _store(tmp_path)
     ext = _load("thread_simple.json")
     gw.apply(s, ext, doc_ids=["t-simple-001"])
-    dana = s.get_entity("dana-okafor")
+    dana = s.get_entity("marcus-reyes")
     assert dana["email_count"] == 1
     gw.apply(s, ext, doc_ids=["t-simple-001"])
-    dana = s.get_entity("dana-okafor")
+    dana = s.get_entity("marcus-reyes")
     assert dana["email_count"] == 1  # not 2 — re-apply must not inflate
 
 
@@ -481,7 +481,7 @@ def test_apply_populates_thread_context(tmp_path):
     assert row["org"] == "Acme"
     assert row["email_count"] == 1
     assert row["summary"]  # the thread headline summary is set
-    assert "dana-okafor" in (row["participant_ids"] or "")
+    assert "marcus-reyes" in (row["participant_ids"] or "")
     # The deep narrative is the synthesis pass's job, not apply's.
     assert (row["contextual_summary"] or "") == ""
 
@@ -551,7 +551,7 @@ def test_topic_gate_allows_two_orgs(tmp_path):
     s = _store(tmp_path)
     # Two prior email_context rows under different orgs carry "budget".
     gw.apply(s, _ext("t1", "Acme", "m1", ["budget"]), doc_ids=["d1"])
-    gw.apply(s, _ext("t2", "ACC", "m2", ["budget"]), doc_ids=["d2"])
+    gw.apply(s, _ext("t2", "NCF", "m2", ["budget"]), doc_ids=["d2"])
     assert s.get_entity("topic-budget") is None  # not yet (gate runs before this row counts)
     # The third apply now sees 2 distinct orgs already in email_context.
     gw.apply(s, _ext("t3", "Acme", "m3", ["budget"]), doc_ids=["d3"])
@@ -562,7 +562,7 @@ def test_topic_gate_escapes_like_metachars(tmp_path):
     s = _store(tmp_path)
     # Two prior rows under different orgs carry "q1_budget" (note the underscore).
     gw.apply(s, _ext("t1", "Acme", "m1", ["q1_budget"]), doc_ids=["d1"])
-    gw.apply(s, _ext("t2", "ACC", "m2", ["q1_budget"]), doc_ids=["d2"])
+    gw.apply(s, _ext("t2", "NCF", "m2", ["q1_budget"]), doc_ids=["d2"])
     # A different topic "q1xbudget" would match "q1_budget" if "_" acted as a LIKE
     # wildcard. With ESCAPE it does not, so this topic has zero prior appearances
     # and the gate must keep it from being created.
@@ -571,7 +571,7 @@ def test_topic_gate_escapes_like_metachars(tmp_path):
     # Sanity: the literal "q1_budget" topic still opens its own gate on the third
     # appearance, confirming the escape didn't break legitimate matching.
     # (entity id slugifies the underscore to a hyphen: topic-q1-budget)
-    gw.apply(s, _ext("t4", "Courageous Church", "m4", ["q1_budget"]), doc_ids=["d4"])
+    gw.apply(s, _ext("t4", "Southbank Community Trust", "m4", ["q1_budget"]), doc_ids=["d4"])
     assert s.get_entity("topic-q1-budget") is not None
 
 
@@ -921,15 +921,15 @@ def test_apply_full_lifecycle_summary(tmp_path):
     pre_upd = s.add_unified_action(text="Draft the audit cover note",
                                    owner="Sam", status="open", thread_id="t-rich")
     gw.apply(s, _ext("seed1", "Acme", "seed-m1", ["audit"]), doc_ids=["s1"])
-    gw.apply(s, _ext("seed2", "ACC", "seed-m2", ["audit"]), doc_ids=["s2"])
+    gw.apply(s, _ext("seed2", "NCF", "seed-m2", ["audit"]), doc_ids=["s2"])
 
     ext = {
-        "thread_id": "t-rich", "org": "ACC", "content_type": "update",
+        "thread_id": "t-rich", "org": "NCF", "content_type": "update",
         "summary": "CAMS audit thread", "contextual_summary": "",
         "entities": [
             {"name": "Marcus Reyes", "type": "person", "org": "Acme",
              "role": "Executive Pastor"},
-            {"name": "CAMS Review", "type": "project", "org": "ACC", "role": ""},
+            {"name": "CAMS Review", "type": "project", "org": "NCF", "role": ""},
         ],
         "topics": ["audit"],
         "actions": [
@@ -990,7 +990,7 @@ def test_strip_affiliation_strips_from_known_org():
 
 def test_strip_affiliation_leaves_plain_names_untouched():
     assert gw.strip_affiliation("Franz") == "Franz"
-    assert gw.strip_affiliation("Dana Okafor") == "Dana Okafor"
+    assert gw.strip_affiliation("Marcus Reyes") == "Marcus Reyes"
     assert gw.strip_affiliation("Nathan") == "Nathan"
 
 
@@ -1036,7 +1036,7 @@ def test_known_domain_sender_gets_its_org(tmp_path, monkeypatch):
     _write_cp_config(tmp_path)
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     s = _store(tmp_path)
-    gw.apply(s, _sender_ext("ACC", "Dana <dana@example.org>"),
+    gw.apply(s, _sender_ext("NCF", "Dana <dana@example.org>"),
              doc_ids=["d1"])
     dana = s.find_entity("Dana")
     assert dana is not None

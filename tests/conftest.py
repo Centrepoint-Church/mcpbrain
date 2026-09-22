@@ -381,7 +381,7 @@ def _no_real_ocr_install(monkeypatch, request):
     neutralise (that fixture only touches subprocess.Popen, for the unrelated
     watchdog-restart path). daemon.py's ocr_setup cadence pass can reach this
     from any bare Daemon() that runs _run_periodic_passes(); before the
-    interval-config fix (Centrepoint-Church/mcpbrain#30 review, HIGH finding),
+    interval-config fix (this repo's mcpbrain#30 review, HIGH finding),
     a plain `pytest tests/` on a macOS/Windows dev box without tesseract
     already installed triggered real package-manager installs from the test
     suite -- invisible on CI (Linux, where install_command() returns None) and

@@ -106,14 +106,14 @@ def test_known_people_excludes_owner(tmp_path):
 def test_known_people_dedups_overlap(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        _add_person(db, "dana", "Dana Okafor", "Acme", email_count=50)
+        _add_person(db, "dana", "Marcus Reyes", "Acme", email_count=50)
         _add_role(db, "dana", "Senior Pastor")
         # Same person also appears in a batch thread.
         _link_thread(db, "t-1", "m-1", "dana")
 
     rows = prompt.build_known_people(s, batch_thread_ids=["t-1"], core_cap=40)
 
-    matches = [r for r in rows if r.get("id") == "dana" or r["name"] == "Dana Okafor"]
+    matches = [r for r in rows if r.get("id") == "dana" or r["name"] == "Marcus Reyes"]
     assert len(matches) == 1
     assert matches[0]["role"] == "Senior Pastor"
 
@@ -139,7 +139,7 @@ def test_known_people_empty_batch_returns_core_only(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         # Core person: confirmed org + current role + sufficient email_count.
-        _add_person(db, "dana", "Dana Okafor", "Acme", email_count=50)
+        _add_person(db, "dana", "Marcus Reyes", "Acme", email_count=50)
         _add_role(db, "dana", "Senior Pastor")
         # Thread-only person: would surface only via a batch overlay.
         _add_person(db, "batch-only", "Batch Only", "unknown", email_count=1)
@@ -148,5 +148,5 @@ def test_known_people_empty_batch_returns_core_only(tmp_path):
     rows = prompt.build_known_people(s, batch_thread_ids=[], core_cap=40)
 
     names = {r["name"] for r in rows}
-    assert "Dana Okafor" in names
+    assert "Marcus Reyes" in names
     assert "Batch Only" not in names

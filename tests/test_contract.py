@@ -113,7 +113,7 @@ def test_validate_rejects_non_int_resolved_action_ids():
 def test_validate_rejects_relation_without_endpoints():
     from mcpbrain.contract import validate_extraction
     d = _load("thread_simple")
-    d["relations"] = [{"source_name": "Dana Okafor", "type": "works_at"}]
+    d["relations"] = [{"source_name": "Marcus Reyes", "type": "works_at"}]
     problems = validate_extraction(d)
     assert any("target_name" in p for p in problems)
 
@@ -131,7 +131,7 @@ def _batch(extractions, merge_answers=None):
 def test_validate_batch_file():
     from mcpbrain.contract import validate_batch_file
     batch = _batch([_load(n) for n in EXTRACTION_FIXTURES],
-                   merge_answers=[{"pair_id": "a|b", "same": True, "canonical": "Dana Okafor"}])
+                   merge_answers=[{"pair_id": "a|b", "same": True, "canonical": "Marcus Reyes"}])
     assert validate_batch_file(batch) == []
 
 
@@ -181,7 +181,7 @@ def test_validate_rejects_merge_answer_missing_pair_id():
 def test_validate_accepts_well_formed_merge_answers():
     from mcpbrain.contract import validate_batch_file
     batch = _batch([], merge_answers=[
-        {"pair_id": "a|b", "same": True, "canonical": "Dana Okafor"},
+        {"pair_id": "a|b", "same": True, "canonical": "Marcus Reyes"},
         {"pair_id": "c|d", "same": False},
     ])
     assert validate_batch_file(batch) == []

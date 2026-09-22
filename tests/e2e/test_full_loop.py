@@ -67,13 +67,13 @@ def _hand_extraction(thread):
         "content_type": "request",
         "summary": "Dana asks Sam to confirm Hall B availability.",
         "entities": [
-            {"name": "Dana Okafor", "type": "person", "org": "Acme", "role": "Pastor"},
+            {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": "Pastor"},
             {"name": "Acme Corp", "type": "org", "org": "Acme", "role": ""},
         ],
         "topics": ["facilities"],
         "actions": [{"description": "Confirm Hall B is free for Wednesday college",
                      "owner": ""}],
-        "relations": [{"source_name": "Dana Okafor", "type": "works_at",
+        "relations": [{"source_name": "Marcus Reyes", "type": "works_at",
                        "target_name": "Acme Corp"}],
         "messages": [{"message_id": m["message_id"], "sender": m.get("sender", ""),
                       "date": m["date"], "subject": m.get("subject", ""),
@@ -174,7 +174,7 @@ def test_calendar_backfill_creates_attendee_graph(e2e_store, fake_google, e2e_ho
     ents = e2e_store.list_entities()
     names = {e["name"] for e in ents}
     ids = {e["id"] for e in ents}
-    assert "Dana Okafor" in names, "a non-owner attendee must become a person entity"
+    assert "Marcus Reyes" in names, "a non-owner attendee must become a person entity"
     assert "sam-admin" not in ids, "the attendee pass must never mint the owner's own node"
     assert sum(1 for e in ents if e["name"] == "Sam Admin") == 1, "no second owner node"
     assert "Hall B" not in names, "room resources must be excluded"

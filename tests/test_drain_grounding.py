@@ -17,9 +17,9 @@ def test_grounding_is_inert_when_payload_messages_carry_no_body():
             {"message_id": "m1", "sender": "Josh Kemp", "subject": "Budget"},
             {"message_id": "m2", "sender": "Jess Williams", "subject": "Re: Budget"},
         ],
-        "entities": [{"name": "Centrepoint Church", "type": "org"},
+        "entities": [{"name": "Northgate Trust", "type": "org"},
                      {"name": "Josh Kemp", "type": "person"}],
-        "relations": [{"source_name": "Josh Kemp", "target_name": "Centrepoint Church",
+        "relations": [{"source_name": "Josh Kemp", "target_name": "Northgate Trust",
                        "type": "works_at"}],
     }
 

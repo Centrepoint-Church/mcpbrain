@@ -35,12 +35,12 @@ def test_core_block_contains_core_chunk_text(store, home):
     """Core-tier chunks appear in the core block."""
     from mcpbrain.memory_tier import get_core_block
 
-    store.upsert_chunk("core-1", "Josh is the lead pastor at Centrepoint Church.", "h1", {})
+    store.upsert_chunk("core-1", "Josh is the lead pastor at Northgate Trust.", "h1", {})
     store.set_chunk_tier("core-1", "core")
 
     block = get_core_block(store, home)
     assert block != ""
-    assert "Centrepoint" in block
+    assert "Northgate Trust" in block
 
 
 def test_core_block_excludes_non_core(store, home):
@@ -177,7 +177,7 @@ def test_run_tier_pass_keeps_high_salience(store, home):
 def test_recompute_core_promotes_top_durable_notes(store, home):
     from mcpbrain.memory_tier import recompute_core, get_core_block
     # Durable semantic notes with varying salience + one episodic (must NOT be core).
-    store.upsert_chunk("sem-hi", "Centrepoint board decided the 2026 budget.", "h1", {})
+    store.upsert_chunk("sem-hi", "Northgate Trust board decided the 2026 budget.", "h1", {})
     store.set_chunk_type("sem-hi", "semantic"); store.set_chunk_salience("sem-hi", 9.0)
     store.upsert_chunk("sem-lo", "Minor note about a coffee order.", "h2", {})
     store.set_chunk_type("sem-lo", "semantic"); store.set_chunk_salience("sem-lo", 2.0)
@@ -229,7 +229,7 @@ def test_run_tier_pass_seeds_core_identity(store, tmp_path):
         "tiered_memory": True,
         "owner_full_name": "Josh Kemp",
         "owner_role": "Lead Pastor",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     run_tier_pass(store, str(h))

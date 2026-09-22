@@ -17,7 +17,7 @@ from mcpbrain.contract import validate_extraction
 def _base():
     return {
         "thread_id": "t1",
-        "org": "Centrepoint",
+        "org": "Northgate Trust",
         "content_type": "fyi",
         "summary": "",
         "entities": [],
@@ -93,7 +93,7 @@ def test_drain_skips_mark_enriched_for_empty_extraction(tmp_path):
     cfg_path.write_text(json.dumps({
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     # Add a chunk to the store so doc_ids_for_messages returns something
@@ -106,7 +106,7 @@ def test_drain_skips_mark_enriched_for_empty_extraction(tmp_path):
         "unit_id": "u1",
         "extractions": [{
             "thread_id": "t1",
-            "org": "Centrepoint",
+            "org": "Northgate Trust",
             "content_type": "fyi",
             "summary": "",        # blank
             "entities": [],

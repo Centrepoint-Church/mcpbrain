@@ -267,11 +267,11 @@ def test_upsert_entity_idempotent_on_id_and_bumps_mentions(tmp_path):
 
 def test_upsert_entity_fills_empty_org_and_name(tmp_path):
     s = _store(tmp_path)
-    s.upsert_entity("dana-okafor", "", "unknown", org="", seen="2026-05-30")
-    s.upsert_entity("dana-okafor", "Dana Okafor", "person",
+    s.upsert_entity("marcus-reyes", "", "unknown", org="", seen="2026-05-30")
+    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person",
                     org="Acme", seen="2026-05-30")
-    e = s.get_entity("dana-okafor")
-    assert e["name"] == "Dana Okafor"
+    e = s.get_entity("marcus-reyes")
+    assert e["name"] == "Marcus Reyes"
     assert e["org"] == "Acme"
 
 
@@ -298,17 +298,17 @@ def test_get_entity_returns_none_when_absent(tmp_path):
 def test_add_relation_dedups(tmp_path):
     s = _store(tmp_path)
     # entity_relations endpoints are enforced foreign keys into entities.
-    for eid in ("marcus-reyes", "dana-okafor"):
+    for eid in ("marcus-reyes", "marcus-reyes"):
         s.upsert_entity(eid, eid.replace("-", " ").title(), "person", "Acme", "2026-05-12")
-    first = s.add_relation("marcus-reyes", "reports_to", "dana-okafor", source_doc_id="d1")
-    second = s.add_relation("marcus-reyes", "reports_to", "dana-okafor", source_doc_id="d2")
+    first = s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", source_doc_id="d1")
+    second = s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", source_doc_id="d2")
     assert first is True   # new triple inserted
     assert second is False  # duplicate triple ignored
     rels = s.list_relations()
     assert len(rels) == 1
     assert rels[0]["entity_a"] == "marcus-reyes"
     assert rels[0]["relation"] == "reports_to"
-    assert rels[0]["entity_b"] == "dana-okafor"
+    assert rels[0]["entity_b"] == "marcus-reyes"
 
 
 # --- meta accessors (Task 4.3) -------------------------------------------
@@ -386,9 +386,9 @@ def test_thread_chunks_returns_empty_for_unknown_thread(tmp_path):
 
 def _seed_graph(s):
     s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
-    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
+    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
-    s.add_relation("marcus-reyes", "reports_to", "dana-okafor", "doc-1")
+    s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", "doc-1")
     s.add_relation("marcus-reyes", "works_on", "college-2026", "doc-2")
     s.add_unified_action(text="Confirm college timetable", owner="Marcus Reyes")
 
@@ -432,10 +432,10 @@ def test_relations_for_returns_in_and_out_edges(tmp_path):
     marcus = s.relations_for("marcus-reyes")
     assert len(marcus) == 2
     # Dana has one in-edge (marcus reports_to dana).
-    dana = s.relations_for("dana-okafor")
+    dana = s.relations_for("marcus-reyes")
     assert len(dana) == 1
     assert dana[0]["entity_a"] == "marcus-reyes"
-    assert dana[0]["entity_b"] == "dana-okafor"
+    assert dana[0]["entity_b"] == "marcus-reyes"
 
 
 # --- enriched-chunk tracker (Task H1) ------------------------------------
@@ -647,13 +647,13 @@ def test_merge_repoints_dedups_drops_self_loops_and_removes_loser(tmp_path):
     s = _store(tmp_path)
     s.upsert_entity("dana", "dana", "person", org="", seen="2026-05-30")
     s.upsert_entity("ps-dana", "Ps Dana", "person", org="Acme", seen="2026-05-30")
-    s.upsert_entity("acc", "ACC", "org", org="", seen="2026-05-30")
+    s.upsert_entity("acc", "NCF", "org", org="", seen="2026-05-30")
 
     s.add_relation("ps-dana", "works_at", "acc")        # repoints cleanly
     s.add_relation("dana", "works_at", "acc")            # collides on UNIQUE after repoint
     s.add_relation("ps-dana", "mentioned_with", "dana")  # becomes a self-loop after repoint
 
-    s.merge_entities("ps-dana", "dana", canonical_name="Dana Okafor", method="llm")
+    s.merge_entities("ps-dana", "dana", canonical_name="Marcus Reyes", method="llm")
 
     ids = {e["id"] for e in s.list_entities()}
     assert "ps-dana" not in ids
@@ -677,10 +677,10 @@ def test_merge_scalar_precedence_and_mention_sum(tmp_path):
     s.upsert_entity("ps-dana", "Ps Dana", "person", org="Acme", seen="2026-05-30")
     s.upsert_entity("ps-dana", "Ps Dana", "person", org="Acme", seen="2026-05-31")  # mentions=2
 
-    s.merge_entities("ps-dana", "dana", canonical_name="Dana Okafor", method="llm")
+    s.merge_entities("ps-dana", "dana", canonical_name="Marcus Reyes", method="llm")
 
     win = s.get_entity("dana")
-    assert win["name"] == "Dana Okafor"      # canonical_name override
+    assert win["name"] == "Marcus Reyes"      # canonical_name override
     assert win["org"] == "Acme"          # winner org was "" -> loser's real org
     assert win["type"] == "person"              # winner was "unknown" -> upgraded
     assert win["mentions"] == 3                  # 1 + 2 summed
@@ -724,7 +724,7 @@ def test_merge_is_noop_when_an_id_is_missing(tmp_path):
 def test_entities_for_resolution_returns_five_fields(tmp_path):
     s = _store(tmp_path)
     s.upsert_entity("dana", "Dana", "person", org="Acme", seen="2026-05-30")
-    s.upsert_entity("acc", "ACC", "org", org="", seen="2026-05-30")
+    s.upsert_entity("acc", "NCF", "org", org="", seen="2026-05-30")
     rows = s.entities_for_resolution()
     assert len(rows) == 2
     for r in rows:
@@ -1339,7 +1339,7 @@ def test_fts_search_falls_back_to_or_when_the_strict_and_match_finds_nothing(tmp
     # None of these words co-occur verbatim as a full phrase set with the doc
     # text's exact tokens plus extra query words the doc doesn't contain.
     hits = [d for d, _ in s.fts_search(
-        "Centrepoint church kids ministry volunteer application Brisa Rojas Bibra Lake", 10)]
+        "Northgate Trust church kids ministry volunteer application Brisa Rojas Bibra Lake", 10)]
 
     assert "gdrive-a-0" in hits
 

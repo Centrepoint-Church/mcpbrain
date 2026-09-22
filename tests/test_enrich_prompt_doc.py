@@ -88,7 +88,7 @@ def test_orphan_and_missing_org_review_rules_documented():
 
 def test_missing_org_rule_flags_document_category_anti_pattern():
     """Task 2.3 gate fix: a live adjudication run wrongly `assign`ed a person to
-    an org based on a document/chunk category tag (e.g. a bracketed `[ACC]`
+    an org based on a document/chunk category tag (e.g. a bracketed `[NCF]`
     label) plus the person co-occurring with an org name in a document *about*
     that org (an MOU/contract), not any statement of the person's own
     affiliation. The rule text must explicitly warn against conflating

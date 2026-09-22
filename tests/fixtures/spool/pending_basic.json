@@ -3,29 +3,29 @@
   "prepared_at": "2026-06-02T09:30:00Z",
   "context": {
     "known_people": [
-      {"name": "Dana Okafor", "org": "Acme", "role": "Senior Pastor"},
+      {"name": "Marcus Reyes", "org": "Acme", "role": "Senior Pastor"},
       {"name": "Marcus Reyes", "org": "Acme", "role": "Executive Pastor"}
     ],
     "projects": [
       {"id": "byford-grant", "name": "Byford Building Grant", "org": "Acme",
        "status_line": "Awaiting council approval on the stage-two plans."},
-      {"id": "cams-review", "name": "CAMS Review", "org": "ACC",
+      {"id": "cams-review", "name": "CAMS Review", "org": "NCF",
        "status_line": "Field audit underway across WA region."}
     ],
     "areas": [
       {"id": "acme-facilities", "name": "Facilities", "description": "Buildings, halls, AV across all campuses."},
-      {"id": "acc-projects", "name": "ACC Projects", "description": "National strategic projects for ACC."}
+      {"id": "acc-projects", "name": "NCF Projects", "description": "National strategic projects for NCF."}
     ],
     "org_domain_map": [
       "example.org → Acme",
-      "acc.org.au → ACC"
+      "ncf.org.au → NCF"
     ]
   },
   "threads": [
     {"thread_id": "t-basic-a", "prior_thread_context": "",
      "open_actions": [],
      "messages": [
-       {"message_id": "m-a1", "sender": "Dana Okafor <dana@example.org>",
+       {"message_id": "m-a1", "sender": "Marcus Reyes <dana@example.org>",
         "date": "2026-06-01", "labels": "INBOX", "subject": "Hall B for Wednesday college",
         "text": "Hi Sam, can you confirm Hall B is free for the Wednesday college session?"}
      ]},

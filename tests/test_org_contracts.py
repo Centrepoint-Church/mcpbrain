@@ -60,7 +60,7 @@ def test_manifest_and_tombstone_round_trip():
     m = oc.SnapshotManifest(version=3, created_at="t", entity_count=10,
                             relation_count=5, tombstone_count=1, snapshot_sha256="ff")
     assert oc.SnapshotManifest.from_dict(m.to_dict()) == m
-    t = oc.Tombstone(entity_id="dup", merged_into="dana-okafor")
+    t = oc.Tombstone(entity_id="dup", merged_into="marcus-reyes")
     assert oc.Tombstone.from_dict(t.to_dict()) == t
 
 

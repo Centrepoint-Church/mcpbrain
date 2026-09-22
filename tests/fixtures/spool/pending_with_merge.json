@@ -3,7 +3,7 @@
   "prepared_at": "2026-06-02T10:15:00Z",
   "context": {
     "known_people": [
-      {"name": "Dana Okafor", "org": "Acme", "role": "Senior Pastor"}
+      {"name": "Marcus Reyes", "org": "Acme", "role": "Senior Pastor"}
     ],
     "projects": [
       {"id": "byford-grant", "name": "Byford Building Grant", "org": "Acme",
@@ -20,15 +20,15 @@
     {"thread_id": "t-merge-a", "prior_thread_context": "",
      "open_actions": [],
      "messages": [
-       {"message_id": "m-ma1", "sender": "Dana Okafor <dana@example.org>",
+       {"message_id": "m-ma1", "sender": "Marcus Reyes <dana@example.org>",
         "date": "2026-06-02", "labels": "INBOX", "subject": "Worship night logistics",
         "text": "Can we lock in the AV crew for the worship night next Friday?"}
      ]}
   ],
   "merge_review": [
-    {"pair_id": "dana-okafor|dana-c",
-     "a": {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"},
-     "b": {"id": "dana-c", "name": "Dana C", "type": "person"}},
+    {"pair_id": "marcus-reyes|marcus-r",
+     "a": {"id": "marcus-reyes", "name": "Marcus Reyes", "type": "person"},
+     "b": {"id": "marcus-r", "name": "Marcus R", "type": "person"}},
     {"pair_id": "acme-church|acme",
      "a": {"id": "acme-church", "name": "Acme Church", "type": "org"},
      "b": {"id": "acme", "name": "Acme", "type": "org"}}

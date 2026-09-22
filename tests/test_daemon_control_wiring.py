@@ -131,8 +131,8 @@ def test_apply_config_auto_enables_spool_when_configured(tmp_path, monkeypatch):
     # owner_name + owner_email + a non-blank orgs[].name make is_configured() true.
     d.apply_config({
         "owner_name": "Nakia",
-        "owner_email": "n@centrepoint.church",
-        "orgs": [{"name": "Centrepoint Church", "domain": "centrepoint.church"}],
+        "owner_email": "n@northgatetrust.org",
+        "orgs": [{"name": "Northgate Trust", "domain": "northgatetrust.org"}],
     })
     assert config.enrich_mode(str(tmp_path)) == "spool"
     assert d._enrich_mode == "spool"
@@ -146,8 +146,8 @@ def test_apply_config_honors_explicit_off(tmp_path, monkeypatch):
     d._config_lock = __import__("threading").Lock()
     d.apply_config({
         "owner_name": "Nakia",
-        "owner_email": "n@centrepoint.church",
-        "orgs": [{"name": "Centrepoint Church", "domain": "centrepoint.church"}],
+        "owner_email": "n@northgatetrust.org",
+        "orgs": [{"name": "Northgate Trust", "domain": "northgatetrust.org"}],
         "enrich_mode": "off",
     })
     assert config.enrich_mode(str(tmp_path)) == "off"

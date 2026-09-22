@@ -1238,15 +1238,15 @@ git commit -m "feat(memory): bin/rechunk_notes.py re-chunks oversize notes"
 ```python
 def test_name_tokens_keeps_distinctive_tokens_only():
     from mcpbrain.chunking import name_tokens
-    assert name_tokens("Dana Okafor") == ["dana", "okafor"]
+    assert name_tokens("Marcus Reyes") == ["marcus", "reyes"]
     assert name_tokens("A B") == []          # nothing >= 4 chars
 
 
 def test_name_in_text_matches_full_name_and_tokens():
     from mcpbrain.chunking import name_in_text
-    assert name_in_text("Dana Okafor", "spoke to dana okafor today")
-    assert name_in_text("Dana Okafor", "ps dana will confirm")
-    assert not name_in_text("Dana Okafor", "nothing relevant here")
+    assert name_in_text("Marcus Reyes", "spoke to marcus reyes today")
+    assert name_in_text("Marcus Reyes", "ps marcus will confirm")
+    assert not name_in_text("Marcus Reyes", "nothing relevant here")
     assert not name_in_text("", "anything")
 ```
 

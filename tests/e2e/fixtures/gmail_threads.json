@@ -7,7 +7,7 @@
       "payload": {
         "mimeType": "text/plain",
         "headers": [
-          {"name": "From", "value": "Dana Okafor <dana@acme.org>"},
+          {"name": "From", "value": "Marcus Reyes <dana@acme.org>"},
           {"name": "Date", "value": "Mon, 10 Jun 2026 09:00:00 +0000"},
           {"name": "Subject", "value": "Hall B booking request"},
           {"name": "To", "value": "sam@acme.org"}
@@ -43,7 +43,7 @@
       "payload": {
         "mimeType": "text/plain",
         "headers": [
-          {"name": "From", "value": "Dana Okafor <dana@acme.org>"},
+          {"name": "From", "value": "Marcus Reyes <dana@acme.org>"},
           {"name": "Date", "value": "Tue, 11 Jun 2026 08:30:00 +0000"},
           {"name": "Subject", "value": "AV equipment for Hall B session"},
           {"name": "To", "value": "av@acme.org"}

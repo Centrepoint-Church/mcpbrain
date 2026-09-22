@@ -385,7 +385,7 @@ def test_a_fully_packed_table_chunk_fits_the_embedder_window_once_prefixed():
 
     meta = {"source_type": "gdrive", "file_name": "2026 Operating Budget.xlsx",
             "folder_path": "Finance/Budgets/2026", "modified": "2026-06-02",
-            "org": "Centrepoint Church"}
+            "org": "Northgate Trust"}
     prefix = contextual_prefix(meta)
     assert len(prefix) > 100, f"prefix too short to discriminate: {len(prefix)}"
 

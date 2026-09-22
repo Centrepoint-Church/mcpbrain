@@ -25,14 +25,14 @@ class TestOrgBackfill:
         from mcpbrain.org_backfill import run_backfill
 
         tax = _orgs.OrgTaxonomy(
-            names=("Centrepoint",),
-            domain_map={"centrepoint.church": "Centrepoint"},
+            names=("Northgate Trust",),
+            domain_map={"northgatetrust.org": "Northgate Trust"},
         )
         monkeypatch.setattr(_orgs, "taxonomy_from_config", lambda: tax)
 
-        _insert_entity(store, "e1", "Alice", "alice@centrepoint.church")
+        _insert_entity(store, "e1", "Alice", "alice@northgatetrust.org")
         _insert_entity(store, "e2", "Bob", "bob@external.org")
-        _insert_entity(store, "e3", "Charlie", "charlie@centrepoint.church", org="Centrepoint")
+        _insert_entity(store, "e3", "Charlie", "charlie@northgatetrust.org", org="Northgate Trust")
 
         result = run_backfill(store)
 
@@ -43,7 +43,7 @@ class TestOrgBackfill:
         # Verify the DB.
         with store._connect() as db:
             row = db.execute("SELECT org FROM entities WHERE id='e1'").fetchone()
-            assert row["org"] == "Centrepoint"
+            assert row["org"] == "Northgate Trust"
             row2 = db.execute("SELECT org FROM entities WHERE id='e2'").fetchone()
             assert row2["org"] == ""  # not updated
 
@@ -52,7 +52,7 @@ class TestOrgBackfill:
         from mcpbrain import orgs as _orgs
         from mcpbrain.org_backfill import run_backfill
 
-        tax = _orgs.OrgTaxonomy(names=("Centrepoint",), domain_map={})
+        tax = _orgs.OrgTaxonomy(names=("Northgate Trust",), domain_map={})
         monkeypatch.setattr(_orgs, "taxonomy_from_config", lambda: tax)
 
         _insert_entity(store, "e1", "Alice", "alice@unknown-church.org")

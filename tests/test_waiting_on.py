@@ -91,7 +91,7 @@ def test_matches_by_normalised_name():
 
 def test_no_match_different_sender():
     """Different person -> no match."""
-    chunk = _make_chunk(sender_name="Dana Okafor", sender_entity_id="ent-dana-001")
+    chunk = _make_chunk(sender_name="Marcus Reyes", sender_entity_id="ent-dana-001")
     assert not _matches(chunk, waiting_on="Marcus Reyes", entity_id="ent-marcus-001")
 
 
@@ -310,7 +310,7 @@ def test_waiting_on_run_advances_cursor_so_second_run_sees_no_new(store):
 
 def test_waiting_on_run_returns_cleared_zero_no_matches(store):
     """run with no matching chunks returns {"cleared": 0}."""
-    _insert_chunk(store, "chunk-dana", date="2026-06-01", sender="Dana Okafor")
+    _insert_chunk(store, "chunk-dana", date="2026-06-01", sender="Marcus Reyes")
     _add_action(store, waiting_on="Marcus Reyes")
     now = datetime.now(timezone.utc).isoformat()
 

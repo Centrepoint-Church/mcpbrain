@@ -629,7 +629,7 @@ def test_recipient_lists_are_not_clipped_at_300_chars():
     """C6: to[:300]/cc[:300] loses most recipients of an all-staff email."""
     from mcpbrain.sync.normalise import normalise_gmail
 
-    recipients = ", ".join(f"person{i}@centrepoint.church" for i in range(60))
+    recipients = ", ".join(f"person{i}@northgatetrust.org" for i in range(60))
     meta = normalise_gmail(_message(headers=[("Subject", "All staff"),
                                              ("To", recipients)],
                                     body="Team update."))[0].metadata

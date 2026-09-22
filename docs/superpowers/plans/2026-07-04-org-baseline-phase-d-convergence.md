@@ -167,7 +167,7 @@ def test_new_member_bootstraps_from_real_snapshot_and_cache(tmp_path):
     # (a) curator has an org entity + relation and publishes a real snapshot.
     with curator.store._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,origin,email_addr) "
-                   "VALUES('dana','Dana Okafor','person','org','dana@acme.org')")
+                   "VALUES('dana','Marcus Reyes','person','org','dana@acme.org')")
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('acme','Acme','org','org')")
         db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin,valid_from) "
                    "VALUES('dana','works_at','acme','org','2026-01-01')")

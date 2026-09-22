@@ -644,7 +644,7 @@ def test_digest_provenance_patches_without_re_embedding(tmp_path):
     store = Store(tmp_path / "brain.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("enriched-cal-abc",
-                       "[ACC] Email: Leaders Gathering\nFrom: \nDate: 2026-05-10\n",
+                       "[NCF] Email: Leaders Gathering\nFrom: \nDate: 2026-05-10\n",
                        "h1", {"source_type": "gmail_enriched_v2",
                               "thread_id": "cal-abc"})
     with store._connect() as db:

@@ -480,13 +480,13 @@ def test_import_applies_cached_enrichment_payload(tmp_path):
     vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
     extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
                   "summary": "quarterly plan",
-                  "entities": [{"name": "Dana Okafor", "type": "person"}],
+                  "entities": [{"name": "Marcus Reyes", "type": "person"}],
                   "relations": [], "actions": [], "topics": [],
-                  "messages": [{"message_id": "gdrive-FID-0", "text": "Dana Okafor owns the plan"}]}
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Marcus Reyes owns the plan"}]}
     art = CacheArtifact(
         file_id="FID", content_hash="vh1", extraction_method="gdocs",
         chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
-        chunks=(CacheChunk(idx=0, text="Dana Okafor owns the plan", embedding_b64=vec,
+        chunks=(CacheChunk(idx=0, text="Marcus Reyes owns the plan", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
         enrich={"logic_version": ENRICH_LOGIC_VERSION, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
@@ -512,13 +512,13 @@ def test_import_below_floor_payload_falls_back_to_reenrich(tmp_path):
     vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
     extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
                   "summary": "quarterly plan",
-                  "entities": [{"name": "Dana Okafor", "type": "person"}],
+                  "entities": [{"name": "Marcus Reyes", "type": "person"}],
                   "relations": [], "actions": [], "topics": [],
-                  "messages": [{"message_id": "gdrive-FID-0", "text": "Dana Okafor owns the plan"}]}
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Marcus Reyes owns the plan"}]}
     art = CacheArtifact(
         file_id="FID", content_hash="vh1", extraction_method="gdocs",
         chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
-        chunks=(CacheChunk(idx=0, text="Dana Okafor owns the plan", embedding_b64=vec,
+        chunks=(CacheChunk(idx=0, text="Marcus Reyes owns the plan", embedding_b64=vec,
                            metadata={"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}),),
         enrich={"logic_version": 0, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")
@@ -563,13 +563,13 @@ def test_import_apply_coerces_float_idx_to_int_doc_id(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     vec = base64.b64encode(struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)).decode()
     extraction = {"thread_id": "gdrive-FID", "org": "Acme", "content_type": "update",
-                  "summary": "s", "entities": [{"name": "Dana Okafor", "type": "person"}],
+                  "summary": "s", "entities": [{"name": "Marcus Reyes", "type": "person"}],
                   "relations": [], "actions": [], "topics": [],
-                  "messages": [{"message_id": "gdrive-FID-0", "text": "Dana Okafor owns it"}]}
+                  "messages": [{"message_id": "gdrive-FID-0", "text": "Marcus Reyes owns it"}]}
     # hand-write the artifact JSON with idx as a float to simulate a peer
     art = CacheArtifact(file_id="FID", content_hash="vh1", extraction_method="gdocs",
         chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
-        chunks=(CacheChunk(idx=0, text="Dana Okafor owns it", embedding_b64=vec,
+        chunks=(CacheChunk(idx=0, text="Marcus Reyes owns it", embedding_b64=vec,
                            metadata={"source_type":"gdrive","file_id":"FID","chunk_index":0}),),
         enrich={"logic_version": ENRICH_LOGIC_VERSION, "extraction": extraction},
         published_by="p@x.org", published_at="2026-07-04")

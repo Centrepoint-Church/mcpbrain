@@ -590,13 +590,13 @@ def _hand_extraction(thread):
         "content_type": "request",
         "summary": "Dana asks Sam to confirm Hall B availability.",
         "entities": [
-            {"name": "Dana Okafor", "type": "person", "org": "Acme", "role": "Pastor"},
+            {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": "Pastor"},
             {"name": "Acme Corp", "type": "org", "org": "Acme", "role": ""},
         ],
         "topics": ["facilities"],
         "actions": [{"description": "Confirm Hall B is free for Wednesday college",
                      "owner": ""}],
-        "relations": [{"source_name": "Dana Okafor", "type": "works_at",
+        "relations": [{"source_name": "Marcus Reyes", "type": "works_at",
                        "target_name": "Acme Corp"}],
         "messages": [{"message_id": m["message_id"], "sender": m.get("sender", ""),
                       "date": m["date"], "subject": m.get("subject", "")}

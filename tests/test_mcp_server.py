@@ -70,9 +70,9 @@ def _seed_graph_store(tmp_path):
     s = Store(tmp_path / "g.sqlite3", dim=4)
     s.init()
     s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
-    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
+    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
-    s.add_relation("marcus-reyes", "reports_to", "dana-okafor", "doc-1")
+    s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", "doc-1")
     s.add_relation("marcus-reyes", "works_on", "college-2026", "doc-2")
     s.add_unified_action(text="Confirm college timetable", owner="Marcus Reyes")
     return s
@@ -84,7 +84,7 @@ def test_brain_context_by_id(tmp_path):
     out = asyncio.run(tool("marcus-reyes"))
     assert out["entity"]["id"] == "marcus-reyes"
     others = {r["other"] for r in out["relations"]}
-    assert others == {"dana-okafor", "college-2026"}
+    assert others == {"marcus-reyes", "college-2026"}
     assert all(r["direction"] == "out" for r in out["relations"])
     assert any(a["text"] == "Confirm college timetable" for a in out["actions"])
 
@@ -101,7 +101,7 @@ def test_brain_context_by_name(tmp_path):
 def test_brain_context_in_edge_labelled_correctly(tmp_path):
     s = _seed_graph_store(tmp_path)
     tool = make_brain_context(s)
-    out = asyncio.run(tool("dana-okafor"))
+    out = asyncio.run(tool("marcus-reyes"))
     assert len(out["relations"]) == 1
     assert out["relations"][0]["direction"] == "in"
     assert out["relations"][0]["other"] == "marcus-reyes"
@@ -119,9 +119,9 @@ def test_brain_graph_one_hop(tmp_path):
     tool = make_brain_graph(s)
     out = asyncio.run(tool("marcus-reyes", 1))
     node_ids = {n["id"] for n in out["nodes"]}
-    assert node_ids == {"marcus-reyes", "dana-okafor", "college-2026"}
+    assert node_ids == {"marcus-reyes", "marcus-reyes", "college-2026"}
     edge_rels = {(e["entity_a"], e["relation"], e["entity_b"]) for e in out["edges"]}
-    assert ("marcus-reyes", "reports_to", "dana-okafor") in edge_rels
+    assert ("marcus-reyes", "reports_to", "marcus-reyes") in edge_rels
     assert ("marcus-reyes", "works_on", "college-2026") in edge_rels
 
 
@@ -130,7 +130,7 @@ def test_brain_graph_caps_hops(tmp_path):
     tool = make_brain_graph(s)
     out = asyncio.run(tool("marcus-reyes", 99))  # must not error, behaves as <=3
     assert out["center"]["id"] == "marcus-reyes"
-    assert {n["id"] for n in out["nodes"]} == {"marcus-reyes", "dana-okafor", "college-2026"}
+    assert {n["id"] for n in out["nodes"]} == {"marcus-reyes", "marcus-reyes", "college-2026"}
 
 
 def test_brain_graph_unknown_returns_empty(tmp_path):
@@ -585,7 +585,7 @@ def test_enrich_push_review_answer_satisfies_the_block_unit_guard(tmp_path):
     out = asyncio.run(push(
         unit_id="u-review2",
         extractions=None,
-        review_org=[{"finding_id": 9, "ref_id": "ACCI", "verdict": "skip"}],
+        review_org=[{"finding_id": 9, "ref_id": "NCFI", "verdict": "skip"}],
     ))
 
     assert out["written"] is True, out

@@ -95,8 +95,8 @@ def test_upsert_never_overwrites_org_skeleton(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,org,email_addr,origin) "
-                   "VALUES('dana','Dana Okafor','person','Acme','dana@acme.org','org')")
-    graph_write.upsert_entity(s, name="Dana Okafor", entity_type="person",
+                   "VALUES('dana','Marcus Reyes','person','Acme','dana@acme.org','org')")
+    graph_write.upsert_entity(s, name="Marcus Reyes", entity_type="person",
                               org="Beta", email_addr="dana@beta.org", notes="local note")
     e = s.get_entity("dana")
     assert e["org"] == "Acme" and e["email_addr"] == "dana@acme.org"   # skeleton unchanged

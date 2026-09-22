@@ -145,7 +145,7 @@ def test_graph_seed_query_no_relations_unchanged():
 def test_community_augment_adds_relevant_community():
     results = [_hit("doc-1", 0.9, "budget ministry")]
     communities = [
-        {"community_id": 1, "summary": "Finance and budget team at Centrepoint."}
+        {"community_id": 1, "summary": "Finance and budget team at Northgate Trust."}
     ]
     store = _make_store(communities=communities)
     augmented = _community_augment(store, "church budget planning", results, 10)

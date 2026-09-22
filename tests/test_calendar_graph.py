@@ -11,16 +11,16 @@ def _store(tmp_path):
     return s
 
 
-# Owner is "Josh" at josh@centrepoint.church. Aliases are lowercased per
+# Owner is "Josh" at josh@northgatetrust.org. Aliases are lowercased per
 # OwnerIdentity contract; entity_id is the owner's slug (never upserted).
 _OWNER = OwnerIdentity(
     name="Josh",
     entity_id="josh-kemp",
-    aliases=frozenset({"josh", "josh kemp", "josh.k@centrepoint.church"}),
+    aliases=frozenset({"josh", "josh kemp", "josh.k@northgatetrust.org"}),
 )
 
 
-def _seed_owner_node(s, *, entity_id="josh-kemp", email="josh.k@centrepoint.church"):
+def _seed_owner_node(s, *, entity_id="josh-kemp", email="josh.k@northgatetrust.org"):
     """Put an owner node in the graph, the way the EMAIL path does.
 
     The attendee pass never mints one (see resolve_owner_entity_id), so a store
@@ -72,7 +72,7 @@ def test_two_external_attendees_create_entities_and_attended_relations(tmp_path)
 def test_owner_self_attendee_is_excluded(tmp_path):
     s = _store(tmp_path)
     ev = _event("evt2", [
-        {"displayName": "Josh", "email": "josh.k@centrepoint.church"},
+        {"displayName": "Josh", "email": "josh.k@northgatetrust.org"},
         {"displayName": "Sam Chen", "email": "sam@partner.org"},
     ])
     n = _apply_attendees_to_graph(s, ev, _OWNER)
@@ -152,10 +152,10 @@ def test_resolve_owner_entity_id_never_matches_a_role_address(tmp_path):
     with s._connect(write=True) as db:
         db.execute("INSERT INTO entities(id,name,type,email_addr) "
                    "VALUES('shared-inbox','Office','person',"
-                   "'office@centrepoint.church')")
+                   "'office@northgatetrust.org')")
     owner = OwnerIdentity(name="Josh", entity_id="joshua-kemp", aliases=frozenset())
 
-    result = resolve_owner_entity_id(s, owner, "office@centrepoint.church")
+    result = resolve_owner_entity_id(s, owner, "office@northgatetrust.org")
 
     assert result == ""   # never binds to the shared-inbox entity
 
@@ -163,10 +163,10 @@ def test_resolve_owner_entity_id_never_matches_a_role_address(tmp_path):
 def test_resolve_owner_entity_id_still_matches_a_genuine_personal_address(tmp_path):
     """The role-address guard must not break the ordinary, real case."""
     s = _store(tmp_path)
-    _seed_owner_node(s, entity_id="josh-kemp", email="josh.k@centrepoint.church")
+    _seed_owner_node(s, entity_id="josh-kemp", email="josh.k@northgatetrust.org")
     owner = OwnerIdentity(name="Josh", entity_id="joshua-kemp", aliases=frozenset())
 
-    result = resolve_owner_entity_id(s, owner, "josh.k@centrepoint.church")
+    result = resolve_owner_entity_id(s, owner, "josh.k@northgatetrust.org")
 
     assert result == "josh-kemp"
 

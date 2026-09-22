@@ -150,7 +150,7 @@ def test_thread_is_noise_microsoft_store():
 
 def test_thread_is_noise_fivetran_left_uncaught():
     # Real leaked email: Fivetran vendor product notification. Documented as
-    # ACCEPTABLY un-caught: support@ is too broad a sender to add, "New ...
+    # NCFEPTABLY un-caught: support@ is too broad a sender to add, "New ...
     # Added" too generic a subject, and the HTML body here lacks bulk markers.
     # Catching it safely would require an over-broad rule, so we leave it.
     assert prepare.thread_is_noise([
@@ -252,7 +252,7 @@ def test_thread_is_noise_ops_brain_eval_harness_body_marker():
     # a business "fyi" note. Caught via a body marker, not sender/subject,
     # since the sender/subject here look unremarkable.
     assert prepare.thread_is_noise([
-        _msg("m1", "josh.k@centrepoint.church", "2026-06-01", "Test run",
+        _msg("m1", "josh.k@northgatetrust.org", "2026-06-01", "Test run",
              "ops-brain eval harness: 34/67 evals passed. FAIL ..."),
     ]) is True
 
@@ -430,12 +430,12 @@ def test_prepare_units_applies_trivial_thread_without_model_unit(tmp_path, monke
     store.init()
     store.upsert_chunk(
         doc_id="d-triv1", text="Thanks, sounds good.", content_hash="h-triv1",
-        metadata={"thread_id": "t-trivial", "sender": "Dana Lee <dana@centrepoint.church>",
+        metadata={"thread_id": "t-trivial", "sender": "Dana Lee <dana@northgatetrust.org>",
                   "subject": "Re: Hall B", "date": "2026-06-01"},
     )
     trivial = FakeBatch(
         "t-trivial", ["d-triv1"],
-        [_msg("m1", "Dana Lee <dana@centrepoint.church>", "2026-06-01",
+        [_msg("m1", "Dana Lee <dana@northgatetrust.org>", "2026-06-01",
               "Re: Hall B", "Thanks, sounds good.")],
     )
     monkeypatch.setattr(prepare, "_group_unenriched_threads",
@@ -591,13 +591,13 @@ def test_thread_block_has_org_hint(monkeypatch):
     from mcpbrain import orgs as _orgs
 
     tax = _orgs.OrgTaxonomy(
-        names=("Centrepoint",),
-        domain_map={"centrepoint.church": "Centrepoint"},
+        names=("Northgate Trust",),
+        domain_map={"northgatetrust.org": "Northgate Trust"},
     )
     monkeypatch.setattr(_orgs, "taxonomy_from_config", lambda: tax)
 
     batch = FakeBatch("t-a", ["d-a1"], [
-        _msg("m1", "Sam Lee <sam.lee@centrepoint.church>", "2026-06-01",
+        _msg("m1", "Sam Lee <sam.lee@northgatetrust.org>", "2026-06-01",
              "Hall B", "body text"),
     ])
     store = FakeStore()
@@ -605,7 +605,7 @@ def test_thread_block_has_org_hint(monkeypatch):
 
     block = prepare._thread_block(store, batch)
 
-    assert block["org_hint"] == "Centrepoint"
+    assert block["org_hint"] == "Northgate Trust"
 
 
 def test_thread_block_org_hint_empty_when_no_messages(monkeypatch):
@@ -768,12 +768,12 @@ def test_split_long_thread_carries_org_hint_single_oversized_message():
         "thread_id": "t-x",
         "prior_thread_context": "",
         "open_actions": [],
-        "org_hint": "Centrepoint",
+        "org_hint": "Northgate Trust",
         "messages": [_msg("m-big", "a@b.com", "2026-06-01", "x", "x" * 200)],
     }
     parts = prepare._split_long_thread(block, char_budget=50)
     assert len(parts) == 1
-    assert parts[0]["org_hint"] == "Centrepoint"
+    assert parts[0]["org_hint"] == "Northgate Trust"
 
 
 def test_split_long_thread_carries_org_hint_across_parts():
@@ -785,7 +785,7 @@ def test_split_long_thread_carries_org_hint_across_parts():
         "thread_id": "t-long",
         "prior_thread_context": "",
         "open_actions": [],
-        "org_hint": "Centrepoint",
+        "org_hint": "Northgate Trust",
         "messages": [
             _msg("m1", "a@b.com", "2026-06-01", "s1", big),
             _msg("m2", "a@b.com", "2026-06-02", "s2", big),
@@ -794,7 +794,7 @@ def test_split_long_thread_carries_org_hint_across_parts():
     }
     parts = prepare._split_long_thread(block, char_budget=100)
     assert len(parts) > 1
-    assert all(p["org_hint"] == "Centrepoint" for p in parts)
+    assert all(p["org_hint"] == "Northgate Trust" for p in parts)
 
 
 def test_split_long_thread_splits_within_a_single_message():
@@ -919,8 +919,8 @@ def test_build_pending_no_merge_review_when_not_due(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore(entities=[
-        {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"},
-        {"id": "dana-c", "name": "Dana C", "type": "person"},
+        {"id": "marcus-reyes", "name": "Marcus Reyes", "type": "person"},
+        {"id": "marcus-r", "name": "Marcus R", "type": "person"},
     ])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
@@ -934,8 +934,8 @@ def test_build_pending_appends_merge_review_when_due(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     batch = FakeBatch("t-a", ["d-a1"], [_msg("m1", "a@b.com", "2026-06-01", "x", "body")])
     store = FakeStore(entities=[
-        {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"},
-        {"id": "dana-c", "name": "Dana C", "type": "person"},
+        {"id": "marcus-reyes", "name": "Marcus Reyes", "type": "person"},
+        {"id": "marcus-r", "name": "Marcus R", "type": "person"},
     ])
     _stub_reassemble(monkeypatch)
     _stub_context(monkeypatch)
@@ -945,16 +945,16 @@ def test_build_pending_appends_merge_review_when_due(tmp_path, monkeypatch):
     mr = data["merge_review"]
     assert len(mr) == 1
     pair = mr[0]
-    assert pair["pair_id"] == "dana-c|dana-okafor"
-    assert {pair["a"]["id"], pair["b"]["id"]} == {"dana-okafor", "dana-c"}
+    assert pair["pair_id"] == "marcus-r|marcus-reyes"
+    assert {pair["a"]["id"], pair["b"]["id"]} == {"marcus-reyes", "marcus-r"}
     assert pair["a"]["type"] == "person"
 
 
 def test_merge_pair_id_stable():
-    a = {"id": "dana-okafor", "name": "Dana Okafor", "type": "person"}
-    b = {"id": "dana-c", "name": "Dana C", "type": "person"}
+    a = {"id": "marcus-reyes", "name": "Marcus Reyes", "type": "person"}
+    b = {"id": "marcus-r", "name": "Marcus R", "type": "person"}
     assert prepare._merge_pair(a, b)["pair_id"] == prepare._merge_pair(b, a)["pair_id"]
-    assert prepare._merge_pair(a, b)["pair_id"] == "dana-c|dana-okafor"
+    assert prepare._merge_pair(a, b)["pair_id"] == "marcus-r|marcus-reyes"
 
 
 # --- 2.6 atomic write (now exercised through write_units, see below) -------
@@ -963,7 +963,7 @@ def test_merge_pair_id_stable():
 # tested _write_pending's single-file pending.json shape and its per-cycle
 # whole-file overwrite semantics. Neither has a surviving equivalent:
 # write_units (the real producer) writes a bounded QUEUE of immutable,
-# content-addressed unit files that ACCUMULATE across cycles rather than being
+# content-addressed unit files that NCFUMULATE across cycles rather than being
 # overwritten — the opposite of the old semantics. build_pending's assembled
 # dict shape (batch_id/prepared_at format) is covered by
 # test_build_pending_returns_dict_without_writing below; write_units' actual
@@ -1108,7 +1108,7 @@ def test_write_units_emits_a_unit_per_review_block(tmp_path):
                                          "ref_id": "e-ghost"}},
         ],
         "org_merge_review": [
-            {"pair_id": "p-1", "a": {"name": "ACC"}, "b": {"name": "ACCI"}},
+            {"pair_id": "p-1", "a": {"name": "NCF"}, "b": {"name": "NCFI"}},
         ],
     }
 
@@ -1426,10 +1426,10 @@ def test_no_unit_exceeds_pull_cap_with_rules(tmp_path):
     from mcpbrain.prepare import CONTEXT_CAP, write_units
     from mcpbrain.tools import _enrich_rules_for, _unit_payload
     core = [{"id": f"e-core-{i:03d}", "name": f"Coreperson Number{i:02d}",
-             "org": "Centrepoint Church", "role": "Operations Coordinator"}
+             "org": "Northgate Trust", "role": "Operations Coordinator"}
             for i in range(40)]
     pool = [{"id": f"e-pool-{i:03d}", "name": f"Poolperson Surname{i:02d}",
-             "org": "Courageous Church", "role": "Ministry Team Leader",
+             "org": "Southbank Community Trust", "role": "Ministry Team Leader",
              "aliases": []} for i in range(120)]
     # Every thread names the whole roster, so every unit's scoped context fills
     # to CONTEXT_CAP the way a real, densely-populated unit does.

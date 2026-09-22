@@ -44,7 +44,7 @@ def test_relation_types_has_expected_values():
 def _base_extraction(**overrides):
     d = {
         "thread_id": "t1",
-        "org": "Centrepoint",
+        "org": "Northgate Trust",
         "content_type": "fyi",
         "summary": "A test thread.",
         "entities": [],
@@ -126,7 +126,7 @@ from mcpbrain.drain import _grounding_filter
 def _extraction_with_text(entities, relations=None, text="Alice works at Acme Corp."):
     return {
         "thread_id": "t1",
-        "org": "Centrepoint",
+        "org": "Northgate Trust",
         "content_type": "fyi",
         "summary": "Test.",
         "entities": entities,
@@ -200,7 +200,7 @@ def test_grounding_filter_no_op_when_no_message_text():
     """No message text → source is empty → filter is a no-op (conservative)."""
     d = {
         "thread_id": "t1",
-        "org": "Centrepoint",
+        "org": "Northgate Trust",
         "content_type": "fyi",
         "summary": "Test.",
         "entities": [{"name": "Alice", "type": "person"}],
@@ -231,7 +231,7 @@ def test_drain_grounding_flag_off_does_not_filter(tmp_path):
         "schema_grounding": False,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     # Write an extraction with a fabricated entity not in the message text
@@ -241,7 +241,7 @@ def test_drain_grounding_flag_off_does_not_filter(tmp_path):
         "unit_id": "u1",
         "extractions": [{
             "thread_id": "t1",
-            "org": "Centrepoint",
+            "org": "Northgate Trust",
             "content_type": "fyi",
             "summary": "Test.",
             "entities": [{"name": "Fabricated Person", "type": "person"}],
@@ -282,7 +282,7 @@ def test_drain_grounding_flag_on_removes_fabricated_entity(tmp_path):
         "schema_grounding": True,
         "owner_name": "Josh",
         "owner_email": "josh@example.com",
-        "orgs": [{"name": "Centrepoint"}],
+        "orgs": [{"name": "Northgate Trust"}],
     }))
 
     inbox = tmp_path / "enrich_inbox"
@@ -291,7 +291,7 @@ def test_drain_grounding_flag_on_removes_fabricated_entity(tmp_path):
         "unit_id": "u1",
         "extractions": [{
             "thread_id": "t1",
-            "org": "Centrepoint",
+            "org": "Northgate Trust",
             "content_type": "fyi",
             "summary": "Test.",
             "entities": [
@@ -331,13 +331,13 @@ def test_grounding_keeps_normalised_name_via_token():
     normalised) is kept when a distinctive token appears in the source."""
     from mcpbrain.drain import _grounding_filter
     ext = {
-        "messages": [{"text": "Spoke with Ps Dana today about the budget."}],
-        "entities": [{"name": "Dana Okafor", "type": "person"}],  # full name not in text
+        "messages": [{"text": "Spoke with Ps Marcus today about the budget."}],
+        "entities": [{"name": "Marcus Reyes", "type": "person"}],  # full name not in text
         "relations": [],
     }
     out, dropped = _grounding_filter(ext)
     assert dropped == 0
-    assert out["entities"] == [{"name": "Dana Okafor", "type": "person"}]
+    assert out["entities"] == [{"name": "Marcus Reyes", "type": "person"}]
 
 
 def test_grounding_drops_hallucinated_entity():

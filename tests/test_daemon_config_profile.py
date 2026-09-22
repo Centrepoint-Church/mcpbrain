@@ -20,8 +20,12 @@ def test_config_profile_exposes_the_tenant(monkeypatch, tmp_path):
     (tmp_path / "config.json").write_text("{}")
     tenant._clear_cache()
     prof = Daemon.config_profile(_StubDaemon())
-    assert prof["tenant"]["display_name"] == "Centrepoint Church"
-    assert prof["tenant"]["tenant_id"] == "centrepoint"
+    # Reads the REAL bundled mcpbrain/tenant.json (no _bundled_path monkeypatch
+    # here), so this asserts against its actual values rather than a renamed
+    # literal — same reasoning as tests/test_tenant.py.
+    bundled = tenant.load(tenant._bundled_path())
+    assert prof["tenant"]["display_name"] == bundled.display_name
+    assert prof["tenant"]["tenant_id"] == bundled.tenant_id
 
 
 def test_config_profile_tenant_is_none_when_unconfigured(monkeypatch, tmp_path):

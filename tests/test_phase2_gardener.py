@@ -211,8 +211,8 @@ def test_gardener_max_changed_lines_default(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_verify_attribution_quote_matches_whitespace_insensitive():
-    src = "Hi all,\n  I'm   the OPERATIONS lead\nfor Centrepoint."
-    assert rw.verify_attribution_quote("I'm the operations lead for Centrepoint", src) is None
+    src = "Hi all,\n  I'm   the OPERATIONS lead\nfor Northgate Trust."
+    assert rw.verify_attribution_quote("I'm the operations lead for Northgate Trust", src) is None
 
 
 def test_verify_attribution_quote_rejects_absent():
@@ -310,12 +310,12 @@ def test_tool_reference_lane_applies(tmp_path, monkeypatch):
 
 def test_tool_context_role_verified_quote_applies(tmp_path, monkeypatch):
     """A role claim whose quote is genuinely in the cited stored chunk is applied."""
-    store = _FakeStore({"msg-1": "Hi all, I'm the operations lead for Centrepoint. — Sam"})
+    store = _FakeStore({"msg-1": "Hi all, I'm the operations lead for Northgate Trust. — Sam"})
     tool = _tool_with_home(tmp_path, monkeypatch, store=store)
     out = _run(tool(lane="context", filename="identity.md",
-                    content="# Identity\n\nSam — operations lead, Centrepoint\n",
+                    content="# Identity\n\nSam — operations lead, Northgate Trust\n",
                     asserts_person_role=True, attribution_source="signature",
-                    attribution_quote="I'm the operations lead for Centrepoint",
+                    attribution_quote="I'm the operations lead for Northgate Trust",
                     attribution_doc_id="msg-1"))
     assert out["applied"] is True
 

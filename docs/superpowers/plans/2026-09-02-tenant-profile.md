@@ -2075,7 +2075,7 @@ the UI on every install, not cosmetics."
 
 **The rule: preserve the linguistic property, do not blind-replace.** Each example
 teaches something. The ordering in the script below matters — `"Pastor Dana
-Okafor"` must be rewritten before the bare `"Dana Okafor"`, or the honorific
+Reyes"` must be rewritten before the bare `"Marcus Reyes"`, or the honorific
 example silently loses its honorific.
 
 **Comments only, never behaviour.** `mcpbrain/chunking.py` holds a real list of
@@ -2096,9 +2096,9 @@ from pathlib import Path
 SUBS = [
     # "Pastor" is a NON-STANDARD honorific nameparser will not know; the example
     # exists to teach stripping exactly that, so the replacement keeps one.
-    ('"Pastor Dana Okafor" becomes `Dana Okafor`',
+    ('"Pastor Marcus Reyes" becomes `Marcus Reyes`',
      '"Principal Marcus Reyes" becomes `Marcus Reyes`'),
-    ("Dana Okafor", "Marcus Reyes"),
+    ("Marcus Reyes", "Marcus Reyes"),
     ('("Dana" = ', '("Marcus" = '),
     # bare first name -> full name resolution
     ("Marcus Reyes", "Dana Okafor"),
@@ -2126,7 +2126,7 @@ SUBS = [
     # --- added 2026-09-08 from the spec's corrected inventory ---
     # chunking.py's honorific COMMENT. The honorific LIST itself ("ps", "pastor")
     # is functional code — do NOT touch it, only the comment's example.
-    # NOTE both anchors below are ORDER-INDEPENDENT on purpose: "Dana Okafor" ->
+    # NOTE both anchors below are ORDER-INDEPENDENT on purpose: "Marcus Reyes" ->
     # "Marcus Reyes" runs earlier in this list, so an anchor containing the full
     # name would already have been rewritten by the time these run and would match
     # nothing, silently leaving "Ps Dana" in place. Anchor on the part that does
@@ -2134,9 +2134,9 @@ SUBS = [
     ('"Ps Dana" / "Pastor', '"Dr Priya" / "Principal'),
     ("extracted from 'Ps Dana'", "extracted from 'Dr Marcus'"),
     ("'Ps Dana' and 'Dana' share a key", "'Dr Marcus' and 'Marcus' share a key"),
-    ('"Dana" vs "J. Okafor"', '"Marcus" vs "M. Reyes"'),
-    ("'Dana' vs 'J. Okafor'", "'Marcus' vs 'M. Reyes'"),
-    ("'dana-okafor'", "'marcus-reyes'"),
+    ('"Dana" vs "M. Reyes"', '"Marcus" vs "M. Reyes"'),
+    ("'Dana' vs 'M. Reyes'", "'Marcus' vs 'M. Reyes'"),
+    ("'marcus-reyes'", "'marcus-reyes'"),
     ('"Dana budget"', '"Marcus budget"'),
     ("'Josh Kemp' to 'J.K.'", "'Dana Okafor' to 'D.O.'"),
     # prepare.py names Marcus REYES — a different surname, so a second real person.
@@ -2214,7 +2214,7 @@ verify with the tests in Step 4 rather than by eye.
 pytest tests/test_enrich_prompt_doc.py tests/test_chunking.py tests/test_resolve.py \
        tests/test_graph_cleanup.py tests/test_orgs.py -q
 ruff check .
-grep -rEni "marcus|okafor|donna k|optus|the church co|thechurchco|centrepoint|courageous|franz|\bcapes\b|josh kemp|ps dana|reyes" \
+grep -rEni "marcus|reyes|donna k|optus|the church co|thechurchco|centrepoint|courageous|franz|\bcapes\b|josh kemp|ps dana|reyes" \
      mcpbrain/ plugin/ --include="*.py" --include="*.md" --include="*.json" \
      --include="*.html" --include="*.ps1" | grep -v __pycache__
 grep -rEn "\bACCI?\b" mcpbrain/ plugin/ --include="*.py" --include="*.md" \
@@ -2224,7 +2224,7 @@ grep -rEn "\bACCI?\b" mcpbrain/ plugin/ --include="*.py" --include="*.md" \
 Two things about these greps, both learned the hard way:
 
 - **Case-insensitive, or it misses five files.** The lowercase slugs
-  `marcus-reyes` and `dana-okafor` appear in `cowork/enrichment.md`,
+  `marcus-reyes` and `marcus-reyes` appear in `cowork/enrichment.md`,
   `enrich_prompt.md`, `query_router.py`, `resolve.py` and `store.py`. Every
   case-sensitive survey of this work undercounted for exactly that reason.
 - **`\bcapes\b` must keep its word boundaries.** An unbounded `capes` matches the

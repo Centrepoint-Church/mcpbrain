@@ -32,7 +32,7 @@ def test_slugify_folds_accents():
 def test_slugify_ascii_cases_unchanged():
     """R1: accent-folding must not disturb existing ASCII behaviour."""
     assert slugify("Marcus Reyes") == "marcus-reyes"
-    assert slugify("ACC (National)") == "acc-national"
+    assert slugify("NCF (National)") == "ncf-national"
     assert slugify("") == ""
     assert slugify(None) == ""
 
@@ -166,7 +166,7 @@ def test_a_fully_packed_chunk_fits_the_embedder_window_once_prefixed():
             "sender": "Samuel Taylor <samuel.taylor@example.org>",
             "date": "Tue, 02 Jun 2026 16:30:01 +0800",
             "subject": "Hall B booking and the revised winter budget",
-            "org": "Centrepoint Church"}
+            "org": "Northgate Trust"}
     prefix = contextual_prefix(meta)
     assert len(prefix) > 100, f"prefix too short to discriminate: {len(prefix)}"
 
@@ -201,15 +201,15 @@ def test_the_headroom_is_not_taken_out_of_a_small_explicit_budget():
 
 def test_name_tokens_keeps_distinctive_tokens_only():
     from mcpbrain.chunking import name_tokens
-    assert name_tokens("Dana Okafor") == ["dana", "okafor"]
+    assert name_tokens("Marcus Reyes") == ["marcus", "reyes"]
     assert name_tokens("A B") == []          # nothing >= 4 chars
 
 
 def test_name_in_text_matches_full_name_and_tokens():
     from mcpbrain.chunking import name_in_text
-    assert name_in_text("Dana Okafor", "spoke to dana okafor today")
-    assert name_in_text("Dana Okafor", "ps dana will confirm")
-    assert not name_in_text("Dana Okafor", "nothing relevant here")
+    assert name_in_text("Marcus Reyes", "spoke to marcus reyes today")
+    assert name_in_text("Marcus Reyes", "ps marcus will confirm")
+    assert not name_in_text("Marcus Reyes", "nothing relevant here")
     assert not name_in_text("", "anything")
 
 

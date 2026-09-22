@@ -376,7 +376,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   Trust, The Lantern Co, Harbourview Arena, NCF/NCFI).
   **Task 11's A/B gate (attended, 2026-09-08) is DONE — result: PASS, no
   regression.** 3 real units claimed from the live queue (one heavily exercising
-  the exact "Ps Dana Okafor"/honorific-stripping case the old prompt's example
+  the exact "Ps Marcus Reyes"/honorific-stripping case the old prompt's example
   was built around, one a genuine `waiting_on` scenario, one mostly generic/
   low-signal content), each extracted twice — once following the rules the live
   daemon actually served (pre-rewrite, confirmed unmodified by this session's

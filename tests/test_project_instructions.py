@@ -1,7 +1,7 @@
 from mcpbrain.config import render_project_instructions
 
 
-def _cfg(name="Josh", orgs=("Centrepoint",), role="", full=""):
+def _cfg(name="Josh", orgs=("Northgate Trust",), role="", full=""):
     return {
         "owner_name": name,
         "owner_full_name": full,
@@ -35,11 +35,11 @@ def test_instructions_use_full_name_role_and_orgs():
     # The standing instructions should be framed in the owner's own details,
     # preferring their full name and folding in role + orgs.
     t = render_project_instructions(
-        _cfg(name="Josh", full="Joshua Kemp", role="Operations Manager", orgs=["Centrepoint Church"])
+        _cfg(name="Josh", full="Joshua Kemp", role="Operations Manager", orgs=["Northgate Trust"])
     )
     assert "Joshua Kemp" in t
     assert "Operations Manager" in t
-    assert "Centrepoint Church" in t
+    assert "Northgate Trust" in t
 
 
 def test_instructions_degrade_without_details():

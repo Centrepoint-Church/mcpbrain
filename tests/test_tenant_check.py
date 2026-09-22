@@ -238,7 +238,7 @@ def test_an_unreachable_marketplace_is_a_note_not_a_failure():
     """mcpbrain-plugin is PRIVATE by design, so an unauthenticated fetch always
     404s. Treating that as a failure made `check --online` exit 1 for the normal,
     correct configuration — and a check that is always red is one people learn to
-    ignore. Found live on 2026-09-09 against the real Centrepoint profile.
+    ignore. Found live on 2026-09-09 against the real bundled tenant profile.
     """
     prof = tenant.load_dict(_profile())
     drive = _FakeDrive({"FLEET1": _FOLDER, "ESCROW1": _FOLDER})
@@ -290,7 +290,7 @@ def test_no_online_test_falls_through_to_the_real_gh(monkeypatch):
 # --- the gold eval set is tenant data, not product ---
 
 def test_use_copies_the_gold_set_into_tests_eval(tenant_repo, fake_repo):
-    """tests/eval/golden_retrieval_set*.yaml held REAL Centrepoint content in a
+    """tests/eval/golden_retrieval_set*.yaml held REAL tenant content in a
     PUBLIC repo — named staff tied to employment agreements, an EOY review, and
     WWCC/Safer-Churches training status. The literal guard could never catch it:
     the spec deliberately excludes tests/ as "fixtures and history", which is

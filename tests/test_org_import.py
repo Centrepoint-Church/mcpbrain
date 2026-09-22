@@ -175,8 +175,8 @@ def test_tombstone_never_touches_colliding_local_entity(tmp_path):
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('me','Me','person','local')")
         db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin) "
                    "VALUES('me','mentioned_with','dup','local')")
-    _publish(fs, [_ent("dana-okafor", "Dana Okafor")], [], version=1,
-             tombstones=[Tombstone(entity_id="dup", merged_into="dana-okafor")])
+    _publish(fs, [_ent("marcus-reyes", "Marcus Reyes")], [], version=1,
+             tombstones=[Tombstone(entity_id="dup", merged_into="marcus-reyes")])
     org_import.import_snapshot(s, fs)
     dup = s.get_entity("dup")
     assert dup is not None and dup["origin"] == "local"      # never touched
@@ -254,19 +254,19 @@ def test_tombstone_repoints_local_references(tmp_path):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
-    _publish(fs, [_ent("dup", "Dup"), _ent("dana-okafor", "Dana Okafor")], [], version=1)
+    _publish(fs, [_ent("dup", "Dup"), _ent("marcus-reyes", "Marcus Reyes")], [], version=1)
     org_import.import_snapshot(s, fs)
     with s._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('doc','Doc','document','local')")
         db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin) "
                    "VALUES('doc','mentioned_with','dup','local')")
-    _publish(fs, [_ent("dana-okafor", "Dana Okafor")], [], version=2,
-             tombstones=[Tombstone(entity_id="dup", merged_into="dana-okafor")])
+    _publish(fs, [_ent("marcus-reyes", "Marcus Reyes")], [], version=2,
+             tombstones=[Tombstone(entity_id="dup", merged_into="marcus-reyes")])
     org_import.import_snapshot(s, fs)
     assert s.get_entity("dup") is None
     with s._connect() as db:
         row = db.execute("SELECT entity_b FROM entity_relations WHERE entity_a='doc'").fetchone()
-    assert row["entity_b"] == "dana-okafor"       # local ref re-pointed to the survivor
+    assert row["entity_b"] == "marcus-reyes"       # local ref re-pointed to the survivor
 
 
 def test_transitive_tombstone_chain_resolves_regardless_of_list_order(tmp_path):
@@ -306,20 +306,20 @@ def test_slug_drift_email_equality_merges_local_into_org(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:                        # local variant with a private observation
         db.execute("INSERT INTO entities(id,name,type,email_addr,origin,mentions) "
-                   "VALUES('dana-c','Dana C','person','dana@acme.org','local',3)")
+                   "VALUES('marcus-r','Marcus R','person','marcus@acme.org','local',3)")
         db.execute("INSERT INTO entity_observations(entity_id,attribute,value,source,valid_from) "
-                   "VALUES('dana-c','note','private','local','2026-01-01')")
-    _publish(fs, [_ent("dana-okafor", "Dana Okafor", email_addr="dana@acme.org")],
+                   "VALUES('marcus-r','note','private','local','2026-01-01')")
+    _publish(fs, [_ent("marcus-reyes", "Marcus Reyes", email_addr="marcus@acme.org")],
              [], version=1)
     org_import.import_snapshot(s, fs)
-    assert s.get_entity("dana-c") is None            # local merged away
-    surv = s.get_entity("dana-okafor")
+    assert s.get_entity("marcus-r") is None            # local merged away
+    surv = s.get_entity("marcus-reyes")
     assert surv is not None and surv["origin"] == "org"   # org node survives
     with s._connect() as db:
         obs = db.execute("SELECT entity_id FROM entity_observations WHERE attribute='note'").fetchone()
         rep = db.execute("SELECT from_entity_id,to_entity_id FROM org_repoint_log").fetchone()
-    assert obs["entity_id"] == "dana-okafor"       # private flesh re-attached
-    assert (rep["from_entity_id"], rep["to_entity_id"]) == ("dana-c", "dana-okafor")
+    assert obs["entity_id"] == "marcus-reyes"       # private flesh re-attached
+    assert (rep["from_entity_id"], rep["to_entity_id"]) == ("marcus-r", "marcus-reyes")
 
 
 def test_role_address_pair_never_auto_merges(tmp_path):
@@ -343,8 +343,8 @@ def test_role_address_org_entity_never_merges_via_fuzzy_name_match(tmp_path):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     s = _store(tmp_path)
     with s._connect() as db:                        # real person, no email at all
-        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('dana-local','Dana Okafor','person','local')")
-    _publish(fs, [_ent("office-org", "Dana Okafor", email_addr="office@acme.org")], [], version=1)
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('dana-local','Marcus Reyes','person','local')")
+    _publish(fs, [_ent("office-org", "Marcus Reyes", email_addr="office@acme.org")], [], version=1)
     org_import.import_snapshot(s, fs)
     assert s.get_entity("dana-local") is not None    # NOT merged into the role inbox
 

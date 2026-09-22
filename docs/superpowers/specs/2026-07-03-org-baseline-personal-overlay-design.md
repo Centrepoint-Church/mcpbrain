@@ -360,18 +360,18 @@ AI-adjudicated, reversible, capped appliers, per the 0.7.84 hardening):
   relations/observations attached, it is demoted to `origin='local'` instead of deleted
   (unless tombstoned as a mis-merge, in which case local references are re-pointed to
   the tombstone's `merged_into` target).
-- **Same-slug collision** (org and local both know `dana-okafor`): one entity row.
+- **Same-slug collision** (org and local both know `marcus-reyes`): one entity row.
   Org snapshot supplies name/type/org/email_addr; local aliases, mentions, profile and
   all local relations/observations are preserved on top. The row is marked
   `origin='org'` with local enrichment intact — org is the skeleton, personal is the
   flesh.
 - **Cross-layer edges are free by construction:** a layer-2 relation (e.g.
-  `document → mentions → dana-okafor`, or a private observation on an org person)
+  `document → mentions → marcus-reyes`, or a private observation on an org person)
   is an ordinary local row pointing at whatever entity row owns that slug, org-origin
   or not. There is no bridge table and no layer awareness in recall/graph traversal —
   mixed-origin neighborhoods are just the graph.
 - **Slug-drift reconciliation:** deterministic keying can split one person across two
-  nodes when the local variant differs (`dana-c` locally vs `dana-okafor` in the
+  nodes when the local variant differs (`marcus-r` locally vs `marcus-reyes` in the
   snapshot), stranding local observations on the orphan. At import time, incoming org
   entities are reconciled against existing local entities using the existing
   `resolve.py` machinery: email-equality merges deterministically (role-address guard
@@ -465,8 +465,8 @@ shared content" to "minutes of downloads + enrichment spend only on their person
 - **Import semantics:** wholesale-replace per origin never touches local rows;
   tombstone suppression; same-slug merge preserves local aliases/profile; transactional
   rollback on injected failure.
-- **Slug-drift reconciliation:** local `dana-c` with private observations + snapshot
-  `dana-okafor` sharing an email or alias → single node with observations intact;
+- **Slug-drift reconciliation:** local `marcus-r` with private observations + snapshot
+  `marcus-reyes` sharing an email or alias → single node with observations intact;
   ambiguous name-only pairs land in the fuzzy queue, never auto-merge; role-address
   pairs never merge.
 - **Cross-layer merge rules:** local `resolve_entities`/appliers presented an org↔org

@@ -48,7 +48,7 @@ def _ext():
         "summary": "Dana asks Sam to confirm Hall B availability for Wednesday college.",
         "contextual_summary": "Term-one room booking follow-up.",
         "entities": [
-            {"name": "Dana Okafor", "type": "person", "org": "Acme",
+            {"name": "Marcus Reyes", "type": "person", "org": "Acme",
              "role": "Senior Pastor"},
             {"name": "Acme Corp", "type": "org", "org": "Acme",
              "role": ""},
@@ -63,7 +63,7 @@ def _ext():
         "resolved_action_ids": [], "updated_actions": [], "relations": [],
         "messages": [
             {"message_id": "m-1",
-             "sender": "Dana Okafor <dana@example.org>",
+             "sender": "Marcus Reyes <dana@example.org>",
              "date": "2026-04-18", "labels": "INBOX",
              "subject": "Hall B for Wednesday college"},
         ],
@@ -82,7 +82,7 @@ def test_build_semantic_doc_text():
     # Summary line.
     assert "Dana asks" in text and "Hall B" in text
     # People line names the relevant person.
-    assert "People: Dana Okafor" in text
+    assert "People: Marcus Reyes" in text
     # Actions line.
     assert "Actions:" in text
     assert "Confirm Hall B is free for Wednesday college." in text

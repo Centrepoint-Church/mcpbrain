@@ -196,7 +196,7 @@ merge_answers:
 Use the pair's pair_id verbatim. When same is false, canonical is an empty
 string. Guidance:
 
-Initials and short forms can match a full name ("Dana" = "Dana Okafor").
+Initials and short forms can match a full name ("Dana" = "Marcus Reyes").
 Different surnames or different initials are different people ("Daniel P" is
 not "Daniel F").
 When unsure, answer false.

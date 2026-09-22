@@ -41,9 +41,9 @@ def test_account_email_uses_google_account_when_profile_not_saved(tmp_path, monk
     # user fills the profile step (owner_email blank). The escrow is keyed by the
     # Google account email — the daemon's `google_account` sidecar — so use it.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    (tmp_path / "google_account").write_text("josh.k@centrepoint.church\n")
+    (tmp_path / "google_account").write_text("josh.k@northgatetrust.org\n")
     config.write_config(str(tmp_path), {})  # profile not saved → no owner_email
-    assert restore.account_email(str(tmp_path)) == "josh.k@centrepoint.church"
+    assert restore.account_email(str(tmp_path)) == "josh.k@northgatetrust.org"
 
 
 def test_account_email_prefers_owner_email_over_sidecar(tmp_path, monkeypatch):

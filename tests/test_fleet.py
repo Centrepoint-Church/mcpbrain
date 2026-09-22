@@ -37,8 +37,8 @@ def _beacon(email, *, ver="0.6.0", reported_at=None, daemon_heartbeat=None, prob
 
 
 def test_generate_report_renders_one_row_per_user_with_colour_classes():
-    html = fleet.generate_report([_beacon("john@centrepoint.church")])
-    assert "john@centrepoint.church" in html
+    html = fleet.generate_report([_beacon("john@northgatetrust.org")])
+    assert "john@northgatetrust.org" in html
     assert "0.6.0" in html
     # colour-coded probe cells: green=ok, amber=needs_action, grey=not_started
     assert "probe-ok" in html
@@ -49,13 +49,13 @@ def test_generate_report_renders_one_row_per_user_with_colour_classes():
 
 def test_generate_report_flags_stale_rows_over_48h():
     old = (datetime.now(timezone.utc) - timedelta(hours=49)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    html = fleet.generate_report([_beacon("mike@centrepoint.church", reported_at=old)])
+    html = fleet.generate_report([_beacon("mike@northgatetrust.org", reported_at=old)])
     assert "stale" in html  # ⚠️ stale badge present on the row
 
 
 def test_generate_report_fresh_row_not_stale():
     fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    html = fleet.generate_report([_beacon("sarah@centrepoint.church", reported_at=fresh)])
+    html = fleet.generate_report([_beacon("sarah@northgatetrust.org", reported_at=fresh)])
     # the fresh row must not carry the stale badge
     assert 'class="stale"' not in html
 
@@ -109,17 +109,17 @@ def _read_uploaded_json(store):
 def test_write_beacon_uploads_user_email_json_with_required_fields(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     from mcpbrain import config, probes
-    config.write_config(str(tmp_path), {"owner_email": "john@centrepoint.church",
+    config.write_config(str(tmp_path), {"owner_email": "john@northgatetrust.org",
                                         "fleet": {"folder_id": "FLEET1"}})
     monkeypatch.setattr(probes, "all_connections",
                         lambda home, store=None: {"google": {"state": "ok", "detail": "Connected"}})
     store = {"listed": []}  # file does not yet exist -> create path
     fleet.write_beacon(str(tmp_path), _FakeDrive(store))
     rec = store["created"][0]
-    assert rec["body"]["name"] == "john@centrepoint.church.json"
+    assert rec["body"]["name"] == "john@northgatetrust.org.json"
     assert rec["body"]["parents"] == ["FLEET1"]
     payload = _read_uploaded_json(store)
-    assert payload["user_email"] == "john@centrepoint.church"
+    assert payload["user_email"] == "john@northgatetrust.org"
     assert payload["mcpbrain_version"]
     assert payload["reported_at"].endswith("Z")
     assert payload["probes"]["google"]["state"] == "ok"
@@ -444,12 +444,12 @@ def test_write_report_uploads_status_html_excluding_org_config(tmp_path, monkeyp
     config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
     store = {
         "listed": [
-            {"id": "A", "name": "john@centrepoint.church.json"},
+            {"id": "A", "name": "john@northgatetrust.org.json"},
             {"id": "B", "name": "org-config.json"},       # must be excluded
             {"id": "C", "name": "bad.json"},               # malformed -> skipped
         ],
         "media_by_id": {
-            "A": json.dumps(_beacon("john@centrepoint.church")).encode(),
+            "A": json.dumps(_beacon("john@northgatetrust.org")).encode(),
             "C": b"{not json",
         },
     }
@@ -460,7 +460,7 @@ def test_write_report_uploads_status_html_excluding_org_config(tmp_path, monkeyp
     # the uploaded HTML contains the valid beacon's user row
     media = rec["media_body"]
     html = media.getbytes(0, media.size()).decode()
-    assert "john@centrepoint.church" in html
+    assert "john@northgatetrust.org" in html
     assert "org-config" not in html  # org-config.json never parsed as a beacon
 
 

@@ -25,15 +25,15 @@ def test_member_curator_consumer_round_trip(tmp_path):
     # (1) alice's local graph learns dana works_at acme; contribute + upload.
     # Entity ids are deterministic name-slugs (graph_write.slugify), matching
     # what a real local extraction via graph_write.upsert_entity would have
-    # produced for "Dana Okafor" -- using anything else here would make this
+    # produced for "Marcus Reyes" -- using anything else here would make this
     # a test-harness artifact, not a realistic round trip.
     a = alice.store
     with a._connect() as db:
         db.execute("INSERT INTO entities(id,name,type,email_addr,origin) "
-                   "VALUES('dana-okafor','Dana Okafor','person','dana@acme.org','local')")
+                   "VALUES('marcus-reyes','Marcus Reyes','person','dana@acme.org','local')")
         db.execute("INSERT INTO entities(id,name,type,origin) VALUES('acme','Acme','org','local')")
     from mcpbrain import graph_write
-    graph_write.upsert_relation(a, "dana-okafor", "works_at", "acme", valid_from="2026-01-01",
+    graph_write.upsert_relation(a, "marcus-reyes", "works_at", "acme", valid_from="2026-01-01",
                                 source_doc_id="msg-1")
     with a._connect() as db:                          # give the provenance chunk a source_type
         db.execute("INSERT INTO chunks(doc_id,text,content_hash,metadata,enrich_state) "
@@ -49,9 +49,9 @@ def test_member_curator_consumer_round_trip(tmp_path):
     # (3) bob imports the snapshot as origin='org'
     res = org_import.import_snapshot(bob.store, fs)
     assert res["status"] == "imported"
-    dana = bob.store.get_entity("dana-okafor")
+    dana = bob.store.get_entity("marcus-reyes")
     assert dana is not None and dana["origin"] == "org"
     with bob.store._connect() as db:
-        rel = db.execute("SELECT origin FROM entity_relations WHERE entity_a='dana-okafor' "
+        rel = db.execute("SELECT origin FROM entity_relations WHERE entity_a='marcus-reyes' "
                          "AND relation='works_at'").fetchone()
     assert rel is not None and rel["origin"] == "org"

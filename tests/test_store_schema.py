@@ -117,9 +117,9 @@ def test_store_link_email_entity(tmp_path):
     # real caller (graph_write.apply) upserts the entity before linking it.
     with s._connect(write=True) as db:
         db.execute("INSERT INTO entities(id,name,type) "
-                   "VALUES('dana-okafor','Dana Okafor','person')")
-    s.link_email_entity("m-1", "dana-okafor", role="sender")
-    s.link_email_entity("m-1", "dana-okafor", role="mentioned")  # no-op re-link
+                   "VALUES('marcus-reyes','Marcus Reyes','person')")
+    s.link_email_entity("m-1", "marcus-reyes", role="sender")
+    s.link_email_entity("m-1", "marcus-reyes", role="mentioned")  # no-op re-link
     with s._connect() as db:
         rows = [dict(r) for r in db.execute(
             "SELECT * FROM email_entities WHERE message_id='m-1'").fetchall()]

@@ -22,7 +22,7 @@ def _digest(text: str, meta: dict) -> dict:
 
 
 def test_date_is_recovered_from_the_digest_text():
-    d = _digest("[ACC] Email: Hall B booking\n"
+    d = _digest("[NCF] Email: Hall B booking\n"
                 "From: sam@example.com\n"
                 "Date: Tue, 02 Jun 2026 16:30:01 +0800\n"
                 "Type: request\n\nConfirmed for Sunday.",
@@ -38,7 +38,7 @@ def test_the_date_parse_cannot_swallow_the_following_line():
     the next line as its value — measured live, that produced
     'Type: notification' as a date for every calendar digest. Horizontal
     whitespace only."""
-    d = _digest("[ACC] Email: ACC State Leaders Gathering\n"
+    d = _digest("[NCF] Email: NCF State Leaders Gathering\n"
                 "From: \n"
                 "Date: \n"
                 "Type: notification",
@@ -125,7 +125,7 @@ def test_a_digest_with_no_recoverable_date_is_left_alone():
     """6,530 email digests had no Date line at enrichment time. Nothing to
     invent — and re-enrichment cannot recover it either, since their source
     chunks are pruned."""
-    d = _digest("[ACC] Email: Something\n\nA summary with no header block.",
+    d = _digest("[NCF] Email: Something\n\nA summary with no header block.",
                 {"source_type": "gmail_enriched_v2", "thread_id": "t-1"})
 
     assert derive_patch(d) == {}

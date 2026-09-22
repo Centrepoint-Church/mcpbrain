@@ -73,14 +73,14 @@ def test_small_graph_is_untouched_and_not_flagged(tmp_path):
     """The ordinary case keeps exactly today's behaviour and reports no bounding."""
     s = Store(str(tmp_path / "s.sqlite3"), dim=4)
     s.init()
-    for e in ("marcus-reyes", "dana-okafor"):
+    for e in ("marcus-reyes", "marcus-reyes"):
         s.upsert_entity(e, e.replace("-", " ").title(), "person")
     s.upsert_entity("college-2026", "College 2026", "project")
-    s.add_relation("marcus-reyes", "reports_to", "dana-okafor", "doc-1")
+    s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", "doc-1")
     s.add_relation("marcus-reyes", "works_on", "college-2026", "doc-2")
     out = asyncio.run(make_brain_graph(s)("marcus-reyes", 2))
     assert {n["id"] for n in out["nodes"]} == {
-        "marcus-reyes", "dana-okafor", "college-2026"}
+        "marcus-reyes", "marcus-reyes", "college-2026"}
     assert out["truncated"] is False
     assert out["hubs_not_expanded"] == []
 

@@ -1,13 +1,13 @@
 {
   "thread_id": "t-multi-002",
-  "org": "ACC",
+  "org": "NCF",
   "content_type": "update",
   "summary": "Marcus raises a CAMS field-audit task, Sam scopes it, and Marcus confirms it is now closed.",
   "contextual_summary": "Three-message thread on the CAMS review; the audit action raised in the first message is resolved by the third.",
   "entities": [
     {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": "Executive Pastor"},
     {"name": "Sam Chen", "type": "person", "org": "Acme", "role": ""},
-    {"name": "CAMS Review", "type": "project", "org": "ACC", "role": ""}
+    {"name": "CAMS Review", "type": "project", "org": "NCF", "role": ""}
   ],
   "topics": ["cams", "salesforce", "audit"],
   "actions": [

@@ -61,7 +61,7 @@ def _make_db(path: Path) -> None:
                 # overdue
                 ("Overdue task A", "open", yesterday, "Acme", "next", None, "email"),
                 # due today
-                ("Due today task B", "open", today, "ACC", "scheduled", None, "manual"),
+                ("Due today task B", "open", today, "NCF", "scheduled", None, "manual"),
                 # upcoming with deadline
                 ("Upcoming task C", "open", tomorrow, "", "next", None, "email"),
                 # upcoming without deadline (no deadline = upcoming)

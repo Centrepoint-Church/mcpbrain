@@ -344,7 +344,7 @@ it sits in a public repository. Full inventory:
 
 | File | Occurrences |
 |---|---|
-| `mcpbrain/enrich_prompt.md` | 15 — Marcus Reyes, Dana Okafor, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `marcus-reyes` |
+| `mcpbrain/enrich_prompt.md` | 15 — Marcus Reyes, Marcus Reyes, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `marcus-reyes` |
 | `plugin/agents/enrich-batch.md` | the same 15 — **generated**, kept byte-identical by `bin/sync_agents.py` |
 | `mcpbrain/cowork/enrichment.md` | 3 |
 | `mcpbrain/routines/meeting-packs.md` | 1 — attendee list |
@@ -352,11 +352,11 @@ it sits in a public repository. Full inventory:
 | `mcpbrain/wizard/index.html` | 3 — see below |
 | `mcpbrain/orgs.py` | 4 — fold-logic comments, incl. `"ACC"` vs `"ACCI"` |
 | `mcpbrain/graph_write.py` | 4 — display-form `"ACC"`; `"Franz from The Church Co"` ×3 |
-| `mcpbrain/resolve.py` | 4 — `"Dana"` / `"J. Okafor"`, `'Ps Dana'`, the slug `'dana-okafor'` |
-| `mcpbrain/chunking.py` | 2 — honorific comment `"Ps Dana"` / `"Pastor Dana Okafor"`; `slugify` docstring |
-| `mcpbrain/query_router.py` | 2 — `'dana-okafor'`, `"Marcus Reyes Centrepoint Maddington"` |
+| `mcpbrain/resolve.py` | 4 — `"Dana"` / `"M. Reyes"`, `'Ps Dana'`, the slug `'marcus-reyes'` |
+| `mcpbrain/chunking.py` | 2 — honorific comment `"Ps Dana"` / `"Pastor Marcus Reyes"`; `slugify` docstring |
+| `mcpbrain/query_router.py` | 2 — `'marcus-reyes'`, `"Marcus Reyes Centrepoint Maddington"` |
 | `mcpbrain/maintenance/graph_cleanup.py` | 2 — org-tag drift example |
-| `mcpbrain/config.py` | 1 — `'Dana Okafor' extracted from 'Ps Dana'` |
+| `mcpbrain/config.py` | 1 — `'Marcus Reyes' extracted from 'Ps Dana'` |
 | `mcpbrain/graph_view.py` | 1 — `merging never downgrades 'Josh Kemp' to 'J.K.'` |
 | `mcpbrain/prepare.py` | 1 — `('Pete\|Peter', 'Marcus Reyes\|Marcus')` |
 | `mcpbrain/store.py` | 1 — `(handles "Marcus Reyes" -> "marcus-reyes")` |
@@ -371,7 +371,7 @@ recording because it is the same mistake each time: every survey used a *narrowe
 pattern than the last. The prompt-directory sweep never looked at `.py` files; the
 follow-up sweep looked at `.py` files but searched only for org identifiers
 (`centrepoint`, `ACC`), not people; and neither was case-insensitive, so the
-lowercase slugs `marcus-reyes` and `dana-okafor` — which appear in five files —
+lowercase slugs `marcus-reyes` and `marcus-reyes` — which appear in five files —
 matched nothing. **The inventory above was produced by one case-insensitive pass over
 every shipped `.py`/`.md`/`.json`/`.html`/`.ps1` file with the full pattern set, and
 that pass is the one to re-run, not any of the narrower greps.**
@@ -415,17 +415,17 @@ lesson while leaving the sentence standing:
 | Current | What it teaches | Replacement |
 |---|---|---|
 | "Marcus" → `waiting_on: "Marcus Reyes"` | bare first name resolves to a full name | "Dana" → "Dana Okafor" |
-| "Pastor Dana Okafor" → `Dana Okafor` | strip a **non-standard** honorific `nameparser` will not know | "Principal Marcus Reyes" → `Marcus Reyes` |
+| "Pastor Marcus Reyes" → `Marcus Reyes` | strip a **non-standard** honorific `nameparser` will not know | "Principal Marcus Reyes" → `Marcus Reyes` |
 | "Franz from The Church Co" → `Franz`, org "The Church Co" | strip an employer phrase whose org name is an article plus a common noun | "Priya from The Lantern Co" → `Priya`, org "The Lantern Co" |
 | `Franz from The Church Co <franz@thechurchco.com>` | the same in a header, with a matching domain | `Priya from The Lantern Co <priya@thelanternco.com>` |
 | "the Optus Stadium team" → `Optus Stadium` | strip the `the … team` wrapper from a venue name | "the Harbourview Arena team" → `Harbourview Arena` |
 | "moved from Centrepoint Church to Capes Community Church" | `org_move` between two same-type orgs sharing a common noun | "moved from Northgate Trust to Southbank Community Trust" |
-| "Dana" = "Dana Okafor"; `canonical: "Dana Okafor"` | a short form matching a full name | "Marcus" = "Marcus Reyes" |
+| "Dana" = "Marcus Reyes"; `canonical: "Marcus Reyes"` | a short form matching a full name | "Marcus" = "Marcus Reyes" |
 | `[ACC]` | a short bracketed document-category tag | `[NCF]` |
 | "Donna K, ACC finance lead" | abbreviated surname + role + org = a statement of the person's **own** affiliation | "Rina T, NCF finance lead" |
 | **"ACC" vs "ACCI"** | a shared-prefix acronym pair likely naming genuinely **different** orgs — paired in the same sentence against "Acme Corp" vs "Acme Corporation" as the typo case | **"NCF" vs "NCFI"** — same prefix-plus-one-letter shape |
 | `{"entity_id": "marcus-reyes", "profile": "Executive Pastor at..."}` | a slug id plus a role-and-org profile string | `{"entity_id": "dana-okafor", "profile": "Operations Director at..."}` |
-| `Dana Okafor,Sam Admin` (meeting-packs) | a comma-joined attendee list | `Marcus Reyes,Sam Admin` |
+| `Marcus Reyes,Sam Admin` (meeting-packs) | a comma-joined attendee list | `Marcus Reyes,Sam Admin` |
 | `(e.g. "Centrepoint")` (bootstrap skill) | a short org name | `(e.g. "Northgate Trust")` |
 
 One fictional cast is used consistently across all six files — **Dana Okafor,

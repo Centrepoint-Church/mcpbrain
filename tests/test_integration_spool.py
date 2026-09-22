@@ -97,7 +97,7 @@ def _seed_chunk(store, doc_id, thread_id, message_id, date="2026-04-18"):
 
 
 def _message_for(thread_id, message_id, date="2026-04-18",
-                 sender="Dana Okafor <dana@example.org>"):
+                 sender="Marcus Reyes <dana@example.org>"):
     return {
         "message_id": message_id,
         "sender": sender,
@@ -242,13 +242,13 @@ def test_round_trip_with_merge_answers(store, home, monkeypatch):
     batches, messages_by_thread = _two_thread_setup(store)
 
     # Seed two similar entities the real candidate finder will flag: same type,
-    # shared 'dana'/'okafor' tokens, high token-set ratio, different canonical
+    # shared 'dana'/'reyes' tokens, high token-set ratio, different canonical
     # keys (so the deterministic tier leaves them for LLM adjudication).
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person",
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person",
                         "Acme", "2026-04-01")
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person",
+    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person",
                         "Acme", "2026-04-02")  # mentions=2 -> winner
-    store.upsert_entity("dana-okafor-snr", "Dana Okafor Snr", "person",
+    store.upsert_entity("marcus-reyes-snr", "Marcus Reyes Snr", "person",
                         "Acme", "2026-04-01")  # mentions=1 -> loser
 
     # Real _merge_review_block (merge_review_pairs left None).
@@ -266,16 +266,16 @@ def test_round_trip_with_merge_answers(store, home, monkeypatch):
     assert summary["merges"] == 1
     # the loser folded into the winner: one fewer entity than before the drain,
     # offset by any new entities apply created. Assert the merge directly.
-    assert store.get_entity("dana-okafor-snr") is None
-    assert store.get_entity("dana-okafor") is not None
+    assert store.get_entity("marcus-reyes-snr") is None
+    assert store.get_entity("marcus-reyes") is not None
     merges = store.list_entity_merges()
-    assert any(m["winner_id"] == "dana-okafor"
-               and m["loser_id"] == "dana-okafor-snr"
+    assert any(m["winner_id"] == "marcus-reyes"
+               and m["loser_id"] == "marcus-reyes-snr"
                and m["method"] == "llm" for m in merges)
     # the structural apply still ran for both threads
     assert summary["applied"] == 2
-    # sanity: the two seeded entities (dana-okafor collapses two upserts into
-    # one id with mentions=2, plus dana-okafor-snr) were present before drain.
+    # sanity: the two seeded entities (marcus-reyes collapses two upserts into
+    # one id with mentions=2, plus marcus-reyes-snr) were present before drain.
     assert ents_before_drain >= 2
 
 
@@ -310,7 +310,7 @@ def test_real_phase1_round_trip(store, home, monkeypatch):
     """
     # Human thread: lead sender is a real person -> kept.
     _seed_real_chunk(store, "d-human", "t-human", "m-human-1",
-                     sender="Dana Okafor <dana@example.org>",
+                     sender="Marcus Reyes <dana@example.org>",
                      subject="Hall B for Wednesday college")
     # Noise thread: lead sender is automated (noreply) -> dropped by the filter.
     _seed_real_chunk(store, "d-noise", "t-noise", "m-noise-1",
