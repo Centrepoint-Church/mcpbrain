@@ -102,6 +102,43 @@ the cursor is a watermark and every write is checkpointed by id+hash.
 4. **Keep the snapshots.** Three snapshots at different times are what made the cause
    datable and the fix targeted rather than a wholesale restore.
 
+## HISTORY REWRITTEN AGAIN — 2026-09-22, two real people's names
+
+**Two real people's names were in this PUBLIC repo's `tests/` and docs, and are
+now removed from every commit.** `git filter-repo --replace-text
+--replace-message --refs refs/heads/main`, force-pushed to `main`.
+
+**How they got there and why nothing caught them.** `tests/test_no_tenant_literals.py`
+was blind twice over: `_ROOTS` was `("mcpbrain", "plugin")` so `tests/` was never
+scanned, and its patterns only covered ORG names — no person name would have been
+caught even if it had scanned. Both blind spots are now closed: `tests` is in
+`_ROOTS`, and a person-name check reads an OPTIONAL `mcpbrain/tenant_people.json`
+that is **gitignored** and copied in by `bin/tenant.py use`, exactly like the gold
+eval sets — a guard that listed real names in a public repo would defeat itself.
+It skips honestly when the file is absent, so a fork gets a clean skip.
+Adding `tests` to `_ROOTS` surfaced ~190 further org-name hits across ~40 files;
+all renamed to the neutral fictional cast.
+
+**Verified.** Fresh clone (what a fork gets): **0 occurrences across all 1,457
+commits**, content and commit messages. `gh-pages` was NOT touched — it is an
+orphan branch, held none of the names, and its SHA is unchanged, so the published
+wheel index and every install are unaffected. Only `main` was force-pushed.
+Conditions were the same ones that made the 2026-09-09 rewrite safe and will not
+recur: 0 forks, 0 stars, 0 watchers.
+
+**SHAs remapped, as the last rewrite's rule requires.** 19 SHAs this file cited
+moved; all were remapped through `filter-repo`'s `commit-map` and spot-checked to
+still name the same commit (the 0.7.128 SHA still resolves to
+"chore(release): bump to 0.7.128", etc.). **Any future rewrite must do the same.**
+
+**What this does NOT do.** As with the OAuth client: **GitHub still serves the
+pre-rewrite commits at their old SHAs** — verified immediately after the push
+(`commits/9ac8aebd` resolves, and `contents/tests/test_store.py?ref=9ac8aebd`
+still returns 73,567 bytes). Unreferenced objects stay reachable until GitHub GCs
+them; **ask GitHub Support to purge the cached views to close that.** A rewrite
+stops PROPAGATION; it cannot un-publish. Unlike the OAuth secret there is no
+rotation equivalent — a name is a name.
+
 ## anarlog meeting source (added 2026-09-22, source-only, NOT released)
 
 Ingests meetings (AI notes, summaries, transcripts) from **anarlog**
