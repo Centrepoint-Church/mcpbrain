@@ -2101,9 +2101,9 @@ SUBS = [
     ("Marcus Reyes", "Marcus Reyes"),
     ('("Dana" = ', '("Marcus" = '),
     # bare first name -> full name resolution
-    ("Marcus Reyes", "Dana Okafor"),
-    ('"Marcus"', '"Dana"'),
-    ("marcus-reyes", "dana-okafor"),
+    ("Dana Okafor", "Dana Okafor"),
+    ('"Dana"', '"Dana"'),
+    ("dana-okafor", "dana-okafor"),
     ("Executive Pastor at...", "Operations Director at..."),
     # employer phrase whose org is an article + a common noun
     ("franz@thechurchco.com", "priya@thelanternco.com"),
@@ -2139,10 +2139,11 @@ SUBS = [
     ("'marcus-reyes'", "'marcus-reyes'"),
     ('"Dana budget"', '"Marcus budget"'),
     ("'Josh Kemp' to 'J.K.'", "'Dana Okafor' to 'D.O.'"),
-    # prepare.py names Marcus REYES — a different surname, so a second real person.
-    ("'Marcus Reyes|Marcus'", "'Dana Okafor|Dana'"),
+    # prepare.py named a variant surname of the same real person — folded to
+    # the same fictional identity used everywhere else.
+    ("'Dana Okafor|Dana'", "'Dana Okafor|Dana'"),
     # store.py's slugify reference, same example as chunking.py's docstring.
-    ('handles "Marcus Reyes" -> "marcus-reyes"',
+    ('handles "Dana Okafor" -> "dana-okafor"',
      'handles "Dana Okafor" -> "dana-okafor"'),
     # resolve.py's diacritic-folding example needs A diacritic name, not none.
     ("'Chané' and 'Chane' share a key", "'Renée' and 'Renee' share a key"),
@@ -2214,7 +2215,7 @@ verify with the tests in Step 4 rather than by eye.
 pytest tests/test_enrich_prompt_doc.py tests/test_chunking.py tests/test_resolve.py \
        tests/test_graph_cleanup.py tests/test_orgs.py -q
 ruff check .
-grep -rEni "marcus|reyes|donna k|optus|the church co|thechurchco|centrepoint|courageous|franz|\bcapes\b|josh kemp|ps dana|reyes" \
+grep -rEni "dana|reyes|donna k|optus|the church co|thechurchco|centrepoint|courageous|franz|\bcapes\b|josh kemp|ps dana|okafor" \
      mcpbrain/ plugin/ --include="*.py" --include="*.md" --include="*.json" \
      --include="*.html" --include="*.ps1" | grep -v __pycache__
 grep -rEn "\bACCI?\b" mcpbrain/ plugin/ --include="*.py" --include="*.md" \
@@ -2224,7 +2225,7 @@ grep -rEn "\bACCI?\b" mcpbrain/ plugin/ --include="*.py" --include="*.md" \
 Two things about these greps, both learned the hard way:
 
 - **Case-insensitive, or it misses five files.** The lowercase slugs
-  `marcus-reyes` and `marcus-reyes` appear in `cowork/enrichment.md`,
+  `dana-okafor` and `marcus-reyes` appear in `cowork/enrichment.md`,
   `enrich_prompt.md`, `query_router.py`, `resolve.py` and `store.py`. Every
   case-sensitive survey of this work undercounted for exactly that reason.
 - **`\bcapes\b` must keep its word boundaries.** An unbounded `capes` matches the

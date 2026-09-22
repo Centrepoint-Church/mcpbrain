@@ -211,7 +211,7 @@ def test_guard_shop_floor_walkthrough_not_noise():
     # Fix 3: adjacency required. "Shop floor walkthrough today" must NOT match
     # the tightened \bshop (?:now|today)\b pattern.
     assert prepare.thread_is_noise([
-        _msg("m1", "marcus@example.org", "2026-06-01",
+        _msg("m1", "dana@example.org", "2026-06-01",
              "Shop floor walkthrough today",
              "Can we do the op-shop walkthrough at 2pm?"),
     ]) is False
@@ -331,7 +331,7 @@ def test_prepare_units_scopes_a_real_people_pool_into_the_unit(tmp_path, monkeyp
     (tmp_path / "config.json").write_text('{"salience_gate": false}')
     good = FakeBatch("t-good", ["d-g1"],
                      [_msg("m2", "dana@example.org", "2026-06-01", "Hall B",
-                           "Can you confirm Hall B with Marcus Reyes on Sunday?")])
+                           "Can you confirm Hall B with Dana Okafor on Sunday?")])
     store = FakeStore()
     monkeypatch.setattr(prepare, "_group_unenriched_threads",
                         lambda store, **kw: [good])
@@ -339,7 +339,7 @@ def test_prepare_units_scopes_a_real_people_pool_into_the_unit(tmp_path, monkeyp
     monkeypatch.setattr(prepare, "_org_domain_lines", lambda: [])
     core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
     pool = [
-        {"id": "p1", "name": "Marcus Reyes", "org": "Acme", "role": "Pastor",
+        {"id": "p1", "name": "Dana Okafor", "org": "Acme", "role": "Pastor",
          "aliases": []},
         {"id": "p2", "name": "Nobody Elsewhere", "org": "Acme", "role": "X",
          "aliases": []},
@@ -1162,13 +1162,13 @@ def test_scoped_known_people_keeps_core_and_mentioned_only():
     from mcpbrain.prepare import _build_people_index, _scoped_known_people
     core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
     pool = [
-        {"id": "p1", "name": "Marcus Reyes", "org": "Acme", "role": "Pastor",
+        {"id": "p1", "name": "Dana Okafor", "org": "Acme", "role": "Pastor",
          "aliases": []},
         {"id": "p2", "name": "Nobody Mentioned", "org": "Acme", "role": "X",
          "aliases": []},
     ]
     out = _scoped_known_people(core, _build_people_index(pool),
-                               "please ask marcus reyes about hall b")
+                               "please ask dana okafor about hall b")
     ids = [p["id"] for p in out]
     assert "c1" in ids and "p1" in ids and "p2" not in ids
 
@@ -1291,7 +1291,7 @@ def test_scoped_known_people_respects_the_cap_and_keeps_core_first():
 def test_write_units_writes_context_into_each_unit(tmp_path):
     from mcpbrain.prepare import write_units
     data = {"threads": [{"thread_id": "t1",
-                         "messages": [{"message_id": "m1", "text": "hi marcus"}]}],
+                         "messages": [{"message_id": "m1", "text": "hi dana"}]}],
             "context": {"owner_name": "Josh", "valid_orgs": ["Acme"],
                         "org_domain_map": [], "known_people": []}}
     write_units(data, home=str(tmp_path))
@@ -1324,7 +1324,7 @@ def test_write_units_scopes_known_people_per_unit(tmp_path):
     # in unit B's context when unit B never mentions them.
     from mcpbrain.prepare import write_units
     core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
-    pool = [{"id": "p1", "name": "Marcus Reyes", "org": "Acme", "role": "Pastor",
+    pool = [{"id": "p1", "name": "Dana Okafor", "org": "Acme", "role": "Pastor",
              "aliases": []}]
     # Padded so two threads together exceed the packing budget (>= 2000 bytes),
     # forcing each into its OWN unit -- scoping must be per-unit, not per-batch.
@@ -1332,7 +1332,7 @@ def test_write_units_scopes_known_people_per_unit(tmp_path):
     data = {
         "threads": [
             {"thread_id": "t-a", "messages": [{"message_id": "m1",
-                                               "text": f"ask marcus reyes {filler}"}]},
+                                               "text": f"ask dana okafor {filler}"}]},
             {"thread_id": "t-b", "messages": [{"message_id": "m2",
                                                "text": f"totally unrelated {filler}"}]},
         ],

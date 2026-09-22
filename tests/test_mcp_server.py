@@ -69,20 +69,20 @@ from mcpbrain.mcp_server import make_brain_context, make_brain_graph
 def _seed_graph_store(tmp_path):
     s = Store(tmp_path / "g.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
-    s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", "doc-1")
-    s.add_relation("marcus-reyes", "works_on", "college-2026", "doc-2")
-    s.add_unified_action(text="Confirm college timetable", owner="Marcus Reyes")
+    s.add_relation("dana-okafor", "reports_to", "marcus-reyes", "doc-1")
+    s.add_relation("dana-okafor", "works_on", "college-2026", "doc-2")
+    s.add_unified_action(text="Confirm college timetable", owner="Dana Okafor")
     return s
 
 
 def test_brain_context_by_id(tmp_path):
     s = _seed_graph_store(tmp_path)
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes"))
-    assert out["entity"]["id"] == "marcus-reyes"
+    out = asyncio.run(tool("dana-okafor"))
+    assert out["entity"]["id"] == "dana-okafor"
     others = {r["other"] for r in out["relations"]}
     assert others == {"marcus-reyes", "college-2026"}
     assert all(r["direction"] == "out" for r in out["relations"])
@@ -92,8 +92,8 @@ def test_brain_context_by_id(tmp_path):
 def test_brain_context_by_name(tmp_path):
     s = _seed_graph_store(tmp_path)
     tool = make_brain_context(s)
-    out = asyncio.run(tool("Marcus Reyes"))
-    assert out["entity"]["id"] == "marcus-reyes"
+    out = asyncio.run(tool("Dana Okafor"))
+    assert out["entity"]["id"] == "dana-okafor"
     assert len(out["relations"]) == 2
     assert len(out["actions"]) == 1
 
@@ -104,7 +104,7 @@ def test_brain_context_in_edge_labelled_correctly(tmp_path):
     out = asyncio.run(tool("marcus-reyes"))
     assert len(out["relations"]) == 1
     assert out["relations"][0]["direction"] == "in"
-    assert out["relations"][0]["other"] == "marcus-reyes"
+    assert out["relations"][0]["other"] == "dana-okafor"
     assert out["relations"][0]["relation"] == "reports_to"
 
 
@@ -117,20 +117,20 @@ def test_brain_context_unknown_returns_empty(tmp_path):
 def test_brain_graph_one_hop(tmp_path):
     s = _seed_graph_store(tmp_path)
     tool = make_brain_graph(s)
-    out = asyncio.run(tool("marcus-reyes", 1))
+    out = asyncio.run(tool("dana-okafor", 1))
     node_ids = {n["id"] for n in out["nodes"]}
-    assert node_ids == {"marcus-reyes", "marcus-reyes", "college-2026"}
+    assert node_ids == {"dana-okafor", "marcus-reyes", "college-2026"}
     edge_rels = {(e["entity_a"], e["relation"], e["entity_b"]) for e in out["edges"]}
-    assert ("marcus-reyes", "reports_to", "marcus-reyes") in edge_rels
-    assert ("marcus-reyes", "works_on", "college-2026") in edge_rels
+    assert ("dana-okafor", "reports_to", "marcus-reyes") in edge_rels
+    assert ("dana-okafor", "works_on", "college-2026") in edge_rels
 
 
 def test_brain_graph_caps_hops(tmp_path):
     s = _seed_graph_store(tmp_path)
     tool = make_brain_graph(s)
-    out = asyncio.run(tool("marcus-reyes", 99))  # must not error, behaves as <=3
-    assert out["center"]["id"] == "marcus-reyes"
-    assert {n["id"] for n in out["nodes"]} == {"marcus-reyes", "marcus-reyes", "college-2026"}
+    out = asyncio.run(tool("dana-okafor", 99))  # must not error, behaves as <=3
+    assert out["center"]["id"] == "dana-okafor"
+    assert {n["id"] for n in out["nodes"]} == {"dana-okafor", "marcus-reyes", "college-2026"}
 
 
 def test_brain_graph_unknown_returns_empty(tmp_path):
@@ -147,7 +147,7 @@ def test_brain_context_actions_carry_freshness(tmp_path):
     action whose thread has a later resolution message reads as 'stale'."""
     s = Store(tmp_path / "f.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     # Source request and a later reply that resolves it, both on the same thread.
     s.upsert_chunk(
         "msg-req", "Can you confirm the college timetable?", "h-req",
@@ -157,11 +157,11 @@ def test_brain_context_actions_carry_freshness(tmp_path):
         "msg-reply", "All sorted, timetable confirmed.", "h-reply",
         {"source_type": "gmail", "thread_id": "t-1", "date": "Mon, 01 Jun 2026 11:00:00 +0800"},
     )
-    s.add_unified_action(text="Confirm college timetable", owner="Marcus Reyes",
+    s.add_unified_action(text="Confirm college timetable", owner="Dana Okafor",
                          source_doc_id="msg-req", thread_id="t-1")
 
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes"))
+    out = asyncio.run(tool("dana-okafor"))
 
     assert out["actions"], "expected at least one action"
     for a in out["actions"]:
@@ -178,11 +178,11 @@ def test_brain_context_actions_from_unified_table(tmp_path):
     """brain_context actions come from the unified `actions` table."""
     s = Store(tmp_path / "u.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
-    s.add_unified_action(text="Unified action", owner="Marcus Reyes", status="open")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
+    s.add_unified_action(text="Unified action", owner="Dana Okafor", status="open")
 
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes"))
+    out = asyncio.run(tool("dana-okafor"))
     texts = {a["text"] for a in out["actions"]}
     assert "Unified action" in texts
 
@@ -199,35 +199,35 @@ def test_brain_context_profile_has_no_projects_areas(tmp_path):
 def test_brain_graph_at_time(tmp_path):
     s = Store(tmp_path / "gt.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus", "Marcus", "person")
     s.upsert_entity("dana", "Dana", "person")
-    s.add_relation("marcus", "reports_to", "dana", "doc-1")
+    s.upsert_entity("dana", "Dana", "person")
+    s.add_relation("dana", "reports_to", "dana", "doc-1")
     with s._connect() as db:
         db.execute("UPDATE entity_relations SET valid_from=?, valid_to=? "
-                   "WHERE entity_a='marcus'", ("2024-01-01", "2025-01-01"))
+                   "WHERE entity_a='dana'", ("2024-01-01", "2025-01-01"))
 
     tool = make_brain_graph(s)
-    inside = asyncio.run(tool("marcus", 1, at_time="2024-06-01"))
-    assert {n["id"] for n in inside["nodes"]} == {"marcus", "dana"}
-    after = asyncio.run(tool("marcus", 1, at_time="2025-06-01"))
-    assert {n["id"] for n in after["nodes"]} == {"marcus"}  # edge no longer valid
+    inside = asyncio.run(tool("dana", 1, at_time="2024-06-01"))
+    assert {n["id"] for n in inside["nodes"]} == {"dana", "dana"}
+    after = asyncio.run(tool("dana", 1, at_time="2025-06-01"))
+    assert {n["id"] for n in after["nodes"]} == {"dana"}  # edge no longer valid
 
 
 def test_brain_graph_include_invalidated(tmp_path):
     s = Store(tmp_path / "gi.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus", "Marcus", "person")
     s.upsert_entity("dana", "Dana", "person")
-    s.add_relation("marcus", "reports_to", "dana", "doc-1")
+    s.upsert_entity("dana", "Dana", "person")
+    s.add_relation("dana", "reports_to", "dana", "doc-1")
     with s._connect() as db:
         db.execute("UPDATE entity_relations SET invalidated_at=? "
-                   "WHERE entity_a='marcus'", ("2025-02-01",))
+                   "WHERE entity_a='dana'", ("2025-02-01",))
 
     tool = make_brain_graph(s)
-    default = asyncio.run(tool("marcus", 1))
-    assert {n["id"] for n in default["nodes"]} == {"marcus"}  # invalidated edge hidden
-    incl = asyncio.run(tool("marcus", 1, include_invalidated=True))
-    assert {n["id"] for n in incl["nodes"]} == {"marcus", "dana"}
+    default = asyncio.run(tool("dana", 1))
+    assert {n["id"] for n in default["nodes"]} == {"dana"}  # invalidated edge hidden
+    incl = asyncio.run(tool("dana", 1, include_invalidated=True))
+    assert {n["id"] for n in incl["nodes"]} == {"dana", "dana"}
 
 
 # --- brain_actions MCP tool (Task 8.2) -----------------------------------
@@ -246,7 +246,7 @@ def test_make_brain_actions(tmp_path, monkeypatch):
                          thread_id="t1")
     s.add_unified_action(text="Send budget", owner="Sam", status="done",
                          thread_id="t1")
-    s.add_unified_action(text="Book hall", owner="Marcus", status="open")
+    s.add_unified_action(text="Book hall", owner="Dana", status="open")
 
     tool = make_brain_actions(s)
 
@@ -261,14 +261,14 @@ def test_make_brain_actions(tmp_path, monkeypatch):
     assert [a["text"] for a in sam_done] == ["Send budget"]
 
     # Different owner.
-    marcus = asyncio.run(tool(owner="Marcus", status="open"))
-    assert [a["text"] for a in marcus] == ["Book hall"]
+    dana = asyncio.run(tool(owner="Dana", status="open"))
+    assert [a["text"] for a in dana] == ["Book hall"]
 
 
 def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monkeypatch):
     """An MCP client passing an explicit null owner must default to the configured
     owner, not widen to every owner. unified_actions(owner=None) would return all
-    owners, leaking Marcus's actions into a Sam-scoped query."""
+    owners, leaking Dana's actions into a Sam-scoped query."""
     import json
     (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Sam"}))
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
@@ -276,7 +276,7 @@ def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monk
     s = Store(tmp_path / "null.sqlite3", dim=4)
     s.init()
     s.add_unified_action(text="Draft policy", owner="Sam", status="open")
-    s.add_unified_action(text="Book hall", owner="Marcus", status="open")
+    s.add_unified_action(text="Book hall", owner="Dana", status="open")
 
     tool = make_brain_actions(s)
 
@@ -288,16 +288,16 @@ def test_brain_actions_explicit_null_owner_defaults_to_configured(tmp_path, monk
 
 
 def test_brain_context_owner_shortform_does_not_match(tmp_path):
-    """Pins accepted behaviour: a Gemini-extracted short-form owner ("Marcus")
-    does NOT match a full entity name ("Marcus Reyes"), so brain_context
+    """Pins accepted behaviour: a Gemini-extracted short-form owner ("Dana")
+    does NOT match a full entity name ("Dana Okafor"), so brain_context
     surfaces no actions for it. This is understood, not a silent surprise."""
     s = Store(tmp_path / "sf.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
-    s.add_unified_action(text="Confirm college timetable", owner="Marcus")  # short form, no match
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
+    s.add_unified_action(text="Confirm college timetable", owner="Dana")  # short form, no match
 
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes"))
+    out = asyncio.run(tool("dana-okafor"))
     assert out["actions"] == []
 
 
@@ -375,8 +375,8 @@ def test_brain_context_profile_still_works_after_signature_change(tmp_path):
     """Regression: the existing profile path still works with the new signature."""
     s = _seed_graph_store(tmp_path)
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes", mode="profile"))
-    assert out["entity"]["id"] == "marcus-reyes"
+    out = asyncio.run(tool("dana-okafor", mode="profile"))
+    assert out["entity"]["id"] == "dana-okafor"
 
 
 def test_brain_context_profile_included(tmp_path):
@@ -384,17 +384,17 @@ def test_brain_context_profile_included(tmp_path):
     the profile text written by the profile_synthesis block."""
     s = Store(tmp_path / "prof.sqlite3", dim=4)
     s.init()
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     # Simulate what the profile_synthesis drain writes.
     with s._connect() as db:
         db.execute(
             "UPDATE entities SET profile=? WHERE id=?",
             ("Executive Pastor at Acme Corp, responsible for staff and ministry teams.",
-             "marcus-reyes"),
+             "dana-okafor"),
         )
 
     tool = make_brain_context(s)
-    out = asyncio.run(tool("marcus-reyes"))
+    out = asyncio.run(tool("dana-okafor"))
 
     assert "profile" in out["entity"], "'profile' key must be present in entity dict"
     assert "Executive Pastor" in out["entity"]["profile"]
@@ -455,8 +455,8 @@ def test_brain_proactive_includes_lint(tmp_path):
     s = _seed_proactive_store(tmp_path, name="lint_pf.sqlite3")
     # Insert a lint finding (same table, different finding_type)
     s.record_finding(
-        "lint:missing_org", "marcus-reyes",
-        summary="Entity 'Marcus Reyes' has no org",
+        "lint:missing_org", "dana-okafor",
+        summary="Entity 'Dana Okafor' has no org",
         severity="warning",
     )
     tool = make_brain_proactive(s)
@@ -470,7 +470,7 @@ def test_brain_proactive_includes_lint(tmp_path):
     # Filter by lint type only
     lint_only = asyncio.run(tool(finding_type="lint:missing_org"))
     assert len(lint_only) == 1
-    assert lint_only[0]["ref_id"] == "marcus-reyes"
+    assert lint_only[0]["ref_id"] == "dana-okafor"
 
 
 def test_brain_proactive_filter_by_severity(tmp_path):

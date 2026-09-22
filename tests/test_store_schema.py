@@ -434,7 +434,7 @@ def test_store_unified_actions_by_owner_status(tmp_path):
                          thread_id="t1")
     s.add_unified_action(text="Send budget", owner="Sam", status="done",
                          thread_id="t1")
-    s.add_unified_action(text="Book hall", owner="Marcus", status="open",
+    s.add_unified_action(text="Book hall", owner="Dana", status="open",
                          thread_id="t2")
 
     # owner + status filter (owner is case-insensitive).
@@ -459,43 +459,43 @@ def test_store_unified_actions_by_owner_status(tmp_path):
 
 def test_store_relations_at_time(tmp_path):
     s = _store(tmp_path)
-    _people(s, "marcus", "dana")
-    s.add_relation("marcus", "reports_to", "dana", "doc-1")
+    _people(s, "dana", "dana")
+    s.add_relation("dana", "reports_to", "dana", "doc-1")
     with s._connect() as db:
         db.execute(
             "UPDATE entity_relations SET valid_from=?, valid_to=? "
-            "WHERE entity_a='marcus'",
+            "WHERE entity_a='dana'",
             ("2024-01-01", "2025-01-01"))
 
     # Inside the valid window — returned.
-    rels = s.relations_for("marcus", at_time="2024-06-01")
+    rels = s.relations_for("dana", at_time="2024-06-01")
     assert any(r["relation"] == "reports_to" for r in rels)
 
     # After valid_to — excluded.
-    rels = s.relations_for("marcus", at_time="2025-06-01")
+    rels = s.relations_for("dana", at_time="2025-06-01")
     assert not any(r["relation"] == "reports_to" for r in rels)
 
     # Exactly at valid_to — excluded. The interval is half-open (valid_to > at),
     # so the boundary instant is not part of the valid window. Pins the
     # inequality against a future >= regression.
-    rels = s.relations_for("marcus", at_time="2025-01-01")
+    rels = s.relations_for("dana", at_time="2025-01-01")
     assert not any(r["relation"] == "reports_to" for r in rels)
 
 
 def test_store_relations_include_invalidated(tmp_path):
     s = _store(tmp_path)
-    _people(s, "marcus", "dana")
-    s.add_relation("marcus", "reports_to", "dana", "doc-1")
+    _people(s, "dana", "dana")
+    s.add_relation("dana", "reports_to", "dana", "doc-1")
     with s._connect() as db:
         db.execute(
-            "UPDATE entity_relations SET invalidated_at=? WHERE entity_a='marcus'",
+            "UPDATE entity_relations SET invalidated_at=? WHERE entity_a='dana'",
             ("2025-02-01",))
 
     # Default excludes invalidated rows.
-    assert s.relations_for("marcus") == []
+    assert s.relations_for("dana") == []
 
     # Explicitly include them.
-    rels = s.relations_for("marcus", include_invalidated=True)
+    rels = s.relations_for("dana", include_invalidated=True)
     assert any(r["relation"] == "reports_to" for r in rels)
 
 
@@ -503,9 +503,9 @@ def test_store_relations_legacy_rows_still_returned(tmp_path):
     """add_relation leaves invalidated_at NULL, so legacy-written relations
     still surface by default (keeps existing brain_context/graph behaviour)."""
     s = _store(tmp_path)
-    _people(s, "marcus", "dana")
-    s.add_relation("marcus", "reports_to", "dana", "doc-1")
-    rels = s.relations_for("marcus")
+    _people(s, "dana", "dana")
+    s.add_relation("dana", "reports_to", "dana", "doc-1")
+    rels = s.relations_for("dana")
     assert any(r["relation"] == "reports_to" for r in rels)
 
 

@@ -3,10 +3,10 @@ def test_score_flags_lost_org_assignments():
     match would hide a systematic misattribution, which is exactly why
     enrich_eval.graph_metrics is insufficient here."""
     from bin.enrich_ab import score_pair
-    a = {"entities": [{"name": "Marcus Reyes", "org": "Acme", "role": "Pastor"}]}
-    b = {"entities": [{"name": "Marcus Reyes", "org": "", "role": "Pastor"}]}
+    a = {"entities": [{"name": "Dana Okafor", "org": "Acme", "role": "Pastor"}]}
+    b = {"entities": [{"name": "Dana Okafor", "org": "", "role": "Pastor"}]}
     r = score_pair(a, b)
-    assert r["org_lost"] == ["Marcus Reyes"]
+    assert r["org_lost"] == ["Dana Okafor"]
     assert r["entities_lost"] == []
 
 

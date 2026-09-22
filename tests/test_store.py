@@ -249,16 +249,16 @@ def _store(tmp_path):
 
 def test_upsert_entity_idempotent_on_id_and_bumps_mentions(tmp_path):
     s = _store(tmp_path)
-    first = s.upsert_entity("marcus-reyes", "Marcus Reyes", "person",
+    first = s.upsert_entity("dana-okafor", "Dana Okafor", "person",
                             org="Acme", seen="2026-05-30")
-    second = s.upsert_entity("marcus-reyes", "Marcus Reyes", "person",
+    second = s.upsert_entity("dana-okafor", "Dana Okafor", "person",
                              org="Acme", seen="2026-05-31")
     assert first is True   # new entity row created
     assert second is False  # existing entity merged
     ents = s.list_entities()
     assert len(ents) == 1
-    e = s.get_entity("marcus-reyes")
-    assert e["name"] == "Marcus Reyes"
+    e = s.get_entity("dana-okafor")
+    assert e["name"] == "Dana Okafor"
     assert e["org"] == "Acme"
     assert e["mentions"] == 2
     assert e["first_seen"] == "2026-05-30"
@@ -298,15 +298,15 @@ def test_get_entity_returns_none_when_absent(tmp_path):
 def test_add_relation_dedups(tmp_path):
     s = _store(tmp_path)
     # entity_relations endpoints are enforced foreign keys into entities.
-    for eid in ("marcus-reyes", "marcus-reyes"):
+    for eid in ("dana-okafor", "marcus-reyes"):
         s.upsert_entity(eid, eid.replace("-", " ").title(), "person", "Acme", "2026-05-12")
-    first = s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", source_doc_id="d1")
-    second = s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", source_doc_id="d2")
+    first = s.add_relation("dana-okafor", "reports_to", "marcus-reyes", source_doc_id="d1")
+    second = s.add_relation("dana-okafor", "reports_to", "marcus-reyes", source_doc_id="d2")
     assert first is True   # new triple inserted
     assert second is False  # duplicate triple ignored
     rels = s.list_relations()
     assert len(rels) == 1
-    assert rels[0]["entity_a"] == "marcus-reyes"
+    assert rels[0]["entity_a"] == "dana-okafor"
     assert rels[0]["relation"] == "reports_to"
     assert rels[0]["entity_b"] == "marcus-reyes"
 
@@ -385,38 +385,38 @@ def test_thread_chunks_returns_empty_for_unknown_thread(tmp_path):
 # --- graph readers for brain_context / brain_graph (Task 4.5) ------------
 
 def _seed_graph(s):
-    s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     s.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
     s.upsert_entity("college-2026", "College 2026", "project")
-    s.add_relation("marcus-reyes", "reports_to", "marcus-reyes", "doc-1")
-    s.add_relation("marcus-reyes", "works_on", "college-2026", "doc-2")
-    s.add_unified_action(text="Confirm college timetable", owner="Marcus Reyes")
+    s.add_relation("dana-okafor", "reports_to", "marcus-reyes", "doc-1")
+    s.add_relation("dana-okafor", "works_on", "college-2026", "doc-2")
+    s.add_unified_action(text="Confirm college timetable", owner="Dana Okafor")
 
 
 def test_find_entity_by_id(tmp_path):
     s = _store(tmp_path)
     _seed_graph(s)
-    ent = s.find_entity("marcus-reyes")
+    ent = s.find_entity("dana-okafor")
     assert ent is not None
-    assert ent["id"] == "marcus-reyes"
+    assert ent["id"] == "dana-okafor"
 
 
 def test_find_entity_by_name_case_insensitive(tmp_path):
     s = _store(tmp_path)
     _seed_graph(s)
-    ent = s.find_entity("marcus reyes")
+    ent = s.find_entity("dana okafor")
     assert ent is not None
-    assert ent["id"] == "marcus-reyes"
+    assert ent["id"] == "dana-okafor"
 
 
 def test_find_entity_by_slug_of_display_name(tmp_path):
     s = _store(tmp_path)
     _seed_graph(s)
-    # "Marcus Reyes" is neither a literal id nor matched by the name branch
-    # exactly, but slugify("Marcus Reyes") == "marcus-reyes".
-    ent = s.find_entity("Marcus Reyes")
+    # "Dana Okafor" is neither a literal id nor matched by the name branch
+    # exactly, but slugify("Dana Okafor") == "dana-okafor".
+    ent = s.find_entity("Dana Okafor")
     assert ent is not None
-    assert ent["id"] == "marcus-reyes"
+    assert ent["id"] == "dana-okafor"
 
 
 def test_find_entity_miss_returns_none(tmp_path):
@@ -428,13 +428,13 @@ def test_find_entity_miss_returns_none(tmp_path):
 def test_relations_for_returns_in_and_out_edges(tmp_path):
     s = _store(tmp_path)
     _seed_graph(s)
-    # Marcus has two out-edges.
-    marcus = s.relations_for("marcus-reyes")
-    assert len(marcus) == 2
-    # Dana has one in-edge (marcus reports_to dana).
+    # Dana has two out-edges.
+    dana = s.relations_for("dana-okafor")
+    assert len(dana) == 2
+    # Dana has one in-edge (dana reports_to dana).
     dana = s.relations_for("marcus-reyes")
     assert len(dana) == 1
-    assert dana[0]["entity_a"] == "marcus-reyes"
+    assert dana[0]["entity_a"] == "dana-okafor"
     assert dana[0]["entity_b"] == "marcus-reyes"
 
 

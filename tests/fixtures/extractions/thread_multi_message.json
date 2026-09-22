@@ -2,10 +2,10 @@
   "thread_id": "t-multi-002",
   "org": "NCF",
   "content_type": "update",
-  "summary": "Marcus raises a CAMS field-audit task, Sam scopes it, and Marcus confirms it is now closed.",
+  "summary": "Dana raises a CAMS field-audit task, Sam scopes it, and Dana confirms it is now closed.",
   "contextual_summary": "Three-message thread on the CAMS review; the audit action raised in the first message is resolved by the third.",
   "entities": [
-    {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": "Executive Pastor"},
+    {"name": "Dana Okafor", "type": "person", "org": "Acme", "role": "Executive Pastor"},
     {"name": "Sam Chen", "type": "person", "org": "Acme", "role": ""},
     {"name": "CAMS Review", "type": "project", "org": "NCF", "role": ""}
   ],
@@ -22,15 +22,15 @@
     {"id": 101, "new_text": "Run the credentialing field audit across the WA region (completed)."}
   ],
   "relations": [
-    {"source_name": "Marcus Reyes", "type": "works_at", "target_name": "Acme Corp"},
+    {"source_name": "Dana Okafor", "type": "works_at", "target_name": "Acme Corp"},
     {"source_name": "Sam Chen", "type": "contributes_to", "target_name": "CAMS Review"}
   ],
   "messages": [
-    {"message_id": "m-1", "sender": "Marcus Reyes <marcus@example.org>",
+    {"message_id": "m-1", "sender": "Dana Okafor <dana@example.org>",
      "date": "2026-05-01", "labels": "INBOX", "subject": "CAMS field audit"},
     {"message_id": "m-2", "sender": "Sam Chen <sam@example.org>",
      "date": "2026-05-02", "labels": "SENT", "subject": "Re: CAMS field audit"},
-    {"message_id": "m-3", "sender": "Marcus Reyes <marcus@example.org>",
+    {"message_id": "m-3", "sender": "Dana Okafor <dana@example.org>",
      "date": "2026-05-10", "labels": "INBOX", "subject": "Re: CAMS field audit"}
   ]
 }

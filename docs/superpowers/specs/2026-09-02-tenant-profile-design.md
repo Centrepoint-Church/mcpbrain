@@ -344,7 +344,7 @@ it sits in a public repository. Full inventory:
 
 | File | Occurrences |
 |---|---|
-| `mcpbrain/enrich_prompt.md` | 15 — Marcus Reyes, Marcus Reyes, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `marcus-reyes` |
+| `mcpbrain/enrich_prompt.md` | 15 — Dana Okafor, Marcus Reyes, Franz / The Church Co, Optus Stadium, Centrepoint Church → Capes Community Church, `[ACC]`, "Donna K, ACC finance lead", "ACC" vs "ACCI", `dana-okafor` |
 | `plugin/agents/enrich-batch.md` | the same 15 — **generated**, kept byte-identical by `bin/sync_agents.py` |
 | `mcpbrain/cowork/enrichment.md` | 3 |
 | `mcpbrain/routines/meeting-packs.md` | 1 — attendee list |
@@ -354,12 +354,12 @@ it sits in a public repository. Full inventory:
 | `mcpbrain/graph_write.py` | 4 — display-form `"ACC"`; `"Franz from The Church Co"` ×3 |
 | `mcpbrain/resolve.py` | 4 — `"Dana"` / `"M. Reyes"`, `'Ps Dana'`, the slug `'marcus-reyes'` |
 | `mcpbrain/chunking.py` | 2 — honorific comment `"Ps Dana"` / `"Pastor Marcus Reyes"`; `slugify` docstring |
-| `mcpbrain/query_router.py` | 2 — `'marcus-reyes'`, `"Marcus Reyes Centrepoint Maddington"` |
+| `mcpbrain/query_router.py` | 2 — `'marcus-reyes'`, `"Dana Okafor Centrepoint Maddington"` |
 | `mcpbrain/maintenance/graph_cleanup.py` | 2 — org-tag drift example |
 | `mcpbrain/config.py` | 1 — `'Marcus Reyes' extracted from 'Ps Dana'` |
 | `mcpbrain/graph_view.py` | 1 — `merging never downgrades 'Josh Kemp' to 'J.K.'` |
-| `mcpbrain/prepare.py` | 1 — `('Pete\|Peter', 'Marcus Reyes\|Marcus')` |
-| `mcpbrain/store.py` | 1 — `(handles "Marcus Reyes" -> "marcus-reyes")` |
+| `mcpbrain/prepare.py` | 1 — `('Pete\|Peter', 'Dana Okafor\|Dana')` |
+| `mcpbrain/store.py` | 1 — `(handles "Dana Okafor" -> "dana-okafor")` |
 
 `mcpbrain/records_templates/` and `mcpbrain/prompts/draft-reply.md` are already
 neutral and need no change. `mcpbrain/update.py`'s Centrepoint URL is §1's work, not
@@ -371,7 +371,7 @@ recording because it is the same mistake each time: every survey used a *narrowe
 pattern than the last. The prompt-directory sweep never looked at `.py` files; the
 follow-up sweep looked at `.py` files but searched only for org identifiers
 (`centrepoint`, `ACC`), not people; and neither was case-insensitive, so the
-lowercase slugs `marcus-reyes` and `marcus-reyes` — which appear in five files —
+lowercase slugs `dana-okafor` and `marcus-reyes` — which appear in five files —
 matched nothing. **The inventory above was produced by one case-insensitive pass over
 every shipped `.py`/`.md`/`.json`/`.html`/`.ps1` file with the full pattern set, and
 that pass is the one to re-run, not any of the narrower greps.**
@@ -394,9 +394,9 @@ verification step waved through.
 Two judgement calls left to the implementer, both flagged rather than decided:
 `resolve.py:71` uses `'Chané'` / `'Chane'` to illustrate diacritic folding — the
 example needs *a* diacritic name, so substitute one (`'Renée'` / `'Renee'`) rather
-than dropping it; and `prepare.py:262` says "Marcus **Reyes**", a different surname
-from the Marcus Reyes used elsewhere, so it is likely a second real person and
-takes the same replacement.
+than dropping it; and `prepare.py:262` used a different surname variant of the
+same real person named elsewhere in this inventory, so it takes the same
+replacement.
 
 **The wizard splits into two different jobs.** Lines 163-164 are not cosmetic —
 `<summary>Fleet setup (Centrepoint org)</summary>` and *"This is the Centrepoint
@@ -414,7 +414,7 @@ lesson while leaving the sentence standing:
 
 | Current | What it teaches | Replacement |
 |---|---|---|
-| "Marcus" → `waiting_on: "Marcus Reyes"` | bare first name resolves to a full name | "Dana" → "Dana Okafor" |
+| "Dana" → `waiting_on: "Dana Okafor"` | bare first name resolves to a full name | "Dana" → "Dana Okafor" |
 | "Pastor Marcus Reyes" → `Marcus Reyes` | strip a **non-standard** honorific `nameparser` will not know | "Principal Marcus Reyes" → `Marcus Reyes` |
 | "Franz from The Church Co" → `Franz`, org "The Church Co" | strip an employer phrase whose org name is an article plus a common noun | "Priya from The Lantern Co" → `Priya`, org "The Lantern Co" |
 | `Franz from The Church Co <franz@thechurchco.com>` | the same in a header, with a matching domain | `Priya from The Lantern Co <priya@thelanternco.com>` |
@@ -424,7 +424,7 @@ lesson while leaving the sentence standing:
 | `[ACC]` | a short bracketed document-category tag | `[NCF]` |
 | "Donna K, ACC finance lead" | abbreviated surname + role + org = a statement of the person's **own** affiliation | "Rina T, NCF finance lead" |
 | **"ACC" vs "ACCI"** | a shared-prefix acronym pair likely naming genuinely **different** orgs — paired in the same sentence against "Acme Corp" vs "Acme Corporation" as the typo case | **"NCF" vs "NCFI"** — same prefix-plus-one-letter shape |
-| `{"entity_id": "marcus-reyes", "profile": "Executive Pastor at..."}` | a slug id plus a role-and-org profile string | `{"entity_id": "dana-okafor", "profile": "Operations Director at..."}` |
+| `{"entity_id": "dana-okafor", "profile": "Operations Director at..."}` | a slug id plus a role-and-org profile string | `{"entity_id": "dana-okafor", "profile": "Operations Director at..."}` |
 | `Marcus Reyes,Sam Admin` (meeting-packs) | a comma-joined attendee list | `Marcus Reyes,Sam Admin` |
 | `(e.g. "Centrepoint")` (bootstrap skill) | a short org name | `(e.g. "Northgate Trust")` |
 

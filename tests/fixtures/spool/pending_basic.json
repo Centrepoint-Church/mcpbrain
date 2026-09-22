@@ -4,7 +4,7 @@
   "context": {
     "known_people": [
       {"name": "Marcus Reyes", "org": "Acme", "role": "Senior Pastor"},
-      {"name": "Marcus Reyes", "org": "Acme", "role": "Executive Pastor"}
+      {"name": "Dana Okafor", "org": "Acme", "role": "Executive Pastor"}
     ],
     "projects": [
       {"id": "byford-grant", "name": "Byford Building Grant", "org": "Acme",
@@ -34,7 +34,7 @@
        {"id": 42, "owner": "Sam", "text": "Lodge the stage-two grant paperwork.", "deadline": "2026-06-10"}
      ],
      "messages": [
-       {"message_id": "m-b1", "sender": "Marcus Reyes <marcus@example.org>",
+       {"message_id": "m-b1", "sender": "Dana Okafor <dana@example.org>",
         "date": "2026-06-02", "labels": "INBOX", "subject": "Byford grant timing",
         "text": "Any movement on the stage-two paperwork? Council wants it this week."}
      ]}

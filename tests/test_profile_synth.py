@@ -19,11 +19,11 @@ def _person(s, name, email_count=5):
 
 def test_requests_pick_unprofiled_high_signal_people(tmp_path):
     s = _store(tmp_path)
-    _person(s, "Marcus Reyes", email_count=10)
+    _person(s, "Dana Okafor", email_count=10)
     _person(s, "One Mail", email_count=1)        # below floor
     reqs = profile_synth.build_profile_requests(s, cap=6)
     names = [r["name"] for r in reqs]
-    assert "Marcus Reyes" in names and "One Mail" not in names
+    assert "Dana Okafor" in names and "One Mail" not in names
     assert all({"entity_id", "name", "org", "role", "relations"} <= set(r) for r in reqs)
 
 
@@ -36,21 +36,21 @@ def test_requests_cap(tmp_path):
 
 def test_drain_writes_profile_and_change_log(tmp_path):
     s = _store(tmp_path)
-    eid = _person(s, "Marcus Reyes")
+    eid = _person(s, "Dana Okafor")
     n = profile_synth.drain_profiles(s, {"profile_synthesis": [
         {"entity_id": eid, "profile": "Executive Pastor at Acme. Leads ops."},
         {"entity_id": "nonexistent", "profile": "x"},        # skipped silently
         {"entity_id": eid, "profile": ""},                   # empty skipped
     ]})
     assert n["profiles_written"] == 1
-    ent = s.find_entity("Marcus Reyes")
+    ent = s.find_entity("Dana Okafor")
     assert "Executive Pastor" in ent["profile"]
     assert s.recent_changes(5)[0]["source"] == "profile_synthesis"
 
 
 def test_profiled_entity_not_rerequested(tmp_path):
     s = _store(tmp_path)
-    eid = _person(s, "Marcus Reyes")
+    eid = _person(s, "Dana Okafor")
     profile_synth.drain_profiles(s, {"profile_synthesis": [
         {"entity_id": eid, "profile": "A profile."}]})
     assert profile_synth.build_profile_requests(s, cap=6) == []
@@ -61,7 +61,7 @@ def test_profile_rerequested_when_re_observed_since_profiled(tmp_path):
     # profile was written must be re-requested (so backfill-discovered facts land),
     # without waiting out the 30-day wall-clock window.
     s = _store(tmp_path)
-    eid = _person(s, "Marcus Reyes")
+    eid = _person(s, "Dana Okafor")
     profile_synth.drain_profiles(s, {"profile_synthesis": [
         {"entity_id": eid, "profile": "A profile."}]})
     assert profile_synth.build_profile_requests(s, cap=6) == []      # fresh, same day
@@ -76,7 +76,7 @@ def test_drainer_registered_and_callable(tmp_path):
     from mcpbrain import profile_synth as _ps  # noqa: F401 — import registers the drainer
     from mcpbrain.drain import BLOCK_DRAINERS
     s = _store(tmp_path)
-    eid = _person(s, "Marcus Reyes")
+    eid = _person(s, "Dana Okafor")
     drainer = BLOCK_DRAINERS["profile_synthesis"]
     n = drainer(s, {"profile_synthesis": [
         {"entity_id": eid, "profile": "Executive Pastor."}]})

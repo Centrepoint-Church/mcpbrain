@@ -466,8 +466,8 @@ and grounded:
   - "managed risk assessments (Pilbara… Annual Playgroup)… distribute responsibility across the
     team [gmail-19ecf2e4b5817328-body-0][gmail-19ecf7b8f8340c5a-body-0][…0ea6a948b-body-0]"
     → all three sources confirm verbatim.
-  - "offered Lauren a discounted School of Ministry place… gap year, via Ps Edward, Ps Marcus
-    [gmail-19ecf634558d110d-body-0]" → source confirms Lauren, gap year, Ps Marcus/Edward.
+  - "offered Lauren a discounted School of Ministry place… gap year, via Ps Edward, Ps Dana
+    [gmail-19ecf634558d110d-body-0]" → source confirms Lauren, gap year, Ps Dana/Edward.
   Citation integrity: pass. No hallucinations detected in verified claims.
   Flag: `consolidation: true` set in config.json.
 

@@ -88,7 +88,7 @@ def test_domain_org_lines_present_and_shaped():
 
 
 def test_entity_slug():
-    assert slugify("Marcus Reyes") == "marcus-reyes"
+    assert slugify("Dana Okafor") == "dana-okafor"
     assert slugify("NCF (National)") == "ncf-national"
     assert slugify("") == ""
 
@@ -495,19 +495,19 @@ def test_apply_writes_waiting_on(tmp_path):
     s = _store(tmp_path)
     ext = dict(_load("thread_simple.json"))
     ext["entities"] = ext["entities"] + [
-        {"name": "Marcus Reyes", "type": "person", "org": "Acme", "role": ""}]
+        {"name": "Dana Okafor", "type": "person", "org": "Acme", "role": ""}]
     ext["actions"] = [{
-        "description": "Wait for Marcus to confirm the venue.",
+        "description": "Wait for Dana to confirm the venue.",
         "owner_name": "Sam Chen", "owner_fallback": "", "due_date": "",
-        "project_id": "", "area_id": "", "waiting_on": "Marcus Reyes"}]
+        "project_id": "", "area_id": "", "waiting_on": "Dana Okafor"}]
     gw.apply(s, ext, doc_ids=["t-simple-001"])
     with s._connect() as db:
         row = db.execute(
             "SELECT waiting_on, waiting_on_entity_id, waiting_on_set_at "
             "FROM actions WHERE waiting_on IS NOT NULL").fetchone()
     assert row is not None
-    assert row["waiting_on"] == "Marcus Reyes"
-    assert row["waiting_on_entity_id"] == "marcus-reyes"
+    assert row["waiting_on"] == "Dana Okafor"
+    assert row["waiting_on_entity_id"] == "dana-okafor"
     assert row["waiting_on_set_at"]
 
 
@@ -724,8 +724,8 @@ def test_within_batch_dedup_drops_near_identical(tmp_path):
     s = _store(tmp_path)
     # Two actions with Jaccard >= 0.75 → one survives.
     ext = _thread(actions=[
-        _action("Send the WA region credentialing report to Marcus"),
-        _action("Send the WA region credentialing report to Marcus please"),
+        _action("Send the WA region credentialing report to Dana"),
+        _action("Send the WA region credentialing report to Dana please"),
     ])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     assert len(s.list_unified_actions()) == 1
@@ -797,12 +797,12 @@ def test_action_routed_with_owner_and_status(tmp_path):
     s = _store(tmp_path)
     # Non-configured-owner confirmed owner (named, resolvable as sender) → that owner, open.
     ext = _thread(actions=[_action("Prepare the venue checklist",
-                                   owner_name="Marcus Reyes")],
-                  lead_sender="Marcus Reyes <marcus@example.org>")
+                                   owner_name="Dana Okafor")],
+                  lead_sender="Dana Okafor <dana@example.org>")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
     assert len(rows) == 1
-    assert rows[0]["owner"] == "Marcus Reyes"
+    assert rows[0]["owner"] == "Dana Okafor"
     assert rows[0]["status"] == "open"
     assert rows[0]["source"] == "email"
     # Baseline confidence for a non-self confirmed-owner email action.
@@ -837,8 +837,8 @@ def test_near_dup_guard_widened_window_catches_20_day_gap(tmp_path):
     days is inside the new 30-day window and outside the old 7-day one."""
     s = _store(tmp_path)
     ext = _thread(actions=[_action("Sort out the complaints process",
-                                   owner_name="Marcus Reyes")],
-                  lead_sender="Marcus Reyes <marcus@example.org>")
+                                   owner_name="Dana Okafor")],
+                  lead_sender="Dana Okafor <dana@example.org>")
     day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
     day20 = datetime(2026, 6, 21, tzinfo=timezone.utc)
     gw.apply(s, ext, doc_ids=["d1"], clock=lambda: day0)
@@ -853,8 +853,8 @@ def test_near_dup_guard_default_window_is_30_days():
 def test_near_dup_guard_skips(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[_action("Prepare the venue checklist",
-                                   owner_name="Marcus Reyes")],
-                  lead_sender="Marcus Reyes <marcus@example.org>")
+                                   owner_name="Dana Okafor")],
+                  lead_sender="Dana Okafor <dana@example.org>")
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     # A second apply with the same open action does not insert a duplicate.
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
@@ -927,25 +927,25 @@ def test_apply_full_lifecycle_summary(tmp_path):
         "thread_id": "t-rich", "org": "NCF", "content_type": "update",
         "summary": "CAMS audit thread", "contextual_summary": "",
         "entities": [
-            {"name": "Marcus Reyes", "type": "person", "org": "Acme",
+            {"name": "Dana Okafor", "type": "person", "org": "Acme",
              "role": "Executive Pastor"},
             {"name": "CAMS Review", "type": "project", "org": "NCF", "role": ""},
         ],
         "topics": ["audit"],
         "actions": [
             _action("Compile the regional credentialing summary",
-                    owner_name="Marcus Reyes"),
+                    owner_name="Dana Okafor"),
             _action("Sign off the audit findings", owner_name="Sam"),
         ],
         "reply_needed": False, "reply_reason": "",
         "resolved_action_ids": [pre],
         "updated_actions": [{"id": pre_upd, "new_text": "Draft the audit cover note (revised)"}],
         "relations": [
-            {"source_name": "Marcus Reyes", "type": "works_at",
+            {"source_name": "Dana Okafor", "type": "works_at",
              "target_name": "Acme Corp"},
         ],
         "messages": [
-            {"message_id": "m-rich", "sender": "Marcus Reyes <marcus@example.org>",
+            {"message_id": "m-rich", "sender": "Dana Okafor <dana@example.org>",
              "date": "2026-05-28", "labels": "INBOX", "subject": "CAMS audit"},
         ],
     }
@@ -962,9 +962,9 @@ def test_apply_full_lifecycle_summary(tmp_path):
 
     # Graph state spot-checks.
     all_actions = s.list_unified_actions()
-    marcus_act = [a for a in all_actions if a["owner"] == "Marcus Reyes"]
+    dana_act = [a for a in all_actions if a["owner"] == "Dana Okafor"]
     owner_act = [a for a in all_actions if a["owner"] == "Sam" and a["status"] == "open"]
-    assert marcus_act and owner_act
+    assert dana_act and owner_act
     closed = [a for a in all_actions if a["id"] == pre][0]
     assert closed["status"] == "done"
     updated = [a for a in all_actions if a["id"] == pre_upd][0]

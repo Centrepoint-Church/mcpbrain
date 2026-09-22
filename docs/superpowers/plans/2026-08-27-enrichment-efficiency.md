@@ -1342,13 +1342,13 @@ def test_scoped_known_people_keeps_core_and_mentioned_only():
     from mcpbrain.prepare import _build_people_index, _scoped_known_people
     core = [{"id": "c1", "name": "Core Person", "org": "Acme", "role": "CEO"}]
     pool = [
-        {"id": "p1", "name": "Marcus Reyes", "org": "Acme", "role": "Pastor",
+        {"id": "p1", "name": "Dana Okafor", "org": "Acme", "role": "Pastor",
          "aliases": []},
         {"id": "p2", "name": "Nobody Mentioned", "org": "Acme", "role": "X",
          "aliases": []},
     ]
     out = _scoped_known_people(core, _build_people_index(pool),
-                               "please ask marcus reyes about hall b")
+                               "please ask dana okafor about hall b")
     ids = [p["id"] for p in out]
     assert "c1" in ids and "p1" in ids and "p2" not in ids
 
@@ -1435,7 +1435,7 @@ def _parse_aliases(raw) -> list[str]:
     """Flatten entities.aliases into alias strings.
 
     The column is a JSON list whose ELEMENTS may themselves be pipe-delimited
-    ('Pete|Peter', 'Marcus Reyes|Marcus'), so both levels must be split. Coverage
+    ('Pete|Peter', 'Dana Okafor|Dana'), so both levels must be split. Coverage
     is 2.9% today (175 of 5,992 people, and zero of the 405 that were in the old
     shared context), so this earns nothing yet — it grows on its own through
     merge_entities' loser-alias carry. It must NOT be treated as justifying a
@@ -1691,7 +1691,7 @@ git commit -m "perf(enrich): serve only the rule sections a unit kind needs"
 def test_write_units_writes_context_into_each_unit(tmp_path):
     from mcpbrain.prepare import write_units
     data = {"threads": [{"thread_id": "t1",
-                         "messages": [{"message_id": "m1", "text": "hi marcus"}]}],
+                         "messages": [{"message_id": "m1", "text": "hi dana"}]}],
             "context": {"owner_name": "Josh", "valid_orgs": ["Acme"],
                         "org_domain_map": [], "known_people": []}}
     write_units(data, home=str(tmp_path))
@@ -1927,10 +1927,10 @@ def test_score_flags_lost_org_assignments():
     match would hide a systematic misattribution, which is exactly why
     enrich_eval.graph_metrics is insufficient here."""
     from bin.enrich_ab import score_pair
-    a = {"entities": [{"name": "Marcus Reyes", "org": "Acme", "role": "Pastor"}]}
-    b = {"entities": [{"name": "Marcus Reyes", "org": "", "role": "Pastor"}]}
+    a = {"entities": [{"name": "Dana Okafor", "org": "Acme", "role": "Pastor"}]}
+    b = {"entities": [{"name": "Dana Okafor", "org": "", "role": "Pastor"}]}
     r = score_pair(a, b)
-    assert r["org_lost"] == ["Marcus Reyes"]
+    assert r["org_lost"] == ["Dana Okafor"]
     assert r["entities_lost"] == []
 
 

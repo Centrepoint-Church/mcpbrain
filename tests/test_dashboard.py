@@ -581,7 +581,7 @@ class TestActionsTodayOwnerFilter:
                 [
                     ("Mine explicit", "Sam", "open", _tomorrow()),
                     ("Mine unowned", "", "open", _tomorrow()),
-                    ("Someone else's", "Marcus", "open", _tomorrow()),
+                    ("Someone else's", "Dana", "open", _tomorrow()),
                     ("Mine case-insensitive", "SAM", "open", _tomorrow()),
                 ],
             )
@@ -602,10 +602,10 @@ class TestActionsTodayOwnerFilter:
         """assemble passes config.owner_name(home) through to actions_today."""
         import json
         store = FakeStore(self._db_with_owners(tmp_path))
-        (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Marcus"}))
+        (tmp_path / "config.json").write_text(json.dumps({"owner_name": "Dana"}))
         with mock.patch("mcpbrain.dashboard.calendar_today", return_value=[]), \
              mock.patch("mcpbrain.dashboard.clickup_today", return_value=[]):
             result = dashboard.assemble(store, str(tmp_path))
         texts = {a["text"] for a in result["actions"]["upcoming"]}
-        # Marcus's view: her explicit action + the unowned one. Sam's are excluded.
+        # Dana's view: her explicit action + the unowned one. Sam's are excluded.
         assert texts == {"Someone else's", "Mine unowned"}

@@ -24,7 +24,7 @@ def store(tmp_path):
     return s
 
 
-def _add_action(store, waiting_on="Marcus Reyes", waiting_on_entity_id="",
+def _add_action(store, waiting_on="Dana Okafor", waiting_on_entity_id="",
                 waiting_on_set_at=None, status="open", thread_id=""):
     """Insert an action with waiting_on set. Returns the new action id."""
     set_at = waiting_on_set_at or (
@@ -40,7 +40,7 @@ def _add_action(store, waiting_on="Marcus Reyes", waiting_on_entity_id="",
 
 
 def _insert_thread_chunk(store, doc_id, thread_id, *, date="2026-06-01",
-                         sender="Marcus Reyes", labels=None, enriched=1):
+                         sender="Dana Okafor", labels=None, enriched=1):
     """Insert a chunk carrying thread_id metadata, for re-extraction tests."""
     meta = json.dumps({"sender": sender, "date": date, "labels": labels or [],
                        "thread_id": thread_id})
@@ -52,7 +52,7 @@ def _insert_thread_chunk(store, doc_id, thread_id, *, date="2026-06-01",
         )
 
 
-def _make_chunk(doc_id="chunk-1", sender_name="Marcus Reyes", sender_entity_id="",
+def _make_chunk(doc_id="chunk-1", sender_name="Dana Okafor", sender_entity_id="",
                 labels=None, date="2026-06-01"):
     meta = {
         "sender": sender_name,
@@ -63,7 +63,7 @@ def _make_chunk(doc_id="chunk-1", sender_name="Marcus Reyes", sender_entity_id="
     return {"doc_id": doc_id, "text": "test", "metadata": meta}
 
 
-def _insert_chunk(store, doc_id, date="2026-06-01", sender="Marcus Reyes", labels=None):
+def _insert_chunk(store, doc_id, date="2026-06-01", sender="Dana Okafor", labels=None):
     """Insert a chunk directly into the store's chunks table."""
     meta = json.dumps({"sender": sender, "date": date, "labels": labels or []})
     with store._connect() as db:
@@ -79,27 +79,27 @@ def _insert_chunk(store, doc_id, date="2026-06-01", sender="Marcus Reyes", label
 
 def test_matches_by_entity_id():
     """A chunk with sender_entity_id matching waiting_on_entity_id -> match."""
-    chunk = _make_chunk(sender_entity_id="ent-marcus-001")
-    assert _matches(chunk, waiting_on="Marcus Reyes", entity_id="ent-marcus-001")
+    chunk = _make_chunk(sender_entity_id="ent-dana-001")
+    assert _matches(chunk, waiting_on="Dana Okafor", entity_id="ent-dana-001")
 
 
 def test_matches_by_normalised_name():
-    """waiting_on='Marcus Reyes', chunk sender_name 'marcus  reyes!' -> match."""
-    chunk = _make_chunk(sender_name="marcus  reyes!")
-    assert _matches(chunk, waiting_on="Marcus Reyes", entity_id=None)
+    """waiting_on='Dana Okafor', chunk sender_name 'dana  okafor!' -> match."""
+    chunk = _make_chunk(sender_name="dana  okafor!")
+    assert _matches(chunk, waiting_on="Dana Okafor", entity_id=None)
 
 
 def test_no_match_different_sender():
     """Different person -> no match."""
     chunk = _make_chunk(sender_name="Marcus Reyes", sender_entity_id="ent-dana-001")
-    assert not _matches(chunk, waiting_on="Marcus Reyes", entity_id="ent-marcus-001")
+    assert not _matches(chunk, waiting_on="Dana Okafor", entity_id="ent-dana-001")
 
 
 def test_normalise_strips_punctuation_and_collapses_whitespace():
     """_normalise strips non-word chars, lowercases, collapses whitespace."""
-    assert _normalise("Marcus  Reyes!") == "marcus reyes"
-    # "marcus.reyes" -> dot stripped (not a word char or space), no space inserted
-    assert _normalise("  marcus.reyes  ") == "marcusreyes"
+    assert _normalise("Dana  Okafor!") == "dana okafor"
+    # "dana.okafor" -> dot stripped (not a word char or space), no space inserted
+    assert _normalise("  dana.okafor  ") == "danaokafor"
 
 
 def test_normalise_empty_inputs():
@@ -113,10 +113,10 @@ def test_normalise_empty_inputs():
 # ---------------------------------------------------------------------------
 
 def test_reconcile_clears_waiting(store):
-    """Open action with waiting_on='Marcus Reyes' + matching inbound chunk
+    """Open action with waiting_on='Dana Okafor' + matching inbound chunk
     -> action's waiting_on nulled, reply_received=1, waiting_on_cleared_by_doc_id set."""
-    action_id = _add_action(store, waiting_on="Marcus Reyes")
-    chunk = _make_chunk(doc_id="chunk-marcus-1", sender_name="Marcus Reyes")
+    action_id = _add_action(store, waiting_on="Dana Okafor")
+    chunk = _make_chunk(doc_id="chunk-dana-1", sender_name="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     cleared = reconcile(store, [chunk], now=now)
@@ -126,7 +126,7 @@ def test_reconcile_clears_waiting(store):
         row = db.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
     assert row["waiting_on"] is None
     assert row["reply_received"] == 1
-    assert row["waiting_on_cleared_by_doc_id"] == "chunk-marcus-1"
+    assert row["waiting_on_cleared_by_doc_id"] == "chunk-dana-1"
 
 
 def test_reconcile_triggers_reextract_not_close(store):
@@ -138,8 +138,8 @@ def test_reconcile_triggers_reextract_not_close(store):
     open forever)."""
     _insert_thread_chunk(store, "chunk-orig", "t-wait", sender="Sam Chen",
                          enriched=1)
-    action_id = _add_action(store, waiting_on="Marcus Reyes", thread_id="t-wait")
-    reply_chunk = _make_chunk(doc_id="chunk-reply", sender_name="Marcus Reyes")
+    action_id = _add_action(store, waiting_on="Dana Okafor", thread_id="t-wait")
+    reply_chunk = _make_chunk(doc_id="chunk-reply", sender_name="Dana Okafor")
     reply_chunk["metadata"]["thread_id"] = "t-wait"
     now = datetime.now(timezone.utc).isoformat()
 
@@ -161,8 +161,8 @@ def test_reconcile_triggers_reextract_not_close(store):
 def test_reconcile_no_thread_id_no_reextract_crash(store):
     """An action with no thread_id (e.g. a capture-sourced action) must not
     raise when the reconciler tries to trigger re-extraction."""
-    _add_action(store, waiting_on="Marcus Reyes", thread_id="")
-    chunk = _make_chunk(sender_name="Marcus Reyes")
+    _add_action(store, waiting_on="Dana Okafor", thread_id="")
+    chunk = _make_chunk(sender_name="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     cleared = reconcile(store, [chunk], now=now)
@@ -175,9 +175,9 @@ def test_reconcile_respects_window(store):
     old_set_at = (
         datetime.now(timezone.utc) - timedelta(days=40)
     ).isoformat()
-    action_id = _add_action(store, waiting_on="Marcus Reyes",
+    action_id = _add_action(store, waiting_on="Dana Okafor",
                             waiting_on_set_at=old_set_at)
-    chunk = _make_chunk(sender_name="Marcus Reyes")
+    chunk = _make_chunk(sender_name="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     cleared = reconcile(store, [chunk], now=now, window_days=30)
@@ -186,14 +186,14 @@ def test_reconcile_respects_window(store):
     with store._connect() as db:
         row = db.execute("SELECT waiting_on FROM actions WHERE id=?", (action_id,)).fetchone()
     # waiting_on must still be set
-    assert row["waiting_on"] == "Marcus Reyes"
+    assert row["waiting_on"] == "Dana Okafor"
 
 
 def test_reconcile_ignores_outbound(store):
     """A SENT chunk does not clear waiting_on."""
-    action_id = _add_action(store, waiting_on="Marcus Reyes")
-    # Chunk from Marcus but labelled SENT (outbound)
-    chunk = _make_chunk(sender_name="Marcus Reyes", labels=["SENT"])
+    action_id = _add_action(store, waiting_on="Dana Okafor")
+    # Chunk from Dana but labelled SENT (outbound)
+    chunk = _make_chunk(sender_name="Dana Okafor", labels=["SENT"])
     now = datetime.now(timezone.utc).isoformat()
 
     cleared = reconcile(store, [chunk], now=now)
@@ -201,15 +201,15 @@ def test_reconcile_ignores_outbound(store):
     assert cleared == 0
     with store._connect() as db:
         row = db.execute("SELECT waiting_on FROM actions WHERE id=?", (action_id,)).fetchone()
-    assert row["waiting_on"] == "Marcus Reyes"
+    assert row["waiting_on"] == "Dana Okafor"
 
 
 def test_reconcile_only_clears_once_per_action(store):
     """Two matching chunks -> action cleared once (break after first match)."""
-    _add_action(store, waiting_on="Marcus Reyes")
+    _add_action(store, waiting_on="Dana Okafor")
     chunks = [
-        _make_chunk(doc_id="chunk-a", sender_name="Marcus Reyes"),
-        _make_chunk(doc_id="chunk-b", sender_name="marcus reyes"),
+        _make_chunk(doc_id="chunk-a", sender_name="Dana Okafor"),
+        _make_chunk(doc_id="chunk-b", sender_name="dana okafor"),
     ]
     now = datetime.now(timezone.utc).isoformat()
 
@@ -220,7 +220,7 @@ def test_reconcile_only_clears_once_per_action(store):
 
 def test_reconcile_no_actions_no_op(store):
     """No waiting actions -> nothing cleared."""
-    chunk = _make_chunk(sender_name="Marcus Reyes")
+    chunk = _make_chunk(sender_name="Dana Okafor")
     cleared = reconcile(store, [chunk])
     assert cleared == 0
 
@@ -281,9 +281,9 @@ def test_recent_inbound_chunks_excludes_sent(store):
 def test_waiting_on_run_clears_and_advances_cursor(store):
     """run(store) reconciles new chunks then advances waiting_on_cursor meta."""
     # Insert a chunk (inbound) with a date
-    _insert_chunk(store, "chunk-marcus", date="2026-06-01", sender="Marcus Reyes")
+    _insert_chunk(store, "chunk-dana", date="2026-06-01", sender="Dana Okafor")
     # Add an open waiting action
-    _add_action(store, waiting_on="Marcus Reyes")
+    _add_action(store, waiting_on="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     result = run(store, now=now)
@@ -296,9 +296,9 @@ def test_waiting_on_run_clears_and_advances_cursor(store):
 
 def test_waiting_on_run_advances_cursor_so_second_run_sees_no_new(store):
     """Second run with no new chunks after cursor advanced -> cleared=0."""
-    _insert_chunk(store, "chunk-marcus", date="2026-06-01", sender="Marcus Reyes")
+    _insert_chunk(store, "chunk-dana", date="2026-06-01", sender="Dana Okafor")
     # Insert a new waiting action for the second run check
-    _add_action(store, waiting_on="Marcus Reyes")
+    _add_action(store, waiting_on="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     # First run: clears
@@ -311,7 +311,7 @@ def test_waiting_on_run_advances_cursor_so_second_run_sees_no_new(store):
 def test_waiting_on_run_returns_cleared_zero_no_matches(store):
     """run with no matching chunks returns {"cleared": 0}."""
     _insert_chunk(store, "chunk-dana", date="2026-06-01", sender="Marcus Reyes")
-    _add_action(store, waiting_on="Marcus Reyes")
+    _add_action(store, waiting_on="Dana Okafor")
     now = datetime.now(timezone.utc).isoformat()
 
     result = run(store, now=now)
@@ -323,22 +323,22 @@ def test_apply_to_reconcile_round_trip(store):
     person, and the reconciler clears it when that person's chunk arrives."""
     ext = {
         "thread_id": "t-wait", "org": "Acme", "content_type": "request",
-        "summary": "Sam asks Marcus to confirm the venue.", "contextual_summary": "",
-        "entities": [{"name": "Marcus Reyes", "type": "person",
+        "summary": "Sam asks Dana to confirm the venue.", "contextual_summary": "",
+        "entities": [{"name": "Dana Okafor", "type": "person",
                       "org": "Acme", "role": ""}],
         "topics": [], "reply_needed": True, "reply_reason": "",
         "resolved_action_ids": [], "updated_actions": [], "relations": [],
         "actions": [{"description": "Confirm the venue booking.",
                      "owner_name": "Sam Chen", "owner_fallback": "",
-                     "due_date": "", "waiting_on": "Marcus Reyes"}],
+                     "due_date": "", "waiting_on": "Dana Okafor"}],
         "messages": [{"message_id": "wait-m1",
                       "sender": "Sam Chen <sam@example.org>",
                       "date": "2026-06-01", "labels": "INBOX", "subject": "Venue"}],
     }
     gw.apply(store, ext, doc_ids=["t-wait"])
 
-    # The action is now awaiting Marcus. Her reply chunk arrives.
-    _insert_chunk(store, "chunk-marcus", date="2026-06-02", sender="Marcus Reyes")
+    # The action is now awaiting Dana. Her reply chunk arrives.
+    _insert_chunk(store, "chunk-dana", date="2026-06-02", sender="Dana Okafor")
     result = run(store, now="2026-06-03T00:00:00Z")
 
     assert result == {"cleared": 1}

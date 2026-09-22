@@ -29,7 +29,7 @@ def _person_with_profile(s, name, role="Volunteer"):
 
 def test_requests_carry_profile_role_relations(tmp_path):
     s = _store(tmp_path)
-    _person_with_profile(s, "Marcus Reyes")
+    _person_with_profile(s, "Dana Okafor")
     reqs = profile_audit.build_audit_requests(s, cap=10)
     assert reqs and {"entity_id", "name", "org", "profile", "role"} <= set(reqs[0])
 
@@ -38,7 +38,7 @@ def test_audit_not_rerequested_until_changed(tmp_path):
     # Change-driven + rotation: once audited, a profile isn't re-audited until it
     # changes (re-synthesised) or the person is re-observed — not every cycle.
     s = _store(tmp_path)
-    eid = _person_with_profile(s, "Marcus Reyes")
+    eid = _person_with_profile(s, "Dana Okafor")
     assert profile_audit.build_audit_requests(s, cap=10)             # never audited → requested
     # auditing stamps profile_audited_at even with no corrections
     profile_audit.drain_audit(s, {"profile_audit": [{"entity_id": eid, "corrections": []}]})
@@ -51,7 +51,7 @@ def test_audit_not_rerequested_until_changed(tmp_path):
 
 def test_role_correction_applies_via_observation(tmp_path):
     s = _store(tmp_path)
-    eid = _person_with_profile(s, "Marcus Reyes", role="Volunteer")
+    eid = _person_with_profile(s, "Dana Okafor", role="Volunteer")
     n = profile_audit.drain_audit(s, {"profile_audit": [
         {"entity_id": eid,
          "corrections": [{"field": "role", "new_value": "Executive Pastor",
@@ -64,7 +64,7 @@ def test_role_correction_applies_via_observation(tmp_path):
 
 def test_caps_and_unknown_fields_skipped(tmp_path):
     s = _store(tmp_path)
-    eid = _person_with_profile(s, "Marcus Reyes")
+    eid = _person_with_profile(s, "Dana Okafor")
     n = profile_audit.drain_audit(s, {"profile_audit": [
         {"entity_id": eid,
          "corrections": [{"field": "shoe_size", "new_value": "11"}]}]},
@@ -90,7 +90,7 @@ def test_max_corrections_cap_within_single_entity(tmp_path):
     s = _store(tmp_path)
     # One entity carrying more corrections than the cap: the inner loop must
     # stop at the cap, not apply all of them.
-    eid = _person_with_profile(s, "Marcus Reyes", role="Volunteer")
+    eid = _person_with_profile(s, "Dana Okafor", role="Volunteer")
     cap = 3
     inbox = {"profile_audit": [
         {"entity_id": eid,

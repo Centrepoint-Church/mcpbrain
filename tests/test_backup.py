@@ -50,7 +50,7 @@ def test_latest_writes_survive_snapshot(tmp_path):
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d-latest", "the annual budget review", "h1", {})
-    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     store.set_cursor("gmail", "cursor-token-42")
 
     snap_path = snapshot(store.path, tmp_path / "snap.sqlite3")
@@ -59,7 +59,7 @@ def test_latest_writes_survive_snapshot(tmp_path):
     # WAL-resident writes folded in.
     loaded = Store(snap_path, dim=4)
     assert loaded.get_chunk("d-latest") is not None
-    assert loaded.get_entity("marcus-reyes") is not None
+    assert loaded.get_entity("dana-okafor") is not None
     assert loaded.get_cursor("gmail") == "cursor-token-42"
 
 
@@ -384,7 +384,7 @@ def test_make_encrypted_snapshot_not_plaintext_and_roundtrips(tmp_path):
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
     store.upsert_chunk("d-latest", "the annual budget review", "h1", {})
-    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     store.set_cursor("gmail", "cursor-token-42")
 
     key = generate_escrow_key()
@@ -412,7 +412,7 @@ def test_make_encrypted_snapshot_not_plaintext_and_roundtrips(tmp_path):
     dec = decrypt_file(out, tmp_path / "restored.sqlite3", key)
     loaded = Store(dec, dim=4)
     assert loaded.get_chunk("d-latest") is not None
-    assert loaded.get_entity("marcus-reyes") is not None
+    assert loaded.get_entity("dana-okafor") is not None
     assert loaded.get_cursor("gmail") == "cursor-token-42"
 
 
@@ -1603,7 +1603,7 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
     store.init()
     store.upsert_chunk("d-budget", "the annual budget review", "h1", {})
     store.upsert_entity(
-        "marcus-reyes", "Marcus Reyes", "person", org="Acme"
+        "dana-okafor", "Dana Okafor", "person", org="Acme"
     )
     index_pending(store, emb)  # vec + fts rows now exist
     SNAPSHOT_CURSOR = "1000"
@@ -1635,7 +1635,7 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
     store2 = Store(live, dim=emb.dim)
     # Chunk + entity + cursor all recovered.
     assert store2.get_chunk("d-budget") is not None
-    assert store2.get_entity("marcus-reyes") is not None
+    assert store2.get_entity("dana-okafor") is not None
     assert store2.get_cursor("gmail") == SNAPSHOT_CURSOR
     # vec + fts searchability recovered.
     knn = store2.vec_knn(emb.embed_query("budget"), k=1)

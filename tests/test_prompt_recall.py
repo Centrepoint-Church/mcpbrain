@@ -29,7 +29,7 @@ def test_flag_off_is_instant_noop(tmp_path, monkeypatch):
 def test_default_on_when_flag_absent(tmp_path, monkeypatch):
     # no config.json at all -> prompt_recall defaults ON
     monkeypatch.setattr(pr, "_recall",
-                        lambda home, q: _hits(("d1", 1.0, "Marcus leads the launch team")))
+                        lambda home, q: _hits(("d1", 1.0, "Dana leads the launch team")))
     out = _run(tmp_path, {"prompt": "who leads the launch team?", "session_id": "s1"})
     assert "launch team" in out
     assert "additionalContext" in out
@@ -137,17 +137,17 @@ def test_quoteback_credits_when_snippet_reappears(tmp_path, monkeypatch):
     monkeypatch.setattr(pr, "_record_used",
                         lambda home, ids, sid: recorded.update(ids=ids, sid=sid))
     # d1 was injected earlier; the assistant's reply quotes its distinctive words
-    state = {"injected": {"d1": "Marcus leads the Easter launch volunteer team"},
+    state = {"injected": {"d1": "Dana leads the Easter launch volunteer team"},
              "used": []}
     tp = _transcript(tmp_path,
-                     "As noted, Marcus leads the Easter launch volunteer team this year.")
+                     "As noted, Dana leads the Easter launch volunteer team this year.")
     newly, _, _ = pr._detect_quoteback(str(tmp_path), tp, state, "s1")
     assert newly == ["d1"]
     assert "d1" in state["used"]          # idempotency guard updated
 
 
 def test_quoteback_no_credit_when_absent(tmp_path):
-    state = {"injected": {"d1": "Marcus leads the Easter launch volunteer team"},
+    state = {"injected": {"d1": "Dana leads the Easter launch volunteer team"},
              "used": []}
     tp = _transcript(tmp_path, "Let me check the budget spreadsheet figures instead.")
     assert pr._detect_quoteback(str(tmp_path), tp, state, "s1")[0] == []
@@ -155,9 +155,9 @@ def test_quoteback_no_credit_when_absent(tmp_path):
 
 
 def test_quoteback_not_recredited(tmp_path):
-    state = {"injected": {"d1": "Marcus leads the Easter launch volunteer team"},
+    state = {"injected": {"d1": "Dana leads the Easter launch volunteer team"},
              "used": ["d1"]}            # already credited
-    tp = _transcript(tmp_path, "Marcus leads the Easter launch volunteer team.")
+    tp = _transcript(tmp_path, "Dana leads the Easter launch volunteer team.")
     assert pr._detect_quoteback(str(tmp_path), tp, state, "s1")[0] == []
 
 

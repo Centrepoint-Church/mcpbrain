@@ -3,7 +3,7 @@ from mcpbrain.chunking import chunk_text, content_hash, slugify
 
 def test_slugify_importable_from_chunking():
     from mcpbrain.chunking import slugify
-    assert slugify("Marcus Reyes") == "marcus-reyes"
+    assert slugify("Dana Okafor") == "dana-okafor"
     assert slugify("") == ""
 
 
@@ -31,7 +31,7 @@ def test_slugify_folds_accents():
 
 def test_slugify_ascii_cases_unchanged():
     """R1: accent-folding must not disturb existing ASCII behaviour."""
-    assert slugify("Marcus Reyes") == "marcus-reyes"
+    assert slugify("Dana Okafor") == "dana-okafor"
     assert slugify("NCF (National)") == "ncf-national"
     assert slugify("") == ""
     assert slugify(None) == ""

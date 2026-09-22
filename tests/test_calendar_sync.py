@@ -180,7 +180,7 @@ def test_normalise_includes_key_fields(tmp_path):
         location="Novotel Perth Langley",
         description="Annual strategy review day.",
         attendees=[
-            {"displayName": "Marcus Reyes", "email": "marcus@example.org"},
+            {"displayName": "Dana Okafor", "email": "dana@example.org"},
             {"email": "dana@example.org"},
         ],
     )
@@ -193,7 +193,7 @@ def test_normalise_includes_key_fields(tmp_path):
     assert "Leadership Offsite" in ch.text
     assert "Novotel Perth Langley" in ch.text
     assert "Annual strategy review day." in ch.text
-    assert "Marcus Reyes" in ch.text
+    assert "Dana Okafor" in ch.text
     assert ch.metadata["source_type"] == "calendar"
 
 

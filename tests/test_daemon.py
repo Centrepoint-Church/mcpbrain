@@ -1308,7 +1308,7 @@ def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
     # Isolate the home so the bundle reflects this test's data, not the dev box.
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     store = _store_with_chunk(tmp_path)
-    store.upsert_entity("marcus-reyes", "Marcus Reyes", "person", org="Acme")
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
     store.set_cursor("gmail", "cursor-42")
 
     files = FakeFiles(list_response={"files": []})
@@ -1327,7 +1327,7 @@ def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
     _bk.restore(cfg.out_path, tmp_path / "restored.sqlite3", key)
     loaded = Store(tmp_path / "restored.sqlite3", dim=4)
     assert loaded.get_chunk("d-budget") is not None
-    assert loaded.get_entity("marcus-reyes") is not None
+    assert loaded.get_entity("dana-okafor") is not None
     assert loaded.get_cursor("gmail") == "cursor-42"
 
 

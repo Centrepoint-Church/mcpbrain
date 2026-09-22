@@ -121,16 +121,16 @@ def test_known_people_dedups_overlap(tmp_path):
 def test_known_people_picks_current_role_not_superseded(tmp_path):
     s = _store(tmp_path)
     with s._connect() as db:
-        _add_person(db, "marcus", "Marcus Reyes", "Acme", email_count=50)
+        _add_person(db, "dana", "Dana Okafor", "Acme", email_count=50)
         # Superseded role: invalidated_at set.
-        _add_role(db, "marcus", "Worship Pastor",
+        _add_role(db, "dana", "Worship Pastor",
                   invalidated_at="2025-01-01T00:00:00Z")
         # Current role: valid_to and invalidated_at both NULL.
-        _add_role(db, "marcus", "Executive Pastor")
+        _add_role(db, "dana", "Executive Pastor")
 
     rows = prompt.build_known_people(s, batch_thread_ids=[], core_cap=40)
 
-    matches = [r for r in rows if r.get("id") == "marcus"]
+    matches = [r for r in rows if r.get("id") == "dana"]
     assert len(matches) == 1
     assert matches[0]["role"] == "Executive Pastor"
 

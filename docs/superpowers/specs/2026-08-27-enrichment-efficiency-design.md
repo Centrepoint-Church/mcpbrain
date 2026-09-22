@@ -119,7 +119,7 @@ smaller core. The top-40 core is what actually carries the nickname case
 ("Bob" for "Robert Smith") and is not reduced.
 
 Stored aliases are pipe-delimited *inside* JSON list elements (`'Pete|Peter'`,
-`'Marcus Reyes|Marcus'`), so matching must split on `|` as well as list boundaries.
+`'Dana Okafor|Dana'`), so matching must split on `|` as well as list boundaries.
 
 ---
 

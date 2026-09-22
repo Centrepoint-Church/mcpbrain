@@ -929,7 +929,7 @@ def test_maybe_audit_runs_when_due(tmp_path):
     Stashes requests in _pending_audit."""
     store, daemon = _audit_daemon(tmp_path, audit_interval_s=3600.0)
 
-    fake_reqs = [{"entity_id": "e-1", "name": "Marcus", "role": "Executive Pastor",
+    fake_reqs = [{"entity_id": "e-1", "name": "Dana", "role": "Executive Pastor",
                   "profile": "...", "org": "Acme"}]
 
     with patch("mcpbrain.profile_audit.build_audit_requests",

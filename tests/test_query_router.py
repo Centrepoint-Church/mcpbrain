@@ -102,11 +102,11 @@ def test_classify_intent_general_no_entity():
 
 def test_classify_intent_entity_longer_name():
     store = _make_store(entities={
-        "marcus reyes": {"id": "marcus-id", "name": "Marcus Reyes"}
+        "dana okafor": {"id": "dana-id", "name": "Dana Okafor"}
     })
-    intent, eid = _classify_intent("emails from Marcus Reyes about facilities", store)
+    intent, eid = _classify_intent("emails from Dana Okafor about facilities", store)
     assert intent == _INTENT_ENTITY
-    assert eid == "marcus-id"
+    assert eid == "dana-id"
 
 
 # ---------------------------------------------------------------------------

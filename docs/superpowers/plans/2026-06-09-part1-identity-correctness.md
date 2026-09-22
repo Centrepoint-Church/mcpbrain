@@ -253,8 +253,8 @@ class TestOwnerName:
 
     def test_returns_configured_value(self, tmp_path):
         from mcpbrain.config import owner_name
-        home = _write_config(tmp_path, {"owner_name": "Marcus"})
-        assert owner_name(home) == "Marcus"
+        home = _write_config(tmp_path, {"owner_name": "Dana"})
+        assert owner_name(home) == "Dana"
 
     def test_blank_string_falls_back_to_empty(self, tmp_path):
         from mcpbrain.config import owner_name
