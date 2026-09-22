@@ -102,10 +102,56 @@ the cursor is a watermark and every write is checkpointed by id+hash.
 4. **Keep the snapshots.** Three snapshots at different times are what made the cause
    datable and the fix targeted rather than a wholesale restore.
 
+## anarlog meeting source (added 2026-09-22, source-only, NOT released)
+
+Ingests meetings (AI notes, summaries, transcripts) from **anarlog**
+(`fastrepl/anarlog`, MIT, formerly Hyprnote) by reading its own SQLite database
+**READ-ONLY**. Spec: `docs/superpowers/specs/2026-09-21-anarlog-meeting-source-design.md`.
+Granola was evaluated first and ruled out: its local cache is encrypted as of
+7.568.0 and its API is gated to the Business plan — OAuth succeeds on any plan
+because it proves identity, not entitlement, which is why its connector reports
+"connected" while importing nothing, with no error.
+
+- **Ingestion is EXPLICIT OPT-IN** via `anarlog.enabled` in `config.json`. With
+  the flag absent, `config.anarlog_db_path(home)` returns None WITHOUT reading
+  `Path.home()` — that hermeticity is load-bearing: an accessor that reads the
+  OS home is not a function of `home`, and merely having anarlog installed broke
+  13 pre-existing sync-cycle tests. The deeper reason is consent: meeting
+  transcripts carry third parties' recorded speech, so ingesting them is the
+  user's decision, not a consequence of an app being on disk.
+- **Transcripts are cold, notes/summaries are hot.** `prepare.should_enrich`
+  gates on `content_subtype in ("table", "transcript")`, source-agnostically.
+  Measured live: 84 chunks from 2 meetings — 18 hot, 66 cold, i.e. **79% never
+  enters the enrichment queue** while staying searchable.
+- **Meetings NEVER contribute to the org shared graph.** `_source_kind` maps
+  `anarlog -> "meeting"` and `collect_from_drain` skips it. Josh's meetings are
+  personnel-adjacent by nature. Verified: meeting-sourced claims 0, gmail 3.
+- **`sessions.event_id` is NOT the Google Calendar event id** — it is anarlog's
+  own fk into its `events` table. The Google id is `external_event_id`, and only
+  when `external_provider` is Google-labelled (a Granola import's
+  `external_event_id` is a *Granola* uuid). Stamping the wrong one asserts a
+  calendar linkage that does not exist. `series_id` is always `''`; recurrence
+  actually lives in `events.recurrence_series_id` and is NOT wired.
+- **`thread_enrich._chunk_key` checks `session_id` BEFORE `event_id`, and that
+  ordering is a PRIVACY BOUNDARY, not a preference.** If an anarlog chunk shared
+  a key with a calendar chunk, `graph_write`'s `prov_doc_id = doc_ids[0]`
+  (rowid order) would stamp `source_doc_id = cal-<id>`, `_source_kind` would
+  return "calendar", and the meeting guard would not fire. Do not "tidy" it.
+- Deletion/stale-sweep call `invalidate_local_relations_for_docs` (reasons
+  `anarlog_session_removed` / `anarlog_note_shrank`), matching the Drive path —
+  without it, a relation whose source chunk was deleted defeats BOTH
+  fail-closed guards (`_is_cold` and `_source_kind` both read "fine" for an
+  ABSENT row) and contributes mislabelled as `unknown`.
+- **UNVERIFIED:** the calendar linkage has never run against a real NATIVE
+  session — every native session in the live anarlog DB is soft-deleted, so only
+  Granola imports exist. Each mechanism was verified separately (the id gate on
+  real shapes, `cal-<eid>` resolving both chunks, the grouping staying
+  separate). The first natively-recorded meeting is the real test.
+
 ## Shipping caveats
 
 - **Current state (2026-09-10): the four version files (+ `uv.lock`) are at `0.7.128`,
-  RELEASED** — source `77f3163`, gh-pages `0cdedcb`, plugin `ee26349`; the published index
+  RELEASED** — source `2b806ee`, gh-pages `0cdedcb`, plugin `ee26349`; the published index
   serves only `mcpbrain-0.7.128-py3-none-any.whl` and `install.ps1` is live (200). Full
   suite **3692 passed**, ruff clean, tenant check passed. Fleet resolution verified against
   the published index: `mcpbrain==0.7.128`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS
@@ -174,7 +220,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   — never rename, launchd holds the file open with O_APPEND). Verified live: 0 tracebacks in
   90 s where the same window had produced ~2 MB.
 - **Current state (2026-09-09): the four version files (+ `uv.lock`) are at `0.7.126`,
-  RELEASED** — source `585fe07`, dist `1c9795e`, plugin `0e4ff5d`; the published index
+  RELEASED** — source `5cc390d`, dist `1c9795e`, plugin `0e4ff5d`; the published index
   serves only `mcpbrain-0.7.126-py3-none-any.whl` and `install.ps1` is live (200). Full
   suite **3662 passed**, ruff clean. Fleet resolution verified against the published
   index: `mcpbrain==0.7.126`, `mcp==2.2.0`, `fastembed==0.8.0`. Wheel CONTENTS asserted:
@@ -241,7 +287,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   rather than trusting the tests (`doctor`'s Desktop-only remedy; `tenant check --online`
   failing permanently on the correct configuration), the gold-set removal, the ruff pin,
   and the consent-screen confirmation.
-  **Superseded: 0.7.125 was the tenant profile itself** — source `d1cbe10`, dist
+  **Superseded: 0.7.125 was the tenant profile itself** — source `03461cf`, dist
   `e716a0b`, plugin `77867d2`. Full
   suite **3654 passed**, ruff clean. Fleet resolution verified against the published
   index: `mcpbrain==0.7.125`, `mcp==2.2.0` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
@@ -289,7 +335,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   ideal and will not be again: 0 forks, 0 stars, 0 watchers, 1 install.
   **A history rewrite invalidates every commit SHA cited as evidence.** This file
   cites 18; `filter-repo`'s `commit-map` was used to remap all 17 that moved (the
-  18th, `317ea4d`, predates the client file and is unchanged), and each was
+  18th, `fb03f1b`, predates the client file and is unchanged), and each was
   spot-checked to still name the same commit — e.g. the 0.7.126 release SHA still
   resolves to "chore(release): bump to 0.7.126". **Any future rewrite must do the
   same remap, or this file's entire evidence trail silently dangles.**
@@ -413,7 +459,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   a Task 6 defect. Needs a caveat in Task 13's `docs/FORKING.md`, and possibly a
   design fix at some point (not scheduled).
   **Tasks 12-13 complete (2026-09-08):** Task 12 shipped the permanent tenant-literal
-  guard test (`tests/test_no_tenant_literals.py`, `b7f882e`), including rewriting the
+  guard test (`tests/test_no_tenant_literals.py`, `043c984`), including rewriting the
   two pre-existing `mcpbrain/tenant.py` / `mcpbrain/fleet_storage.py:358` docstrings
   flagged above so they no longer trip it. Task 13 shipped `docs/FORKING.md` (the
   one-time fork setup runbook, including the `tenant check --online` marketplace-
@@ -424,7 +470,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   plan (Tasks 1-13) is now fully implemented and committed to `main`, still **NOT
   released** per the plan's Global Constraints.
 - **Current state (2026-09-08): the five version files are at `0.7.124`, RELEASED** —
-  source `8270360`, dist `486cf47`, plugin `9bda998`; the index serves only
+  source `5661461`, dist `486cf47`, plugin `9bda998`; the index serves only
   `mcpbrain-0.7.124-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3601
   passed**, ruff clean.
   **0.7.124 is two follow-up fixes to the shared-drive queue migration's final review**,
@@ -470,7 +516,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   investigated here: backup upload failing, last success 4 days prior to this release,
   2 failed attempts — flagged to the user, not silently fixed.
 - **Current state (2026-09-03): the five version files are at `0.7.123`, RELEASED** —
-  source `d24c70b`, dist `3bd3b69`, plugin `2710e04`; the index serves only
+  source `b4de1d3`, dist `3bd3b69`, plugin `2710e04`; the index serves only
   `mcpbrain-0.7.123-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3576
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.123`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -539,7 +585,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   68,007-item `bin/repair.py` re-chunk backlog were both seen and NOT addressed** — neither
   is implicated in either fix.
 - **Current state (2026-09-02): the five version files are at `0.7.122`, RELEASED** —
-  source `5fa276a`, dist `dbe7b11`, plugin `ec89092`; the index serves only
+  source `cd39e23`, dist `dbe7b11`, plugin `ec89092`; the index serves only
   `mcpbrain-0.7.122-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3565
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.122`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -567,7 +613,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   `config.py` — releasing the wheel does NOT activate them; they need config + real-data validation.
 - The **Q1 salience gate (`salience_gate`) is the exception: validated on the live store
   (~40% of the corpus gated as tabular/low-signal with no recall impact) and flipped default
-  **ON** in 0.7.65** (commit `f732c29`). It ships active for all users. Source-aware
+  **ON** in 0.7.65** (commit `b139ee4`). It ships active for all users. Source-aware
   `should_enrich()` in `prepare.py` cold-marks promotional email + tabular/short Drive docs
   before extraction; cold-marking is reversible (chunks stay embedded/searchable). The aggressive
   `salience_require_drive_mention` sub-flag remains opt-in OFF.
@@ -598,7 +644,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   **416** `entity_relations.invalidated_by_relation_id` dangling pointers
   nullified. **Correction to an earlier claim here:** it was recorded that
   `merge_entities`/`decay_relations` would keep producing these. They do
-  **not** — `324d42d` gave the column
+  **not** — `be102ca` gave the column
   `REFERENCES entity_relations(id) ON DELETE SET NULL`, and a reproduction
   against current code (2026-08-25) shows a pointer to a nonexistent row is
   rejected with `FOREIGN KEY constraint failed` and a parent delete NULLs its
@@ -645,11 +691,11 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   post — are a separate, earlier measurement against the SAME mechanism on a
   different snapshot of the live corpus; both runs show the same upward
   direction and the same explained cause.) `contextual_prefix()`'s
-  `folder_path` clause has existed since the initial commit (317ea4d,
+  `folder_path` clause has existed since the initial commit (fb03f1b,
   2026-06-02); `FTS_CONTEXT_VERSION` was introduced seven weeks later
-  (6003bce, 2026-07-22, Phase C), so the clause cannot be what escaped that
+  (4158d9b, 2026-07-22, Phase C), so the clause cannot be what escaped that
   version. `folder_path` metadata itself only started being STAMPED onto
-  Drive chunks on 2026-07-28 (`3a784e1`, "C5"). The real gap:
+  Drive chunks on 2026-07-28 (`77a9039`, "C5"). The real gap:
   `Store.patch_chunk_metadata` (`mcpbrain/store.py`) writes
   `UPDATE chunks SET metadata=?` and returns — it never touches the
   `fts_chunks` mirror and never resets `fts_context_version`.
@@ -745,7 +791,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   hide behind) — now excludes them; the gold floor recorded in the plan/spec/
   runbook was stale (see above); the latency table above is the
   re-measurement that finding asked for. PR #25 merged to `main` 2026-08-25
-  (`dd62c08`) before this rebuild ran.
+  (`501d191`) before this rebuild ran.
 - **Current state (2026-08-31): the enrichment pipeline efficiency plan (Tasks 1-17,
   workstreams W3→W2→W1→W0→live validation) is IMPLEMENTED, REVIEWED, AND LIVE-VALIDATED
   on the author's real store — not yet version-bumped or released** (source only; local
@@ -856,7 +902,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   `bin/rechunk_notes.py` remain attended-only, dry-run default, `--yes`-gated, and are
   called from no daemon cadence (grepped both the pre- and post-fix trees to confirm).
   **Post-merge review (2026-08-31) found two real defects in the merged work; both fixed.**
-  (1) **The claim-time backstop was inert for 78% of units** (`ff6a2bc`).
+  (1) **The claim-time backstop was inert for 78% of units** (`961781f`).
   `tools._bump_unit_attempts` collected ids from `part_doc_ids` only and returned when
   empty — but a unit that could NOT be seam-split carries no `part_doc_ids`, and that is
   exactly the class the backstop exists to bound (the unsplittable oversize unit no drainer
@@ -866,7 +912,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   `reassemble_thread` already stamps on every message split or not — 457/457 covered.
   Note this is the SECOND time this one function shipped inert (the first was the
   `Store(str(home))` signature bug); both times its tests passed against fakes.
-  (2) **The model-echoed `part` was trusted outright** (`164c7f5`). `part_doc_ids` is looked
+  (2) **The model-echoed `part` was trusted outright** (`662f23d`). `part_doc_ids` is looked
   up by `(thread_id, part)` and decides which chunks get marked enriched, but `part` comes
   back from the model. If part 1's extraction claims part 2's number, part 2's chunks are
   marked enriched while only part 1's text was extracted — **silent content loss, and those
@@ -883,7 +929,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   85.2% reduction** — essentially the plan's 87% projection.
   **Shipped in 0.7.120** (see the entry above).
 - **Current state (2026-09-01): the five version files are at `0.7.121`, RELEASED** —
-  source `41f38b7`, dist `a62f9b6`, plugin `a346a90`; the index serves only
+  source `aed06a4`, dist `a62f9b6`, plugin `a346a90`; the index serves only
   `mcpbrain-0.7.121-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3566
   passed**, ruff clean. Fleet resolution verified against the published index:
   `mcpbrain==0.7.121`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`. Wheel
@@ -1015,7 +1061,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   `tests/test_sweep_merge_residue.py` seeds via a raw `sqlite3` connection — which is also
   how the real residue got written.
 - **Current state (2026-08-31): the five version files are at `0.7.120`, RELEASED** — source
-  `c433501`, dist `5293c6f`, plugin `f93683e`; the index serves only
+  `5993830`, dist `5293c6f`, plugin `f93683e`; the index serves only
   `mcpbrain-0.7.120-py3-none-any.whl` and `install.ps1` is live (200). Full suite **3555
   passed**. Fleet resolution verified end-to-end (`uv pip compile` against the published
   index): `mcpbrain==0.7.120`, `mcp==2.1.1` (inside the `>=2.0,<3` pin), `fastembed==0.8.0`.
@@ -1063,7 +1109,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   **The Windows HARDWARE QA GATE remains OPEN** — unchanged by this release; do not onboard
   Windows users.
 - **Earlier: the four version files (+ `uv.lock`) were at `0.7.119`,
-  RELEASED** — source `c188d6f`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
+  RELEASED** — source `41c7f98`, dist `3c00af3`, plugin `0e2ed3f`; the index serves only
   `mcpbrain-0.7.119-py3-none-any.whl` and `install.ps1` is live (200). Full suite 3464 passed.
   **0.7.119 is the three-stage install simplification (#28/#29/#30) plus a flag audit.**
   Install goes from ~20 manual actions to ~6: `/mcpbrain:install` now CREATES the four Local
@@ -1091,7 +1137,7 @@ the cursor is a watermark and every write is checkpointed by id+hash.
   **The Windows HARDWARE QA GATE remains OPEN** — 0.7.119 changes `install.ps1` and adds MSIX
   detection derived from bug reports, neither validated on real hardware. Do not onboard
   Windows users. Earlier: the **five** version files were at `0.7.113`,
-  **released** — source `eb542a7`, dist `546ef40`, plugin `2feedd8`; the index serves only
+  **released** — source `3731be5`, dist `546ef40`, plugin `2feedd8`; the index serves only
   `mcpbrain-0.7.113-py3-none-any.whl`. **0.7.113 is the `mcp` 2.x migration + backup hardening,
   and it was URGENT:** the published 0.7.112 wheel was built with an unbounded `"mcp>=1.2"`, and
   `update.py` scopes its index override to `mcpbrain=` only — so every machine's daily
