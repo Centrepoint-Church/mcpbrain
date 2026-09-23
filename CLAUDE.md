@@ -139,6 +139,35 @@ them; **ask GitHub Support to purge the cached views to close that.** A rewrite
 stops PROPAGATION; it cannot un-publish. Unlike the OAuth secret there is no
 rotation equivalent — a name is a name.
 
+- **Current state (2026-09-23): the four version files (+ `uv.lock`) are at `0.7.130`,
+  RELEASED** — source `0274cd2b`, gh-pages `4adf98fc`, plugin `3a40cd6`; the published
+  index serves only `mcpbrain-0.7.130-py3-none-any.whl` and `install.ps1` is live (200).
+  Full suite **3787 passed**, ruff clean, tenant check passed. Fleet resolution verified
+  against the published index: `mcpbrain==0.7.130`, `mcp==2.2.0`, **`fastembed==0.8.1`**.
+  Wheel CONTENTS asserted: `sync/anarlog.py` present carrying `?mode=ro`,
+  `external_event_id` and `_DISCOVER_LIMIT`; `prepare.py` carrying
+  `"table", "transcript"`; `org_contrib.py` carrying `"anarlog": "meeting"`;
+  `store.py` carrying `idx_chunks_sessionid`; tenant files present; **no gold set and
+  no `tenant_people.json`**. Verified against the RUNNING process after installing from
+  the PUBLISHED index (bootout -> `--reinstall --force` -> clear `__pycache__` ->
+  bootstrap): `/api/status` reports `0.7.130`, `stalled: None`.
+  **`fastembed` drifted 0.8.0 -> 0.8.1 and the local lock still pins 0.8.0**, so the
+  fleet would have run a version the suite never exercised — the same shape as the
+  0.7.112 `mcp` outage. Full suite re-run under `uv run --with "fastembed==0.8.1"`:
+  **3787 passed**, lock/venv unmutated. **`pyproject` still says `fastembed>=0.3`
+  (unbounded) — bound it if "the suite tested what the fleet gets" is meant to stay
+  true**, the same argument already recorded for `ruff` and `mcp`.
+  **0.7.130 is the anarlog meeting source** (see the section below) plus the privacy
+  work: two real people's names removed from this public repo AND from all history,
+  and the tenant guard's two blind spots closed.
+  **ONE BEHAVIOUR CHANGE THAT AFFECTS EVERY USER, not just anarlog adopters:**
+  org contribution now FAILS CLOSED when a relation's source chunk no longer exists
+  (`_chunk_provenance`). Measured on this store: **87 of 11,456 local allowlisted
+  relations, 0.8%** stop contributing. Correct — an unverifiable provenance should not
+  ship a claim — but an install with more aggressive retention will see a larger,
+  silent drop in contribution count.
+  **The Windows HARDWARE QA GATE remains OPEN** — unchanged by this release.
+
 ## anarlog meeting source (added 2026-09-22, source-only, NOT released)
 
 Ingests meetings (AI notes, summaries, transcripts) from **anarlog**
