@@ -158,9 +158,9 @@ rotation equivalent — a name is a name.
   local-part as a role address (`drive-shares-noreply@google.com`, `cloudplatform-noreply@`,
   `noreply-ott@`), and `_extract_name` drops a trailing `(via <service>)`. Before it, a Google
   Drive share notification keyed a person on Google's relay address and minted
-  `<name>-via-google-sheets`, which the org curator then merged a real person into (live:
-  `a-person-via-google-sheets` holds a real person's 1,858 email links; A second person's
-  record is the same shape). **Both are origin='org' and still carry the relay address in the
+  `<name>-via-google-sheets`, which the org curator then merged a real person into (live: one
+  such record holds a real person's 1,858 email links; a second person record has the same
+  shape). **Both are origin='org' and still carry the relay address in the
   shared snapshot — tidying them is a CURATOR-side job** (a member-side edit is reverted at
   import); the fix already stops the address keying or merging anything new.
   **Behaviour changes every install gets:** 27 tools; `resources/list` adds the top-100
