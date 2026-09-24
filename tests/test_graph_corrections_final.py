@@ -559,3 +559,38 @@ def test_i5_tool_description_says_reason_is_required():
     from mcpbrain import tools  # noqa: F401  (registers the tools)
     from mcpbrain.tool_registry import spec
     assert "non-empty reason" in spec("brain_graph_correct").description
+
+
+# --- M2 / M3: entity resources see corrections ------------------------------
+
+def test_m2_hide_and_merge_invalidate_top_entities_cache(tmp_path):
+    from mcpbrain import entity_resource
+    entity_resource._cache.clear()
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", mentions=9)
+    _ent(s, "dee-okafor", "Dee Okafor", mentions=1)
+    _ent(s, "marcus-reyes", "Marcus Reyes")
+    assert {e["id"] for e in entity_resource.top_entities(s)} == {
+        "dana-okafor", "dee-okafor", "marcus-reyes"}
+    hid = gc.submit(s, _stated(op="hide", entity_id="marcus-reyes"))["correction_id"]
+    assert "marcus-reyes" not in {e["id"] for e in entity_resource.top_entities(s)}
+    gc.submit(s, _stated(op="merge", entity_id="dana-okafor", other_id="dee-okafor"))
+    assert "dee-okafor" not in {e["id"] for e in entity_resource.top_entities(s)}
+    gc.submit(s, {"op": "undo", "correction_id": hid})
+    assert "marcus-reyes" in {e["id"] for e in entity_resource.top_entities(s)}
+    entity_resource._cache.clear()
+
+
+def test_m3_render_markdown_shows_the_ranked_role(tmp_path):
+    from mcpbrain import entity_resource
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", org="Northgate Trust")
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_observations(entity_id, attribute, value, source, "
+                   "valid_from) VALUES('dana-okafor','role','Operations Lead','manual','2026-01-01')")
+        db.execute("INSERT INTO entity_observations(entity_id, attribute, value, source, "
+                   "valid_from) VALUES('dana-okafor','role','Events Coordinator',"
+                   "'llm_extraction','2026-09-01')")
+    md = entity_resource.render_markdown(s, "dana-okafor")["markdown"]
+    assert "Operations Lead" in md.splitlines()[2]
+    assert "Events Coordinator" not in md.splitlines()[2]

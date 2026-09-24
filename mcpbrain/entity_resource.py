@@ -37,6 +37,30 @@ def _collapse_ws(text: str) -> str:
     return " ".join((text or "").split())
 
 
+def invalidate_cache() -> None:
+    """Drop the day's cached list. graph_corrections calls this after a
+    correction applies or is undone (it runs in the daemon, as this cache
+    does), so a hidden or merged-away entity stops being advertised today
+    rather than tomorrow."""
+    with _CACHE_LOCK:
+        _cache.clear()
+
+
+def _ranked_role(db, eid: str) -> str:
+    """The current role by source rank (graph_write._SOURCE_RANK: a manual
+    correction outranks extraction), then newest -- not merely newest-dated,
+    which would bury a user's correction under the next email's guess."""
+    from mcpbrain.graph_write import _source_rank
+    rows = db.execute(
+        "SELECT id, value, source, valid_from FROM entity_observations "
+        "WHERE entity_id=? AND attribute='role' AND (valid_to IS NULL OR valid_to='') "
+        "AND (invalidated_at IS NULL OR invalidated_at='')", (eid,)).fetchall()
+    if not rows:
+        return ""
+    best = max(rows, key=lambda r: (_source_rank(r["source"]), r["valid_from"] or "", r["id"]))
+    return best["value"]
+
+
 def top_entities(store, limit: int = TOP_N, *, today: str | None = None) -> list[dict]:
     path = store._path if hasattr(store, "_path") else store.path
     key = (str(path), today or _today())
@@ -93,7 +117,7 @@ def render_markdown(store, entity_id: str) -> dict | None:
             "WHERE entity_id=? AND valid_to IS NULL "
             "AND (invalidated_at IS NULL OR invalidated_at='') AND attribute != 'occurrence' "
             "ORDER BY valid_from DESC LIMIT ?", (eid, MAX_OBSERVATIONS)).fetchall()
-    role = next((o["value"] for o in obs if o["attribute"] == "role"), "")
+        role = _ranked_role(db, eid)
     header = ", ".join(_collapse_ws(x) for x in (ent["type"], ent.get("org") or "") if x)
     lines = [f"# {_collapse_ws(ent['name'])}", "", f"*{header}*" + (f" · {role}" if role else "")]
     if merged_from:

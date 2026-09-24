@@ -593,6 +593,17 @@ def _find_blocking_correction(db, applied_order, op: str, p: dict, snap: dict):
 
 # --- public entry points -------------------------------------------------------
 
+def _graph_changed() -> None:
+    """After a correction commits (or is undone): drop the daemon's day-cached
+    entity-resource list, so a hide/merge/rename shows up today. Never lets a
+    cache problem turn a committed correction into an error."""
+    try:
+        from mcpbrain import entity_resource
+        entity_resource.invalidate_cache()
+    except Exception:  # noqa: BLE001 -- the correction itself already committed
+        pass
+
+
 def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False) -> dict:
     """Apply, stage or record one correction. Never raises for a refusal.
 
@@ -681,6 +692,7 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
             _log_change(db, cid, "graph_corrected", summary, p.get("reason", ""))
     except Refused as exc:
         return {"status": "refused", "error": str(exc)}
+    _graph_changed()
     return {"status": "applied", "correction_id": cid, "summary": summary,
             "undo": f"brain_graph_correct op=undo correction_id={cid}"}
 
@@ -706,6 +718,7 @@ def undo(store, correction_id: int) -> dict:
                         f"Undid: {describe(row['op'], p)}", "")
     except Refused as exc:
         return {"status": "refused", "error": str(exc)}
+    _graph_changed()
     return {"status": "reverted", "correction_id": correction_id,
             "summary": f"Undid: {describe(row['op'], p)}"}
 
@@ -735,6 +748,7 @@ def approve(store, correction_id: int, *, via: str = "dashboard") -> dict:
             if cur.rowcount:
                 _resolve_finding(db, correction_id, "failed")
         return {"status": "failed", "correction_id": correction_id, "error": str(exc)}
+    _graph_changed()
     return {"status": "applied", "correction_id": correction_id, "summary": summary,
             "undo": f"brain_graph_correct op=undo correction_id={correction_id}"}
 
