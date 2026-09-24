@@ -139,8 +139,37 @@ them; **ask GitHub Support to purge the cached views to close that.** A rewrite
 stops PROPAGATION; it cannot un-publish. Unlike the OAuth secret there is no
 rotation equivalent — a name is a name.
 
-- **Current state (2026-09-23): the four version files (+ `uv.lock`) are at `0.7.130`,
-  RELEASED** — source `0274cd2b`, gh-pages `4adf98fc`, plugin `3a40cd6`; the published
+- **Current state (2026-09-24): the four version files (+ `uv.lock`) are at `0.7.131`,
+  RELEASED** — source `36a8556e`, gh-pages `d385fb1d`, plugin `6bfb6f3`; the published
+  index serves only `mcpbrain-0.7.131-py3-none-any.whl` and `install.ps1` is live (200).
+  Full suite **3963 passed** under the lock AND again under the fleet's resolved versions
+  (`uv run --with mcp==2.2.0 --with mcp-types==2.2.0 --with fastembed==0.8.1`), lock/venv
+  unmutated; ruff clean; tenant check passed. Fleet resolution against the published index:
+  `mcpbrain==0.7.131`, `mcp==2.2.0`, `fastembed==0.8.1`. Wheel CONTENTS asserted (16 checks:
+  `graph_corrections.py`, `entity_resource.py`, `brain_graph_correct`, `applied_order`, no
+  top-level `allOf`, `_merge_entities_tx`, `_confirm_correction`, `mcpbrain://entity/`,
+  `_NOREPLY_SEGMENT_RE`, `_RELAY_SUFFIX_RE`, `_alias_match_set`, the dashboard card, tenant
+  files present, no gold set, no `tenant_people.json`). Installed from the PUBLISHED index
+  (bootout → `--upgrade --reinstall-package mcpbrain` → clear `__pycache__` → bootstrap) and
+  verified against the RUNNING process: `/api/status` reports `0.7.131`, `stalled: None`;
+  `doctor` integrity ok, 0 need action.
+  **0.7.131 = graph corrections + entity resources** (see the section below) **plus the
+  relay-sender fix**: `is_role_address` now treats a no-reply SEGMENT inside a longer
+  local-part as a role address (`drive-shares-noreply@google.com`, `cloudplatform-noreply@`,
+  `noreply-ott@`), and `_extract_name` drops a trailing `(via <service>)`. Before it, a Google
+  Drive share notification keyed a person on Google's relay address and minted
+  `<name>-via-google-sheets`, which the org curator then merged a real person into (live:
+  `a-person-via-google-sheets` holds a real person's 1,858 email links; A second person's
+  record is the same shape). **Both are origin='org' and still carry the relay address in the
+  shared snapshot — tidying them is a CURATOR-side job** (a member-side edit is reverted at
+  import); the fix already stops the address keying or merging anything new.
+  **Behaviour changes every install gets:** 27 tools; `resources/list` adds the top-100
+  entities; aliases are written with `|` and read tolerant of `,` (entity matching on every
+  store — the change most likely to move numbers on stores with other legacy alias mixes);
+  more addresses count as role addresses. Nothing correction-related activates until a
+  correction is made. Schema change is additive only.
+  **The Windows HARDWARE QA GATE remains OPEN** — unchanged by this release.
+- **Superseded: 0.7.130 (2026-09-23)** — source `0274cd2b`, gh-pages `4adf98fc`, plugin `3a40cd6`; the published
   index serves only `mcpbrain-0.7.130-py3-none-any.whl` and `install.ps1` is live (200).
   Full suite **3787 passed**, ruff clean, tenant check passed. Fleet resolution verified
   against the published index: `mcpbrain==0.7.130`, `mcp==2.2.0`, **`fastembed==0.8.1`**.
