@@ -261,7 +261,35 @@ def _apply_hide(store, db, p) -> dict:
 
 
 def _apply_merge(store, db, p) -> dict:
-    raise Refused("merge is implemented in Task 5")
+    """Fold two entities into one, field-reconciled best-of, via the same
+    _merge_entities_tx/_unmerge_tx pair the deterministic/review merge paths
+    use -- so `undo` gets an exact, general-purpose reversal for free.
+
+    `_orient`/`is_distinct_pair` read through the store's own connections
+    (get_entity) rather than `db`, but that is safe here: they run BEFORE
+    `_merge_entities_tx` (this function's first write), so a WAL reader still
+    sees the last-committed, pre-merge state. Nothing above that call may
+    write -- keep it that way."""
+    from mcpbrain import graph_view
+    from mcpbrain.resolve import _NAME_MERGEABLE_TYPES
+    from mcpbrain.store import _merge_entities_tx
+    if p["entity_id"] == p["other_id"]:
+        raise Refused("merge needs two different entities")
+    oriented = graph_view._orient(store, p["entity_id"], p["other_id"])
+    if isinstance(oriented, dict):
+        raise Refused(oriented["message"])
+    winner, loser = oriented
+    if winner["type"] not in _NAME_MERGEABLE_TYPES or loser["type"] not in _NAME_MERGEABLE_TYPES:
+        raise Refused("only people, organisations and projects can be merged "
+                      f"(these are {loser['type']} and {winner['type']})")
+    result = graph_view._merge_result(winner, loser, p.get("name"))
+    snap = _merge_entities_tx(db, loser["id"], winner["id"],
+                              canonical_name=result["name"], method="user")
+    if snap is None:
+        raise Refused("nothing to merge")
+    db.execute("UPDATE entities SET email_addr=?, notes=? WHERE id=?",
+               (result["email_addr"], result["notes"], winner["id"]))
+    return snap
 
 
 _APPLY = {

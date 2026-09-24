@@ -460,3 +460,63 @@ def test_submit_refuses_a_non_string_value(tmp_path):
     assert out["status"] == "refused" and "value" in out["error"]
     with s._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0
+
+
+# --- Task 5: the merge op ------------------------------------------------------
+
+def _seed_dupes(s):
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type,degree,email_addr) VALUES"
+                   "('d-okafor','D Okafor','person',1,'dana@northgate.example')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('topic-x','x','topic')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('topic-y','y','topic')")
+        db.execute("INSERT INTO entities(id,name,type,email_addr) VALUES"
+                   "('office','Office','person','office@northgate.example')")
+
+
+def test_merge_applies_best_of_fields_and_undo_restores(tmp_path):
+    s = _store(tmp_path)
+    _seed_dupes(s)
+    before_d = dict(s.get_entity(D))
+    out = gc.submit(s, _stated(op="merge", entity_id="d-okafor", other_id=D))
+    assert out["status"] == "applied"
+    survivor = s.get_entity(D)
+    assert s.get_entity("d-okafor") is None
+    assert survivor["email_addr"] == "dana@northgate.example"  # best-of from the loser
+    assert "D Okafor" in survivor["aliases"]
+    assert gc.undo(s, out["correction_id"])["status"] == "reverted"
+    assert s.get_entity("d-okafor")["name"] == "D Okafor"
+    assert {k: s.get_entity(D)[k] for k in ("name", "email_addr", "aliases", "org")} == \
+           {k: before_d[k] for k in ("name", "email_addr", "aliases", "org")}
+
+
+def test_merge_guards(tmp_path):
+    s = _store(tmp_path)
+    _seed_dupes(s)
+    assert gc.submit(s, _stated(op="merge", entity_id=D, other_id=D))["status"] == "refused"
+    assert gc.submit(s, _stated(op="merge", entity_id="topic-x", other_id="topic-y"))["status"] == "refused"
+    assert gc.submit(s, _stated(op="merge", entity_id="office", other_id=D))["status"] == "refused"
+    gc.submit(s, _stated(op="not_same", entity_id="d-okafor", other_id=D))
+    assert gc.submit(s, _stated(op="merge", entity_id="d-okafor", other_id=D))["status"] == "refused"
+
+
+def test_merge_undo_refused_while_later_correction_touches_winner(tmp_path):
+    """Same guard as the hand-inserted-ledger-row test above (Task 4), but this
+    time the merge itself goes through the real op end to end via submit()."""
+    s = _store(tmp_path)
+    _seed_dupes(s)
+    merge_out = gc.submit(s, _stated(op="merge", entity_id="d-okafor", other_id=D))
+    assert merge_out["status"] == "applied"
+
+    later = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                                 value="Southbank Community Trust"))
+    assert later["status"] == "applied"
+
+    out = gc.undo(s, merge_out["correction_id"])
+    assert out["status"] == "refused"
+    assert f"undo correction {later['correction_id']} first" in out["error"]
+    assert str(D) in out["error"]
+
+    assert gc.undo(s, later["correction_id"])["status"] == "reverted"
+    assert gc.undo(s, merge_out["correction_id"])["status"] == "reverted"
+    assert s.get_entity("d-okafor") is not None
