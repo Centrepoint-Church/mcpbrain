@@ -142,6 +142,20 @@ def test_every_advertised_tool_is_registered(mcp_env):
     assert {t.name for t in tools} == set(registry())
 
 
+def test_no_tool_schema_has_a_top_level_combinator(mcp_env):
+    """The Anthropic Messages API rejects a tool input_schema with a top-level
+    oneOf/allOf/anyOf ("input_schema does not support oneOf, allOf, or anyOf
+    at the top level") -- a client that forwards a registered tool's advertised
+    schema verbatim would 400 on every request, not just for that one tool.
+    brain_graph_correct originally advertised a per-op `allOf` of if/then
+    conditionals for exactly this reason before it was flattened; this pins
+    the surface against a repeat, for that tool or any future one.
+    """
+    for name, s in registry().items():
+        combinators = {"oneOf", "allOf", "anyOf"} & set(s.input_schema)
+        assert not combinators, f"{name}: top-level {combinators} in input_schema"
+
+
 def test_advertised_order_is_registration_order(mcp_env):
     """Registration order IS tools/list order; the model sees this sequence.
 

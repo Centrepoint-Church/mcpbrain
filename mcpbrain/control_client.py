@@ -225,7 +225,7 @@ class ControlClient:
         marks an error.
         """
         body = {"name": name, "arguments": arguments}
-        if confirmation:
+        if confirmation is not None:
             body["confirmation"] = confirmation
         r = self._request("/api/tool", method="POST", body=body,
                           timeout=self.TOOL_CALL_TIMEOUT_S, error_body=True)

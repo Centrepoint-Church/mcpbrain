@@ -780,7 +780,7 @@ def build_server(store, draft_store, client, home: str):
                 # urllib request with a 120s ceiling, and running it on the event
                 # loop would stall this session's progress notifications and
                 # every other in-flight request for its whole duration.
-                kwargs = {"confirmation": confirmation} if confirmation else {}
+                kwargs = {"confirmation": confirmation} if confirmation is not None else {}
                 return await asyncio.to_thread(client.call_tool, name, arguments, **kwargs)
             # DaemonTimeout FIRST: it subclasses DaemonUnavailable, so the broader
             # handler below would otherwise claim the daemon is not running when

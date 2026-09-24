@@ -48,13 +48,6 @@ def test_empty_list_is_preserved_distinctly():
     assert args["extractions"] == []
 
 
-def _sample_value(field_schema: dict):
-    if field_schema.get("enum"):
-        return field_schema["enum"][0]
-    return {"string": "x", "integer": 1, "boolean": True,
-            "array": [], "object": {}}[field_schema["type"]]
-
-
 def test_declared_defaults_are_never_written_into_arguments():
     """No schema `default` may leak into the dict the dispatch layer reads.
 
@@ -63,13 +56,6 @@ def test_declared_defaults_are_never_written_into_arguments():
     come back byte-identical. `arguments.get(k, <fallback>)` in the dispatch
     chain is what encodes each tool's real default, so a validator that
     pre-filled them would silently change behaviour across the whole surface.
-
-    A tool's TOP-LEVEL `required` is not always the whole story:
-    brain_graph_correct's schema also has a per-`op` `allOf`/`if`/`then` (each
-    clause requiring more fields once a particular `op` is chosen), so the
-    minimal valid payload here is a fixpoint over those clauses too -- fill the
-    top-level required fields, then any `then.required` whose `if` condition
-    they now satisfy, repeating until nothing new is added.
     """
     from mcpbrain.tool_registry import registry
 
@@ -77,19 +63,11 @@ def test_declared_defaults_are_never_written_into_arguments():
         schema = s.input_schema
         args = {}
         for field in schema.get("required", []):
-            args[field] = _sample_value(schema["properties"][field])
-        changed = True
-        while changed:
-            changed = False
-            for clause in schema.get("allOf", []):
-                cond = clause.get("if", {}).get("properties", {})
-                if not all(args.get(k) == v.get("const")
-                          for k, v in cond.items() if "const" in v):
-                    continue
-                for field in clause.get("then", {}).get("required", []):
-                    if field not in args:
-                        args[field] = _sample_value(schema["properties"][field])
-                        changed = True
+            spec = schema["properties"][field]
+            args[field] = {"string": "x", "integer": 1, "boolean": True,
+                           "array": [], "object": {}}[spec["type"]]
+            if spec.get("enum"):
+                args[field] = spec["enum"][0]
         before = dict(args)
         _validate_tool_arguments(name, args)
         assert args == before, f"{name}: validation mutated arguments {before} -> {args}"

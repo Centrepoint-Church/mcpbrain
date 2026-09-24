@@ -20,7 +20,7 @@ from mcpbrain.tool_registry import registry, spec
 
 def _declared() -> dict[str, dict]:
     """name -> outputSchema, for the tools that declare one. Absence is
-    meaningful: 13 of the 26 declare none on purpose (see the module docstring),
+    meaningful: 13 of the 27 declare none on purpose (see the module docstring),
     so `output_schema is None` is the distinction being asserted, not `{}`."""
     return {n: dict(s.output_schema) for n, s in registry().items()
             if s.output_schema is not None}

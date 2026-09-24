@@ -180,6 +180,70 @@ def test_the_endpoint_round_trips_through_the_control_client(tmp_path):
     assert daemon.calls == [("brain_read", {"doc_id": "d-2"})]
 
 
+def test_confirmation_rides_the_full_http_hop_to_apply_an_inferred_correction(tmp_path):
+    """ControlClient.call_tool(..., confirmation=...) -> POST /api/tool ->
+    Daemon.call_tool -> graph_corrections.submit, with no MCP server involved.
+    An inferred correction stages `pending` without a confirmation and
+    `applied` with one -- proving the out-of-band channel survives the real
+    HTTP round trip, not just an in-process call."""
+    from mcpbrain.control_client import ControlClient
+
+    store, daemon = _daemon(tmp_path)
+    with store._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('x','X','person')")
+    srv = ControlServer(daemon, home=str(tmp_path))
+    srv.start()
+    try:
+        client = ControlClient(home=tmp_path)
+        args = {"op": "hide", "basis": "inferred", "reason": "r", "entity_id": "x"}
+        assert client.call_tool("brain_graph_correct", args)["status"] == "pending"
+        with store._connect(write=True) as db:
+            db.execute("DELETE FROM graph_corrections")  # admin-delete-ok
+        out = client.call_tool("brain_graph_correct", args,
+                               confirmation={"via": "elicitation"})
+        assert out["status"] == "applied"
+    finally:
+        srv.stop()
+
+
+def test_a_non_dict_confirmation_over_http_is_a_400(tmp_path):
+    """control_api's own defensive check, reached over the real endpoint."""
+    from mcpbrain.control_client import ControlClient, ToolExecutionError
+
+    _store, daemon = _daemon(tmp_path)
+    srv = ControlServer(daemon, home=str(tmp_path))
+    srv.start()
+    try:
+        with pytest.raises(ToolExecutionError, match="confirmation must be an object"):
+            ControlClient(home=tmp_path).call_tool(
+                "brain_graph_correct",
+                {"op": "hide", "basis": "user_stated", "reason": "r", "entity_id": "x"},
+                confirmation="oops")
+    finally:
+        srv.stop()
+
+
+def test_a_confirmation_sent_for_a_different_tool_never_reaches_its_handler(tmp_path):
+    """`_CONFIRMABLE_TOOLS` gates which handler even SEES a confirmation.
+
+    brain_proactive's handler takes one argument; if the daemon forwarded a
+    confirmation to it regardless of the allowlist, this would raise a
+    TypeError instead of returning the plain result -- proving the gate, not
+    just the happy path, matters.
+    """
+    from mcpbrain.control_client import ControlClient
+
+    _store, daemon = _daemon(tmp_path)
+    srv = ControlServer(daemon, home=str(tmp_path))
+    srv.start()
+    try:
+        out = ControlClient(home=tmp_path).call_tool(
+            "brain_proactive", {}, confirmation={"via": "elicitation"})
+    finally:
+        srv.stop()
+    assert out == []
+
+
 def test_a_daemon_side_failure_is_not_reported_as_an_absent_daemon(tmp_path):
     """A reached-but-failing daemon must NOT look like a missing one.
 
@@ -435,7 +499,7 @@ def _seeded(tmp_path, monkeypatch):
 def test_the_routing_table_partitions_the_whole_advertised_surface():
     """Every advertised tool is classified: routed, or local for a stated reason.
 
-    The point is the 27th tool. A tool added to the registry without a routing
+    The point is the 28th tool. A tool added to the registry without a routing
     decision would otherwise just quietly execute in the MCP server (the `else`
     of every `if config.tool_exec_in_daemon(...)`) and re-open the
     multiple-writable-handle hole this phase closed, with nothing failing.

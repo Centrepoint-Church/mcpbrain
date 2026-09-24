@@ -16,22 +16,35 @@ def test_schema_rejects_smuggled_confirmation():
                              "entity_id": "x", "confirmed_via": "elicitation"}, _schema())
 
 
-@pytest.mark.parametrize("args", [
-    {"op": "hide", "basis": "user_stated", "reason": "r"},                  # no entity_id
-    {"op": "reject_relation", "basis": "user_stated", "reason": "r", "entity_a": "a"},
-    {"op": "undo"},                                                          # no correction_id
-    {"op": "set_field", "basis": "user_stated", "reason": "r", "entity_id": "x",
-     "field": "phone", "value": "1"},                                        # bad field
-])
-def test_schema_requires_per_op_fields(args):
+def test_schema_rejects_bad_enum_value():
+    """`field` keeps its enum in the schema (unlike the per-op required-field
+    rule below), so an invalid value is still a schema-level rejection."""
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(args, _schema())
+        jsonschema.validate({"op": "set_field", "basis": "user_stated", "reason": "r",
+                             "entity_id": "x", "field": "phone", "value": "1"}, _schema())
+
+
+def test_schema_has_no_top_level_combinator():
+    """The Anthropic Messages API rejects a tool input_schema with a top-level
+    oneOf/allOf/anyOf ("input_schema does not support oneOf, allOf, or anyOf
+    at the top level") -- a client forwarding this schema verbatim would 400
+    on every request, not just a brain_graph_correct call. Per-op required
+    fields are advertised in the description and enforced by
+    graph_corrections.submit itself (see test_per_op_*_are_refused_by_the_daemon
+    below), not by a schema combinator."""
+    schema = _schema()
+    assert not ({"oneOf", "allOf", "anyOf"} & set(schema)), schema
 
 
 def test_schema_accepts_valid_calls():
     jsonschema.validate({"op": "undo", "correction_id": 3}, _schema())
     jsonschema.validate({"op": "merge", "basis": "user_stated", "reason": "r",
                          "entity_id": "a", "other_id": "b"}, _schema())
+    # Missing per-op fields are now schema-VALID (only "op" is required at the
+    # schema level) -- the daemon tests below prove they are still refused,
+    # just by graph_corrections.submit rather than by jsonschema.
+    jsonschema.validate({"op": "hide", "basis": "user_stated", "reason": "r"}, _schema())
+    jsonschema.validate({"op": "undo"}, _schema())
 
 
 def test_annotations_are_destructive():
@@ -74,3 +87,19 @@ def test_daemon_honours_out_of_band_confirmation_only(tmp_path, monkeypatch):
         db.execute("DELETE FROM graph_corrections")  # admin-delete-ok
     out = d.call_tool("brain_graph_correct", args, confirmation={"via": "elicitation"})
     assert out["status"] == "applied"
+
+
+@pytest.mark.parametrize("args", [
+    {"op": "hide", "basis": "user_stated", "reason": "r"},                  # no entity_id
+    {"op": "reject_relation", "basis": "user_stated", "reason": "r", "entity_a": "a"},
+    {"op": "undo"},                                                          # no correction_id
+])
+def test_per_op_missing_fields_are_refused_by_the_daemon(tmp_path, monkeypatch, args):
+    """Per-op required-field enforcement moved out of the schema (a top-level
+    allOf is rejected by the Anthropic Messages API -- see
+    test_schema_has_no_top_level_combinator) and into
+    graph_corrections.submit, which is exercised here through the real daemon
+    call path rather than jsonschema."""
+    d, _s = _daemon(tmp_path, monkeypatch)
+    out = d.call_tool("brain_graph_correct", args)
+    assert out["status"] == "refused", out

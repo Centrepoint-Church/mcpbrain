@@ -507,9 +507,11 @@ def make_brain_finding_resolve(store):
     return brain_finding_resolve
 
 
-# Every argument a correction op requires, keyed by op. Also drives the `op`
-# enum below (list(_CORRECT_REQUIRED)) and the schema's per-op `allOf`
-# conditionals, so a new op added here is required-checked automatically.
+# Every argument a correction op requires, keyed by op. Drives the `op` enum
+# below (list(_CORRECT_REQUIRED)). Per-op enforcement is NOT in the advertised
+# schema (see the @tool(...) comment below) -- graph_corrections.submit checks
+# this same requirement itself and returns {"status": "refused", ...} naming
+# the missing key, so this dict stays the single source either way.
 _CORRECT_REQUIRED = {
     "reject_relation": ["basis", "reason", "entity_a", "relation", "entity_b"],
     "assert_relation": ["basis", "reason", "entity_a", "relation", "entity_b"],
@@ -528,12 +530,27 @@ _CORRECT_REQUIRED = {
         "never names. ops: reject_relation (a relation is wrong), assert_relation (record "
         "a relation), merge (two entries are the same person/org/project), not_same (two "
         "entries are different), set_field (role, org, name or email), hide (junk entity), "
-        "undo (reverse a correction by correction_id). basis: 'user_stated' ONLY when the "
-        "user said it in this conversation (applied at once); 'inferred' when you worked "
-        "it out yourself (the user is asked to confirm, or it waits for approval on the "
-        "dashboard). Corrections survive re-enrichment. Report the returned status "
-        "faithfully: never say a pending correction was applied."
+        "undo (reverse a correction by correction_id). Fields needed per op: "
+        "reject_relation/assert_relation: entity_a, relation, entity_b; merge/not_same: "
+        "entity_id, other_id; set_field: entity_id, field, value; hide: entity_id; undo: "
+        "correction_id; every op but undo also needs basis and reason. basis: "
+        "'user_stated' ONLY when the user said it in this conversation (applied at once); "
+        "'inferred' when you worked it out yourself (the user is asked to confirm, or it "
+        "waits for approval on the dashboard). Corrections survive re-enrichment. Report "
+        "the returned status faithfully: never say a pending correction was applied."
     ),
+    # additionalProperties + a flat `required: ["op"]` ONLY -- no top-level
+    # oneOf/allOf/anyOf. This schema previously carried a per-op `allOf` of
+    # if/then conditionals, which is REJECTED outright by the Anthropic
+    # Messages API ("input_schema does not support oneOf, allOf, or anyOf at
+    # the top level") -- a client that forwards this tool's advertised schema
+    # verbatim would 400 on every request, not just a brain_graph_correct
+    # call. Per-op requirements are advertised in the description above
+    # instead, and ENFORCED by graph_corrections.submit's own required-key
+    # check, which returns {"status": "refused", ...} naming the missing key
+    # -- there is no second, schema-shaped copy of that rule to keep in step.
+    # test_tool_registry.py guards against this schema (or any other tool's)
+    # regaining a top-level oneOf/allOf/anyOf.
     input_schema={
         "type": "object",
         "additionalProperties": False,
@@ -555,10 +572,6 @@ _CORRECT_REQUIRED = {
             "correction_id": {"type": "integer"},
         },
         "required": ["op"],
-        "allOf": [
-            {"if": {"properties": {"op": {"const": op}}}, "then": {"required": req}}
-            for op, req in _CORRECT_REQUIRED.items()
-        ],
     },
     annotations=_destructive("Correct the knowledge graph"),
     output_schema={
