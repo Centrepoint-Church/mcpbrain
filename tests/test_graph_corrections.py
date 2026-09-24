@@ -205,10 +205,10 @@ def test_undo_merge_refuses_while_later_correction_changed_the_winner(tmp_path):
         snap = _merge_entities_tx(db, "dana-okafor-2", D, method="user")
     with s._connect(write=True) as db:
         merge_cid = db.execute(
-            "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,dedup_key,applied_at) "
-            "VALUES('merge','user_stated','applied',?,?,'merge:[]',?) ",
+            "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,dedup_key,"
+            "applied_at,applied_order) VALUES('merge','user_stated','applied',?,?,'merge:[]',?,?) ",
             (_json.dumps({"entity_id": "dana-okafor-2", "other_id": D}),
-             _json.dumps(snap), gc._now())).lastrowid
+             _json.dumps(snap), gc._now(), gc._next_applied_order(db))).lastrowid
 
     later = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
                                  value="Southbank Community Trust"))
@@ -332,9 +332,10 @@ def test_undo_refused_when_later_merge_touches_the_entity(tmp_path):
         snap = _merge_entities_tx(db, S, D, method="user")  # S (loser) folded into D (winner)
     with s._connect(write=True) as db:
         merge_cid = db.execute(
-            "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,dedup_key,applied_at) "
-            "VALUES('merge','user_stated','applied',?,?,'merge:[]',?) ",
-            (_json.dumps({"entity_id": S, "other_id": D}), _json.dumps(snap), gc._now())).lastrowid
+            "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,dedup_key,"
+            "applied_at,applied_order) VALUES('merge','user_stated','applied',?,?,'merge:[]',?,?) ",
+            (_json.dumps({"entity_id": S, "other_id": D}), _json.dumps(snap), gc._now(),
+             gc._next_applied_order(db))).lastrowid
 
     out = gc.undo(s, c1)
     assert out["status"] == "refused"
@@ -399,5 +400,63 @@ def test_refused_set_field_and_hide_write_nothing(tmp_path):
     s = _store(tmp_path)
     assert gc.submit(s, _stated(op="set_field", entity_id=D, field="role", value="volunteer"))["status"] == "refused"
     assert gc.submit(s, _stated(op="hide", entity_id="nobody"))["status"] == "refused"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0
+
+
+# --- fix round 2 ---------------------------------------------------------------
+
+# --- (1) the guard orders by WHEN a correction became applied, not by id -----
+
+def test_undo_guard_uses_applied_order_not_id_for_a_pending_then_approved_pair(tmp_path):
+    """A pending inferred correction is assigned a LOWER id than one that
+    applies immediately afterwards, but approving it later makes it the
+    truly-later change. The guard must use applied_order, not id, or
+    undoing #2 here would silently overwrite what approving #1 just did."""
+    s = _store(tmp_path)
+    pending = gc.submit(s, _inferred(op="set_field", entity_id=D, field="org",
+                                     value="The Lantern Co"))
+    assert pending["status"] == "pending"
+    cid1 = pending["correction_id"]
+
+    applied = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                                   value="Southbank Community Trust"))
+    assert applied["status"] == "applied"
+    cid2 = applied["correction_id"]
+    assert cid1 < cid2  # submitted first, but not yet applied
+
+    assert gc.approve(s, cid1)["status"] == "applied"  # applied AFTER cid2
+
+    out = gc.undo(s, cid2)
+    assert out["status"] == "refused"
+    assert f"undo correction {cid1} first" in out["error"]
+
+    assert gc.undo(s, cid1)["status"] == "reverted"
+    assert gc.undo(s, cid2)["status"] == "reverted"
+    assert s.get_entity(D)["org"] == "Northgate Trust"
+
+
+# --- (2) assert's rule-i keys only rivals it actually retired ----------------
+
+def test_undo_assert_not_blocked_by_an_unrelated_non_singleton_rival(tmp_path):
+    """mentioned_with is not a singleton relation, so asserting D-S never
+    retires the pre-existing D-N relation; a later correction touching D-N
+    must not block undoing the assert."""
+    s = _store(tmp_path)
+    gw.upsert_relation(s, D, "mentioned_with", N, valid_from="2026-01-01")
+    a_out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="mentioned_with", entity_b=S))
+    assert a_out["status"] == "applied"
+    r_out = gc.submit(s, _stated(op="reject_relation", entity_a=D, relation="mentioned_with", entity_b=N))
+    assert r_out["status"] == "applied"
+
+    assert gc.undo(s, a_out["correction_id"])["status"] == "reverted"
+
+
+# --- (3) every string argument is type-checked -------------------------------
+
+def test_submit_refuses_a_non_string_value(tmp_path):
+    s = _store(tmp_path)
+    out = gc.submit(s, _stated(op="set_field", entity_id=D, field="org", value=5))
+    assert out["status"] == "refused" and "value" in out["error"]
     with s._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0

@@ -1423,9 +1423,22 @@ class Store:
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
                 applied_at    TEXT DEFAULT '',
                 reverted_at   TEXT DEFAULT '',
-                change_log_id INTEGER){_S}""")
+                change_log_id INTEGER,
+                applied_order INTEGER){_S}""")
+            # When a row BECAME 'applied' (submit or approve), not when it was
+            # created: a pending inferred correction gets a lower id but can be
+            # approved after a later user_stated one already applied, and the
+            # undo-conflict guard must call the approved-later one "later" too.
+            # applied_at (1s resolution) can tie exactly on this case, so the
+            # guard orders on this monotonically-assigned integer instead.
+            gc_cols = {row["name"] for row in db.execute(
+                "PRAGMA table_info(graph_corrections)").fetchall()}
+            if "applied_order" not in gc_cols:
+                db.execute("ALTER TABLE graph_corrections ADD COLUMN applied_order INTEGER")
             db.execute("CREATE INDEX IF NOT EXISTS idx_gc_status ON graph_corrections(status)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_gc_dedup ON graph_corrections(dedup_key)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_gc_applied_order "
+                       "ON graph_corrections(applied_order)")
             # "These two are different entities": consulted by every merge path.
             # a < b always (the writer sorts), so one row per unordered pair.
             db.execute(f"""CREATE TABLE IF NOT EXISTS entity_distinct_pairs(

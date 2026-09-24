@@ -19,7 +19,7 @@ def test_init_creates_correction_tables_and_verdict_column(tmp_path):
     s = _store(tmp_path)
     assert {"id", "op", "basis", "status", "payload", "snapshot", "reason",
             "confirmed_via", "dedup_key", "error", "created_at", "applied_at",
-            "reverted_at", "change_log_id"} <= _cols(s, "graph_corrections")
+            "reverted_at", "change_log_id", "applied_order"} <= _cols(s, "graph_corrections")
     assert {"a", "b"} <= _cols(s, "entity_distinct_pairs")
     assert {"entity_id", "field"} <= _cols(s, "entity_field_locks")
     assert "user_verdict" in _cols(s, "entity_relations")

@@ -30,6 +30,11 @@ PENDING_CAP = 25
 FINDING_TYPE = "graph_correction"
 
 _FIELD_COLUMN = {"org": "org", "name": "name", "email": "email_addr"}
+# Every string-typed argument across every op, checked uniformly in submit()
+# regardless of which op is in play (a stray value under the wrong op's key
+# is still worth refusing on, not silently ignored).
+_STRING_ARGS = ("entity_a", "entity_b", "entity_id", "other_id", "relation",
+               "field", "value", "reason", "name", "valid_from")
 _PAYLOAD_KEYS = {
     "reject_relation": ("entity_a", "relation", "entity_b"),
     "assert_relation": ("entity_a", "relation", "entity_b", "valid_from"),
@@ -90,12 +95,22 @@ def describe(op: str, p: dict) -> str:
 
 # --- ledger + side tables, all on the caller's connection ---------------------
 
-def _insert(db, op, basis, status, payload, snapshot, confirmed_via, key, *, applied_at="") -> int:
+def _next_applied_order(db) -> int:
+    """The next value of applied_order: monotonically increasing across the
+    table regardless of which row's status changes, so it orders BY WHEN A
+    ROW BECAME APPLIED, not by id/created_at -- id is assignment order, and a
+    pending inferred correction can be approved well after a later
+    user_stated one already applied."""
+    return db.execute("SELECT COALESCE(MAX(applied_order),0)+1 FROM graph_corrections").fetchone()[0]
+
+
+def _insert(db, op, basis, status, payload, snapshot, confirmed_via, key, *,
+           applied_at="", applied_order=None) -> int:
     return db.execute(
         "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,reason,"
-        "confirmed_via,dedup_key,applied_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        "confirmed_via,dedup_key,applied_at,applied_order) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (op, basis, status, json.dumps(payload), json.dumps(snapshot),
-         payload.get("reason", ""), confirmed_via, key, applied_at)).lastrowid
+         payload.get("reason", ""), confirmed_via, key, applied_at, applied_order)).lastrowid
 
 
 def _log_change(db, cid: int, change: str, summary: str, detail: str) -> None:
@@ -157,7 +172,7 @@ def _apply_assert_relation(store, db, p) -> dict:
     prior = _relation(db, a, rel, b)
     if prior is not None and prior["user_verdict"] == "asserted" and prior["invalidated_at"] is None:
         raise Refused("that relation is already recorded as stated by the user")
-    rivals = [dict(r) for r in db.execute(
+    candidates = [dict(r) for r in db.execute(
         "SELECT * FROM entity_relations WHERE entity_a=? AND relation=? AND entity_b != ? "
         "AND invalidated_at IS NULL", (a, rel, b))]
     if prior is not None and prior["user_verdict"] == "rejected":
@@ -167,6 +182,17 @@ def _apply_assert_relation(store, db, p) -> dict:
                                 evidence=f"stated by the user: {p.get('reason', '')}",
                                 source_doc_id="")
     db.execute("UPDATE entity_relations SET user_verdict='asserted' WHERE id=?", (rid,))
+    # Only candidates the singleton recency rule ACTUALLY retired (their
+    # invalidated_by_relation_id now points at this assert's own row) belong
+    # in the snapshot as "rivals". A non-singleton relation (e.g.
+    # mentioned_with) never retires anything, so its merely-coexisting
+    # candidates must not be snapshotted here -- both `undo`'s restore step
+    # AND the undo-conflict guard's target keys treat "rivals" as things this
+    # assert is responsible for, and a false one makes the guard block an
+    # unrelated later correction it never touched.
+    rivals = [r for r in candidates if db.execute(
+        "SELECT invalidated_by_relation_id FROM entity_relations WHERE id=?",
+        (r["id"],)).fetchone()["invalidated_by_relation_id"] == rid]
     row_after = db.execute("SELECT invalidated_at FROM entity_relations WHERE id=?",
                            (rid,)).fetchone()
     return {"relation_id": rid, "prior": dict(prior) if prior else None, "rivals": rivals,
@@ -359,14 +385,22 @@ _UNDO = {
 # --- the one generalised "don't clobber a later correction" guard ------------
 #
 # Undoing correction N must not silently overwrite something a LATER, still-
-# applied correction M did. Each non-merge op has a "target key" identifying
-# what it wrote; two corrections that share a target key conflict directly
-# (rule i). Because a merge deletes/renames entities rather than writing a
-# target key of its own, it is handled by id membership instead: a later
-# merge touching one of N's entities can invalidate N's undo (rule ii), and
-# when N is ITSELF the merge, a later correction touching its winner id can
-# invalidate undoing it (rule iii) -- the winner survives the merge and keeps
-# being written to; the loser id is gone and cannot be touched again.
+# applied correction M did. "Later" means applied_order, NOT id and NOT
+# applied_at: a pending inferred correction is assigned a lower id (it was
+# SUBMITTED first) but can be approved well after a later user_stated
+# correction already applied, and applied_at's 1-second resolution can tie
+# on exactly that sequence. applied_order is a monotonically increasing
+# integer stamped only at the moment a row becomes 'applied' (submit or
+# approve), inside that same write transaction.
+#
+# Each non-merge op has a "target key" identifying what it wrote; two
+# corrections that share a target key conflict directly (rule i). Because a
+# merge deletes/renames entities rather than writing a target key of its
+# own, it is handled by id membership instead: a later merge touching one of
+# N's entities can invalidate N's undo (rule ii), and when N is ITSELF the
+# merge, a later correction touching its winner id can invalidate undoing it
+# (rule iii) -- the winner survives the merge and keeps being written to;
+# the loser id is gone and cannot be touched again.
 
 def _payload_entity_ids(p: dict) -> set:
     return {p[k] for k in ("entity_id", "other_id", "entity_a", "entity_b") if p.get(k)}
@@ -400,6 +434,9 @@ def _merge_ids(snap: dict) -> set:
 
 
 def _conflict_note(op: str, p: dict, snap: dict) -> str:
+    """Fallback description naming N's OWN target -- used for rule ii/iii,
+    where the conflict is "this entity was touched by a later merge" rather
+    than a specific shared key."""
     if op in ("reject_relation", "assert_relation"):
         return f"{p['entity_a']} -{p['relation']}-> {p['entity_b']}"
     if op == "set_field":
@@ -413,30 +450,54 @@ def _conflict_note(op: str, p: dict, snap: dict) -> str:
     return op
 
 
-def _find_blocking_correction(db, correction_id: int, op: str, p: dict, snap: dict):
-    """The lowest-id LATER 'applied' correction that undoing (op, p, snap)
-    would silently corrupt, or None."""
+def _note_from_key(key: str) -> str:
+    """Render an opaque _target_keys() key back into English for a refusal
+    message. Used for rule i, where the actual shared key -- e.g. a rival
+    triple an assert retired -- can differ from the correction's OWN target
+    (naming the assert's own triple there would be misleading: the conflict
+    is over the RIVAL, not what the assert itself asserted)."""
+    kind, _, rest = key.partition(":")
+    if kind == "rel":
+        a, rel, b = rest.split("|")
+        return f"{a} -{rel}-> {b}"
+    if kind == "field":
+        eid, field = rest.split(":", 1)
+        return f"{eid}'s {field}"
+    if kind == "hide":
+        return rest
+    if kind == "pair":
+        a, b = rest.split("|")
+        return f"{a} and {b}"
+    return key
+
+
+def _find_blocking_correction(db, applied_order, op: str, p: dict, snap: dict):
+    """The lowest-applied_order LATER 'applied' correction that undoing
+    (op, p, snap) would silently corrupt, as (blocker_id, note), or
+    (None, None)."""
     rows = db.execute(
         "SELECT id, op, payload, snapshot FROM graph_corrections "
-        "WHERE id > ? AND status='applied' ORDER BY id", (correction_id,))
+        "WHERE status='applied' AND applied_order > ? ORDER BY applied_order",
+        (applied_order,))
     if op == "merge":
         watch = {snap.get("winner_id")}  # rule iii: only the survivor can be touched again
         for row in rows:
             m_p = json.loads(row["payload"] or "{}")
             if watch & _payload_entity_ids(m_p):
-                return row["id"]
-        return None
+                return row["id"], _conflict_note("merge", p, snap)
+        return None, None
 
     my_keys = _target_keys(op, p, snap)
     my_ids = _payload_entity_ids(p)
     for row in rows:
         m_op, m_p = row["op"], json.loads(row["payload"] or "{}")
         m_snap = json.loads(row["snapshot"] or "{}")
-        if my_keys & _target_keys(m_op, m_p, m_snap):  # rule i
-            return row["id"]
+        shared = my_keys & _target_keys(m_op, m_p, m_snap)  # rule i
+        if shared:
+            return row["id"], _note_from_key(sorted(shared)[0])
         if m_op == "merge" and my_ids & _merge_ids(m_snap):  # rule ii
-            return row["id"]
-    return None
+            return row["id"], _conflict_note(op, p, snap)
+    return None, None
 
 
 # --- public entry points -------------------------------------------------------
@@ -463,6 +524,14 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
     basis = args.get("basis")
     if basis not in BASES:
         return {"status": "refused", "error": f"basis must be one of {list(BASES)}"}
+    # Every value the model could hand us is untyped as far as Python is
+    # concerned: a wrong-typed value (e.g. value=5 for a set_field job title)
+    # would otherwise reach describe()/dedup_key()/a SQL bind or a .lower()
+    # call downstream and fail there instead of being refused cleanly here.
+    bad_type = next((k for k in _STRING_ARGS
+                     if args.get(k) is not None and not isinstance(args[k], str)), None)
+    if bad_type is not None:
+        return {"status": "refused", "error": f"{bad_type} must be a string"}
     # Every payload key except valid_from (optional, defaults to today) and
     # merge's name (optional, defaults to the winner's existing name) is
     # required. Checked BEFORE dedup_key/describe touch p[...], which would
@@ -511,7 +580,7 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
                 # the current fact. "applied" alone would misreport that.
                 summary += " (recorded as historical: a newer rival is current)"
             cid = _insert(db, op, basis, "applied", p, snapshot, confirmed_via, key,
-                          applied_at=_now())
+                          applied_at=_now(), applied_order=_next_applied_order(db))
             _log_change(db, cid, "graph_corrected", summary, p.get("reason", ""))
     except Refused as exc:
         return {"status": "refused", "error": str(exc)}
@@ -529,10 +598,10 @@ def undo(store, correction_id: int) -> dict:
             if row["status"] != "applied":
                 raise Refused(f"correction {correction_id} is {row['status']}, not applied")
             p, snap = json.loads(row["payload"]), json.loads(row["snapshot"])
-            blocker = _find_blocking_correction(db, correction_id, row["op"], p, snap)
+            blocker, note = _find_blocking_correction(db, row["applied_order"],
+                                                       row["op"], p, snap)
             if blocker is not None:
-                raise Refused(f"undo correction {blocker} first: it changed "
-                              f"{_conflict_note(row['op'], p, snap)}")
+                raise Refused(f"undo correction {blocker} first: it changed {note}")
             _UNDO[row["op"]](db, p, snap)
             db.execute("UPDATE graph_corrections SET status='reverted', reverted_at=? "
                        "WHERE id=?", (_now(), correction_id))
@@ -557,8 +626,9 @@ def approve(store, correction_id: int, *, via: str = "dashboard") -> dict:
             if row["op"] == "assert_relation" and snapshot.get("historical"):
                 summary += " (recorded as historical: a newer rival is current)"
             db.execute("UPDATE graph_corrections SET status='applied', snapshot=?, "
-                       "confirmed_via=?, applied_at=? WHERE id=?",
-                       (json.dumps(snapshot), via, _now(), correction_id))
+                       "confirmed_via=?, applied_at=?, applied_order=? WHERE id=?",
+                       (json.dumps(snapshot), via, _now(), _next_applied_order(db),
+                        correction_id))
             _resolve_finding(db, correction_id, "applied")
             _log_change(db, correction_id, "graph_corrected", summary, p.get("reason", ""))
     except Refused as exc:
