@@ -1,14 +1,17 @@
 """Pins the Store-access seam the thin adapter is built on.
 
 The whole design of Phase 4 rests on one fact: exactly which tools hold a
-`Store` handle today. Those 12 move behind `POST /api/tool`; the other 14 stay
+`Store` handle today. Those 13 move behind `POST /api/tool`; the other 14 stay
 in the MCP server process. That fact was a comment in the plan; here it is an
 executable assertion, so a tool gaining or losing Store access fails loudly
 instead of silently changing which side of the adapter it belongs on.
+(brain_graph_correct joined the move-list in Task 6 of the graph-corrections
+work -- a deliberate, known addition, not the drift this file otherwise
+guards against.)
 
 Two mechanisms, because the codebase has two:
 
-1. 11 of the 12 are `make_brain_*(store, ...)` / `(draft_store, ...)` factories
+1. 12 of the 13 are `make_brain_*(store, ...)` / `(draft_store, ...)` factories
    in `mcpbrain/tools.py` -- derivable from the signature.
 2. `brain_read` is NOT a factory at all. It is dispatched inline in
    `on_call_tool` as a bare `store.get_chunk(arguments["doc_id"])` (see the
@@ -39,7 +42,7 @@ STORE_TOUCHING = {
     "brain_read", "brain_context", "brain_actions", "brain_graph",
     "brain_proactive", "brain_finding_resolve", "brain_draft_context",
     "brain_draft_save", "brain_meetings_today", "brain_meeting_pack_get",
-    "brain_meeting_pack_upsert", "brain_gardener_apply",
+    "brain_meeting_pack_upsert", "brain_gardener_apply", "brain_graph_correct",
 }
 
 # The one member of STORE_TOUCHING with no make_brain_* factory to inspect.
@@ -175,12 +178,12 @@ def test_every_store_touching_tool_is_a_declared_tool():
     assert not missing, f"move-list names absent from the registry: {sorted(missing)}"
 
 
-def test_all_24_factories_are_accounted_for():
-    """Guards the arithmetic the plan quotes: 24 factories, 11 of them holding a
-    Store handle, +1 inline-dispatched = the 12 that move."""
+def test_all_25_factories_are_accounted_for():
+    """Guards the arithmetic the plan quotes: 25 factories, 12 of them holding a
+    Store handle, +1 inline-dispatched = the 13 that move."""
     from mcpbrain import tools as ms
 
     factories = {n for n in dir(ms) if n.startswith("make_brain_")}
-    assert len(factories) == 24, f"expected 24 factories, found {len(factories)}"
-    assert len(_factory_derived_store_touching()) == 11
-    assert len(STORE_TOUCHING) == 12
+    assert len(factories) == 25, f"expected 25 factories, found {len(factories)}"
+    assert len(_factory_derived_store_touching()) == 12
+    assert len(STORE_TOUCHING) == 13

@@ -1057,6 +1057,7 @@ Keep my brain current as we work:
 - A "just decided / where we're up to" note -> brain_note
 - A durable learning, preference, or fact worth keeping -> brain_memory_write
 - When a system or project materially changes, propose an edit to the matching reference file and I'll approve it.
+- Something in the graph is wrong (a relation, a role or org, a duplicate or a mix-up) -> brain_graph_correct: basis user_stated when I said it, inferred when you worked it out
 
 Captures are queued (the daemon writes them to my records repo within ~a minute; don't hand-edit those files). If something is clearly tied to one of my orgs{org_phrase} pass that org on a write; otherwise leave it — classifying people, orgs and relationships is automatic background enrichment, you don't tag anything.
 """

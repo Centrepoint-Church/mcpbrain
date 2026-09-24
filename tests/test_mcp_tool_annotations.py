@@ -15,7 +15,7 @@ READ_ONLY = {
     "brain_proactive", "brain_routine", "brain_enrich_pull", "brain_enrich_pending",
     "brain_meetings_today", "brain_meeting_pack_get", "brain_draft_context",
 }
-DESTRUCTIVE = {"brain_gardener_apply", "brain_enrich_advance"}
+DESTRUCTIVE = {"brain_gardener_apply", "brain_enrich_advance", "brain_graph_correct"}
 LEASE_ACQUIRING = {"brain_enrich_units", "brain_enrich_claim"}
 IDEMPOTENT_MUTATORS = {
     "brain_action_update", "brain_meeting_pack_upsert", "brain_finding_resolve",

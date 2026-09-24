@@ -113,8 +113,10 @@ in memory — even in passing.
 - Keep the brain current as we work, unprompted: a decision that changes how things are done -> \
 brain_decision; a "just decided / where we're up to" note -> brain_note; a durable learning, \
 preference, or fact worth keeping -> brain_memory_write; a system/project materially changing -> \
-propose an edit to the matching reference file. Never hand-edit records/context or records/state \
-files directly — they're daemon-managed; always go through these write tools.
+propose an edit to the matching reference file; a graph fact I correct (wrong relation, role, \
+org, duplicate) -> brain_graph_correct (basis user_stated; inferred only for your own \
+deductions, which I confirm). Never hand-edit records/context or records/state files directly \
+— they're daemon-managed; always go through these write tools.
 """
 
 

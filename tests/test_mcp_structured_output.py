@@ -30,7 +30,7 @@ STRUCTURED = {
     "brain_ingest", "brain_action_create", "brain_action_update", "brain_decision",
     "brain_note", "brain_memory_write", "brain_gardener_apply", "brain_enrich_push",
     "brain_enrich_advance", "brain_enrich_pending", "brain_finding_resolve",
-    "brain_draft_save", "brain_meeting_pack_upsert",
+    "brain_draft_save", "brain_meeting_pack_upsert", "brain_graph_correct",
 }
 # Markdown carriers: JSON-wrapping them is already overhead; don't double it.
 DELIBERATELY_UNSTRUCTURED = {"brain_routine", "brain_enrich_pull"}

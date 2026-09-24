@@ -360,11 +360,19 @@ class ControlServer:
                 # log.exception, so a real fault keeps its traceback.
                 name = body.get("name")
                 arguments = body.get("arguments") or {}
+                confirmation = body.get("confirmation")
                 if not isinstance(name, str) or not isinstance(arguments, dict):
                     return h_json(h, 400, {"error": "name must be a string and "
                                                     "arguments an object"})
+                if confirmation is not None and not isinstance(confirmation, dict):
+                    return h_json(h, 400, {"error": "confirmation must be an object"})
+                # Passed only when present, like ControlClient.call_tool's own
+                # body -- so a two-argument daemon stand-in (every existing
+                # test double, and any tool but brain_graph_correct) keeps
+                # working unchanged.
+                kwargs = {"confirmation": confirmation} if confirmation is not None else {}
                 try:
-                    return h_json(h, 200, {"result": d.call_tool(name, arguments)})
+                    return h_json(h, 200, {"result": d.call_tool(name, arguments, **kwargs)})
                 except ValueError as exc:
                     log.error("control API /api/tool refused %r: %s", name, exc)
                     return h_json(h, 400, {"error": str(exc)})

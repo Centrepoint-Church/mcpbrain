@@ -202,7 +202,7 @@ class ControlClient:
             return []
         return r.get("results", [])
 
-    def call_tool(self, name: str, arguments: dict):
+    def call_tool(self, name: str, arguments: dict, confirmation: dict | None = None):
         """Execute a Store-touching MCP tool IN the daemon and return its result.
 
         The thin-adapter path: the MCP server holds the protocol, the daemon
@@ -215,12 +215,19 @@ class ControlClient:
         handler ran and failed, or the executor refused a tool/arguments it does
         not recognise).
 
+        `confirmation` carries a user confirmation the MCP server obtained
+        (brain_graph_correct only). It travels beside the arguments, never
+        inside them, so the model cannot supply one. Sent only when set, so a
+        test double with a two-argument `call_tool` keeps working.
+
         Returns the handler's return value verbatim, including None: `"result"`
         is present in every success body, so absence -- not falsiness -- is what
         marks an error.
         """
-        r = self._request("/api/tool", method="POST",
-                          body={"name": name, "arguments": arguments},
+        body = {"name": name, "arguments": arguments}
+        if confirmation:
+            body["confirmation"] = confirmation
+        r = self._request("/api/tool", method="POST", body=body,
                           timeout=self.TOOL_CALL_TIMEOUT_S, error_body=True)
         if "result" not in r:
             raise ToolExecutionError(r.get("error") or f"tool call failed: {name}")

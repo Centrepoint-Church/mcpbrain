@@ -25,6 +25,8 @@ TOOL_CALLS: dict[str, dict] = {
     "brain_graph": {"entity": "Someone", "hops": 1},
     "brain_proactive": {},
     "brain_finding_resolve": {"finding_id": 1, "outcome": "dismissed"},
+    "brain_graph_correct": {"op": "hide", "basis": "user_stated", "reason": "junk",
+                            "entity_id": "x"},
     "brain_ingest": {"title": "t", "content": "c"},
     "brain_action_create": {"text": "do a thing"},
     "brain_action_update": {"action_id": 1, "status": "done"},

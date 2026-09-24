@@ -31,8 +31,9 @@ ROUTED_MARKER = "routed-through-the-daemon"
 # tool has to be classified HERE by hand, which is the decision we want forced.
 ROUTED_TOOLS = frozenset({
     "brain_read", "brain_context", "brain_actions", "brain_proactive",
-    "brain_finding_resolve", "brain_gardener_apply", "brain_draft_save",
-    "brain_meetings_today", "brain_meeting_pack_get", "brain_meeting_pack_upsert",
+    "brain_finding_resolve", "brain_graph_correct", "brain_gardener_apply",
+    "brain_draft_save", "brain_meetings_today", "brain_meeting_pack_get",
+    "brain_meeting_pack_upsert",
 })
 
 # Store-touching, and DELIBERATELY not routed. Both report progress through
@@ -601,6 +602,8 @@ _MINIMAL_ARGS = {
     "brain_actions": {"owner": "Sam Taylor"},
     "brain_proactive": {},
     "brain_finding_resolve": {"finding_id": 1, "outcome": "dismissed"},
+    "brain_graph_correct": {"op": "hide", "basis": "user_stated", "reason": "junk",
+                            "entity_id": "x"},
     # lane='reference' with a file that does not exist: the handler raises
     # FileNotFoundError before writing anything, so this is schema-valid AND
     # side-effect-free (which section 6 needs, since it calls twice).
@@ -994,6 +997,13 @@ _FULL_ARGS = {
     "brain_proactive": {"finding_type": "memory_promotion", "severity": "info"},
     "brain_finding_resolve": {"finding_id": 3, "outcome": "promoted",
                               "note": "wrote the memory file"},
+    "brain_graph_correct": {
+        "op": "merge", "basis": "user_stated", "reason": "the user said so",
+        "entity_a": "a", "relation": "works_at", "entity_b": "b",
+        "valid_from": "2026-09-01", "entity_id": "e1", "other_id": "e2",
+        "name": "Merged Name", "field": "role", "value": "Manager",
+        "correction_id": 5,
+    },
     "brain_gardener_apply": {"lane": "context", "filename": "identity.md",
                              "content": "new body", "asserts_person_role": True,
                              "attribution_source": "signature",
@@ -1017,6 +1027,7 @@ _TOOL_FACTORIES = {
     "brain_actions": "make_brain_actions",
     "brain_proactive": "make_brain_proactive",
     "brain_finding_resolve": "make_brain_finding_resolve",
+    "brain_graph_correct": "make_brain_graph_correct",
     "brain_gardener_apply": "make_brain_gardener_apply",
     "brain_draft_save": "make_brain_draft_save",
     "brain_meetings_today": "make_brain_meetings_today",

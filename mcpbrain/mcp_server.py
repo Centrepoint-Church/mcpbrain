@@ -41,6 +41,7 @@ from mcpbrain.tools import (
     make_brain_finding_resolve,
     make_brain_gardener_apply,
     make_brain_graph,
+    make_brain_graph_correct,
     make_brain_ingest,
     make_brain_meeting_pack_get,
     make_brain_meeting_pack_upsert,
@@ -639,6 +640,9 @@ def build_server(store, draft_store, client, home: str):
     meeting_pack_upsert = make_brain_meeting_pack_upsert(draft_store)
     # Writable handle: resolving a finding UPDATEs proactive_findings.
     finding_resolve = make_brain_finding_resolve(draft_store)
+    # Writable handle, used only on the kill-switch path: correcting the graph
+    # writes graph_corrections + the affected entity/relation rows.
+    graph_correct = make_brain_graph_correct(draft_store)
 
     # watch_resources() needs a live ServerSession, which only exists once a client
     # has connected — so it cannot start in main(). It starts from the first
@@ -737,7 +741,7 @@ def build_server(store, draft_store, client, home: str):
             for name, s in registry().items()
         ])
 
-    async def run_tool(name: str, arguments: dict, local):
+    async def run_tool(name: str, arguments: dict, local, confirmation: dict | None = None):
         """Execute `name` in the daemon when routing is on, else run `local`.
 
         The routing decision lives HERE, in the dispatch layer, and not in
@@ -760,6 +764,11 @@ def build_server(store, draft_store, client, home: str):
 
         Never raises for an absent daemon -- it returns _RoutedCallFailed; see
         that class for why the error is a value and not a fifth `return`.
+
+        `confirmation` (brain_graph_correct only) rides beside `arguments` to
+        the daemon, exactly as `client.call_tool` carries it -- never folded
+        into `arguments`, which is model-controlled. Passed on only when set,
+        so every other routed tool's call keeps working unchanged.
         """
         import asyncio
         import inspect
@@ -771,7 +780,8 @@ def build_server(store, draft_store, client, home: str):
                 # urllib request with a 120s ceiling, and running it on the event
                 # loop would stall this session's progress notifications and
                 # every other in-flight request for its whole duration.
-                return await asyncio.to_thread(client.call_tool, name, arguments)
+                kwargs = {"confirmation": confirmation} if confirmation else {}
+                return await asyncio.to_thread(client.call_tool, name, arguments, **kwargs)
             # DaemonTimeout FIRST: it subclasses DaemonUnavailable, so the broader
             # handler below would otherwise claim the daemon is not running when
             # in fact it accepted the call and never came back. Two routed tools
@@ -917,6 +927,11 @@ def build_server(store, draft_store, client, home: str):
                 outcome=arguments.get("outcome", ""),
                 note=arguments.get("note", ""),
             ))
+        elif name == "brain_graph_correct":
+            confirmation = None  # Task 7 fills this from an elicitation
+            out = await run_tool(name, arguments,
+                                 lambda: graph_correct(arguments, confirmation),
+                                 confirmation=confirmation)
         elif name == "brain_ingest":
             out = await ingest(
                 title=arguments.get("title", ""),

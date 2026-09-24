@@ -1,8 +1,8 @@
 """Every mcpbrain tool: its handler factory AND its registry declaration.
 
 The EXECUTABLE half of the tool seam. `tool_registry` holds the mechanism
-(declare/tool/ToolSpec, deep-freezing, ordering); this module holds the 26
-declarations and the 24 handler factories that back them, and importing it is
+(declare/tool/ToolSpec, deep-freezing, ordering); this module holds the 27
+declarations and the 25 handler factories that back them, and importing it is
 what populates the registry.
 
 Split out of `mcp_server` so BOTH sides of the seam can reach the tools. The
@@ -49,7 +49,7 @@ _log = logging.getLogger("mcpbrain.tools")
 # importable without the MCP protocol stack; _sdk_annotations converts at the
 # tools/list boundary. Do not "simplify" these back to the SDK model.
 #
-# open_world_hint is False for 25 of the 26: each of those touches only the local
+# open_world_hint is False for 26 of the 27: each of those touches only the local
 # store, local files, or the loopback control API. The one exception is
 # brain_meetings_today, which calls dashboard.calendar_today(home) ->
 # auth.build_google_services(...) + a live Calendar events().list(...)
@@ -505,6 +505,92 @@ def make_brain_finding_resolve(store):
             _log.exception("brain_finding_resolve failed")
             return {"resolved": False, "error": str(exc)}
     return brain_finding_resolve
+
+
+# Every argument a correction op requires, keyed by op. Also drives the `op`
+# enum below (list(_CORRECT_REQUIRED)) and the schema's per-op `allOf`
+# conditionals, so a new op added here is required-checked automatically.
+_CORRECT_REQUIRED = {
+    "reject_relation": ["basis", "reason", "entity_a", "relation", "entity_b"],
+    "assert_relation": ["basis", "reason", "entity_a", "relation", "entity_b"],
+    "merge": ["basis", "reason", "entity_id", "other_id"],
+    "not_same": ["basis", "reason", "entity_id", "other_id"],
+    "set_field": ["basis", "reason", "entity_id", "field", "value"],
+    "hide": ["basis", "reason", "entity_id"],
+    "undo": ["correction_id"],
+}
+
+
+@tool(
+    "brain_graph_correct",
+    description=(
+        "Correct the knowledge graph. Use entity ids from brain_context or brain_graph, "
+        "never names. ops: reject_relation (a relation is wrong), assert_relation (record "
+        "a relation), merge (two entries are the same person/org/project), not_same (two "
+        "entries are different), set_field (role, org, name or email), hide (junk entity), "
+        "undo (reverse a correction by correction_id). basis: 'user_stated' ONLY when the "
+        "user said it in this conversation (applied at once); 'inferred' when you worked "
+        "it out yourself (the user is asked to confirm, or it waits for approval on the "
+        "dashboard). Corrections survive re-enrichment. Report the returned status "
+        "faithfully: never say a pending correction was applied."
+    ),
+    input_schema={
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "op": {"type": "string", "enum": list(_CORRECT_REQUIRED)},
+            "basis": {"type": "string", "enum": ["user_stated", "inferred"]},
+            "reason": {"type": "string",
+                       "description": "the user's words, or the evidence you inferred it from"},
+            "entity_a": {"type": "string"},
+            "relation": {"type": "string"},
+            "entity_b": {"type": "string"},
+            "valid_from": {"type": "string",
+                           "description": "YYYY-MM-DD, assert_relation only; default today"},
+            "entity_id": {"type": "string"},
+            "other_id": {"type": "string"},
+            "name": {"type": "string", "description": "merge only: the final display name"},
+            "field": {"type": "string", "enum": ["role", "org", "name", "email"]},
+            "value": {"type": "string"},
+            "correction_id": {"type": "integer"},
+        },
+        "required": ["op"],
+        "allOf": [
+            {"if": {"properties": {"op": {"const": op}}}, "then": {"required": req}}
+            for op, req in _CORRECT_REQUIRED.items()
+        ],
+    },
+    annotations=_destructive("Correct the knowledge graph"),
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": [
+                "applied", "pending", "declined", "duplicate", "refused", "failed",
+                "reverted", "not_applied", "error"]},
+            "correction_id": {"type": "integer"},
+            "summary": {"type": "string"},
+            "undo": {"type": "string"},
+            "next": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "required": ["status"],
+    },
+)
+def make_brain_graph_correct(store):
+    async def brain_graph_correct(arguments: dict, confirmation: dict | None = None) -> dict:
+        """Apply, stage or undo a graph correction. `confirmation` is set ONLY by
+        the MCP server (after an elicitation) and never comes from the model's
+        arguments. Returns a status dict; never raises."""
+        from mcpbrain import graph_corrections
+        c = confirmation or {}
+        try:
+            return graph_corrections.submit(
+                store, arguments, confirmed_via=c.get("via", ""),
+                declined=bool(c.get("declined")))
+        except Exception as exc:  # noqa: BLE001 -- a tool must return, not raise
+            _log.exception("brain_graph_correct failed")
+            return {"status": "error", "error": str(exc)}
+    return brain_graph_correct
 
 
 def _capture_envelope(kind: str, source: str = "mcp", **fields) -> dict:

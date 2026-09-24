@@ -762,6 +762,12 @@ def _mac_user_is_active() -> bool:
         return True
 
 
+# Routed tools whose handler reads an out-of-band `confirmation` (see
+# Daemon.call_tool). Every other routed handler still takes exactly one
+# argument, so this stays a short allowlist rather than a signature probe.
+_CONFIRMABLE_TOOLS = frozenset({"brain_graph_correct"})
+
+
 class Daemon:
     """Owns the store-writing loop: sync -> embed on an interval, with
     pause/resume and a single-writer lock.
@@ -1526,6 +1532,7 @@ class Daemon:
                 make_brain_draft_save,
                 make_brain_finding_resolve,
                 make_brain_gardener_apply,
+                make_brain_graph_correct,
                 make_brain_meeting_pack_get,
                 make_brain_meeting_pack_upsert,
                 make_brain_meetings_today,
@@ -1541,6 +1548,7 @@ class Daemon:
             actions = make_brain_actions(store)
             proactive = make_brain_proactive(store)
             finding_resolve = make_brain_finding_resolve(store)
+            graph_correct = make_brain_graph_correct(store)
             gardener_apply = make_brain_gardener_apply(store)
             draft_save = make_brain_draft_save(store, home)
             meetings_today = make_brain_meetings_today(store, home)
@@ -1575,6 +1583,7 @@ class Daemon:
                     outcome=a.get("outcome", ""),
                     note=a.get("note", ""),
                 ),
+                "brain_graph_correct": lambda a, c=None: graph_correct(a, c),
                 "brain_gardener_apply": lambda a: gardener_apply(
                     lane=a.get("lane", ""),
                     filename=a.get("filename", ""),
@@ -1605,7 +1614,7 @@ class Daemon:
             }
         return self._tool_handlers
 
-    def call_tool(self, name: str, arguments: dict):
+    def call_tool(self, name: str, arguments: dict, confirmation: dict | None = None):
         """Execute a routed MCP tool here and return its result (for /api/tool).
 
         Raises ValueError -- surfaced as a 400, not a 500 -- for a tool this
@@ -1619,6 +1628,11 @@ class Daemon:
         result the model can read), and this one exists so a mismatch fails here
         instead of arriving as a KeyError from deep inside a handler. Its message
         is deliberately terser -- it goes to the daemon log, not to the model.
+
+        `confirmation` is the out-of-band channel `brain_graph_correct` reads
+        (an elicitation the MCP server obtained, or a dashboard confirm) -- it
+        travels beside `arguments`, never inside them, so the model cannot
+        forge one. Ignored for every other tool.
         """
         import jsonschema
 
@@ -1642,7 +1656,9 @@ class Daemon:
         except jsonschema.ValidationError as exc:
             raise ValueError(f"invalid arguments for {name}: {exc.message}") from exc
 
-        result = handlers[name](arguments)
+        handler = handlers[name]
+        result = (handler(arguments, confirmation) if name in _CONFIRMABLE_TOOLS
+                  else handler(arguments))
         # Every routed tool except brain_read is an `async def` handler, and the
         # control API's handler threads have no running event loop -- so a
         # coroutine result is driven to completion here. A fresh loop per call is

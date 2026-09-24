@@ -6,7 +6,8 @@ from tests.conftest import list_tools_via_handler
 
 EXPECTED_TOOLS = {
     "brain_search", "brain_read", "brain_context", "brain_actions", "brain_graph",
-    "brain_proactive", "brain_finding_resolve", "brain_ingest", "brain_action_create",
+    "brain_proactive", "brain_finding_resolve", "brain_graph_correct",
+    "brain_ingest", "brain_action_create",
     "brain_action_update", "brain_decision", "brain_note", "brain_memory_write",
     "brain_gardener_apply", "brain_draft_context", "brain_draft_save", "brain_routine",
     "brain_enrich_units", "brain_enrich_pull", "brain_enrich_push",
@@ -16,7 +17,7 @@ EXPECTED_TOOLS = {
 
 
 def test_build_server_registers_every_tool(mcp_env):
-    """26 tools, registered, without starting stdio."""
+    """27 tools, registered, without starting stdio."""
     server = build_server(**mcp_env)
     tools = asyncio.run(list_tools_via_handler(server))
     names = {t.name for t in tools}
