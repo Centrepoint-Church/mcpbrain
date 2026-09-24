@@ -456,7 +456,9 @@ async function loadCorrections(){
       row.className = "kv";
       const label = document.createElement("span");
       label.className = "k";
-      label.textContent = c.summary + (c.reason ? " (" + c.reason + ")" : "");
+      const names = Object.entries(c.names || {}).map(([id, n]) => `${n} (${id})`).join(", ");
+      label.textContent = c.summary + (names ? "; " + names : "") +
+                          (c.reason ? " (" + c.reason + ")" : "");
       const actions = document.createElement("span");
       actions.className = "v";
       for (const [verb, text] of [["apply", "Apply"], ["decline", "Decline"]]) {

@@ -178,9 +178,16 @@ class ControlServer:
                 if self.path.split("?")[0] == "/api/corrections/pending":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
-                    from mcpbrain.graph_corrections import describe
+                    from mcpbrain.graph_corrections import _payload_entity_ids, describe
                     pending = []
-                    for c in server.store.pending_corrections():
+                    rows = server.store.pending_corrections()
+                    # Ids alone are unreadable on the card: resolve every
+                    # entity id the pending payloads name, in one query.
+                    ids = set()
+                    for c in rows:
+                        ids |= {i for i in _payload_entity_ids(c["payload"]) if isinstance(i, str)}
+                    ents = server.store.get_entities(ids) if ids else {}
+                    for c in rows:
                         # describe() indexes required payload keys; a pending row
                         # always has them (submit() validated before staging), but
                         # a hand-crafted/legacy row missing one must not 500 the
@@ -189,8 +196,11 @@ class ControlServer:
                             summary = describe(c["op"], c["payload"])
                         except KeyError:
                             summary = c["op"]
+                        names = {i: ents[i]["name"] for i in sorted(
+                            i for i in _payload_entity_ids(c["payload"]) if i in ents)}
                         pending.append({"id": c["id"], "op": c["op"], "summary": summary,
-                                        "reason": c["reason"], "created_at": c["created_at"]})
+                                        "reason": c["reason"], "created_at": c["created_at"],
+                                        "names": names})
                     return h_json(self, 200, {"pending": pending})
                 if self.path.split("?")[0] == "/api/graph/merge/preview":
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
@@ -507,6 +517,15 @@ class ControlServer:
                     return h_json(h, 503, {"error": "dashboard not available"})
                 finding_id = int(m.group(1))
                 finding = self.store.get_finding(finding_id)
+                from mcpbrain import graph_corrections as gc
+                if finding and finding["finding_type"] == gc.FINDING_TYPE and \
+                        not finding["resolved_at"] and str(finding["ref_id"]).isdigit():
+                    # Dismissing a proposed correction declines it: left pending
+                    # it would keep counting against the pending cap, unseen.
+                    # decline() also resolves this finding.
+                    if gc.decline(self.store, int(finding["ref_id"]))["status"] == "declined":
+                        self.store.record_change("finding_dismissed", ref_id=str(finding_id))
+                        return h_json(h, 200, {"dismissed": True, "correction": "declined"})
                 from mcpbrain.agent_errs import FINDING_TYPE as _AGENT_STDERR_FINDING_TYPE
                 verdict = (None if finding and finding["finding_type"] == _AGENT_STDERR_FINDING_TYPE
                            else "dismissed_by_human")

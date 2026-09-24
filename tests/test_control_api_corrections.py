@@ -124,3 +124,35 @@ def test_corrections_script_never_uses_innerhtml():
     snippet = DASH[start:end]
     assert "loadCorrections" in snippet  # sanity: the slice found the function
     assert "innerHTML" not in snippet
+
+
+def test_dismissing_a_correction_finding_declines_the_correction(api, store):
+    """M6: the generic findings dismiss must not leave the correction pending
+    (it would keep counting against the 25-pending cap, invisibly)."""
+    cid = gc.submit(store, {"op": "hide", "basis": "inferred", "reason": "r",
+                            "entity_id": "x"})["correction_id"]
+    with store._connect() as db:
+        fid = db.execute("SELECT id FROM proactive_findings WHERE finding_type=? AND ref_id=?",
+                         (gc.FINDING_TYPE, str(cid))).fetchone()[0]
+    status, body = api.post(f"/api/dashboard/findings/{fid}/dismiss", {})
+    assert status == 200 and body["dismissed"] is True
+    assert store.get_correction(cid)["status"] == "declined"
+    assert store.pending_corrections() == []
+    assert api.post(f"/api/dashboard/findings/{fid}/dismiss", {})[0] == 404
+
+
+def test_pending_lists_entity_names(api, store):
+    """M8: the card shows names beside ids."""
+    store.upsert_entity("y", "Marcus Reyes", "person")
+    gc.submit(store, {"op": "not_same", "basis": "inferred", "reason": "r",
+                      "entity_id": "x", "other_id": "y"})
+    status, body = api.get("/api/corrections/pending")
+    assert status == 200
+    assert body["pending"][0]["names"] == {"x": "Dana Okafor", "y": "Marcus Reyes"}
+
+
+def test_corrections_card_renders_names_with_textcontent_only():
+    start = DASH.index("function loadCorrections")
+    end = DASH.index("refresh();", start)
+    snippet = DASH[start:end]
+    assert "c.names" in snippet and "innerHTML" not in snippet
