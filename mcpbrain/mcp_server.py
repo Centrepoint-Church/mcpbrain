@@ -54,6 +54,61 @@ from mcpbrain.tools import (
 
 _log = logging.getLogger("mcpbrain.mcp_server")
 
+_CONFIRM_SCHEMA = {
+    "type": "object",
+    "properties": {"confirm": {"type": "boolean", "title": "Apply this correction",
+                               "default": True}},
+    "required": ["confirm"],
+}
+
+
+async def _confirm_correction(ctx, arguments: dict) -> dict | None:
+    """Ask the user to confirm an INFERRED graph correction via form elicitation.
+
+    Returns the confirmation to forward to the daemon, or None when this client
+    cannot elicit (Claude Desktop) or the message cannot be built, in which case
+    the daemon stages the correction for dashboard approval. The confirmation is
+    produced HERE, from the client's answer, and never read from the model's
+    arguments: that is the whole gate.
+    """
+    session = getattr(ctx, "session", None)
+    caps = getattr(session, "client_capabilities", None) if session is not None else None
+    elicitation = getattr(caps, "elicitation", None) if caps is not None else None
+    if elicitation is None:
+        return None
+    # Form mode is present explicitly, or implied by a bare `elicitation: {}`
+    # (pre-2025-11-25). URL-only clients cannot show this form.
+    if getattr(elicitation, "form", None) is None and getattr(elicitation, "url", None) is not None:
+        return None
+    from mcpbrain.graph_corrections import describe, payload_from_args
+    try:
+        # The advertised schema requires only `op` (Task 6) -- a model can
+        # send `basis: inferred` with none of a per-op payload's fields.
+        # describe()/payload_from_args() assume they are present and KeyError
+        # otherwise; that must not escape here (it would abort the whole call
+        # before the daemon's own "refused" result ever reaches the model), so
+        # an incomplete call just skips elicitation and falls through to that
+        # refusal.
+        message = ("mcpbrain wants to correct your knowledge graph:\n\n"
+                   f"{describe(arguments['op'], payload_from_args(arguments))}\n\n"
+                   f"Why: {arguments.get('reason', '')}")
+    except KeyError:
+        _log.debug("correction elicitation message incomplete; staging instead",
+                   exc_info=True)
+        return None
+    try:
+        result = await session.elicit_form(message, _CONFIRM_SCHEMA)
+    except Exception:  # noqa: BLE001 -- no back channel, client gone: fall back to pending
+        _log.debug("correction elicitation failed; staging instead", exc_info=True)
+        return None
+    if result.action == "accept":
+        if (result.content or {}).get("confirm", True) is False:
+            return {"declined": True}
+        return {"via": "elicitation"}
+    if result.action == "decline":
+        return {"declined": True}
+    return {"cancelled": True}
+
 
 def _sdk_annotations(ann):
     """Convert a registry `ToolAnnotations` into the SDK's pydantic model.
@@ -928,10 +983,16 @@ def build_server(store, draft_store, client, home: str):
                 note=arguments.get("note", ""),
             ))
         elif name == "brain_graph_correct":
-            confirmation = None  # Task 7 fills this from an elicitation
-            out = await run_tool(name, arguments,
-                                 lambda: graph_correct(arguments, confirmation),
-                                 confirmation=confirmation)
+            confirmation = None
+            if arguments.get("op") != "undo" and arguments.get("basis") == "inferred":
+                confirmation = await _confirm_correction(ctx, arguments)
+            if confirmation and confirmation.get("cancelled"):
+                out = {"status": "not_applied",
+                       "summary": "The confirmation was dismissed, so nothing was written."}
+            else:
+                out = await run_tool(name, arguments,
+                                     lambda: graph_correct(arguments, confirmation),
+                                     confirmation=confirmation)
         elif name == "brain_ingest":
             out = await ingest(
                 title=arguments.get("title", ""),
