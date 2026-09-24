@@ -1006,6 +1006,40 @@ def test_apply_full_lifecycle_summary(tmp_path):
 
 # Part 1 — affiliation-suffix stripping for person names.
 
+@pytest.mark.parametrize("header,expected", [
+    ('"Priya Anand (via Google Sheets)" <drive-shares-noreply@google.com>', "Priya Anand"),
+    ('"Marcus Reyes (via Google Docs)" <drive-shares-dm-noreply@google.com>', "Marcus Reyes"),
+    ("Dana Okafor (via Google Drive) <drive-shares-noreply@google.com>", "Dana Okafor"),
+    ('"Rina T (Via Dropbox)" <no-reply@dropbox.com>', "Rina T"),
+    # Parentheticals that are not relay markers are left alone.
+    ('"Dana Okafor (Northgate Trust)" <dana@northgate.example>', "Dana Okafor (Northgate Trust)"),
+    ('"Marcus Reyes" <marcus@northgate.example>', "Marcus Reyes"),
+])
+def test_extract_name_drops_relay_suffix(header, expected):
+    # A share notification names the person who shared; the "(via ...)" suffix
+    # is the relay, not part of their name, and left in place it minted a
+    # separate "<name>-via-google-sheets" person.
+    assert gw._extract_name(header) == expected
+
+
+def test_share_notification_resolves_to_the_person_not_the_relay(tmp_path):
+    s = _store(tmp_path)
+    real = gw.upsert_entity(s, name="Priya Anand", entity_type="person",
+                            org="Northgate Trust", email_addr="priya@northgate.example",
+                            valid_from="2026-01-01")
+    header = '"Priya Anand (via Google Sheets)" <drive-shares-noreply@google.com>'
+    from mcpbrain.resolve import is_role_address
+    email = gw._extract_email_addr(header)
+    sid = gw.upsert_entity(s, name=gw.strip_affiliation(gw._extract_name(header)),
+                           entity_type="person", org="external",
+                           email_addr="" if is_role_address(email) else email,
+                           valid_from="2026-09-01")
+    assert sid == real
+    ent = s.get_entity(real)
+    assert ent["email_addr"] == "priya@northgate.example"
+    assert s.get_entity("priya-anand-via-google-sheets") is None
+
+
 def test_strip_affiliation_strips_from_suffix():
     assert gw.strip_affiliation("Franz from The Church Co") == "Franz"
 

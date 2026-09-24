@@ -69,6 +69,22 @@ def test_is_role_address():
     assert is_role_address("notanemail") is False
 
 
+def test_is_role_address_catches_prefixed_and_suffixed_noreply_relays():
+    # Relay senders put the no-reply token inside a longer local-part. Google
+    # Drive share notifications arrive as "<Person> (via Google Sheets)"
+    # <drive-shares-noreply@google.com>, and keying a person on that address let
+    # every share notification email-merge into whoever holds it.
+    from mcpbrain.resolve import is_role_address
+    for addr in ("drive-shares-noreply@google.com", "drive-shares-dm-noreply@google.com",
+                 "cloudplatform-noreply@google.com", "noreply-ott@vimeo.com",
+                 "en_flt_noreply@trip.com", "accounts.do-not-reply@x.org",
+                 "billing.donotreply@x.org", "team_no-reply+tag@x.org"):
+        assert is_role_address(addr) is True, addr
+    # A name that merely contains the letters is not a relay.
+    for addr in ("noreplyson@x.org", "dana.okafor@northgatetrust.org"):
+        assert is_role_address(addr) is False, addr
+
+
 def test_email_equality_skips_role_addresses(tmp_path):
     # C1: distinct real people who share a ROLE/shared inbox (office@, info@) must
     # NEVER be identity-merged — that would irreversibly collapse them. A genuine

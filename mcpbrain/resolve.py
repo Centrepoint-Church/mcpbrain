@@ -34,6 +34,7 @@ prepare._merge_review_block.
 """
 
 import logging
+import re
 
 from mcpbrain import config
 from mcpbrain.chunking import slugify, _canonical_name
@@ -55,14 +56,24 @@ _ROLE_LOCAL_PARTS = frozenset({
 })
 
 
+# A no-reply token as a whole segment of a longer local-part: relay senders such
+# as drive-shares-noreply@google.com, cloudplatform-noreply@, noreply-ott@ and
+# en_flt_noreply@. The exact-match set above missed every one of them, so Google
+# Drive share notifications keyed a PERSON on Google's relay address and folded
+# other senders into it by email equality. Segment-bounded so a name that merely
+# contains the letters ("noreplyson@") is not caught.
+_NOREPLY_SEGMENT_RE = re.compile(r"(?:^|[-_.])(?:no-?reply|do-?not-?reply)(?:$|[-_.])")
+
+
 def is_role_address(email: str) -> bool:
-    """True when an email is a shared/role mailbox (its local-part is a role token),
-    not a personal address. Such addresses must not key person-identity merges."""
+    """True when an email is a shared/role mailbox (its local-part is a role token,
+    or carries a no-reply segment), not a personal address. Such addresses must not
+    key person-identity merges."""
     email = (email or "").strip().lower()
     if "@" not in email:
         return False
     local = email.split("@", 1)[0].split("+", 1)[0]  # drop +tags
-    return local in _ROLE_LOCAL_PARTS
+    return local in _ROLE_LOCAL_PARTS or bool(_NOREPLY_SEGMENT_RE.search(local))
 
 
 def canonical_key(name: str) -> str:

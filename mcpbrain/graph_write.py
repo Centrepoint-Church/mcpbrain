@@ -708,14 +708,24 @@ def _extract_email_addr(header: str) -> str:
     return ""
 
 
+# A trailing "(via <service>)" relay marker: Google Drive share notifications
+# arrive as '"Dana Okafor (via Google Sheets)" <drive-shares-noreply@google.com>'.
+# The person named is the one who shared; the suffix belongs to the relay, and
+# left in the name it minted a separate "<name>-via-google-sheets" person that
+# then collected the real person's history.
+_RELAY_SUFFIX_RE = re.compile(r"\s*\(\s*via\s+[^()]+\)\s*$", re.IGNORECASE)
+
+
 def _extract_name(header: str) -> str:
-    """Display name from 'Name <email>'."""
+    """Display name from 'Name <email>', without a trailing '(via <service>)'."""
     m = re.match(r'^"?([^<"]+)"?\s*<', header)
     if m:
-        return m.group(1).strip().strip('"')
-    if "@" in header and "<" not in header:
+        name = m.group(1).strip().strip('"')
+    elif "@" in header and "<" not in header:
         return ""
-    return header.strip()
+    else:
+        name = header.strip()
+    return _RELAY_SUFFIX_RE.sub("", name).strip() or name
 
 
 def _is_owner(name: str, owner: OwnerIdentity) -> bool:
