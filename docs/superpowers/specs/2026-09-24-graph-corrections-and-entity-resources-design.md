@@ -57,17 +57,20 @@ the highest in `graph_write._SOURCE_RANK`.
 ### Data model (new, all additive migrations in `Store.init()`)
 
 - `graph_corrections` — the ledger and the pending queue:
-  `id INTEGER PK, op TEXT, basis TEXT, status TEXT` (`pending|applied|reverted|declined`),
+  `id INTEGER PK, op TEXT, basis TEXT, status TEXT` (`pending|applied|reverted|declined|failed`;
+  `failed` = approved on the dashboard but no longer applicable),
   `payload TEXT` (JSON, the op's arguments), `snapshot TEXT` (JSON, what undo
   needs), `reason TEXT`, `confirmed_via TEXT` (`''|elicitation|dashboard`),
+  `error TEXT` (why an approval failed),
   `dedup_key TEXT`, `created_at, applied_at, reverted_at TEXT`,
   `change_log_id INTEGER`. Index on `(status)` and `(dedup_key)`.
 - `entity_relations.user_verdict TEXT` — `'rejected' | 'asserted' | NULL`.
-- `entity_distinct_pairs(a TEXT, b TEXT, correction_id INTEGER,
-  PRIMARY KEY(a, b))`, `a < b` enforced by the writer, both FK to
-  `entities(id) ON DELETE CASCADE`.
-- `entity_field_locks(entity_id TEXT, field TEXT, correction_id INTEGER,
-  PRIMARY KEY(entity_id, field))`, FK cascade. `field ∈ {org, name, email}`.
+- `entity_distinct_pairs(a TEXT, b TEXT, PRIMARY KEY(a, b))`, `a < b` enforced
+  by the writer, both FK to `entities(id) ON DELETE CASCADE`.
+- `entity_field_locks(entity_id TEXT, field TEXT, PRIMARY KEY(entity_id, field))`,
+  FK cascade. `field ∈ {org, name, email}`. (Neither carries a correction id:
+  it is not known until the ledger row is inserted in the same transaction, and
+  the ledger payload already records which pair or lock a correction made.)
 
 ### Stickiness mechanisms
 
@@ -139,8 +142,10 @@ The handler runs in the daemon (`/api/tool`), but only the MCP server process
 holds the client session, so `mcp_server.on_call_tool` intercepts
 `brain_graph_correct` when `basis == "inferred"`:
 
-1. It strips any `confirmed_via` from the model's arguments (not in the
-   advertised schema; a model-supplied one is discarded, not trusted).
+1. The tool's input schema sets `additionalProperties: false`, so the model
+   cannot supply a confirmation at all. The MCP server passes the user's answer
+   to the daemon OUT OF BAND, as a `confirmation` object beside the arguments
+   in the `/api/tool` body (`{"via": "elicitation"}` or `{"declined": true}`).
 2. If the client advertised form-mode elicitation (Claude Code 2.1.76+): send
    an elicitation with the plain-English correction and the evidence.
    - accept → forward with `confirmed_via="elicitation"` → applied.
@@ -155,7 +160,8 @@ holds the client session, so `mcp_server.on_call_tool` intercepts
 
 There is deliberately **no in-chat approve op**: "the user said yes" relayed by
 the model is the exact unenforceable claim the gate exists to prevent.
-`confirmed_via` is only honoured over the bearer-authenticated control channel.
+The `confirmation` object is only honoured over the bearer-authenticated control
+channel.
 
 Guards: inferred proposals dedup on `dedup_key` (op + sorted ids + field/value)
 against pending, declined and applied rows (no-op with a message); at most 25
@@ -189,8 +195,9 @@ Desktop. Plan task 1 settles this against the real clients.
 `resources/list` appends ~100 entities (person/org/project, not suppressed),
 ranked by `degree`. URI `mcpbrain://entity/<id>`, `name` = display name,
 `title` = "Name, type, org", `mimeType` `text/markdown`. The daemon computes the
-set once a day on an existing cadence and serves it via the control API; the
-MCP server caches it for 10 minutes. Because the set only moves daily, the
+set on first request each UTC day and caches it in memory (no new cadence pass:
+the query is one indexed `ORDER BY degree LIMIT 100`), serving it via the
+control API; the MCP server caches it for 10 minutes. Because the set only moves daily, the
 existing `watch_resources` fingerprint fires `list_changed` at most about daily.
 Daemon unreachable → the entity entries are omitted (the `file://` resources
 still list), never an error on `resources/list`.
