@@ -258,6 +258,30 @@ class ControlClient:
         ingest caches (re-runnable; idempotent daemon-side)."""
         return self._request("/api/bootstrap-baseline", method="POST")
 
+    def entity_resources(self) -> list[dict]:
+        """The top-N person/org/project entities (mcpbrain://entity/<id> resources/list)."""
+        return self._request("/api/resources/entities").get("entities", [])
+
+    def entity_resource(self, entity_id: str) -> dict | None:
+        """One entity rendered as markdown ({"id", "markdown"}), or None if unknown/suppressed."""
+        from urllib.parse import quote
+        try:
+            return self._request(f"/api/resources/entity/{quote(entity_id, safe='')}")
+        except DaemonUnavailable as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def search_entities(self, q: str) -> list[dict]:
+        """Wraps the existing dashboard entity search (/api/graph/search)."""
+        from urllib.parse import quote
+        return self._request(f"/api/graph/search?q={quote(q)}")
+
+    def reply_needed(self, q: str) -> list[str]:
+        """Message ids matching q that are still awaiting a reply (draft-reply completion)."""
+        from urllib.parse import quote
+        return self._request(f"/api/resources/reply-needed?q={quote(q)}").get("ids", [])
+
     def model_status(self) -> dict:
         return self._request("/api/model/status")
 

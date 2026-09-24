@@ -227,6 +227,21 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("dashboard today failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] == "/api/resources/entities":
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import entity_resource
+                    return h_json(self, 200, {"entities": entity_resource.top_entities(server.store)})
+                m = re.match(r"^/api/resources/entity/([^/?]+)$", self.path.split("?")[0])
+                if m:
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import entity_resource
+                    d = entity_resource.render_markdown(server.store, urllib.parse.unquote(m.group(1)))
+                    return h_json(self, 200, d) if d else h_json(self, 404, {"error": "not found"})
+                if self.path.split("?")[0] == "/api/resources/reply-needed":
+                    if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import entity_resource
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
+                    return h_json(self, 200, {"ids": entity_resource.reply_needed_ids(server.store, q)})
                 m = re.match(r"^/api/meeting-packs/([^?]+)$", self.path)
                 if m:
                     if server.store is None:
