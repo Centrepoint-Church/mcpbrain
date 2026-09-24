@@ -204,8 +204,9 @@ Desktop was not exercised (owner's live setup, out of scope for this probe).
 | @-picker showing the resource while typing, `/probe` argument completion | not tested (interactive, left for owner) | not tested (left for owner) |
 
 Tasks 10-11 still ship the template and completion handlers (spec-correct,
-cheap), but they are inert in today's clients; the user-visible win is the
-static top-N. A templated URI is directly readable by `@`-mention without the
+cheap), but they are inert in Claude Code today (Claude Desktop unconfirmed,
+left for the owner); the user-visible win is the static top-N. A templated URI
+is directly readable by `@`-mention without the
 client ever calling `resources/templates/list`, so a user (or the model)
 constructing the URI by hand still works even though template discovery is
 unverified end-to-end.
