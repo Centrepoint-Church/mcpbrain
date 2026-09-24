@@ -189,6 +189,8 @@ def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
                 # and fold B in anyway -- defeating the correction.
                 if store.is_distinct_pair(m["id"], survivor["id"]):
                     continue  # the user said these are different (brain_graph_correct)
+                if store.has_user_corrections(m["id"]) or store.has_user_corrections(survivor["id"]):
+                    continue  # a lock/user hide would cascade away; only the user merges these
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
                 merged += 1
     return merged
@@ -248,6 +250,8 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
             if m["id"] != survivor["id"]:
                 if store.is_distinct_pair(m["id"], survivor["id"]):  # live: see above
                     continue  # the user said these are different (brain_graph_correct)
+                if store.has_user_corrections(m["id"]) or store.has_user_corrections(survivor["id"]):
+                    continue  # see _deterministic_merges
                 store.merge_entities(m["id"], survivor["id"], method="email")
                 merged += 1
     return merged

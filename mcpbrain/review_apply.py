@@ -394,6 +394,12 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
             log.info("review_apply: merge pair %s is marked distinct by the user, guarding", pair_id)
             result["guarded"] += 1
             continue
+        if store.has_user_corrections(a["id"]) or store.has_user_corrections(b["id"]):
+            # A user field lock or hide on either side would cascade away
+            # with the loser while the ledger still says 'applied'.
+            log.info("review_apply: merge pair %s carries a user correction, guarding", pair_id)
+            result["guarded"] += 1
+            continue
 
         if result["merged"] >= cap:
             result["capped"] += 1

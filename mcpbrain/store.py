@@ -4944,6 +4944,18 @@ class Store:
             return db.execute("SELECT 1 FROM entity_distinct_pairs WHERE a=? AND b=?",
                               (lo, hi)).fetchone() is not None
 
+    def has_user_corrections(self, entity_id: str) -> bool:
+        """True when the user corrected this entity in a way a merge would
+        silently undo: a field lock (the loser's lock cascades away with its
+        row) or a user hide (the loser's suppression row is deleted). Every
+        automated merge applier skips a pair where either side has one --
+        only the user may merge a corrected entity."""
+        with self._connect() as db:
+            return db.execute(
+                "SELECT 1 FROM entity_field_locks WHERE entity_id=? UNION ALL "
+                "SELECT 1 FROM entity_suppressions WHERE entity_id=? AND reason='user' "
+                "LIMIT 1", (entity_id, entity_id)).fetchone() is not None
+
     def locked_fields(self, entity_id: str) -> set[str]:
         with self._connect() as db:
             return {r["field"] for r in db.execute(

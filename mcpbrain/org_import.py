@@ -296,6 +296,11 @@ def _reconcile_slug_drift(store, entities, version) -> int:
         # stubs org ids before calling this, so org_id should already be
         # materialised; local_id is re-verified in case something upstream
         # already touched it. Only log/count a repoint that actually happens.
+        if (store.is_distinct_pair(local_id, org_id) or store.has_user_corrections(local_id)
+                or store.has_user_corrections(org_id)):
+            # The user said these differ, or corrected the local entity in a
+            # way the merge would cascade away: leave it for the user.
+            continue
         if store.get_entity(local_id) is not None and store.get_entity(org_id) is not None:
             # Captured BEFORE merge_entities moves local_id's observations
             # onto org_id — the exact set migrating in THIS merge.

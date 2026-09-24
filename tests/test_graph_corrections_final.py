@@ -429,3 +429,102 @@ def test_i3_merge_refused_for_org_origin_entity(tmp_path):
     out = gc.submit(s, _stated(op="merge", entity_id="dana-okafor", other_id="dee-okafor"))
     assert out["status"] == "refused" and "organisation-shared" in out["error"]
     assert {"dana-okafor", "dee-okafor"} <= _ids(s)
+
+
+# --- I4: automated merges skip entities carrying user corrections -----------
+
+def _user_hide(s, eid):
+    s.suppress_entity(eid, reason="user")
+
+
+def test_i4_has_user_corrections(tmp_path):
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor")
+    _ent(s, "marcus-reyes", "Marcus Reyes")
+    _ent(s, "priya-anand", "Priya Anand")
+    assert not s.has_user_corrections("dana-okafor")
+    _lock(s, "dana-okafor", "org")
+    _user_hide(s, "marcus-reyes")
+    s.suppress_entity("priya-anand", reason="junk")          # automated hide: not a correction
+    assert s.has_user_corrections("dana-okafor")
+    assert s.has_user_corrections("marcus-reyes")
+    assert not s.has_user_corrections("priya-anand")
+
+
+def test_i4_resolve_deterministic_skips_locked_and_hidden(tmp_path):
+    from mcpbrain.resolve import _deterministic_merges
+    s = _store(tmp_path)
+    _ent(s, "dana-a", "Dana Okafor", mentions=1)
+    _ent(s, "dana-c", "Dana Okafor", mentions=9)
+    _lock(s, "dana-a", "org")
+    _ent(s, "marcus-a", "Marcus Reyes", mentions=1)
+    _ent(s, "marcus-c", "Marcus Reyes", mentions=9)
+    _user_hide(s, "marcus-c")
+    assert _deterministic_merges(s) == 0
+    assert {"dana-a", "dana-c", "marcus-a", "marcus-c"} <= _ids(s)
+
+
+def test_i4_resolve_email_skips_locked(tmp_path):
+    from mcpbrain.resolve import _email_equality_merges
+    s = _store(tmp_path)
+    _ent(s, "dana-a", "Dana Okafor", email="dana@northgate.example", mentions=1)
+    _ent(s, "dana-c", "Dee Okafor", email="dana@northgate.example", mentions=9)
+    _lock(s, "dana-a", "name")
+    assert _email_equality_merges(s, home=tmp_path) == 0
+    assert {"dana-a", "dana-c"} <= _ids(s)
+
+
+def test_i4_review_apply_guards_user_corrected_pair(tmp_path):
+    from mcpbrain import review_apply
+    s = _store(tmp_path)
+    _ent(s, "dana-a", "Dana Okafor", mentions=1)
+    _ent(s, "dana-c", "Dana Okafor", mentions=9)
+    _user_hide(s, "dana-a")
+    out = review_apply.apply_duplicate_verdicts(
+        s, [{"pair_id": "dana-a|dana-c", "same": True}], cap=10)
+    assert out["merged"] == 0 and out["guarded"] == 1
+    with s._connect() as db:
+        assert db.execute("SELECT reason FROM entity_suppressions WHERE entity_id='dana-a'"
+                          ).fetchone()[0] == "user"
+
+
+def test_i4_org_curate_guards_user_corrected_pair(tmp_path):
+    from mcpbrain import org_curate
+    s = _store(tmp_path)
+    _ent(s, "dana-a", "Dana Okafor", mentions=1)
+    _ent(s, "dana-c", "Dana Okafor", mentions=9)
+    _lock(s, "dana-c", "email")
+    out = org_curate._apply_merge_verdicts(
+        s, [{"pair_id": "dana-a|dana-c", "verdict": "merge"}], cap=10)
+    assert out["merged"] == 0 and out["guarded"] == 1
+    assert {"dana-a", "dana-c"} <= _ids(s)
+
+
+def test_i4_org_import_slug_drift_skips_user_corrected_and_distinct(tmp_path):
+    import gzip
+    import hashlib
+    import json
+    from mcpbrain import org_import
+    from mcpbrain.org_contracts import SnapshotManifest
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    s = _store(tmp_path)
+    _ent(s, "dana-local", "Dana Okafor", email="dana@northgate.example")
+    _lock(s, "dana-local", "org")
+    _ent(s, "marcus-local", "Marcus Reyes", email="marcus@northgate.example")
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    ents = [{"kind": "entity", "id": "dana-org", "name": "Dana Okafor", "type": "person",
+             "org": "", "email_addr": "dana@northgate.example", "aliases": ""},
+            {"kind": "entity", "id": "marcus-org", "name": "Marcus Reyes", "type": "person",
+             "org": "", "email_addr": "marcus@northgate.example", "aliases": ""}]
+    gz = gzip.compress(("\n".join(json.dumps(e, sort_keys=True) for e in ents) + "\n").encode())
+    man = SnapshotManifest(version=1, created_at="t", entity_count=2, relation_count=0,
+                           tombstone_count=0, snapshot_sha256=hashlib.sha256(gz).hexdigest())
+    fs.put_bytes("org-graph/snapshot.jsonl.gz", gz)
+    fs.put_bytes("org-graph/tombstones.jsonl", b"")
+    fs.put_bytes("org-graph/manifest.json", json.dumps(man.to_dict(), sort_keys=True).encode())
+    # marcus-org is stubbed by the import before reconcile; mark the pair
+    # distinct up front by pre-creating the org stub.
+    _ent(s, "marcus-org", "Marcus Reyes", origin="org")
+    _distinct(s, "marcus-local", "marcus-org")
+    assert org_import.import_snapshot(s, fs)["status"] == "imported"
+    assert {"dana-local", "marcus-local"} <= _ids(s)

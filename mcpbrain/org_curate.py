@@ -455,6 +455,9 @@ def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
             # replayed verdict: the correction wins over the adjudication.
             result["guarded"] += 1
             continue
+        if store.has_user_corrections(a["id"]) or store.has_user_corrections(b["id"]):
+            result["guarded"] += 1          # a user lock/hide would cascade away
+            continue
         if result["merged"] >= cap:
             result["capped"] += 1
             continue
