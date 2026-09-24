@@ -50,6 +50,9 @@ class FakeStore:
     def entities_for_resolution(self):
         return self._entities
 
+    def distinct_pair_set(self):
+        return set()
+
 
 def _msg(message_id, sender, date, subject, text, labels="INBOX"):
     return {
@@ -1021,11 +1024,14 @@ def test_merge_review_block_caps_pairs(monkeypatch):
     n = prepare._MERGE_REVIEW_CAP + 50
     fake = [({"id": f"a{i}", "name": "X", "type": "person"},
              {"id": f"b{i}", "name": "Y", "type": "person"}) for i in range(n)]
-    monkeypatch.setattr(prepare, "_candidate_pairs", lambda ents: fake)
+    monkeypatch.setattr(prepare, "_candidate_pairs", lambda ents, distinct=frozenset(): fake)
 
     class _Store:
         def entities_for_resolution(self):
             return []
+
+        def distinct_pair_set(self):
+            return set()
 
     out = prepare._merge_review_block(_Store())
     assert len(out) == prepare._MERGE_REVIEW_CAP
