@@ -32,6 +32,14 @@ def test_build_server_registers_resource_handlers(mcp_env):
     assert server.get_request_handler("resources/read") is not None
 
 
+def test_build_server_registers_template_and_completion_handlers(mcp_env):
+    """Task 11: mcpbrain://entity/{id} is advertised via a resource template,
+    and its `id` argument (plus draft-reply's `email_id`) is completable."""
+    server = build_server(**mcp_env)
+    assert server.get_request_handler("resources/templates/list") is not None
+    assert server.get_request_handler("completion/complete") is not None
+
+
 def test_build_server_reports_mcpbrain_version(mcp_env):
     """serverInfo.version must be mcpbrain's version, not the SDK's."""
     from mcpbrain import __version__

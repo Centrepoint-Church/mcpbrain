@@ -11,10 +11,10 @@ import asyncio
 from mcpbrain.mcp_server import build_server
 from tests.conftest import list_tools_via_handler
 
-EXPECTED_TOOL_COUNT = 26
-EXPECTED_OUTPUT_SCHEMA_COUNT = 13
+EXPECTED_TOOL_COUNT = 27
+EXPECTED_OUTPUT_SCHEMA_COUNT = 14
 OPEN_WORLD = {"brain_meetings_today"}
-DESTRUCTIVE = {"brain_gardener_apply", "brain_enrich_advance"}
+DESTRUCTIVE = {"brain_gardener_apply", "brain_enrich_advance", "brain_graph_correct"}
 NO_OUTPUT_SCHEMA_BY_DESIGN = {"brain_routine", "brain_enrich_pull"}
 
 
