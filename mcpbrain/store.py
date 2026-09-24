@@ -128,6 +128,266 @@ def _field_is_locked(db, entity_id: str, field: str) -> bool:
                       (entity_id, field)).fetchone() is not None
 
 
+_MERGE_TOUCHED_COLS = ("name", "type", "org", "aliases", "email_addr", "notes")
+
+
+def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
+                       method="deterministic") -> dict | None:
+    """Fold loser into winner on a caller-held write connection.
+
+    Behaviour is exactly Store.merge_entities' (see its docstring), plus three
+    things the graph-corrections work needs: distinct pairs are repointed onto
+    the winner, a user rejection on a loser triple is carried onto the surviving
+    winner triple, and the function RETURNS a snapshot from which _unmerge_tx
+    can restore the pre-merge state exactly. Returns None for a no-op (same id,
+    or either entity missing).
+
+    Every value in the snapshot is JSON-native (SQLite returns str/int/float/
+    None), because Task 4 stores it as JSON. Every table that ON DELETE
+    CASCADEs from entities is captured here; a new cascading table must be
+    added the same way as `communities`, or unmerge silently loses its rows."""
+    if loser_id == winner_id:
+        return None
+    loser = db.execute("SELECT * FROM entities WHERE id=?", (loser_id,)).fetchone()
+    win = db.execute("SELECT * FROM entities WHERE id=?", (winner_id,)).fetchone()
+    if loser is None or win is None:
+        return None
+
+    def sub(x):
+        return winner_id if x == loser_id else x
+
+    def table_exists(name):
+        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                          (name,)).fetchone() is not None
+
+    rels = [dict(r) for r in db.execute(
+        "SELECT * FROM entity_relations WHERE entity_a=? OR entity_b=?", (loser_id, loser_id))]
+    collisions = []
+    for (a, rel, b) in {(sub(r["entity_a"]), r["relation"], sub(r["entity_b"])) for r in rels}:
+        row = db.execute("SELECT * FROM entity_relations WHERE entity_a=? AND relation=? "
+                         "AND entity_b=?", (a, rel, b)).fetchone()
+        if row is not None:
+            collisions.append(dict(row))
+    # Other relations whose invalidated_by_relation_id points at a loser
+    # relation: the merge may DELETE that relation (a collision or a self-loop),
+    # and the FK's ON DELETE SET NULL then clears the pointer, so it has to be
+    # remembered to be put back.
+    rel_ids = [r["id"] for r in rels]
+    snap_ids = set(rel_ids) | {c["id"] for c in collisions}
+    pointers = []
+    if rel_ids and "invalidated_by_relation_id" in rels[0]:
+        pointers = [[r[0], r[1]] for r in db.execute(
+            "SELECT id, invalidated_by_relation_id FROM entity_relations "
+            f"WHERE invalidated_by_relation_id IN ({','.join('?' * len(rel_ids))})",
+            rel_ids) if r[0] not in snap_ids]
+    emails = [dict(r) for r in db.execute(
+        "SELECT * FROM email_entities WHERE entity_id=?", (loser_id,))]
+    loser_msgs = [e["message_id"] for e in emails]
+    winner_overlap = [r[0] for r in db.execute(
+        f"SELECT message_id FROM email_entities WHERE entity_id=? AND message_id IN "
+        f"({','.join('?' * len(loser_msgs)) or 'NULL'})", (winner_id, *loser_msgs))]
+    snap = {
+        "loser": dict(loser),
+        "winner": {c: win[c] for c in (*_MERGE_TOUCHED_COLS, "mentions")},
+        "winner_id": winner_id,
+        "relations": rels,
+        "collisions": collisions,
+        "relation_pointers": pointers,
+        "observation_ids": [r[0] for r in db.execute(
+            "SELECT id FROM entity_observations WHERE entity_id=?", (loser_id,))],
+        "emails": emails,
+        "winner_email_overlap": winner_overlap,
+        "suppression": None,
+        "distinct_pairs": [], "winner_distinct_pairs": [],
+        "field_locks": [dict(r) for r in db.execute(
+            "SELECT * FROM entity_field_locks WHERE entity_id=?", (loser_id,))]
+            if table_exists("entity_field_locks") else [],
+        "communities": [dict(r) for r in db.execute(
+            "SELECT * FROM entity_communities WHERE entity_id=?", (loser_id,))]
+            if table_exists("entity_communities") else [],
+    }
+    has_suppressions = table_exists("entity_suppressions")
+    if has_suppressions:
+        row = db.execute("SELECT * FROM entity_suppressions WHERE entity_id=?",
+                         (loser_id,)).fetchone()
+        snap["suppression"] = dict(row) if row else None
+    has_pairs = table_exists("entity_distinct_pairs")
+    if has_pairs:
+        snap["distinct_pairs"] = [dict(r) for r in db.execute(
+            "SELECT * FROM entity_distinct_pairs WHERE a=? OR b=?", (loser_id, loser_id))]
+        snap["winner_distinct_pairs"] = [dict(r) for r in db.execute(
+            "SELECT * FROM entity_distinct_pairs WHERE a=? OR b=?", (winner_id, winner_id))]
+
+    # --- the merge itself: the pre-existing statements, unchanged ------------
+    # Repoint relations onto the winner; UPDATE OR IGNORE drops rows that
+    # would collide with an existing winner triple (the UNIQUE index).
+    db.execute("UPDATE OR IGNORE entity_relations SET entity_a=? WHERE entity_a=?",
+               (winner_id, loser_id))
+    db.execute("UPDATE OR IGNORE entity_relations SET entity_b=? WHERE entity_b=?",
+               (winner_id, loser_id))
+    # Rows still on the loser are the ignored duplicates -> delete them.
+    db.execute("DELETE FROM entity_relations WHERE entity_a=? OR entity_b=?",  # admin-delete-ok
+               (loser_id, loser_id))
+    # Drop any self-loop the merge produced. Scoped to the winner: the
+    # only self-loops a repoint can create have winner on both sides, so
+    # this never sweeps unrelated rows.
+    db.execute(
+        "DELETE FROM entity_relations WHERE entity_a=entity_b AND entity_a=?",  # admin-delete-ok
+        (winner_id,),
+    )
+    # A user rejection on a loser triple survives onto the winner's copy of it.
+    for r in rels:
+        if r.get("user_verdict") == "rejected":
+            db.execute(
+                "UPDATE entity_relations SET user_verdict='rejected', "
+                "invalidated_at=COALESCE(invalidated_at, ?), superseded_reason='user_rejected' "
+                "WHERE entity_a=? AND relation=? AND entity_b=? AND entity_a != entity_b",
+                (r.get("invalidated_at") or datetime.now(timezone.utc).isoformat(),
+                 sub(r["entity_a"]), r["relation"], sub(r["entity_b"])))
+
+    # Repoint the loser's observations + email links onto the winner so
+    # nothing is orphaned when the loser row is deleted below. email_entities
+    # has PRIMARY KEY(message_id, entity_id): OR IGNORE drops rows that would
+    # collide with an existing winner link, then the leftover loser rows go.
+    db.execute("UPDATE entity_observations SET entity_id=? WHERE entity_id=?",
+               (winner_id, loser_id))
+    db.execute("UPDATE OR IGNORE email_entities SET entity_id=? WHERE entity_id=?",
+               (winner_id, loser_id))
+    db.execute("DELETE FROM email_entities WHERE entity_id=?", (loser_id,))  # admin-delete-ok
+    # Clean up the loser's suppression row (if any) so it doesn't dangle
+    # against a deleted id. Deliberately NOT repointed to the winner: the
+    # survivor keeps its OWN visibility — merging a hidden junk duplicate
+    # into a real, visible entity must not hide the real entity. Guarded so
+    # stores predating the suppression feature don't error.
+    if has_suppressions:
+        db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (loser_id,))  # admin-delete-ok
+    # "These two are different" follows the loser onto the winner: if the user
+    # said loser != X, the merged entity is still != X. A pair between loser
+    # and winner themselves is dropped (it would be a self-pair).
+    if has_pairs:
+        for p in snap["distinct_pairs"]:
+            other = p["b"] if p["a"] == loser_id else p["a"]
+            if other != winner_id:
+                db.execute("INSERT OR IGNORE INTO entity_distinct_pairs(a,b) VALUES(?,?)",
+                           tuple(sorted((winner_id, other))))
+        db.execute("DELETE FROM entity_distinct_pairs WHERE a=? OR b=?",  # admin-delete-ok
+                   (loser_id, loser_id))
+
+    new_org = win["org"] if win["org"] not in ("", "unknown") else loser["org"]
+    new_type = win["type"] if win["type"] != "unknown" else loser["type"]
+    new_name = canonical_name or win["name"]
+    new_mentions = (win["mentions"] or 0) + (loser["mentions"] or 0)
+    # Carry the loser's name + aliases (and the winner's prior name, if it was
+    # renamed) onto the winner as aliases, so a future mention of the
+    # merged-away name still resolves here.
+    alias_set = set()
+    for src in (win["aliases"], loser["aliases"]):
+        for a in (src or "").split("|"):
+            if a:
+                alias_set.add(a)
+    alias_set.add(win["name"])
+    alias_set.add(loser["name"])
+    alias_set.discard(new_name)
+    alias_set.discard("")
+    new_aliases = "|".join(sorted(alias_set))
+    db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",
+               (new_name, new_type, new_org, new_mentions, new_aliases, winner_id))
+    snap["merge_log_id"] = db.execute(
+        "INSERT INTO entity_merge_log(winner_id,loser_id,loser_name,method) "
+        "VALUES(?,?,?,?)",
+        (winner_id, loser_id, loser["name"], method)).lastrowid
+    db.execute("DELETE FROM entities WHERE id=?", (loser_id,))  # admin-delete-ok
+    return snap
+
+
+def _insert_row(db, table: str, row: dict, *, or_ignore: bool = False) -> None:
+    """INSERT `row` (a column->value dict) into `table` verbatim, ids included."""
+    verb = "INSERT OR IGNORE" if or_ignore else "INSERT"
+    db.execute(f"{verb} INTO {table}({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
+               tuple(row.values()))
+
+
+def _restore_row(db, table: str, row: dict, key: str = "id") -> None:
+    """Put `row` back exactly: UPDATE every column by key, or INSERT it if gone."""
+    cols = [c for c in row if c != key]
+    cur = db.execute(f"UPDATE {table} SET {', '.join(f'{c}=?' for c in cols)} WHERE {key}=?",
+                     (*[row[c] for c in cols], row[key]))
+    if cur.rowcount == 0:
+        _insert_row(db, table, row)
+
+
+def _unmerge_tx(db, snap: dict) -> None:
+    """Reverse a _merge_entities_tx exactly, or refuse. Raises ValueError naming
+    the conflict when anything the merge moved has changed since: a partial
+    restore would be worse than none.
+
+    Winner scalars the merge touched are put back to their pre-merge values and
+    the loser's mentions are subtracted (not overwritten), so mentions counted
+    on the winner since the merge are kept."""
+    loser_id, winner_id = snap["loser"]["id"], snap["winner_id"]
+
+    def sub(x):
+        return winner_id if x == loser_id else x
+
+    if db.execute("SELECT 1 FROM entities WHERE id=?", (winner_id,)).fetchone() is None:
+        raise ValueError(f"cannot undo: {winner_id} no longer exists (it was merged or removed since)")
+    if db.execute("SELECT 1 FROM entities WHERE id=?", (loser_id,)).fetchone() is not None:
+        raise ValueError(f"cannot undo: an entity with id {loser_id} exists again")
+    for oid in snap["observation_ids"]:
+        row = db.execute("SELECT entity_id FROM entity_observations WHERE id=?", (oid,)).fetchone()
+        if row is not None and row[0] != winner_id:
+            raise ValueError(f"cannot undo: observation {oid} has moved to {row[0]}")
+    for r in snap["relations"]:
+        row = db.execute("SELECT entity_a, entity_b FROM entity_relations WHERE id=?",
+                         (r["id"],)).fetchone()
+        if row is not None and (row[0], row[1]) != (sub(r["entity_a"]), sub(r["entity_b"])):
+            raise ValueError(f"cannot undo: relation {r['id']} has changed since the merge")
+
+    # Relations restored below can point (invalidated_by_relation_id) at one
+    # another in any order; defer FK checks to COMMIT so the order cannot
+    # matter. Resets automatically when this transaction ends.
+    db.execute("PRAGMA defer_foreign_keys=ON")
+    _insert_row(db, "entities", snap["loser"])
+    w = snap["winner"]
+    loser_mentions = snap["loser"].get("mentions") or 0
+    db.execute(
+        "UPDATE entities SET name=?, type=?, org=?, aliases=?, email_addr=?, notes=?, "
+        "mentions=MAX(COALESCE(mentions,0)-?, 0) WHERE id=?",
+        (w["name"], w["type"], w["org"], w["aliases"], w["email_addr"], w["notes"],
+         loser_mentions, winner_id))
+    # Collisions first: a loser triple re-inserted by id must not trip the
+    # UNIQUE constraint against a winner row not yet put back to its own triple.
+    for c in snap["collisions"]:
+        _restore_row(db, "entity_relations", c)
+    for r in snap["relations"]:
+        _restore_row(db, "entity_relations", r)
+    for rid, ptr in snap.get("relation_pointers", []):
+        db.execute("UPDATE entity_relations SET invalidated_by_relation_id=? WHERE id=?",
+                   (ptr, rid))
+    for oid in snap["observation_ids"]:
+        db.execute("UPDATE entity_observations SET entity_id=? WHERE id=?", (loser_id, oid))
+    overlap = set(snap["winner_email_overlap"])
+    for e in snap["emails"]:
+        if e["message_id"] not in overlap:
+            db.execute("DELETE FROM email_entities WHERE message_id=? AND entity_id=?",  # admin-delete-ok
+                       (e["message_id"], winner_id))
+        _insert_row(db, "email_entities", e, or_ignore=True)
+    if snap["suppression"] is not None:
+        _insert_row(db, "entity_suppressions", snap["suppression"], or_ignore=True)
+    prior_winner_pairs = {(p["a"], p["b"]) for p in snap["winner_distinct_pairs"]}
+    for p in snap["distinct_pairs"]:
+        other = p["b"] if p["a"] == loser_id else p["a"]
+        repointed = tuple(sorted((winner_id, other)))
+        if other != winner_id and repointed not in prior_winner_pairs:
+            db.execute("DELETE FROM entity_distinct_pairs WHERE a=? AND b=?", repointed)  # admin-delete-ok
+        _insert_row(db, "entity_distinct_pairs", p, or_ignore=True)
+    for lk in snap["field_locks"]:
+        _insert_row(db, "entity_field_locks", lk, or_ignore=True)
+    for cm in snap["communities"]:
+        _insert_row(db, "entity_communities", cm, or_ignore=True)
+    db.execute("DELETE FROM entity_merge_log WHERE id=?", (snap["merge_log_id"],))  # admin-delete-ok
+
+
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -3279,7 +3539,7 @@ class Store:
             return cur.rowcount > 0
 
     def merge_entities(self, loser_id, winner_id, *, canonical_name=None,
-                       method="deterministic") -> None:
+                       method="deterministic") -> dict | None:
         """Fold loser into winner, keeping the winner's id stable.
 
         The winner id is never re-slugged: relations reference ids, so changing
@@ -3290,74 +3550,17 @@ class Store:
         winner's value unless it's a stub (org "" / "unknown", type "unknown"),
         in which case the loser's value wins; mentions are summed. One
         transaction. Loser==winner or a missing id is a no-op.
+
+        Returns the undo snapshot from _merge_entities_tx (None for a no-op);
+        existing callers ignore it. The body lives in _merge_entities_tx so a
+        caller holding its own write transaction (the corrections applier) can
+        merge and record the snapshot atomically.
         """
         if loser_id == winner_id:
-            return
+            return None  # no-op without taking the write lock, as before
         with self._connect(write=True) as db:
-            loser = db.execute(
-                "SELECT name,type,org,mentions,COALESCE(aliases,'') AS aliases "
-                "FROM entities WHERE id=?", (loser_id,)).fetchone()
-            win = db.execute(
-                "SELECT name,type,org,mentions,COALESCE(aliases,'') AS aliases "
-                "FROM entities WHERE id=?", (winner_id,)).fetchone()
-            if loser is None or win is None:
-                return
-            # Repoint relations onto the winner; UPDATE OR IGNORE drops rows that
-            # would collide with an existing winner triple (the UNIQUE index).
-            db.execute("UPDATE OR IGNORE entity_relations SET entity_a=? WHERE entity_a=?",
-                       (winner_id, loser_id))
-            db.execute("UPDATE OR IGNORE entity_relations SET entity_b=? WHERE entity_b=?",
-                       (winner_id, loser_id))
-            # Rows still on the loser are the ignored duplicates -> delete them.
-            db.execute("DELETE FROM entity_relations WHERE entity_a=? OR entity_b=?",  # admin-delete-ok
-                       (loser_id, loser_id))
-            # Drop any self-loop the merge produced. Scoped to the winner: the
-            # only self-loops a repoint can create have winner on both sides, so
-            # this never sweeps unrelated rows.
-            db.execute(
-                "DELETE FROM entity_relations WHERE entity_a=entity_b AND entity_a=?",  # admin-delete-ok
-                (winner_id,),
-            )
-
-            # Repoint the loser's observations + email links onto the winner so
-            # nothing is orphaned when the loser row is deleted below. email_entities
-            # has PRIMARY KEY(message_id, entity_id): OR IGNORE drops rows that would
-            # collide with an existing winner link, then the leftover loser rows go.
-            db.execute("UPDATE entity_observations SET entity_id=? WHERE entity_id=?",
-                       (winner_id, loser_id))
-            db.execute("UPDATE OR IGNORE email_entities SET entity_id=? WHERE entity_id=?",
-                       (winner_id, loser_id))
-            db.execute("DELETE FROM email_entities WHERE entity_id=?", (loser_id,))  # admin-delete-ok
-            # Clean up the loser's suppression row (if any) so it doesn't dangle
-            # against a deleted id. Deliberately NOT repointed to the winner: the
-            # survivor keeps its OWN visibility — merging a hidden junk duplicate
-            # into a real, visible entity must not hide the real entity. Guarded so
-            # stores predating the suppression feature don't error.
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                          "AND name='entity_suppressions'").fetchone():
-                db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (loser_id,))  # admin-delete-ok
-
-            new_org = win["org"] if win["org"] not in ("", "unknown") else loser["org"]
-            new_type = win["type"] if win["type"] != "unknown" else loser["type"]
-            new_name = canonical_name or win["name"]
-            new_mentions = (win["mentions"] or 0) + (loser["mentions"] or 0)
-            # Carry the loser's name + aliases (and the winner's prior name, if it was
-            # renamed) onto the winner as aliases, so a future mention of the
-            # merged-away name still resolves here.
-            alias_set = set()
-            for src in (win["aliases"], loser["aliases"]):
-                for a in (src or "").split("|"):
-                    if a: alias_set.add(a)
-            alias_set.add(win["name"]); alias_set.add(loser["name"])
-            alias_set.discard(new_name); alias_set.discard("")
-            new_aliases = "|".join(sorted(alias_set))
-            db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",
-                       (new_name, new_type, new_org, new_mentions, new_aliases, winner_id))
-            db.execute(
-                "INSERT INTO entity_merge_log(winner_id,loser_id,loser_name,method) "
-                "VALUES(?,?,?,?)",
-                (winner_id, loser_id, loser["name"], method))
-            db.execute("DELETE FROM entities WHERE id=?", (loser_id,))  # admin-delete-ok
+            return _merge_entities_tx(db, loser_id, winner_id,
+                                      canonical_name=canonical_name, method=method)
 
     # --- unified actions table (Task 1.7) ---------------------------------
 

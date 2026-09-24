@@ -447,6 +447,9 @@ def _orient(store, loser_id: str, winner_id: str):
         return {"ok": False, "error": "role_inbox",
                 "message": "One of these is keyed on a shared/role inbox "
                            "(e.g. office@) — merging could fuse distinct people. Refused."}
+    if store.is_distinct_pair(loser_id, winner_id):
+        return {"ok": False, "error": "marked_distinct",
+                "message": "These were marked as different entities. Undo that correction first."}
     # Keep the caller's winner unless the loser is STRICTLY more connected.
     if _merge_score(loser) > _merge_score(winner):
         winner, loser = loser, winner

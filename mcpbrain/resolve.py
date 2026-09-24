@@ -160,6 +160,7 @@ def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
     _org_survivor)."""
     ents = store.entities_for_resolution()
     origins = _origin_map(store)
+    distinct = store.distinct_pair_set()
     groups = {}   # (type, canonical_key) -> [entity dicts]
     for e in ents:
         if e["type"] not in _NAME_MERGEABLE_TYPES:
@@ -183,6 +184,8 @@ def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
                     or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
+                if tuple(sorted((m["id"], survivor["id"]))) in distinct:
+                    continue  # the user said these are different (brain_graph_correct)
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
                 merged += 1
     return merged
@@ -215,6 +218,7 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
     if not config.write_time_dedup_enabled(home_str):
         return 0
     origins = _origin_map(store)
+    distinct = store.distinct_pair_set()
     with store._connect() as conn:
         rows = conn.execute(
             "SELECT id, name, email_addr, mentions FROM entities "
@@ -240,6 +244,8 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
                     or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
+                if tuple(sorted((m["id"], survivor["id"]))) in distinct:
+                    continue  # the user said these are different (brain_graph_correct)
                 store.merge_entities(m["id"], survivor["id"], method="email")
                 merged += 1
     return merged
@@ -268,7 +274,7 @@ def _token_set_ratio(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def _candidate_pairs(entities) -> list:
+def _candidate_pairs(entities, distinct=frozenset()) -> list:
     """Return (a, b) entity-dict pairs that are: same NAME-IDENTITY type, share a
     significant token, token-set similarity >= gate, and NOT canonical-key-identical
     (those are handled deterministically). No cross-type pairs, no singletons.
@@ -277,7 +283,10 @@ def _candidate_pairs(entities) -> list:
     types (document/thread/topic/meeting/…) are identified by their source id, not
     their title, so pairing them explodes the candidate count (365k on the live
     store) AND feeds pairs the merge appliers' type guard rejects anyway — the same
-    allowlist enforced in _deterministic_merges (#23) and apply_duplicate_verdicts."""
+    allowlist enforced in _deterministic_merges (#23) and apply_duplicate_verdicts.
+
+    `distinct` is a set of sorted (a, b) id pairs the user marked as different
+    entities (Store.distinct_pair_set()); those are never proposed again."""
     by_type = {}
     for e in entities:
         if e["type"] not in _NAME_MERGEABLE_TYPES:
@@ -303,6 +312,8 @@ def _candidate_pairs(entities) -> list:
                     if pair_key in seen:
                         continue
                     seen.add(pair_key)   # dedup on first encounter, regardless of outcome
+                    if pair_key in distinct:
+                        continue   # the user said these are different (brain_graph_correct)
                     if canonical_key(a["name"]) == canonical_key(b["name"]):
                         continue   # deterministic handles these
                     if _token_set_ratio(toks_cache[a["id"]], toks_cache[b["id"]]) >= _CANDIDATE_GATE:

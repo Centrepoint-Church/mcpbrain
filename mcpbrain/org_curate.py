@@ -351,7 +351,7 @@ def _build_adjudication_units(store) -> list[dict]:
     ents = _org_entities(store)
     suppressed = _suppressed_pairs(store)
     units = []
-    for a, b in _candidate_pairs(ents):
+    for a, b in _candidate_pairs(ents, distinct=store.distinct_pair_set()):
         pair_id = "|".join(sorted((a["id"], b["id"])))
         if pair_id in suppressed:
             continue                       # already judged 'distinct' — don't re-ask

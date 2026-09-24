@@ -921,7 +921,8 @@ def _merge_review_block(store, *, cap: int = _MERGE_REVIEW_CAP) -> list:
     deterministic resolve tier still runs every cycle elsewhere; this block only
     covers the LLM-adjudication tier.
     """
-    pairs = _candidate_pairs(store.entities_for_resolution())
+    pairs = _candidate_pairs(store.entities_for_resolution(),
+                             distinct=store.distinct_pair_set())
     return [_merge_pair(a, b) for a, b in pairs[:cap]]
 
 

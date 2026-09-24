@@ -350,8 +350,9 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
 
     Returns {"merged": n, "guarded": n, "capped": n, "skipped": n}.
     "skipped" covers the pre-existing skip reasons (malformed pair_id,
-    missing entity, `same` not strictly True). "guarded" covers the two
-    NEW safety-guard rejections (non-mergeable type, role address).
+    missing entity, `same` not strictly True). "guarded" covers the
+    safety-guard rejections (non-mergeable type, role address, and a pair the
+    user marked as distinct entities via brain_graph_correct).
     """
     result = {"merged": 0, "guarded": 0, "capped": 0, "skipped": 0}
     for ans in answers or []:
@@ -387,6 +388,10 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
         if is_role_address(a.get("email_addr", "")) or is_role_address(b.get("email_addr", "")):
             log.warning(
                 "review_apply: merge pair %s has a role-address entity, guarding", pair_id)
+            result["guarded"] += 1
+            continue
+        if store.is_distinct_pair(a["id"], b["id"]):
+            log.info("review_apply: merge pair %s is marked distinct by the user, guarding", pair_id)
             result["guarded"] += 1
             continue
 
