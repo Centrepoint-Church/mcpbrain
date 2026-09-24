@@ -1,4 +1,5 @@
 """Daemon-side entity resources (Task 10)."""
+import concurrent.futures
 import json
 import urllib.error
 import urllib.request
@@ -73,6 +74,43 @@ def test_unknown_and_suppressed_render_none(tmp_path):
     assert er.render_markdown(s, "hidden") is None
 
 
+def test_merge_chain_ending_in_suppressed_survivor_renders_none(tmp_path):
+    """X -> Y -> Z (two merge hops), Z itself suppressed: resolve_id must walk
+    both hops to find the live survivor, THEN honour the suppression on it."""
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('x','X','person')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('y','Y','person')")
+        db.execute("INSERT INTO entities(id,name,type) VALUES('z','Z','person')")
+    s.merge_entities("x", "y")
+    s.merge_entities("y", "z")
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_suppressions(entity_id,reason) VALUES('z','junk')")
+    assert er.resolve_id(s, "x") is None
+    assert er.render_markdown(s, "x") is None
+
+
+def test_top_entities_thread_safe_under_concurrent_alternating_today(tmp_path):
+    """Hammers top_entities from several threads with alternating `today`
+    values (as the daemon's ThreadingHTTPServer would). The old check-then-act
+    cache (`if key not in _cache: _cache.clear(); ...`) could KeyError when
+    one thread's clear() lands between another thread's write and read."""
+    s = _store(tmp_path)
+    days = ["2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"]
+    errors: list[Exception] = []
+
+    def worker(i):
+        try:
+            for _ in range(50):
+                er.top_entities(s, today=days[i % len(days)])
+        except Exception as exc:
+            errors.append(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(worker, range(16)))
+    assert errors == []
+
+
 def test_relation_groups_are_bounded(tmp_path, monkeypatch):
     s = _store(tmp_path)
     monkeypatch.setattr(er, "MAX_RELATIONS", 1)
@@ -140,6 +178,26 @@ def test_resources_routes_require_the_token(api_server):
     assert _request(api_server, "/api/resources/entities", authed=False)[0] == 401
     assert _request(api_server, "/api/resources/entity/dana-okafor", authed=False)[0] == 401
     assert _request(api_server, "/api/resources/reply-needed?q=", authed=False)[0] == 401
+
+
+def test_resources_routes_wrap_store_errors_as_500(api_server, monkeypatch):
+    """A raise inside entity_resource.* must not drop the connection -- same
+    log.exception + h_json 500 contract as /api/dashboard/today and
+    /api/graph/canvas."""
+    def boom(*a, **kw):
+        raise RuntimeError("store exploded")
+    monkeypatch.setattr(er, "top_entities", boom)
+    monkeypatch.setattr(er, "render_markdown", boom)
+    monkeypatch.setattr(er, "reply_needed_ids", boom)
+
+    status, body = _request(api_server, "/api/resources/entities")
+    assert status == 500 and "store exploded" in body["error"]
+
+    status, body = _request(api_server, "/api/resources/entity/dana-okafor")
+    assert status == 500 and "store exploded" in body["error"]
+
+    status, body = _request(api_server, "/api/resources/reply-needed?q=")
+    assert status == 500 and "store exploded" in body["error"]
 
 
 # ---- ControlClient methods (same style as test_control_client.py) ----

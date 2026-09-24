@@ -9,6 +9,7 @@ degree shift.
 
 No mcp / Store / native imports at module scope.
 """
+import threading
 from datetime import datetime, timezone
 
 TOP_N = 100
@@ -19,6 +20,10 @@ MAX_OBSERVATIONS = 15
 _MERGE_HOPS = 10
 
 _cache: dict[tuple[str, str], list[dict]] = {}
+# Guards the cache's check-then-act (clear + rebuild) so a concurrent call
+# under the daemon's ThreadingHTTPServer can't observe the cache mid-clear.
+# Double-checked-locking fast path, same shape as embed.get_embedder.
+_CACHE_LOCK = threading.Lock()
 
 
 def _today() -> str:
@@ -35,8 +40,13 @@ def _collapse_ws(text: str) -> str:
 def top_entities(store, limit: int = TOP_N, *, today: str | None = None) -> list[dict]:
     path = store._path if hasattr(store, "_path") else store.path
     key = (str(path), today or _today())
-    if key not in _cache:
-        _cache.clear()  # one day's list at a time
+    cached = _cache.get(key)
+    if cached is not None:
+        return list(cached)
+    with _CACHE_LOCK:
+        cached = _cache.get(key)
+        if cached is not None:
+            return list(cached)
         q = ",".join("?" * len(RESOURCE_TYPES))
         with store._connect() as db:
             rows = db.execute(
@@ -45,8 +55,10 @@ def top_entities(store, limit: int = TOP_N, *, today: str | None = None) -> list
                 f"WHERE e.type IN ({q}) AND s.entity_id IS NULL "
                 f"ORDER BY COALESCE(e.degree,0) DESC, e.id LIMIT ?",
                 (*RESOURCE_TYPES, int(limit))).fetchall()
-        _cache[key] = [dict(r) for r in rows]
-    return list(_cache[key])
+        result = [dict(r) for r in rows]
+        _cache.clear()  # one day's list at a time
+        _cache[key] = result
+        return list(result)
 
 
 def resolve_id(store, entity_id: str) -> tuple[str, str | None] | None:
@@ -72,8 +84,9 @@ def render_markdown(store, entity_id: str) -> dict | None:
     eid, merged_from = resolved
     ent = store.get_entity(eid)
     rels = store.relations_for(eid)
+    bounded_rels = rels[:MAX_RELATIONS]
     others = store.get_entities({r["entity_b"] if r["entity_a"] == eid else r["entity_a"]
-                                 for r in rels})
+                                 for r in bounded_rels})
     with store._connect() as db:
         obs = db.execute(
             "SELECT attribute, value, source, valid_from FROM entity_observations "
@@ -81,14 +94,14 @@ def render_markdown(store, entity_id: str) -> dict | None:
             "AND (invalidated_at IS NULL OR invalidated_at='') AND attribute != 'occurrence' "
             "ORDER BY valid_from DESC LIMIT ?", (eid, MAX_OBSERVATIONS)).fetchall()
     role = next((o["value"] for o in obs if o["attribute"] == "role"), "")
-    header = ", ".join(x for x in (ent["type"], ent.get("org") or "") if x)
+    header = ", ".join(_collapse_ws(x) for x in (ent["type"], ent.get("org") or "") if x)
     lines = [f"# {_collapse_ws(ent['name'])}", "", f"*{header}*" + (f" · {role}" if role else "")]
     if merged_from:
         lines += ["", f"Merged from {merged_from}."]
     if ent.get("email_addr"):
         lines += ["", f"Email: {ent['email_addr']}"]
     groups: dict[str, list[str]] = {}
-    for r in rels[:MAX_RELATIONS]:
+    for r in bounded_rels:
         out = r["entity_a"] == eid
         other_id = r["entity_b"] if out else r["entity_a"]
         other = others.get(other_id, {})
