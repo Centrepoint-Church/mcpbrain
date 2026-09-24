@@ -261,8 +261,12 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
   (`_alias_match_set`). `split_aliases` picks one separator per value, so a legacy mixed
   value (`"A, B|C"`; 16 on the live store, read-only count 2026-09-24: 630 aliased, 42 pipe-only, 16 comma-only, 16 mixed) read as the alias `"A, B"` and upsert minted a
   duplicate. Writers stay on `|`.
-- **OPEN, owner-only:** Claude Desktop (attach menu shows entities; an inferred correction
-  lands pending, approve it on the dashboard); the interactive `@` picker in Claude Code;
+- **Verified in Claude Desktop (2026-09-24):** the attach menu lists mcpbrain entities
+  ("Add from mcpbrain") and attaching one calls `resources/read`; Desktop never calls
+  `resources/templates/list` or `completion/complete`. Desktop REWROTE
+  `claude_desktop_config.json` during the restart and dropped an entry added while it ran.
+- **OPEN, owner-only:** an inferred correction from Desktop landing pending (approve it on
+  the dashboard); the interactive `@` picker in Claude Code;
   the elicitation accept path (`confirmed_via='elicitation'`) in an interactive session;
   the dashboard Pending-corrections click-through.
 
