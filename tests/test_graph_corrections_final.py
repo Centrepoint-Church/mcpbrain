@@ -528,3 +528,34 @@ def test_i4_org_import_slug_drift_skips_user_corrected_and_distinct(tmp_path):
     _distinct(s, "marcus-local", "marcus-org")
     assert org_import.import_snapshot(s, fs)["status"] == "imported"
     assert {"dana-local", "marcus-local"} <= _ids(s)
+
+
+# --- I5: reason is required for every op except undo ------------------------
+
+def test_i5_blank_or_missing_reason_is_refused(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    base = {"op": "hide", "entity_id": "dana-okafor"}
+    for basis in ("user_stated", "inferred"):
+        for reason in (None, "", "   "):
+            args = {**base, "basis": basis}
+            if reason is not None:
+                args["reason"] = reason
+            out = gc.submit(s, args)
+            assert out["status"] == "refused" and "reason" in out["error"], out
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM entity_suppressions").fetchone()[0] == 0
+
+
+def test_i5_undo_needs_no_reason(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="hide", entity_id="dana-okafor"))["correction_id"]
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+
+
+def test_i5_tool_description_says_reason_is_required():
+    from mcpbrain import tools  # noqa: F401  (registers the tools)
+    from mcpbrain.tool_registry import spec
+    assert "non-empty reason" in spec("brain_graph_correct").description

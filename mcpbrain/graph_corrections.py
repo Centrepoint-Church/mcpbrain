@@ -615,6 +615,12 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
     basis = args.get("basis")
     if basis not in BASES:
         return {"status": "refused", "error": f"basis must be one of {list(BASES)}"}
+    # The reason is the audit trail (ledger, change_log, the pending card):
+    # a correction nobody can explain later must not be written.
+    if not isinstance(args.get("reason"), str) or not args["reason"].strip():
+        return {"status": "refused",
+                "error": "reason is required: the user's words, or the evidence you "
+                         "inferred it from"}
     # Every value the model could hand us is untyped as far as Python is
     # concerned: a wrong-typed value (e.g. value=5 for a set_field job title)
     # would otherwise reach describe()/dedup_key()/a SQL bind or a .lower()
