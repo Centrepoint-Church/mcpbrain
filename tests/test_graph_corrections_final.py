@@ -618,3 +618,11 @@ def test_m5_undo_with_deferred_fk_failure_is_refused(tmp_path):
     assert out["status"] == "refused", out
     assert "dee-okafor" not in _ids(s)                  # rolled back whole
     assert s.get_correction(cid)["status"] == "applied"
+
+
+# --- M7: the tool description says undo needs no confirmation ---------------
+
+def test_m7_tool_description_says_undo_needs_no_confirmation():
+    from mcpbrain import tools  # noqa: F401  (registers the tools)
+    from mcpbrain.tool_registry import spec
+    assert "undo needs no confirmation" in spec("brain_graph_correct").description

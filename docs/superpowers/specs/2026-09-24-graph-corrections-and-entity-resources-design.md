@@ -163,6 +163,15 @@ the model is the exact unenforceable claim the gate exists to prevent.
 The `confirmation` object is only honoured over the bearer-authenticated control
 channel.
 
+**Gate boundary.** `basis` is self-declared: the model chooses `user_stated`,
+so text injected into the conversation (an email, a document, a web page the
+model read) can drive a `user_stated` correction that applies at once. `undo`
+is the remedy, and it needs no confirmation. Likewise a shell-capable agent on
+the user's machine can read the control token from `$MCPBRAIN_HOME` and call
+the `/api/corrections/*` routes directly. The gate stops an honest model from
+claiming consent in chat that the user never gave; it is not a sandbox against
+a hostile one.
+
 Guards: inferred proposals dedup on `dedup_key` (op + sorted ids + field/value)
 against pending, declined and applied rows (no-op with a message); at most 25
 pending rows (further inferred proposals refused with a message); `set_field`

@@ -537,7 +537,8 @@ _CORRECT_REQUIRED = {
         "refused without one). basis: "
         "'user_stated' ONLY when the user said it in this conversation (applied at once); "
         "'inferred' when you worked it out yourself (the user is asked to confirm, or it "
-        "waits for approval on the dashboard). Corrections survive re-enrichment. Report "
+        "waits for approval on the dashboard). undo needs no confirmation: the user can "
+        "ask for any correction to be undone. Corrections survive re-enrichment. Report "
         "the returned status faithfully: never say a pending correction was applied."
     ),
     # additionalProperties + a flat `required: ["op"]` ONLY -- no top-level
