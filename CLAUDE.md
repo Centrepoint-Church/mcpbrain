@@ -214,6 +214,57 @@ because it proves identity, not entitlement, which is why its connector reports
   real shapes, `cal-<eid>` resolving both chunks, the grouping staying
   separate). The first natively-recorded meeting is the real test.
 
+## Graph corrections + entity resources (2026-09-24, source-only, NOT released)
+
+`brain_graph_correct` (hide / not_same / set_field / reject_relation /
+assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
+`mcpbrain://entity/<id>` MCP resources. Plan/briefs:
+`.superpowers/sdd/2026-09-24-graph-corrections-and-entity-resources/`. Source is at
+0.7.130 still; nothing is on the index.
+
+- **A user correction is sticky BY DESIGN: automated writers skip locked fields and
+  rejected triples; `undo` is the only way back.** Do not "fix" an extraction that
+  cannot update a locked org/name/email, or a re-extracted relation that stays
+  rejected — that is the feature. Every automated `UPDATE entities SET` must go
+  through the lock guard (a grep test pins the literal).
+- **Verified live on this machine, 2026-09-24** (bootout → `--reinstall --force
+  ".[daemon]"` → `__pycache__` cleared → bootstrap; installed `store.py` carries
+  `_merge_entities_tx`; `/api/status` 0.7.130, `stalled: None`). Verified snapshot
+  first (`Connection.backup`, `integrity_check` ok). Migration landed on the live store:
+  `graph_corrections` (incl. `applied_order`), `entity_distinct_pairs`,
+  `entity_field_locks` + `idx_efl_field`, `entity_relations.user_verdict`.
+- **Each op ran LIVE through the daemon's `/api/tool` and was undone**, on vendor/project
+  entities: #1 hide `reckon` (gone from `/api/graph/search`, entity route 404) → undo;
+  #2 not_same `reckon`/`myob` → undo; #3 set_field org `the005` (lock row written) →
+  undo restored org AND the blank `org_valid_from`; #4 reject relation 75479 → undo;
+  #5 assert `reckon -mentioned_with-> myob` → undo; #6 hide `myob` with basis
+  `inferred` and no client confirmation → `pending` + a `graph_correction` finding →
+  `POST /api/corrections/6/decline` → declined, finding resolved. End state: 5 reverted,
+  1 declined, 0 locks / distinct pairs / verdicts left.
+- **Stickiness and MERGE were exercised on a COPY of the snapshot, never live.** Lock:
+  `update_entity_org` returned False and a newer-dated `upsert_entity` left the locked org
+  alone. Reject: `upsert_relation` re-extracting the rejected triple returned the same row,
+  still `rejected`. Merge → undo on two genuine duplicate org pairs (one 0+3 relations,
+  one 5+21 relations / 16+23 email links, 3 relations collapsed by the merge):
+  **row-level identical after undo** — entity rows, every relation row, every email link,
+  community rows; `entity_merge_log` back to its prior count.
+- **After:** live `integrity_check` ok, `foreign_key_check` 0, `doctor` 0 actions (its two
+  warnings are the pre-existing re-chunk/oversize items). **Gold 0.850 / 0.545 on the live
+  store and 0.850 / 0.545 on the pre-work snapshot, same harness** — corrections do not
+  touch retrieval (CLAUDE.md's last record was 0.546; the 0.001 is not this work).
+- **Client support, measured:** headless Claude Code 2.1.281 (`claude -p --mcp-config
+  <scratch> --strict-mcp-config`, no user config touched) lists 100 entity resources and
+  reads one to its markdown profile via `@mcpbrain:mcpbrain://entity/<id>`. Task 9's
+  finding stands: `resources/templates/list` and completion are never called headless.
+- **Also fixed here:** `graph_write`'s alias MATCHING splits on both `|` and `,`
+  (`_alias_match_set`). `split_aliases` picks one separator per value, so a legacy mixed
+  value (`"A, B|C"`, 16 on the live store) read as the alias `"A, B"` and upsert minted a
+  duplicate. Writers stay on `|`.
+- **OPEN, owner-only:** Claude Desktop (attach menu shows entities; an inferred correction
+  lands pending, approve it on the dashboard); the interactive `@` picker in Claude Code;
+  the elicitation accept path (`confirmed_via='elicitation'`) in an interactive session;
+  the dashboard Pending-corrections click-through.
+
 ## Shipping caveats
 
 - **Current state (2026-09-10): the four version files (+ `uv.lock`) are at `0.7.128`,
