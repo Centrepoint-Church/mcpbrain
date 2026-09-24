@@ -8,8 +8,10 @@ from mcpbrain import mcp_server
 
 @pytest.fixture(autouse=True)
 def _cold_cache(monkeypatch):
-    # list_entity_resources caches for 10 minutes; each test starts cold.
+    # list_entity_resources caches for 10 minutes (and a failure for 45s);
+    # each test starts cold.
     monkeypatch.setattr(mcp_server, "_entity_list_cache", None)
+    monkeypatch.setattr(mcp_server, "_entity_list_failed_at", None, raising=False)
 
 
 class _Client:
@@ -81,3 +83,37 @@ def test_protocol_lists_template_and_completes_empty(protocol_session):
             assert result.completion.values == []
 
     asyncio.run(_body())
+
+
+class _BadRowClient(_Client):
+    def entity_resources(self):
+        return [{"id": "dana-okafor"}]          # no name/type: malformed
+
+
+class _CountingDownClient(_Client):
+    def __init__(self):
+        super().__init__(down=True)
+        self.calls = 0
+
+    def entity_resources(self):
+        self.calls += 1
+        return super().entity_resources()
+
+
+def test_malformed_daemon_row_degrades_to_empty(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_entity_list_failed_at", None, raising=False)
+    assert asyncio.run(mcp_server.list_entity_resources(_BadRowClient())) == []
+    assert mcp_server._entity_list_cache is None     # never cached, watcher unaffected
+
+
+def test_daemon_failure_is_negatively_cached(monkeypatch):
+    import time
+    monkeypatch.setattr(mcp_server, "_entity_list_failed_at", None, raising=False)
+    c = _CountingDownClient()
+    assert asyncio.run(mcp_server.list_entity_resources(c)) == []
+    assert asyncio.run(mcp_server.list_entity_resources(c)) == []
+    assert c.calls == 1
+    monkeypatch.setattr(mcp_server, "_entity_list_failed_at",
+                        time.monotonic() - mcp_server._ENTITY_LIST_FAIL_TTL_S - 1)
+    asyncio.run(mcp_server.list_entity_resources(c))
+    assert c.calls == 2

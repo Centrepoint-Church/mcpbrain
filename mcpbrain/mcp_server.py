@@ -317,31 +317,50 @@ ENTITY_SCHEME = "mcpbrain://entity/"
 ENTITY_TEMPLATE = ENTITY_SCHEME + "{id}"
 _ENTITY_LIST_TTL_S = 600.0
 _entity_list_cache: tuple[float, list] | None = None
+# After a daemon failure, don't ask again for this long: a hung daemon would
+# otherwise cost the client its full timeout on every resources/list.
+_ENTITY_LIST_FAIL_TTL_S = 45.0
+_entity_list_failed_at: float | None = None
 
 
-async def list_entity_resources(client) -> list:
-    """The daemon's top-N entities as resources, cached 10 minutes here (the
-    daemon's list itself only changes daily). Daemon unreachable -> [] so the
-    file:// resources still list."""
-    import asyncio
-    import time
+def _entity_resource_objs(ents) -> list:
     from mcp import types
-    global _entity_list_cache
-    now = time.monotonic()
-    if _entity_list_cache is None or now - _entity_list_cache[0] > _ENTITY_LIST_TTL_S:
-        try:
-            ents = await asyncio.to_thread(client.entity_resources)
-        except Exception:  # noqa: BLE001 -- daemon down: list what we can
-            _log.debug("entity resources unavailable", exc_info=True)
-            return []
-        _entity_list_cache = (now, ents)
     return [
         types.Resource(
             uri=f"{ENTITY_SCHEME}{e['id']}", name=e["name"],
             title=", ".join(x for x in (e["name"], e["type"], e.get("org") or "") if x),
             mimeType="text/markdown")
-        for e in _entity_list_cache[1]
+        for e in ents
     ]
+
+
+async def list_entity_resources(client) -> list:
+    """The daemon's top-N entities as resources, cached 10 minutes here (the
+    daemon's list itself only changes daily). Daemon unreachable, or a list
+    this server cannot turn into resources -> [] so the file:// resources
+    still list; a failure is not retried for _ENTITY_LIST_FAIL_TTL_S."""
+    import asyncio
+    import time
+    global _entity_list_cache, _entity_list_failed_at
+    now = time.monotonic()
+    if _entity_list_cache is not None and now - _entity_list_cache[0] <= _ENTITY_LIST_TTL_S:
+        try:
+            return _entity_resource_objs(_entity_list_cache[1])
+        except Exception:  # noqa: BLE001 -- cached rows already validated below
+            _log.debug("cached entity resources unusable", exc_info=True)
+            return []
+    if _entity_list_failed_at is not None and now - _entity_list_failed_at < _ENTITY_LIST_FAIL_TTL_S:
+        return []
+    try:
+        ents = await asyncio.to_thread(client.entity_resources)
+        resources = _entity_resource_objs(ents)
+    except Exception:  # noqa: BLE001 -- daemon down or a malformed row: list what we can
+        _log.debug("entity resources unavailable", exc_info=True)
+        _entity_list_failed_at = now
+        return []
+    _entity_list_failed_at = None
+    _entity_list_cache = (now, ents)
+    return resources
 
 
 async def read_entity_resource(client, uri) -> str:
