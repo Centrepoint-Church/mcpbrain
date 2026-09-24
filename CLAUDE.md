@@ -244,10 +244,11 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
 - **Stickiness and MERGE were exercised on a COPY of the snapshot, never live.** Lock:
   `update_entity_org` returned False and a newer-dated `upsert_entity` left the locked org
   alone. Reject: `upsert_relation` re-extracting the rejected triple returned the same row,
-  still `rejected`. Merge → undo on two genuine duplicate org pairs (one 0+3 relations,
-  one 5+21 relations / 16+23 email links, 3 relations collapsed by the merge):
-  **row-level identical after undo** — entity rows, every relation row, every email link,
-  community rows; `entity_merge_log` back to its prior count.
+  still `rejected`. Merge → undo on two genuine duplicate org pairs. Pair 1 (0+3 relations):
+  relation/observation/email/community counts and both entity rows identical after undo,
+  `entity_merge_log` back to its prior count. Pair 2 (5+21 relations / 16+23 email links,
+  3 relations collapsed by the merge): **exhaustive row-level equality after undo** —
+  entity rows, every relation row, every email link, community rows.
 - **After:** live `integrity_check` ok, `foreign_key_check` 0, `doctor` 0 actions (its two
   warnings are the pre-existing re-chunk/oversize items). **Gold 0.850 / 0.545 on the live
   store and 0.850 / 0.545 on the pre-work snapshot, same harness** — corrections do not
@@ -258,7 +259,7 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
   finding stands: `resources/templates/list` and completion are never called headless.
 - **Also fixed here:** `graph_write`'s alias MATCHING splits on both `|` and `,`
   (`_alias_match_set`). `split_aliases` picks one separator per value, so a legacy mixed
-  value (`"A, B|C"`, 16 on the live store) read as the alias `"A, B"` and upsert minted a
+  value (`"A, B|C"`; 16 on the live store, read-only count 2026-09-24: 630 aliased, 42 pipe-only, 16 comma-only, 16 mixed) read as the alias `"A, B"` and upsert minted a
   duplicate. Writers stay on `|`.
 - **OPEN, owner-only:** Claude Desktop (attach menu shows entities; an inferred correction
   lands pending, approve it on the dashboard); the interactive `@` picker in Claude Code;
