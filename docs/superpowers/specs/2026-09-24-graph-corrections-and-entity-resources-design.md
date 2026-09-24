@@ -183,12 +183,32 @@ Every applied correction also writes a `change_log` row
 Entities only (person, org, project). Documents are excluded: no one can
 @-mention a doc id, and `brain_read` already serves the model.
 
-### Client support (researched 2026-09-24, partly unverified)
+### Client support (measured 2026-09-24, Claude Code CLI 2.1.281)
 
-Static resources work in both Claude Code and Desktop. Whether either client
-lists `resources/templates/list` or calls `completion/complete` is **not
-confirmed**; elicitation is documented for Claude Code 2.1.76+ and absent from
-Desktop. Plan task 1 settles this against the real clients.
+A throwaway probe MCP server (static resource + template + completion +
+prompt handlers, each logging on invocation) was run headlessly via
+`claude -p --mcp-config ./mcp.json --strict-mcp-config "<prompt>"`, once per
+row below, and `probe.log` was read back to see which methods the client
+actually called. `claude mcp add`/Desktop's config were left untouched;
+Desktop was not exercised (owner's live setup, out of scope for this probe).
+
+| Feature | Claude Code CLI (headless `-p`, 2026-09-24) | Claude Desktop |
+|---|---|---|
+| Static resource listed (`resources/list`) | yes — asking "list the MCP resources available" triggered `resources/list` and returned the one static entry | not tested (left for owner) |
+| Static/templated resource read via `@server:uri` (`resources/read`) | yes — `@probe:probe://entity/marcus-reyes` and `@probe:probe://entity/dana-okafor` both resolved and the model quoted the returned markdown | not tested (left for owner) |
+| Templates listed (`resources/templates/list`) | no — never appeared in the log across 4 separate `-p` invocations, including ones that read a templated (non-listed) URI | not tested (left for owner) |
+| Templated URI readable | yes — `probe://entity/marcus-reyes` (never returned by `resources/list`, only matching the `probe://entity/{id}` template) was read successfully via the `@`-mention with no `resources/templates/list` call in between | not tested (left for owner) |
+| Prompt fetched (`prompts/get`) | yes — the slash form `/mcp__probe__probe <args>` called `prompts/get`; positional-arg quoting behaviour was also observed (unquoted multi-word args split on spaces) | not tested (left for owner) |
+| Completion called, template variable (`completion/complete`) | no — not observed in any headless call | not tested (interactive-only; left for owner) |
+| Completion called, prompt argument (`completion/complete`) | no — not observed in any headless call | not tested (interactive-only; left for owner) |
+| @-picker showing the resource while typing, `/probe` argument completion | not tested (interactive, left for owner) | not tested (left for owner) |
+
+Tasks 10-11 still ship the template and completion handlers (spec-correct,
+cheap), but they are inert in today's clients; the user-visible win is the
+static top-N. A templated URI is directly readable by `@`-mention without the
+client ever calling `resources/templates/list`, so a user (or the model)
+constructing the URI by hand still works even though template discovery is
+unverified end-to-end.
 
 ### Static top-N
 
