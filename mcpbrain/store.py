@@ -714,6 +714,7 @@ class Store:
                 ("evidence", "TEXT"),
                 ("strength", "INTEGER DEFAULT 1"),
                 ("last_seen", "TEXT"),
+                ("user_verdict", "TEXT"),
             ):
                 if col_name not in er_cols:
                     db.execute(f"ALTER TABLE entity_relations ADD COLUMN {col_name} {col_def}")
@@ -1099,6 +1100,41 @@ class Store:
                 reason        TEXT DEFAULT '',
                 suppressed_at TEXT DEFAULT ''
             ){_S}""")
+
+            # --- Graph corrections (2026-09-24 spec) ---------------------------
+            # The ledger for brain_graph_correct: every correction the model makes
+            # (applied, pending approval, declined, failed, reverted), with the
+            # snapshot undo needs. Pending rows are the approval queue for
+            # inferred corrections on clients without elicitation.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS graph_corrections(
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                op            TEXT NOT NULL,
+                basis         TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                payload       TEXT NOT NULL DEFAULT '{{}}',
+                snapshot      TEXT NOT NULL DEFAULT '{{}}',
+                reason        TEXT DEFAULT '',
+                confirmed_via TEXT DEFAULT '',
+                dedup_key     TEXT DEFAULT '',
+                error         TEXT DEFAULT '',
+                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                applied_at    TEXT DEFAULT '',
+                reverted_at   TEXT DEFAULT '',
+                change_log_id INTEGER){_S}""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_gc_status ON graph_corrections(status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_gc_dedup ON graph_corrections(dedup_key)")
+            # "These two are different entities": consulted by every merge path.
+            # a < b always (the writer sorts), so one row per unordered pair.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_distinct_pairs(
+                a TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                b TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                PRIMARY KEY(a, b)){_S}""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_edp_b ON entity_distinct_pairs(b)")
+            # A field the user corrected: automated writers must not overwrite it.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS entity_field_locks(
+                entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                field     TEXT NOT NULL,
+                PRIMARY KEY(entity_id, field)){_S}""")
 
             # --- Session-4, Task 3.2: org-suggestion inbox ----------------------
             # Purely additive/inspectable: an org string the extractor keeps
@@ -4563,6 +4599,44 @@ class Store:
         with self._connect(write=True) as db:
             cur = db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (entity_id,))
             return cur.rowcount > 0
+
+    # --- Graph corrections (read side) ----------------------------------------
+
+    @staticmethod
+    def _decode_correction(row) -> dict:
+        d = dict(row)
+        d["payload"] = json.loads(d.get("payload") or "{}")
+        d["snapshot"] = json.loads(d.get("snapshot") or "{}")
+        return d
+
+    def get_correction(self, correction_id: int) -> dict | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM graph_corrections WHERE id=?",
+                             (int(correction_id),)).fetchone()
+        return self._decode_correction(row) if row else None
+
+    def pending_corrections(self, limit: int = 50) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM graph_corrections WHERE status='pending' "
+                "ORDER BY id LIMIT ?", (int(limit),)).fetchall()
+        return [self._decode_correction(r) for r in rows]
+
+    def distinct_pair_set(self) -> set[tuple[str, str]]:
+        with self._connect() as db:
+            return {(r["a"], r["b"]) for r in db.execute(
+                "SELECT a, b FROM entity_distinct_pairs")}
+
+    def is_distinct_pair(self, a: str, b: str) -> bool:
+        lo, hi = sorted((a, b))
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM entity_distinct_pairs WHERE a=? AND b=?",
+                              (lo, hi)).fetchone() is not None
+
+    def locked_fields(self, entity_id: str) -> set[str]:
+        with self._connect() as db:
+            return {r["field"] for r in db.execute(
+                "SELECT field FROM entity_field_locks WHERE entity_id=?", (entity_id,))}
 
     # --- Session-4, Task 3.2: org-suggestion inbox ---------------------------
 
