@@ -191,19 +191,30 @@ existing path: delete, `invalidate_local_relations_for_docs`, re-enrich.
    `graph_decisions_legacy.source_doc_id`, `recall_feedback.doc_id`
    (repointed) and `chunk_quality` (merged: exposures and uses summed,
    `memory_strength` max, `last_accessed` max).
-4. **Persist the map** in a new permanent table
-   `reflow_map(old_doc_id TEXT PRIMARY KEY, new_doc_id TEXT NOT NULL,
-   owner TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL)`.
-   `Store.read_doc`, drain's doc_id resolution (`doc_ids_for_messages` /
-   `_stamp_part_doc_ids`) and `org_contrib._chunk_provenance` fall back through
-   it, so a stale id anywhere (an in-flight unit, an old citation) resolves
-   rather than silently missing.
+   **doc_ids are positional and reused** (`gdrive-<fid>-<i>`,
+   `gmail-<msg>-body-<i>`, …): new chunk *j* is written at the same id family,
+   so the remap is a simultaneous in-place substitution over the owner's own id
+   space (`i → j`), applied through a temp mapping table in one statement per
+   target table, never a chain of single-row UPDATEs (which would re-map an
+   already-remapped id).
+4. **Log the map** in a new permanent table
+   `reflow_map(id INTEGER PRIMARY KEY, owner TEXT NOT NULL,
+   old_doc_id TEXT NOT NULL, new_doc_id TEXT NOT NULL, reason TEXT NOT NULL,
+   at TEXT NOT NULL)` — an append-only log, not a lookup keyed on old id, since
+   the same id is both an old and a new chunk. It is the audit trail and the
+   input to `remap-gold`. For ids that no longer exist at all (the new
+   document has fewer chunks than the old), `Store.read_doc`, drain's doc_id
+   resolution and `org_contrib._chunk_provenance` fall back to the latest
+   `reflow_map` row for that id, so a stale reference resolves rather than
+   silently missing.
 
 **Ordering.** Embeddings for the new chunks are computed BEFORE the write lock
 (local compute), so recall never has a gap. Then, in one `BEGIN IMMEDIATE`:
-insert new chunks with vectors and FTS rows → carry state → apply the remap →
-write `reflow_map` → delete old chunks and their `vec_chunks` / `fts_chunks`
-rows. Any exception rolls back to the untouched old chunks and the queue item
+write each new chunk over its positional id with its vector and FTS row
+(`Store._write_cached_chunk_row`, the same helper the ingest-cache import uses)
+→ carry state → apply the remap → append `reflow_map` → delete the owner's
+old ids beyond the new chunk count (with their `vec_chunks` / `fts_chunks`
+rows). Any exception rolls back to the untouched old chunks and the queue item
 retries with backoff.
 
 **Guards.**
@@ -211,10 +222,10 @@ retries with backoff.
 - An owner with a pending or claimed enrichment unit is skipped this cycle (the
   item is re-queued with a short delay).
 - After each commit, an **orphan check** for that owner: no row in any table in
-  step 3 may reference a doc_id that has neither a `chunks` row nor a
-  `reflow_map` row. A non-zero count fails the item loudly (logged, recorded in
-  `last_error`) and **halts the reflow cadence** until `doctor` is run —
-  a wrong remap must stop, not propagate.
+  step 3 may reference a doc_id of that owner that has no `chunks` row. A non-zero count fails the item loudly (logged, recorded in
+  `last_error`) and **halts the reflow cadence**; `doctor` reports the halt and
+  an attended `bin/reflow.py resume` clears it after investigation — a wrong
+  remap must stop, not propagate.
 
 ### 4. The reflow queue
 
