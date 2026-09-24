@@ -168,6 +168,12 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
                          "AND entity_b=?", (a, rel, b)).fetchone()
         if row is not None:
             collisions.append(dict(row))
+    # Every pre-existing winner self-loop is swept below, whether or not a loser
+    # triple collides with it, so all of them belong in the snapshot.
+    seen = {c["id"] for c in collisions}
+    collisions += [dict(r) for r in db.execute(
+        "SELECT * FROM entity_relations WHERE entity_a=entity_b AND entity_a=?", (winner_id,))
+        if r["id"] not in seen]
     # Other relations whose invalidated_by_relation_id points at a loser
     # relation: the merge may DELETE that relation (a collision or a self-loop),
     # and the FK's ON DELETE SET NULL then clears the pointer, so it has to be
@@ -228,9 +234,11 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     # Rows still on the loser are the ignored duplicates -> delete them.
     db.execute("DELETE FROM entity_relations WHERE entity_a=? OR entity_b=?",  # admin-delete-ok
                (loser_id, loser_id))
-    # Drop any self-loop the merge produced. Scoped to the winner: the
-    # only self-loops a repoint can create have winner on both sides, so
-    # this never sweeps unrelated rows.
+    # Drop every winner self-loop. Scoped to the winner: the only self-loops a
+    # repoint can create have winner on both sides, so this never sweeps
+    # unrelated rows. It also removes a winner self-loop that PREDATES the
+    # merge; the snapshot captures every such row under `collisions`, so
+    # _unmerge_tx restores it.
     db.execute(
         "DELETE FROM entity_relations WHERE entity_a=entity_b AND entity_a=?",  # admin-delete-ok
         (winner_id,),
@@ -347,11 +355,20 @@ def _unmerge_tx(db, snap: dict) -> None:
         # if it was deleted and its triple re-created under a new id, restoring
         # it by id would trip UNIQUE mid-restore.
         # Exception: a pre-existing winner self-loop is itself deleted by the
-        # merge's self-loop sweep, so its absence is expected, not a conflict.
+        # merge's self-loop sweep, so its absence is expected, not a conflict,
+        # PROVIDED the triple has not been re-created under another id since
+        # (e.g. re-enrichment re-deriving it) -- that would trip UNIQUE too.
         row = db.execute("SELECT entity_a, relation, entity_b FROM entity_relations WHERE id=?",
                          (c["id"],)).fetchone()
         if row is None and c["entity_a"] == c["entity_b"]:
-            continue
+            again = db.execute("SELECT id FROM entity_relations WHERE entity_a=? AND relation=? "
+                               "AND entity_b=?",
+                               (c["entity_a"], c["relation"], c["entity_b"])).fetchone()
+            if again is None:
+                continue
+            raise ValueError(f"cannot undo: relation {c['entity_a']} {c['relation']} "
+                             f"{c['entity_b']} was re-created as relation {again[0]} "
+                             f"since the merge")
         if row is None or tuple(row) != (c["entity_a"], c["relation"], c["entity_b"]):
             raise ValueError(f"cannot undo: relation {c['id']} ({c['entity_a']} "
                              f"{c['relation']} {c['entity_b']}) was removed or changed "

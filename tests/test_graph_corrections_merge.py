@@ -240,3 +240,35 @@ def test_round_trip_with_pre_existing_winner_self_loop_collision(tmp_path):
     with s._connect(write=True) as db:
         _unmerge_tx(db, snap)
     assert _state(s) == before
+
+
+def test_unmerge_refuses_when_swept_self_loop_triple_was_recreated(tmp_path):
+    """A pre-existing winner self-loop is swept by the merge; if re-enrichment
+    re-creates the same triple under a NEW id before the undo, restoring the
+    old row would trip UNIQUE. Refuse with a ValueError instead."""
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES(?, 'mentioned_with', ?)", (W, W))
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES(?, 'mentioned_with', ?)", (W, W))
+    with s._connect(write=True) as db, pytest.raises(ValueError, match="re-created"):
+        _unmerge_tx(db, snap)
+
+
+def test_round_trip_restores_non_colliding_winner_self_loop(tmp_path):
+    """The merge's self-loop sweep removes ANY winner self-loop, including one
+    no loser triple collides with; the snapshot must still capture it."""
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES(?, 'related_to', ?)", (W, W))
+    before = _state(s)
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    with s._connect(write=True) as db:
+        _unmerge_tx(db, snap)
+    assert _state(s) == before
