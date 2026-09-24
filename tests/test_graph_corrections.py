@@ -222,3 +222,182 @@ def test_undo_merge_refuses_while_later_correction_changed_the_winner(tmp_path):
     assert gc.undo(s, later["correction_id"])["status"] == "reverted"
     assert gc.undo(s, merge_cid)["status"] == "reverted"
     assert s.get_entity("dana-okafor-2") is not None
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+# --- (1) submit refuses cleanly on missing/malformed arguments, never raises --
+
+def test_submit_refuses_on_missing_or_empty_required_args(tmp_path):
+    s = _store(tmp_path)
+    assert gc.submit(s, _stated(op="set_field", entity_id=D, field="org", value=""))["status"] == "refused"
+    assert gc.submit(s, _stated(op="reject_relation", entity_a=D, relation="works_at"))["status"] == "refused"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0
+
+
+def test_submit_undo_refuses_on_missing_or_malformed_correction_id(tmp_path):
+    s = _store(tmp_path)
+    assert gc.submit(s, {"op": "undo"})["status"] == "refused"
+    assert gc.submit(s, {"op": "undo", "correction_id": "abc"})["status"] == "refused"
+
+
+def test_confirmed_via_rejects_unknown_values(tmp_path):
+    s = _store(tmp_path)
+    out = gc.submit(s, _inferred(op="hide", entity_id=S), confirmed_via="bogus")
+    assert out["status"] == "refused"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0
+    assert gc.submit(s, _inferred(op="hide", entity_id=S), confirmed_via="elicitation")["status"] == "applied"
+
+
+# --- (2) the generalised "later correction" undo guard ------------------------
+
+def test_undo_assert_refused_while_later_correction_touches_retired_rival(tmp_path):
+    """(a): assert D-works_at-S retires N; a later reject of D-works_at-N must
+    block undoing the assert, or N would be restored wholesale and the reject
+    would silently vanish while still reading 'applied'."""
+    s = _store(tmp_path)
+    a_out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="works_at", entity_b=S))
+    r_out = gc.submit(s, _stated(op="reject_relation", entity_a=D, relation="works_at", entity_b=N))
+    assert r_out["status"] == "applied"
+
+    out = gc.undo(s, a_out["correction_id"])
+    assert out["status"] == "refused"
+    assert f"undo correction {r_out['correction_id']} first" in out["error"]
+
+    assert gc.undo(s, r_out["correction_id"])["status"] == "reverted"
+    assert gc.undo(s, a_out["correction_id"])["status"] == "reverted"
+    assert _rel(s, D, "works_at", S) is None
+    assert _rel(s, D, "works_at", N)["invalidated_at"] is None
+
+
+def test_undo_reject_refused_while_later_assert_on_same_triple_stands(tmp_path):
+    """(b): reject then assert the same triple; undoing the reject first must
+    be blocked while the assert stands, or the pair ends up rejected even
+    after both are undone."""
+    s = _store(tmp_path)
+    before = dict(_rel(s, D, "works_at", N))
+    reject_out = gc.submit(s, _stated(op="reject_relation", entity_a=D, relation="works_at", entity_b=N))
+    assert_out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="works_at", entity_b=N))
+    assert assert_out["status"] == "applied"
+
+    out = gc.undo(s, reject_out["correction_id"])
+    assert out["status"] == "refused"
+    assert f"undo correction {assert_out['correction_id']} first" in out["error"]
+
+    assert gc.undo(s, assert_out["correction_id"])["status"] == "reverted"
+    assert gc.undo(s, reject_out["correction_id"])["status"] == "reverted"
+    # Only the correction-owned columns are asserted here: the assert's undo
+    # deliberately leaves confidence/evidence/last_seen alone (item 3), so a
+    # whole-row comparison against `before` would fail on those, not on
+    # anything this fix is responsible for.
+    after = dict(_rel(s, D, "works_at", N))
+    for col in ("user_verdict", "invalidated_at", "valid_to", "superseded_reason",
+               "invalidated_by_relation_id", "valid_from"):
+        assert after[col] == before[col], col
+
+
+def test_undo_first_set_field_refused_while_second_stands(tmp_path):
+    """(c): two set_field org corrections on the same entity; undoing the
+    first while the second still applies must be blocked, or org reverts and
+    the lock is removed while the second reads 'applied'."""
+    s = _store(tmp_path)
+    c1 = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                              value="Southbank Community Trust"))["correction_id"]
+    c2 = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                              value="The Lantern Co"))["correction_id"]
+
+    out = gc.undo(s, c1)
+    assert out["status"] == "refused"
+    assert f"undo correction {c2} first" in out["error"]
+
+    assert gc.undo(s, c2)["status"] == "reverted"
+    assert gc.undo(s, c1)["status"] == "reverted"
+    assert s.get_entity(D)["org"] == "Northgate Trust"
+    assert s.locked_fields(D) == set()
+
+
+def test_undo_refused_when_later_merge_touches_the_entity(tmp_path):
+    """(ii): a later merge whose winner or loser id is an entity the earlier
+    correction touched must block that correction's undo."""
+    import json as _json
+
+    from mcpbrain.store import _merge_entities_tx
+
+    s = _store(tmp_path)
+    c1 = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                              value="Southbank Community Trust"))["correction_id"]
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, S, D, method="user")  # S (loser) folded into D (winner)
+    with s._connect(write=True) as db:
+        merge_cid = db.execute(
+            "INSERT INTO graph_corrections(op,basis,status,payload,snapshot,dedup_key,applied_at) "
+            "VALUES('merge','user_stated','applied',?,?,'merge:[]',?) ",
+            (_json.dumps({"entity_id": S, "other_id": D}), _json.dumps(snap), gc._now())).lastrowid
+
+    out = gc.undo(s, c1)
+    assert out["status"] == "refused"
+    assert f"undo correction {merge_cid} first" in out["error"]
+
+
+# --- (4) an assert superseded at birth reports itself as historical ----------
+
+def test_assert_relation_older_than_current_reports_historical(tmp_path):
+    s = _store(tmp_path)
+    out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="works_at",
+                               entity_b=S, valid_from="2020-01-01"))
+    assert out["status"] == "applied"
+    assert "(recorded as historical: a newer rival is current)" in out["summary"]
+    assert _rel(s, D, "works_at", S)["invalidated_at"] is not None
+    assert _rel(s, D, "works_at", N)["invalidated_at"] is None  # the rival stays current
+
+
+# --- (6) further coverage: pre-existing state survives an undo ---------------
+
+def test_undo_hide_restores_a_pre_existing_suppression(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_suppressions(entity_id, reason, suppressed_at) "
+                  "VALUES(?, 'junk', '2020-01-01T00:00:00Z')", (S,))
+    cid = gc.submit(s, _stated(op="hide", entity_id=S))["correction_id"]
+    with s._connect() as db:
+        row = db.execute("SELECT reason FROM entity_suppressions WHERE entity_id=?", (S,)).fetchone()
+    assert row["reason"] == "user"
+    gc.undo(s, cid)
+    with s._connect() as db:
+        row = db.execute("SELECT reason, suppressed_at FROM entity_suppressions WHERE entity_id=?",
+                         (S,)).fetchone()
+    assert row["reason"] == "junk" and row["suppressed_at"] == "2020-01-01T00:00:00Z"
+
+
+def test_set_field_keeps_a_pre_existing_lock_on_undo(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_field_locks(entity_id, field) VALUES(?, 'org')", (D,))
+    cid = gc.submit(s, _stated(op="set_field", entity_id=D, field="org",
+                               value="Southbank Community Trust"))["correction_id"]
+    gc.undo(s, cid)
+    assert s.get_entity(D)["org"] == "Northgate Trust"
+    assert s.locked_fields(D) == {"org"}  # the pre-existing lock is not this correction's to remove
+
+
+def test_assert_relation_undo_restores_degree(tmp_path):
+    s = _store(tmp_path)
+    before_a = s.get_entity(D)["degree"]
+    before_b = s.get_entity(S)["degree"]
+    out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="mentioned_with", entity_b=S))
+    assert out["status"] == "applied"
+    assert s.get_entity(D)["degree"] == before_a + 1
+    assert s.get_entity(S)["degree"] == before_b + 1
+    gc.undo(s, out["correction_id"])
+    assert s.get_entity(D)["degree"] == before_a
+    assert s.get_entity(S)["degree"] == before_b
+
+
+def test_refused_set_field_and_hide_write_nothing(tmp_path):
+    s = _store(tmp_path)
+    assert gc.submit(s, _stated(op="set_field", entity_id=D, field="role", value="volunteer"))["status"] == "refused"
+    assert gc.submit(s, _stated(op="hide", entity_id="nobody"))["status"] == "refused"
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM graph_corrections").fetchone()[0] == 0

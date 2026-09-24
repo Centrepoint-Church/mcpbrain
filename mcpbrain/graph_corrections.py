@@ -167,7 +167,10 @@ def _apply_assert_relation(store, db, p) -> dict:
                                 evidence=f"stated by the user: {p.get('reason', '')}",
                                 source_doc_id="")
     db.execute("UPDATE entity_relations SET user_verdict='asserted' WHERE id=?", (rid,))
-    return {"relation_id": rid, "prior": dict(prior) if prior else None, "rivals": rivals}
+    row_after = db.execute("SELECT invalidated_at FROM entity_relations WHERE id=?",
+                           (rid,)).fetchone()
+    return {"relation_id": rid, "prior": dict(prior) if prior else None, "rivals": rivals,
+            "historical": row_after["invalidated_at"] is not None}
 
 
 def _apply_not_same(store, db, p) -> dict:
@@ -258,18 +261,48 @@ def _undo_reject_relation(db, p, snap):
 
 
 def _undo_assert_relation(db, p, snap):
-    from mcpbrain.store import _restore_row
+    """Undo an assert without rolling back automated changes the assert never
+    made: only the columns the assert (via upsert_relation_in/_mark_superseded)
+    actually touched are put back, not the whole row. Confidence/evidence/
+    strength/last_seen/source_doc_id from the assert are left as they are --
+    reverting them would be undoing re-observations that happened alongside
+    the assert, which this correction never claimed credit for."""
+    relation_id = snap["relation_id"]
+    # A rival is only touched here if THIS assert is what retired it (singleton
+    # recency rule); one whose invalidated_by_relation_id has since moved on
+    # (e.g. a later correction) must be left alone -- restoring it would
+    # silently clobber that later change. Checked and captured BEFORE the
+    # fresh-row-delete branch below: deleting `relation_id` FK-cascades
+    # (ON DELETE SET NULL) and clears every rival's pointer to it, which would
+    # make this check always read NULL and never fire if done afterwards.
+    to_restore = []
+    for r in snap["rivals"]:
+        cur = db.execute("SELECT invalidated_by_relation_id FROM entity_relations WHERE id=?",
+                         (r["id"],)).fetchone()
+        if cur is not None and cur["invalidated_by_relation_id"] == relation_id:
+            to_restore.append(r)
+
     if snap["prior"] is None:
         row = db.execute("SELECT entity_a, entity_b FROM entity_relations WHERE id=?",
-                         (snap["relation_id"],)).fetchone()
+                         (relation_id,)).fetchone()
         if row is not None:
-            db.execute("DELETE FROM entity_relations WHERE id=?", (snap["relation_id"],))  # admin-delete-ok
+            db.execute("DELETE FROM entity_relations WHERE id=?", (relation_id,))  # admin-delete-ok
             db.execute("UPDATE entities SET degree=MAX(COALESCE(degree,0)-1, 0) WHERE id IN (?,?)",
                        (row[0], row[1]))
     else:
-        _restore_row(db, "entity_relations", snap["prior"])
-    for r in snap["rivals"]:
-        _restore_row(db, "entity_relations", r)
+        prior = snap["prior"]
+        db.execute(
+            "UPDATE entity_relations SET user_verdict=?, valid_from=?, valid_to=?, "
+            "invalidated_at=?, superseded_reason=?, invalidated_by_relation_id=? WHERE id=?",
+            (prior["user_verdict"], prior["valid_from"], prior["valid_to"],
+             prior["invalidated_at"], prior["superseded_reason"],
+             prior["invalidated_by_relation_id"], prior["id"]))
+    for r in to_restore:
+        db.execute(
+            "UPDATE entity_relations SET valid_to=?, invalidated_at=?, "
+            "superseded_reason=?, invalidated_by_relation_id=? WHERE id=?",
+            (r["valid_to"], r["invalidated_at"], r["superseded_reason"],
+             r["invalidated_by_relation_id"], r["id"]))
 
 
 def _undo_not_same(db, p, snap):
@@ -279,6 +312,10 @@ def _undo_not_same(db, p, snap):
 def _undo_set_field(db, p, snap):
     eid, field = p["entity_id"], p["field"]
     if field == "role":
+        # Deleting the inserted manual row also drops any observed_count that
+        # extraction consolidated into it since it was written -- acceptable,
+        # because the value being undone is the user's correction, not a
+        # source's observation; there is nothing of the source's left to keep.
         db.execute("DELETE FROM entity_observations WHERE id=?", (snap["inserted_id"],))  # admin-delete-ok
         for oid in snap["retired_ids"]:
             db.execute("UPDATE entity_observations SET valid_to=NULL WHERE id=?", (oid,))
@@ -301,28 +338,7 @@ def _undo_hide(db, p, snap):
         _restore_row(db, "entity_suppressions", snap["prior"], key="entity_id")
 
 
-def _later_correction_touching_winner(db, correction_id: int, winner_id: str):
-    """The lowest-id LATER 'applied' correction whose payload references
-    `winner_id` as one of the entities it acted on -- i.e. one whose undo
-    would be silently clobbered by `_unmerge_tx` restoring the winner's
-    pre-merge name/type/org/aliases/email/notes. `undo()` must refuse the
-    merge's own undo until that later correction is undone first."""
-    for row in db.execute(
-        "SELECT id, payload FROM graph_corrections WHERE id > ? AND status='applied' "
-        "ORDER BY id", (correction_id,)):
-        payload = json.loads(row["payload"] or "{}")
-        if winner_id in (payload.get("entity_id"), payload.get("other_id"),
-                         payload.get("entity_a"), payload.get("entity_b")):
-            return row["id"]
-    return None
-
-
-def _undo_merge(db, correction_id, p, snap):
-    winner_id = snap["winner_id"]
-    blocker = _later_correction_touching_winner(db, correction_id, winner_id)
-    if blocker is not None:
-        raise Refused(f"undo correction {blocker} first: it changed {winner_id} "
-                      f"after this merge")
+def _undo_merge(db, p, snap):
     from mcpbrain.store import _unmerge_tx
     try:
         _unmerge_tx(db, snap)
@@ -331,27 +347,130 @@ def _undo_merge(db, correction_id, p, snap):
 
 
 _UNDO = {
-    "reject_relation": lambda db, cid, p, snap: _undo_reject_relation(db, p, snap),
-    "assert_relation": lambda db, cid, p, snap: _undo_assert_relation(db, p, snap),
+    "reject_relation": _undo_reject_relation,
+    "assert_relation": _undo_assert_relation,
     "merge": _undo_merge,
-    "not_same": lambda db, cid, p, snap: _undo_not_same(db, p, snap),
-    "set_field": lambda db, cid, p, snap: _undo_set_field(db, p, snap),
-    "hide": lambda db, cid, p, snap: _undo_hide(db, p, snap),
+    "not_same": _undo_not_same,
+    "set_field": _undo_set_field,
+    "hide": _undo_hide,
 }
+
+
+# --- the one generalised "don't clobber a later correction" guard ------------
+#
+# Undoing correction N must not silently overwrite something a LATER, still-
+# applied correction M did. Each non-merge op has a "target key" identifying
+# what it wrote; two corrections that share a target key conflict directly
+# (rule i). Because a merge deletes/renames entities rather than writing a
+# target key of its own, it is handled by id membership instead: a later
+# merge touching one of N's entities can invalidate N's undo (rule ii), and
+# when N is ITSELF the merge, a later correction touching its winner id can
+# invalidate undoing it (rule iii) -- the winner survives the merge and keeps
+# being written to; the loser id is gone and cannot be touched again.
+
+def _payload_entity_ids(p: dict) -> set:
+    return {p[k] for k in ("entity_id", "other_id", "entity_a", "entity_b") if p.get(k)}
+
+
+def _target_keys(op: str, p: dict, snap: dict) -> set:
+    """What this (non-merge) correction wrote, as opaque conflict keys."""
+    if op in ("reject_relation", "assert_relation"):
+        keys = {f"rel:{p['entity_a']}|{p['relation']}|{p['entity_b']}"}
+        if op == "assert_relation":
+            for r in (snap or {}).get("rivals") or ():
+                keys.add(f"rel:{r['entity_a']}|{r['relation']}|{r['entity_b']}")
+        return keys
+    if op == "set_field":
+        return {f"field:{p['entity_id']}:{p['field']}"}
+    if op == "hide":
+        return {f"hide:{p['entity_id']}"}
+    if op == "not_same":
+        a, b = sorted((p["entity_id"], p["other_id"]))
+        return {f"pair:{a}|{b}"}
+    return set()  # merge has no target key of this shape
+
+
+def _merge_ids(snap: dict) -> set:
+    """The winner + loser ids a merge's OWN snapshot names."""
+    ids = {snap.get("winner_id")}
+    loser = snap.get("loser") or {}
+    if loser.get("id"):
+        ids.add(loser["id"])
+    return {i for i in ids if i}
+
+
+def _conflict_note(op: str, p: dict, snap: dict) -> str:
+    if op in ("reject_relation", "assert_relation"):
+        return f"{p['entity_a']} -{p['relation']}-> {p['entity_b']}"
+    if op == "set_field":
+        return f"{p['entity_id']}'s {p['field']}"
+    if op == "hide":
+        return p["entity_id"]
+    if op == "not_same":
+        return f"{p['entity_id']} and {p['other_id']}"
+    if op == "merge":
+        return f"{snap.get('winner_id')} after this merge"
+    return op
+
+
+def _find_blocking_correction(db, correction_id: int, op: str, p: dict, snap: dict):
+    """The lowest-id LATER 'applied' correction that undoing (op, p, snap)
+    would silently corrupt, or None."""
+    rows = db.execute(
+        "SELECT id, op, payload, snapshot FROM graph_corrections "
+        "WHERE id > ? AND status='applied' ORDER BY id", (correction_id,))
+    if op == "merge":
+        watch = {snap.get("winner_id")}  # rule iii: only the survivor can be touched again
+        for row in rows:
+            m_p = json.loads(row["payload"] or "{}")
+            if watch & _payload_entity_ids(m_p):
+                return row["id"]
+        return None
+
+    my_keys = _target_keys(op, p, snap)
+    my_ids = _payload_entity_ids(p)
+    for row in rows:
+        m_op, m_p = row["op"], json.loads(row["payload"] or "{}")
+        m_snap = json.loads(row["snapshot"] or "{}")
+        if my_keys & _target_keys(m_op, m_p, m_snap):  # rule i
+            return row["id"]
+        if m_op == "merge" and my_ids & _merge_ids(m_snap):  # rule ii
+            return row["id"]
+    return None
 
 
 # --- public entry points -------------------------------------------------------
 
 def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False) -> dict:
-    """Apply, stage or record one correction. Never raises for a refusal."""
+    """Apply, stage or record one correction. Never raises for a refusal.
+
+    Every argument coming from the model is untrusted: a missing/empty required
+    key or a malformed correction_id must return a 'refused' result, never an
+    uncaught KeyError/ValueError -- a tool that raises breaks the MCP contract.
+    """
+    if confirmed_via and confirmed_via not in ("elicitation", "dashboard"):
+        return {"status": "refused",
+                "error": "confirmed_via must be 'elicitation' or 'dashboard'"}
     op = args.get("op")
     if op == "undo":
-        return undo(store, int(args["correction_id"]))
+        try:
+            cid = int(args["correction_id"])
+        except (KeyError, TypeError, ValueError):
+            return {"status": "refused", "error": "undo needs a correction_id"}
+        return undo(store, cid)
     if op not in _APPLY:
         return {"status": "refused", "error": f"op must be one of {list(OPS)}"}
     basis = args.get("basis")
     if basis not in BASES:
         return {"status": "refused", "error": f"basis must be one of {list(BASES)}"}
+    # Every payload key except valid_from (optional, defaults to today) and
+    # merge's name (optional, defaults to the winner's existing name) is
+    # required. Checked BEFORE dedup_key/describe touch p[...], which would
+    # otherwise raise KeyError on a missing key.
+    required = [k for k in _PAYLOAD_KEYS[op] if k not in ("valid_from", "name")]
+    missing = [k for k in required if args.get(k) in (None, "")]
+    if missing:
+        return {"status": "refused", "error": f"{op} needs {missing[0]}"}
     p = payload_from_args(args)
     key = dedup_key(op, p)
     summary = describe(op, p)
@@ -386,6 +505,11 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
                                     "(Pending corrections). Ask the user to approve it "
                                     "there. Do not say it was applied."}
             snapshot = _APPLY[op](store, db, p)
+            if op == "assert_relation" and snapshot.get("historical"):
+                # A singleton relation's recency rule can bury the newly-
+                # asserted row under a newer rival at birth -- true, but not
+                # the current fact. "applied" alone would misreport that.
+                summary += " (recorded as historical: a newer rival is current)"
             cid = _insert(db, op, basis, "applied", p, snapshot, confirmed_via, key,
                           applied_at=_now())
             _log_change(db, cid, "graph_corrected", summary, p.get("reason", ""))
@@ -405,7 +529,11 @@ def undo(store, correction_id: int) -> dict:
             if row["status"] != "applied":
                 raise Refused(f"correction {correction_id} is {row['status']}, not applied")
             p, snap = json.loads(row["payload"]), json.loads(row["snapshot"])
-            _UNDO[row["op"]](db, correction_id, p, snap)
+            blocker = _find_blocking_correction(db, correction_id, row["op"], p, snap)
+            if blocker is not None:
+                raise Refused(f"undo correction {blocker} first: it changed "
+                              f"{_conflict_note(row['op'], p, snap)}")
+            _UNDO[row["op"]](db, p, snap)
             db.execute("UPDATE graph_corrections SET status='reverted', reverted_at=? "
                        "WHERE id=?", (_now(), correction_id))
             _log_change(db, correction_id, "graph_correction_reverted",
@@ -425,12 +553,14 @@ def approve(store, correction_id: int, *, via: str = "dashboard") -> dict:
                 raise Refused(f"correction {correction_id} is not pending")
             p = json.loads(row["payload"])
             snapshot = _APPLY[row["op"]](store, db, p)
+            summary = describe(row["op"], p)
+            if row["op"] == "assert_relation" and snapshot.get("historical"):
+                summary += " (recorded as historical: a newer rival is current)"
             db.execute("UPDATE graph_corrections SET status='applied', snapshot=?, "
                        "confirmed_via=?, applied_at=? WHERE id=?",
                        (json.dumps(snapshot), via, _now(), correction_id))
             _resolve_finding(db, correction_id, "applied")
-            _log_change(db, correction_id, "graph_corrected", describe(row["op"], p),
-                        p.get("reason", ""))
+            _log_change(db, correction_id, "graph_corrected", summary, p.get("reason", ""))
     except Refused as exc:
         with store._connect(write=True) as db:
             cur = db.execute("UPDATE graph_corrections SET status='failed', error=? "
@@ -438,8 +568,7 @@ def approve(store, correction_id: int, *, via: str = "dashboard") -> dict:
             if cur.rowcount:
                 _resolve_finding(db, correction_id, "failed")
         return {"status": "failed", "correction_id": correction_id, "error": str(exc)}
-    return {"status": "applied", "correction_id": correction_id,
-            "summary": describe(row["op"], p),
+    return {"status": "applied", "correction_id": correction_id, "summary": summary,
             "undo": f"brain_graph_correct op=undo correction_id={correction_id}"}
 
 
