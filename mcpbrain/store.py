@@ -300,6 +300,16 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     new_aliases = "|".join(sorted(alias_set))
     db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",  # lock-exempt: automated merges skip entities with user corrections (has_user_corrections); a user merge is itself a correction
                (new_name, new_type, new_org, new_mentions, new_aliases, winner_id))
+    # What the merge LEFT on the winner, so _unmerge_tx restores a column only
+    # where nothing has changed it since. A caller that writes more winner
+    # columns in the same transaction (graph_corrections._apply_merge's
+    # best-of email/notes) must update this after its own write.
+    snap["winner_after"] = {"name": new_name, "type": new_type, "org": new_org,
+                            "aliases": new_aliases, "email_addr": win["email_addr"],
+                            "notes": win["notes"]}
+    prior_aliases = {a for a in (win["aliases"] or "").split("|") if a}
+    snap["aliases_added"] = sorted(alias_set - prior_aliases)
+    snap["aliases_removed"] = sorted(prior_aliases - alias_set)
     snap["merge_log_id"] = db.execute(
         "INSERT INTO entity_merge_log(winner_id,loser_id,loser_name,method) "
         "VALUES(?,?,?,?)",
@@ -329,9 +339,18 @@ def _unmerge_tx(db, snap: dict) -> None:
     the conflict when anything the merge moved has changed since: a partial
     restore would be worse than none.
 
-    Winner scalars the merge touched are put back to their pre-merge values and
-    the loser's mentions are subtracted (not overwritten), so mentions counted
-    on the winner since the merge are kept."""
+    Winner columns, per column, when the snapshot records `winner_after`
+    (what the merge left on the winner):
+      name/type/org/email_addr/notes -- put back to the pre-merge value only
+        if the column still equals the post-merge value; a change since the
+        merge (re-enrichment, an org backfill, a synthesis note, a graph-UI
+        edit) is kept.
+      aliases -- only the aliases the merge added are removed (and any it
+        dropped are put back); aliases added since the merge are kept.
+      mentions -- the loser's mentions are subtracted, never overwritten, so
+        mentions counted on the winner since the merge are kept.
+    A snapshot without `winner_after` (written before it existed) falls back
+    to restoring the pre-merge scalars wholesale."""
     loser_id, winner_id = snap["loser"]["id"], snap["winner_id"]
 
     def sub(x):
@@ -380,6 +399,15 @@ def _unmerge_tx(db, snap: dict) -> None:
     db.execute("PRAGMA defer_foreign_keys=ON")
     _insert_row(db, "entities", snap["loser"])
     w = snap["winner"]
+    after = snap.get("winner_after")
+    if after is not None:
+        cur = db.execute("SELECT * FROM entities WHERE id=?", (winner_id,)).fetchone()
+        w = {c: (w[c] if (cur[c] or "") == (after[c] or "") else cur[c])
+             for c in ("name", "type", "org", "email_addr", "notes")}
+        added = set(snap.get("aliases_added") or ())
+        parts = [a for a in (cur["aliases"] or "").split("|") if a and a not in added]
+        parts += [a for a in snap.get("aliases_removed") or () if a not in parts]
+        w["aliases"] = "|".join(parts)
     loser_mentions = snap["loser"].get("mentions") or 0
     db.execute(
         "UPDATE entities SET name=?, type=?, org=?, aliases=?, email_addr=?, notes=?, "  # lock-exempt: undoing a merge restores the pre-merge row

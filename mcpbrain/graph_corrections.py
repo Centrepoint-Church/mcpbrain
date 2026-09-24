@@ -298,6 +298,9 @@ def _apply_merge(store, db, p) -> dict:
         raise Refused("nothing to merge")
     db.execute("UPDATE entities SET email_addr=?, notes=? WHERE id=?",  # lock-exempt: a user merge
                (result["email_addr"], result["notes"], winner["id"]))
+    # The post-merge values undo compares against must include this write.
+    snap["winner_after"]["email_addr"] = result["email_addr"]
+    snap["winner_after"]["notes"] = result["notes"]
     return snap
 
 

@@ -346,3 +346,41 @@ def test_i1_undo_hide_refused_when_suppression_replaced(tmp_path):
     with s._connect() as db:
         assert db.execute("SELECT reason FROM entity_suppressions WHERE entity_id='dana-okafor'"
                           ).fetchone()[0] == "junk"
+
+
+# --- I2: unmerge restores a winner column only if the merge's value stands --
+
+def _merge_pair(s):
+    _ent(s, "dana-okafor", "Dana Okafor", org="", mentions=9, aliases="Dana O")
+    _ent(s, "dana-okafor-2", "Dana Okafor", org="Northgate Trust", mentions=1,
+         email="dana@northgate.example")
+    out = gc.submit(s, _stated(op="merge", entity_id="dana-okafor", other_id="dana-okafor-2"))
+    assert out["status"] == "applied", out
+    return out["correction_id"]
+
+
+def test_i2_unmerge_keeps_automated_changes_since_the_merge(tmp_path):
+    s = _store(tmp_path)
+    cid = _merge_pair(s)
+    w = s.get_entity("dana-okafor")
+    assert w["org"] == "Northgate Trust" and w["email_addr"] == "dana@northgate.example"
+    # Automated writers since the merge: notes, org, a new alias.
+    s.set_entity_notes("dana-okafor", "added by synthesis")
+    s.update_entity_org("dana-okafor", "The Lantern Co", "2026-10-01")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entities SET aliases=aliases||'|D. Okafor' WHERE id='dana-okafor'")
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+    w = s.get_entity("dana-okafor")
+    assert w["notes"] == "added by synthesis"          # changed since: kept
+    assert w["org"] == "The Lantern Co"                # changed since: kept
+    assert w["email_addr"] == ""                       # unchanged since: restored
+    assert sorted(w["aliases"].split("|")) == ["D. Okafor", "Dana O"]
+    assert s.get_entity("dana-okafor-2") is not None
+
+
+def test_i2_unmerge_restores_untouched_winner_exactly(tmp_path):
+    s = _store(tmp_path)
+    cid = _merge_pair(s)
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+    w = s.get_entity("dana-okafor")
+    assert (w["name"], w["org"], w["aliases"], w["email_addr"]) == ("Dana Okafor", "", "Dana O", "")
