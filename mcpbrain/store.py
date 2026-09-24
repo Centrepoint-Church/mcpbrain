@@ -116,6 +116,18 @@ def _meta_extract(path: str) -> str:
     return f"json_extract(metadata,'{path}')"
 
 
+def _field_is_locked(db, entity_id: str, field: str) -> bool:
+    """True when the user has corrected `field` on `entity_id` (brain_graph_correct).
+
+    Guarded on the table existing so stores/tests predating it keep working.
+    """
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='entity_field_locks'").fetchone():
+        return False
+    return db.execute("SELECT 1 FROM entity_field_locks WHERE entity_id=? AND field=?",
+                      (entity_id, field)).fetchone() is not None
+
+
 def _fts_match_query(query: str, *, require_all: bool = True) -> str:
     """Turn an arbitrary user string into a safe FTS5 MATCH expression.
 
@@ -1615,25 +1627,33 @@ class Store:
             rows = db.execute(sql).fetchall()
             return [dict(r) for r in rows]
 
-    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "") -> bool:
-        """Set the org (and optionally org_valid_from) on one entity. Returns True if a row was actually updated."""
+    def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "",
+                          *, user: bool = False) -> bool:
+        """Set the org (and optionally org_valid_from) on one entity. Returns True if a
+        row was actually updated. A user-locked org is left alone unless user=True:
+        that single check covers org_backfill and both review appliers."""
         with self._connect(write=True) as db:
+            if not user and _field_is_locked(db, entity_id, "org"):
+                return False
             cur = db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
                 (org, org_valid_from, entity_id))
             return cur.rowcount > 0
 
-    def rename_entity(self, entity_id: str, new_name: str) -> bool:
+    def rename_entity(self, entity_id: str, new_name: str, *, user: bool = False) -> bool:
         """Rename an entity, preserving the old name as an alias.
 
         aliases is a '|'-separated, de-duplicated list. The old name is appended
         (case-preserving) unless it already equals the new name or is already
-        present. Returns True iff the entity exists and was updated.
+        present. Returns True iff the entity exists and was updated. A
+        user-locked name is left alone unless user=True.
         """
         new_name = (new_name or "").strip()
         if not new_name:
             return False
         with self._connect(write=True) as db:
+            if not user and _field_is_locked(db, entity_id, "name"):
+                return False
             row = db.execute("SELECT name, COALESCE(aliases,'') AS aliases "
                              "FROM entities WHERE id=?", (entity_id,)).fetchone()
             if row is None:
@@ -1646,9 +1666,12 @@ class Store:
                        (new_name, "|".join(parts), entity_id))
             return True
 
-    def set_entity_email(self, entity_id: str, email_addr: str) -> bool:
-        """Set an entity's email_addr. Returns True iff a row was updated."""
+    def set_entity_email(self, entity_id: str, email_addr: str, *, user: bool = False) -> bool:
+        """Set an entity's email_addr. Returns True iff a row was updated. A
+        user-locked email is left alone unless user=True."""
         with self._connect(write=True) as db:
+            if not user and _field_is_locked(db, entity_id, "email"):
+                return False
             cur = db.execute("UPDATE entities SET email_addr=? WHERE id=?",
                              (email_addr or "", entity_id))
             return cur.rowcount > 0
@@ -1663,10 +1686,12 @@ class Store:
     def rewrite_org_field(self, variant_org: str, canonical_org: str) -> int:
         """Bulk-correct the org field: relabel every entity currently tagged
         with variant_org to canonical_org. Returns the number of rows updated
-        (0 means no entity currently carries variant_org — a stale finding)."""
+        (0 means no entity currently carries variant_org — a stale finding).
+        Entities with a user-locked org field are excluded."""
         with self._connect(write=True) as db:
             cur = db.execute(
-                "UPDATE entities SET org=? WHERE org=?",
+                "UPDATE entities SET org=? WHERE org=? AND id NOT IN "
+                "(SELECT entity_id FROM entity_field_locks WHERE field='org')",
                 (canonical_org, variant_org))
             return cur.rowcount
 
@@ -1675,10 +1700,13 @@ class Store:
 
         Used by write-time dedup: when a new mention with a real org redirects to
         an existing entity that lacks one, fill it without clobbering a known org.
+        A user-locked org (e.g. deliberately cleared) is left alone.
         """
         if not org:
             return False
         with self._connect(write=True) as db:
+            if _field_is_locked(db, entity_id, "org"):
+                return False
             cur = db.execute(
                 "UPDATE entities SET org=? WHERE id=? AND (org='' OR org IS NULL)",
                 (org, entity_id))

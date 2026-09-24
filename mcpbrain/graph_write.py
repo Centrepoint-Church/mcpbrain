@@ -537,12 +537,38 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
     row on a re-observation). The Nexus `created_at` column is dropped — the
     mcpbrain entity_relations table has no such column.
 
+    Thin wrapper around upsert_relation_in: opens the write connection and
+    delegates. Kept so existing callers (which only ever have a Store, not an
+    open connection) don't need to change.
+    """
+    with store._connect(write=True) as conn:
+        return upsert_relation_in(
+            conn, entity_a, relation, entity_b, valid_from=valid_from,
+            evidence=evidence, confidence=confidence, strength=strength,
+            source_doc_id=source_doc_id)
+
+
+def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
+                       evidence="", confidence=1.0, strength=1,
+                       source_doc_id: str | None = None) -> int:
+    """Insert a bi-temporal relation with automatic supersession, on a
+    caller-held write connection. This is the body of upsert_relation, split
+    out so a caller that already holds a write connection (e.g. a batch
+    apply) can drive several relations inside one transaction. Later tasks
+    import this name directly.
+
     The legacy UNIQUE(entity_a,relation,entity_b) does NOT block re-observation:
     a same-target observation bumps the existing row rather than inserting, and
     a same-target observation of a SUPERSEDED row revives that row (the UNIQUE
     spans invalidated rows, so inserting a fresh one is impossible — the
     2026-06-05 drain failures were exactly this). degree is incremented on both
     endpoints only for a NEW row; supersession and revival never touch it.
+
+    A row the user explicitly REJECTED (brain_graph_correct; user_verdict=
+    'rejected') is never revived by re-observation: this function returns its
+    id unchanged, with no bump, no supersession of rivals, and no field
+    touched. A source re-asserting a fact the user has already said is wrong
+    must not undo that correction.
 
     source_doc_id: the originating document id for provenance. Defaults to
     evidence for backward compatibility when not explicitly supplied.
@@ -557,71 +583,75 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
         raise ValueError("valid_from is required for bi-temporal writes")
     confidence = max(0.0, min(1.0, float(confidence)))
     now = _now_iso()
-    with store._connect(write=True) as conn:
-        conflicts = _find_conflicting_relations(conn, entity_a, relation)
-        same_target = [c for c in conflicts if c["entity_b"] == entity_b]
+    conflicts = _find_conflicting_relations(conn, entity_a, relation)
+    same_target = [c for c in conflicts if c["entity_b"] == entity_b]
 
-        if same_target:
-            rid = same_target[0]["id"]
-            _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
-            _backfill_provenance_if_empty(
-                conn, rid, source_doc_id=source_doc_id, valid_from=valid_from)
-            return rid
+    if same_target:
+        rid = same_target[0]["id"]
+        _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
+        _backfill_provenance_if_empty(
+            conn, rid, source_doc_id=source_doc_id, valid_from=valid_from)
+        return rid
 
-        # Recency rule for SINGLETON relations (works_at/reports_to): a person has
-        # one current value, and the CURRENT one is the newest-dated. Under backfill
-        # (arbitrary order) an older fact can arrive after a newer one, so compare
-        # valid_from rather than assuming the incoming write is the latest.
-        singleton = is_singleton_relation(relation)
-        others = [c for c in conflicts if c["entity_b"] != entity_b]
-        newest_other = max(others, key=lambda c: ((c["valid_from"] or ""), c["id"]),
-                           default=None) if singleton else None
-        incoming_is_current = (newest_other is None
-                               or (valid_from or "") >= (newest_other["valid_from"] or ""))
+    # Recency rule for SINGLETON relations (works_at/reports_to): a person has
+    # one current value, and the CURRENT one is the newest-dated. Under backfill
+    # (arbitrary order) an older fact can arrive after a newer one, so compare
+    # valid_from rather than assuming the incoming write is the latest.
+    singleton = is_singleton_relation(relation)
+    others = [c for c in conflicts if c["entity_b"] != entity_b]
+    newest_other = max(others, key=lambda c: ((c["valid_from"] or ""), c["id"]),
+                       default=None) if singleton else None
+    incoming_is_current = (newest_other is None
+                           or (valid_from or "") >= (newest_other["valid_from"] or ""))
 
-        # A superseded row for this exact pair blocks INSERT via the legacy UNIQUE.
-        # Revive it: the fact is observed again. It becomes current from valid_from
-        # UNLESS a newer rival is already current (then it is revived as historical).
-        invalidated = conn.execute(
-            "SELECT id FROM entity_relations "
-            "WHERE entity_a = ? AND relation = ? AND entity_b = ? "
-            "AND invalidated_at IS NOT NULL",
-            (entity_a, relation, entity_b),
-        ).fetchone()
-        if invalidated is not None:
-            new_id = invalidated["id"]
-            conn.execute(
-                "UPDATE entity_relations "
-                "SET valid_from = ?, valid_to = NULL, invalidated_at = NULL, "
-                "    superseded_reason = NULL, invalidated_by_relation_id = NULL, "
-                "    confidence = ?, evidence = ?, strength = ?, last_seen = ?, "
-                "    source_doc_id = ? "
-                "WHERE id = ?",
-                (valid_from, confidence, evidence, strength, now, source_doc_id, new_id),
-            )
-        else:
-            new_id = conn.execute(
-                "INSERT INTO entity_relations "
-                "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen, source_doc_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now, source_doc_id),
-            ).lastrowid
-            _increment_degree(conn, entity_a, entity_b)
+    # A superseded row for this exact pair blocks INSERT via the legacy UNIQUE.
+    # Revive it: the fact is observed again. It becomes current from valid_from
+    # UNLESS a newer rival is already current (then it is revived as historical).
+    invalidated = conn.execute(
+        "SELECT id, COALESCE(user_verdict, '') AS user_verdict FROM entity_relations "
+        "WHERE entity_a = ? AND relation = ? AND entity_b = ? "
+        "AND invalidated_at IS NOT NULL",
+        (entity_a, relation, entity_b),
+    ).fetchone()
+    if invalidated is not None and invalidated["user_verdict"] == "rejected":
+        # The user said this fact is wrong (brain_graph_correct). Re-observing
+        # it in a source must not undo that: no revive, no bump, no
+        # supersession of rivals.
+        return invalidated["id"]
+    if invalidated is not None:
+        new_id = invalidated["id"]
+        conn.execute(
+            "UPDATE entity_relations "
+            "SET valid_from = ?, valid_to = NULL, invalidated_at = NULL, "
+            "    superseded_reason = NULL, invalidated_by_relation_id = NULL, "
+            "    confidence = ?, evidence = ?, strength = ?, last_seen = ?, "
+            "    source_doc_id = ? "
+            "WHERE id = ?",
+            (valid_from, confidence, evidence, strength, now, source_doc_id, new_id),
+        )
+    else:
+        new_id = conn.execute(
+            "INSERT INTO entity_relations "
+            "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, last_seen, source_doc_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now, source_doc_id),
+        ).lastrowid
+        _increment_degree(conn, entity_a, entity_b)
 
-        if singleton and incoming_is_current:
-            # Newest fact → it is current; retire the older rivals.
-            for c in others:
-                _mark_superseded(
-                    conn, c["id"], valid_to=valid_from, invalidated_at=now,
-                    reason="superseded_by_newer", invalidated_by_relation_id=new_id,
-                )
-        elif singleton and not incoming_is_current:
-            # An OLDER fact arrived late → record it but keep the newer rival current.
+    if singleton and incoming_is_current:
+        # Newest fact → it is current; retire the older rivals.
+        for c in others:
             _mark_superseded(
-                conn, new_id, valid_to=newest_other["valid_from"], invalidated_at=now,
-                reason="older_than_current", invalidated_by_relation_id=newest_other["id"],
+                conn, c["id"], valid_to=valid_from, invalidated_at=now,
+                reason="superseded_by_newer", invalidated_by_relation_id=new_id,
             )
-        return new_id
+    elif singleton and not incoming_is_current:
+        # An OLDER fact arrived late → record it but keep the newer rival current.
+        _mark_superseded(
+            conn, new_id, valid_to=newest_other["valid_from"], invalidated_at=now,
+            reason="older_than_current", invalidated_by_relation_id=newest_other["id"],
+        )
+    return new_id
 
 
 # ---------------------------------------------------------------------------

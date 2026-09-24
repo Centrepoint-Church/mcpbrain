@@ -57,9 +57,9 @@ def run_backfill(store, *, limit: int | None = None) -> dict:
                     unknown_domains.add(domain)
             continue
 
-        # Found a recognised org — write it back.
-        store.update_entity_org(ent["id"], org)
-        updated += 1
+        # Found a recognised org — write it back, unless the user has locked it.
+        if store.update_entity_org(ent["id"], org):
+            updated += 1
 
     if unknown_domains:
         log.info(

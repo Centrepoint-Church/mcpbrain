@@ -357,11 +357,11 @@ def update_entity(store, entity_id: str, *, name=None, org=None,
         return None
     changed = []
     if name is not None and name.strip():
-        store.rename_entity(entity_id, name); changed.append("name")
+        store.rename_entity(entity_id, name, user=True); changed.append("name")
     if org is not None:
-        store.update_entity_org(entity_id, org); changed.append("org")
+        store.update_entity_org(entity_id, org, user=True); changed.append("org")
     if email_addr is not None:
-        store.set_entity_email(entity_id, email_addr); changed.append("email")
+        store.set_entity_email(entity_id, email_addr, user=True); changed.append("email")
     if notes is not None:
         store.set_entity_notes(entity_id, notes); changed.append("notes")
     if changed:
