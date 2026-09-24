@@ -384,3 +384,48 @@ def test_i2_unmerge_restores_untouched_winner_exactly(tmp_path):
     assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
     w = s.get_entity("dana-okafor")
     assert (w["name"], w["org"], w["aliases"], w["email_addr"]) == ("Dana Okafor", "", "Dana O", "")
+
+
+# --- I3: a merge correction is not silently reversed ------------------------
+
+def test_i3_upsert_of_merged_away_name_resolves_to_winner(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", mentions=9, aliases="Dana O")
+    _ent(s, "dee-okafor", "Dee Okafor", mentions=1)
+    out = gc.submit(s, _stated(op="merge", entity_id="dana-okafor", other_id="dee-okafor"))
+    assert out["status"] == "applied"
+    assert len(s.get_entity("dana-okafor")["aliases"].split("|")) >= 2
+    got = gw.upsert_entity(s, name="Dee Okafor", entity_type="person", taxonomy=_TAX)
+    assert got == "dana-okafor"
+    assert "dee-okafor" not in _ids(s)
+    assert gc.submit(s, {"op": "undo", "correction_id": out["correction_id"]})["status"] == "reverted"
+
+
+def test_i3_append_alias_writes_pipe_and_reads_legacy_comma(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", aliases="Dana O")
+    with s._connect(write=True) as db:
+        gw._append_alias(db, "dana-okafor", "D. Okafor")
+    assert s.get_entity("dana-okafor")["aliases"] == "Dana O|D. Okafor"
+    _ent(s, "marcus-reyes", "Marcus Reyes", aliases="Marc R, M. Reyes")   # legacy comma value
+    assert gw.upsert_entity(s, name="M. Reyes", entity_type="person",
+                            taxonomy=_TAX) == "marcus-reyes"
+
+
+def test_i3_new_entity_aliases_are_pipe_joined(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    eid = gw.upsert_entity(s, name="Priya Anand", entity_type="person",
+                           aliases="P. Anand, Priya A", taxonomy=_TAX)
+    assert s.get_entity(eid)["aliases"] == "P. Anand|Priya A"
+
+
+def test_i3_merge_refused_for_org_origin_entity(tmp_path):
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", mentions=9, origin="org")
+    _ent(s, "dee-okafor", "Dee Okafor", mentions=1)
+    out = gc.submit(s, _stated(op="merge", entity_id="dana-okafor", other_id="dee-okafor"))
+    assert out["status"] == "refused" and "organisation-shared" in out["error"]
+    assert {"dana-okafor", "dee-okafor"} <= _ids(s)

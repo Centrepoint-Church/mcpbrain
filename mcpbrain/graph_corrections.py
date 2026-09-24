@@ -23,6 +23,8 @@ describe() and payload_from_args() to build its elicitation message.
 import json
 from datetime import datetime, timezone
 
+from mcpbrain.chunking import split_aliases  # stdlib-only module
+
 OPS = ("reject_relation", "assert_relation", "merge", "not_same", "set_field", "hide", "undo")
 BASES = ("user_stated", "inferred")
 FIELDS = ("role", "org", "name", "email")
@@ -242,7 +244,7 @@ def _apply_set_field(store, db, p) -> dict:
             "lock": dict(lock) if lock else None, "wrote": value, "alias_added": ""}
     if field == "name":
         old = (ent["name"] or "").strip()
-        parts = [x for x in (ent["aliases"] or "").split("|") if x]
+        parts = split_aliases(ent["aliases"])
         if old and old != value and old not in parts:
             parts.append(old)
             snap["alias_added"] = old
@@ -288,6 +290,11 @@ def _apply_merge(store, db, p) -> dict:
     if isinstance(oriented, dict):
         raise Refused(oriented["message"])
     winner, loser = oriented
+    if "org" in ((winner.get("origin") or "local"), (loser.get("origin") or "local")):
+        # org_import re-inserts an organisation-shared loser at the next
+        # import, silently reversing the merge; the curator owns that layer.
+        raise Refused("one of these is an organisation-shared entity; ask the curator "
+                      "to merge it in the shared graph")
     if winner["type"] not in _NAME_MERGEABLE_TYPES or loser["type"] not in _NAME_MERGEABLE_TYPES:
         raise Refused("only people, organisations and projects can be merged "
                       f"(these are {loser['type']} and {winner['type']})")
@@ -415,10 +422,10 @@ def _undo_set_field(db, p, snap, cid):
     if field == "name":
         added = snap.get("alias_added")
         if added is None:  # a snapshot from before alias_added was recorded
-            prior = [x for x in (e["aliases"] or "").split("|") if x]
+            prior = split_aliases(e["aliases"])
             old = (e["name"] or "").strip()
             added = old if old and old != wrote and old not in prior else ""
-        parts = [x for x in (ent["aliases"] or "").split("|") if x and x != added]
+        parts = [x for x in split_aliases(ent["aliases"]) if x != added]
         db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: undo of the user's own correction
                    (e["name"], "|".join(parts), eid))
     elif field == "org":

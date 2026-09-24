@@ -26,6 +26,7 @@ from mcpbrain import config, orgs, topics
 from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index, is_role_address
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
+    split_aliases,
     _normalise_title_for_dedup,
     action_fingerprint as _compute_fingerprint,
 )
@@ -1899,14 +1900,14 @@ def _append_alias(conn, entity_id: str, new_alias: str) -> None:
         "SELECT name, aliases FROM entities WHERE id = ?", (entity_id,)).fetchone()
     if not row:
         return
-    existing = [a.strip() for a in (row["aliases"] or "").split(",") if a.strip()]
+    existing = split_aliases(row["aliases"])
     seen = {a.lower() for a in existing}
     if row["name"]:
         seen.add(row["name"].lower())
     if new_alias.lower().strip() not in seen:
         existing.append(new_alias.strip())
         conn.execute("UPDATE entities SET aliases = ? WHERE id = ?",
-                     (", ".join(existing), entity_id))
+                     ("|".join(existing), entity_id))
 
 
 def _meeting_series_id(series_name: str, org: str) -> str:
@@ -2122,7 +2123,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 (entity_type,)).fetchall()
             alias_matches = []
             for row in candidates:
-                alias_list = [a.strip().lower() for a in row["aliases"].split(",") if a.strip()]
+                alias_list = [a.lower() for a in split_aliases(row["aliases"])]
                 if normalised in alias_list or (normalised_original and normalised_original in alias_list):
                     alias_matches.append(row["id"])
 
@@ -2191,9 +2192,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
             if org and entity_type == "person":
                 _ensure_works_at(conn, eid, org)
         else:
-            all_aliases = aliases
-            if title_alias:
-                all_aliases = ", ".join(filter(None, [aliases, title_alias]))
+            all_aliases = "|".join(split_aliases(aliases) + ([title_alias] if title_alias else []))
             conn.execute(
                 "INSERT INTO entities "
                 "(id, name, type, org, org_valid_from, email_addr, aliases, first_seen, last_seen, notes) "

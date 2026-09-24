@@ -12,7 +12,7 @@ import sqlite_vec
 # chunking is dependency-free; no store->enrich coupling. action_fingerprint is
 # the single source of truth shared with graph_write so a text rewrite produces
 # a fingerprint the near-duplicate guard recognises.
-from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
+from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify, split_aliases
 
 
 # Enrichment-logic version. Bump when extraction rules/guards/model materially
@@ -290,9 +290,7 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     # merged-away name still resolves here.
     alias_set = set()
     for src in (win["aliases"], loser["aliases"]):
-        for a in (src or "").split("|"):
-            if a:
-                alias_set.add(a)
+        alias_set.update(split_aliases(src))  # tolerant of legacy comma values
     alias_set.add(win["name"])
     alias_set.add(loser["name"])
     alias_set.discard(new_name)
@@ -307,7 +305,7 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     snap["winner_after"] = {"name": new_name, "type": new_type, "org": new_org,
                             "aliases": new_aliases, "email_addr": win["email_addr"],
                             "notes": win["notes"]}
-    prior_aliases = {a for a in (win["aliases"] or "").split("|") if a}
+    prior_aliases = set(split_aliases(win["aliases"]))
     snap["aliases_added"] = sorted(alias_set - prior_aliases)
     snap["aliases_removed"] = sorted(prior_aliases - alias_set)
     snap["merge_log_id"] = db.execute(
@@ -405,7 +403,7 @@ def _unmerge_tx(db, snap: dict) -> None:
         w = {c: (w[c] if (cur[c] or "") == (after[c] or "") else cur[c])
              for c in ("name", "type", "org", "email_addr", "notes")}
         added = set(snap.get("aliases_added") or ())
-        parts = [a for a in (cur["aliases"] or "").split("|") if a and a not in added]
+        parts = [a for a in split_aliases(cur["aliases"]) if a not in added]
         parts += [a for a in snap.get("aliases_removed") or () if a not in parts]
         w["aliases"] = "|".join(parts)
     loser_mentions = snap["loser"].get("mentions") or 0
@@ -1996,7 +1994,7 @@ class Store:
             if row is None:
                 return False
             old = (row["name"] or "").strip()
-            parts = [a for a in row["aliases"].split("|") if a]
+            parts = split_aliases(row["aliases"])
             if old and old != new_name and old not in parts:
                 parts.append(old)
             db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: guarded by _field_is_locked above

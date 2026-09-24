@@ -124,6 +124,15 @@ def action_fingerprint(text: str) -> str:
     return hashlib.sha1(norm.encode()).hexdigest() if norm else ""
 
 
+def split_aliases(value) -> list[str]:
+    """An entity's aliases as a list. The stored separator is '|' (merges,
+    renames and graph_write all write it); a legacy value with no '|' was
+    comma-joined by older graph_write code and is split on ',' instead."""
+    value = value or ""
+    sep = "|" if "|" in value or "," not in value else ","
+    return [a.strip() for a in value.split(sep) if a.strip()]
+
+
 def slugify(name: str) -> str:
     """Lower-case, collapse runs of non-alphanumerics into single hyphens, truncate to 80 chars.
 
