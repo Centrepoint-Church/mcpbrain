@@ -235,13 +235,17 @@ def _apply_set_field(store, db, p) -> dict:
     col = _FIELD_COLUMN[field]
     lock = db.execute("SELECT * FROM entity_field_locks WHERE entity_id=? AND field=?",
                       (eid, field)).fetchone()
+    # "wrote" is what this correction put in the column: undo is a compare-
+    # and-swap against it, so a later edit (incl. a graph-UI edit, which
+    # writes no ledger row) is refused rather than silently reverted.
     snap = {"entity": {c: ent[c] for c in (col, "aliases", "org_valid_from")},
-            "lock": dict(lock) if lock else None}
+            "lock": dict(lock) if lock else None, "wrote": value, "alias_added": ""}
     if field == "name":
         old = (ent["name"] or "").strip()
         parts = [x for x in (ent["aliases"] or "").split("|") if x]
         if old and old != value and old not in parts:
             parts.append(old)
+            snap["alias_added"] = old
         db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: the user's own correction
                    (value, "|".join(parts), eid))
     elif field == "org":
@@ -258,9 +262,11 @@ def _apply_hide(store, db, p) -> dict:
     _entity(db, p["entity_id"])
     prior = db.execute("SELECT * FROM entity_suppressions WHERE entity_id=?",
                        (p["entity_id"],)).fetchone()
+    now = _now()
     db.execute("INSERT OR REPLACE INTO entity_suppressions(entity_id, reason, suppressed_at) "
-               "VALUES(?, 'user', ?)", (p["entity_id"], _now()))
-    return {"prior": dict(prior) if prior else None}
+               "VALUES(?, 'user', ?)", (p["entity_id"], now))
+    return {"prior": dict(prior) if prior else None,
+            "written": {"reason": "user", "suppressed_at": now}}
 
 
 def _apply_merge(store, db, p) -> dict:
@@ -307,7 +313,7 @@ _APPLY = {
 
 # --- undo, per op --------------------------------------------------------------
 
-def _undo_reject_relation(db, p, snap):
+def _undo_reject_relation(db, p, snap, cid):
     r = snap["relation"]
     cur = db.execute("UPDATE entity_relations SET invalidated_at=?, valid_to=?, "
                      "superseded_reason=?, user_verdict=? WHERE id=?",
@@ -317,7 +323,7 @@ def _undo_reject_relation(db, p, snap):
         raise Refused("the relation no longer exists")
 
 
-def _undo_assert_relation(db, p, snap):
+def _undo_assert_relation(db, p, snap, cid):
     """Undo an assert without rolling back automated changes the assert never
     made: only the columns the assert (via upsert_relation_in/_mark_superseded)
     actually touched are put back, not the whole row. Confidence/evidence/
@@ -362,13 +368,31 @@ def _undo_assert_relation(db, p, snap):
              r["invalidated_by_relation_id"], r["id"]))
 
 
-def _undo_not_same(db, p, snap):
+def _undo_not_same(db, p, snap, cid):
     db.execute("DELETE FROM entity_distinct_pairs WHERE a=? AND b=?", tuple(snap["pair"]))  # admin-delete-ok
 
 
-def _undo_set_field(db, p, snap):
+def _changed(field: str, cid: int, current) -> Refused:
+    shown = current if current not in (None, "") else "(empty)"
+    return Refused(f"{field} changed since correction {cid}; current value {shown!r}. "
+                   f"Nothing was undone.")
+
+
+def _undo_set_field(db, p, snap, cid):
+    """Put back ONLY the corrected column (plus aliases for a name, and
+    org_valid_from for an org), and only if it still holds what this
+    correction wrote -- otherwise refuse, naming the current value. Every
+    other column, and any edit made since, is left alone."""
     eid, field = p["entity_id"], p["field"]
     if field == "role":
+        row = db.execute("SELECT valid_to, invalidated_at FROM entity_observations WHERE id=?",
+                         (snap["inserted_id"],)).fetchone()
+        if row is None or row["valid_to"] or row["invalidated_at"]:
+            cur = db.execute(
+                "SELECT value FROM entity_observations WHERE entity_id=? AND attribute='role' "
+                "AND (valid_to IS NULL OR valid_to='') AND (invalidated_at IS NULL OR "
+                "invalidated_at='') ORDER BY valid_from DESC, id DESC LIMIT 1", (eid,)).fetchone()
+            raise _changed("role", cid, cur["value"] if cur else "")
         # Deleting the inserted manual row also drops any observed_count that
         # extraction consolidated into it since it was written -- acceptable,
         # because the value being undone is the user's correction, not a
@@ -379,15 +403,41 @@ def _undo_set_field(db, p, snap):
         return
     e = snap["entity"]
     col = _FIELD_COLUMN[field]
-    cur = db.execute(f"UPDATE entities SET {col}=?, aliases=?, org_valid_from=? WHERE id=?",  # lock-exempt: undo of the user's own correction
-                     (e[col], e["aliases"], e["org_valid_from"], eid))
-    if cur.rowcount == 0:
+    ent = db.execute("SELECT * FROM entities WHERE id=?", (eid,)).fetchone()
+    if ent is None:
         raise Refused(f"{eid} no longer exists")
+    wrote = snap.get("wrote", p["value"])
+    if (ent[col] or "") != (wrote or ""):
+        raise _changed(field, cid, ent[col])
+    if field == "name":
+        added = snap.get("alias_added")
+        if added is None:  # a snapshot from before alias_added was recorded
+            prior = [x for x in (e["aliases"] or "").split("|") if x]
+            old = (e["name"] or "").strip()
+            added = old if old and old != wrote and old not in prior else ""
+        parts = [x for x in (ent["aliases"] or "").split("|") if x and x != added]
+        db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: undo of the user's own correction
+                   (e["name"], "|".join(parts), eid))
+    elif field == "org":
+        db.execute("UPDATE entities SET org=?, org_valid_from=? WHERE id=?",  # lock-exempt: undo of the user's own correction
+                   (e["org"], e["org_valid_from"], eid))
+    else:
+        db.execute("UPDATE entities SET email_addr=? WHERE id=?",  # lock-exempt: undo of the user's own correction
+                   (e["email_addr"], eid))
     if snap["lock"] is None:
         db.execute("DELETE FROM entity_field_locks WHERE entity_id=? AND field=?", (eid, field))  # admin-delete-ok
 
 
-def _undo_hide(db, p, snap):
+def _undo_hide(db, p, snap, cid):
+    """Only undo a suppression that is still the one this correction wrote."""
+    cur = db.execute("SELECT * FROM entity_suppressions WHERE entity_id=?",
+                     (p["entity_id"],)).fetchone()
+    written = snap.get("written") or {"reason": "user"}
+    if cur is None:
+        raise _changed("hide", cid, "not hidden")
+    if cur["reason"] != written["reason"] or (
+            "suppressed_at" in written and cur["suppressed_at"] != written["suppressed_at"]):
+        raise _changed("hide", cid, f"hidden ({cur['reason'] or 'no reason'})")
     if snap["prior"] is None:
         db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (p["entity_id"],))  # admin-delete-ok
     else:
@@ -395,7 +445,7 @@ def _undo_hide(db, p, snap):
         _restore_row(db, "entity_suppressions", snap["prior"], key="entity_id")
 
 
-def _undo_merge(db, p, snap):
+def _undo_merge(db, p, snap, cid):
     from mcpbrain.store import _unmerge_tx
     try:
         _unmerge_tx(db, snap)
@@ -633,7 +683,7 @@ def undo(store, correction_id: int) -> dict:
                                                        row["op"], p, snap)
             if blocker is not None:
                 raise Refused(f"undo correction {blocker} first: it changed {note}")
-            _UNDO[row["op"]](db, p, snap)
+            _UNDO[row["op"]](db, p, snap, correction_id)
             db.execute("UPDATE graph_corrections SET status='reverted', reverted_at=? "
                        "WHERE id=?", (_now(), correction_id))
             _log_change(db, correction_id, "graph_correction_reverted",

@@ -259,3 +259,90 @@ def test_c2_every_entity_field_write_honours_locks_or_says_why():
                 continue
             offenders.append(f"{path.relative_to(root.parent)}:{i + 1}: {line.strip()}")
     assert not offenders, "field writes that ignore user locks:\n" + "\n".join(offenders)
+
+
+# --- I1: set_field undo restores only its own column, compare-and-swap ------
+
+def _stated(**kw):
+    return {"basis": "user_stated", "reason": "the user said so", **kw}
+
+
+def _dana(s):
+    _ent(s, "dana-okafor", "Dana Okafor", org="Northgate Trust",
+         email="dana@northgate.example")
+
+
+def test_i1_undo_org_keeps_a_later_ui_rename_and_aliases(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="set_field", entity_id="dana-okafor", field="org",
+                               value="The Lantern Co"))["correction_id"]
+    s.rename_entity("dana-okafor", "Dana A. Okafor", user=True)   # graph-UI edit, no ledger row
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+    e = s.get_entity("dana-okafor")
+    assert e["org"] == "Northgate Trust"
+    assert e["name"] == "Dana A. Okafor" and "Dana Okafor" in e["aliases"].split("|")
+
+
+def test_i1_undo_org_refused_when_org_changed_since(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="set_field", entity_id="dana-okafor", field="org",
+                               value="The Lantern Co"))["correction_id"]
+    s.update_entity_org("dana-okafor", "Southbank Community Trust", user=True)
+    out = gc.submit(s, {"op": "undo", "correction_id": cid})
+    assert out["status"] == "refused"
+    assert f"org changed since correction {cid}" in out["error"]
+    assert "Southbank Community Trust" in out["error"]
+    assert s.get_entity("dana-okafor")["org"] == "Southbank Community Trust"
+
+
+def test_i1_undo_name_removes_only_the_alias_it_added(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="set_field", entity_id="dana-okafor", field="name",
+                               value="Dana A. Okafor"))["correction_id"]
+    with s._connect(write=True) as db:   # extraction adds an alias since
+        db.execute("UPDATE entities SET aliases=aliases||'|D. Okafor' WHERE id='dana-okafor'")
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+    e = s.get_entity("dana-okafor")
+    assert e["name"] == "Dana Okafor"
+    assert e["aliases"].split("|") == ["D. Okafor"]
+
+
+def test_i1_undo_email_keeps_later_org_valid_from(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="set_field", entity_id="dana-okafor", field="email",
+                               value="dana@lantern.example"))["correction_id"]
+    s.update_entity_org("dana-okafor", "The Lantern Co", "2026-10-01")
+    assert gc.submit(s, {"op": "undo", "correction_id": cid})["status"] == "reverted"
+    e = s.get_entity("dana-okafor")
+    assert e["email_addr"] == "dana@northgate.example"
+    assert e["org"] == "The Lantern Co" and e["org_valid_from"] == "2026-10-01"
+
+
+def test_i1_undo_role_refused_when_manual_row_no_longer_current(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="set_field", entity_id="dana-okafor", field="role",
+                               value="Operations Lead"))["correction_id"]
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_observations SET valid_to='2026-09-25' "
+                   "WHERE entity_id='dana-okafor' AND attribute='role'")
+        db.execute("INSERT INTO entity_observations(entity_id, attribute, value, source, "
+                   "valid_from) VALUES('dana-okafor','role','Finance Lead','manual','2026-09-25')")
+    out = gc.submit(s, {"op": "undo", "correction_id": cid})
+    assert out["status"] == "refused" and f"role changed since correction {cid}" in out["error"]
+
+
+def test_i1_undo_hide_refused_when_suppression_replaced(tmp_path):
+    s = _store(tmp_path)
+    _dana(s)
+    cid = gc.submit(s, _stated(op="hide", entity_id="dana-okafor"))["correction_id"]
+    s.suppress_entity("dana-okafor", reason="junk")          # review applier since
+    out = gc.submit(s, {"op": "undo", "correction_id": cid})
+    assert out["status"] == "refused" and f"hide changed since correction {cid}" in out["error"]
+    with s._connect() as db:
+        assert db.execute("SELECT reason FROM entity_suppressions WHERE entity_id='dana-okafor'"
+                          ).fetchone()[0] == "junk"
