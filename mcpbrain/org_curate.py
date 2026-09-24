@@ -159,11 +159,19 @@ def _apply_org_skeleton(store, entity_id, aggregated_claim) -> None:
         updates["org"] = aggregated_claim["org"]
     if aggregated_claim.get("email_addr"):
         updates["email_addr"] = aggregated_claim["email_addr"]
-    if not updates:
-        return
-    set_clause = ", ".join(f"{k}=?" for k in updates)
     with store._connect(write=True) as db:
-        db.execute(f"UPDATE entities SET {set_clause} WHERE id=?",
+        # The curator is the authority for the org layer, but not over a
+        # field the user corrected on this machine (brain_graph_correct).
+        locked = {r[0] for r in db.execute(
+            "SELECT field FROM entity_field_locks WHERE entity_id=?", (entity_id,))}
+        if "org" in locked:
+            updates.pop("org", None)
+        if "email" in locked:
+            updates.pop("email_addr", None)
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k}=?" for k in updates)
+        db.execute(f"UPDATE entities SET {set_clause} WHERE id=?",  # lock-exempt: locked fields popped from `updates` above
                    list(updates.values()) + [entity_id])
 
 

@@ -242,11 +242,14 @@ def _apply_set_field(store, db, p) -> dict:
         parts = [x for x in (ent["aliases"] or "").split("|") if x]
         if old and old != value and old not in parts:
             parts.append(old)
-        db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?", (value, "|".join(parts), eid))
+        db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: the user's own correction
+                   (value, "|".join(parts), eid))
     elif field == "org":
-        db.execute("UPDATE entities SET org=?, org_valid_from=? WHERE id=?", (value, _today(), eid))
+        db.execute("UPDATE entities SET org=?, org_valid_from=? WHERE id=?",  # lock-exempt: the user's own correction
+                   (value, _today(), eid))
     else:
-        db.execute("UPDATE entities SET email_addr=? WHERE id=?", (value, eid))
+        db.execute("UPDATE entities SET email_addr=? WHERE id=?",  # lock-exempt: the user's own correction
+                   (value, eid))
     db.execute("INSERT OR IGNORE INTO entity_field_locks(entity_id, field) VALUES(?,?)", (eid, field))
     return snap
 
@@ -287,7 +290,7 @@ def _apply_merge(store, db, p) -> dict:
                               canonical_name=result["name"], method="user")
     if snap is None:
         raise Refused("nothing to merge")
-    db.execute("UPDATE entities SET email_addr=?, notes=? WHERE id=?",
+    db.execute("UPDATE entities SET email_addr=?, notes=? WHERE id=?",  # lock-exempt: a user merge
                (result["email_addr"], result["notes"], winner["id"]))
     return snap
 
@@ -376,7 +379,7 @@ def _undo_set_field(db, p, snap):
         return
     e = snap["entity"]
     col = _FIELD_COLUMN[field]
-    cur = db.execute(f"UPDATE entities SET {col}=?, aliases=?, org_valid_from=? WHERE id=?",
+    cur = db.execute(f"UPDATE entities SET {col}=?, aliases=?, org_valid_from=? WHERE id=?",  # lock-exempt: undo of the user's own correction
                      (e[col], e["aliases"], e["org_valid_from"], eid))
     if cur.rowcount == 0:
         raise Refused(f"{eid} no longer exists")

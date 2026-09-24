@@ -2017,7 +2017,11 @@ def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
 
     B4a rule 3: an org-origin row's skeleton (org/org_valid_from) is never
     overwritten by a local write — the WHERE clause excludes origin='org' rows
-    regardless of the recency check above."""
+    regardless of the recency check above.
+
+    A user-corrected org (entity_field_locks) is never overwritten either: a
+    correction stamps org_valid_from=today, so without this the first later-
+    dated email would silently win it back."""
     if not org:
         return
     if valid_from:
@@ -2025,12 +2029,14 @@ def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
             "UPDATE entities SET org = ?, org_valid_from = ? "
             "WHERE id = ? AND COALESCE(origin,'') != 'org' "
             "AND (COALESCE(org,'') = '' OR COALESCE(org_valid_from,'') = '' "
-            "OR org_valid_from < ?)",
+            "OR org_valid_from < ?) "
+            "AND id NOT IN (SELECT entity_id FROM entity_field_locks WHERE field='org')",
             (org, valid_from, entity_id, valid_from))
     else:
         conn.execute(
             "UPDATE entities SET org = ? WHERE id = ? AND COALESCE(origin,'') != 'org' "
-            "AND (org = '' OR org IS NULL)",
+            "AND (org = '' OR org IS NULL) "
+            "AND id NOT IN (SELECT entity_id FROM entity_field_locks WHERE field='org')",
             (org, entity_id))
 
 
@@ -2154,13 +2160,22 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                     updates["org_valid_from"] = valid_from
             if email_addr and not existing["email_addr"] and not _is_org:
                 updates["email_addr"] = email_addr
+            # A user-corrected field (brain_graph_correct) is never overwritten
+            # by extraction, however newer the email that carries it.
+            locked = {r[0] for r in conn.execute(
+                "SELECT field FROM entity_field_locks WHERE entity_id = ?", (eid,))}
+            if "org" in locked:
+                updates.pop("org", None)
+                updates.pop("org_valid_from", None)
+            if "email" in locked:
+                updates.pop("email_addr", None)
             if notes:
                 existing_notes = existing["notes"] or ""
                 if notes not in existing_notes:
                     updates["notes"] = (existing_notes + "\n" + notes).strip()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             conn.execute(
-                f"UPDATE entities SET {set_clause} WHERE id = ?",
+                f"UPDATE entities SET {set_clause} WHERE id = ?",  # lock-exempt: locked fields popped from `updates` above
                 list(updates.values()) + [eid])
             if title_alias:
                 _append_alias(conn, eid, title_alias)

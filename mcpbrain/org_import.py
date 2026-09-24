@@ -462,8 +462,18 @@ def import_snapshot(store, fleet_storage) -> dict:
                 "INSERT INTO entities(id,name,type,org,email_addr,aliases,origin,first_seen,last_seen) "
                 "VALUES(?,?,?,?,?,?, 'org', '', '') "
                 "ON CONFLICT(id) DO UPDATE SET "
-                "  name=excluded.name, type=excluded.type, org=excluded.org, "
-                "  email_addr=excluded.email_addr, "
+                # A column the user corrected locally (entity_field_locks)
+                # keeps the user's value; every other column follows the org.
+                "  name=CASE WHEN EXISTS (SELECT 1 FROM entity_field_locks WHERE "
+                "    entity_id=entities.id AND field='name') THEN entities.name "
+                "    ELSE excluded.name END, "
+                "  type=excluded.type, "
+                "  org=CASE WHEN EXISTS (SELECT 1 FROM entity_field_locks WHERE "
+                "    entity_id=entities.id AND field='org') THEN entities.org "
+                "    ELSE excluded.org END, "
+                "  email_addr=CASE WHEN EXISTS (SELECT 1 FROM entity_field_locks WHERE "
+                "    entity_id=entities.id AND field='email') THEN entities.email_addr "
+                "    ELSE excluded.email_addr END, "
                 "  aliases=CASE WHEN entities.aliases='' THEN excluded.aliases ELSE entities.aliases END, "
                 "  origin='org' "
                 "WHERE entities.origin != 'local'",

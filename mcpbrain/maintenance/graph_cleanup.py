@@ -91,7 +91,10 @@ def cleanup_graph(store, *, taxonomy=None) -> dict:
             raw = row[0]
             canon = graph_write.canonical_org(raw, taxonomy)
             if canon and canon != raw:
+                # A user-corrected org is left exactly as the user wrote it.
                 cur = conn.execute(
-                    "UPDATE entities SET org = ? WHERE org = ?", (canon, raw))
+                    "UPDATE entities SET org = ? WHERE org = ? AND id NOT IN "
+                    "(SELECT entity_id FROM entity_field_locks WHERE field='org')",
+                    (canon, raw))
                 counts["orgs_folded"] += cur.rowcount or 0
     return counts

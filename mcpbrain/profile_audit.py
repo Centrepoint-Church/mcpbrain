@@ -161,14 +161,19 @@ def drain_audit(store, inbox_obj: dict, *, max_corrections: int = 10) -> dict:
                 applied += 1
 
             elif field == "org":
-                with store._connect(write=True) as db:
+                with store._connect() as db:
                     existing = db.execute(
-                        "SELECT org FROM entities WHERE id=?", (eid,)
+                        "SELECT org, org_valid_from FROM entities WHERE id=?", (eid,)
                     ).fetchone()
-                    old_org = existing["org"] if existing else ""
-                    db.execute(
-                        "UPDATE entities SET org=? WHERE id=?", (new_value, eid)
-                    )
+                old_org = existing["org"] if existing else ""
+                # Through the guarded setter (user=False): a user-corrected org
+                # is left alone, and only a real update is logged and counted.
+                # org_valid_from is carried over unchanged, as before.
+                if not store.update_entity_org(
+                        eid, new_value,
+                        (existing["org_valid_from"] or "") if existing else ""):
+                    log.info("profile_audit: org of %r is user-corrected; skipping", eid)
+                    continue
                 store.record_change(
                     "org_corrected",
                     ref_id=str(eid),

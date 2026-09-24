@@ -5,7 +5,12 @@ org_import, org_curate, graph_cleanup, review_apply) against a real Store --
 not only the Store setters, which is the seam earlier tests exercised.
 """
 from mcpbrain import graph_corrections as gc
+from mcpbrain import orgs
 from mcpbrain.store import Store
+
+_TAX = orgs.OrgTaxonomy(names=("Northgate Trust", "Southbank Community Trust",
+                               "The Lantern Co"),
+                        aliases={"northgate trust inc": "Northgate Trust"})
 
 
 def _store(tmp_path):
@@ -65,3 +70,192 @@ def test_c1_email_merge_respects_not_same_transitively(tmp_path):
     ids = _ids(s)
     assert "dana-c" in ids and "dana-b" in ids
     assert s.is_distinct_pair("dana-b", "dana-c")
+
+
+# --- C2: field locks hold against writers that do their own SQL -------------
+
+def _locked_dana(s, *, field="org", org="Northgate Trust", ovf="2026-09-24", origin="local"):
+    _ent(s, "dana-okafor", "Dana Okafor", org=org, email="dana@northgate.example",
+         origin=origin)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entities SET org_valid_from=? WHERE id='dana-okafor'", (ovf,))
+    _lock(s, "dana-okafor", field)
+
+
+def test_c2_upsert_entity_newer_dated_org_leaves_locked_org(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _locked_dana(s)
+    got = gw.upsert_entity(s, name="Dana Okafor", entity_type="person",
+                           org="Southbank Community Trust", valid_from="2026-12-01",
+                           taxonomy=_TAX)
+    assert got == "dana-okafor"
+    assert s.get_entity("dana-okafor")["org"] == "Northgate Trust"
+
+
+def test_c2_upsert_entity_email_branch_set_org_recency_leaves_locked_org(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _locked_dana(s)
+    # A different display name routes through the email-dedup branch, i.e.
+    # _set_org_recency.
+    got = gw.upsert_entity(s, name="D Okafor", entity_type="person",
+                           email_addr="dana@northgate.example",
+                           org="Southbank Community Trust", valid_from="2026-12-01",
+                           taxonomy=_TAX)
+    assert got == "dana-okafor"
+    assert s.get_entity("dana-okafor")["org"] == "Northgate Trust"
+
+
+def test_c2_set_org_recency_direct_leaves_locked_org(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _locked_dana(s)
+    with s._connect(write=True) as db:
+        gw._set_org_recency(db, "dana-okafor", "The Lantern Co", "2026-12-01")
+        gw._set_org_recency(db, "dana-okafor", "The Lantern Co", "")
+    assert s.get_entity("dana-okafor")["org"] == "Northgate Trust"
+
+
+def test_c2_upsert_entity_locked_email_not_filled(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor")   # blank email, locked blank is impossible,
+    _lock(s, "dana-okafor", "email")        # but a lock row must still be honoured
+    gw.upsert_entity(s, name="Dana Okafor", entity_type="person",
+                     email_addr="other@southbank.example", taxonomy=_TAX)
+    assert (s.get_entity("dana-okafor")["email_addr"] or "") == ""
+
+
+def test_c2_profile_audit_leaves_locked_org_and_counts_only_real(tmp_path):
+    from mcpbrain import profile_audit
+    s = _store(tmp_path)
+    _locked_dana(s)
+    _ent(s, "marcus-reyes", "Marcus Reyes", org="Northgate Trust")
+    out = profile_audit.drain_audit(s, {"profile_audit": [
+        {"entity_id": "dana-okafor",
+         "corrections": [{"field": "org", "new_value": "The Lantern Co"}]},
+        {"entity_id": "marcus-reyes",
+         "corrections": [{"field": "org", "new_value": "The Lantern Co"}]},
+    ]})
+    assert s.get_entity("dana-okafor")["org"] == "Northgate Trust"
+    assert s.get_entity("marcus-reyes")["org"] == "The Lantern Co"
+    assert out["corrections_applied"] == 1
+    with s._connect() as db:
+        refs = [r[0] for r in db.execute(
+            "SELECT ref_id FROM change_log WHERE change_type='org_corrected'")]
+    assert refs == ["marcus-reyes"]
+
+
+def test_c2_org_import_preserves_locked_columns(tmp_path):
+    import gzip
+    import hashlib
+    import json
+    from mcpbrain import org_import
+    from mcpbrain.org_contracts import SnapshotManifest
+    from tests.helpers.org_fleet import LocalDirFleetStorage
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", org="Northgate Trust",
+         email="dana@northgate.example", origin="org")
+    _lock(s, "dana-okafor", "org")
+    _lock(s, "dana-okafor", "name")
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    ent = {"kind": "entity", "id": "dana-okafor", "name": "Dana A. Okafor", "type": "person",
+           "org": "The Lantern Co", "email_addr": "dana@lantern.example", "aliases": ""}
+    gz = gzip.compress((json.dumps(ent, sort_keys=True) + "\n").encode())
+    man = SnapshotManifest(version=1, created_at="t", entity_count=1, relation_count=0,
+                           tombstone_count=0, snapshot_sha256=hashlib.sha256(gz).hexdigest())
+    fs.put_bytes("org-graph/snapshot.jsonl.gz", gz)
+    fs.put_bytes("org-graph/tombstones.jsonl", b"")
+    fs.put_bytes("org-graph/manifest.json", json.dumps(man.to_dict(), sort_keys=True).encode())
+    assert org_import.import_snapshot(s, fs)["status"] == "imported"
+    e = s.get_entity("dana-okafor")
+    assert e["name"] == "Dana Okafor" and e["org"] == "Northgate Trust"
+    assert e["email_addr"] == "dana@lantern.example"      # not locked: import wins
+
+
+def test_c2_org_curate_skeleton_leaves_locked_fields(tmp_path):
+    from mcpbrain import org_curate
+    s = _store(tmp_path)
+    _locked_dana(s)
+    _lock(s, "dana-okafor", "email")
+    org_curate._apply_org_skeleton(s, "dana-okafor", {"org": "The Lantern Co",
+                                                     "email_addr": "d@lantern.example"})
+    e = s.get_entity("dana-okafor")
+    assert e["org"] == "Northgate Trust" and e["email_addr"] == "dana@northgate.example"
+
+
+def test_c2_org_curate_skeleton_writes_unlocked_field_beside_locked(tmp_path):
+    from mcpbrain import org_curate
+    s = _store(tmp_path)
+    _locked_dana(s)                                        # org locked, email not
+    org_curate._apply_org_skeleton(s, "dana-okafor", {"org": "The Lantern Co",
+                                                     "email_addr": "d@lantern.example"})
+    e = s.get_entity("dana-okafor")
+    assert e["org"] == "Northgate Trust" and e["email_addr"] == "d@lantern.example"
+
+
+def test_c2_graph_cleanup_fold_leaves_locked_org(tmp_path):
+    from mcpbrain.maintenance import graph_cleanup
+    s = _store(tmp_path)
+    _locked_dana(s, org="northgate trust inc")
+    _ent(s, "marcus-reyes", "Marcus Reyes", org="northgate trust inc")
+    graph_cleanup.cleanup_graph(s, taxonomy=_TAX)
+    assert s.get_entity("dana-okafor")["org"] == "northgate trust inc"
+
+
+def test_c2_rewrite_org_field_mixed_locked_and_unlocked(tmp_path):
+    s = _store(tmp_path)
+    _locked_dana(s)
+    _ent(s, "marcus-reyes", "Marcus Reyes", org="Northgate Trust")
+    assert s.rewrite_org_field("Northgate Trust", "The Lantern Co") == 1
+    assert s.get_entity("dana-okafor")["org"] == "Northgate Trust"
+    assert s.get_entity("marcus-reyes")["org"] == "The Lantern Co"
+
+
+def test_c2_store_upsert_entity_on_conflict_respects_locks(tmp_path):
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "", org="")
+    _lock(s, "dana-okafor", "name")
+    _lock(s, "dana-okafor", "org")
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Northgate Trust")
+    e = s.get_entity("dana-okafor")
+    assert e["name"] == "" and e["org"] == ""
+
+
+def test_c2_field_lock_index_exists(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                          "AND name='idx_efl_field'").fetchone()
+
+
+def test_c2_every_entity_field_write_honours_locks_or_says_why():
+    """Grep guard: every `UPDATE entities SET` (and every `INSERT INTO entities
+    ... DO UPDATE SET`) in mcpbrain/ that writes org, name or email_addr, or
+    builds its SET clause dynamically, must reference entity_field_locks in the
+    statement or carry a `# lock-exempt: <reason>` marker. A new writer that
+    does its own SQL would otherwise bypass a user correction silently."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "mcpbrain"
+    guarded = re.compile(r"(?<![\w.])(org|name|email_addr)\s*=|\{")
+    offenders = []
+    for path in root.rglob("*.py"):
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if "UPDATE entities SET" in line:
+                window = "\n".join(lines[i:i + 6])
+                set_part = window.split("UPDATE entities SET", 1)[1]
+            elif "DO UPDATE SET" in line and "INTO entities" in "\n".join(lines[max(0, i - 4):i + 1]):
+                window = "\n".join(lines[i:i + 16])
+                set_part = window.split("DO UPDATE SET", 1)[1]
+            else:
+                continue
+            set_part = set_part.split("WHERE", 1)[0]
+            if not guarded.search(set_part):
+                continue
+            if "entity_field_locks" in window or "# lock-exempt:" in line:
+                continue
+            offenders.append(f"{path.relative_to(root.parent)}:{i + 1}: {line.strip()}")
+    assert not offenders, "field writes that ignore user locks:\n" + "\n".join(offenders)

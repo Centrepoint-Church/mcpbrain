@@ -298,7 +298,7 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     alias_set.discard(new_name)
     alias_set.discard("")
     new_aliases = "|".join(sorted(alias_set))
-    db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",
+    db.execute("UPDATE entities SET name=?,type=?,org=?,mentions=?,aliases=? WHERE id=?",  # lock-exempt: automated merges skip entities with user corrections (has_user_corrections); a user merge is itself a correction
                (new_name, new_type, new_org, new_mentions, new_aliases, winner_id))
     snap["merge_log_id"] = db.execute(
         "INSERT INTO entity_merge_log(winner_id,loser_id,loser_name,method) "
@@ -382,7 +382,7 @@ def _unmerge_tx(db, snap: dict) -> None:
     w = snap["winner"]
     loser_mentions = snap["loser"].get("mentions") or 0
     db.execute(
-        "UPDATE entities SET name=?, type=?, org=?, aliases=?, email_addr=?, notes=?, "
+        "UPDATE entities SET name=?, type=?, org=?, aliases=?, email_addr=?, notes=?, "  # lock-exempt: undoing a merge restores the pre-merge row
         "mentions=MAX(COALESCE(mentions,0)-?, 0) WHERE id=?",
         (w["name"], w["type"], w["org"], w["aliases"], w["email_addr"], w["notes"],
          loser_mentions, winner_id))
@@ -1451,6 +1451,11 @@ class Store:
                 entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 field     TEXT NOT NULL,
                 PRIMARY KEY(entity_id, field)){_S}""")
+            # Bulk writers exclude locked rows with
+            # `id NOT IN (SELECT entity_id FROM entity_field_locks WHERE field=?)`;
+            # the PK leads on entity_id, so that subquery needs field first.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_efl_field "
+                       "ON entity_field_locks(field, entity_id)")
 
             # --- Session-4, Task 3.2: org-suggestion inbox ----------------------
             # Purely additive/inspectable: an org string the extractor keeps
@@ -1940,7 +1945,7 @@ class Store:
             if not user and _field_is_locked(db, entity_id, "org"):
                 return False
             cur = db.execute(
-                "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",
+                "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",  # lock-exempt: guarded by _field_is_locked above
                 (org, org_valid_from, entity_id))
             return cur.rowcount > 0
 
@@ -1966,7 +1971,7 @@ class Store:
             parts = [a for a in row["aliases"].split("|") if a]
             if old and old != new_name and old not in parts:
                 parts.append(old)
-            db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",
+            db.execute("UPDATE entities SET name=?, aliases=? WHERE id=?",  # lock-exempt: guarded by _field_is_locked above
                        (new_name, "|".join(parts), entity_id))
             return True
 
@@ -1976,7 +1981,7 @@ class Store:
         with self._connect(write=True) as db:
             if not user and _field_is_locked(db, entity_id, "email"):
                 return False
-            cur = db.execute("UPDATE entities SET email_addr=? WHERE id=?",
+            cur = db.execute("UPDATE entities SET email_addr=? WHERE id=?",  # lock-exempt: guarded by _field_is_locked above
                              (email_addr or "", entity_id))
             return cur.rowcount > 0
 
@@ -2012,7 +2017,7 @@ class Store:
             if _field_is_locked(db, entity_id, "org"):
                 return False
             cur = db.execute(
-                "UPDATE entities SET org=? WHERE id=? AND (org='' OR org IS NULL)",
+                "UPDATE entities SET org=? WHERE id=? AND (org='' OR org IS NULL)",  # lock-exempt: guarded by _field_is_locked above
                 (org, entity_id))
             return cur.rowcount > 0
 
@@ -2027,7 +2032,8 @@ class Store:
             return False
         with self._connect(write=True) as db:
             cur = db.execute(
-                "UPDATE entities SET email_addr=? WHERE id=? AND (email_addr='' OR email_addr IS NULL)",
+                "UPDATE entities SET email_addr=? WHERE id=? AND (email_addr='' OR email_addr IS NULL) "
+                "AND id NOT IN (SELECT entity_id FROM entity_field_locks WHERE field='email')",
                 (email_addr, entity_id))
             return cur.rowcount > 0
 
@@ -3460,8 +3466,12 @@ class Store:
                        first_seen = CASE WHEN entities.first_seen = '' THEN excluded.first_seen ELSE entities.first_seen END,
                        last_seen  = MAX(last_seen, excluded.last_seen),
                        mentions   = mentions + 1,
-                       name       = CASE WHEN name = '' THEN excluded.name ELSE name END,
-                       org        = CASE WHEN org  = '' THEN excluded.org  ELSE org  END,
+                       name       = CASE WHEN name = '' AND NOT EXISTS (SELECT 1 FROM entity_field_locks
+                                        WHERE entity_id = entities.id AND field = 'name')
+                                    THEN excluded.name ELSE name END,
+                       org        = CASE WHEN org  = '' AND NOT EXISTS (SELECT 1 FROM entity_field_locks
+                                        WHERE entity_id = entities.id AND field = 'org')
+                                    THEN excluded.org  ELSE org  END,
                        type       = CASE WHEN type = 'unknown' THEN excluded.type ELSE type END""",
                 (ent_id, name, entity_type, org, seen, seen))
             return not existed
