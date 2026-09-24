@@ -172,20 +172,20 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
     # relation: the merge may DELETE that relation (a collision or a self-loop),
     # and the FK's ON DELETE SET NULL then clears the pointer, so it has to be
     # remembered to be put back.
-    rel_ids = [r["id"] for r in rels]
-    snap_ids = set(rel_ids) | {c["id"] for c in collisions}
+    # Subqueries, not bound IN-lists: a large entity (10k+ email links exist
+    # live) would exceed SQLite's host-parameter limit.
+    snap_ids = {r["id"] for r in rels} | {c["id"] for c in collisions}
     pointers = []
-    if rel_ids and "invalidated_by_relation_id" in rels[0]:
+    if rels and "invalidated_by_relation_id" in rels[0]:
         pointers = [[r[0], r[1]] for r in db.execute(
             "SELECT id, invalidated_by_relation_id FROM entity_relations "
-            f"WHERE invalidated_by_relation_id IN ({','.join('?' * len(rel_ids))})",
-            rel_ids) if r[0] not in snap_ids]
+            "WHERE invalidated_by_relation_id IN (SELECT id FROM entity_relations "
+            "WHERE entity_a=? OR entity_b=?)", (loser_id, loser_id)) if r[0] not in snap_ids]
     emails = [dict(r) for r in db.execute(
         "SELECT * FROM email_entities WHERE entity_id=?", (loser_id,))]
-    loser_msgs = [e["message_id"] for e in emails]
     winner_overlap = [r[0] for r in db.execute(
-        f"SELECT message_id FROM email_entities WHERE entity_id=? AND message_id IN "
-        f"({','.join('?' * len(loser_msgs)) or 'NULL'})", (winner_id, *loser_msgs))]
+        "SELECT message_id FROM email_entities WHERE entity_id=? AND message_id IN "
+        "(SELECT message_id FROM email_entities WHERE entity_id=?)", (winner_id, loser_id))]
     snap = {
         "loser": dict(loser),
         "winner": {c: win[c] for c in (*_MERGE_TOUCHED_COLS, "mentions")},
@@ -342,6 +342,20 @@ def _unmerge_tx(db, snap: dict) -> None:
                          (r["id"],)).fetchone()
         if row is not None and (row[0], row[1]) != (sub(r["entity_a"]), sub(r["entity_b"])):
             raise ValueError(f"cannot undo: relation {r['id']} has changed since the merge")
+    for c in snap["collisions"]:
+        # A winner row the merge collided with must still be that same triple:
+        # if it was deleted and its triple re-created under a new id, restoring
+        # it by id would trip UNIQUE mid-restore.
+        # Exception: a pre-existing winner self-loop is itself deleted by the
+        # merge's self-loop sweep, so its absence is expected, not a conflict.
+        row = db.execute("SELECT entity_a, relation, entity_b FROM entity_relations WHERE id=?",
+                         (c["id"],)).fetchone()
+        if row is None and c["entity_a"] == c["entity_b"]:
+            continue
+        if row is None or tuple(row) != (c["entity_a"], c["relation"], c["entity_b"]):
+            raise ValueError(f"cannot undo: relation {c['id']} ({c['entity_a']} "
+                             f"{c['relation']} {c['entity_b']}) was removed or changed "
+                             f"since the merge")
 
     # Relations restored below can point (invalidated_by_relation_id) at one
     # another in any order; defer FK checks to COMMIT so the order cannot

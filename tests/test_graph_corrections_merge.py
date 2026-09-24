@@ -150,3 +150,93 @@ def test_round_trip_restores_invalidation_pointers_into_deleted_relations(tmp_pa
     with s._connect(write=True) as db:
         _unmerge_tx(db, snap)
     assert _state(s) == before
+
+
+# --- review fix round 1: refusal branches + a wider round trip -------------
+
+def _merged(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    return s, snap
+
+
+def test_unmerge_refuses_when_loser_id_exists_again(tmp_path):
+    s, snap = _merged(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES(?, 'Dana Okafor', 'person')", (L,))
+    with s._connect(write=True) as db, pytest.raises(ValueError, match="exists again"):
+        _unmerge_tx(db, snap)
+
+
+def test_unmerge_refuses_when_observation_moved(tmp_path):
+    s, snap = _merged(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_observations SET entity_id=? WHERE id=?",
+                   (C, snap["observation_ids"][0]))
+    with s._connect(write=True) as db, pytest.raises(ValueError, match="observation .* moved"):
+        _unmerge_tx(db, snap)
+
+
+def test_unmerge_refuses_when_relation_changed(tmp_path):
+    s, snap = _merged(tmp_path)
+    knows = next(r["id"] for r in snap["relations"] if r["relation"] == "knows")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_relations SET entity_b='northgate-trust' WHERE id=?", (knows,))
+    with s._connect(write=True) as db, pytest.raises(ValueError, match="relation .* changed"):
+        _unmerge_tx(db, snap)
+
+
+def test_unmerge_refuses_when_collision_row_was_replaced(tmp_path):
+    """The winner's colliding triple was deleted and re-created under a new id:
+    restoring the snapshot row by id would trip UNIQUE (IntegrityError). It must
+    be refused as a ValueError naming the conflict instead."""
+    s, snap = _merged(tmp_path)
+    cid = snap["collisions"][0]["id"]
+    with s._connect(write=True) as db:
+        db.execute("DELETE FROM entity_relations WHERE id=?", (cid,))
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES(?, 'works_at', 'northgate-trust')", (W,))
+    with s._connect(write=True) as db, pytest.raises(ValueError, match=f"relation {cid}"):
+        _unmerge_tx(db, snap)
+
+
+def test_round_trip_with_pairs_communities_and_json_snapshot(tmp_path):
+    import json
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id,name,type) VALUES('zed','Zed','person')")
+        # loser-only pair, winner-only pair, a pair both share, and loser~winner itself
+        for a, b in ((L, C), (W, "zed"), (L, "northgate-trust"), (W, "northgate-trust"), (L, W)):
+            db.execute("INSERT INTO entity_distinct_pairs(a,b) VALUES(?,?)", tuple(sorted((a, b))))
+        db.execute("INSERT INTO entity_communities(entity_id,community_id,level) VALUES(?,7,0)", (L,))
+        db.execute("INSERT INTO entity_communities(entity_id,community_id,level) VALUES(?,7,1)", (L,))
+        db.execute("INSERT INTO entity_communities(entity_id,community_id,level) VALUES(?,8,0)", (W,))
+    state = _state(s)
+    with s._connect() as db:
+        comms = sorted(tuple(r) for r in db.execute("SELECT * FROM entity_communities"))
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    assert s.is_distinct_pair(W, C)
+    snap = json.loads(json.dumps(snap))  # Task 4 stores it as JSON
+    with s._connect(write=True) as db:
+        _unmerge_tx(db, snap)
+    assert _state(s) == state
+    with s._connect() as db:
+        assert sorted(tuple(r) for r in db.execute("SELECT * FROM entity_communities")) == comms
+
+
+def test_round_trip_with_pre_existing_winner_self_loop_collision(tmp_path):
+    """L-mentioned_with-W collides with a pre-existing W-mentioned_with-W; the
+    merge's self-loop sweep deletes that winner row, so the collision
+    pre-check must not treat its absence as a conflict."""
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                   "VALUES(?, 'mentioned_with', ?)", (W, W))
+    before = _state(s)
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    with s._connect(write=True) as db:
+        _unmerge_tx(db, snap)
+    assert _state(s) == before

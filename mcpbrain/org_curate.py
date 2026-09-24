@@ -413,8 +413,8 @@ def apply_org_merge_answers(store, answers, *, cap) -> dict:
 def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
     """Apply curator merge verdicts with the 0.7.84 brain-review hardening:
     re-fetch both entities from the store by their OWN id (never trust a
-    verdict's embedded data), missing -> skip; enforce the _NAME_MERGEABLE_TYPES
-    and role-address guards; cap the number of merges actually applied; and
+    verdict's embedded data), missing -> skip; enforce the _NAME_MERGEABLE_TYPES,
+    role-address and user-marked-distinct guards; cap the number of merges actually applied; and
     treat anything that isn't strictly "merge" (including "pending") as a
     no-op. Returns counts: {"merged", "guarded", "capped", "pending", "skipped"}.
     """
@@ -440,6 +440,11 @@ def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
             result["guarded"] += 1
             continue
         if is_role_address(a.get("email_addr", "")) or is_role_address(b.get("email_addr", "")):
+            result["guarded"] += 1
+            continue
+        if store.is_distinct_pair(a["id"], b["id"]):
+            # Marked different by the user after the unit was built, or a
+            # replayed verdict: the correction wins over the adjudication.
             result["guarded"] += 1
             continue
         if result["merged"] >= cap:

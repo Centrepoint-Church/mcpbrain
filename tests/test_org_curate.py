@@ -557,6 +557,21 @@ def test_apply_merge_verdict_role_address_guarded(tmp_path):
     assert res["guarded"] == 1 and res["merged"] == 0
 
 
+def test_apply_merge_verdict_distinct_pair_guarded(tmp_path):
+    # A pair marked distinct after the unit was built (or a replayed verdict)
+    # must not be merged by the curator applier.
+    s = _store(tmp_path)
+    with s._connect() as db:
+        for eid, name in (("marcus-r", "Marcus R"), ("marcus-reyes", "Marcus Reyes")):
+            db.execute("INSERT INTO entities(id,name,type,origin,mentions) "
+                       "VALUES(?,?,'person','org',1)", (eid, name))
+        db.execute("INSERT INTO entity_distinct_pairs(a,b) VALUES('marcus-r','marcus-reyes')")
+    res = org_curate._apply_merge_verdicts(
+        s, [{"pair_id": "marcus-r|marcus-reyes", "verdict": "merge"}], cap=10)
+    assert res["guarded"] == 1 and res["merged"] == 0
+    assert s.get_entity("marcus-r") is not None and s.get_entity("marcus-reyes") is not None
+
+
 def test_run_end_to_end_publishes_snapshot(tmp_path, monkeypatch):
     from tests.helpers.org_fleet import LocalDirFleetStorage
     from mcpbrain.org_contracts import SnapshotManifest
