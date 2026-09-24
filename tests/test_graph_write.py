@@ -5,6 +5,8 @@ path and exercises the ported write-path functions against it.
 """
 
 import json
+
+import pytest
 from pathlib import Path
 
 
@@ -144,6 +146,34 @@ def test_upsert_entity_alias_merge(tmp_path):
     eid = gw.upsert_entity(s, name="Pastor Dana", entity_type="person")
     assert eid == "marcus-reyes"
     assert len(s.list_entities()) == 1
+
+
+@pytest.mark.parametrize("spelling", ["Dana O", "D. Okafor", "Dee Okafor"])
+def test_upsert_entity_alias_merge_reads_legacy_mixed_separators(tmp_path, spelling):
+    """A legacy value mixing ',' (old extraction) and '|' (merges) must match on
+    every alias. split_aliases picks ONE separator per value, so it reads
+    "Dana O, D. Okafor" as a single alias and would mint a duplicate."""
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute(
+            "INSERT INTO entities(id,name,type,aliases) VALUES(?,?,?,?)",
+            ("dana-okafor", "Dana Okafor", "person", "Dana O, D. Okafor|Dee Okafor"))
+    eid = gw.upsert_entity(s, name=spelling, entity_type="person")
+    assert eid == "dana-okafor"
+    assert [e["id"] for e in s.list_entities()] == ["dana-okafor"]
+
+
+def test_append_alias_does_not_duplicate_a_legacy_comma_alias(tmp_path):
+    s = _store(tmp_path)
+    with s._connect() as db:
+        db.execute(
+            "INSERT INTO entities(id,name,type,aliases) VALUES(?,?,?,?)",
+            ("dana-okafor", "Dana Okafor", "person", "Dana O, D. Okafor|Dee Okafor"))
+    with s._connect(write=True) as db:
+        gw._append_alias(db, "dana-okafor", "D. Okafor")
+    with s._connect() as db:
+        val = db.execute("SELECT aliases FROM entities WHERE id='dana-okafor'").fetchone()[0]
+    assert val == "Dana O, D. Okafor|Dee Okafor"
 
 
 def test_upsert_entity_alias_match_self_heals_works_at_even_when_org_unchanged(tmp_path):

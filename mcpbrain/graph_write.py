@@ -1895,13 +1895,24 @@ def _topic_distinct_orgs(store, tag_clean: str, *, exclude_message_id="") -> int
 # Entity writers (ported from memory_db.py:1164-1174, 1561-1572, 1581-1717)
 # ---------------------------------------------------------------------------
 
+def _alias_match_set(value) -> set[str]:
+    """Lower-cased aliases for MATCHING, split on both '|' and ','.
+
+    Writers store '|', but legacy values can mix the two ("A, B|C": commas from
+    old extraction, a pipe from a later merge). split_aliases picks one separator
+    per value and would read "A, B" as a single alias, so a matching read that
+    used it would miss "A" and "B" and mint a duplicate. Writes still go through
+    split_aliases so a stored value round-trips unchanged."""
+    return {a.strip().lower() for a in re.split(r"[|,]", value or "") if a.strip()}
+
+
 def _append_alias(conn, entity_id: str, new_alias: str) -> None:
     row = conn.execute(
         "SELECT name, aliases FROM entities WHERE id = ?", (entity_id,)).fetchone()
     if not row:
         return
     existing = split_aliases(row["aliases"])
-    seen = {a.lower() for a in existing}
+    seen = {a.lower() for a in existing} | _alias_match_set(row["aliases"])
     if row["name"]:
         seen.add(row["name"].lower())
     if new_alias.lower().strip() not in seen:
@@ -2123,7 +2134,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 (entity_type,)).fetchall()
             alias_matches = []
             for row in candidates:
-                alias_list = [a.lower() for a in split_aliases(row["aliases"])]
+                alias_list = _alias_match_set(row["aliases"])
                 if normalised in alias_list or (normalised_original and normalised_original in alias_list):
                     alias_matches.append(row["id"])
 
