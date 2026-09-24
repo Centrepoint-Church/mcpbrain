@@ -698,6 +698,7 @@ def submit(store, args: dict, *, confirmed_via: str = "", declined: bool = False
 
 
 def undo(store, correction_id: int) -> dict:
+    import sqlite3  # stdlib; kept off module scope with the module's other imports
     try:
         with store._connect(write=True) as db:
             row = db.execute("SELECT * FROM graph_corrections WHERE id=?",
@@ -718,6 +719,14 @@ def undo(store, correction_id: int) -> dict:
                         f"Undid: {describe(row['op'], p)}", "")
     except Refused as exc:
         return {"status": "refused", "error": str(exc)}
+    except sqlite3.IntegrityError as exc:
+        # A merge undo defers FK checks to COMMIT (_unmerge_tx), so a row it
+        # restores that points at something deleted since fails there, after
+        # every guard passed. The transaction rolled back whole: refuse.
+        return {"status": "refused",
+                "error": f"cannot undo correction {correction_id}: the graph has changed "
+                         f"since in a way that restoring it would break ({exc}). Nothing "
+                         f"was undone."}
     _graph_changed()
     return {"status": "reverted", "correction_id": correction_id,
             "summary": f"Undid: {describe(row['op'], p)}"}

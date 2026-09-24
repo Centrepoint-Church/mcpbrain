@@ -594,3 +594,27 @@ def test_m3_render_markdown_shows_the_ranked_role(tmp_path):
     md = entity_resource.render_markdown(s, "dana-okafor")["markdown"]
     assert "Operations Lead" in md.splitlines()[2]
     assert "Events Coordinator" not in md.splitlines()[2]
+
+
+# --- M5: a deferred FK failure at COMMIT is a refusal, not an exception -----
+
+def test_m5_undo_with_deferred_fk_failure_is_refused(tmp_path):
+    s = _store(tmp_path)
+    _ent(s, "dana-okafor", "Dana Okafor", mentions=9)
+    _ent(s, "dee-okafor", "Dee Okafor", mentions=1)
+    _ent(s, "priya-anand", "Priya Anand")
+    _ent(s, "marcus-reyes", "Marcus Reyes")
+    with s._connect(write=True) as db:
+        x = db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                       "VALUES('priya-anand','mentioned_with','marcus-reyes')").lastrowid
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,"
+                   "invalidated_at,invalidated_by_relation_id) "
+                   "VALUES('dee-okafor','knows','priya-anand','x',?)", (x,))
+    cid = gc.submit(s, _stated(op="merge", entity_id="dana-okafor",
+                               other_id="dee-okafor"))["correction_id"]
+    with s._connect(write=True) as db:
+        db.execute("DELETE FROM entity_relations WHERE id=?", (x,))  # admin-delete-ok
+    out = gc.submit(s, {"op": "undo", "correction_id": cid})
+    assert out["status"] == "refused", out
+    assert "dee-okafor" not in _ids(s)                  # rolled back whole
+    assert s.get_correction(cid)["status"] == "applied"
