@@ -160,7 +160,6 @@ def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
     _org_survivor)."""
     ents = store.entities_for_resolution()
     origins = _origin_map(store)
-    distinct = store.distinct_pair_set()
     groups = {}   # (type, canonical_key) -> [entity dicts]
     for e in ents:
         if e["type"] not in _NAME_MERGEABLE_TYPES:
@@ -184,7 +183,11 @@ def _deterministic_merges(store, *, home=None, curator: bool = False) -> int:
                     or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
-                if tuple(sorted((m["id"], survivor["id"]))) in distinct:
+                # Checked LIVE, not against a set read before the loop: an
+                # earlier merge in this same group repoints a user's A != B
+                # onto the survivor, so a stale set would miss (B, survivor)
+                # and fold B in anyway -- defeating the correction.
+                if store.is_distinct_pair(m["id"], survivor["id"]):
                     continue  # the user said these are different (brain_graph_correct)
                 store.merge_entities(m["id"], survivor["id"], method="deterministic")
                 merged += 1
@@ -218,7 +221,6 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
     if not config.write_time_dedup_enabled(home_str):
         return 0
     origins = _origin_map(store)
-    distinct = store.distinct_pair_set()
     with store._connect() as conn:
         rows = conn.execute(
             "SELECT id, name, email_addr, mentions FROM entities "
@@ -244,7 +246,7 @@ def _email_equality_merges(store, home=None, *, curator: bool = False) -> int:
                     or max(members, key=lambda m: (m.get("mentions", 0), len(m["name"]), m["id"])))
         for m in members:
             if m["id"] != survivor["id"]:
-                if tuple(sorted((m["id"], survivor["id"]))) in distinct:
+                if store.is_distinct_pair(m["id"], survivor["id"]):  # live: see above
                     continue  # the user said these are different (brain_graph_correct)
                 store.merge_entities(m["id"], survivor["id"], method="email")
                 merged += 1
