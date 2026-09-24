@@ -246,6 +246,11 @@
       <div class="kv"><span class="k">Enrichment</span><span class="v" id="d-enrich">—</span></div>
       <div class="kv"><span class="k">Open findings</span><span class="v" id="d-findings">—</span></div>
     </div>
+    <div class="card" id="corrections-card" hidden>
+      <h2>Pending corrections</h2>
+      <p class="empty">Graph corrections Claude inferred and wants you to confirm.</p>
+      <div id="corrections-body"></div>
+    </div>
   </section>
 </main>
 
@@ -437,8 +442,45 @@ async function refresh(){
   }
 }
 
+// ---- pending graph corrections (Apply/Decline) ----
+
+async function loadCorrections(){
+  try {
+    const res = await fetch("/api/corrections/pending", H);
+    if (!res.ok) return;
+    const {pending} = await res.json();
+    const card = $("corrections-card"), body = $("corrections-body");
+    card.hidden = pending.length === 0;
+    body.replaceChildren(...pending.map(c => {
+      const row = document.createElement("div");
+      row.className = "kv";
+      const label = document.createElement("span");
+      label.className = "k";
+      label.textContent = c.summary + (c.reason ? " (" + c.reason + ")" : "");
+      const actions = document.createElement("span");
+      actions.className = "v";
+      for (const [verb, text] of [["apply", "Apply"], ["decline", "Decline"]]) {
+        const b = document.createElement("button");
+        b.textContent = text;
+        b.onclick = async () => {
+          const r = await fetch(`/api/corrections/${c.id}/${verb}`,
+                                {method: "POST", headers: H.headers, body: "{}"});
+          const out = await r.json().catch(() => ({}));
+          showToast(r.ok ? `${text}: ${c.summary}` : (out.error || "Failed"));
+          loadCorrections();
+        };
+        actions.appendChild(b);
+      }
+      row.append(label, actions);
+      return row;
+    }));
+  } catch (e) { /* the rest of the dashboard must keep working */ }
+}
+
 refresh();
+loadCorrections();
 setInterval(refresh, 60000);
+setInterval(loadCorrections, 60000);
 
 // ---- constellation motif in the graph panel (teaser for the interactive view) ----
 const cv = $("constellation");

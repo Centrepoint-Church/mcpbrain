@@ -175,6 +175,23 @@ class ControlServer:
                     from mcpbrain import graph_view
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
                     return h_json(self, 200, graph_view.search_entities(server.store, q))
+                if self.path.split("?")[0] == "/api/corrections/pending":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain.graph_corrections import describe
+                    pending = []
+                    for c in server.store.pending_corrections():
+                        # describe() indexes required payload keys; a pending row
+                        # always has them (submit() validated before staging), but
+                        # a hand-crafted/legacy row missing one must not 500 the
+                        # dashboard -- fall back to the bare op name.
+                        try:
+                            summary = describe(c["op"], c["payload"])
+                        except KeyError:
+                            summary = c["op"]
+                        pending.append({"id": c["id"], "op": c["op"], "summary": summary,
+                                        "reason": c["reason"], "created_at": c["created_at"]})
+                    return h_json(self, 200, {"pending": pending})
                 if self.path.split("?")[0] == "/api/graph/merge/preview":
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
                     from mcpbrain import graph_view
@@ -444,6 +461,18 @@ class ControlServer:
                     # already closed) is a 404, not a success-shaped 200.
                     return h_json(h, 404, {"error": "action not found or not open"})
                 return h_json(h, 200, {"snoozed": True})
+
+            m = re.match(r"^/api/corrections/(\d+)/(apply|decline)$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import graph_corrections as gc
+                cid = int(m.group(1))
+                if m.group(2) == "apply":
+                    out = gc.approve(self.store, cid, via="dashboard")
+                    return h_json(h, 200 if out["status"] == "applied" else 409, out)
+                out = gc.decline(self.store, cid)
+                return h_json(h, 200 if out["status"] == "declined" else 404, out)
 
             m = re.match(r"^/api/dashboard/findings/(\d+)/dismiss$", h.path)
             if m:
