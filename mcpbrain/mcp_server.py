@@ -313,10 +313,61 @@ async def read_context_resource(uri) -> str:
     return path.read_text(encoding="utf-8")
 
 
+ENTITY_SCHEME = "mcpbrain://entity/"
+ENTITY_TEMPLATE = ENTITY_SCHEME + "{id}"
+_ENTITY_LIST_TTL_S = 600.0
+_entity_list_cache: tuple[float, list] | None = None
+
+
+async def list_entity_resources(client) -> list:
+    """The daemon's top-N entities as resources, cached 10 minutes here (the
+    daemon's list itself only changes daily). Daemon unreachable -> [] so the
+    file:// resources still list."""
+    import asyncio
+    import time
+    from mcp import types
+    global _entity_list_cache
+    now = time.monotonic()
+    if _entity_list_cache is None or now - _entity_list_cache[0] > _ENTITY_LIST_TTL_S:
+        try:
+            ents = await asyncio.to_thread(client.entity_resources)
+        except Exception:  # noqa: BLE001 -- daemon down: list what we can
+            _log.debug("entity resources unavailable", exc_info=True)
+            return []
+        _entity_list_cache = (now, ents)
+    return [
+        types.Resource(
+            uri=f"{ENTITY_SCHEME}{e['id']}", name=e["name"],
+            title=", ".join(x for x in (e["name"], e["type"], e.get("org") or "") if x),
+            mimeType="text/markdown")
+        for e in _entity_list_cache[1]
+    ]
+
+
+async def read_entity_resource(client, uri) -> str:
+    """Return one entity's markdown profile, rejecting anything not shaped like
+    a mcpbrain://entity/<id> uri. Unlike read_context_resource, this does NOT
+    check the id against list_entity_resources' (cached, top-N) set -- Task 9
+    measured a `@server:uri` mention reading a uri that was never listed, so
+    the read path accepts any id and lets the daemon's own lookup decide."""
+    import asyncio
+    from urllib.parse import unquote
+    uri = str(uri)
+    if not uri.startswith(ENTITY_SCHEME):
+        raise ValueError(f"not an entity resource: {uri}")
+    eid = unquote(uri[len(ENTITY_SCHEME):])
+    if not eid or "/" in eid:
+        raise ValueError(f"malformed entity resource: {uri}")
+    out = await asyncio.to_thread(client.entity_resource, eid)
+    if not out:
+        raise ValueError(f"unknown entity: {eid}")
+    return out["markdown"]
+
+
 _RESOURCE_POLL_INTERVAL_S = 5.0
 
 
-def _resource_fingerprint() -> frozenset[str]:
+def _resource_fingerprint(entity_ids: frozenset = frozenset()) -> frozenset[str]:
     """The advertised resource SET, as a comparable value.
 
     Paths only, deliberately: notifications/resources/list_changed is about the
@@ -324,8 +375,15 @@ def _resource_fingerprint() -> frozenset[str]:
     (hot.md, decisions.md) is what resources/subscribe is for, and Claude does not
     support subscribe — so we do not track content or mtimes here. Including them
     would emit list_changed for changes a client cannot act on.
+
+    `entity_ids` folds the entity resource set (Task 11) into the same
+    fingerprint, so the watcher also notices it changing -- the daily entity
+    list plus the 10-minute cache above mean this fires at most about once a
+    day for entities.
     """
-    return frozenset(str(p) for _, p in _resource_entries())
+    return frozenset(str(p) for _, p in _resource_entries()) | {
+        f"{ENTITY_SCHEME}{e}" for e in entity_ids
+    }
 
 
 async def watch_resources(session, interval_s: float = _RESOURCE_POLL_INTERVAL_S) -> None:
@@ -361,7 +419,12 @@ async def watch_resources(session, interval_s: float = _RESOURCE_POLL_INTERVAL_S
     previous = None
     while True:
         try:
-            current = _resource_fingerprint()
+            # Reads whatever list_entity_resources last cached -- never fetches
+            # on its own account, so a stalled/absent daemon costs this watcher
+            # nothing beyond an empty entity_ids set.
+            ids = (frozenset(e["id"] for e in _entity_list_cache[1])
+                   if _entity_list_cache else frozenset())
+            current = _resource_fingerprint(ids)
             changed = previous is not None and current != previous
             previous = current  # update first: a failed send must not re-fire forever
             if changed:
@@ -720,16 +783,49 @@ def build_server(store, draft_store, client, home: str):
 
     async def on_list_resources(ctx, params) -> types.ListResourcesResult:
         await _ensure_watcher(ctx)
-        return types.ListResourcesResult(resources=await list_context_resources())
+        return types.ListResourcesResult(
+            resources=await list_context_resources() + await list_entity_resources(client))
 
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
         # 2.x requires a full result model with the uri echoed back; the 1.x
         # ReadResourceContents helper is no longer accepted at the low level.
-        text = await read_context_resource(params.uri)
+        #
+        # Dispatch on scheme: each reader has its own guard and neither can
+        # reach the other's namespace (test_schemes_are_isolated pins this).
+        if str(params.uri).startswith(ENTITY_SCHEME):
+            text = await read_entity_resource(client, params.uri)
+        else:
+            text = await read_context_resource(params.uri)
         return types.ReadResourceResult(contents=[
             types.TextResourceContents(
                 uri=params.uri, mimeType="text/markdown", text=text)
         ])
+
+    async def on_list_resource_templates(ctx, params) -> types.ListResourceTemplatesResult:
+        return types.ListResourceTemplatesResult(resource_templates=[types.ResourceTemplate(
+            uri_template=ENTITY_TEMPLATE, name="entity", title="Person, organisation or project",
+            description="A profile from your mcpbrain knowledge graph, by entity id.",
+            mime_type="text/markdown")])
+
+    async def on_completion(ctx, params) -> types.CompleteResult:
+        # Best-effort only, never an error: Task 9 measured that Claude Code
+        # never actually calls completion/complete, so this exists to be
+        # spec-correct for clients that do, and an empty list on any failure
+        # (daemon down, an unrecognised ref) is indistinguishable from "no
+        # suggestions" -- never a broken completion popup.
+        import asyncio
+        values: list[str] = []
+        try:
+            ref, arg = params.ref, params.argument
+            if getattr(ref, "type", "") == "ref/resource" and ref.uri == ENTITY_TEMPLATE \
+                    and arg.name == "id":
+                values = [e["id"] for e in await asyncio.to_thread(client.search_entities, arg.value)]
+            elif getattr(ref, "type", "") == "ref/prompt" and ref.name == "draft-reply" \
+                    and arg.name == "email_id":
+                values = await asyncio.to_thread(client.reply_needed, arg.value)
+        except Exception:  # noqa: BLE001 -- completion is best-effort, never an error
+            _log.debug("completion failed", exc_info=True)
+        return types.CompleteResult(completion=types.Completion(values=values[:100]))
 
     async def on_list_prompts(ctx, params) -> types.ListPromptsResult:
         # prompt_definitions() is the single source both this list and
@@ -1188,6 +1284,8 @@ def build_server(store, draft_store, client, home: str):
         instructions=config.render_project_instructions(config.read_config(home)),
         on_list_resources=on_list_resources,
         on_read_resource=on_read_resource,
+        on_list_resource_templates=on_list_resource_templates,
+        on_completion=on_completion,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
         on_list_prompts=on_list_prompts,

@@ -59,6 +59,25 @@ def test_lowlevel_server_exposes_the_api_mcp_server_targets():
     )
 
 
+def test_lowlevel_server_exposes_resource_templates_and_completion():
+    """Task 11: entities are advertised via a resource template, and the `id`
+    argument is completable. Same guard shape as the test above -- pin the
+    SIGNATURE, not a version number, so a future SDK rename fails loudly here
+    instead of as a silent AttributeError from build_server()."""
+    import inspect
+
+    from mcp.server import Server
+
+    params = inspect.signature(Server.__init__).parameters
+    missing = [
+        kw for kw in ("on_list_resource_templates", "on_completion")
+        if kw not in params
+    ]
+    assert not missing, (
+        f"mcp.server.Server no longer accepts {missing} — build_server() will fail"
+    )
+
+
 def test_mcpbrain_validates_tool_arguments_itself():
     """mcp 2.x's low-level server validates nothing; we must.
 
