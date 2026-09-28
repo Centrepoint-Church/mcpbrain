@@ -288,3 +288,60 @@ def test_discover_logs_schema_drift_once_across_two_calls(tmp_path, caplog):
         assert caplog.text.count("differs from pinned") == 1
     finally:
         anarlog._drift_logged = False
+
+
+def test_stale_sweep_remaps_non_relation_refs_to_the_lineage_first_chunk(tmp_path):
+    """D3 on anarlog's own stale-id sweep: a summary that shrinks from several
+    chunks to one drops its tail, and every non-relation reference to the tail
+    (observation, action, recall feedback) moves to the lineage's first
+    surviving chunk -- nothing is left naming a deleted id. The local relation
+    is still invalidated with the anarlog reason. A lineage with NO surviving
+    chunk (the transcript, soft-deleted) keeps today's invalidate + delete."""
+    from mcpbrain.store import _REFLOW_REF_COLUMNS
+    p = tmp_path / "app.db"
+    long = "\n\n".join(" ".join(f"w{p_}x{i}" for i in range(300)) for p_ in range(4))
+    _anarlog_db(p, [{"id": "a", "updated_at": "2026-09-17T01:00:00Z",
+                     "summary": long, "transcript": "Spoken words."}])
+    s = _store(tmp_path)
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"}, db_path=str(p))
+    ids = set(s.doc_ids_for_messages(["anarlog-a"]))
+    assert "anarlog-a-summary-1" in ids
+    tail, tx = "anarlog-a-summary-1", "anarlog-a-transcript-0"
+    with s._connect() as db:
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('x','X','person','local')")
+        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('y','Y','org','local')")
+        for rel, d in (("works_at", tail), ("member_of", tx)):
+            db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,"
+                       "origin) VALUES('x',?,'y',?,'local')", (rel, d))
+            db.execute("INSERT INTO entity_observations(entity_id, attribute, value, source)"
+                       " VALUES('x','role','Treasurer',?)", (d,))
+            db.execute("INSERT INTO actions(text, source_doc_id) VALUES('Send it',?)", (d,))
+            db.execute("INSERT INTO recall_feedback(doc_id, event_type) VALUES(?,'exposure')",
+                       (d,))
+    raw = sqlite3.connect(str(p))
+    raw.execute("UPDATE session_documents SET body=? WHERE session_id='a'",
+                (json.dumps({"type": "doc", "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": "Short now."}]}]}),))
+    raw.execute("UPDATE transcripts SET deleted_at='2026-09-17T02:00:00Z' WHERE session_id='a'")
+    raw.execute("UPDATE sessions SET updated_at='2026-09-17T02:00:00Z' WHERE id='a'")
+    raw.commit(); raw.close()
+    anarlog.handle_anarlog_item(s, {"event": "upsert", "ref_id": "a"}, db_path=str(p))
+
+    assert set(s.doc_ids_for_messages(["anarlog-a"])) == {"anarlog-a-summary-0"}
+    with s._connect() as db:
+        rels = db.execute("SELECT source_doc_id, invalidated_at, superseded_reason "
+                          "FROM entity_relations ORDER BY id").fetchall()
+        for r in rels:
+            assert r["invalidated_at"] is not None
+            assert r["superseded_reason"] == "anarlog_note_shrank"
+        for table, col in _REFLOW_REF_COLUMNS:
+            if table == "entity_relations":
+                continue
+            vals = {r[0] for r in db.execute(f"SELECT {col} FROM {table}") if r[0]}
+            assert tail not in vals, (table, col)
+        obs = sorted(r[0] for r in db.execute("SELECT source FROM entity_observations"))
+        acts = sorted(r[0] for r in db.execute("SELECT source_doc_id FROM actions"))
+        fb = sorted(r[0] for r in db.execute("SELECT doc_id FROM recall_feedback"))
+    # The summary tail moved to summary-0; the transcript (no surviving
+    # chunk in its lineage) is left as before -- invalidate + delete only.
+    assert obs == acts == fb == ["anarlog-a-summary-0", tx]

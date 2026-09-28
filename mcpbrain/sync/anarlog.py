@@ -19,6 +19,7 @@ import sqlite3
 from contextlib import nullcontext
 
 from mcpbrain.chunking import CHUNKER_VERSION, SPLIT_VERSION, chunk_text, content_hash
+from mcpbrain.reflow import lineage_key
 from mcpbrain.sync.normalise import Chunk
 
 log = logging.getLogger(__name__)
@@ -490,12 +491,30 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
     with bulk_section():
         # Drop chunks that no longer exist (a note that shrank from 3 chunks to
         # 1 would otherwise leave two stale rows resolvable by session_id).
+        # Upsert FIRST so a stale id can be remapped onto its lineage's first
+        # surviving chunk (which must exist as a row) rather than leaving
+        # observations / actions / recall feedback naming a deleted id.
         live = {c.doc_id for c in chunks}
         stale = set(store.doc_ids_for_messages([f"anarlog-{sid}"])) - live
-        if stale:
-            stale_ids = list(stale)
-            store.invalidate_local_relations_for_docs(
-                stale_ids, reason="anarlog_note_shrank")
-            store.delete_chunks(stale_ids)
         for ch in chunks:
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+        if stale:
+            first: dict[str, str] = {}
+            for ch in chunks:
+                first.setdefault(lineage_key(ch.doc_id, ch.metadata), ch.doc_id)
+            remap, orphans = {}, []
+            for d in sorted(stale):
+                target = first.get(lineage_key(d, {}))
+                if target is None:
+                    orphans.append(d)
+                else:
+                    remap[d] = target
+            if remap:
+                store.sweep_changed_chunks(sid, remap,
+                                           invalidate_reason="anarlog_note_shrank",
+                                           map_reason="source_changed")
+            if orphans:
+                # No surviving chunk in the lineage: nothing to remap onto.
+                store.invalidate_local_relations_for_docs(
+                    orphans, reason="anarlog_note_shrank")
+                store.delete_chunks(orphans)
