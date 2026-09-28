@@ -706,6 +706,10 @@ def reflow_line(store) -> str:
               f"{st['chunks_carried']} chunks carried, "
               f"{st.get('chunks_uncovered', 0)} new text to enrich, "
               f"{st.get('chunks_inherited_unenriched', 0)} inherited unenriched")
+    if st.get("owners_text_differed"):
+        # Carried anyway (spec §3: nearest-mapped); counted so a normaliser
+        # that silently drops text shows up as a number, not nothing.
+        detail += f"; {st['owners_text_differed']} owner(s) whose text differed"
     pending = st["queued"] + (st["remaining"] or 0)
     last = (st.get("last_seed") or {}).get("status")
     # Blocked = work remains (queued rows or unseeded owners) AND the last

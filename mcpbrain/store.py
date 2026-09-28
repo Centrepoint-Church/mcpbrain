@@ -995,7 +995,8 @@ class Store:
                 reenrich    INTEGER NOT NULL,
                 outcome     TEXT NOT NULL DEFAULT 'carried',
                 uncovered   INTEGER NOT NULL DEFAULT 0,
-                inherited_unenriched INTEGER NOT NULL DEFAULT 0){_S}""")
+                inherited_unenriched INTEGER NOT NULL DEFAULT 0,
+                unequal_lineages INTEGER NOT NULL DEFAULT 0){_S}""")
             # One row per owner the reflow is DONE with, whatever the outcome:
             # carried (apply_reflow) | ordinary (source changed -> normal path)
             # | gave_up | source_gone | unsupported. Pre-outcome stores hold
@@ -1010,7 +1011,11 @@ class Store:
             # chunks were never enriched either (cold by design, or pending).
             # `reenrich` is still written (their sum) for older readers. Rows
             # written before these columns read 0 for both.
-            for col in ("uncovered", "inherited_unenriched"):
+            # `unequal_lineages`: lineages whose stitched old and new text
+            # differed (plan.unequal) on a carried owner -- e.g. text our own
+            # normaliser now drops inside a surviving chunk, which maps
+            # "nearest" and is otherwise invisible once apply_reflow returns.
+            for col in ("uncovered", "inherited_unenriched", "unequal_lineages"):
                 if col not in ro_cols:
                     db.execute(f"ALTER TABLE reflow_owners ADD COLUMN {col} INTEGER "
                                "NOT NULL DEFAULT 0")
@@ -3708,7 +3713,8 @@ class Store:
         counts = {"carried": sum(1 for r in rows if r.covered and r.enriched),
                   "uncovered": sum(1 for r in rows if not r.covered),
                   "inherited_unenriched": sum(1 for r in rows
-                                              if r.covered and not r.enriched)}
+                                              if r.covered and not r.enriched),
+                  "unequal_lineages": len(set(plan.unequal))}
         try:
             return self._apply_reflow_txn(owner, source, plan, vectors, rows, new_ids,
                                           old_ids, now, counts, home)
@@ -3814,11 +3820,12 @@ class Store:
                 db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
                            (json.dumps(covers), fid))
             db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
-                       " carried, reenrich, outcome, uncovered, inherited_unenriched)"
-                       " VALUES(?,?,?,?,?,?,'carried',?,?)",
+                       " carried, reenrich, outcome, uncovered, inherited_unenriched,"
+                       " unequal_lineages) VALUES(?,?,?,?,?,?,'carried',?,?,?)",
                        (owner, source, now, len(rows), counts["carried"],
                         counts["uncovered"] + counts["inherited_unenriched"],
-                        counts["uncovered"], counts["inherited_unenriched"]))
+                        counts["uncovered"], counts["inherited_unenriched"],
+                        counts["unequal_lineages"]))
             db.execute("DROP TABLE reflow_tmp")
         return {"written": len(rows), **counts,
                 "deleted": len(plan.deletes), "remapped": remapped}
@@ -3967,7 +3974,8 @@ class Store:
     def reflow_stats(self, *, live_remaining: bool = False,
                      remaining_cap: int = 5000, sources=None) -> dict:
         """{owners_done, by_outcome, chunks_carried, chunks_uncovered,
-        chunks_inherited_unenriched, queued, remaining, total, last_seed}.
+        chunks_inherited_unenriched, owners_text_differed (carried owners with
+        at least one lineage whose old and new text differed), queued, remaining, total, last_seed}.
 
         owners_done counts every owner with a terminal outcome (by_outcome
         splits it). chunks_carried = new chunks covered AND enriched;
@@ -3993,7 +4001,8 @@ class Store:
                 "SELECT outcome, count(*) n FROM reflow_owners GROUP BY outcome")}
             o = db.execute("SELECT count(*) n, COALESCE(sum(carried),0) c, "
                            "COALESCE(sum(uncovered),0) u, "
-                           "COALESCE(sum(inherited_unenriched),0) i "
+                           "COALESCE(sum(inherited_unenriched),0) i, "
+                           "COALESCE(sum(unequal_lineages > 0),0) d "
                            "FROM reflow_owners").fetchone()
             q = db.execute("SELECT count(*) FROM sync_queue WHERE source LIKE 'reflow:%'"
                            ).fetchone()[0]
@@ -4013,7 +4022,7 @@ class Store:
         total = (o["n"] + q + remaining) if remaining is not None else None
         return {"owners_done": o["n"], "by_outcome": by, "chunks_carried": o["c"],
                 "chunks_uncovered": o["u"], "chunks_inherited_unenriched": o["i"],
-                "queued": q, "remaining": remaining,
+                "owners_text_differed": o["d"], "queued": q, "remaining": remaining,
                 "total": total, "last_seed": last_seed}
 
     def reflow_due_count(self, now: str | None = None) -> int:

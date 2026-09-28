@@ -397,3 +397,53 @@ def test_dashboard_reflow_tooltip_splits_the_chunk_counts():
                                 "chunks_inherited_unenriched": 3}) == \
         "5 chunks carried · 2 new text to enrich · 3 inherited unenriched"
     assert _reflow_chunks_text(None) == ""
+
+
+def _unequal_count(s, owner):
+    with s._connect() as db:
+        return db.execute("SELECT unequal_lineages FROM reflow_owners WHERE owner=?",
+                          (owner,)).fetchone()[0]
+
+
+def test_text_that_differed_on_a_carried_owner_is_persisted(tmp_path):
+    """Text our own normaliser dropped inside a surviving chunk used to leave
+    only the plan's in-memory `unequal` list: once apply_reflow returned there
+    was no record an owner's old and new text differed. It is now a column,
+    a stat and a doctor clause."""
+    s = _store(tmp_path)
+    out = _d4_owner(s)                          # new text appended: one lineage differs
+    assert out["unequal_lineages"] == 1
+    assert _unequal_count(s, "F") == 1
+    st = s.reflow_stats()
+    assert st["owners_text_differed"] == 1
+    assert "1 owner(s) whose text differed" in reflow_line(s)
+
+
+def test_identical_text_records_no_difference(tmp_path):
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    s = _store(tmp_path)
+    _seed_owner(s, "F", n=1)
+    old = s.owner_chunks(["gdrive-F-"])
+    md = {"source_type": "gdrive", "file_id": "F", "chunk_index": 0}
+    out = s.apply_reflow("F", "drive", plan(old, [Chunk("gdrive-F-0", "text F 0", "a", md,
+                                                        ["text F 0"])]), [[0.1] * 4])
+    assert out["unequal_lineages"] == 0 and _unequal_count(s, "F") == 0
+    assert s.reflow_stats()["owners_text_differed"] == 0
+    assert "whose text differed" not in reflow_line(s)
+
+
+def test_unequal_column_migrates_an_existing_store(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("DROP TABLE reflow_owners")
+        db.execute("CREATE TABLE reflow_owners(owner TEXT PRIMARY KEY, source TEXT NOT NULL,"
+                   " at TEXT NOT NULL, chunks_new INTEGER NOT NULL, carried INTEGER NOT NULL,"
+                   " reenrich INTEGER NOT NULL, outcome TEXT NOT NULL DEFAULT 'carried',"
+                   " uncovered INTEGER NOT NULL DEFAULT 0,"
+                   " inherited_unenriched INTEGER NOT NULL DEFAULT 0)")
+        db.execute("INSERT INTO reflow_owners VALUES('G','drive','t',1,1,0,'carried',0,0)")
+    s.init()
+    assert _unequal_count(s, "G") == 0
+    _d4_owner(s)
+    assert s.reflow_stats()["owners_text_differed"] == 1
