@@ -115,12 +115,21 @@ def remap_gold(gold_path: Path, store, *, dry_run: bool = False, from_start: boo
     before any reflow, or after one), so by default it is treated as current:
     it adopts the store's max reflow_map id and nothing is remapped.
     `from_start=True` (the CLI's `--from-start`) replays from id 0 instead --
-    the right call exactly once, for a gold file that predates the reflow.
+    the right call exactly once, for a gold file that predates the reflow; on
+    a file that already carries a watermark it raises ValueError rather than
+    being silently ignored.
     `info`, when given, is filled with {after, watermark, adopted}."""
     import re
     text = gold_path.read_text()
     m = re.search(r"^" + re.escape(_GOLD_WATERMARK) + r"(\d+)[ \t]*$", text, flags=re.M)
     adopted = False
+    if m and from_start:
+        # The file was already remapped through id N: replaying from id 0 would
+        # apply those batches a second time and move ids that name current text.
+        raise ValueError(
+            f"{gold_path} already carries a remap-gold watermark (id {m.group(1)}); "
+            f"--from-start is only for a gold file with NO watermark. Re-run without "
+            f"--from-start to apply only the batches after id {m.group(1)}.")
     if m:
         after = int(m.group(1))
         rows = list(store.reflow_map_rows(after_id=after))
@@ -204,8 +213,12 @@ def main(argv=None) -> int:
         return 0
     if ns.cmd == "remap-gold":
         info: dict = {}
-        changes = remap_gold(Path(ns.gold), _open_gold_store(), dry_run=not ns.write,
-                             from_start=ns.from_start, info=info)
+        try:
+            changes = remap_gold(Path(ns.gold), _open_gold_store(), dry_run=not ns.write,
+                                 from_start=ns.from_start, info=info)
+        except ValueError as exc:
+            print(f"remap-gold refused: {exc}", file=sys.stderr)
+            return 2
         if info.get("adopted"):
             print(f"no watermark: started at the current max reflow_map id "
                   f"{info['watermark']}; nothing replayed. If "

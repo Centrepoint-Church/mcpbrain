@@ -590,23 +590,32 @@ and seeds only while a backup succeeded in the last 24 h. Kill switch:
    Gmail/Calendar `source_changed` rate (a high rate means the ordinary path is
    re-ingesting, which costs re-enrichment) in the release commit body.
 3. Gold on the copy. remap-gold reads `config.store_path()`, so point
-   `MCPBRAIN_HOME` at the copy's directory, and remap **scratch copies** of the
-   gold files — the reflow_map ids of the copy are not the live store's:
+   `MCPBRAIN_HOME` at the copy's directory. The copy's reflow_map ids are not
+   the live store's, so remap **scratch copies** of the gold files only — the
+   real files in `tests/eval/` (copies of the tenant repo's) are never
+   `--write`-ed here. `run_eval.py` loads gold files from its OWN directory, so
+   it is copied next to the scratch gold files and run from there:
    ```bash
-   cp tests/eval/golden_retrieval_set*.yaml /tmp/reflow-dry/     # keep the originals
-   for f in tests/eval/golden_retrieval_set*.yaml; do
+   GOLD=/tmp/reflow-dry/gold
+   rm -rf "$GOLD" && mkdir -p "$GOLD"      # fresh copies: a watermarked copy refuses --from-start
+   shasum tests/eval/golden_retrieval_set*.yaml > /tmp/reflow-dry/gold.sha
+   cp tests/eval/run_eval.py tests/eval/golden_retrieval_set*.yaml "$GOLD/"
+   for f in "$GOLD"/golden_retrieval_set*.yaml; do
      MCPBRAIN_HOME=/tmp/reflow-dry uv run python bin/tenant.py remap-gold "$f" --from-start --write
    done
-   MCPBRAIN_HOME=/tmp/reflow-dry uv run python tests/eval/run_eval.py --gold --k 10
-   cp /tmp/reflow-dry/golden_retrieval_set*.yaml tests/eval/      # restore the originals
+   MCPBRAIN_HOME=/tmp/reflow-dry uv run python "$GOLD/run_eval.py" --gold --k 10
+   shasum -c /tmp/reflow-dry/gold.sha        # must print OK: the real files are untouched
+                                             # (they are gitignored, so git status cannot tell)
    ```
    `--from-start` is right here because the gold files predate every reflow
-   (they carry no watermark). A 200-owner dry run is indicative only; the binding
-   gold gate is step 5.
+   (they carry no watermark); on a file that already has one, remap-gold refuses
+   and exits non-zero rather than replaying history twice. A 200-owner dry run is
+   indicative only; the binding gold gate is step 5.
 4. Release (§1). Afterwards watch `mcpbrain doctor` (the `Reflow` line) and
    `/api/status` → `reflow`: `n of N owners done`, carried / re-enrich, the last
-   seed status. `BLOCKED` means the seed is gated (no backup in 24 h, the kill
-   switch, or an error) — fix the cause; it is never reported as idle.
+   seed status. `BLOCKED` means work remains and the seed is gated (no backup in
+   24 h, the kill switch, or an error) — fix the cause; it is never reported as
+   idle while work remains (a finished backlog with a stale backup is not blocked).
 5. **On backlog 0** (doctor `✅ Reflow idle`, `/api/status` `reflow.integrity`
    `== "ok"` — the seed runs `integrity_check` once when the backlog empties):
    ```bash

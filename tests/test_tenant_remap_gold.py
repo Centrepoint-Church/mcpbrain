@@ -11,6 +11,8 @@ file that predates the reflow has no watermark and is run with from_start.
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from mcpbrain.reflow import plan
 from mcpbrain.store import Store
 from mcpbrain.sync.normalise import Chunk
@@ -201,3 +203,27 @@ def test_cli_prints_where_a_watermarkless_file_started(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert "no watermark" in out and "id 1" in out and "--from-start" in out
     assert "    - gdrive-F-4\n" in gold.read_text()
+
+
+# -- hardening H2: --from-start on a watermarked file refuses ----------------
+
+def test_from_start_with_a_watermark_refuses(tmp_path):
+    store = _FakeStore([("F", "gdrive-F-4", "gdrive-F-3", "t1")])
+    gold = tmp_path / "gold.yaml"
+    text = f"{tenant._GOLD_WATERMARK}1\n- expected_chunk_ids:\n    - gdrive-F-3\n"
+    gold.write_text(text)
+    with pytest.raises(ValueError, match="watermark"):
+        tenant.remap_gold(gold, store, from_start=True)
+    assert gold.read_text() == text
+
+
+def test_cli_from_start_with_a_watermark_exits_non_zero(tmp_path, monkeypatch, capsys):
+    store = _FakeStore([("F", "gdrive-F-4", "gdrive-F-3", "t1")])
+    gold = tmp_path / "gold.yaml"
+    text = f"{tenant._GOLD_WATERMARK}1\n- expected_chunk_ids:\n    - gdrive-F-3\n"
+    gold.write_text(text)
+    monkeypatch.setattr(tenant, "_open_gold_store", lambda: store)
+    assert tenant.main(["remap-gold", str(gold), "--from-start", "--write"]) != 0
+    err = capsys.readouterr().err
+    assert "--from-start" in err and "watermark" in err
+    assert gold.read_text() == text
