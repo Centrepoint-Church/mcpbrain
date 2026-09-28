@@ -92,7 +92,8 @@ def _reflow_batches(rows):
     return batches
 
 
-def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[str, str]]:
+def remap_gold(gold_path: Path, store, *, dry_run: bool = False, from_start: bool = False,
+               info: dict | None = None) -> list[tuple[str, str]]:
     """Repoint gold expected_chunk_ids through reflow_map (spec §5).
 
     doc_ids are positional and REUSED by a reflow: after one, gdrive-F-4
@@ -106,12 +107,34 @@ def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[s
     Textual edit of '- <id>' list lines (never a YAML parse/dump): single- or
     double-quoted ids and trailing '# comments' are kept exactly, and so is
     every other line. `dry_run=True` returns the same changes without
-    touching the file (the CLI's `--write` decides)."""
+    touching the file (the CLI's `--write` decides).
+
+    The watermark is persisted whenever it advances, even when no id changed:
+    otherwise a later edit that adds a CURRENT id would have already-seen
+    batches replayed onto it. A file with NO watermark is ambiguous (written
+    before any reflow, or after one), so by default it is treated as current:
+    it adopts the store's max reflow_map id and nothing is remapped.
+    `from_start=True` (the CLI's `--from-start`) replays from id 0 instead --
+    the right call exactly once, for a gold file that predates the reflow.
+    `info`, when given, is filled with {after, watermark, adopted}."""
     import re
     text = gold_path.read_text()
     m = re.search(r"^" + re.escape(_GOLD_WATERMARK) + r"(\d+)[ \t]*$", text, flags=re.M)
-    after = int(m.group(1)) if m else 0
-    rows = list(store.reflow_map_rows(after_id=after))
+    adopted = False
+    if m:
+        after = int(m.group(1))
+        rows = list(store.reflow_map_rows(after_id=after))
+    elif from_start:
+        after = 0
+        rows = list(store.reflow_map_rows(after_id=0))
+    else:
+        seen = list(store.reflow_map_rows(after_id=0))
+        after = seen[-1]["id"] if seen else 0
+        adopted = bool(seen)
+        rows = []
+    watermark = rows[-1]["id"] if rows else after
+    if info is not None:
+        info.update({"after": after, "watermark": watermark, "adopted": adopted})
     batches = _reflow_batches(rows)
     changes: list[tuple[str, str]] = []
 
@@ -138,15 +161,24 @@ def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[s
     out = re.sub(r"^([ \t]*-[ \t]+)"
                  rf"""(?:"({ident}[^"\n]*)"|'({ident}[^'\n]*)'|({ident}[^\n]*?))"""
                  r"([ \t]+#.*|[ \t]*)$", sub, text, flags=re.M)
-    if rows:
-        mark = f"{_GOLD_WATERMARK}{rows[-1]['id']}"
+    advanced = watermark > (int(m.group(1)) if m else 0) or (adopted and not m)
+    if advanced:
+        mark = f"{_GOLD_WATERMARK}{watermark}"
         if m:
             out = out.replace(m.group(0), mark, 1)
         else:
             out = f"{mark}\n{out}"
-    if changes and not dry_run:
+    if (changes or advanced) and not dry_run:
         gold_path.write_text(out)
     return changes
+
+
+def _open_gold_store():
+    """The live store, read-only (remap-gold never writes it)."""
+    from mcpbrain import config
+    from mcpbrain.embed import get_embedder
+    from mcpbrain.store import Store
+    return Store(config.store_path(), dim=get_embedder("bge-small").dim, read_only=True)
 
 
 def main(argv=None) -> int:
@@ -161,17 +193,24 @@ def main(argv=None) -> int:
     p_gold = sub.add_parser("remap-gold", help="repoint gold chunk ids moved by a reflow")
     p_gold.add_argument("gold", help="path to a gold YAML (in the tenant checkout)")
     p_gold.add_argument("--write", action="store_true")
+    p_gold.add_argument("--from-start", action="store_true",
+                        help="replay reflow_map from id 0 for a gold file with no "
+                             "watermark (one written BEFORE the reflow). Without it, "
+                             "a watermark-less file adopts the current max id.")
     ns = ap.parse_args(argv)
     if ns.cmd == "use":
         for p in use_profile(Path(ns.dir)):
             print(f"installed {p.relative_to(_REPO)}")
         return 0
     if ns.cmd == "remap-gold":
-        from mcpbrain import config
-        from mcpbrain.embed import get_embedder
-        from mcpbrain.store import Store
-        store = Store(config.store_path(), dim=get_embedder("bge-small").dim, read_only=True)
-        changes = remap_gold(Path(ns.gold), store, dry_run=not ns.write)
+        info: dict = {}
+        changes = remap_gold(Path(ns.gold), _open_gold_store(), dry_run=not ns.write,
+                             from_start=ns.from_start, info=info)
+        if info.get("adopted"):
+            print(f"no watermark: started at the current max reflow_map id "
+                  f"{info['watermark']}; nothing replayed. If "
+                  f"this gold file predates the reflow, remove the watermark line and "
+                  f"re-run with --from-start.")
         for o, n in changes:
             print(f"{o} -> {n}")
         print(f"{len(changes)} id(s) {'rewritten' if ns.write else 'would change'}")
