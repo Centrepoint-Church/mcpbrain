@@ -390,16 +390,16 @@ function renderDaemon(d){
   $("live-text").textContent = paused ? "paused" : "live";
 }
 
-// Background reflow (extraction fidelity): same states doctor reports --
-// halted, blocked (work remains but the last seed was gated), progress, idle.
+// Background reflow (extraction fidelity): halted, blocked (the last seed was
+// gated or failed -- never shown as idle/done while it is), progress, idle.
 function reflowText(r){
   if(!r) return "—";
   if(r.halted) return "halted — see doctor";
   const last = (r.last_seed || {}).status;
   const pending = (r.queued || 0) + (r.remaining || 0);
   const done = r.owners_done || 0;
-  if(pending && !r.queued && ["no_recent_backup", "disabled", "error"].includes(last))
-    return "blocked (" + last.replace(/_/g, " ") + ")";
+  if(["no_recent_backup", "disabled", "error"].includes(last))
+    return "blocked: " + last.replace(/_/g, " ");
   if(pending)
     return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done";
   return done ? "done (" + fmt(done) + ")" : "idle";

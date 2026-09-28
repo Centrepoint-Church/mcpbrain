@@ -230,7 +230,7 @@ def test_doctor_idle_only_when_nothing_remains(tmp_path):
 def test_dashboard_page_renders_the_reflow_state():
     html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
     assert 'id="d-reflow"' in html and "reflowText(data.reflow)" in html
-    assert "blocked (" in html
+    assert "blocked: " in html
 
 
 def test_bin_reflow_status_reports_outcomes_and_remaining(tmp_path):
@@ -241,3 +241,34 @@ def test_bin_reflow_status_reports_outcomes_and_remaining(tmp_path):
     out = _run("status", home=tmp_path)
     assert out.returncode == 0, out.stderr
     assert "'remaining': 1" in out.stdout and "'gave_up': 1" in out.stdout
+
+
+# -- residual R3: the dashboard text says "blocked: <reason>" ----------------
+
+def _reflow_text(r):
+    import json
+    import re
+    import shutil
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
+    fn = re.search(r"function reflowText\(r\)\{.*?\n\}\n", html, flags=re.S).group(0)
+    js = f"const fmt = String;\n{fn}\nprocess.stdout.write(reflowText({json.dumps(r)}));"
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+def test_dashboard_reflow_text_reports_every_blocked_status():
+    for status in ("no_recent_backup", "disabled", "error"):
+        r = {"owners_done": 3, "queued": 0, "remaining": 5, "total": 8,
+             "last_seed": {"status": status, "remaining": 5}}
+        assert _reflow_text(r) == "blocked: " + status.replace("_", " ")
+    # Blocked even when rows are still queued, and even when remaining is 0:
+    # a gated seed is never "idle"/"done".
+    r = {"owners_done": 3, "queued": 2, "remaining": 0,
+         "last_seed": {"status": "disabled", "remaining": 0}}
+    assert _reflow_text(r) == "blocked: disabled"
+    assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
+                         "last_seed": {"status": "ok"}}) == "idle"
+    assert _reflow_text({"halted": "x"}) == "halted — see doctor"
