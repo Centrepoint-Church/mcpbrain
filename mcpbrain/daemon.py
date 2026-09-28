@@ -191,6 +191,8 @@ WATCHDOG_WINDOW_S = 6 * 3600.0
 # recovery point than this).
 REFLOW_WINDOW = 200
 REFLOW_BACKUP_MAX_AGE_S = 86400.0
+# Bound on the seed's `remaining` count (a visibility figure, not a limit).
+REFLOW_REMAINING_CAP = 20000
 
 # Brief bounded wait for the single-writer lock on daemon startup, so a
 # successor spawned by the watchdog (unsupervised Windows) does not fail
@@ -3151,6 +3153,27 @@ class Daemon:
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
 
+    _REFLOW_SOURCE_SERVICES = {"reflow:drive": "drive_service",
+                               "reflow:gmail": "gmail_service",
+                               "reflow:calendar": "calendar_service"}
+
+    def _reflow_sources(self, home) -> set[str]:
+        """Reflow sources this install can work: a Google source only when its
+        service was built (auth.build_google_services omits one whose scope
+        the token lacks), anarlog only while it is enabled
+        (config.anarlog_db_path) -- the same facts run_sync_cycle uses. A
+        source outside this set is not seeded: its rows would only defer
+        forever and hold REFLOW_WINDOW, so the backlog never reached 0."""
+        try:
+            services = self.ensure_services() or {}
+        except Exception:  # noqa: BLE001 — no services means nothing Google to seed
+            services = {}
+        out = {src for src, key in self._REFLOW_SOURCE_SERVICES.items()
+               if services.get(key) is not None}
+        if config.anarlog_db_path(home):
+            out.add("reflow:anarlog")
+        return out
+
     def _run_reflow_seed(self):
         """Top the reflow queue up to REFLOW_WINDOW (spec §4). Gated on the
         kill switch, the halt flag and a backup that succeeded in the last 24h.
@@ -3160,15 +3183,40 @@ class Daemon:
         interval -- hence the freshness gate, checked every time this fires
         rather than once at startup, so a backup that later goes stale halts
         seeding without anyone having to notice and flip a switch by hand.
+
+        Every run records its outcome in the `reflow:last_seed` cursor
+        ({status, at, enqueued?, remaining?}) so doctor and /api/status can say
+        WHY nothing is moving, instead of reading a gated seed as idle.
         """
         if not self._is_due("_reflow_seed_interval_s", "_last_reflow_seed"):
             return None
         home = str(app_dir())
         self._last_reflow_seed = self._clock()
+        out = self._reflow_seed_once(home)
+        try:
+            import datetime as _dt
+            rec = {"status": out.get("reflow_seed") if out.get("reflow_seed") is not False
+                   else "error", "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+            for k in ("enqueued", "remaining", "error"):
+                if k in out:
+                    rec[k] = out[k]
+            self._store.set_cursor("reflow:last_seed", json.dumps(rec))
+        except Exception as exc:  # noqa: BLE001 — visibility must never kill the cycle
+            log.debug("reflow_seed: could not record last status: %s", exc)
+        return {k: v for k, v in out.items() if k != "remaining"}
+
+    def _reflow_remaining(self, sources) -> int | None:
+        try:
+            return len(self._store.reflow_candidates(REFLOW_REMAINING_CAP, sources=sources))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _reflow_seed_once(self, home) -> dict:
         if not config.reflow_enabled(home):
             return {"reflow_seed": "disabled"}
         if self._store.get_cursor("reflow:halted"):
             return {"reflow_seed": "halted"}
+        sources = self._reflow_sources(home)
         from mcpbrain.probes import _read_backup_state
         st = _read_backup_state(home) or {}
         try:
@@ -3176,19 +3224,31 @@ class Daemon:
         except (TypeError, ValueError):
             fresh = False
         if not fresh:
-            return {"reflow_seed": "no_recent_backup"}
+            return {"reflow_seed": "no_recent_backup",
+                    "remaining": self._reflow_remaining(sources)}
         try:
+            unavailable = set(self._REFLOW_SOURCE_SERVICES) | {"reflow:anarlog"}
+            dropped = self._store.drop_queued_reflow_rows(unavailable - sources)
+            if dropped:
+                log.info("reflow_seed: freed %d queued row(s) of unavailable source(s) %s",
+                         dropped, sorted(unavailable - sources))
             room = REFLOW_WINDOW - self._store.reflow_stats()["queued"]
             if room <= 0:
-                return {"reflow_seed": "window_full", "enqueued": 0}
+                return {"reflow_seed": "window_full", "enqueued": 0,
+                        "remaining": self._reflow_remaining(sources)}
             by_src: dict[str, list[dict]] = {}
-            for src, owner in self._store.reflow_candidates(room):
+            for src, owner in self._store.reflow_candidates(room, sources=sources):
                 by_src.setdefault(src, []).append(
                     {"ref_id": owner, "event": "reflow", "modified_at": "1970-01-01T00:00:00"})
             n = sum(self._store.enqueue_items(items, source=src) for src, items in by_src.items())
-            if n == 0 and self._store.reflow_stats()["queued"] == 0:
+            if n:
+                # New work: the backlog's end must be integrity-checked again
+                # (e.g. after a future EXTRACTION_VERSIONS bump).
+                self._store.set_cursor("reflow:integrity_checked", "")
+            elif self._store.reflow_stats()["queued"] == 0:
                 self._reflow_backlog_empty()
-            return {"reflow_seed": "ok", "enqueued": n}
+            return {"reflow_seed": "ok", "enqueued": n,
+                    "remaining": self._reflow_remaining(sources)}
         except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
             log.warning("reflow_seed failed: %s", exc, exc_info=True)
             return {"reflow_seed": False, "error": str(exc)}

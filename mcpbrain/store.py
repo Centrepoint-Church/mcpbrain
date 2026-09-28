@@ -992,7 +992,16 @@ class Store:
                 at          TEXT NOT NULL,
                 chunks_new  INTEGER NOT NULL,
                 carried     INTEGER NOT NULL,
-                reenrich    INTEGER NOT NULL){_S}""")
+                reenrich    INTEGER NOT NULL,
+                outcome     TEXT NOT NULL DEFAULT 'carried'){_S}""")
+            # One row per owner the reflow is DONE with, whatever the outcome:
+            # carried (apply_reflow) | ordinary (source changed -> normal path)
+            # | gave_up | source_gone | unsupported. Pre-outcome stores hold
+            # apply_reflow rows only, hence the default.
+            if "outcome" not in {r["name"] for r in db.execute(
+                    "PRAGMA table_info(reflow_owners)")}:
+                db.execute("ALTER TABLE reflow_owners ADD COLUMN outcome TEXT "
+                           "NOT NULL DEFAULT 'carried'")
 
             # Durable seam for the shared-drive cache-miss -> embed -> publish
             # pipeline. A row means "this file's chunks are extracted and
@@ -3495,7 +3504,9 @@ class Store:
         if stray or set(plan.deletes) & set(new_ids):
             raise ValueError("apply_reflow: deletes must be old ids with no new chunk")
         now = datetime.now(timezone.utc).isoformat()
-        carried = sum(1 for r in rows if r.covered)
+        # carried = text whose enrichment survived; covered-but-unenriched
+        # text still needs extraction and counts as re-enrich.
+        carried = sum(1 for r in rows if r.covered and r.enriched)
         reenrich = sum(1 for r in rows if not r.enriched)
         try:
             return self._apply_reflow_txn(owner, source, plan, vectors, rows, new_ids,
@@ -3582,7 +3593,7 @@ class Store:
                     f"{len(missing_targets)} remap target(s) with no chunk "
                     f"{missing_targets[:5]}")
             db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
-                       " carried, reenrich) VALUES(?,?,?,?,?,?)",
+                       " carried, reenrich, outcome) VALUES(?,?,?,?,?,?,'carried')",
                        (owner, source, now, len(rows), carried, reenrich))
             db.execute("DROP TABLE reflow_tmp")
         return {"written": len(rows), "carried": carried, "reenrich": reenrich,
@@ -3678,17 +3689,71 @@ class Store:
                 out.append(cur)
         return out
 
-    def reflow_stats(self) -> dict:
-        """{owners_done, chunks_carried, chunks_reenrich, queued}."""
+    REFLOW_OUTCOMES = ("carried", "ordinary", "gave_up", "source_gone", "unsupported")
+
+    def record_reflow_outcome(self, owner: str, source: str, outcome: str) -> None:
+        """Record a terminal reflow outcome that did not go through
+        apply_reflow (which records 'carried' itself, in its transaction)."""
+        if outcome not in self.REFLOW_OUTCOMES:
+            raise ValueError(f"unknown reflow outcome {outcome!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect(write=True) as db:
+            db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
+                       " carried, reenrich, outcome) VALUES(?,?,?,0,0,0,?)",
+                       (owner, source, now, outcome))
+
+    def reflow_stats(self, *, live_remaining: bool = False,
+                     remaining_cap: int = 5000) -> dict:
+        """{owners_done, by_outcome, chunks_carried, chunks_reenrich, queued,
+        remaining, total, last_seed}.
+
+        owners_done counts every owner with a terminal outcome (by_outcome
+        splits it). chunks_carried = new chunks covered AND enriched;
+        chunks_reenrich = new chunks at enriched=0. remaining = owners the
+        selector still matches and that are not queued: computed live (a
+        bounded reflow_candidates call, capped at remaining_cap -- several
+        chunk-table scans, so for attended callers: doctor, bin/reflow.py) when
+        live_remaining, else the figure the last seed recorded (None before the
+        first seed). total = owners_done + queued + remaining (None when
+        remaining is unknown). last_seed = the seed's last recorded status
+        dict ({status, at, enqueued?, remaining?}) or None."""
         with self._connect() as db:
+            by = {r["outcome"]: r["n"] for r in db.execute(
+                "SELECT outcome, count(*) n FROM reflow_owners GROUP BY outcome")}
             o = db.execute("SELECT count(*) n, COALESCE(sum(carried),0) c, "
                            "COALESCE(sum(reenrich),0) r FROM reflow_owners").fetchone()
             q = db.execute("SELECT count(*) FROM sync_queue WHERE source LIKE 'reflow:%'"
                            ).fetchone()[0]
-        return {"owners_done": o["n"], "chunks_carried": o["c"],
-                "chunks_reenrich": o["r"], "queued": q}
+        last_seed = None
+        raw = self.get_cursor("reflow:last_seed")
+        if raw:
+            try:
+                last_seed = json.loads(raw)
+            except ValueError:
+                last_seed = {"status": str(raw)}
+        if live_remaining:
+            remaining = len(self.reflow_candidates(remaining_cap))
+        else:
+            remaining = (last_seed or {}).get("remaining")
+        total = (o["n"] + q + remaining) if remaining is not None else None
+        return {"owners_done": o["n"], "by_outcome": by, "chunks_carried": o["c"],
+                "chunks_reenrich": o["r"], "queued": q, "remaining": remaining,
+                "total": total, "last_seed": last_seed}
 
-    def reflow_candidates(self, limit: int) -> list[tuple[str, str]]:
+    def drop_queued_reflow_rows(self, sources) -> int:
+        """Delete queued reflow rows for `sources` (e.g. {"reflow:calendar"}).
+        For a source that cannot be worked on this install (scope not
+        granted, source not configured), so its rows stop holding the seed
+        window. Loses nothing: the selector is level-triggered and re-seeds
+        them once the source is available."""
+        srcs = sorted(sources or ())
+        if not srcs:
+            return 0
+        with self._connect(write=True) as db:
+            return db.execute(f"DELETE FROM sync_queue WHERE source IN "
+                              f"({','.join('?' * len(srcs))})", srcs).rowcount
+
+    def reflow_candidates(self, limit: int, *, sources=None) -> list[tuple[str, str]]:
         """Level-triggered reflow selector (spec §4): (source, owner) pairs,
         source in reflow:drive|gmail|anarlog|calendar, excluding owners already
         queued. An owner stops matching once its chunks carry the current
@@ -3704,7 +3769,11 @@ class Store:
         The already-queued exclusion is IN the query, before LIMIT: filtered
         afterwards, a window of stuck (backing-off) items would fill every
         rule's LIMIT with owners that are then discarded, and the seed would
-        stall with real candidates left."""
+        stall with real candidates left.
+
+        `sources`, when given, restricts the rules to those reflow sources --
+        again in the query, so an unavailable source's owners cannot fill the
+        LIMIT."""
         from mcpbrain.chunking import SPLIT_VERSION
         from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
         if limit <= 0:
@@ -3738,6 +3807,8 @@ class Store:
                           [stype, SPLIT_VERSION]))
         out: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
+        if sources is not None:
+            rules = [r for r in rules if r[0] in sources]
         with self._connect() as db:
             for src, fld, where, args in rules:
                 owner = _meta_extract(fld)

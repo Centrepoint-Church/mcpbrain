@@ -426,7 +426,10 @@ def test_missing_service_and_halt_defer_with_delay_not_attempts(tmp_path):
     assert row["next_attempt_at"] > "2000" and row["attempts"] == 0
 
 
-def test_anarlog_disabled_row_is_stamped_and_completed(tmp_path):
+def test_anarlog_disabled_row_is_deferred_not_stamped(tmp_path):
+    """Final review I6: a disabled anarlog is not seeded at all (see the seed),
+    and a row already queued is DEFERRED like any missing service -- never
+    stamped, so re-enabling anarlog reflows its sessions."""
     s = _store(tmp_path)
     md = {"source_type": "anarlog", "session_id": "S1", "content_subtype": "transcript"}
     for i in range(2):
@@ -434,13 +437,11 @@ def test_anarlog_disabled_row_is_stamped_and_completed(tmp_path):
                        {**md, "chunk_index": i, "chunk_total": 2})
     s.enqueue_items([{"ref_id": "S1", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
                     source="reflow:anarlog")
-    out = queue.work_queue(s, handlers={"reflow": _ctx(s, tmp_path).handle}, limit=5)
-    assert out == {"processed": 1, "failed": 0}
-    assert s.reflow_stats()["queued"] == 0
+    assert _ctx(s, tmp_path).handle(
+        {"source": "reflow:anarlog", "ref_id": "S1", "attempts": 0}) is queue.DEFER
     rows = s.owner_chunks(["anarlog-S1-"])
-    assert all(r["metadata"]["reflow_skipped"] == "source_disabled"
-               and r["metadata"]["split_version"] == 1 for r in rows)
-    assert ("reflow:anarlog", "S1") not in s.reflow_candidates(50)
+    assert not any("reflow_skipped" in r["metadata"] for r in rows)
+    assert s.reflow_stats()["queued"] == 1
 
 
 def test_changed_gmail_body_drops_its_stale_tail_and_stops_matching(tmp_path, monkeypatch):
@@ -766,3 +767,32 @@ def test_handler_that_wrote_nothing_sweeps_nothing(tmp_path, monkeypatch):
     _ctx(s, tmp_path, gmail_service=object()).handle(
         {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
     assert len(s.owner_chunks(["gmail-M-"])) == 3
+
+
+# -- final review I5: every terminal outcome is recorded per owner -------------
+
+def _outcomes(s):
+    with s._connect() as db:
+        return {r[0]: r[1] for r in db.execute("SELECT owner, outcome FROM reflow_owners")}
+
+
+def test_terminal_outcomes_are_recorded(tmp_path, monkeypatch):
+    from mcpbrain.sync import drive, gmail
+    s = _store(tmp_path); _seed_drive(s)
+    monkeypatch.setattr(drive, "handle_drive_item", lambda *a, **k: None)
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-05-05T00:00:00Z"))
+    ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0})
+    assert _outcomes(s)["F"] == "ordinary"
+
+    _seed_drive(s, fid="G")
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-01-01T00:00:00Z"))
+    ctx.handle({"source": "reflow:drive", "ref_id": "G", "attempts": 5})
+    assert _outcomes(s)["G"] == "gave_up"
+
+    s.upsert_chunk("gmail-M-body-0", "hi", "h", {"source_type": "gmail", "message_id": "M",
+                   "chunk_index": 0, "chunk_total": 2})
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: (None, []))
+    _ctx(s, tmp_path, gmail_service=object()).handle(
+        {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
+    assert _outcomes(s)["M"] == "source_gone"
+    assert s.reflow_stats()["by_outcome"] == {"ordinary": 1, "gave_up": 1, "source_gone": 1}

@@ -245,6 +245,7 @@
       <div class="kv"><span class="k">State</span><span class="v" id="d-state">—</span></div>
       <div class="kv"><span class="k">Enrichment</span><span class="v" id="d-enrich">—</span></div>
       <div class="kv"><span class="k">Open findings</span><span class="v" id="d-findings">—</span></div>
+      <div class="kv"><span class="k">Re-chunking</span><span class="v" id="d-reflow">—</span></div>
     </div>
     <div class="card" id="corrections-card" hidden>
       <h2>Pending corrections</h2>
@@ -389,6 +390,21 @@ function renderDaemon(d){
   $("live-text").textContent = paused ? "paused" : "live";
 }
 
+// Background reflow (extraction fidelity): same states doctor reports --
+// halted, blocked (work remains but the last seed was gated), progress, idle.
+function reflowText(r){
+  if(!r) return "—";
+  if(r.halted) return "halted — see doctor";
+  const last = (r.last_seed || {}).status;
+  const pending = (r.queued || 0) + (r.remaining || 0);
+  const done = r.owners_done || 0;
+  if(pending && !r.queued && ["no_recent_backup", "disabled", "error"].includes(last))
+    return "blocked (" + last.replace(/_/g, " ") + ")";
+  if(pending)
+    return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done";
+  return done ? "done (" + fmt(done) + ")" : "idle";
+}
+
 function render(data){
   const idx = data.index || {}, g = data.graph || {}, d = data.daemon || {};
 
@@ -415,6 +431,7 @@ function render(data){
   renderSpool(data.spool || {});
   renderConnections(data.connections);
   renderDaemon(d);
+  $("d-reflow").textContent = reflowText(data.reflow);
 
   const live = $("live-text");
   if(!paused && data.as_of) live.textContent = "live · " + asofLabel(data.as_of);

@@ -87,8 +87,11 @@ def test_apply_reflow_merges_to_one_chunk_and_remaps_relation(tmp_path):
     assert s.latest_reflow_target("gdrive-F-1") == "gdrive-F-0"
     assert s.read_doc("gdrive-F-1")["doc_id"] == "gdrive-F-0"
     assert [d for d, _ in s.fts_search("epsilon", 5)] == ["gdrive-F-0"]
-    assert s.reflow_stats() == {"owners_done": 1, "chunks_carried": 1,
-                                "chunks_reenrich": 0, "queued": 0}
+    st = s.reflow_stats()
+    assert {k: st[k] for k in ("owners_done", "chunks_carried", "chunks_reenrich",
+                               "queued", "by_outcome")} == {
+        "owners_done": 1, "chunks_carried": 1, "chunks_reenrich": 0, "queued": 0,
+        "by_outcome": {"carried": 1}}
 
 
 def test_every_reference_table_is_remapped(tmp_path):

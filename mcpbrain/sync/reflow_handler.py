@@ -108,16 +108,12 @@ class ReflowContext:
         if kind not in ("drive", "gmail", "anarlog", "calendar"):
             raise ValueError(f"reflow: unknown source {item['source']!r}")
         owner = item["ref_id"]
-        if kind == "anarlog" and self.anarlog_db is None:
-            # anarlog is opt-in; disabled means its sessions are not to be read
-            # at all. Stamp and complete so the row leaves the seed window and
-            # the selector (split_version now current) never re-selects it.
-            old = self.store.owner_chunks(self._prefixes(kind, owner))
-            if old:
-                self._stamp(old, "source_disabled")
-            return None
+        self._cur = (owner, kind)          # for outcome records (_stamp/_normal)
         if self._service_missing(kind):
-            return self._defer_later(item)   # not authed this cycle
+            # Transient (not authed this cycle, anarlog switched off since the
+            # row was queued): wait. A PERMANENTLY unavailable source is never
+            # seeded, and the seed frees its queued rows (daemon._run_reflow_seed).
+            return self._defer_later(item)
         old = self.store.owner_chunks(self._prefixes(kind, owner))
         if not old:
             return None                   # nothing left to reflow
@@ -241,9 +237,16 @@ class ReflowContext:
                     for c in chunks]
         return self.embedder.embed_passages(passages)
 
+    def _record(self, outcome: str) -> None:
+        owner, kind = getattr(self, "_cur", (None, None))
+        if owner is not None:
+            self.store.record_reflow_outcome(owner, kind, outcome)
+
     def _stamp(self, old, reason: str) -> None:
-        """Mark an owner as not reflowable so the selector stops matching it."""
+        """Mark an owner as not reflowable so the selector stops matching it,
+        and record the outcome so visibility counts it."""
         with self.bulk_section():
+            self._record(reason)
             for r in old:
                 md = r["metadata"] or {}
                 patch = {"split_version": SPLIT_VERSION, "reflow_skipped": reason}
@@ -272,6 +275,7 @@ class ReflowContext:
                 "modified_at": _EPOCH, "attempts": 0}
         if self.normal_handlers is not None and kind in self.normal_handlers:
             self.normal_handlers[kind](item)
+            self._record("ordinary")
             return
         if kind == "drive":
             if source != "drive":
@@ -296,6 +300,7 @@ class ReflowContext:
             from mcpbrain.sync import calendar
             calendar.handle_calendar_item(self.calendar, self.store, item,
                                           bulk_section=self.bulk_section)
+        self._record("ordinary")
 
     def _new_drive(self, fid, old):
         from mcpbrain.org_contracts import DRIVE_ID_META_KEY

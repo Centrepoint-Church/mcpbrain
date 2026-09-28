@@ -149,3 +149,95 @@ def test_resume_yes_clears_the_halt(tmp_path):
     assert out.returncode == 0
     assert "halt cleared" in out.stdout
     assert s.get_cursor("reflow:halted") == ""
+
+
+# -- final review I5: every terminal outcome, N, and the seed's gate reason ----
+
+def _seed_owner(s, fid, n=2, enriched=True):
+    for i in range(n):
+        s.upsert_chunk(f"gdrive-{fid}-{i}", f"text {fid} {i}", f"{fid}{i}",
+                       {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
+                        "chunk_total": n, "mime_type": "application/pdf"})
+    if enriched:
+        with s._connect(write=True) as db:
+            db.execute("UPDATE chunks SET enriched=1 WHERE doc_id LIKE ?", (f"gdrive-{fid}-%",))
+
+
+def test_reflow_stats_counts_every_outcome_and_remaining(tmp_path):
+    s = _store(tmp_path)
+    _seed_owner(s, "A"); _seed_owner(s, "B"); _seed_owner(s, "C")
+    s.record_reflow_outcome("X", "drive", "ordinary")
+    s.record_reflow_outcome("Y", "gmail", "gave_up")
+    s.record_reflow_outcome("Z", "gmail", "source_gone")
+    st = s.reflow_stats(live_remaining=True)
+    assert st["owners_done"] == 3
+    assert st["by_outcome"] == {"ordinary": 1, "gave_up": 1, "source_gone": 1}
+    assert st["remaining"] == 3 and st["total"] == 6
+
+
+def test_carried_means_covered_and_enriched(tmp_path):
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    s = _store(tmp_path)
+    _seed_owner(s, "F", n=2, enriched=False)
+    old = s.owner_chunks(["gdrive-F-"])
+    new = [Chunk("gdrive-F-0", "text F 0\ntext F 1", "n", {"source_type": "gdrive",
+                 "file_id": "F", "chunk_index": 0}, ["text F 0", "text F 1"])]
+    out = s.apply_reflow("F", "drive", plan(old, new), [[0.1] * 4])
+    assert out["carried"] == 0 and out["reenrich"] == 1       # covered, not enriched
+    st = s.reflow_stats()
+    assert st["by_outcome"] == {"carried": 1} and st["chunks_carried"] == 0
+
+
+def test_reflow_owners_outcome_column_migrates_an_existing_store(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("DROP TABLE reflow_owners")
+        db.execute("CREATE TABLE reflow_owners(owner TEXT PRIMARY KEY, source TEXT NOT NULL,"
+                   " at TEXT NOT NULL, chunks_new INTEGER NOT NULL, carried INTEGER NOT NULL,"
+                   " reenrich INTEGER NOT NULL)")
+        db.execute("INSERT INTO reflow_owners VALUES('F','drive','t',1,1,0)")
+    s.init()
+    assert s.reflow_stats()["by_outcome"] == {"carried": 1}
+
+
+def test_doctor_is_not_idle_while_the_seed_is_blocked(tmp_path):
+    import json
+    s = _store(tmp_path)
+    _seed_owner(s, "A")
+    s.set_cursor("reflow:last_seed", json.dumps({"status": "no_recent_backup", "at": "t"}))
+    line = reflow_line(s)
+    assert not line.startswith("✅") and "no_recent_backup" in line
+
+
+def test_doctor_reports_n_of_total(tmp_path):
+    import json
+    s = _store(tmp_path)
+    _seed_owner(s, "A")
+    s.record_reflow_outcome("X", "drive", "carried")
+    s.set_cursor("reflow:last_seed", json.dumps({"status": "ok", "at": "t"}))
+    line = reflow_line(s)
+    assert line.startswith("⏳") and "1 of 2" in line
+
+
+def test_doctor_idle_only_when_nothing_remains(tmp_path):
+    import json
+    s = _store(tmp_path)
+    s.set_cursor("reflow:last_seed", json.dumps({"status": "no_recent_backup", "at": "t"}))
+    assert reflow_line(s).startswith("✅")
+
+
+def test_dashboard_page_renders_the_reflow_state():
+    html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
+    assert 'id="d-reflow"' in html and "reflowText(data.reflow)" in html
+    assert "blocked (" in html
+
+
+def test_bin_reflow_status_reports_outcomes_and_remaining(tmp_path):
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    _seed_owner(s, "A")
+    s.record_reflow_outcome("X", "drive", "gave_up")
+    out = _run("status", home=tmp_path)
+    assert out.returncode == 0, out.stderr
+    assert "'remaining': 1" in out.stdout and "'gave_up': 1" in out.stdout

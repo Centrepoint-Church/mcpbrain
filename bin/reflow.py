@@ -48,7 +48,9 @@ def main(argv=None) -> int:
         halted = store.get_cursor("reflow:halted") or ""
         if ns.cmd == "status":
             integrity = store.get_cursor("reflow:integrity_checked")
-            print({**store.reflow_stats(), "halted": halted or None,
+            # live_remaining: the owners still to do, counted now (a bounded,
+            # read-only selector query) rather than the seed's last figure.
+            print({**store.reflow_stats(live_remaining=True), "halted": halted or None,
                    "integrity": integrity})
             return 0
     except sqlite3.OperationalError as exc:

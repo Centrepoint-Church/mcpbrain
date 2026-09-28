@@ -680,23 +680,41 @@ def integrity_line(home, *, check=None) -> str:
             f"and see CLAUDE.md's store-corruption section")
 
 
+_REFLOW_SEED_BLOCKED = ("no_recent_backup", "disabled", "error")
+
+
 def reflow_line(store) -> str:
     """One doctor line for the background reflow (extraction-fidelity,
-    2026-09-24): idle/progress/halted. A halt means apply_reflow found a
-    dangling reference and rolled back -- the operator must investigate and
-    clear it with `bin/reflow.py resume --yes` before the seed resumes."""
+    2026-09-24): halted / blocked / progress (n of N owners) / idle.
+
+    A halt means apply_reflow found a dangling reference and rolled back --
+    investigate, then `bin/reflow.py resume --yes`. "Blocked" means work
+    remains but the seed's last run was gated (no backup in 24h, the kill
+    switch, or an error): never reported as idle, which is how an unattended
+    rollout would stall unnoticed. `remaining` is computed live (bounded)."""
     try:
-        st = store.reflow_stats()
+        st = store.reflow_stats(live_remaining=True)
         halted = store.get_cursor("reflow:halted")
     except Exception as exc:  # noqa: BLE001 — a diagnostic must never be fatal
         return f"➖ {'Reflow':<16} skipped ({exc})"
     if halted:
         return (f"❌ {'Reflow':<16} HALTED: {halted} — investigate, then "
                 f"`python bin/reflow.py resume --yes`")
-    if st["queued"]:
-        return (f"⏳ {'Reflow':<16} {st['queued']} queued, {st['owners_done']} done "
-                f"({st['chunks_carried']} chunks carried, {st['chunks_reenrich']} re-enrich)")
-    return f"✅ {'Reflow':<16} idle ({st['owners_done']} owners reflowed)"
+    by = st.get("by_outcome") or {}
+    outcomes = ", ".join(f"{k} {v}" for k, v in sorted(by.items())) or "none yet"
+    detail = (f"{st['owners_done']} of {st['total']} owners done ({outcomes}); "
+              f"{st['chunks_carried']} chunks carried, {st['chunks_reenrich']} re-enrich")
+    pending = st["queued"] + (st["remaining"] or 0)
+    last = (st.get("last_seed") or {}).get("status")
+    if pending and last in _REFLOW_SEED_BLOCKED and not st["queued"]:
+        return (f"⚠️ {'Reflow':<16} BLOCKED: last seed {last} — {st['remaining']} "
+                f"owner(s) waiting; {detail}")
+    if pending:
+        gate = f"; last seed {last}" if last and last != "ok" else ""
+        if last is None:
+            gate = "; not yet seeded"
+        return f"⏳ {'Reflow':<16} {st['queued']} queued; {detail}{gate}"
+    return f"✅ {'Reflow':<16} idle ({detail})"
 
 
 def version_drift_line(home, installed: str | None = None) -> str | None:

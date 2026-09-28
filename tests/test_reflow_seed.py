@@ -18,6 +18,10 @@ def _store(tmp_path):
     return s
 
 
+_ALL_SERVICES = {"gmail_service": object(), "drive_service": object(),
+                 "calendar_service": object()}
+
+
 def _c(s, doc_id, **md):
     s.upsert_chunk(doc_id, "t " + doc_id, doc_id, md)
 
@@ -29,6 +33,7 @@ def test_seed_requires_recent_backup_and_tops_up_window(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)          # minimal instance, as other cadence tests do
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}
     (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
@@ -61,6 +66,7 @@ def test_seed_disabled_by_kill_switch(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     monkeypatch.setattr(dmod.config, "reflow_enabled", lambda home: False)
     assert d._run_reflow_seed() == {"reflow_seed": "disabled"}
@@ -74,6 +80,7 @@ def test_seed_halted(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     assert d._run_reflow_seed() == {"reflow_seed": "halted"}
 
@@ -86,6 +93,7 @@ def test_seed_stale_backup_still_gates(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}
 
@@ -100,6 +108,7 @@ def test_seed_window_full_reports_zero_enqueued(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     assert d._run_reflow_seed() == {"reflow_seed": "window_full", "enqueued": 0}
 
@@ -111,6 +120,7 @@ def test_seed_backlog_empty_runs_integrity_check_once(tmp_path, monkeypatch):
     d = dmod.Daemon.__new__(dmod.Daemon)
     d._store, d._clock = s, time.monotonic
     d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = _ALL_SERVICES, True
     monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
     calls = []
 
@@ -129,3 +139,75 @@ def test_seed_backlog_empty_runs_integrity_check_once(tmp_path, monkeypatch):
     d._last_reflow_seed = None
     d._run_reflow_seed()
     assert calls == [str(tmp_path)]
+
+
+def _seed_daemon(tmp_path, monkeypatch, s):
+    from mcpbrain import daemon as dmod
+    d = dmod.Daemon.__new__(dmod.Daemon)
+    d._store, d._clock = s, time.monotonic
+    d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = {"gmail_service": object(), "drive_service": object(),
+                                         "calendar_service": object()}, True
+    monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
+    return d
+
+
+def test_seed_persists_its_last_status(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    d._run_reflow_seed()
+    assert json.loads(s.get_cursor("reflow:last_seed"))["status"] == "no_recent_backup"
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d._last_reflow_seed = None
+    d._run_reflow_seed()
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "ok" and last["enqueued"] == 1
+
+
+def test_seed_enqueue_resets_the_integrity_marker(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.set_cursor("reflow:integrity_checked", "ok")
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed()["enqueued"] == 1
+    assert not s.get_cursor("reflow:integrity_checked")
+
+
+# -- final review I6: a permanently unavailable source is not seeded ----------
+
+def test_seed_skips_sources_without_a_service_and_frees_their_queued_rows(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    _c(s, "cal-E-0", source_type="calendar", event_id="E", chunk_total=2)
+    _c(s, "anarlog-S-transcript-0", source_type="anarlog", session_id="S", chunk_total=2)
+    s.enqueue_items([{"ref_id": "OLD", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:calendar")
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    d._services = {"gmail_service": object()}           # no calendar scope granted
+    out = d._run_reflow_seed()
+    assert out["enqueued"] == 1
+    with s._connect() as db:
+        rows = {(r[0], r[1]) for r in db.execute("SELECT source, ref_id FROM sync_queue")}
+    # anarlog disabled (not configured) -> not seeded; calendar -> not seeded,
+    # and its queued row no longer holds the window
+    assert rows == {("reflow:gmail", "N")}
+
+
+def test_seed_seeds_anarlog_when_enabled(tmp_path, monkeypatch):
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    _c(s, "anarlog-S-transcript-0", source_type="anarlog", session_id="S", chunk_total=2)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    monkeypatch.setattr(dmod.config, "anarlog_db_path", lambda home: tmp_path / "anarlog.db")
+    assert d._run_reflow_seed()["enqueued"] == 1
+
+
+def test_selector_can_be_restricted_to_sources(tmp_path):
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    _c(s, "cal-E-0", source_type="calendar", event_id="E", chunk_total=2)
+    assert s.reflow_candidates(50, sources={"reflow:calendar"}) == [("reflow:calendar", "E")]
