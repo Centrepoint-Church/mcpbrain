@@ -211,3 +211,68 @@ def test_selector_can_be_restricted_to_sources(tmp_path):
     _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
     _c(s, "cal-E-0", source_type="calendar", event_id="E", chunk_total=2)
     assert s.reflow_candidates(50, sources={"reflow:calendar"}) == [("reflow:calendar", "E")]
+
+
+def test_end_to_end_seed_work_queue_handler_converges(tmp_path, monkeypatch):
+    """seed -> sync_queue -> work_queue -> ReflowContext -> apply_reflow, on a
+    real Store with fake services: the selector ends empty, enrichment and a
+    relation survive, and the next seed runs the integrity check once."""
+    from mcpbrain.sync import drive, queue
+    from mcpbrain.sync.blocks import Heading, Paragraph
+    from mcpbrain.sync.reflow_handler import ReflowContext
+    import mcpbrain.doctor as doctor_mod
+    PDF = "application/pdf"
+    M = "2026-01-01T00:00:00Z"
+    s = _store(tmp_path)
+    for fid in ("F", "G"):
+        for i, t in enumerate(("Budget Line one", "Line two")):
+            s.upsert_chunk(f"gdrive-{fid}-{i}", t, f"{fid}{i}",
+                           {"source_type": "gdrive", "file_id": fid, "mime_type": PDF,
+                            "modified": M, "chunk_index": i, "chunk_total": 2})
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=1")
+        db.execute("INSERT INTO entities(id, name, type) VALUES('e1','Priya Anand','person')")
+        db.execute("INSERT INTO entities(id, name, type) VALUES('e2','Northgate Trust','org')")
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id)"
+                   " VALUES('e1','works_at','e2','gdrive-F-1')")
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "ok", "enqueued": 2}
+
+    monkeypatch.setattr(drive, "fetch_content", lambda svc, fm, **k: drive.Content(
+        text="Budget\n\nLine one\nLine two",
+        blocks=[Heading(1, "Budget"), Paragraph("Line one\nLine two")]))
+    monkeypatch.setattr(drive, "folder_path", lambda *a, **k: "")
+
+    class _Svc:
+        def files(self):
+            return self
+
+        def get(self, **kw):
+            class R:
+                def execute(self, num_retries=0):
+                    return {"id": kw["fileId"], "name": "r.pdf", "mimeType": PDF,
+                            "modifiedTime": M, "parents": []}
+            return R()
+
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, xs):
+            return [[0.1, 0.2, 0.3, 0.4] for _ in xs]
+    ctx = ReflowContext(s, _Emb(), str(tmp_path), drive_service=_Svc())
+    assert queue.work_queue(s, handlers={"reflow": ctx.handle}, limit=10) == {
+        "processed": 2, "failed": 0}
+    assert s.reflow_candidates(50) == []
+    st = s.reflow_stats(live_remaining=True)
+    assert st["by_outcome"] == {"carried": 2} and st["queued"] == 0 and st["remaining"] == 0
+    assert all(r["enriched"] == 1 for r in s.owner_chunks(["gdrive-F-", "gdrive-G-"]))
+    with s._connect() as db:
+        assert db.execute("SELECT source_doc_id FROM entity_relations").fetchone()[0] == "gdrive-F-0"
+
+    calls = []
+    monkeypatch.setattr(doctor_mod, "_run_integrity_check", lambda home: calls.append(home) or [])
+    d._last_reflow_seed = None
+    assert d._run_reflow_seed() == {"reflow_seed": "ok", "enqueued": 0}
+    assert calls and s.get_cursor("reflow:integrity_checked") == "ok"
+    assert doctor_mod.reflow_line(s).startswith("✅")
