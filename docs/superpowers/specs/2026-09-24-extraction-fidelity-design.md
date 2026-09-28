@@ -223,14 +223,19 @@ retries with backoff.
   item is re-queued with a short delay).
 - After each commit, an **orphan check** for that owner: no row in any table in
   step 3 may reference a doc_id of that owner that has no `chunks` row. A non-zero count fails the item loudly (logged, recorded in
-  `last_error`) and **halts the reflow cadence**; `doctor` reports the halt and
+  `last_error`) and **halts the reflow cadence** -- the halt cursor is set
+  inside `Store.apply_reflow` itself, so every carry-over path (the queue
+  handler and the ingest-cache import) halts, and every one of them waits
+  while it is set; `doctor` reports the halt and
   an attended `bin/reflow.py resume` clears it after investigation — a wrong
   remap must stop, not propagate.
 
 ### 4. The reflow queue
 
-- Items live in the existing `sync_queue` as `reflow:drive`,
-  `reflow:shared_drive:<id>`, `reflow:gmail`, `reflow:anarlog`, drained by
+- Items live in the existing `sync_queue` as `reflow:drive` (My Drive AND
+  Shared Drive files -- a Shared Drive file is recognised by the `drive_id` on
+  its chunks, and a changed one is handed to that drive's ordinary handler),
+  `reflow:gmail`, `reflow:calendar` and `reflow:anarlog`, drained by
   `work_queue` through a single `reflow` handler — retry, backoff and
   never-drop semantics come free.
 - Reflow rows carry an epoch `modified_at`, so `due_sync_items`' newest-first
@@ -245,7 +250,16 @@ retries with backoff.
   - Gmail bodies, calendar events and anarlog sessions with `chunk_total > 1`
     and `split_version < SPLIT_VERSION`.
   A reflowed owner stops matching, so the selector converges and the cadence
-  goes idle.
+  goes idle. The seed only seeds sources this install can work: a Google
+  source whose service was built (a scope not granted means no service), and
+  anarlog only while it is enabled -- a disabled anarlog is NOT seeded (and its
+  already-queued rows are freed) rather than stamped, so enabling it later
+  reflows its sessions. A queued row whose service is only transiently missing
+  is deferred.
+- The ordinary ingest paths (Drive delta/backfill, the Shared Drive
+  cache-first path, calendar item and window backfill) never re-chunk an
+  unchanged owner the selector covers: they enqueue it as `reflow:<source>`
+  instead. `bin/repair.py reingest-stale` skips such owners.
 - The handler: re-fetch → prove unchanged → extract to blocks → render →
   `carry_over`, or hand off to the ordinary change path.
 - **Shared-drive ingest cache.** When `ingest_cache.try_import` brings in a
@@ -259,9 +273,14 @@ backlog reaches zero. `reflow_enabled` is a fleet-flippable kill switch
 (`config.fleet_flag`), default ON; the new extractors apply to fresh ingests
 regardless of it.
 
-**Visibility.** `/api/status` and `doctor` report reflow progress (n of N
-owners, carried-over vs re-enriched chunk counts, failures, halted state); the
-dashboard shows the same.
+**Visibility.** Every terminal outcome is recorded per owner in
+`reflow_owners.outcome` (carried | ordinary | gave_up | source_gone |
+unsupported). `/api/status`, `doctor`, the dashboard and `bin/reflow.py status`
+report n of N owners (N = done + queued + remaining, remaining counted by a
+bounded selector query), counts by outcome, carried (covered AND enriched) vs
+re-enriched chunk counts, the halted state, and the seed's last status
+(`reflow:last_seed`) -- `doctor` reports BLOCKED, never idle, while work remains
+behind a gate (no recent backup, kill switch).
 
 ### 5. The gold set
 
