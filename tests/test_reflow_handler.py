@@ -807,3 +807,21 @@ def test_anarlog_session_with_a_removed_part_takes_the_ordinary_path(tmp_path, m
                normal_handlers={"anarlog": lambda it: seen.append(it["ref_id"])})
     assert ctx.handle({"source": "reflow:anarlog", "ref_id": "S1", "attempts": 0}) is None
     assert seen == ["S1"]
+
+
+@pytest.mark.parametrize("err", [_http_error(429), _http_error(503), TimeoutError("read"),
+                                 ConnectionResetError("reset")])
+def test_rate_limit_or_outage_defers_without_counting_an_attempt(tmp_path, err):
+    """Task 11 concern: a transient outage used to raise, so work_queue counted
+    an attempt, and five of them stamped the owner gave_up for good. Rate
+    limits, 502-504 and network errors now defer with a delay instead."""
+    s = _store(tmp_path); _seed_drive(s)
+    s.enqueue_items([{"ref_id": "F", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:drive")
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("x", exc=err))
+    assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 4}) is queue.DEFER
+    with s._connect() as db:
+        row = db.execute("SELECT attempts, next_attempt_at FROM sync_queue "
+                         "WHERE ref_id='F'").fetchone()
+    assert row["attempts"] == 0 and row["next_attempt_at"]
+    assert not any("reflow_skipped" in r["metadata"] for r in s.owner_chunks(["gdrive-F-"]))

@@ -52,6 +52,17 @@ def _http_status(exc) -> int | None:
     return getattr(resp, "status", None) if resp is not None else None
 
 
+# Rate limits and gateway/availability failures: the service, not the owner.
+# A plain 500 still counts toward give-up (a file that always 500s must end).
+_TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
+
+
+def _is_transient(exc) -> bool:
+    if isinstance(exc, HttpError):
+        return _http_status(exc) in _TRANSIENT_HTTP
+    return isinstance(exc, (TimeoutError, ConnectionError))
+
+
 class ReflowContext:
     """One sync cycle's reflow worker. `handle(item)` returns None (done:
     reflowed, routed to the ordinary path, or stamped) or `queue.DEFER`; it
@@ -135,7 +146,16 @@ class ReflowContext:
             self._stamp(old, "gave_up")
             return None
         self._pending_publish = None
-        new = getattr(self, f"_new_{kind}")(owner, old)
+        try:
+            new = getattr(self, f"_new_{kind}")(owner, old)
+        except Exception as exc:  # noqa: BLE001 — classified, then re-raised
+            if not _is_transient(exc):
+                raise
+            # A rate limit / outage is not this owner's fault: wait, without
+            # spending one of its _GIVE_UP_ATTEMPTS (five of them used to
+            # stamp it gave_up for good during a long outage).
+            log.info("reflow: %s %s deferred on a transient error: %s", kind, owner, exc)
+            return self._defer_later(item)
         if new is None:
             return None                   # routed to the ordinary path, or stamped
         if any((c.metadata or {}).get("extraction_partial") for c in new):
