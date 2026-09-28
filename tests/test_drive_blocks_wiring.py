@@ -126,7 +126,7 @@ def test_google_slides_export_pptx_then_plain_text():
     meta = {"id": "s1", "name": "Deck", "mimeType": GSLIDES}
     content = drive.fetch_content(_Svc(files), meta)
     assert files.export_calls == [PPTX]
-    assert isinstance(content.blocks[0], Heading) and content.blocks[0].text == "Slide 1"
+    assert isinstance(content.blocks[0], Heading) and content.blocks[0].label + content.blocks[0].text == "Slide 1"
     assert "Quarterly roster for Northgate Trust" in content.text
 
     files = _Files(exports={PPTX: _size_error(), "text/plain": b"Slide text"})

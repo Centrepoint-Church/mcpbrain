@@ -103,9 +103,10 @@ def _pptx_walk(shapes, skip_id, out: list) -> None:
 
 
 def extract_blocks_from_pptx(content_bytes: bytes) -> list:
-    """PPTX -> Blocks: a Heading per slide ('Slide N: <title>'), shapes walked
-    recursively through groups, tables as TableBlocks, and speaker notes as a
-    trailing 'Notes: ' Paragraph."""
+    """PPTX -> Blocks: a Heading per slide (rendered 'Slide N: <title>', the
+    'Slide N: ' part a label), shapes walked recursively through groups, tables
+    as TableBlocks, and speaker notes as a trailing Paragraph labelled
+    'Notes: '. Labels are rendered but are never source spans."""
     try:
         from pptx import Presentation
         prs = Presentation(io.BytesIO(content_bytes))
@@ -117,13 +118,15 @@ def extract_blocks_from_pptx(content_bytes: bytes) -> list:
         for n, slide in enumerate(prs.slides, start=1):
             title_shape = slide.shapes.title
             title = title_shape.text_frame.text.strip() if title_shape is not None else ""
-            out.append(Heading(2, f"Slide {n}: {title}" if title else f"Slide {n}"))
+            # "Slide N: " is synthesised, not slide text: a label, never a span
+            out.append(Heading(2, title, label=f"Slide {n}: ") if title
+                       else Heading(2, "", label=f"Slide {n}"))
             _pptx_walk(slide.shapes,
                        title_shape.shape_id if title_shape is not None else None, out)
             if slide.has_notes_slide:
                 notes = slide.notes_slide.notes_text_frame.text.strip()
                 if notes:
-                    out.append(Paragraph(f"Notes: {notes}"))
+                    out.append(Paragraph(notes, label="Notes: "))
         return out
     except Exception as exc:
         log.warning("pptx: extraction failed after %d blocks: %s", len(out), exc)

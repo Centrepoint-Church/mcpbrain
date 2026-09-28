@@ -120,3 +120,29 @@ def test_table_row_with_many_fields_stays_within_budget():
             assert len(r.text) <= max_chars
             for span in r.spans:
                 assert span in r.text
+
+
+# -- final review I1: synthetic label prefixes are rendered, never spans -------
+
+def test_label_is_rendered_but_is_not_a_span():
+    from mcpbrain.sync.blocks import Heading, Paragraph, render, to_text
+    blocks = [Heading(2, "Topic", label="Slide 1: "), Paragraph("body line"),
+              Paragraph("remember the grant", label="Notes: ")]
+    out = render(blocks)
+    assert out[0].text == "Slide 1: Topic\n\nbody line\n\nNotes: remember the grant"
+    assert out[0].spans == ["Topic", "body line", "remember the grant"]
+    assert "Slide 1: Topic" in to_text(blocks) and "Notes: remember" in to_text(blocks)
+
+
+def test_label_only_heading_renders_with_no_span():
+    from mcpbrain.sync.blocks import Heading, Paragraph, render
+    out = render([Heading(2, "", label="Slide 3"), Paragraph("body words")])
+    assert out[0].text.startswith("Slide 3\n\nbody words")
+    assert out[0].spans == ["body words"]
+    assert out[0].meta["heading_trail"] == "Slide 3"
+
+
+def test_default_label_keeps_existing_constructions_unchanged():
+    from mcpbrain.sync.blocks import Heading, Paragraph
+    assert Heading(1, "A") == Heading(1, "A", label="")
+    assert Paragraph("x").label == ""

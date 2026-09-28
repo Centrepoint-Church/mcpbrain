@@ -38,11 +38,16 @@ def extraction_version(mime: str) -> int:
 class Heading:
     level: int
     text: str
+    # Renderer-synthesised prefix ("Slide 3: "): emitted before `text` in the
+    # chunk but NEVER a source span (spec §2) -- reflow proves coverage from
+    # spans against the old text, which never contained the label.
+    label: str = ""
 
 
 @dataclass
 class Paragraph:
     text: str
+    label: str = ""          # synthesised prefix ("Notes: "); see Heading.label
 
 
 @dataclass
@@ -73,8 +78,9 @@ def to_text(blocks) -> str:
     parts: list[str] = []
     for b in blocks:
         if isinstance(b, (Heading, Paragraph)):
-            if b.text.strip():
-                parts.append(b.text.strip())
+            text = (b.label + b.text).strip()
+            if text:
+                parts.append(text)
         elif isinstance(b, TableBlock):
             lines = [_table_line(r) for r in b.rows if any(c.strip() for c in r)]
             if lines:
@@ -229,19 +235,32 @@ def render(blocks, *, max_chars: int | None = None) -> list[Rendered]:
     for b in blocks:
         tr = TRAIL_SEP.join(t for _, t in trail)
         if isinstance(b, Heading):
-            text = b.text.strip()
+            src = b.text.strip()
+            text = (b.label + src).strip()
             if not has_content(text):
                 continue
             while trail and trail[-1][0] >= b.level:
                 trail.pop()
             trail.append((b.level, text[:120]))
-            pieces.append(_Piece(text[:max_chars], [text[:max_chars]], "heading",
+            shown = text[:max_chars]
+            # the span is the SOURCE text only, and only as much of it as the
+            # (possibly truncated) rendering actually carries
+            span = src[:max(max_chars - (len(text) - len(src)), 0)]
+            pieces.append(_Piece(shown, [span] if span.strip() else [], "heading",
                                  TRAIL_SEP.join(t for _, t in trail)))
         elif isinstance(b, Paragraph):
-            text = b.text.strip("\n")
-            if not has_content(text):
+            src = b.text.strip("\n")
+            if not has_content(src):
                 continue
-            parts = [text] if len(text) <= max_chars else split_long_paragraph(text, max_chars)
+            if b.label:
+                # the label rides on the first piece; spans stay source-only
+                first_budget = max(max_chars - len(b.label), 1)
+                parts = ([src] if len(src) <= first_budget
+                         else split_long_paragraph(src, first_budget))
+                pieces.append(_Piece(b.label + parts[0], [parts[0]], "para", tr))
+                pieces.extend(_Piece(p, [p], "para", tr) for p in parts[1:])
+                continue
+            parts = [src] if len(src) <= max_chars else split_long_paragraph(src, max_chars)
             pieces.extend(_Piece(p, [p], "para", tr) for p in parts)
         elif isinstance(b, TableBlock):
             pieces.extend(_table_pieces(b, tr, max_chars))
