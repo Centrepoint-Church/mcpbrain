@@ -62,3 +62,19 @@ def test_selector_limit_is_not_starved_by_queued_owners(tmp_path):
     assert sorted(s.reflow_candidates(2)) == [("reflow:gmail", "D"), ("reflow:gmail", "E")]
     assert len(s.reflow_candidates(1)) == 1
     assert s.reflow_candidates(0) == []
+
+
+def test_legacy_multi_chunk_owner_without_chunk_total_is_selected(tmp_path):
+    """Final-review investigation: legacy chunks carry no chunk_total; COALESCE
+    to 1 hid every such multi-chunk owner (235 on the author's store) from the
+    split rule. A missing chunk_total counts the owner's chunks instead."""
+    s = _store(tmp_path)
+    _c(s, "gmail-L-body-0", source_type="gmail", message_id="L", chunk_index=0)
+    _c(s, "gmail-L-body-1", source_type="gmail", message_id="L", chunk_index=1)
+    _c(s, "gmail-S-body-0", source_type="gmail", message_id="S")          # single: skip
+    _c(s, "cal-E", source_type="calendar", event_id="E")                    # single: skip
+    _c(s, "gdrive-T-0", source_type="gdrive", file_id="T", content_subtype="table",
+       mime_type="text/csv")
+    _c(s, "gdrive-T-1", source_type="gdrive", file_id="T", content_subtype="table",
+       mime_type="text/csv")                                                # table: skip
+    assert set(s.reflow_candidates(50)) == {("reflow:gmail", "L")}

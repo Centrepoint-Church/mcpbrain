@@ -3798,7 +3798,8 @@ class Store:
           2. Gmail attachments likewise, on attachment_mime (owner message_id);
           3. any multi-chunk, non-table owner below SPLIT_VERSION -- gdrive
              (file_id), gmail (message_id), anarlog (session_id), calendar
-             (event_id).
+             (event_id); a legacy chunk with no chunk_total counts as
+             multi-chunk when its owner has more than one such chunk.
         The already-queued exclusion is IN the query, before LIMIT: filtered
         afterwards, a window of stuck (backing-off) items would fill every
         rule's LIMIT with owners that are then discarded, and the seed would
@@ -3835,21 +3836,29 @@ class Store:
                                 ("reflow:anarlog", "anarlog", "$.session_id"),
                                 ("reflow:calendar", "calendar", "$.event_id")):
             rules.append((src, fld,
-                          f"{st}=? AND COALESCE({sv},0) < ? AND COALESCE({total},1) > 1 "
+                          f"{st}=? AND COALESCE({sv},0) < ? AND {total} > 1 "
                           f"AND COALESCE({sub},'') != 'table'",
                           [stype, SPLIT_VERSION]))
+            # Legacy chunks carry no chunk_total at all: count the owner's
+            # chunks instead (an owner with one such chunk was never split).
+            rules.append((src, fld,
+                          f"{st}=? AND COALESCE({sv},0) < ? AND {total} IS NULL "
+                          f"AND COALESCE({sub},'') != 'table'",
+                          [stype, SPLIT_VERSION], "HAVING count(*) > 1"))
         out: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
         if sources is not None:
             rules = [r for r in rules if r[0] in sources]
         with self._connect() as db:
-            for src, fld, where, args in rules:
+            for src, fld, where, args, *having in rules:
                 owner = _meta_extract(fld)
+                tail = f"GROUP BY {owner} {having[0]} " if having else ""
+                pick = f"{owner} AS o" if having else f"DISTINCT {owner} AS o"
                 for r in db.execute(
-                        f"SELECT DISTINCT {owner} AS o FROM chunks WHERE {where} "
+                        f"SELECT {pick} FROM chunks WHERE {where} "
                         f"AND {owner} IS NOT NULL AND {owner} != '' "
                         f"AND {owner} NOT IN (SELECT ref_id FROM sync_queue "
-                        f"WHERE source LIKE 'reflow:%') LIMIT ?", [*args, limit]):
+                        f"WHERE source LIKE 'reflow:%') {tail}LIMIT ?", [*args, limit]):
                     key = (src, str(r["o"]))
                     if key in seen:
                         continue
