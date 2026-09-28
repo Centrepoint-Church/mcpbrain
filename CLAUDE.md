@@ -301,7 +301,25 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
 
 ## Shipping caveats
 
-- **Current state (2026-09-28): the four version files (+ `uv.lock`) are at `0.7.132`,
+- **Current state (2026-09-28, later): the four version files (+ `uv.lock`) are at
+  `0.7.133`, RELEASED** — source `e3b41c09`, gh-pages `5d3f54a2`, plugin `f53988b`;
+  index serves only `mcpbrain-0.7.133-py3-none-any.whl`, `install.ps1` 200. Full
+  suite **4320 passed** under the lock AND under the fleet's resolution
+  (`pymupdf==1.28.2`, `mcp==2.2.0`, `fastembed==0.8.1`). **pymupdf is now imported
+  by name and bounded `>=1.27,<1.29`** (the `fitz` alias is deprecated; a guard
+  test fails on any `fitz` import). Also: every deferred per-unit review minor that
+  does not change chunk/render/extraction output was fixed; the 14 that would are
+  recorded in the spec's "Known limitations" with the version bump that fixes each
+  (do NOT fix those mid-rollout — they would churn already-reflowed owners);
+  consecutive transient reflow defers are bounded at 12; `backup_state.json` is
+  written atomically. Installed from the published index; `/api/status` 0.7.133,
+  reflow resumed after the restart (89 carried, 0 halted). **Gold: interim run
+  (≈80 of 12,968 owners reflowed) 0.850 / 0.577; both gold files now carry a
+  `# remap-gold` watermark (id 57), so the binding run at backlog 0 is
+  `remap-gold <file> --write` WITHOUT `--from-start`, then `run_eval.py --gold`,
+  then copy the files to `mcpbrain-tenant/eval/`.** Reflow backlog ≈4 days at
+  ~130 owners/hour.
+- **Earlier (2026-09-28): the four version files (+ `uv.lock`) were at `0.7.132`,
   RELEASED** — source `950b8bd9`, gh-pages `105058ed`, plugin `a443263`; the index
   serves only `mcpbrain-0.7.132-py3-none-any.whl`, `install.ps1` 200. Full suite
   **4268 passed**, ruff clean, tenant check passed. Fleet resolution:
