@@ -227,3 +227,51 @@ def plan(old: list[dict], new: list[Chunk]) -> ReflowPlan:
     p.rows.sort(key=lambda r: order[r.chunk.doc_id])
     p.deletes = sorted(r["doc_id"] for r in old if r["doc_id"] not in order)
     return p
+
+
+_UNIT_REF_KEYS = ("thread_id", "message_id")
+_UNIT_REF_LISTS = ("part_doc_ids", "chunk_doc_ids")
+
+
+def _collect_unit_refs(node, out: set[str]) -> None:
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in _UNIT_REF_KEYS and isinstance(v, (str, int)) and v != "":
+                out.add(str(v))
+            elif k in _UNIT_REF_LISTS and isinstance(v, list):
+                out.update(str(d) for d in v if isinstance(d, (str, int)) and d != "")
+            else:
+                _collect_unit_refs(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _collect_unit_refs(v, out)
+
+
+def pending_unit_refs(home) -> set[str]:
+    """Every thread_id, message_id, part_doc_ids and chunk_doc_ids entry named by
+    an enrichment unit still pending or claimed under <home>/enrich_queue (spec §3
+    guard: an owner with an in-flight unit must not be reflowed, or drain would
+    later mark re-chunked, never-extracted text enriched). Unreadable or
+    malformed unit files are ignored. A claim's unit is read from units/<uid>.json;
+    a claim with no readable unit file contributes nothing."""
+    import json
+    from pathlib import Path
+    queue = Path(home) / "enrich_queue"
+    paths: set[Path] = set()
+    try:
+        paths.update((queue / "units").glob("*.json"))
+    except OSError:
+        pass
+    try:
+        for claim in (queue / "claims").iterdir():
+            uid = claim.name[:-5] if claim.name.endswith(".json") else claim.name
+            paths.add(queue / "units" / f"{uid}.json")
+    except OSError:
+        pass
+    out: set[str] = set()
+    for p in paths:
+        try:
+            _collect_unit_refs(json.loads(p.read_text(encoding="utf-8")), out)
+        except (OSError, ValueError):
+            continue
+    return out

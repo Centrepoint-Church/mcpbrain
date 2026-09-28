@@ -23,51 +23,64 @@ M = "2026-09-01T10:00:00.000Z"
 V = [0.1, 0.2, 0.3, 0.4]
 
 
+@pytest.fixture(autouse=True)
+def _home(tmp_path, monkeypatch):
+    """The in-flight-unit guard reads config.app_dir()/enrich_queue by default;
+    keep it off the real app dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    return home
+
+
 def _store(tmp_path, name):
     s = Store(tmp_path / name, dim=4)
     s.init()
     return s
 
 
-def _local(tmp_path, texts=("alpha beta gamma", "delta epsilon"), modified=M):
-    """Install A: file F already held locally, enriched, relation on chunk 1."""
-    a = _store(tmp_path, "A.sqlite3")
+def _local(tmp_path, texts=("alpha beta gamma", "delta epsilon"), modified=M,
+           unenriched=(), name="A.sqlite3", fid="F"):
+    """Install A: file F already held locally, enriched (except the indexes in
+    `unenriched`), relation on chunk 1."""
+    a = _store(tmp_path, name)
     for i, t in enumerate(texts):
+        enr = i not in unenriched
         a.import_cached_chunk(
-            f"gdrive-F-{i}", t, f"h{i}",
-            {"source_type": "gdrive", "file_id": "F", "chunk_index": i,
+            f"gdrive-{fid}-{i}", t, f"h{i}",
+            {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
              "chunk_total": len(texts), "drive_id": "D1", "mime_type": PDF,
              "modified": modified},
-            V, enriched=True, enriched_version=ENRICH_LOGIC_VERSION)
+            V, enriched=enr, enriched_version=ENRICH_LOGIC_VERSION if enr else 0)
     with a._connect(write=True) as db:
         db.execute("INSERT INTO entities(id, name, type) VALUES('e1','Dana Okafor','person')")
         db.execute("INSERT INTO entities(id, name, type) VALUES('e2','Northgate Trust','org')")
         db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id)"
-                   " VALUES('e1','works_at','e2','gdrive-F-1')")
+                   " VALUES('e1','works_at','e2',?)", (f"gdrive-{fid}-1",))
     return a
 
 
-def _publish(tmp_path, fs, texts, modified=M, enriched=True):
+def _publish(tmp_path, fs, texts, modified=M, enriched=True, fid="F"):
     """A peer install P publishes F re-chunked under the new extractor."""
-    p = _store(tmp_path, "P.sqlite3")
+    p = _store(tmp_path, f"P-{fid}.sqlite3")
     for i, t in enumerate(texts):
         p.import_cached_chunk(
-            f"gdrive-F-{i}", t, f"n{i}",
-            {"source_type": "gdrive", "file_id": "F", "chunk_index": i,
+            f"gdrive-{fid}-{i}", t, f"n{i}",
+            {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
              "chunk_total": len(texts), "drive_id": "D1", "mime_type": PDF,
              "modified": modified, "extraction_version": 1},
             V)
     if enriched:
         extraction = {
-            "thread_id": "gdrive-F", "org": "unknown", "content_type": "update",
+            "thread_id": f"gdrive-{fid}", "org": "unknown", "content_type": "update",
             "summary": "Marcus Reyes reviewed the budget.",
             "messages": [{"message_id": "m1", "sender": "marcus@example.org",
                           "date": "2026-09-01", "subject": "Budget"}],
             "entities": [{"name": "Marcus Reyes", "type": "person"}],
             "relations": [], "actions": [], "topics": [],
         }
-        p.set_enrich_payload("F", json.dumps(extraction), ENRICH_LOGIC_VERSION)
-    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+        p.set_enrich_payload(fid, json.dumps(extraction), ENRICH_LOGIC_VERSION)
+    assert ingest_cache.publish_file(p, fs, "D1", fid, "vh2", PIN) is True
 
 
 def _chunks(s):
@@ -83,6 +96,14 @@ def _relation_doc(s):
                           "WHERE entity_a='e1'").fetchone()[0]
 
 
+def _graph_counts(s):
+    with s._connect() as db:
+        return {t: db.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                for t in ("entities", "entity_relations", "entity_observations",
+                          "actions", "graph_actions_legacy", "graph_decisions_legacy",
+                          "chunks")}
+
+
 def _reflow_map(s):
     with s._connect() as db:
         return [tuple(r) for r in db.execute(
@@ -93,12 +114,17 @@ def test_same_modified_import_carries_enrichment_and_provenance(tmp_path):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     a = _local(tmp_path)
     _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+    before = _graph_counts(a)
 
     assert ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
 
     assert _chunks(a) == [("gdrive-F-0", "alpha beta gamma\ndelta epsilon", 1,
                            ENRICH_LOGIC_VERSION)]
     assert _relation_doc(a) == "gdrive-F-0"
+    # Every covered row was already extracted locally: the peer's extraction is
+    # NOT re-applied (no second set of actions/decisions, no summary chunk).
+    after = _graph_counts(a)
+    assert after == {**before, "chunks": before["chunks"] - 1}
     assert _reflow_map(a) == [("F", "gdrive-F-0", "gdrive-F-0"),
                               ("F", "gdrive-F-1", "gdrive-F-0")]
     with a._connect() as db:
@@ -110,8 +136,90 @@ def test_same_modified_import_carries_enrichment_and_provenance(tmp_path):
     assert meta["extraction_version"] == 1 and meta["drive_id"] == "D1"
     assert nvec == 1
     assert src == "drive_import"
-    # The artifact's validated cached extraction is still applied (A#4).
-    assert ent is not None
+    assert ent is None
+
+
+def test_locally_unenriched_covered_row_applies_the_cached_extraction(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path, unenriched=(1,))
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+
+    assert ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+
+    # The covered row's text was only half-extracted locally; the artifact's
+    # extraction is applied, which is what justifies marking it enriched.
+    assert _chunks(a) == [("gdrive-F-0", "alpha beta gamma\ndelta epsilon", 1,
+                           ENRICH_LOGIC_VERSION)]
+    with a._connect() as db:
+        assert db.execute("SELECT 1 FROM entities WHERE name='Marcus Reyes'").fetchone()
+    assert _relation_doc(a) == "gdrive-F-0"
+
+
+def _unit(home, uid, body, claim=False):
+    q = home / "enrich_queue"
+    (q / "units").mkdir(parents=True, exist_ok=True)
+    (q / "units" / f"{uid}.json").write_text(json.dumps(body))
+    if claim:
+        (q / "claims").mkdir(parents=True, exist_ok=True)
+        (q / "claims" / uid).write_text("")
+
+
+def test_in_flight_unit_defers_the_carry_over_import(tmp_path, _home):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path)
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+    _unit(_home, "u1", {"unit_id": "u1", "kind": "thread", "threads": [
+        {"thread_id": "gdrive-F", "messages": [
+            {"message_id": "F", "chunk_doc_ids": ["gdrive-F-1"]}]}]}, claim=True)
+    before = (_chunks(a), _graph_counts(a))
+
+    with pytest.raises(ingest_cache.ImportDeferred):
+        ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF)
+    assert (_chunks(a), _graph_counts(a)) == before
+    assert _relation_doc(a) == "gdrive-F-1" and _reflow_map(a) == []
+
+
+def test_unit_for_another_file_does_not_defer(tmp_path, _home):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path)
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+    _unit(_home, "u2", {"unit_id": "u2", "kind": "thread", "threads": [
+        {"thread_id": "gdrive-G", "part_doc_ids": ["gdrive-G-0"]}]})
+    (_home / "enrich_queue" / "units" / "junk.json").write_text("{not json")
+
+    assert ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert _relation_doc(a) == "gdrive-F-0"
+
+
+def test_bootstrap_continues_past_a_refused_file(tmp_path, _home):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path, fid="F")
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"], fid="F")
+    _publish(tmp_path, fs, ["second file text"], fid="G")
+    _unit(_home, "u1", {"unit_id": "u1", "kind": "thread",
+                        "threads": [{"thread_id": "gdrive-F"}]})
+
+    summary = ingest_cache.bootstrap_drive(a, fs, "D1", PIN)
+    assert summary["imported"] == 1 and summary["skipped"] == 1
+    with a._connect() as db:
+        assert db.execute("SELECT 1 FROM chunks WHERE doc_id='gdrive-G-0'").fetchone()
+    assert _relation_doc(a) == "gdrive-F-1"
+
+
+def test_bootstrap_continues_past_an_orphan_error(tmp_path, monkeypatch):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path, fid="F")
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"], fid="F")
+    _publish(tmp_path, fs, ["second file text"], fid="G")
+
+    def boom(*_a, **_k):
+        raise ReflowOrphanError("reflow F: 1 dangling reference(s)")
+
+    monkeypatch.setattr(a, "apply_reflow", boom)
+    summary = ingest_cache.bootstrap_drive(a, fs, "D1", PIN)
+    assert summary["imported"] == 1 and summary["skipped"] == 1
+    with a._connect() as db:
+        assert db.execute("SELECT 1 FROM chunks WHERE doc_id='gdrive-G-0'").fetchone()
 
 
 def test_uncovered_row_stays_unenriched_even_when_artifact_is_enriched(tmp_path):

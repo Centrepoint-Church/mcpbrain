@@ -36,6 +36,14 @@ log = logging.getLogger(__name__)
 CACHE_DIR = ".mcpbrain-cache"
 
 
+class ImportDeferred(RuntimeError):
+    """A carry-over import was refused because an enrichment unit naming this
+    file is still pending or claimed (spec 2026-09-24 §3 guard). The caller
+    must retry LATER (work_queue backoff), never fall back to a local
+    re-extract: that has the same exposure — drain would later mark the
+    re-chunked, never-extracted text enriched."""
+
+
 # -- filename / path helpers ------------------------------------------------
 
 def _version_int(value) -> int:
@@ -151,20 +159,31 @@ def _encode_vec(vector) -> str:
 # -- read path --------------------------------------------------------------
 
 def _write_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: bool,
-                logic_v: int) -> bool:
+                logic_v: int, home) -> tuple[bool, bool]:
     """Write a validated artifact's rows: through the reflow carry-over when
     this install already holds the same file content, else a plain replace.
-    False = store write failed (caller treats it as a cache miss). Raises
-    store.ReflowOrphanError (rolled back, nothing written) rather than fall
-    back to a replace that would silently strand this install's provenance."""
-    done = _reflow_rows(store, art, rows, mark_enriched, logic_v)
+
+    Returns (written, apply_extraction). written False = store write failed
+    (caller treats it as a cache miss). apply_extraction says whether the
+    artifact's cached extraction should now be applied to the graph: on the
+    plain path whenever the artifact is marked enriched (unchanged); on the
+    carry-over path only when the import marked text enriched that this
+    install had NOT extracted -- re-applying a peer's extraction over content
+    already extracted locally writes a second set of Drive-sourced
+    actions/decisions (graph_write dedups relations, not those).
+
+    Raises store.ReflowOrphanError (rolled back, nothing written) rather than
+    fall back to a replace that would silently strand this install's
+    provenance, and ImportDeferred when an in-flight enrichment unit names
+    the file."""
+    done = _reflow_rows(store, art, rows, mark_enriched, logic_v, home)
     if done is not None:
         return done
-    return _replace_rows(store, art, rows)
+    return _replace_rows(store, art, rows), mark_enriched
 
 
 def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: bool,
-                 logic_v: int) -> bool | None:
+                 logic_v: int, home) -> tuple[bool, bool] | None:
     """Carry-over import (spec 2026-09-24 §3/§4 "Shared-drive ingest cache").
 
     Applies only when this install already has chunks for the file and EVERY
@@ -177,13 +196,23 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
 
     The artifact carries rendered text only, so each row's single span is its
     whole text (coverage proven on whole-chunk text — conservative). When the
-    artifact's own enrichment clears the version gates (`mark_enriched`), only
-    COVERED rows are marked enriched at its logic version: an uncovered row is
-    text this install never extracted and must still flow through enrichment.
+    artifact's own enrichment clears the version gates (`mark_enriched`) AND
+    at least one covered row was not enriched locally, the covered rows are
+    marked enriched at the artifact's logic version and the extraction is
+    applied (the second element of the result); when every covered row was
+    already enriched locally, the plan's carried state stands and nothing is
+    re-applied. An uncovered row is text this install never extracted and
+    always stays enriched=0.
+
+    Spec §3 guard: if a pending or claimed enrichment unit names this file
+    (its `gdrive-<fid>` thread, the file id, or any of its current doc_ids),
+    raise ImportDeferred -- drain applying that unit after the re-chunk
+    would mark never-extracted text enriched.
 
     Returns None when the carry-over does not apply (caller takes the plain
-    replace path), else the write result. A plan that would drop a whole
-    lineage describes a genuinely different document and takes the plain path.
+    replace path), else (written, apply_extraction). A plan that would drop a
+    whole lineage describes a genuinely different document and takes the
+    plain path.
     """
     old = store.owner_chunks([f"gdrive-{art.file_id}-"])
     if not old or not rows:
@@ -195,6 +224,11 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
     from mcpbrain import reflow
     from mcpbrain.store import ReflowOrphanError
     from mcpbrain.sync.normalise import Chunk
+    refs = reflow.pending_unit_refs(home)
+    if refs and ({f"gdrive-{art.file_id}", art.file_id} | {r["doc_id"] for r in old}) & refs:
+        raise ImportDeferred(
+            f"ingest_cache: {art.file_id} has an in-flight enrichment unit; "
+            "carry-over import deferred")
     new = [Chunk(r["doc_id"], r["text"], r["content_hash"], r["metadata"], [r["text"]])
            for r in rows]
     try:
@@ -205,7 +239,9 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
         log.info("ingest_cache: %s reflow plan drops a whole lineage; plain replace",
                  art.file_id)
         return None
-    if mark_enriched:
+    apply_extraction = mark_enriched and any(
+        nr.covered and not nr.enriched for nr in plan.rows)
+    if apply_extraction:
         for nr in plan.rows:
             if nr.covered:
                 nr.enriched, nr.enriched_version = 1, logic_v
@@ -221,9 +257,9 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
         log.warning(
             "ingest_cache: reflow write failed importing artifact for %s "
             "(NOT a cache-corruption signal): %s", art.file_id, exc)
-        return False
+        return False, False
     log.info("ingest_cache: %s imported by carry-over: %s", art.file_id, out)
-    return True
+    return True, apply_extraction
 
 
 def _replace_rows(store, art: CacheArtifact, rows: list[dict]) -> bool:
@@ -290,7 +326,8 @@ def _replace_rows(store, art: CacheArtifact, rows: list[dict]) -> bool:
 
 
 def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
-                     contextual_retrieval: bool | None = None, mime: str = "") -> bool:
+                     contextual_retrieval: bool | None = None, mime: str = "",
+                     home=None) -> bool:
     """Import a validated artifact's chunks into the store, atomically.
 
     All chunk vectors are decoded/validated UP FRONT, before anything is
@@ -304,7 +341,9 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     treat False as a cache miss (fall back to local extraction). When this
     install already holds the same file content (same Drive `modified`), the
     write goes through the reflow carry-over instead (see _reflow_rows), which
-    may raise store.ReflowOrphanError (rolled back, nothing written).
+    may raise store.ReflowOrphanError (rolled back, nothing written) or
+    ImportDeferred (an in-flight enrichment unit names the file; nothing
+    written). `home` locates the enrichment queue (default config.app_dir()).
 
     `contextual_retrieval`, when not None, must match the artifact's stamped
     enrich["contextual_retrieval"] flag (when present) — see try_import.
@@ -352,12 +391,16 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     except Exception:
         log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
         return False
-    if not _write_rows(store, art, rows, mark_enriched, logic_v):
+    if home is None:
+        from mcpbrain import config as _cfg
+        home = _cfg.app_dir()
+    written, apply_extraction = _write_rows(store, art, rows, mark_enriched, logic_v, home)
+    if not written:
         return False
     # A#4: apply the cached enrichment so the importer's graph gets this doc's
     # entities/relations without re-running Haiku. Validate through the SAME
     # guards drain uses before apply — never apply a peer's payload raw.
-    extraction = (art.enrich or {}).get("extraction") if mark_enriched else None
+    extraction = (art.enrich or {}).get("extraction") if apply_extraction else None
     if extraction:
         try:
             from mcpbrain import contract, graph_write, config as _config
@@ -395,9 +438,22 @@ def _load(fleet_storage, path) -> CacheArtifact | None:
 
 
 def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
-               *, contextual_retrieval: bool | None = None, mime: str = "") -> bool:
+               *, contextual_retrieval: bool | None = None, mime: str = "",
+               home=None) -> bool:
     """Cache-first import for one shared-drive file version. Returns True iff the
     artifact was found, validated, and imported; False => caller extracts locally.
+
+    Two exceptions escape, both with NOTHING written, and neither may be
+    treated as False (a local re-extract has the same exposure):
+    - ImportDeferred: this install already holds the file's content and a
+      pending/claimed enrichment unit names it, so the carry-over import must
+      wait. Retry later (work_queue backoff).
+    - store.ReflowOrphanError: the carry-over's orphan guard fired and the
+      transaction rolled back. A wrong remap must stop, not be papered over
+      by a plain replace. Log loudly; do not abort other files over it.
+
+    `home` locates the enrichment queue for the in-flight-unit guard
+    (default config.app_dir()).
 
     `content_hash` is the Drive file-version id (NOT the text hash).
 
@@ -417,7 +473,8 @@ def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
     if art.file_id != file_id or art.content_hash != content_hash:
         return False
     return _import_artifact(store, drive_id, art, pin,
-                            contextual_retrieval=contextual_retrieval, mime=mime)
+                            contextual_retrieval=contextual_retrieval, mime=mime,
+                            home=home)
 
 
 def collect_chunks(store, file_id) -> list[CacheChunk]:
@@ -628,12 +685,16 @@ def remove_file_artifacts(fleet_storage, file_id) -> int:
 
 # -- bulk import (onboarding) + revocation ----------------------------------
 
-def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
+def bootstrap_drive(store, fleet_storage, drive_id, pin, *, home=None) -> dict:
     """Bulk-import all cache artifacts for a drive whose pipeline matches `pin`.
     For a file with several content versions, the newest published_at wins.
     Returns {'imported','chunks','skipped','cache_hits'} where cache_hits ==
     imported (files served from cache). Subsystem C sums cache_hits across drives
-    for its onboarding summary (spec §C.2)."""
+    for its onboarding summary (spec §C.2).
+
+    A file whose carry-over import raises ImportDeferred or
+    store.ReflowOrphanError is logged, counted as skipped, and the loop moves
+    on; nothing was written for it. `home` is forwarded to _import_artifact."""
     summary = {"imported": 0, "chunks": 0, "skipped": 0, "cache_hits": 0}
     if not pin.is_pinned:
         return summary
@@ -655,8 +716,21 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
         prev = best.get(fid)
         if prev is None or (art.published_at or "") > prev[0]:
             best[fid] = (art.published_at or "", art)
+    from mcpbrain.store import ReflowOrphanError
     for _fid, (_pa, art) in best.items():
-        if _import_artifact(store, drive_id, art, pin, mime=_artifact_mime(art)):
+        # One file's refusal must not abort the rest of the drive's bootstrap
+        # (onboarding would otherwise re-fail on the same file forever).
+        try:
+            ok = _import_artifact(store, drive_id, art, pin, mime=_artifact_mime(art),
+                                  home=home)
+        except ImportDeferred as exc:
+            log.info("ingest_cache: bootstrap skipped %s: %s", art.file_id, exc)
+            ok = False
+        except ReflowOrphanError as exc:
+            log.error("ingest_cache: bootstrap skipped %s, reflow orphan guard: %s",
+                      art.file_id, exc)
+            ok = False
+        if ok:
             summary["imported"] += 1
             summary["chunks"] += len(art.chunks)
         else:
