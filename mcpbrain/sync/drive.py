@@ -1016,7 +1016,20 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     200) and touches no cursor, so no budget/checkpoint logic is needed —
     `bulk_section` (default `contextlib.nullcontext`) still brackets each
     file's extraction+upsert.
+
+    A file whose ingest-cache carry-over import raises ReflowOrphanError (a
+    wrong remap was rolled back) or ingest_cache.ImportDeferred (an in-flight
+    enrichment unit names the file) is logged and SKIPPED, not propagated:
+    this loop has no queue row to back off, so one such raise used to abort
+    the rest of the drive's backfill window and re-stall on the same file every
+    cycle. The delta path (handle_shared_drive_item) still propagates both, so
+    work_queue backs that one item off.
     """
+    from mcpbrain import ingest_cache
+    from mcpbrain.store import ReflowOrphanError
+    # getattr: ImportDeferred is added by the ingest-cache carry-over work.
+    import_deferred = getattr(ingest_cache, "ImportDeferred", None)
+
     if bulk_section is None:
         bulk_section = nullcontext
     # C5: owned by this whole backfill call, not per file — see folder_path's
@@ -1044,10 +1057,22 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
             if max_files is not None and processed >= max_files:
                 flush_skip_report(store, skip_report, source=f"drive:{drive_id}")
                 return {"processed": processed, "miss": miss}
-            did_process, file_miss = _cache_first_extract_one(
-                service, store, fleet_storage, drive_id, f, pin,
-                contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-                folder_cache=folder_cache, report=skip_report)
+            try:
+                did_process, file_miss = _cache_first_extract_one(
+                    service, store, fleet_storage, drive_id, f, pin,
+                    contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+                    folder_cache=folder_cache, report=skip_report)
+            except ReflowOrphanError as exc:
+                log.error("drive backfill %s: carry-over import of %s rolled back "
+                          "(orphaned provenance); skipping it: %s",
+                          drive_id, f.get("id"), exc)
+                continue
+            except Exception as exc:
+                if import_deferred is not None and isinstance(exc, import_deferred):
+                    log.info("drive backfill %s: %s deferred (%s); skipping it this round",
+                             drive_id, f.get("id"), exc)
+                    continue
+                raise
             if did_process:
                 processed += 1
             if file_miss:

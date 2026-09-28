@@ -255,3 +255,66 @@ def test_backfill_shared_drive_cache_hit_skips_extraction(tmp_path):
                                 fleet_storage=fs, pin=PIN)
     assert out["processed"] == 1 and out["miss"] == []          # imported from cache
     assert s.get_chunk("gdrive-FID-0")["text"] == "cached body"  # not the export bytes
+
+
+def _backfill_two_files_first_raises(tmp_path, monkeypatch, exc):
+    from mcpbrain.sync.drive import backfill_shared_drive
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    files = [{"id": f, "name": f, "mimeType": "text/plain",
+              "modifiedTime": "2026-05-01T10:00:00Z", "md5Checksum": f"m{f}"}
+             for f in ("BAD", "GOOD")]
+    svc = FakeDriveService(file_list=files,
+                           media={"BAD": b"bad body text", "GOOD": b"good body text"})
+    real = ingest_cache.try_import
+
+    def _try_import(store, fleet_storage, drive_id, file_id, *a, **k):
+        if file_id == "BAD":
+            raise exc
+        return real(store, fleet_storage, drive_id, file_id, *a, **k)
+    monkeypatch.setattr(ingest_cache, "try_import", _try_import)
+    out = backfill_shared_drive(svc, s, "D1", "2000-01-01T00:00:00",
+                                fleet_storage=fs, pin=PIN)
+    return s, out
+
+
+def test_backfill_shared_drive_skips_a_file_whose_import_orphans(tmp_path, monkeypatch, caplog):
+    """A ReflowOrphanError on one file must not abort the drive's backfill
+    window (it would re-stall on that file every cycle): skip it, go on."""
+    import logging
+    from mcpbrain.store import ReflowOrphanError
+    with caplog.at_level(logging.ERROR, logger="mcpbrain.sync.drive"):
+        s, out = _backfill_two_files_first_raises(
+            tmp_path, monkeypatch, ReflowOrphanError("orphan in gdrive-BAD-"))
+    assert out["processed"] == 1 and [m[0] for m in out["miss"]] == ["GOOD"]
+    assert s.get_chunk("gdrive-GOOD-0") is not None
+    assert s.get_chunk("gdrive-BAD-0") is None
+    assert any("BAD" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+
+def test_backfill_shared_drive_skips_a_deferred_import(tmp_path, monkeypatch):
+    import pytest
+    deferred = getattr(ingest_cache, "ImportDeferred", None)
+    if deferred is None:
+        pytest.skip("ingest_cache.ImportDeferred not present yet")
+    s, out = _backfill_two_files_first_raises(tmp_path, monkeypatch, deferred("unit in flight"))
+    assert out["processed"] == 1 and s.get_chunk("gdrive-GOOD-0") is not None
+
+
+def test_backfill_shared_drive_still_raises_other_errors(tmp_path, monkeypatch):
+    import pytest
+    with pytest.raises(KeyError):
+        _backfill_two_files_first_raises(tmp_path, monkeypatch, KeyError("boom"))
+
+
+def test_handle_shared_drive_item_still_propagates_orphan_error(tmp_path, monkeypatch):
+    import pytest
+    from mcpbrain.store import ReflowOrphanError
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    fm = _gdoc_change("FID")["file"]
+    svc = FakeDriveService(files_by_id={"FID": fm}, exports={"FID": b"body"})
+    monkeypatch.setattr(ingest_cache, "try_import",
+                        lambda *a, **k: (_ for _ in ()).throw(ReflowOrphanError("x")))
+    with pytest.raises(ReflowOrphanError):
+        handle_shared_drive_item(svc, s, {"ref_id": "FID", "version": "", "event": "upsert",
+                                          "modified_at": "2026-05-01T10:00:00Z"},
+                                 fleet_storage=fs, pin=PIN, drive_id="D1")
