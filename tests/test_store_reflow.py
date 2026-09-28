@@ -469,3 +469,33 @@ def test_malformed_covers_never_fails_the_upsert(tmp_path, bad):
         assert db.execute("SELECT covers FROM enrich_payloads WHERE file_id='F'"
                           ).fetchone()[0] == "[]"
     assert not s.enrich_payload_covers_file("F")
+
+
+@pytest.mark.parametrize("bad", ["garbage", "null", "5", "{}", '["gdrive-F-0", 7]'])
+def test_malformed_covers_withholds_the_payload_on_the_publish_path(tmp_path, bad):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3, covers=["gdrive-F-0", "gdrive-F-1"])
+    with s._connect(write=True) as db:
+        db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id='F'", (bad,))
+    assert s.enrich_payload_covers_file("F") is False
+
+
+def test_one_files_publish_failure_does_not_abort_the_others(tmp_path):
+    """publish_pending_shared_drive_artifacts isolates each file: a raise for
+    one file is logged and counted, and the next file still publishes."""
+    from mcpbrain.sync import publish_pending_shared_drive_artifacts
+    s = _store(tmp_path)
+    for fid in ("A", "B"):
+        s.record_pending_publish("D1", fid, "h")
+
+    class _Cache:
+        def publish_file(self, store, fs, drive_id, file_id, *a, **k):
+            if file_id == "A":
+                raise ValueError("malformed payload")
+            return True
+
+    out = publish_pending_shared_drive_artifacts(
+        s, _Cache(), drives_fs={"D1": object()}, pin=None, published_by="t")
+    assert out == {"D1": 1}
+    assert s.pending_publishes("D1") == [("A", "h")]   # A stays pending, B cleared

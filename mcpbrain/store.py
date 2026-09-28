@@ -4687,7 +4687,10 @@ class Store:
     def enrich_payload_covers_file(self, file_id: str) -> bool:
         """True when the file's payload was made from every chunk of the file
         that is not cold (a NULL `covers` is a whole-file payload). False when
-        there is no payload."""
+        there is no payload, and False -- never a raise -- when `covers` is
+        malformed (unparseable, not a list, or holding non-strings): fail
+        closed, the payload is withheld and the file publishes without it."""
+        import logging
         with self._connect() as db:
             r = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
                            (file_id,)).fetchone()
@@ -4695,10 +4698,18 @@ class Store:
                 return False
             if r["covers"] is None:
                 return True
+            try:
+                covers = json.loads(r["covers"])
+            except (TypeError, ValueError):
+                covers = None
+            if not isinstance(covers, list) or not all(isinstance(x, str) for x in covers):
+                logging.getLogger(__name__).debug(
+                    "enrich payload %s: malformed covers %r -- withheld", file_id, r["covers"])
+                return False
             need = {x[0] for x in db.execute(
                 f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=? "
                 "AND COALESCE(enrich_state,'')!='cold'", (file_id,))}
-        return need <= set(json.loads(r["covers"]))
+        return need <= set(covers)
 
     def get_enrich_payload(self, file_id: str) -> dict | None:
         with self._connect() as db:
