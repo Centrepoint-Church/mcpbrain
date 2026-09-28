@@ -94,6 +94,37 @@ def _artifact_path(file_id: str, content_hash: str, pin, mime: str = "") -> str:
             f"{artifact_filename(file_id, content_hash, pin.embed_model, pin.dim, effective_chunker_version(pin, mime))}")
 
 
+def _current_pipeline_fingerprints(pin) -> set[str]:
+    """Every pf8 this install currently reads as 'not stale': the base
+    (unsuffixed) fingerprint plus every block-extracted MIME's
+    +x<N>-suffixed one (sync.blocks.EXTRACTION_VERSIONS). Several MIMEs can
+    share one pf8 when their extraction_version numbers collide (they all do
+    today, at 1) — a set is enough here since GC/bootstrap only need to know
+    whether a listed artifact's fingerprint is CURRENT at all, not which MIME
+    produced it (see _artifact_mime for that).
+
+    A pf8 missing from this set is either a different embed_model/dim/
+    chunker_version pipeline (coexists untouched — spec A2) or a stale
+    pre-extraction-fidelity block-MIME artifact (exactly what the +x<N>
+    suffix exists to flush out of GC/bootstrap)."""
+    from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
+    out = {_pf8(pin)}
+    out.update(_pf8(pin, mime) for mime in EXTRACTION_VERSIONS)
+    return out
+
+
+def _artifact_mime(art: CacheArtifact) -> str:
+    """Best-effort recovery of the MIME an artifact's chunks were extracted
+    from, straight from the chunk metadata publish_file stamped (drive.py
+    stamps `metadata["mime_type"]` on every Drive-sourced chunk, independent
+    of this module). Read from the artifact itself rather than reverse-
+    mapping its pf8 through EXTRACTION_VERSIONS, since a shared pf8 can't
+    always be traced back to one specific MIME."""
+    if not art.chunks:
+        return ""
+    return (art.chunks[0].metadata or {}).get("mime_type", "")
+
+
 def _parse_name(name: str):
     """`<file_id>.<hash12>.<pf8>.mbc.gz` -> (file_id, hash12, pf8), else None.
     Drive file ids never contain '.', so an rsplit is unambiguous."""
@@ -444,14 +475,19 @@ def gc_superseded(fleet_storage, drive_id, file_id, keep_content_hash, pin) -> i
     the whole cache folder once per call; a publish loop over many files should
     prefer gc_superseded_batch to avoid an O(n^2) Drive-API listing cost."""
     keep12 = keep_content_hash[:12]
-    cur_pf8 = _pf8(pin)
+    cur_pf8s = _current_pipeline_fingerprints(pin)
     removed = 0
     for path, (fid, h12, pf8) in _cache_names(fleet_storage):
         if fid != file_id:
             continue
         # Only GC same-pipeline artifacts with stale content hashes;
-        # leave artifacts from other pipelines alone (they coexist).
-        if pf8 == cur_pf8 and h12 != keep12:
+        # leave artifacts from other pipelines alone (they coexist). "Same
+        # pipeline" includes every block-MIME's +x<N>-suffixed fingerprint,
+        # not just the unsuffixed base — otherwise a superseded PDF/DOCX/
+        # PPTX/RTF/Google-Doc artifact would never be collected (spec A2
+        # says other pipelines coexist; a stale version of THIS pipeline
+        # must not).
+        if pf8 in cur_pf8s and h12 != keep12:
             if _safe_delete(fleet_storage, path):
                 removed += 1
     return removed
@@ -468,13 +504,13 @@ def gc_superseded_batch(fleet_storage, drive_id, keep_map: dict[str, str], pin) 
     the batch. Returns the total count removed across the whole batch.
     """
     keep12_by_fid = {fid: h[:12] for fid, h in keep_map.items()}
-    cur_pf8 = _pf8(pin)
+    cur_pf8s = _current_pipeline_fingerprints(pin)
     removed = 0
     for path, (fid, h12, pf8) in _cache_names(fleet_storage):
         keep12 = keep12_by_fid.get(fid)
         if keep12 is None:
             continue
-        if pf8 == cur_pf8 and h12 != keep12:
+        if pf8 in cur_pf8s and h12 != keep12:
             if _safe_delete(fleet_storage, path):
                 removed += 1
     return removed
@@ -514,10 +550,17 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
     summary = {"imported": 0, "chunks": 0, "skipped": 0, "cache_hits": 0}
     if not pin.is_pinned:
         return summary
-    cur_pf8 = _pf8(pin)
+    cur_pf8s = _current_pipeline_fingerprints(pin)
     best: dict[str, tuple[str, CacheArtifact]] = {}   # file_id -> (published_at, art)
     for path, (fid, _h12, pf8) in _cache_names(fleet_storage):
-        if pf8 != cur_pf8:
+        # A pf8 outside the current set is a genuinely different pipeline
+        # (embed_model/dim/chunker_version) and coexists untouched — never
+        # counted as skipped. A pf8 IN the set but for a block MIME whose
+        # artifact turns out to be a stale pre-suffix one is handled below,
+        # by _import_artifact's own version check (mime derived from the
+        # artifact), and DOES count as skipped: it was a real candidate that
+        # was correctly rejected, not silently filtered out here.
+        if pf8 not in cur_pf8s:
             continue
         art = _load(fleet_storage, path)
         if art is None:
@@ -526,7 +569,7 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin) -> dict:
         if prev is None or (art.published_at or "") > prev[0]:
             best[fid] = (art.published_at or "", art)
     for _fid, (_pa, art) in best.items():
-        if _import_artifact(store, drive_id, art, pin):
+        if _import_artifact(store, drive_id, art, pin, mime=_artifact_mime(art)):
             summary["imported"] += 1
             summary["chunks"] += len(art.chunks)
         else:
