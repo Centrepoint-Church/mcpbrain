@@ -185,6 +185,26 @@ def _table_pieces(t: TableBlock, trail: str, max_chars: int) -> list[_Piece]:
 
     for r in body:
         sent = tabular._fit_row_sentence(header, r, budget)
+        if len(sent) > budget:
+            # _fit_row_sentence only shrinks CELL VALUES (to a 5-char floor);
+            # it cannot do anything about an oversize HEADER LABEL or the
+            # "H: v; " per-field overhead, so the row sentence itself can
+            # still be longer than the whole chunk budget. Flush whatever is
+            # already batched, then bound this row the same way an oversize
+            # single-row line is bounded: split it directly, deriving each
+            # piece's spans from what THAT piece actually contains, and
+            # re-emitting (via _lost_cell_pieces, below) any cell text that
+            # ends up in none of them.
+            flush_rows()
+            cur, cur_cells = [], []
+            row_cells = [c for c in r if c]
+            row_parts = split_long_paragraph(sent, max_chars, overlap=0)
+            row_pieces = [_Piece(p, [c for c in row_cells if c in p], "table", trail)
+                          for p in row_parts]
+            claimed = {c for p in row_pieces for c in p.spans}
+            dropped.extend(c for c in row_cells if c not in claimed)
+            pieces.extend(row_pieces)
+            continue
         if cur and len("\n".join(cur + [sent])) > budget:
             flush_rows()
             cur, cur_cells = [], []

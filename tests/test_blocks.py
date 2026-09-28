@@ -89,3 +89,34 @@ def test_table_render_stays_within_budget_and_spans_are_substrings():
             assert len(r.text) <= max_chars
             for span in r.spans:
                 assert span in r.text
+
+
+def test_table_row_with_long_header_label_stays_within_budget():
+    """Fix round 2: _fit_row_sentence shrinks only the CELL VALUE (to a
+    5-char floor), never the header LABEL, so one oversize header alone can
+    make a row's rendered sentence longer than the whole chunk budget --
+    reproduced at the production budget (1800) as well as a tight one (200)."""
+    for max_chars in (1800, 200):
+        t = TableBlock([["Header " * 300, "h2"], ["v1", "v2"]])
+        out = render([t], max_chars=max_chars)
+        assert out, "expected at least one chunk"
+        for r in out:
+            assert len(r.text) <= max_chars
+            for span in r.spans:
+                assert span in r.text
+
+
+def test_table_row_with_many_fields_stays_within_budget():
+    """Fix round 2: the per-field 'H: v; ' overhead, multiplied across many
+    columns, can exceed the chunk budget even when every individual header
+    and cell is short on its own."""
+    header = [f"Column Header Number {i:03d} With Extra Padding Text" for i in range(45)]
+    row = [f"v{i}" for i in range(45)]
+    for max_chars in (1800, 200):
+        t = TableBlock([header, row])
+        out = render([t], max_chars=max_chars)
+        assert out, "expected at least one chunk"
+        for r in out:
+            assert len(r.text) <= max_chars
+            for span in r.spans:
+                assert span in r.text
