@@ -374,3 +374,83 @@ def test_uncovered_row_gets_fresh_defaults_not_the_positional_old_chunks(tmp_pat
             "SELECT doc_id, salience, memory_tier, memory_type, enriched FROM chunks")}
     assert rows["gdrive-F-0"] == (0.9, "core", "semantic", 1)       # covered: carried
     assert rows["gdrive-F-1"] == (0.0, "", "episodic", 0)           # uncovered: fresh
+
+
+# -- hardening H4: the ordinary path never leaves a stale payload looking whole -
+
+def _covers(s, fid="F"):
+    import json
+    with s._connect() as db:
+        r = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?", (fid,)).fetchone()
+    return None if r is None or r[0] is None else json.loads(r[0])
+
+
+def _meta(i, fid="F"):
+    return {"source_type": "gdrive", "file_id": fid, "chunk_index": i, "chunk_total": 2,
+            "mime_type": "application/pdf"}
+
+
+def test_content_change_drops_the_chunk_from_an_explicit_covers(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3, covers=["gdrive-F-0", "gdrive-F-1"])
+    assert s.enrich_payload_covers_file("F")
+    s.upsert_chunk("gdrive-F-1", "changed text", "h1-new", _meta(1))
+    assert _covers(s) == ["gdrive-F-0"]
+    # A mark_enriched that bypasses drain (give-up, noise filter, trivial
+    # short-circuit) must not make the stale payload look whole again.
+    s.mark_enriched(["gdrive-F-1"])
+    assert not s.enrich_payload_covers_file("F")
+
+
+def test_content_change_materialises_a_whole_file_null_covers(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3)            # NULL covers = whole file
+    s.upsert_chunk("gdrive-F-1", "changed text", "h1-new", _meta(1))
+    assert _covers(s) == ["gdrive-F-0"]
+    s.mark_enriched(["gdrive-F-1"])
+    assert not s.enrich_payload_covers_file("F")
+
+
+def test_a_new_chunk_is_never_inside_a_whole_file_null_covers(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3)
+    s.upsert_chunk("gdrive-F-2", "a third chunk", "h2", _meta(2))
+    assert _covers(s) == ["gdrive-F-0", "gdrive-F-1"]
+    assert not s.enrich_payload_covers_file("F")
+
+
+def test_unchanged_upsert_leaves_covers_alone(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3)
+    assert s.upsert_chunk("gdrive-F-1", "delta epsilon", "h1", _meta(1)) is False
+    assert _covers(s) is None and s.enrich_payload_covers_file("F")
+
+
+def _legacy(s, rows):
+    with s._connect(write=True) as db:
+        db.execute("CREATE TABLE enrich_payloads_legacy(doc_id TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, logic_version INTEGER DEFAULT 0, "
+                   "at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        db.executemany("INSERT INTO enrich_payloads_legacy(doc_id,payload,logic_version) "
+                       "VALUES(?,?,?)", [(d, "{}", 3) for d in rows])
+
+
+def test_migrated_legacy_payload_covers_nothing_unless_provably_whole(tmp_path):
+    s = _store(tmp_path)
+    _seed(s, "F")
+    _seed(s, "G")
+    _seed(s, "H")
+    s.upsert_chunk("gdrive-H-1", "changed since the payload", "h1-new", _meta(1, "H"))
+    _legacy(s, ["gdrive-F-0",                      # F: only one of two chunks
+                "gdrive-G-0", "gdrive-G-1",        # G: every hot chunk, all enriched
+                "gdrive-H-0", "gdrive-H-1"])       # H: chunk 1 changed (enriched=0)
+    while not s.migrate_enrich_payloads_batch()["done"]:
+        pass
+    assert _covers(s, "F") == [] and not s.enrich_payload_covers_file("F")
+    assert _covers(s, "G") == ["gdrive-G-0", "gdrive-G-1"]
+    assert s.enrich_payload_covers_file("G")
+    assert _covers(s, "H") == [] and not s.enrich_payload_covers_file("H")

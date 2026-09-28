@@ -2229,6 +2229,7 @@ class Store:
             row = cur.fetchone()
             if row and row["content_hash"] == content_hash:
                 return False  # idempotent: unchanged
+            self._uncover_changed_chunk(db, doc_id)
             if row:
                 db.execute(
                     "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=0,enriched=0 WHERE doc_id=?",
@@ -2240,6 +2241,35 @@ class Store:
                     (doc_id, text, content_hash, json.dumps(metadata)),
                 )
             return True
+
+    @staticmethod
+    def _uncover_changed_chunk(db, doc_id: str) -> None:
+        """A Drive chunk's text is about to change (or a new chunk appear):
+        take it out of its file's enrich payload `covers`, in the caller's
+        transaction. The payload was not made from the new text, and a later
+        mark_enriched that bypasses drain (drain._give_up_or_bump, the prepare
+        noise filter, the trivial short-circuit) would otherwise make a stale
+        payload look whole-file to enrich_payload_covers_file. A NULL (legacy
+        whole-file) covers is materialised as the file's other non-cold
+        chunks. One primary-key lookup; nothing for a non-Drive doc_id."""
+        fid = _file_key_from_doc_id(doc_id)
+        if fid is None:
+            return
+        prow = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
+                          (fid,)).fetchone()
+        if prow is None:
+            return
+        if prow[0] is None:
+            covers = {x[0] for x in db.execute(
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=? "
+                "AND COALESCE(enrich_state,'')!='cold'", (fid,))}
+        else:
+            covers = set(json.loads(prow[0]))
+            if doc_id not in covers:
+                return
+        covers.discard(doc_id)
+        db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
+                   (json.dumps(sorted(covers)), fid))
 
     def mark_all_unembedded(self) -> None:
         with self._connect(write=True) as db:
@@ -4699,12 +4729,14 @@ class Store:
 
             keeper: dict[str, str] = {}
             keeper_idx: dict[str, int] = {}
+            legacy_ids: dict[str, set[str]] = {}
             unkeyed: list[str] = []
             for d in doc_ids:
                 fid = _file_key_from_doc_id(d)
                 if fid is None:
                     unkeyed.append(d)
                     continue
+                legacy_ids.setdefault(fid, set()).add(d)
                 idx = _chunk_index_from_doc_id(d)
                 if fid not in keeper or idx > keeper_idx[fid]:
                     keeper[fid] = d
@@ -4720,9 +4752,13 @@ class Store:
                     continue
                 # INSERT OR IGNORE, not REPLACE: a row written since the rename
                 # is current and a legacy row for the same file is stale.
+                # covers is explicit, never NULL: a legacy payload is trusted
+                # as whole-file only when it provably is (below), else it
+                # covers nothing and is withheld until drain re-covers it.
                 db.execute("INSERT OR IGNORE INTO enrich_payloads"
-                           "(file_id, payload, logic_version) VALUES(?,?,?)",
-                           (fid, row["payload"], row["logic_version"]))
+                           "(file_id, payload, logic_version, covers) VALUES(?,?,?,?)",
+                           (fid, row["payload"], row["logic_version"],
+                            json.dumps(self._legacy_payload_covers(db, fid, legacy_ids[fid]))))
                 migrated += 1
 
             done_keys = {fid for fid, _ in batch}
@@ -4737,6 +4773,20 @@ class Store:
                 db.execute("DROP TABLE enrich_payloads_legacy")
             return {"migrated": migrated, "deleted": len(drop),
                     "done": remaining == 0}
+
+    @staticmethod
+    def _legacy_payload_covers(db, fid: str, legacy: set[str]) -> list[str]:
+        """The `covers` a migrated legacy payload gets. The legacy table wrote
+        one row per chunk the extraction came from, so it is PROVABLY whole-file
+        only when every current non-cold chunk of the file has a legacy row and
+        is still enriched (an unenriched chunk changed since, or was never
+        extracted). Then covers is that explicit list; otherwise []."""
+        need = [(x[0], x[1]) for x in db.execute(
+            f"SELECT doc_id, enriched FROM chunks WHERE {_meta_extract('$.file_id')}=? "
+            "AND COALESCE(enrich_state,'')!='cold'", (fid,))]
+        if need and all(d in legacy and e for d, e in need):
+            return sorted(d for d, _e in need)
+        return []
 
     def get_unified_action(self, action_id: int) -> dict | None:
         with self._connect() as db:
