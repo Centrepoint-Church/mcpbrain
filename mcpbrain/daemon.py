@@ -185,6 +185,13 @@ STALL_S = 1800.0
 WATCHDOG_MAX_EXITS = 3
 WATCHDOG_WINDOW_S = 6 * 3600.0
 
+# Reflow seed (extraction-fidelity, 2026-09-24): the sync_queue window the
+# seed cadence tops up to, and how fresh a backup must be before it seeds at
+# all (a reflow rewrites chunk rows -- it must never run further ahead of a
+# recovery point than this).
+REFLOW_WINDOW = 200
+REFLOW_BACKUP_MAX_AGE_S = 86400.0
+
 # Brief bounded wait for the single-writer lock on daemon startup, so a
 # successor spawned by the watchdog (unsupervised Windows) does not fail
 # outright while its slow-exiting parent still holds the lockfile.
@@ -411,6 +418,11 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
                 "_last_org_import", "_run_org_import"),
     CadencePass("org_curate", "_org_curate_interval_s",
                 "_last_org_curate", "_run_org_curate"),
+    # Extraction-fidelity (2026-09-24): tops the reflow sync_queue up to
+    # REFLOW_WINDOW. Gated on the kill switch, the halt flag, and a recent
+    # backup -- see _run_reflow_seed.
+    CadencePass("reflow_seed", "_reflow_seed_interval_s",
+                "_last_reflow_seed", "_run_reflow_seed"),
 )
 
 
@@ -1042,6 +1054,10 @@ class Daemon:
         # in the cadences config to disable.
         self._action_hygiene_interval_s: float | None = None
         self._last_action_hygiene = None
+        # Extraction-fidelity reflow seed: default 3600s via _CADENCE_DEFAULTS;
+        # set reflow_seed_interval_s: 0 in the cadences config to disable.
+        self._reflow_seed_interval_s: float | None = None
+        self._last_reflow_seed = None
         # Drain the legacy doc_id-keyed enrich_payloads table store.init()
         # renames aside. Hourly and hardcoded (not config-driven): this is a
         # one-time-ish drain, not a tunable maintenance policy, and it
@@ -1448,6 +1464,15 @@ class Daemon:
         # a human/dashboard, just not a watchdog signal.
         bulk_pass_active = bool(getattr(self, "_bulk_pass_active", None)
                                  and self._bulk_pass_active.is_set())
+        # Extraction-fidelity reflow (2026-09-24): progress + halt visibility.
+        # Best-effort -- status must never raise.
+        reflow = None
+        try:
+            reflow = {**self._store.reflow_stats(),
+                      "halted": self._store.get_cursor("reflow:halted") or None,
+                      "integrity": self._store.get_cursor("reflow:integrity_checked") or None}
+        except Exception as exc:  # noqa: BLE001
+            log.debug("status: reflow block degraded: %s", exc)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -1471,6 +1496,7 @@ class Daemon:
             "watchdog_limit_reached":
                 watchdog_exits >= getattr(self, "_watchdog_max_exits", WATCHDOG_MAX_EXITS),
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
+            "reflow": reflow,
         }
 
     def config_profile(self) -> dict:
@@ -1873,6 +1899,7 @@ class Daemon:
             self._org_import_interval_s = cadences["org_import_interval_s"]
             self._org_curate_interval_s = cadences["org_curate_interval_s"]
             self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
+            self._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -3123,6 +3150,64 @@ class Daemon:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
+
+    def _run_reflow_seed(self):
+        """Top the reflow queue up to REFLOW_WINDOW (spec §4). Gated on the
+        kill switch, the halt flag and a backup that succeeded in the last 24h.
+
+        A reflow rewrites chunk rows in place (carry-over + re-enrich), so it
+        must never run further ahead of a recovery point than one backup
+        interval -- hence the freshness gate, checked every time this fires
+        rather than once at startup, so a backup that later goes stale halts
+        seeding without anyone having to notice and flip a switch by hand.
+        """
+        if not self._is_due("_reflow_seed_interval_s", "_last_reflow_seed"):
+            return None
+        home = str(app_dir())
+        self._last_reflow_seed = self._clock()
+        if not config.reflow_enabled(home):
+            return {"reflow_seed": "disabled"}
+        if self._store.get_cursor("reflow:halted"):
+            return {"reflow_seed": "halted"}
+        from mcpbrain.probes import _read_backup_state
+        st = _read_backup_state(home) or {}
+        try:
+            fresh = time.time() - float(st.get("last_success") or 0) <= REFLOW_BACKUP_MAX_AGE_S
+        except (TypeError, ValueError):
+            fresh = False
+        if not fresh:
+            return {"reflow_seed": "no_recent_backup"}
+        try:
+            room = REFLOW_WINDOW - self._store.reflow_stats()["queued"]
+            if room <= 0:
+                return {"reflow_seed": "window_full", "enqueued": 0}
+            by_src: dict[str, list[dict]] = {}
+            for src, owner in self._store.reflow_candidates(room):
+                by_src.setdefault(src, []).append(
+                    {"ref_id": owner, "event": "reflow", "modified_at": "1970-01-01T00:00:00"})
+            n = sum(self._store.enqueue_items(items, source=src) for src, items in by_src.items())
+            if n == 0 and self._store.reflow_stats()["queued"] == 0:
+                self._reflow_backlog_empty()
+            return {"reflow_seed": "ok", "enqueued": n}
+        except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
+            log.warning("reflow_seed failed: %s", exc, exc_info=True)
+            return {"reflow_seed": False, "error": str(exc)}
+
+    def _reflow_backlog_empty(self):
+        """Once per completion: run integrity_check and record the result.
+
+        Cheap idempotence guard (`reflow:integrity_checked`) so a store that
+        stays empty (nothing left to reflow) doesn't re-run a ~19s full-store
+        check on every hourly tick forever.
+        """
+        if self._store.get_cursor("reflow:integrity_checked"):
+            return
+        from mcpbrain.doctor import _run_integrity_check
+        problems = _run_integrity_check(str(app_dir()))
+        self._store.set_cursor("reflow:integrity_checked",
+                               "ok" if not problems else f"{len(problems)} problem(s)")
+        if problems:
+            log.error("reflow complete but integrity_check reported %d problem(s)", len(problems))
 
     def _run_enrich_payload_migration(self) -> None:
         """Drain one batch of the legacy doc_id-keyed enrich_payloads table.
@@ -4447,6 +4532,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "org_import_interval_s":          86400.0,   # Phase 0 stub: daily snapshot import
     "org_curate_interval_s":          86400.0,   # Phase 0 stub: daily curator adjudication
     "ocr_setup_interval_s":           86400.0,   # once-ever OCR binary install (marker-gated)
+    "reflow_seed_interval_s":         3600.0,    # extraction-fidelity: hourly reflow queue top-up
 }
 
 _CADENCE_KEYS = (
@@ -4476,6 +4562,7 @@ _CADENCE_KEYS = (
     "org_import_interval_s",
     "org_curate_interval_s",
     "ocr_setup_interval_s",
+    "reflow_seed_interval_s",
 )
 
 
@@ -4616,6 +4703,7 @@ def main(argv=None) -> None:
     daemon._org_import_interval_s = cadences["org_import_interval_s"]
     daemon._org_curate_interval_s = cadences["org_curate_interval_s"]
     daemon._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
+    daemon._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
     # Task 7 tuning knobs: not constructor params either, wired the same way
     # as the cadences just above (see _tuning_from_config / Daemon.__init__).
     daemon._cycle_budget_s = tuning["cycle_budget_s"]

@@ -513,6 +513,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # foreign_key_check above is structurally blind to a damaged b-tree, which is
     # how the 2026-09-10 sync_cursors corruption stayed invisible for hours.
     lines.append(integrity_line(home))
+    lines.append(reflow_line(store))
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
@@ -677,6 +678,25 @@ def integrity_line(home, *, check=None) -> str:
     return (f"❌ {'Integrity':<16} {len(problems)} problem(s): {shown}{more} — "
             f"content may still be intact; check per-table counts before restoring, "
             f"and see CLAUDE.md's store-corruption section")
+
+
+def reflow_line(store) -> str:
+    """One doctor line for the background reflow (extraction-fidelity,
+    2026-09-24): idle/progress/halted. A halt means apply_reflow found a
+    dangling reference and rolled back -- the operator must investigate and
+    clear it with `bin/reflow.py resume --yes` before the seed resumes."""
+    try:
+        st = store.reflow_stats()
+        halted = store.get_cursor("reflow:halted")
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never be fatal
+        return f"➖ {'Reflow':<16} skipped ({exc})"
+    if halted:
+        return (f"❌ {'Reflow':<16} HALTED: {halted} — investigate, then "
+                f"`python bin/reflow.py resume --yes`")
+    if st["queued"]:
+        return (f"⏳ {'Reflow':<16} {st['queued']} queued, {st['owners_done']} done "
+                f"({st['chunks_carried']} chunks carried, {st['chunks_reenrich']} re-enrich)")
+    return f"✅ {'Reflow':<16} idle ({st['owners_done']} owners reflowed)"
 
 
 def version_drift_line(home, installed: str | None = None) -> str | None:

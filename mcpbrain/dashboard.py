@@ -483,6 +483,7 @@ def stats(store, home, status: dict) -> dict:
             "enrich_enabled": bool(status.get("enrich_enabled")),
             "open_findings": int(status.get("open_findings") or 0),
         },
+        "reflow": status.get("reflow"),
     }
 
 
