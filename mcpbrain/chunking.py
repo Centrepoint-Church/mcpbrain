@@ -37,6 +37,11 @@ CHUNKER_VERSION = 3
 # deliberately separate from CHUNKER_VERSION, which gates the table pipeline.
 SPLIT_VERSION = 1
 
+# split_long_paragraph's sentence-boundary fallback: split after a
+# terminal .!? followed by whitespace, keeping the punctuation with the
+# preceding sentence.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+
 # The version floor below which EVERY content type is considered stale --
 # these chunks predate the 2026-07-28 headroom fix (1 -> 2) and have needed
 # re-chunking since before this release, regardless of source or subtype.
@@ -380,11 +385,62 @@ def prose_max_chars(max_tokens: int = 500) -> int:
     return max_chars
 
 
+def _units(para: str, max_chars: int) -> list[tuple[str, str]]:
+    """(unit, separator-before-next) pairs, each unit <= max_chars: lines first,
+    then sentences inside an over-long line, then words inside an over-long
+    sentence. The separator is what joins this unit to the following one."""
+    out: list[tuple[str, str]] = []
+    for line in para.split("\n"):
+        if len(line) <= max_chars:
+            out.append((line, "\n"))
+            continue
+        sentences = _SENTENCE_BREAK.split(line)
+        for s in sentences:
+            if len(s) <= max_chars:
+                out.append((s, " "))
+            else:
+                out.extend((w, " ") for w in _split_paragraph(s, max_chars, 0))
+        if out:
+            out[-1] = (out[-1][0], "\n")
+    return [(u, sep) for u, sep in out if u != ""] or [("", "\n")]
+
+
 def split_long_paragraph(para: str, max_chars: int, overlap: int = 50) -> list[str]:
-    """Split ONE paragraph larger than max_chars without collapsing newlines:
-    lines -> sentences -> words, overlap as whole trailing units. CONTRACT
-    (extraction-fidelity Stage 0); implemented by unit 1a."""
-    raise NotImplementedError("split_long_paragraph: unit 1a")
+    """Split ONE paragraph larger than max_chars without collapsing newlines.
+
+    Packs line/sentence/word units (see _units) greedily. When a piece is
+    flushed, the next one is seeded with whole trailing units of the flushed
+    piece totalling at most `overlap` words — whole units only, so a seed
+    never starts mid-line — and only when seed + next unit still fit.
+    """
+    units = _units(para, max_chars)
+    pieces: list[str] = []
+    cur: list[tuple[str, str]] = []
+
+    def text_of(us):
+        return "".join(u + (sep if i < len(us) - 1 else "")
+                       for i, (u, sep) in enumerate(us))
+
+    for unit in units:
+        trial = cur + [unit]
+        if not cur or len(text_of(trial)) <= max_chars:
+            cur = trial
+            continue
+        pieces.append(text_of(cur))
+        seed: list[tuple[str, str]] = []
+        words = 0
+        for u in reversed(cur):
+            words += len(u[0].split())
+            if words > overlap:
+                break
+            seed.insert(0, u)
+        if seed and len(text_of(seed + [unit])) <= max_chars and seed != cur:
+            cur = seed + [unit]
+        else:
+            cur = [unit]
+    if cur:
+        pieces.append(text_of(cur))
+    return [p for p in pieces if p.strip()]
 
 
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
@@ -394,6 +450,10 @@ def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]
     and in fact at most `max_tokens * 4 - _PREFIX_HEADROOM_CHARS` whenever that
     is a meaningful reduction — see _PREFIX_HEADROOM_CHARS. The signature is
     locked, so the reservation happens inside.
+
+    An over-budget paragraph is split by `split_long_paragraph` (lines ->
+    sentences -> words); newlines are never collapsed. Output is byte-identical
+    to the pre-SPLIT_VERSION splitter whenever no paragraph exceeds the budget.
     """
     max_chars = max_tokens * 4
     # Not applied when the whole requested budget is comparable to the headroom:
@@ -411,7 +471,7 @@ def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]
             if current:
                 chunks.append(current)
                 current = ""
-            pieces = _split_paragraph(para, max_chars, overlap)
+            pieces = split_long_paragraph(para, max_chars, overlap)
             chunks.extend(pieces[:-1])
             current = pieces[-1] if pieces else ""
         else:
