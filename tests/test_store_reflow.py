@@ -547,3 +547,35 @@ def test_one_files_publish_failure_does_not_abort_the_others(tmp_path):
         s, _Cache(), drives_fs={"D1": object()}, pin=None, published_by="t")
     assert out == {"D1": 1}
     assert s.pending_publishes("D1") == [("A", "h")]   # A stays pending, B cleared
+
+
+def test_dashless_narrow_prefix_never_takes_a_sibling(tmp_path):
+    """A caller prefix without its trailing dash must not match a sibling whose
+    id merely continues the digits: `gmail-M-att-2` is attachment 2, never
+    attachment 20."""
+    s = _store(tmp_path)
+    md = {"source_type": "gmail", "message_id": "M"}
+    s.upsert_chunk("gmail-M-att-2-0", "attachment two", "a", md)
+    s.upsert_chunk("gmail-M-att-20-0", "attachment twenty", "b", md)
+    assert [r["doc_id"] for r in s.owner_chunks(["gmail-M-att-2"])] == ["gmail-M-att-2-0"]
+    assert {r["doc_id"] for r in s.owner_chunks(["gmail-M-att-"])} == {
+        "gmail-M-att-2-0", "gmail-M-att-20-0"}
+
+
+def test_a_failed_halt_write_never_masks_the_orphan_error(tmp_path, monkeypatch):
+    """If recording the halt cursor itself fails, apply_reflow must still raise
+    ReflowOrphanError (the handler catches exactly that), not the cursor error."""
+    s = _store(tmp_path)
+    _seed(s)
+    _all_refs(s, "gdrive-F-1")
+    with s._connect(write=True) as db:
+        db.execute("CREATE TRIGGER late_ref AFTER INSERT ON reflow_map BEGIN "
+                   "INSERT INTO recall_feedback(doc_id, event_type) "
+                   "VALUES('gdrive-F-1', 'late'); END")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(s, "set_cursor", boom)
+    p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
+    with pytest.raises(ReflowOrphanError):
+        s.apply_reflow("F", "drive", p, [V])

@@ -741,8 +741,12 @@ def _owner_suffix_ok(prefix: str, rest: str) -> bool:
             if prefix.endswith("-"):
                 return re.fullmatch(r"\d+", rest) is not None
             return rx.fullmatch(rest) is not None
-        if not prefix.endswith("-") and rest.startswith("-"):
-            rest = rest[1:]                 # "gdrive-<fid>" given without its dash
+        if not prefix.endswith("-"):
+            # "gdrive-<fid>" / "gmail-<mid>-att-2" given without its dash: the
+            # next character must BE the dash, or "att-2" would take "att-20".
+            if not rest.startswith("-"):
+                return False
+            rest = rest[1:]
         return rx.fullmatch(rest) is not None
     return True
 
@@ -3723,8 +3727,16 @@ class Store:
             # the ingest-cache import) halts the reflow cadence: the
             # transaction has already rolled back, and this separate small
             # write is what doctor and `bin/reflow.py resume` act on.
-            self.set_cursor(REFLOW_HALT_CURSOR, str(exc)[:500])
-            raise
+            try:
+                self.set_cursor(REFLOW_HALT_CURSOR, str(exc)[:500])
+            except Exception as cur_exc:  # noqa: BLE001 — never mask the orphan error
+                import logging
+                # Raising the cursor error instead would hide the orphan from
+                # the handler (it catches ReflowOrphanError) and leave the
+                # cadence un-halted; the transaction is rolled back either way.
+                logging.getLogger(__name__).error(
+                    "reflow %s: could not record the halt cursor: %s", owner, cur_exc)
+            raise exc
 
     def _apply_reflow_txn(self, owner, source, plan, vectors, rows, new_ids, old_ids,
                           now, counts, home) -> dict:
