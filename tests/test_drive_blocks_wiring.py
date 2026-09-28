@@ -216,8 +216,11 @@ def test_handle_drive_item_threads_blocks_through(tmp_path):
     assert rows[0]["metadata"]["extraction_version"] == 1
 
 
-def test_cache_first_extract_passes_mime_to_both_try_imports(monkeypatch):
+def test_cache_first_extract_passes_mime_to_both_try_imports(monkeypatch, tmp_path):
     from mcpbrain import ingest_cache
+    from mcpbrain.store import Store
+    store = Store(tmp_path / "a.sqlite3", dim=4)
+    store.init()        # real (empty) store: the path now asks it for the file's chunks
     seen = []
     monkeypatch.setattr(ingest_cache, "try_import",
                         lambda *a, **k: seen.append(k.get("mime")) or False)
@@ -225,7 +228,7 @@ def test_cache_first_extract_passes_mime_to_both_try_imports(monkeypatch):
     monkeypatch.setattr(drive, "folder_path", lambda *a, **k: "")
     meta = {"id": "f1", "name": "b.docx", "mimeType": DOCX, "modifiedTime": "2026-01-01T00:00:00Z"}
     ok, miss = drive._cache_first_extract_one(
-        _Svc(_Files(media=_docx_bytes())), object(), object(), "D1", meta, {})
+        _Svc(_Files(media=_docx_bytes())), store, object(), "D1", meta, {})
     assert ok and seen == [DOCX, DOCX]
 
 
