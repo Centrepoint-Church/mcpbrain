@@ -19,7 +19,6 @@ import sqlite3
 from contextlib import nullcontext
 
 from mcpbrain.chunking import CHUNKER_VERSION, SPLIT_VERSION, chunk_text, content_hash
-from mcpbrain.reflow import lineage_key
 from mcpbrain.sync.normalise import Chunk
 
 log = logging.getLogger(__name__)
@@ -499,6 +498,9 @@ def handle_anarlog_item(store, item, *, db_path, bulk_section=None) -> None:
         for ch in chunks:
             store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if stale:
+            # Local import: mcpbrain.reflow imports mcpbrain.sync.normalise,
+            # whose package __init__ imports this module.
+            from mcpbrain.reflow import lineage_key
             first: dict[str, str] = {}
             for ch in chunks:
                 first.setdefault(lineage_key(ch.doc_id, ch.metadata), ch.doc_id)
